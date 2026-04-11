@@ -10,11 +10,13 @@ This package stays outside `@stratusclaw/core` and focuses on small helpers for 
 - a lightweight provider registry
 - deterministic static providers for local development
 - deterministic scripted providers for tests and scenario playback
+- an OpenAI-compatible chat-completions adapter for real provider wiring
 
 ## Example
 
 ```ts
 import {
+  createOpenAICompatibleProvider,
   createProviderRegistry,
   defineScriptedProvider,
   defineStaticProvider,
@@ -39,6 +41,11 @@ const scripted = defineScriptedProvider({
   ],
 });
 
-const registry = createProviderRegistry([fallback, scripted]);
+const realProvider = createOpenAICompatibleProvider({
+  model: 'gpt-4.1-mini',
+  apiKey: process.env.OPENAI_API_KEY ?? '',
+});
+
+const registry = createProviderRegistry([fallback, scripted, realProvider]);
 const provider = registry.require('scripted');
 ```

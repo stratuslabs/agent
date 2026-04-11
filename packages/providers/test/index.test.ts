@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { ProviderRequest } from '@stratusclaw/core';
 import {
+  createOpenAICompatibleProvider,
   createProviderRegistry,
   createProviderResponseBuilder,
   defineProvider,
@@ -17,7 +18,14 @@ const createRequest = (): ProviderRequest => ({
     id: 'session-1',
     agent: { id: 'agent-1', name: 'Kernel' },
     status: 'running',
-    messages: [],
+    messages: [
+      {
+        id: 'session-1:user:1',
+        role: 'user',
+        content: 'Say hello',
+        createdAt: new Date().toISOString(),
+      },
+    ],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   },
@@ -177,4 +185,66 @@ test('defineScriptedProvider rejects empty scripts', () => {
     () => defineScriptedProvider({ name: 'empty', steps: [] }),
     /Scripted provider requires at least one step: empty/,
   );
+});
+
+test('createOpenAICompatibleProvider posts session messages to a real chat-completions endpoint', async () => {
+  let requestUrl = '';
+  let requestInit: RequestInit | undefined;
+
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    baseUrl: 'https://example.test/v1',
+    systemPrompt: 'Be concise.',
+    fetch: async (url, init) => {
+      requestUrl = String(url);
+      requestInit = init;
+
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: 'Hello from the real provider path.',
+              },
+            },
+          ],
+        }),
+      } as Response;
+    },
+  });
+
+  const response = await provider.generate(createRequest());
+
+  assert.equal(requestUrl, 'https://example.test/v1/chat/completions');
+  assert.equal(requestInit?.method, 'POST');
+  assert.equal((requestInit?.headers as Record<string, string>).authorization, 'Bearer test-key');
+
+  const body = JSON.parse(String(requestInit?.body));
+  assert.equal(body.model, 'gpt-4.1-mini');
+  assert.deepEqual(body.messages, [
+    { role: 'system', content: 'Be concise.' },
+    { role: 'user', content: 'Say hello' },
+  ]);
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Hello from the real provider path.' }]);
+});
+
+test('createOpenAICompatibleProvider surfaces provider-side errors', async () => {
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: async () => ({
+      ok: false,
+      status: 401,
+      json: async () => ({
+        error: {
+          message: 'Bad key',
+        },
+      }),
+    }) as Response,
+  });
+
+  await assert.rejects(() => provider.generate(createRequest()), /Bad key/);
 });
