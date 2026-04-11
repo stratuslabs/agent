@@ -1,5 +1,5 @@
 {
-  "name": "@stratuslabs/cli",
+  "name": "@stratusagent/cli",
   "version": "0.1.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -23,8 +23,8 @@
     "test": "node --test --experimental-strip-types ./test/**/*.test.ts"
   },
   "dependencies": {
-    "@stratuslabs/core": "workspace:*",
-    "@stratuslabs/providers": "workspace:*"
+    "@stratusagent/core": "workspace:*",
+    "@stratusagent/providers": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.6.0",

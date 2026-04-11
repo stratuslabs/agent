@@ -14,12 +14,12 @@ import {
   type Session,
   type StratusEvent,
   type Tool,
-} from '@stratuslabs/core';
+} from '@stratusagent/core';
 import {
   createOpenAICompatibleProvider,
   createProviderResponseBuilder,
   defineProvider,
-} from '@stratuslabs/providers';
+} from '@stratusagent/providers';
 
 export interface CliStreams {
   stdout: Pick<typeof process.stdout, 'write'>;

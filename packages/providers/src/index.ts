@@ -4,7 +4,7 @@ import type {
   ProviderRequest,
   ProviderResponse,
   ToolCall,
-} from '@stratuslabs/core';
+} from '@stratusagent/core';
 
 export interface ProviderResponseBuilder {
   addText(text: string): ProviderResponseBuilder;

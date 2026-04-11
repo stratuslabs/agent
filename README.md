@@ -6,10 +6,10 @@ Right now, the best way to try it is a local loop in the terminal or a minimal l
 
 ## What it includes
 
-- `@stratuslabs/core`, the runtime primitives and agent loop
-- `@stratuslabs/providers`, helpers for building model providers
-- `@stratuslabs/executors`, helpers for execution behavior
-- `@stratuslabs/cli`, the local CLI entrypoint
+- `@stratusagent/core`, the runtime primitives and agent loop
+- `@stratusagent/providers`, helpers for building model providers
+- `@stratusagent/executors`, helpers for execution behavior
+- `@stratusagent/cli`, the local CLI entrypoint
 
 ## Current status
 

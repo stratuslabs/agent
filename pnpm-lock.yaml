@@ -10,10 +10,10 @@ importers:
 
   packages/cli:
     dependencies:
-      '@stratuslabs/core':
+      '@stratusagent/core':
         specifier: workspace:*
         version: link:../core
-      '@stratuslabs/providers':
+      '@stratusagent/providers':
         specifier: workspace:*
         version: link:../providers
     devDependencies:
@@ -32,7 +32,7 @@ importers:
 
   packages/executors:
     dependencies:
-      '@stratuslabs/core':
+      '@stratusagent/core':
         specifier: workspace:*
         version: link:../core
     devDependencies:
@@ -42,7 +42,7 @@ importers:
 
   packages/providers:
     dependencies:
-      '@stratuslabs/core':
+      '@stratusagent/core':
         specifier: workspace:*
         version: link:../core
     devDependencies:

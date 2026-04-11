@@ -25,11 +25,11 @@ packages/
   cli/        # thin local entrypoint that exercises the kernel without adding product concerns
 ```
 
-`@stratuslabs/core` stays intentionally small and dependency-light.
+`@stratusagent/core` stays intentionally small and dependency-light.
 
-`@stratuslabs/providers` is the first boundary package outside the kernel. It provides reusable builders for constructing provider responses cleanly, while keeping actual OpenAI, Anthropic, local model, or gateway-specific adapters in separate packages later.
+`@stratusagent/providers` is the first boundary package outside the kernel. It provides reusable builders for constructing provider responses cleanly, while keeping actual OpenAI, Anthropic, local model, or gateway-specific adapters in separate packages later.
 
-`@stratuslabs/cli` is intentionally thin. It is a local developer entrypoint that wires together core plus helper packages for demos and tests, without pulling product UI or vendor integrations into the kernel.
+`@stratusagent/cli` is intentionally thin. It is a local developer entrypoint that wires together core plus helper packages for demos and tests, without pulling product UI or vendor integrations into the kernel.
 
 ## Event and state model
 

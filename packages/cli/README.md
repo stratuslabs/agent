@@ -1,4 +1,4 @@
-# @stratuslabs/cli
+# @stratusagent/cli
 
 Thin local entrypoint for exercising the Stratus kernel without pulling product UI concerns into the runtime.
 

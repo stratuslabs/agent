@@ -1,5 +1,5 @@
 {
-  "name": "@stratuslabs/executors",
+  "name": "@stratusagent/executors",
   "version": "0.1.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -19,7 +19,7 @@
     "test": "node --test --experimental-strip-types"
   },
   "dependencies": {
-    "@stratuslabs/core": "workspace:*"
+    "@stratusagent/core": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.9.3"
