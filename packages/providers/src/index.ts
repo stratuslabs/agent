@@ -82,6 +82,7 @@ interface OpenAICompatibleResponse {
   error?: {
     message?: string;
   };
+  rawText?: string;
 }
 
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
@@ -305,10 +306,10 @@ export const createOpenAICompatibleProvider = ({
         }),
       });
 
-      const payload = await response.json() as OpenAICompatibleResponse;
+      const payload = await parseOpenAICompatibleResponse(response);
 
       if (!response.ok) {
-        throw new Error(payload.error?.message ?? `Provider request failed with status ${response.status}`);
+        throw new Error(payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`);
       }
 
       const text = extractOpenAICompatibleText(payload);
@@ -319,6 +320,19 @@ export const createOpenAICompatibleProvider = ({
       return createProviderResponseBuilder().addText(text).done();
     },
   });
+};
+
+const parseOpenAICompatibleResponse = async (response: Response): Promise<OpenAICompatibleResponse> => {
+  const rawText = await response.text();
+  if (rawText.length === 0) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(rawText) as OpenAICompatibleResponse;
+  } catch {
+    return { rawText };
+  }
 };
 
 const createOpenAICompatibleMessages = (

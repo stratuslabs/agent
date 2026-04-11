@@ -408,9 +408,7 @@ export const resolveRuntimeConfig = async (
   const fileConfig = configPath ? await loadConfigFile(configPath) : {};
 
   const provider = command.provider
-    ?? (typeof processEnv.STRATUSCLAW_PROVIDER === 'string'
-      ? parseProviderName(processEnv.STRATUSCLAW_PROVIDER, 'STRATUSCLAW_PROVIDER')
-      : undefined)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'))
     ?? fileConfig.provider
     ?? 'demo';
 
@@ -418,10 +416,10 @@ export const resolveRuntimeConfig = async (
     return { provider: 'demo' };
   }
 
-  const model = command.model ?? processEnv.STRATUSCLAW_MODEL ?? fileConfig.model ?? DEFAULT_OPENAI_MODEL;
-  const baseUrl = command.baseUrl ?? processEnv.STRATUSCLAW_BASE_URL ?? fileConfig.baseUrl ?? DEFAULT_OPENAI_BASE_URL;
-  const apiKeyEnvName = processEnv.STRATUSCLAW_API_KEY_ENV ?? fileConfig.apiKeyEnv ?? 'OPENAI_API_KEY';
-  const apiKey = processEnv.STRATUSCLAW_API_KEY ?? processEnv[apiKeyEnvName];
+  const model = command.model ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL) ?? fileConfig.model ?? DEFAULT_OPENAI_MODEL;
+  const baseUrl = command.baseUrl ?? readNonEmptyString(processEnv.STRATUSCLAW_BASE_URL) ?? fileConfig.baseUrl ?? DEFAULT_OPENAI_BASE_URL;
+  const apiKeyEnvName = readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV) ?? fileConfig.apiKeyEnv ?? 'OPENAI_API_KEY';
+  const apiKey = readNonEmptyString(processEnv.STRATUSCLAW_API_KEY) ?? readNonEmptyString(processEnv[apiKeyEnvName]);
 
   if (!apiKey) {
     throw new Error(`Missing API key for provider=openai. Set STRATUSCLAW_API_KEY or ${apiKeyEnvName}.`);
@@ -434,7 +432,7 @@ export const resolveRuntimeConfig = async (
     apiKey,
   };
 
-  const systemPrompt = processEnv.STRATUSCLAW_SYSTEM_PROMPT ?? fileConfig.systemPrompt;
+  const systemPrompt = readNonEmptyString(processEnv.STRATUSCLAW_SYSTEM_PROMPT) ?? fileConfig.systemPrompt;
   if (systemPrompt) {
     resolved.systemPrompt = systemPrompt;
   }
@@ -444,6 +442,22 @@ export const resolveRuntimeConfig = async (
   }
 
   return resolved;
+};
+
+const readNonEmptyString = <T = string>(
+  value: string | undefined,
+  map?: (resolved: string) => T,
+): T | string | undefined => {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+
+  return map ? map(trimmed) : trimmed;
 };
 
 const createRuntimeProvider = (config: RuntimeConfig): ModelProvider => {

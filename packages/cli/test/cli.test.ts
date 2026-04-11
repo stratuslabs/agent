@@ -131,6 +131,31 @@ test('resolveRuntimeConfig loads openai settings from env', async () => {
   });
 });
 
+test('resolveRuntimeConfig ignores empty env vars and falls back to defaults or alternate env keys', async () => {
+  const runtime = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    provider: 'openai',
+    format: 'text',
+    events: true,
+  }, {
+    processEnv: {
+      STRATUSCLAW_API_KEY: '',
+      STRATUSCLAW_MODEL: '',
+      STRATUSCLAW_BASE_URL: '',
+      STRATUSCLAW_API_KEY_ENV: 'CUSTOM_OPENAI_KEY',
+      CUSTOM_OPENAI_KEY: 'config-key',
+    },
+  });
+
+  assert.deepEqual(runtime, {
+    provider: 'openai',
+    apiKey: 'config-key',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://api.openai.com/v1',
+  });
+});
+
 test('resolveRuntimeConfig loads openai settings from config file', async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratusclaw-cli-'));
   const configPath = path.join(tempDir, 'stratusclaw.config.json');
@@ -181,7 +206,7 @@ test('runCli executes the real provider path with env config', async () => {
         return {
           ok: true,
           status: 200,
-          json: async () => ({
+          text: async () => JSON.stringify({
             choices: [
               {
                 message: {

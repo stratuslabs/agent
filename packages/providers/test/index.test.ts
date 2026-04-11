@@ -203,7 +203,7 @@ test('createOpenAICompatibleProvider posts session messages to a real chat-compl
       return {
         ok: true,
         status: 200,
-        json: async () => ({
+        text: async () => JSON.stringify({
           choices: [
             {
               message: {
@@ -238,7 +238,7 @@ test('createOpenAICompatibleProvider surfaces provider-side errors', async () =>
     fetch: async () => ({
       ok: false,
       status: 401,
-      json: async () => ({
+      text: async () => JSON.stringify({
         error: {
           message: 'Bad key',
         },
@@ -247,4 +247,18 @@ test('createOpenAICompatibleProvider surfaces provider-side errors', async () =>
   });
 
   await assert.rejects(() => provider.generate(createRequest()), /Bad key/);
+});
+
+test('createOpenAICompatibleProvider preserves non-json HTTP error bodies', async () => {
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: async () => ({
+      ok: false,
+      status: 502,
+      text: async () => 'upstream proxy failure',
+    }) as Response,
+  });
+
+  await assert.rejects(() => provider.generate(createRequest()), /upstream proxy failure/);
 });
