@@ -1,0 +1,33 @@
+{
+  "name": "@stratusclaw/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "stratusclaw": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "cli": "node --experimental-strip-types ./src/bin.ts",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types ./test/**/*.test.ts"
+  },
+  "dependencies": {
+    "@stratusclaw/core": "workspace:*",
+    "@stratusclaw/providers": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3"
+  }
+}
