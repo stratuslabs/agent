@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { once } from 'node:events';
 import path from 'node:path';
 import {
   AgentRunner,
@@ -11,12 +14,12 @@ import {
   type Session,
   type StratusEvent,
   type Tool,
-} from '@stratusclaw/core';
+} from '@stratusagent/core';
 import {
   createOpenAICompatibleProvider,
   createProviderResponseBuilder,
   defineProvider,
-} from '@stratusclaw/providers';
+} from '@stratusagent/providers';
 
 export interface CliStreams {
   stdout: Pick<typeof process.stdout, 'write'>;
@@ -29,6 +32,8 @@ export interface CliEnvironment {
   processEnv?: NodeJS.ProcessEnv;
   cwd?: string;
   fetch?: typeof fetch;
+  openExternal?: (url: string) => Promise<void> | void;
+  dashboardAutoShutdownMs?: number;
 }
 
 export interface CliRunOptions {
@@ -50,11 +55,18 @@ export interface ParsedRunCommand {
   events: boolean;
 }
 
+export interface ParsedDashboardCommand {
+  command: 'dashboard';
+  port?: number;
+  host: string;
+  openBrowser: boolean;
+}
+
 export interface ParsedHelpCommand {
   command: 'help';
 }
 
-export type ParsedCommand = ParsedRunCommand | ParsedHelpCommand;
+export type ParsedCommand = ParsedRunCommand | ParsedDashboardCommand | ParsedHelpCommand;
 
 interface CliConfigFile {
   provider?: CliProviderName;
@@ -75,21 +87,32 @@ type RuntimeConfig =
       fetch?: typeof fetch;
     };
 
-const DEFAULT_CONFIG_FILENAME = 'stratusclaw.config.json';
+export interface DashboardServerHandle {
+  url: string;
+  close: () => Promise<void>;
+}
+
+const DEFAULT_CONFIG_FILENAME = 'stratus.config.json';
+const LEGACY_CONFIG_FILENAME = 'stratusclaw.config.json';
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_OPENAI_MODEL = 'gpt-4.1-mini';
+const DEFAULT_DASHBOARD_HOST = '127.0.0.1';
+const DASHBOARD_TITLE = 'Stratus Agent Dashboard';
 
-const HELP_TEXT = `StratusClaw CLI
+const HELP_TEXT = `Stratus Agent CLI
 
 Usage:
-  pnpm cli run --prompt "Use the demo tool"
-  pnpm cli run "Say hello"
-  echo "Use the echo tool" | pnpm cli run --stdin
-  STRATUSCLAW_PROVIDER=openai OPENAI_API_KEY=... pnpm cli run "Say hello"
-  pnpm cli run --config ./stratusclaw.config.json --provider openai "Say hello"
+  stratus run --prompt "Use the demo tool"
+  stratus run "Say hello"
+  echo "Use the echo tool" | stratus run --stdin
+  STRATUS_PROVIDER=openai OPENAI_API_KEY=... stratus run "Say hello"
+  stratus run --config ./stratus.config.json --provider openai "Say hello"
+  stratus dashboard
+  stratus dashboard --port 4123 --host 0.0.0.0 --no-open
 
 Commands:
-  run              Execute one local StratusClaw session
+  run              Execute one local Stratus Agent session
+  dashboard        Start the local Stratus Agent dashboard and open it in your browser
   help             Show this help message
 
 Options:
@@ -101,17 +124,14 @@ Options:
   --config         Load provider settings from a JSON config file
   --format         Output format: text or json (default: text)
   --no-events      Hide event-by-event progress lines in text mode
+  --port           Dashboard port, defaults to an open local port
+  --host           Dashboard host (default: 127.0.0.1)
+  --no-open        Do not open the browser automatically
   --help, -h       Show this help message
 
 Config file:
-  The CLI looks for ./stratusclaw.config.json by default, or a path from --config / STRATUSCLAW_CONFIG.
-  Example:
-    {
-      "provider": "openai",
-      "model": "gpt-4.1-mini",
-      "baseUrl": "https://api.openai.com/v1",
-      "apiKeyEnv": "OPENAI_API_KEY"
-    }
+  The CLI looks for ./stratus.config.json by default, or a path from --config / STRATUS_CONFIG.
+  Legacy STRATUSCLAW_* env vars and stratusclaw.config.json are still supported for compatibility.
 `;
 
 const writeLine = (stream: Pick<typeof process.stdout, 'write'>, line = ''): void => {
@@ -190,11 +210,56 @@ const parseProviderName = (value: string, label: string): CliProviderName => {
 const readProcessEnv = (env: CliEnvironment): NodeJS.ProcessEnv => env.processEnv ?? process.env;
 const readWorkingDirectory = (env: CliEnvironment): string => env.cwd ?? process.cwd();
 
+const readOptionValue = (tokens: string[], index: number, flag: string): string => {
+  const value = tokens[index + 1];
+  if (!value) {
+    throw new Error(`Missing value for ${flag}`);
+  }
+  return value;
+};
+
 export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCommand => {
   const [command, ...rest] = argv;
 
   if (!command || command === 'help' || command === '--help' || command === '-h') {
     return { command: 'help' };
+  }
+
+  if (command === 'dashboard') {
+    let port: number | undefined;
+    let host = DEFAULT_DASHBOARD_HOST;
+    let openBrowser = true;
+
+    for (let index = 0; index < rest.length; index += 1) {
+      const token = rest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--port') {
+        const value = Number(readOptionValue(rest, index, '--port'));
+        if (!Number.isInteger(value) || value < 0 || value > 65535) {
+          throw new Error(`Invalid value for --port: ${rest[index + 1] ?? '(missing)'}`);
+        }
+        port = value;
+        index += 1;
+        continue;
+      }
+      if (token === '--host') {
+        host = readOptionValue(rest, index, '--host');
+        index += 1;
+        continue;
+      }
+      if (token === '--no-open') {
+        openBrowser = false;
+        continue;
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+
+    return { command: 'dashboard', ...(port !== undefined ? { port } : {}), host, openBrowser };
   }
 
   if (command !== 'run') {
@@ -223,11 +288,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     }
 
     if (token === '--prompt' || token === '-p') {
-      const value = rest[index + 1];
-      if (!value) {
-        throw new Error('Missing value for --prompt');
-      }
-      prompt = value;
+      prompt = readOptionValue(rest, index, '--prompt');
       index += 1;
       continue;
     }
@@ -238,49 +299,33 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     }
 
     if (token === '--provider') {
-      const value = rest[index + 1];
-      if (!value) {
-        throw new Error('Missing value for --provider');
-      }
-      provider = parseProviderName(value, '--provider');
+      provider = parseProviderName(readOptionValue(rest, index, '--provider'), '--provider');
       index += 1;
       continue;
     }
 
     if (token === '--model') {
-      const value = rest[index + 1];
-      if (!value) {
-        throw new Error('Missing value for --model');
-      }
-      model = value;
+      model = readOptionValue(rest, index, '--model');
       index += 1;
       continue;
     }
 
     if (token === '--base-url') {
-      const value = rest[index + 1];
-      if (!value) {
-        throw new Error('Missing value for --base-url');
-      }
-      baseUrl = value;
+      baseUrl = readOptionValue(rest, index, '--base-url');
       index += 1;
       continue;
     }
 
     if (token === '--config') {
-      const value = rest[index + 1];
-      if (!value) {
-        throw new Error('Missing value for --config');
-      }
-      configPath = value;
+      configPath = readOptionValue(rest, index, '--config');
       index += 1;
       continue;
     }
 
     if (token === '--format') {
-      const value = rest[index + 1];
+      const value = readOptionValue(rest, index, '--format');
       if (value !== 'text' && value !== 'json') {
-        throw new Error(`Unsupported format: ${value ?? '(missing)'}`);
+        throw new Error(`Unsupported format: ${value}`);
       }
       format = value;
       index += 1;
@@ -380,68 +425,26 @@ const resolveConfigPath = async (
 ): Promise<string | undefined> => {
   const processEnv = readProcessEnv(env);
   const cwd = readWorkingDirectory(env);
-  const explicit = command.configPath ?? processEnv.STRATUSCLAW_CONFIG;
+  const explicit = command.configPath ?? processEnv.STRATUS_CONFIG ?? processEnv.STRATUSCLAW_CONFIG;
 
   if (explicit) {
     return path.resolve(cwd, explicit);
   }
 
-  const defaultPath = path.join(cwd, DEFAULT_CONFIG_FILENAME);
-  try {
-    await readFile(defaultPath, 'utf8');
-    return defaultPath;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT') {
-      return undefined;
+  for (const candidate of [DEFAULT_CONFIG_FILENAME, LEGACY_CONFIG_FILENAME]) {
+    const candidatePath = path.join(cwd, candidate);
+    try {
+      await readFile(candidatePath, 'utf8');
+      return candidatePath;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        throw error;
+      }
     }
-    throw error;
-  }
-};
-
-export const resolveRuntimeConfig = async (
-  command: ParsedRunCommand,
-  env: CliEnvironment = {},
-): Promise<RuntimeConfig> => {
-  const processEnv = readProcessEnv(env);
-  const configPath = await resolveConfigPath(command, env);
-  const fileConfig = configPath ? await loadConfigFile(configPath) : {};
-
-  const provider = command.provider
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'))
-    ?? fileConfig.provider
-    ?? 'demo';
-
-  if (provider === 'demo') {
-    return { provider: 'demo' };
   }
 
-  const model = command.model ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL) ?? fileConfig.model ?? DEFAULT_OPENAI_MODEL;
-  const baseUrl = command.baseUrl ?? readNonEmptyString(processEnv.STRATUSCLAW_BASE_URL) ?? fileConfig.baseUrl ?? DEFAULT_OPENAI_BASE_URL;
-  const apiKeyEnvName = readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV) ?? fileConfig.apiKeyEnv ?? 'OPENAI_API_KEY';
-  const apiKey = readNonEmptyString(processEnv.STRATUSCLAW_API_KEY) ?? readNonEmptyString(processEnv[apiKeyEnvName]);
-
-  if (!apiKey) {
-    throw new Error(`Missing API key for provider=openai. Set STRATUSCLAW_API_KEY or ${apiKeyEnvName}.`);
-  }
-
-  const resolved: RuntimeConfig = {
-    provider: 'openai',
-    model,
-    baseUrl,
-    apiKey,
-  };
-
-  const systemPrompt = readNonEmptyString(processEnv.STRATUSCLAW_SYSTEM_PROMPT) ?? fileConfig.systemPrompt;
-  if (systemPrompt) {
-    resolved.systemPrompt = systemPrompt;
-  }
-
-  if (env.fetch) {
-    resolved.fetch = env.fetch;
-  }
-
-  return resolved;
+  return undefined;
 };
 
 const readNonEmptyString = <T = string>(
@@ -458,6 +461,71 @@ const readNonEmptyString = <T = string>(
   }
 
   return map ? map(trimmed) : trimmed;
+};
+
+export const resolveRuntimeConfig = async (
+  command: ParsedRunCommand,
+  env: CliEnvironment = {},
+): Promise<RuntimeConfig> => {
+  const processEnv = readProcessEnv(env);
+  const configPath = await resolveConfigPath(command, env);
+  const fileConfig = configPath ? await loadConfigFile(configPath) : {};
+
+  const provider = command.provider
+    ?? readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'))
+    ?? fileConfig.provider
+    ?? 'demo';
+
+  if (provider === 'demo') {
+    return { provider: 'demo' };
+  }
+
+  const model = command.model
+    ?? readNonEmptyString(processEnv.STRATUS_MODEL)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL)
+    ?? fileConfig.model
+    ?? DEFAULT_OPENAI_MODEL;
+
+  const baseUrl = command.baseUrl
+    ?? readNonEmptyString(processEnv.STRATUS_BASE_URL)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_BASE_URL)
+    ?? fileConfig.baseUrl
+    ?? DEFAULT_OPENAI_BASE_URL;
+
+  const apiKeyEnvName = readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV)
+    ?? fileConfig.apiKeyEnv
+    ?? 'OPENAI_API_KEY';
+
+  const apiKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY)
+    ?? readNonEmptyString(processEnv[String(apiKeyEnvName)]);
+
+  if (!apiKey) {
+    throw new Error(`Missing API key for provider=openai. Set STRATUS_API_KEY or ${apiKeyEnvName}.`);
+  }
+
+  const resolved: RuntimeConfig = {
+    provider: 'openai',
+    model: String(model),
+    baseUrl: String(baseUrl),
+    apiKey: String(apiKey),
+  };
+
+  const systemPrompt = readNonEmptyString(processEnv.STRATUS_SYSTEM_PROMPT)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_SYSTEM_PROMPT)
+    ?? fileConfig.systemPrompt;
+
+  if (systemPrompt) {
+    resolved.systemPrompt = String(systemPrompt);
+  }
+
+  if (env.fetch) {
+    resolved.fetch = env.fetch;
+  }
+
+  return resolved;
 };
 
 const createRuntimeProvider = (config: RuntimeConfig): ModelProvider => {
@@ -544,10 +612,254 @@ export const printSessionSummary = (session: Session, streams: CliStreams): void
 
 const formatRuntimeBanner = (runtime: RuntimeConfig): string => {
   if (runtime.provider === 'demo') {
-    return 'Starting StratusClaw local loop with provider=demo';
+    return 'Starting Stratus Agent local loop with provider=demo';
   }
 
-  return `Starting StratusClaw local loop with provider=openai model=${runtime.model}`;
+  return `Starting Stratus Agent local loop with provider=openai model=${runtime.model}`;
+};
+
+const escapeHtml = (value: string): string => value
+  .replaceAll('&', '&amp;')
+  .replaceAll('<', '&lt;')
+  .replaceAll('>', '&gt;')
+  .replaceAll('"', '&quot;');
+
+const renderDashboardHtml = (url: string): string => `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${DASHBOARD_TITLE}</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+        background: radial-gradient(circle at top, #1f3a5f 0%, #0b1020 45%, #05070f 100%);
+        color: #f3f7ff;
+      }
+      main { max-width: 960px; margin: 0 auto; padding: 40px 20px 72px; }
+      .hero, .card { background: rgba(10, 16, 32, 0.74); border: 1px solid rgba(148, 163, 184, 0.2); border-radius: 20px; backdrop-filter: blur(12px); }
+      .hero { padding: 32px; margin-bottom: 20px; }
+      .eyebrow { display: inline-block; font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: #93c5fd; }
+      h1 { font-size: clamp(32px, 6vw, 56px); line-height: 1; margin: 14px 0 12px; }
+      p { color: #cbd5e1; line-height: 1.6; }
+      .grid { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+      .card { padding: 24px; }
+      .stat { font-size: 28px; font-weight: 700; margin: 6px 0; }
+      code, pre, textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      textarea {
+        width: 100%; min-height: 120px; border-radius: 14px; border: 1px solid rgba(148, 163, 184, 0.28);
+        background: rgba(15, 23, 42, 0.9); color: #e2e8f0; padding: 14px; resize: vertical;
+      }
+      button {
+        margin-top: 12px; border: 0; border-radius: 999px; padding: 12px 18px; font-weight: 700; cursor: pointer;
+        background: linear-gradient(135deg, #60a5fa, #22d3ee); color: #08111f;
+      }
+      pre {
+        margin: 14px 0 0; padding: 14px; border-radius: 14px; overflow: auto;
+        background: rgba(2, 6, 23, 0.9); border: 1px solid rgba(148, 163, 184, 0.2); color: #bfdbfe;
+      }
+      a { color: #7dd3fc; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <span class="eyebrow">Stratus Agent local dashboard</span>
+        <h1>Stratus Agent is up.</h1>
+        <p>A tiny dashboard for local testing. It confirms the CLI is reachable, gives you a quick action, and keeps the current repo intent visible.</p>
+        <p><strong>Local URL:</strong> <a href="${escapeHtml(url)}">${escapeHtml(url)}</a></p>
+      </section>
+      <section class="grid">
+        <article class="card">
+          <div class="eyebrow">Status</div>
+          <div class="stat">Ready</div>
+          <p>The local server is running with Node standard library primitives only.</p>
+        </article>
+        <article class="card">
+          <div class="eyebrow">About</div>
+          <div class="stat">Minimal by design</div>
+          <p>Use <code>stratus run</code> for the agent loop, or use the tester here to verify browser-to-local requests during development.</p>
+        </article>
+      </section>
+      <section class="card" style="margin-top:20px;">
+        <div class="eyebrow">Actionable test</div>
+        <h2 style="margin:12px 0 8px;">Echo tester</h2>
+        <p>Send a payload to the local dashboard API and inspect the response.</p>
+        <textarea id="payload">Hello from Stratus Agent dashboard</textarea>
+        <button id="send">POST /api/echo</button>
+        <pre id="result">Waiting for input…</pre>
+      </section>
+    </main>
+    <script>
+      const button = document.getElementById('send');
+      const payload = document.getElementById('payload');
+      const result = document.getElementById('result');
+      button.addEventListener('click', async () => {
+        result.textContent = 'Sending...';
+        try {
+          const response = await fetch('/api/echo', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ text: payload.value })
+          });
+          const data = await response.json();
+          result.textContent = JSON.stringify(data, null, 2);
+        } catch (error) {
+          result.textContent = String(error);
+        }
+      });
+    </script>
+  </body>
+</html>`;
+
+const readBody = async (request: IncomingMessage): Promise<string> => {
+  let data = '';
+  for await (const chunk of request) {
+    data += chunk.toString();
+  }
+  return data;
+};
+
+const sendJson = (response: ServerResponse, statusCode: number, payload: unknown): void => {
+  response.statusCode = statusCode;
+  response.setHeader('content-type', 'application/json; charset=utf-8');
+  response.end(JSON.stringify(payload, null, 2));
+};
+
+const sendHtml = (response: ServerResponse, html: string): void => {
+  response.statusCode = 200;
+  response.setHeader('content-type', 'text/html; charset=utf-8');
+  response.end(html);
+};
+
+export const openExternalUrl = async (url: string): Promise<void> => {
+  const platform = process.platform;
+  const command = platform === 'darwin' ? 'open' : platform === 'win32' ? 'cmd' : 'xdg-open';
+  const args = platform === 'win32' ? ['/c', 'start', '', url] : [url];
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, { stdio: 'ignore', detached: platform !== 'win32' });
+    child.once('error', reject);
+    child.once('spawn', () => {
+      child.unref();
+      resolve();
+    });
+  });
+};
+
+export const startDashboardServer = async (
+  options: { host: string; port?: number },
+): Promise<DashboardServerHandle> => {
+  const server = createServer(async (request, response) => {
+    const method = request.method ?? 'GET';
+    const requestUrl = new URL(request.url ?? '/', 'http://localhost');
+
+    if (method === 'GET' && requestUrl.pathname === '/') {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : options.port ?? 0;
+      const host = typeof address === 'object' && address && address.address ? address.address : options.host;
+      sendHtml(response, renderDashboardHtml(`http://${host === '::' ? '127.0.0.1' : host}:${port}`));
+      return;
+    }
+
+    if (method === 'GET' && requestUrl.pathname === '/api/status') {
+      sendJson(response, 200, {
+        ok: true,
+        service: 'stratus-dashboard',
+        version: '0.1.0',
+        now: new Date().toISOString(),
+      });
+      return;
+    }
+
+    if (method === 'POST' && requestUrl.pathname === '/api/echo') {
+      const raw = await readBody(request);
+      let text = '';
+      if (raw.trim().length > 0) {
+        const payload = JSON.parse(raw) as { text?: unknown };
+        text = typeof payload.text === 'string' ? payload.text : '';
+      }
+      sendJson(response, 200, {
+        ok: true,
+        received: text,
+        uppercase: text.toUpperCase(),
+        length: text.length,
+      });
+      return;
+    }
+
+    sendJson(response, 404, { ok: false, error: 'Not found' });
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(options.port ?? 0, options.host, () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('Unable to determine dashboard server address.');
+  }
+
+  const host = address.address === '::' ? '127.0.0.1' : address.address;
+  const url = `http://${host}:${address.port}`;
+
+  return {
+    url,
+    close: async () => {
+      if (!server.listening) {
+        return;
+      }
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    },
+  };
+};
+
+export const runDashboard = async (
+  command: ParsedDashboardCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const handle = await startDashboardServer({
+    host: command.host,
+    ...(command.port !== undefined ? { port: command.port } : {}),
+  });
+
+  writeLine(streams.stdout, `${DASHBOARD_TITLE} ready at ${handle.url}`);
+  writeLine(streams.stdout, 'Press Ctrl+C to stop.');
+
+  if (command.openBrowser) {
+    try {
+      await (env.openExternal ?? openExternalUrl)(handle.url);
+      writeLine(streams.stdout, 'Opened your default browser.');
+    } catch (error) {
+      writeLine(streams.stderr, `Warning: Could not open the browser automatically: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  if (env.dashboardAutoShutdownMs !== undefined) {
+    await new Promise((resolve) => setTimeout(resolve, env.dashboardAutoShutdownMs));
+    await handle.close();
+    return 0;
+  }
+
+  await once(process, 'SIGINT');
+  await handle.close();
+  return 0;
 };
 
 export const runCli = async ({ argv, streams = process, env = {} }: CliRunOptions): Promise<number> => {
@@ -564,6 +876,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     if (command.command === 'help') {
       writeLine(streams.stdout, HELP_TEXT);
       return 0;
+    }
+
+    if (command.command === 'dashboard') {
+      return runDashboard(command, streams, resolvedEnv);
     }
 
     const runtime = await resolveRuntimeConfig(command, resolvedEnv);

@@ -1,11 +1,11 @@
 {
-  "name": "@stratusclaw/cli",
+  "name": "@stratusagent/cli",
   "version": "0.1.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "stratusclaw": "./dist/bin.js"
+    "stratus": "./dist/bin.js"
   },
   "exports": {
     ".": {
@@ -23,8 +23,8 @@
     "test": "node --test --experimental-strip-types ./test/**/*.test.ts"
   },
   "dependencies": {
-    "@stratusclaw/core": "workspace:*",
-    "@stratusclaw/providers": "workspace:*"
+    "@stratusagent/core": "workspace:*",
+    "@stratusagent/providers": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.6.0",

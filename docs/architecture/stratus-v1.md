@@ -1,8 +1,8 @@
-# StratusClaw v1 Architecture
+# Stratus Agent v1 Architecture
 
 ## Product framing
 
-StratusClaw is the kernel: a small runtime that defines the contracts for sessions, providers, tools, plugins, events, and orchestration. StratusOS is an optional GUI and product layer that can sit on top of the kernel, but the kernel should remain usable from code, tests, CLIs, servers, or other UIs without depending on any StratusOS concerns.
+Stratus Agent is the kernel: a small runtime that defines the contracts for sessions, providers, tools, plugins, events, and orchestration. StratusOS is an optional GUI and product layer that can sit on top of the kernel, but the kernel should remain usable from code, tests, CLIs, servers, or other UIs without depending on any StratusOS concerns.
 
 ## Kernel boundary
 
@@ -25,11 +25,11 @@ packages/
   cli/        # thin local entrypoint that exercises the kernel without adding product concerns
 ```
 
-`@stratusclaw/core` stays intentionally small and dependency-light.
+`@stratusagent/core` stays intentionally small and dependency-light.
 
-`@stratusclaw/providers` is the first boundary package outside the kernel. It provides reusable builders for constructing provider responses cleanly, while keeping actual OpenAI, Anthropic, local model, or gateway-specific adapters in separate packages later.
+`@stratusagent/providers` is the first boundary package outside the kernel. It provides reusable builders for constructing provider responses cleanly, while keeping actual OpenAI, Anthropic, local model, or gateway-specific adapters in separate packages later.
 
-`@stratusclaw/cli` is intentionally thin. It is a local developer entrypoint that wires together core plus helper packages for demos and tests, without pulling product UI or vendor integrations into the kernel.
+`@stratusagent/cli` is intentionally thin. It is a local developer entrypoint that wires together core plus helper packages for demos and tests, without pulling product UI or vendor integrations into the kernel.
 
 ## Event and state model
 

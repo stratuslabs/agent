@@ -8,7 +8,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { HELP_TEXT, parseCommand, resolveRuntimeConfig, runCli } from '../src/index.ts';
+import {
+  HELP_TEXT,
+  parseCommand,
+  resolveRuntimeConfig,
+  runCli,
+  startDashboardServer,
+} from '../src/index.ts';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 
@@ -70,6 +76,15 @@ test('parseCommand accepts real-provider flags', () => {
   });
 });
 
+test('parseCommand accepts dashboard flags', () => {
+  assert.deepEqual(parseCommand(['dashboard', '--port', '4123', '--host', '0.0.0.0', '--no-open']), {
+    command: 'dashboard',
+    port: 4123,
+    host: '0.0.0.0',
+    openBrowser: false,
+  });
+});
+
 test('runCli prints help text', async () => {
   const { streams, output } = createStreams();
   const exitCode = await runCli({ argv: ['help'], streams });
@@ -84,7 +99,7 @@ test('runCli executes the demo tool loop', async () => {
   const exitCode = await runCli({ argv: ['run', '--prompt', 'please use the echo tool'], streams });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /Starting StratusClaw local loop with provider=demo/);
+  assert.match(output.stdout, /Starting Stratus Agent local loop with provider=demo/);
   assert.match(output.stdout, /tool.called demo\.echo/);
   assert.match(output.stdout, /\[tool:demo\.echo\]/);
   assert.match(output.stdout, /"uppercase": "PLEASE USE THE ECHO TOOL"/);
@@ -108,7 +123,7 @@ test('runCli can render machine-readable json output', async () => {
   assert.equal(payload.session.messages[0].content, 'please use the echo tool');
 });
 
-test('resolveRuntimeConfig loads openai settings from env', async () => {
+test('resolveRuntimeConfig loads openai settings from renamed env vars', async () => {
   const runtime = await resolveRuntimeConfig({
     command: 'run',
     prompt: 'hello',
@@ -118,8 +133,8 @@ test('resolveRuntimeConfig loads openai settings from env', async () => {
   }, {
     processEnv: {
       OPENAI_API_KEY: 'env-key',
-      STRATUSCLAW_MODEL: 'gpt-4.1-mini',
-      STRATUSCLAW_BASE_URL: 'https://example.test/v1',
+      STRATUS_MODEL: 'gpt-4.1-mini',
+      STRATUS_BASE_URL: 'https://example.test/v1',
     },
   });
 
@@ -131,7 +146,7 @@ test('resolveRuntimeConfig loads openai settings from env', async () => {
   });
 });
 
-test('resolveRuntimeConfig ignores empty env vars and falls back to defaults or alternate env keys', async () => {
+test('resolveRuntimeConfig still supports legacy env vars', async () => {
   const runtime = await resolveRuntimeConfig({
     command: 'run',
     prompt: 'hello',
@@ -141,24 +156,24 @@ test('resolveRuntimeConfig ignores empty env vars and falls back to defaults or 
   }, {
     processEnv: {
       STRATUSCLAW_API_KEY: '',
-      STRATUSCLAW_MODEL: '',
-      STRATUSCLAW_BASE_URL: '',
+      STRATUSCLAW_MODEL: 'gpt-4.1-mini',
+      STRATUSCLAW_BASE_URL: 'https://example.test/v1',
       STRATUSCLAW_API_KEY_ENV: 'CUSTOM_OPENAI_KEY',
-      CUSTOM_OPENAI_KEY: 'config-key',
+      CUSTOM_OPENAI_KEY: 'legacy-key',
     },
   });
 
   assert.deepEqual(runtime, {
     provider: 'openai',
-    apiKey: 'config-key',
+    apiKey: 'legacy-key',
     model: 'gpt-4.1-mini',
-    baseUrl: 'https://api.openai.com/v1',
+    baseUrl: 'https://example.test/v1',
   });
 });
 
 test('resolveRuntimeConfig loads openai settings from config file', async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratusclaw-cli-'));
-  const configPath = path.join(tempDir, 'stratusclaw.config.json');
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const configPath = path.join(tempDir, 'stratus.config.json');
 
   await writeFile(configPath, JSON.stringify({
     provider: 'openai',
@@ -184,6 +199,36 @@ test('resolveRuntimeConfig loads openai settings from config file', async () => 
     apiKey: 'config-key',
     model: 'gpt-4.1-mini',
     baseUrl: 'https://example.test/v1',
+  });
+});
+
+test('resolveRuntimeConfig falls back to legacy config filename', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const configPath = path.join(tempDir, 'stratusclaw.config.json');
+
+  await writeFile(configPath, JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    apiKeyEnv: 'CUSTOM_OPENAI_KEY',
+  }, null, 2));
+
+  const runtime = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    format: 'text',
+    events: true,
+  }, {
+    cwd: tempDir,
+    processEnv: {
+      CUSTOM_OPENAI_KEY: 'config-key',
+    },
+  });
+
+  assert.deepEqual(runtime, {
+    provider: 'openai',
+    apiKey: 'config-key',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://api.openai.com/v1',
   });
 });
 
@@ -223,8 +268,59 @@ test('runCli executes the real provider path with env config', async () => {
   assert.equal(exitCode, 0);
   assert.equal(requestUrl, 'https://api.openai.com/v1/chat/completions');
   assert.match(requestBody, /"model":"gpt-4.1-mini"/);
-  assert.match(output.stdout, /Starting StratusClaw local loop with provider=openai model=gpt-4.1-mini/);
+  assert.match(output.stdout, /Starting Stratus Agent local loop with provider=openai model=gpt-4.1-mini/);
   assert.match(output.stdout, /\[assistant\] Hello from the API path\./);
+  assert.equal(output.stderr, '');
+});
+
+test('startDashboardServer serves the landing page and echo api', async () => {
+  const dashboard = await startDashboardServer({ host: '127.0.0.1' });
+
+  try {
+    const pageResponse = await fetch(`${dashboard.url}/`);
+    const pageHtml = await pageResponse.text();
+    assert.equal(pageResponse.status, 200);
+    assert.match(pageHtml, /Stratus Agent Dashboard/);
+    assert.match(pageHtml, /POST \/api\/echo/);
+
+    const echoResponse = await fetch(`${dashboard.url}/api/echo`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'local test' }),
+    });
+    const echoPayload = await echoResponse.json();
+
+    assert.deepEqual(echoPayload, {
+      ok: true,
+      received: 'local test',
+      uppercase: 'LOCAL TEST',
+      length: 10,
+    });
+  } finally {
+    await dashboard.close();
+  }
+});
+
+test('runCli starts the dashboard, prints the URL, and opens the browser callback', async () => {
+  const { streams, output } = createStreams();
+  let openedUrl = '';
+
+  const exitCode = await runCli({
+    argv: ['dashboard', '--port', '0'],
+    streams,
+    env: {
+      openExternal: async (url) => {
+        openedUrl = url;
+      },
+      dashboardAutoShutdownMs: 25,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Stratus Agent Dashboard ready at http:\/\/127\.0\.0\.1:\d+/);
+  assert.match(output.stdout, /Opened your default browser\./);
+  assert.match(output.stdout, /Press Ctrl\+C to stop\./);
+  assert.match(openedUrl, /^http:\/\/127\.0\.0\.1:\d+$/);
   assert.equal(output.stderr, '');
 });
 
@@ -279,7 +375,7 @@ test('source bin script works with piped stdin', async () => {
   const [exitCode] = (await once(child, 'close')) as [number];
 
   assert.equal(exitCode, 0);
-  assert.match(stdout, /Starting StratusClaw local loop with provider=demo/);
+  assert.match(stdout, /Starting Stratus Agent local loop with provider=demo/);
   assert.match(stdout, /please inspect this tool/);
   assert.equal(stderr, '');
 });
