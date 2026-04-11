@@ -8,13 +8,15 @@ import {
   AgentRunner,
   EventBus,
   ToolRegistry,
-  type JsonObject,
   type JsonValue,
   type ModelProvider,
   type Session,
   type StratusEvent,
-  type Tool,
 } from '@stratusagent/core';
+import {
+  createLocalCommandExecutor,
+  defineLocalCommandTool,
+} from '@stratusagent/executor-local';
 import {
   createOpenAICompatibleProvider,
   createProviderResponseBuilder,
@@ -146,20 +148,24 @@ const stringifyValue = (value: JsonValue): string => {
   return JSON.stringify(value, null, 2);
 };
 
-const createDemoTool = (): Tool => ({
-  name: 'demo.echo',
-  description: 'Return a tiny transformed summary for CLI demos.',
-  async execute(input) {
-    const text = typeof input.text === 'string' ? input.text : '';
-    const normalized = text.trim() || 'empty input';
+const createDemoTool = () =>
+  defineLocalCommandTool({
+    name: 'demo.echo',
+    description: 'Return a tiny transformed summary for CLI demos through a real local process.',
+    async createCommand(input) {
+      const text = typeof input.text === 'string' ? input.text : '';
+      const normalized = text.trim() || 'empty input';
+      const script = `const text = ${JSON.stringify(normalized)}; console.log(JSON.stringify({ received: text, uppercase: text.toUpperCase(), length: text.length }));`;
 
-    return {
-      received: normalized,
-      uppercase: normalized.toUpperCase(),
-      length: normalized.length,
-    } satisfies JsonObject;
-  },
-});
+      return {
+        command: process.execPath,
+        args: ['-e', script],
+      };
+    },
+    parseResult(result) {
+      return JSON.parse(result.stdout) as JsonValue;
+    },
+  });
 
 const createDemoProvider = (): ModelProvider =>
   defineProvider({
@@ -566,6 +572,7 @@ export const runSingleLoop = async (
   const runner = new AgentRunner({
     provider: runtimeProvider,
     tools,
+    executor: createLocalCommandExecutor(),
     bus,
   });
 
@@ -595,7 +602,12 @@ export const runSingleLoop = async (
     sessionId: randomUUID(),
     agent,
     userMessage: prompt,
-    metadata,
+    metadata: options.runtime.provider === 'demo'
+      ? {
+          ...metadata,
+          executor: 'local-command',
+        }
+      : metadata,
   });
 };
 

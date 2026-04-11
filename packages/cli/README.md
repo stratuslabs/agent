@@ -71,7 +71,7 @@ This is intentionally dependency-light and built on Node standard library primit
 
 - runs a single local session against either the demo provider or an OpenAI-compatible provider
 - shows event progress in text mode
-- executes the built-in `demo.echo` tool in demo mode
+- executes the built-in `demo.echo` tool through `@stratusagent/executor-local`
 - can emit the full session as JSON for scripts and fixtures
 - serves a minimal dashboard for browser-based local smoke tests
 

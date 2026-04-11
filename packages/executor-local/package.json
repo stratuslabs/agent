@@ -1,12 +1,9 @@
 {
-  "name": "@stratusagent/cli",
+  "name": "@stratusagent/executor-local",
   "version": "0.1.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "bin": {
-    "stratus": "./dist/bin.js"
-  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -18,14 +15,12 @@
   ],
   "scripts": {
     "build": "tsc -b",
-    "cli": "node --experimental-strip-types ./src/bin.ts",
     "typecheck": "tsc --noEmit --project tsconfig.test.json",
     "test": "node --test --experimental-strip-types ./test/**/*.test.ts"
   },
   "dependencies": {
     "@stratusagent/core": "workspace:*",
-    "@stratusagent/executor-local": "workspace:*",
-    "@stratusagent/providers": "workspace:*"
+    "@stratusagent/executors": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.6.0",

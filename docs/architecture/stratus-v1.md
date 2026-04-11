@@ -20,14 +20,20 @@ Plugins and modules sit outside the kernel when they add behavior rather than de
 
 ```text
 packages/
-  core/       # kernel contracts + minimal orchestration runtime
-  providers/  # adapter helpers for building provider implementations against core
-  cli/        # thin local entrypoint that exercises the kernel without adding product concerns
+  core/            # kernel contracts + minimal orchestration runtime
+  providers/       # adapter helpers for building provider implementations against core
+  executors/       # shared executor helpers and result normalization
+  executor-local/  # concrete local child-process executor adapter
+  cli/             # thin local entrypoint that exercises the kernel without adding product concerns
 ```
 
 `@stratusagent/core` stays intentionally small and dependency-light.
 
 `@stratusagent/providers` is the first boundary package outside the kernel. It provides reusable builders for constructing provider responses cleanly, while keeping actual OpenAI, Anthropic, local model, or gateway-specific adapters in separate packages later.
+
+`@stratusagent/executors` holds executor-side helpers and base adapters that remain generic across execution targets.
+
+`@stratusagent/executor-local` is the first concrete runtime package. It runs compatible tools through local child processes, captures stdout and stderr, and keeps that infrastructure outside the kernel.
 
 `@stratusagent/cli` is intentionally thin. It is a local developer entrypoint that wires together core plus helper packages for demos and tests, without pulling product UI or vendor integrations into the kernel.
 

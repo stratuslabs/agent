@@ -120,6 +120,7 @@ test('runCli can render machine-readable json output', async () => {
   assert.equal(payload.provider, 'demo');
   assert.equal(payload.session.status, 'completed');
   assert.equal(payload.session.metadata.provider, 'demo');
+  assert.equal(payload.session.metadata.executor, 'local-command');
   assert.equal(payload.session.messages[0].content, 'please use the echo tool');
 });
 
