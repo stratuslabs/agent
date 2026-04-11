@@ -3,6 +3,7 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 
 import type {
   Executor,
@@ -176,6 +177,8 @@ const runLocalCommand = async (
   let stdout = '';
   let stderr = '';
   let timedOut = false;
+  const stdoutDecoder = new StringDecoder('utf8');
+  const stderrDecoder = new StringDecoder('utf8');
 
   const child = options.spawn(invocation.command, args, {
     cwd: invocation.cwd,
@@ -184,11 +187,11 @@ const runLocalCommand = async (
   });
 
   child.stdout.on('data', (chunk) => {
-    stdout += chunk.toString();
+    stdout += stdoutDecoder.write(chunk);
   });
 
   child.stderr.on('data', (chunk) => {
-    stderr += chunk.toString();
+    stderr += stderrDecoder.write(chunk);
   });
 
   if (typeof invocation.stdin === 'string') {
@@ -205,6 +208,9 @@ const runLocalCommand = async (
 
   try {
     const exitCode = await waitForChild(child);
+    stdout += stdoutDecoder.end();
+    stderr += stderrDecoder.end();
+
     return {
       command: invocation.command,
       args: [...args],

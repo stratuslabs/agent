@@ -137,3 +137,26 @@ test('local command executor times out long-running processes', async () => {
   assert.equal(output.timedOut, true);
   assert.equal(typeof output.durationMs, 'number');
 });
+
+test('local command executor preserves utf-8 characters split across stdout chunks', async () => {
+  const tool = defineLocalCommandTool({
+    name: 'utf8.echo',
+    createCommand() {
+      return {
+        command: process.execPath,
+        args: ['-e', `process.stdout.write(Buffer.from([0xF0, 0x9F])); setTimeout(() => process.stdout.end(Buffer.from([0x98, 0x80])), 10);`],
+      };
+    },
+  });
+
+  const executor = createLocalCommandExecutor();
+  const result = await executor.execute({
+    id: 'call-5',
+    toolName: 'utf8.echo',
+    input: {},
+  }, tool, session);
+
+  assert.equal(result.ok, true);
+  const output = result.output as Record<string, unknown>;
+  assert.equal(output.stdout, '😀');
+});
