@@ -9,6 +9,7 @@ Right now, the best way to try it is a local loop in the terminal or a minimal l
 - `@stratusagent/core`, the runtime primitives and agent loop
 - `@stratusagent/providers`, helpers for building model providers
 - `@stratusagent/executors`, helpers for execution behavior
+- `@stratusagent/executor-local`, a concrete local child-process executor adapter
 - `@stratusagent/cli`, the local CLI entrypoint
 
 ## Current status
@@ -20,7 +21,7 @@ Today it is useful for:
 - running a single text-only session against a real OpenAI-compatible provider
 - opening a tiny local dashboard for browser-based smoke testing
 - seeing how provider output becomes session events
-- seeing a simple tool call execute end to end in demo mode
+- seeing a simple tool call execute end to end through a real local process
 
 It is not yet a full production agent platform.
 
@@ -164,6 +165,7 @@ node packages/cli/dist/bin.js dashboard
 packages/
   cli/
   core/
+  executor-local/
   executors/
   providers/
 docs/
