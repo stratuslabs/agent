@@ -57,6 +57,36 @@ export interface ScriptedProviderDefinition {
   repeatLast?: boolean;
 }
 
+export interface OpenAICompatibleProviderConfig {
+  model: string;
+  apiKey: string;
+  baseUrl?: string;
+  name?: string;
+  systemPrompt?: string;
+  headers?: Record<string, string>;
+  fetch?: typeof fetch;
+}
+
+interface OpenAICompatibleMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  name?: string;
+}
+
+interface OpenAICompatibleResponse {
+  choices?: Array<{
+    message?: {
+      content?: string | Array<{ type?: string; text?: string }>;
+    };
+  }>;
+  error?: {
+    message?: string;
+  };
+  rawText?: string;
+}
+
+const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
+
 export const textPart = (text: string): ProviderPart => ({ type: 'text', text });
 
 export const toolCallPart = (call: ToolCall): ProviderPart => ({
@@ -243,6 +273,104 @@ export const defineScriptedProvider = ({
       return normalizeProviderResponse(resolved);
     },
   });
+};
+
+export const createOpenAICompatibleProvider = ({
+  model,
+  apiKey,
+  baseUrl = DEFAULT_OPENAI_BASE_URL,
+  name = 'openai',
+  systemPrompt,
+  headers = {},
+  fetch: fetchImpl = globalThis.fetch,
+}: OpenAICompatibleProviderConfig): ModelProvider => {
+  if (typeof fetchImpl !== 'function') {
+    throw new Error('Global fetch is unavailable for the OpenAI-compatible provider.');
+  }
+
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
+
+  return defineProvider({
+    name,
+    async generate(request) {
+      const response = await fetchImpl(`${normalizedBaseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${apiKey}`,
+          ...headers,
+        },
+        body: JSON.stringify({
+          model,
+          messages: createOpenAICompatibleMessages(request, systemPrompt),
+        }),
+      });
+
+      const payload = await parseOpenAICompatibleResponse(response);
+
+      if (!response.ok) {
+        throw new Error(payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`);
+      }
+
+      const text = extractOpenAICompatibleText(payload);
+      if (text.length === 0) {
+        throw new Error('Provider returned an empty response.');
+      }
+
+      return createProviderResponseBuilder().addText(text).done();
+    },
+  });
+};
+
+const parseOpenAICompatibleResponse = async (response: Response): Promise<OpenAICompatibleResponse> => {
+  const rawText = await response.text();
+  if (rawText.length === 0) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(rawText) as OpenAICompatibleResponse;
+  } catch {
+    return { rawText };
+  }
+};
+
+const createOpenAICompatibleMessages = (
+  request: ProviderRequest,
+  systemPrompt?: string,
+): OpenAICompatibleMessage[] => {
+  const messages: OpenAICompatibleMessage[] = [];
+
+  if (systemPrompt) {
+    messages.push({ role: 'system', content: systemPrompt });
+  }
+
+  for (const message of request.session.messages) {
+    messages.push({
+      role: message.role,
+      content: message.content,
+      ...(message.name ? { name: message.name } : {}),
+    });
+  }
+
+  return messages;
+};
+
+const extractOpenAICompatibleText = (payload: OpenAICompatibleResponse): string => {
+  const message = payload.choices?.[0]?.message;
+  const content = message?.content;
+
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (part?.type === 'text' && typeof part.text === 'string' ? part.text : ''))
+      .join('');
+  }
+
+  return '';
 };
 
 const isProviderPart = (value: ProviderResponseInput): value is ProviderPart => {

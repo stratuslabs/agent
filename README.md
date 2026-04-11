@@ -2,23 +2,24 @@
 
 StratusClaw is a tiny JavaScript agent runtime and CLI.
 
-Right now, the best way to try it is a local demo loop in the terminal. You give it a prompt, it runs a small in-memory agent flow, and you can watch session and tool events as they happen.
+Right now, the best way to try it is a local loop in the terminal. You give it a prompt, it runs a small in-memory agent flow, and you can watch session and tool events as they happen.
 
 ## What it includes
 
-- `@stratusclaw/core` — the runtime primitives and agent loop
-- `@stratusclaw/providers` — helpers for building model providers
-- `@stratusclaw/executors` — helpers for execution behavior
-- `@stratusclaw/cli` — the local CLI demo
+- `@stratusclaw/core` , the runtime primitives and agent loop
+- `@stratusclaw/providers` , helpers for building model providers
+- `@stratusclaw/executors` , helpers for execution behavior
+- `@stratusclaw/cli` , the local CLI entrypoint
 
 ## Current status
 
 This repo is early.
 
 Today it is useful for:
-- running a local demo agent loop
+- running the demo agent loop locally
+- running a single text-only session against a real OpenAI-compatible provider
 - seeing how provider output becomes session events
-- seeing a simple tool call execute end to end
+- seeing a simple tool call execute end to end in demo mode
 
 It is not yet a full production agent platform.
 
@@ -36,7 +37,7 @@ pnpm install
 pnpm build
 ```
 
-### 3) Run the CLI demo
+### 3) Run the demo path
 
 Use the built CLI directly:
 
@@ -50,17 +51,40 @@ Or trigger the demo tool:
 node packages/cli/dist/bin.js run --prompt "please use the echo tool"
 ```
 
-You can also run help:
+### 4) Run a real provider path
+
+With environment variables:
 
 ```bash
-node packages/cli/dist/bin.js --help
+export STRATUSCLAW_PROVIDER=openai
+export OPENAI_API_KEY=your-key
+export STRATUSCLAW_MODEL=gpt-4.1-mini
+pnpm cli run "say hello"
+```
+
+Or with a config file `stratusclaw.config.json`:
+
+```json
+{
+  "provider": "openai",
+  "model": "gpt-4.1-mini",
+  "baseUrl": "https://api.openai.com/v1",
+  "apiKeyEnv": "OPENAI_API_KEY"
+}
+```
+
+Then:
+
+```bash
+export OPENAI_API_KEY=your-key
+pnpm cli run "say hello"
 ```
 
 ## What you’ll see
 
 A run prints a short event log followed by the final session messages.
 
-A text-only prompt looks like this:
+A text-only demo prompt looks like this:
 
 ```text
 Starting StratusClaw local loop with provider=demo
@@ -83,18 +107,27 @@ A prompt that mentions `tool` or `echo` will also show tool events and a tool me
 • tool.completed demo.echo ok=true
 ```
 
+A real provider run prints the same session envelope, but the assistant text comes from the configured API instead of the local demo provider.
+
 ## CLI usage
 
 ```bash
 stratusclaw run --prompt "Use the demo tool"
 stratusclaw run "Say hello"
+stratusclaw run --provider openai --model gpt-4.1-mini "Say hello"
 ```
 
 Current options:
 
-- `--prompt`, `-p` — pass the prompt explicitly
-- `--provider` — currently only `demo` is supported
-- `--help`, `-h` — show help
+- `--prompt`, `-p` , pass the prompt explicitly
+- `--stdin` , read the prompt from stdin
+- `--provider` , choose `demo` or `openai`
+- `--model` , set the model for real providers
+- `--base-url` , override the OpenAI-compatible API base URL
+- `--config` , load provider settings from a JSON config file
+- `--format` , choose `text` or `json`
+- `--no-events` , hide event logs in text mode
+- `--help`, `-h` , show help
 
 If you are running from the repo without installing the CLI globally, use:
 
@@ -126,6 +159,6 @@ pnpm test
 
 Near term, StratusClaw is aiming to stay small and understandable while the runtime pieces settle.
 
-Expect the local CLI demo to keep improving first. Broader provider, executor, and runtime capabilities can grow from there.
+Expect the CLI to keep improving first. Broader provider, executor, and runtime capabilities can grow from there.
 
 If you want the deeper design notes, see `docs/architecture/stratusclaw-v1.md`.

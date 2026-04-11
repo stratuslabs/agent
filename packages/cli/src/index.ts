@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import {
   AgentRunner,
   EventBus,
@@ -10,7 +12,11 @@ import {
   type StratusEvent,
   type Tool,
 } from '@stratusclaw/core';
-import { createProviderResponseBuilder, defineProvider } from '@stratusclaw/providers';
+import {
+  createOpenAICompatibleProvider,
+  createProviderResponseBuilder,
+  defineProvider,
+} from '@stratusclaw/providers';
 
 export interface CliStreams {
   stdout: Pick<typeof process.stdout, 'write'>;
@@ -20,6 +26,9 @@ export interface CliStreams {
 export interface CliEnvironment {
   stdin?: string;
   stdinStream?: NodeJS.ReadableStream;
+  processEnv?: NodeJS.ProcessEnv;
+  cwd?: string;
+  fetch?: typeof fetch;
 }
 
 export interface CliRunOptions {
@@ -28,10 +37,15 @@ export interface CliRunOptions {
   env?: CliEnvironment;
 }
 
+export type CliProviderName = 'demo' | 'openai';
+
 export interface ParsedRunCommand {
   command: 'run';
   prompt: string;
-  provider: 'demo';
+  provider?: CliProviderName;
+  model?: string;
+  baseUrl?: string;
+  configPath?: string;
   format: 'text' | 'json';
   events: boolean;
 }
@@ -42,24 +56,62 @@ export interface ParsedHelpCommand {
 
 export type ParsedCommand = ParsedRunCommand | ParsedHelpCommand;
 
+interface CliConfigFile {
+  provider?: CliProviderName;
+  model?: string;
+  baseUrl?: string;
+  apiKeyEnv?: string;
+  systemPrompt?: string;
+}
+
+type RuntimeConfig =
+  | { provider: 'demo' }
+  | {
+      provider: 'openai';
+      model: string;
+      baseUrl: string;
+      apiKey: string;
+      systemPrompt?: string;
+      fetch?: typeof fetch;
+    };
+
+const DEFAULT_CONFIG_FILENAME = 'stratusclaw.config.json';
+const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
+const DEFAULT_OPENAI_MODEL = 'gpt-4.1-mini';
+
 const HELP_TEXT = `StratusClaw CLI
 
 Usage:
   pnpm cli run --prompt "Use the demo tool"
   pnpm cli run "Say hello"
   echo "Use the echo tool" | pnpm cli run --stdin
+  STRATUSCLAW_PROVIDER=openai OPENAI_API_KEY=... pnpm cli run "Say hello"
+  pnpm cli run --config ./stratusclaw.config.json --provider openai "Say hello"
 
 Commands:
-  run              Execute the local demo loop
+  run              Execute one local StratusClaw session
   help             Show this help message
 
 Options:
   --prompt, -p     Prompt to send to the local agent loop
   --stdin          Read the prompt from stdin
-  --provider       Provider mode to use (default: demo)
+  --provider       Provider to use: demo or openai
+  --model          Model name for real providers (default: gpt-4.1-mini)
+  --base-url       Override the OpenAI-compatible API base URL
+  --config         Load provider settings from a JSON config file
   --format         Output format: text or json (default: text)
   --no-events      Hide event-by-event progress lines in text mode
   --help, -h       Show this help message
+
+Config file:
+  The CLI looks for ./stratusclaw.config.json by default, or a path from --config / STRATUSCLAW_CONFIG.
+  Example:
+    {
+      "provider": "openai",
+      "model": "gpt-4.1-mini",
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKeyEnv": "OPENAI_API_KEY"
+    }
 `;
 
 const writeLine = (stream: Pick<typeof process.stdout, 'write'>, line = ''): void => {
@@ -127,6 +179,17 @@ const readPromptFromStdin = async (stdin: NodeJS.ReadableStream): Promise<string
   return data.trim();
 };
 
+const parseProviderName = (value: string, label: string): CliProviderName => {
+  if (value === 'demo' || value === 'openai') {
+    return value;
+  }
+
+  throw new Error(`Unsupported provider in ${label}: ${value}`);
+};
+
+const readProcessEnv = (env: CliEnvironment): NodeJS.ProcessEnv => env.processEnv ?? process.env;
+const readWorkingDirectory = (env: CliEnvironment): string => env.cwd ?? process.cwd();
+
 export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCommand => {
   const [command, ...rest] = argv;
 
@@ -139,7 +202,10 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
   }
 
   let prompt = '';
-  let provider: 'demo' = 'demo';
+  let provider: CliProviderName | undefined;
+  let model: string | undefined;
+  let baseUrl: string | undefined;
+  let configPath: string | undefined;
   let format: 'text' | 'json' = 'text';
   let events = true;
   let useStdin = false;
@@ -173,10 +239,40 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
 
     if (token === '--provider') {
       const value = rest[index + 1];
-      if (value !== 'demo') {
-        throw new Error(`Unsupported provider: ${value ?? '(missing)'}`);
+      if (!value) {
+        throw new Error('Missing value for --provider');
       }
-      provider = value;
+      provider = parseProviderName(value, '--provider');
+      index += 1;
+      continue;
+    }
+
+    if (token === '--model') {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error('Missing value for --model');
+      }
+      model = value;
+      index += 1;
+      continue;
+    }
+
+    if (token === '--base-url') {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error('Missing value for --base-url');
+      }
+      baseUrl = value;
+      index += 1;
+      continue;
+    }
+
+    if (token === '--config') {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error('Missing value for --config');
+      }
+      configPath = value;
       index += 1;
       continue;
     }
@@ -215,7 +311,16 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     throw new Error('A prompt is required. Pass it with --prompt, --stdin, or as a positional argument.');
   }
 
-  return { command: 'run', prompt, provider, format, events };
+  return {
+    command: 'run',
+    prompt,
+    ...(provider ? { provider } : {}),
+    ...(model ? { model } : {}),
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(configPath ? { configPath } : {}),
+    format,
+    events,
+  };
 };
 
 export const formatEvent = (event: StratusEvent): string | null => {
@@ -239,10 +344,141 @@ export const formatEvent = (event: StratusEvent): string | null => {
   }
 };
 
+const loadConfigFile = async (configPath: string): Promise<CliConfigFile> => {
+  const raw = await readFile(configPath, 'utf8');
+  const parsed = JSON.parse(raw) as unknown;
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`Config file must contain a JSON object: ${configPath}`);
+  }
+
+  const config = parsed as Record<string, unknown>;
+  const resolved: CliConfigFile = {};
+
+  if (typeof config.provider === 'string') {
+    resolved.provider = parseProviderName(config.provider, `config ${configPath}`);
+  }
+  if (typeof config.model === 'string' && config.model.length > 0) {
+    resolved.model = config.model;
+  }
+  if (typeof config.baseUrl === 'string' && config.baseUrl.length > 0) {
+    resolved.baseUrl = config.baseUrl;
+  }
+  if (typeof config.apiKeyEnv === 'string' && config.apiKeyEnv.length > 0) {
+    resolved.apiKeyEnv = config.apiKeyEnv;
+  }
+  if (typeof config.systemPrompt === 'string' && config.systemPrompt.length > 0) {
+    resolved.systemPrompt = config.systemPrompt;
+  }
+
+  return resolved;
+};
+
+const resolveConfigPath = async (
+  command: ParsedRunCommand,
+  env: CliEnvironment,
+): Promise<string | undefined> => {
+  const processEnv = readProcessEnv(env);
+  const cwd = readWorkingDirectory(env);
+  const explicit = command.configPath ?? processEnv.STRATUSCLAW_CONFIG;
+
+  if (explicit) {
+    return path.resolve(cwd, explicit);
+  }
+
+  const defaultPath = path.join(cwd, DEFAULT_CONFIG_FILENAME);
+  try {
+    await readFile(defaultPath, 'utf8');
+    return defaultPath;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+};
+
+export const resolveRuntimeConfig = async (
+  command: ParsedRunCommand,
+  env: CliEnvironment = {},
+): Promise<RuntimeConfig> => {
+  const processEnv = readProcessEnv(env);
+  const configPath = await resolveConfigPath(command, env);
+  const fileConfig = configPath ? await loadConfigFile(configPath) : {};
+
+  const provider = command.provider
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'))
+    ?? fileConfig.provider
+    ?? 'demo';
+
+  if (provider === 'demo') {
+    return { provider: 'demo' };
+  }
+
+  const model = command.model ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL) ?? fileConfig.model ?? DEFAULT_OPENAI_MODEL;
+  const baseUrl = command.baseUrl ?? readNonEmptyString(processEnv.STRATUSCLAW_BASE_URL) ?? fileConfig.baseUrl ?? DEFAULT_OPENAI_BASE_URL;
+  const apiKeyEnvName = readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV) ?? fileConfig.apiKeyEnv ?? 'OPENAI_API_KEY';
+  const apiKey = readNonEmptyString(processEnv.STRATUSCLAW_API_KEY) ?? readNonEmptyString(processEnv[apiKeyEnvName]);
+
+  if (!apiKey) {
+    throw new Error(`Missing API key for provider=openai. Set STRATUSCLAW_API_KEY or ${apiKeyEnvName}.`);
+  }
+
+  const resolved: RuntimeConfig = {
+    provider: 'openai',
+    model,
+    baseUrl,
+    apiKey,
+  };
+
+  const systemPrompt = readNonEmptyString(processEnv.STRATUSCLAW_SYSTEM_PROMPT) ?? fileConfig.systemPrompt;
+  if (systemPrompt) {
+    resolved.systemPrompt = systemPrompt;
+  }
+
+  if (env.fetch) {
+    resolved.fetch = env.fetch;
+  }
+
+  return resolved;
+};
+
+const readNonEmptyString = <T = string>(
+  value: string | undefined,
+  map?: (resolved: string) => T,
+): T | string | undefined => {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+
+  return map ? map(trimmed) : trimmed;
+};
+
+const createRuntimeProvider = (config: RuntimeConfig): ModelProvider => {
+  if (config.provider === 'demo') {
+    return createDemoProvider();
+  }
+
+  return createOpenAICompatibleProvider({
+    name: 'openai',
+    model: config.model,
+    apiKey: config.apiKey,
+    baseUrl: config.baseUrl,
+    ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
+    ...(config.fetch ? { fetch: config.fetch } : {}),
+  });
+};
+
 export const runSingleLoop = async (
   prompt: string,
   streams: CliStreams,
-  options: { events?: boolean } = {},
+  options: { events?: boolean; runtime: RuntimeConfig },
 ): Promise<Session> => {
   const tools = new ToolRegistry();
   tools.register(createDemoTool());
@@ -257,23 +493,41 @@ export const runSingleLoop = async (
     });
   }
 
+  const runtimeProvider = createRuntimeProvider(options.runtime);
+
   const runner = new AgentRunner({
-    provider: createDemoProvider(),
+    provider: runtimeProvider,
     tools,
     bus,
   });
 
   await runner.initialize();
 
+  const agent = options.runtime.provider === 'demo'
+    ? {
+        id: 'demo-agent',
+        name: 'Demo Agent',
+        instructions: 'Keep the loop tiny and readable.',
+      }
+    : {
+        id: 'openai-agent',
+        name: 'OpenAI Agent',
+        instructions: 'Respond clearly and directly to the user request.',
+      };
+
+  const metadata = options.runtime.provider === 'demo'
+    ? { provider: 'demo' as const }
+    : {
+        provider: 'openai' as const,
+        model: options.runtime.model,
+        baseUrl: options.runtime.baseUrl,
+      };
+
   return runner.run({
     sessionId: randomUUID(),
-    agent: {
-      id: 'demo-agent',
-      name: 'Demo Agent',
-      instructions: 'Keep the loop tiny and readable.',
-    },
+    agent,
     userMessage: prompt,
-    metadata: { provider: 'demo' },
+    metadata,
   });
 };
 
@@ -286,6 +540,14 @@ export const printSessionSummary = (session: Session, streams: CliStreams): void
     const content = message.role === 'tool' ? stringifyValue(JSON.parse(message.content) as JsonValue) : message.content;
     writeLine(streams.stdout, `[${message.role}${nameSuffix}] ${content}`);
   }
+};
+
+const formatRuntimeBanner = (runtime: RuntimeConfig): string => {
+  if (runtime.provider === 'demo') {
+    return 'Starting StratusClaw local loop with provider=demo';
+  }
+
+  return `Starting StratusClaw local loop with provider=openai model=${runtime.model}`;
 };
 
 export const runCli = async ({ argv, streams = process, env = {} }: CliRunOptions): Promise<number> => {
@@ -304,15 +566,20 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
       return 0;
     }
 
+    const runtime = await resolveRuntimeConfig(command, resolvedEnv);
+
     if (command.format === 'text') {
-      writeLine(streams.stdout, `Starting StratusClaw local loop with provider=${command.provider}`);
+      writeLine(streams.stdout, formatRuntimeBanner(runtime));
     }
 
-    const session = await runSingleLoop(command.prompt, streams, { events: command.events && command.format === 'text' });
+    const session = await runSingleLoop(command.prompt, streams, {
+      events: command.events && command.format === 'text',
+      runtime,
+    });
 
     if (command.format === 'json') {
       writeLine(streams.stdout, JSON.stringify({
-        provider: command.provider,
+        provider: runtime.provider,
         session,
       }, null, 2));
       return 0;
