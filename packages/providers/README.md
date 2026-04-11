@@ -1,6 +1,6 @@
 # @stratusagent/providers
 
-Reusable provider-side utilities for Stratus.
+Reusable provider-side utilities for Stratus Agent.
 
 This package stays outside `@stratusagent/core` and focuses on small helpers for building, testing, and composing provider implementations without pulling vendor SDKs into the kernel.
 

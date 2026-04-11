@@ -1,6 +1,6 @@
 # @stratusagent/cli
 
-Thin local entrypoint for exercising the Stratus kernel without pulling product UI concerns into the runtime.
+Thin local entrypoint for exercising the Stratus Agent kernel without pulling product UI concerns into the runtime.
 
 ## Local usage
 
@@ -61,7 +61,7 @@ Legacy `STRATUSCLAW_*` env vars and `stratusclaw.config.json` are still accepted
 
 `stratus dashboard` starts a small local server, prints the URL, opens your browser, and serves:
 
-- `GET /`, a simple Stratus dashboard page
+- `GET /`, a simple Stratus Agent dashboard page
 - `GET /api/status`, a basic status payload
 - `POST /api/echo`, a tiny local test endpoint used by the page
 

@@ -1,8 +1,8 @@
-# Stratus v1 Architecture
+# Stratus Agent v1 Architecture
 
 ## Product framing
 
-Stratus is the kernel: a small runtime that defines the contracts for sessions, providers, tools, plugins, events, and orchestration. StratusOS is an optional GUI and product layer that can sit on top of the kernel, but the kernel should remain usable from code, tests, CLIs, servers, or other UIs without depending on any StratusOS concerns.
+Stratus Agent is the kernel: a small runtime that defines the contracts for sessions, providers, tools, plugins, events, and orchestration. StratusOS is an optional GUI and product layer that can sit on top of the kernel, but the kernel should remain usable from code, tests, CLIs, servers, or other UIs without depending on any StratusOS concerns.
 
 ## Kernel boundary
 

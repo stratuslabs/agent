@@ -99,7 +99,7 @@ test('runCli executes the demo tool loop', async () => {
   const exitCode = await runCli({ argv: ['run', '--prompt', 'please use the echo tool'], streams });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /Starting Stratus local loop with provider=demo/);
+  assert.match(output.stdout, /Starting Stratus Agent local loop with provider=demo/);
   assert.match(output.stdout, /tool.called demo\.echo/);
   assert.match(output.stdout, /\[tool:demo\.echo\]/);
   assert.match(output.stdout, /"uppercase": "PLEASE USE THE ECHO TOOL"/);
@@ -268,7 +268,7 @@ test('runCli executes the real provider path with env config', async () => {
   assert.equal(exitCode, 0);
   assert.equal(requestUrl, 'https://api.openai.com/v1/chat/completions');
   assert.match(requestBody, /"model":"gpt-4.1-mini"/);
-  assert.match(output.stdout, /Starting Stratus local loop with provider=openai model=gpt-4.1-mini/);
+  assert.match(output.stdout, /Starting Stratus Agent local loop with provider=openai model=gpt-4.1-mini/);
   assert.match(output.stdout, /\[assistant\] Hello from the API path\./);
   assert.equal(output.stderr, '');
 });
@@ -280,7 +280,7 @@ test('startDashboardServer serves the landing page and echo api', async () => {
     const pageResponse = await fetch(`${dashboard.url}/`);
     const pageHtml = await pageResponse.text();
     assert.equal(pageResponse.status, 200);
-    assert.match(pageHtml, /Stratus Dashboard/);
+    assert.match(pageHtml, /Stratus Agent Dashboard/);
     assert.match(pageHtml, /POST \/api\/echo/);
 
     const echoResponse = await fetch(`${dashboard.url}/api/echo`, {
@@ -317,7 +317,7 @@ test('runCli starts the dashboard, prints the URL, and opens the browser callbac
   });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /Stratus Dashboard ready at http:\/\/127\.0\.0\.1:\d+/);
+  assert.match(output.stdout, /Stratus Agent Dashboard ready at http:\/\/127\.0\.0\.1:\d+/);
   assert.match(output.stdout, /Opened your default browser\./);
   assert.match(output.stdout, /Press Ctrl\+C to stop\./);
   assert.match(openedUrl, /^http:\/\/127\.0\.0\.1:\d+$/);
@@ -375,7 +375,7 @@ test('source bin script works with piped stdin', async () => {
   const [exitCode] = (await once(child, 'close')) as [number];
 
   assert.equal(exitCode, 0);
-  assert.match(stdout, /Starting Stratus local loop with provider=demo/);
+  assert.match(stdout, /Starting Stratus Agent local loop with provider=demo/);
   assert.match(stdout, /please inspect this tool/);
   assert.equal(stderr, '');
 });

@@ -97,9 +97,9 @@ const LEGACY_CONFIG_FILENAME = 'stratusclaw.config.json';
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_OPENAI_MODEL = 'gpt-4.1-mini';
 const DEFAULT_DASHBOARD_HOST = '127.0.0.1';
-const DASHBOARD_TITLE = 'Stratus Dashboard';
+const DASHBOARD_TITLE = 'Stratus Agent Dashboard';
 
-const HELP_TEXT = `Stratus CLI
+const HELP_TEXT = `Stratus Agent CLI
 
 Usage:
   stratus run --prompt "Use the demo tool"
@@ -111,8 +111,8 @@ Usage:
   stratus dashboard --port 4123 --host 0.0.0.0 --no-open
 
 Commands:
-  run              Execute one local Stratus session
-  dashboard        Start the local Stratus dashboard and open it in your browser
+  run              Execute one local Stratus Agent session
+  dashboard        Start the local Stratus Agent dashboard and open it in your browser
   help             Show this help message
 
 Options:
@@ -612,10 +612,10 @@ export const printSessionSummary = (session: Session, streams: CliStreams): void
 
 const formatRuntimeBanner = (runtime: RuntimeConfig): string => {
   if (runtime.provider === 'demo') {
-    return 'Starting Stratus local loop with provider=demo';
+    return 'Starting Stratus Agent local loop with provider=demo';
   }
 
-  return `Starting Stratus local loop with provider=openai model=${runtime.model}`;
+  return `Starting Stratus Agent local loop with provider=openai model=${runtime.model}`;
 };
 
 const escapeHtml = (value: string): string => value
@@ -667,8 +667,8 @@ const renderDashboardHtml = (url: string): string => `<!doctype html>
   <body>
     <main>
       <section class="hero">
-        <span class="eyebrow">Stratus local dashboard</span>
-        <h1>Stratus is up.</h1>
+        <span class="eyebrow">Stratus Agent local dashboard</span>
+        <h1>Stratus Agent is up.</h1>
         <p>A tiny dashboard for local testing. It confirms the CLI is reachable, gives you a quick action, and keeps the current repo intent visible.</p>
         <p><strong>Local URL:</strong> <a href="${escapeHtml(url)}">${escapeHtml(url)}</a></p>
       </section>
@@ -688,7 +688,7 @@ const renderDashboardHtml = (url: string): string => `<!doctype html>
         <div class="eyebrow">Actionable test</div>
         <h2 style="margin:12px 0 8px;">Echo tester</h2>
         <p>Send a payload to the local dashboard API and inspect the response.</p>
-        <textarea id="payload">Hello from Stratus dashboard</textarea>
+        <textarea id="payload">Hello from Stratus Agent dashboard</textarea>
         <button id="send">POST /api/echo</button>
         <pre id="result">Waiting for input…</pre>
       </section>

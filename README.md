@@ -1,6 +1,6 @@
-# Stratus
+# Stratus Agent
 
-Stratus is a tiny JavaScript agent runtime and CLI.
+Stratus Agent is a tiny JavaScript agent runtime and CLI.
 
 Right now, the best way to try it is a local loop in the terminal or a minimal local dashboard. You can run prompts through the CLI, watch session and tool events, and open a lightweight browser surface for local testing.
 
@@ -98,7 +98,7 @@ A run prints a short event log followed by the final session messages.
 A text-only demo prompt looks like this:
 
 ```text
-Starting Stratus local loop with provider=demo
+Starting Stratus Agent local loop with provider=demo
 • session.created <id>
 • session.updated running
 • provider.response 1 part(s)
@@ -121,7 +121,7 @@ A prompt that mentions `tool` or `echo` will also show tool events and a tool me
 The dashboard prints a line like this when it starts:
 
 ```text
-Stratus Dashboard ready at http://127.0.0.1:4123
+Stratus Agent Dashboard ready at http://127.0.0.1:4123
 Press Ctrl+C to stop.
 Opened your default browser.
 ```
@@ -180,7 +180,7 @@ pnpm test
 
 ## Where this is headed
 
-Near term, Stratus is aiming to stay small and understandable while the runtime pieces settle.
+Near term, Stratus Agent is aiming to stay small and understandable while the runtime pieces settle.
 
 Expect the CLI to keep improving first. Broader provider, executor, and runtime capabilities can grow from there.
 
