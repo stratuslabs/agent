@@ -1,7 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { Readable } from 'node:stream';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { HELP_TEXT, parseCommand, runCli } from '../src/index.ts';
+
+const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 
 const createStreams = () => {
   let stdout = '';
@@ -88,4 +95,39 @@ test('runCli reports missing prompt errors', async () => {
   assert.equal(exitCode, 1);
   assert.match(output.stderr, /A prompt is required/);
   assert.match(output.stderr, /Usage:/);
+});
+
+test('runCli reads stdin from an injected stdin stream', async () => {
+  const { streams, output } = createStreams();
+  const stdinStream = Readable.from(['inspect this tool\n']);
+  const exitCode = await runCli({ argv: ['run', '--stdin'], streams, env: { stdinStream } });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /inspect this tool/);
+  assert.equal(output.stderr, '');
+});
+
+test('source bin script works with piped stdin', async () => {
+  const child = spawn(process.execPath, ['--experimental-strip-types', './src/bin.ts', 'run', '--stdin'], {
+    cwd: packageDir,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk.toString();
+  });
+
+  child.stdin.end('please inspect this tool\n');
+
+  const [exitCode] = (await once(child, 'close')) as [number];
+
+  assert.equal(exitCode, 0);
+  assert.match(stdout, /Starting StratusClaw local loop with provider=demo/);
+  assert.match(stdout, /please inspect this tool/);
+  assert.equal(stderr, '');
 });

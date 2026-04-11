@@ -5,7 +5,7 @@
   "packageManager": "pnpm@10.18.3",
   "scripts": {
     "build": "pnpm -r build",
-    "cli": "pnpm --filter @stratusclaw/cli run cli --",
+    "cli": "pnpm --filter @stratusclaw/cli run cli",
     "demo": "pnpm cli run --prompt \"please use the echo tool\"",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test"

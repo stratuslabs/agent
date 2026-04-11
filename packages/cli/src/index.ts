@@ -19,6 +19,7 @@ export interface CliStreams {
 
 export interface CliEnvironment {
   stdin?: string;
+  stdinStream?: NodeJS.ReadableStream;
 }
 
 export interface CliRunOptions {
@@ -114,6 +115,17 @@ const createDemoProvider = (): ModelProvider =>
   });
 
 const readPromptFromEnvironment = (env: CliEnvironment): string => (env.stdin ?? '').trim();
+
+const readPromptFromStdin = async (stdin: NodeJS.ReadableStream): Promise<string> => {
+  stdin.setEncoding('utf8');
+
+  let data = '';
+  for await (const chunk of stdin) {
+    data += chunk;
+  }
+
+  return data.trim();
+};
 
 export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCommand => {
   const [command, ...rest] = argv;
@@ -278,7 +290,14 @@ export const printSessionSummary = (session: Session, streams: CliStreams): void
 
 export const runCli = async ({ argv, streams = process, env = {} }: CliRunOptions): Promise<number> => {
   try {
-    const command = parseCommand(argv, env);
+    const resolvedEnv = argv.includes('--stdin') && env.stdin === undefined
+      ? {
+          ...env,
+          stdin: await readPromptFromStdin(env.stdinStream ?? process.stdin),
+        }
+      : env;
+
+    const command = parseCommand(argv, resolvedEnv);
 
     if (command.command === 'help') {
       writeLine(streams.stdout, HELP_TEXT);
