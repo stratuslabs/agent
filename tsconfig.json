@@ -4,6 +4,6 @@
   "references": [
     { "path": "./packages/core" },
     { "path": "./packages/providers" },
-    { "path": "./packages/executors" }
+    { "path": "./packages/cli" }
   ]
 }
