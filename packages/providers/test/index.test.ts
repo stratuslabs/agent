@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { ProviderRequest } from '@stratusclaw/core';
+import type { ProviderRequest } from '@stratuslabs/core';
 import {
   createOpenAICompatibleProvider,
   createProviderRegistry,

@@ -1,8 +1,8 @@
-# @stratusclaw/providers
+# @stratuslabs/providers
 
-Reusable provider-side utilities for StratusClaw.
+Reusable provider-side utilities for Stratus.
 
-This package stays outside `@stratusclaw/core` and focuses on small helpers for building, testing, and composing provider implementations without pulling vendor SDKs into the kernel.
+This package stays outside `@stratuslabs/core` and focuses on small helpers for building, testing, and composing provider implementations without pulling vendor SDKs into the kernel.
 
 ## Included
 
@@ -20,7 +20,7 @@ import {
   createProviderRegistry,
   defineScriptedProvider,
   defineStaticProvider,
-} from '@stratusclaw/providers';
+} from '@stratuslabs/providers';
 
 const fallback = defineStaticProvider({
   name: 'fallback',

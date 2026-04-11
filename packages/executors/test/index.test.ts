@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { Session, Tool } from '@stratusclaw/core';
+import type { Session, Tool } from '@stratuslabs/core';
 import {
   createDirectExecutor,
   defineExecutor,

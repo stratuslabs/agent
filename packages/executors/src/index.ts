@@ -5,7 +5,7 @@ import type {
   Tool,
   ToolCall,
   ToolResult,
-} from '@stratusclaw/core';
+} from '@stratuslabs/core';
 
 export interface ExecutorResultCallRef {
   id: string;
