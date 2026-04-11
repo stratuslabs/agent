@@ -1,6 +1,6 @@
 # StratusClaw
 
-StratusClaw is a tiny JavaScript agent kernel. This workspace currently contains the core package, a providers helper package, and the minimum scaffolding needed to validate the architecture.
+StratusClaw is a tiny JavaScript agent kernel. This workspace currently contains the core package, provider helpers, executor helpers, and the minimum scaffolding needed to validate the architecture.
 
 ## Kernel boundary
 
@@ -36,7 +36,12 @@ stratusclaw/
   packages/
     core/       # @stratusclaw/core
     providers/  # @stratusclaw/providers
+    executors/  # @stratusclaw/executors
 ```
+
+`@stratusclaw/providers` holds response builders and adapter helpers for provider packages.
+
+`@stratusclaw/executors` holds result builders and baseline executor adapters so local, container, and remote execution strategies can stay outside the kernel.
 
 ## Commands
 

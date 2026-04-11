@@ -22,11 +22,14 @@ Plugins and modules sit outside the kernel when they add behavior rather than de
 packages/
   core/       # kernel contracts + minimal orchestration runtime
   providers/  # adapter helpers for building provider implementations against core
+  executors/  # adapter helpers for building executor implementations against core
 ```
 
 `@stratusclaw/core` stays intentionally small and dependency-light.
 
 `@stratusclaw/providers` is the first boundary package outside the kernel. It provides reusable builders for constructing provider responses cleanly, while keeping actual OpenAI, Anthropic, local model, or gateway-specific adapters in separate packages later.
+
+`@stratusclaw/executors` is the matching execution boundary package. It provides result helpers plus baseline executor adapters that can be reused by local, container, or remote execution packages later without pulling that policy into core.
 
 ## Event and state model
 
@@ -44,7 +47,7 @@ State is session-centric, append-only in spirit, and easy to persist or replay l
 
 The kernel coordinates provider output, approvals, and tool execution, but it should not decide where work runs. Local processes, containers, sandboxes, and cloud executors all have different trust, lifecycle, and infrastructure concerns.
 
-Those execution targets stay outside core so the kernel can remain portable and policy-free. Core defines the executor interface; environment-specific packages implement it.
+Those execution targets stay outside core so the kernel can remain portable and policy-free. Core defines the executor interface; environment-specific packages implement it. The public helpers for those implementations now live in `@stratusclaw/executors`, which keeps adapter ergonomics outside the kernel while still preserving a tiny zero-config path for local tests.
 
 ## Explicitly out of scope for v1
 
