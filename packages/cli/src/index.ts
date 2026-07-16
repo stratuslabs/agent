@@ -1107,8 +1107,8 @@ export const runSetup = async (
       primary: string,
       legacy: string,
       chosen: string,
-      flagName: string,
-    ): { envVar: string; envValue: string; flag: string } | undefined => {
+      flagName?: string,
+    ): { envVar: string; envValue: string; flag?: string } | undefined => {
       const envVar = readNonEmptyString(processEnv[primary])
         ? primary
         : readNonEmptyString(processEnv[legacy])
@@ -1121,11 +1121,15 @@ export const runSetup = async (
       if (envValue === chosen) {
         return undefined;
       }
-      return { envVar, envValue, flag: `${flagName} ${quoteShellArg(chosen)}` };
+      return {
+        envVar,
+        envValue,
+        ...(flagName ? { flag: `${flagName} ${quoteShellArg(chosen)}` } : {}),
+      };
     };
 
     const warnAboutEnvOverrides = (
-      conflicts: Array<{ envVar: string; envValue: string; flag: string }>,
+      conflicts: Array<{ envVar: string; envValue: string; flag?: string }>,
     ): void => {
       for (const conflict of conflicts) {
         writeLine(
@@ -1133,8 +1137,10 @@ export const runSetup = async (
           `Note: ${conflict.envVar}=${conflict.envValue} is exported and takes precedence over the config file (run \`unset ${conflict.envVar}\` to clear it).`,
         );
       }
-      if (conflicts.length > 0) {
+      if (conflicts.some((conflict) => conflict.flag)) {
         writeLine(streams.stdout, 'The suggested commands below include flags so they use what you just configured.');
+      }
+      if (conflicts.length > 0) {
         writeLine(streams.stdout);
       }
     };
@@ -1172,8 +1178,10 @@ export const runSetup = async (
       detectEnvOverride('STRATUS_PROVIDER', 'STRATUSCLAW_PROVIDER', provider, '--provider'),
       detectEnvOverride('STRATUS_MODEL', 'STRATUSCLAW_MODEL', model, '--model'),
       detectEnvOverride('STRATUS_BASE_URL', 'STRATUSCLAW_BASE_URL', baseUrl, '--base-url'),
+      // No run flag exists for the system prompt, so this one is warn-only.
+      detectEnvOverride('STRATUS_SYSTEM_PROMPT', 'STRATUSCLAW_SYSTEM_PROMPT', systemPrompt),
     ].filter((conflict) => conflict !== undefined);
-    const extraFlags = conflicts.map((conflict) => ` ${conflict.flag}`).join('');
+    const extraFlags = conflicts.flatMap((conflict) => (conflict.flag ? [` ${conflict.flag}`] : [])).join('');
 
     writeLine(streams.stdout);
     writeLine(streams.stdout, `Wrote ${configPath}`);

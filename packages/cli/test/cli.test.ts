@@ -266,6 +266,25 @@ test('runCli setup warns when exported model or base-url overrides the configure
   assert.match(output.stdout, /stratus run --model gpt-4\.1-mini --base-url https:\/\/new\.example\.test\/v1 "say hello"/);
 });
 
+test('runCli setup warns when an exported system prompt overrides the configured one', async () => {
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      processEnv: { STRATUS_SYSTEM_PROMPT: 'Old env prompt.', OPENAI_API_KEY: 'set-key' },
+      setupInput: Readable.from(['1\n', '\n', '\n', '\n', 'New configured prompt.\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /STRATUS_SYSTEM_PROMPT=Old env prompt\. is exported and takes precedence/);
+  assert.match(output.stdout, /unset STRATUS_SYSTEM_PROMPT/);
+  assert.doesNotMatch(output.stdout, /--system-prompt/);
+});
+
 test('runCli setup bases the key readiness check on exported API key overrides', async () => {
   const redirected = createStreams();
   const redirectedExit = await runCli({
