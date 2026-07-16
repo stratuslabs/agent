@@ -371,7 +371,7 @@ test('runCli completes a real-provider tool round trip across two turns', async 
                         id: 'call-1',
                         type: 'function',
                         function: {
-                          name: 'demo.echo',
+                          name: 'demo_echo',
                           arguments: JSON.stringify({ text: 'hello' }),
                         },
                       },
@@ -398,12 +398,14 @@ test('runCli completes a real-provider tool round trip across two turns', async 
   assert.equal(requestBodies.length, 2);
 
   const firstTools = requestBodies[0]?.tools as Array<{ function?: { name?: string } }>;
-  assert.equal(firstTools?.[0]?.function?.name, 'demo.echo');
+  assert.equal(firstTools?.[0]?.function?.name, 'demo_echo');
 
   const secondMessages = requestBodies[1]?.messages ?? [];
   const assistantToolCall = secondMessages.find((message) => Array.isArray(message.tool_calls));
   const toolResult = secondMessages.find((message) => message.role === 'tool');
   assert.ok(assistantToolCall, 'second request should replay the assistant tool call');
+  const replayedCalls = assistantToolCall?.tool_calls as Array<{ function?: { name?: string } }>;
+  assert.equal(replayedCalls?.[0]?.function?.name, 'demo_echo');
   assert.equal(toolResult?.tool_call_id, 'call-1');
   assert.match(String(toolResult?.content), /HELLO/);
 

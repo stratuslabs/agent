@@ -11,6 +11,7 @@ import {
   defineStaticProvider,
   normalizeProviderParts,
   normalizeProviderResponse,
+  sanitizeOpenAICompatibleToolName,
 } from '../src/index.ts';
 
 const createRequest = (): ProviderRequest => ({
@@ -271,7 +272,7 @@ test('createOpenAICompatibleProvider advertises tools and parses tool calls', as
                     id: 'call-abc',
                     type: 'function',
                     function: {
-                      name: 'demo.echo',
+                      name: 'demo_echo',
                       arguments: JSON.stringify({ text: 'hello' }),
                     },
                   },
@@ -305,7 +306,7 @@ test('createOpenAICompatibleProvider advertises tools and parses tool calls', as
     {
       type: 'function',
       function: {
-        name: 'demo.echo',
+        name: 'demo_echo',
         description: 'Echo text back.',
         parameters: {
           type: 'object',
@@ -383,7 +384,7 @@ test('createOpenAICompatibleProvider maps tool call and tool result messages for
         {
           id: 'call-abc',
           type: 'function',
-          function: { name: 'demo.echo', arguments: JSON.stringify({ text: 'hello' }) },
+          function: { name: 'demo_echo', arguments: JSON.stringify({ text: 'hello' }) },
         },
       ],
     },
@@ -394,6 +395,62 @@ test('createOpenAICompatibleProvider maps tool call and tool result messages for
     },
   ]);
   assert.deepEqual(response.parts, [{ type: 'text', text: 'The echo returned HELLO.' }]);
+});
+
+test('createOpenAICompatibleProvider sanitizes tool names and resolves collisions', async () => {
+  assert.equal(sanitizeOpenAICompatibleToolName('demo.echo'), 'demo_echo');
+  assert.equal(sanitizeOpenAICompatibleToolName('files:read/all'), 'files_read_all');
+  assert.equal(sanitizeOpenAICompatibleToolName(''), 'tool');
+  assert.equal(sanitizeOpenAICompatibleToolName('x'.repeat(80)).length, 64);
+
+  let requestBody: { tools?: Array<{ function: { name: string } }> } = {};
+
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as typeof requestBody;
+
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  {
+                    id: 'call-1',
+                    type: 'function',
+                    function: { name: 'demo_echo_2', arguments: '{}' },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      } as Response;
+    },
+  });
+
+  const request: ProviderRequest = {
+    ...createRequest(),
+    tools: [
+      { name: 'demo.echo' },
+      { name: 'demo/echo' },
+    ],
+  };
+
+  const response = await provider.generate(request);
+
+  assert.deepEqual(
+    requestBody.tools?.map((tool) => tool.function.name),
+    ['demo_echo', 'demo_echo_2'],
+  );
+  assert.deepEqual(response.parts, [
+    { type: 'tool-call', call: { id: 'call-1', toolName: 'demo/echo', input: {} } },
+  ]);
 });
 
 test('createOpenAICompatibleProvider rejects malformed tool call arguments', async () => {

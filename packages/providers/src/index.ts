@@ -320,7 +320,8 @@ export const createOpenAICompatibleProvider = ({
   return defineProvider({
     name,
     async generate(request) {
-      const tools = createOpenAICompatibleTools(request.tools);
+      const toolNames = createOpenAICompatibleToolNameMapping(request.tools);
+      const tools = createOpenAICompatibleTools(request.tools, toolNames);
 
       const response = await fetchImpl(`${normalizedBaseUrl}/chat/completions`, {
         method: 'POST',
@@ -331,7 +332,7 @@ export const createOpenAICompatibleProvider = ({
         },
         body: JSON.stringify({
           model,
-          messages: createOpenAICompatibleMessages(request, systemPrompt),
+          messages: createOpenAICompatibleMessages(request, systemPrompt, toolNames),
           ...(tools.length > 0 ? { tools } : {}),
         }),
       });
@@ -349,7 +350,7 @@ export const createOpenAICompatibleProvider = ({
         builder.addText(text);
       }
 
-      const toolCalls = extractOpenAICompatibleToolCalls(payload);
+      const toolCalls = extractOpenAICompatibleToolCalls(payload, toolNames);
       for (const call of toolCalls) {
         builder.addToolCall(call);
       }
@@ -364,28 +365,73 @@ export const createOpenAICompatibleProvider = ({
   });
 };
 
+interface OpenAICompatibleToolNameMapping {
+  toWire: Map<string, string>;
+  fromWire: Map<string, string>;
+}
+
+// OpenAI only accepts function names matching ^[a-zA-Z0-9_-]{1,64}$, so
+// registry names like "demo.echo" must be sanitized for the wire and
+// translated back when the model calls them.
+export const sanitizeOpenAICompatibleToolName = (name: string): string => {
+  const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+  return sanitized.length > 0 ? sanitized : 'tool';
+};
+
+const createOpenAICompatibleToolNameMapping = (
+  tools: ToolDescriptor[] | undefined,
+): OpenAICompatibleToolNameMapping => {
+  const toWire = new Map<string, string>();
+  const fromWire = new Map<string, string>();
+
+  for (const tool of tools ?? []) {
+    if (toWire.has(tool.name)) {
+      continue;
+    }
+
+    const base = sanitizeOpenAICompatibleToolName(tool.name);
+    let wireName = base;
+    for (let suffix = 2; fromWire.has(wireName); suffix += 1) {
+      wireName = `${base.slice(0, 60)}_${suffix}`;
+    }
+
+    toWire.set(tool.name, wireName);
+    fromWire.set(wireName, tool.name);
+  }
+
+  return { toWire, fromWire };
+};
+
+const toWireToolName = (name: string, mapping: OpenAICompatibleToolNameMapping): string =>
+  mapping.toWire.get(name) ?? sanitizeOpenAICompatibleToolName(name);
+
 const createOpenAICompatibleTools = (
   tools: ToolDescriptor[] | undefined,
+  toolNames: OpenAICompatibleToolNameMapping,
 ): OpenAICompatibleToolDefinition[] =>
   (tools ?? []).map((tool) => ({
     type: 'function',
     function: {
-      name: tool.name,
+      name: toWireToolName(tool.name, toolNames),
       ...(tool.description ? { description: tool.description } : {}),
       parameters: tool.parameters ?? { type: 'object', properties: {} },
     },
   }));
 
-const extractOpenAICompatibleToolCalls = (payload: OpenAICompatibleResponse): ToolCall[] => {
+const extractOpenAICompatibleToolCalls = (
+  payload: OpenAICompatibleResponse,
+  toolNames: OpenAICompatibleToolNameMapping,
+): ToolCall[] => {
   const toolCalls = payload.choices?.[0]?.message?.tool_calls ?? [];
   const calls: ToolCall[] = [];
 
   for (const [index, toolCall] of toolCalls.entries()) {
-    const name = toolCall.function?.name;
-    if (!name) {
+    const wireName = toolCall.function?.name;
+    if (!wireName) {
       continue;
     }
 
+    const name = toolNames.fromWire.get(wireName) ?? wireName;
     const rawArguments = toolCall.function?.arguments ?? '{}';
     let input: JsonObject;
     try {
@@ -425,7 +471,8 @@ const parseOpenAICompatibleResponse = async (response: Response): Promise<OpenAI
 
 const createOpenAICompatibleMessages = (
   request: ProviderRequest,
-  systemPrompt?: string,
+  systemPrompt: string | undefined,
+  toolNames: OpenAICompatibleToolNameMapping,
 ): OpenAICompatibleMessage[] => {
   const messages: OpenAICompatibleMessage[] = [];
 
@@ -442,7 +489,7 @@ const createOpenAICompatibleMessages = (
           id: call.id,
           type: 'function',
           function: {
-            name: call.toolName,
+            name: toWireToolName(call.toolName, toolNames),
             arguments: JSON.stringify(call.input),
           },
         })),
