@@ -26,6 +26,38 @@ Today it is useful for:
 
 It is not yet a full production agent platform: durable storage, remote executors, vendor SDK adapters, and retries/queues remain out of scope for v1 (see `docs/architecture/stratus-v1.md`).
 
+## Local setup (fresh machine)
+
+Stratus Agent needs **Node.js 22.6+** (the test runner uses `--experimental-strip-types`) and **pnpm 10**.
+
+On macOS:
+
+```bash
+brew install node             # installs the latest Node, which satisfies >= 22.6
+# or, to pin the Node 22 line: nvm install 22
+# (avoid `brew install node@22` — it is keg-only, so node/corepack won't be on PATH without extra steps)
+corepack enable && corepack prepare pnpm@10.18.3 --activate
+```
+
+On Linux, install Node 22 from your package manager or nvm, then enable corepack the same way.
+
+Then clone and verify the toolchain end to end:
+
+```bash
+git clone https://github.com/stratuslabs/agent.git && cd agent
+pnpm install --frozen-lockfile
+pnpm build && pnpm typecheck && pnpm test
+```
+
+If the test suite is green you're ready for the Quickstart below. To talk to a real provider, copy the example config and set your API key:
+
+```bash
+cp stratus.config.json.example stratus.config.json
+export OPENAI_API_KEY=your-key
+```
+
+`stratus.config.json` is gitignored, so your local provider settings never end up in a commit.
+
 ## Quickstart
 
 ### 1) Install dependencies
@@ -73,7 +105,7 @@ export STRATUS_MODEL=gpt-4.1-mini
 pnpm cli run "say hello"
 ```
 
-Or with a config file `stratus.config.json`:
+Or with a config file `stratus.config.json` (start from `stratus.config.json.example`):
 
 ```json
 {
