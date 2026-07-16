@@ -7,6 +7,7 @@ import { StringDecoder } from 'node:string_decoder';
 
 import type {
   Executor,
+  JsonObject,
   JsonValue,
   Session,
   Tool,
@@ -55,6 +56,7 @@ export interface LocalCommandTool extends Tool {
 export interface LocalCommandToolDefinition {
   name: string;
   description?: string;
+  parameters?: JsonObject;
   createCommand(input: ToolCall['input'], session: Session): LocalCommandInvocation | Promise<LocalCommandInvocation>;
   parseResult?(result: LocalCommandExecution, context: LocalCommandContext): JsonValue | Promise<JsonValue>;
 }
@@ -78,11 +80,13 @@ const DEFAULT_MAX_TIMEOUT_MS = 300_000;
 export const defineLocalCommandTool = ({
   name,
   description,
+  parameters,
   createCommand,
   parseResult,
 }: LocalCommandToolDefinition): LocalCommandTool => ({
   name,
   ...(description ? { description } : {}),
+  ...(parameters ? { parameters } : {}),
   runtime: 'local-command',
   createCommand,
   ...(parseResult ? { parseResult } : {}),

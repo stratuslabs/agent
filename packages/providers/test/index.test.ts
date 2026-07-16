@@ -249,6 +249,185 @@ test('createOpenAICompatibleProvider surfaces provider-side errors', async () =>
   await assert.rejects(() => provider.generate(createRequest()), /Bad key/);
 });
 
+test('createOpenAICompatibleProvider advertises tools and parses tool calls', async () => {
+  let requestBody: Record<string, unknown> = {};
+
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  {
+                    id: 'call-abc',
+                    type: 'function',
+                    function: {
+                      name: 'demo.echo',
+                      arguments: JSON.stringify({ text: 'hello' }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      } as Response;
+    },
+  });
+
+  const request: ProviderRequest = {
+    ...createRequest(),
+    tools: [
+      {
+        name: 'demo.echo',
+        description: 'Echo text back.',
+        parameters: {
+          type: 'object',
+          properties: { text: { type: 'string' } },
+          required: ['text'],
+        },
+      },
+    ],
+  };
+
+  const response = await provider.generate(request);
+
+  assert.deepEqual(requestBody.tools, [
+    {
+      type: 'function',
+      function: {
+        name: 'demo.echo',
+        description: 'Echo text back.',
+        parameters: {
+          type: 'object',
+          properties: { text: { type: 'string' } },
+          required: ['text'],
+        },
+      },
+    },
+  ]);
+  assert.deepEqual(response.parts, [
+    {
+      type: 'tool-call',
+      call: { id: 'call-abc', toolName: 'demo.echo', input: { text: 'hello' } },
+    },
+  ]);
+});
+
+test('createOpenAICompatibleProvider maps tool call and tool result messages for the wire', async () => {
+  let requestBody: { messages?: Array<Record<string, unknown>> } = {};
+
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as typeof requestBody;
+
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          choices: [{ message: { content: 'The echo returned HELLO.' } }],
+        }),
+      } as Response;
+    },
+  });
+
+  const base = createRequest();
+  const request: ProviderRequest = {
+    session: {
+      ...base.session,
+      messages: [
+        ...base.session.messages,
+        {
+          id: 'session-1:assistant:2',
+          role: 'assistant',
+          content: '',
+          createdAt: new Date().toISOString(),
+          toolCalls: [{ id: 'call-abc', toolName: 'demo.echo', input: { text: 'hello' } }],
+        },
+        {
+          id: 'session-1:tool:call-abc',
+          role: 'tool',
+          name: 'demo.echo',
+          content: '{"callId":"call-abc","toolName":"demo.echo","ok":true,"output":{"echoed":"HELLO"}}',
+          createdAt: new Date().toISOString(),
+          toolResult: {
+            callId: 'call-abc',
+            toolName: 'demo.echo',
+            ok: true,
+            output: { echoed: 'HELLO' },
+          },
+        },
+      ],
+    },
+  };
+
+  const response = await provider.generate(request);
+
+  assert.deepEqual(requestBody.messages, [
+    { role: 'user', content: 'Say hello' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        {
+          id: 'call-abc',
+          type: 'function',
+          function: { name: 'demo.echo', arguments: JSON.stringify({ text: 'hello' }) },
+        },
+      ],
+    },
+    {
+      role: 'tool',
+      content: JSON.stringify({ echoed: 'HELLO' }),
+      tool_call_id: 'call-abc',
+    },
+  ]);
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'The echo returned HELLO.' }]);
+});
+
+test('createOpenAICompatibleProvider rejects malformed tool call arguments', async () => {
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [
+                {
+                  id: 'call-bad',
+                  type: 'function',
+                  function: { name: 'demo.echo', arguments: 'not-json' },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    }) as Response,
+  });
+
+  await assert.rejects(
+    () => provider.generate(createRequest()),
+    /invalid arguments for tool demo\.echo/,
+  );
+});
+
 test('createOpenAICompatibleProvider preserves non-json HTTP error bodies', async () => {
   const provider = createOpenAICompatibleProvider({
     model: 'gpt-4.1-mini',

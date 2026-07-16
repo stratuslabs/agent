@@ -10,6 +10,8 @@ export interface Message {
   content: string;
   name?: string;
   createdAt: string;
+  toolCalls?: ToolCall[];
+  toolResult?: ToolResult;
 }
 
 export interface AgentDescriptor {
@@ -47,8 +49,15 @@ export type ProviderPart =
   | { type: 'text'; text: string }
   | { type: 'tool-call'; call: ToolCall };
 
+export interface ToolDescriptor {
+  name: string;
+  description?: string;
+  parameters?: JsonObject;
+}
+
 export interface ProviderRequest {
   session: Session;
+  tools?: ToolDescriptor[];
 }
 
 export interface ProviderResponse {
@@ -63,6 +72,8 @@ export interface ModelProvider {
 export interface Tool {
   name: string;
   description?: string;
+  /** JSON Schema describing the tool's input, advertised to model providers. */
+  parameters?: JsonObject;
   execute(input: JsonObject, session: Session): Promise<JsonValue>;
 }
 
@@ -85,13 +96,24 @@ export type StratusEvent =
   | { type: 'provider.response'; sessionId: string; parts: ProviderPart[] }
   | { type: 'tool.called'; sessionId: string; call: ToolCall }
   | { type: 'tool.completed'; sessionId: string; result: ToolResult }
+  | { type: 'tool.denied'; sessionId: string; call: ToolCall }
   | { type: 'session.completed'; sessionId: string }
   | { type: 'session.failed'; sessionId: string; error: string };
 
 export type EventHandler = (event: StratusEvent) => void | Promise<void>;
 
+export interface EventBusOptions {
+  /** Called when a subscriber throws. Handler errors never interrupt the run. */
+  onError?: (error: unknown, event: StratusEvent) => void;
+}
+
 export class EventBus {
   private handlers = new Set<EventHandler>();
+  private readonly onError: EventBusOptions['onError'];
+
+  constructor(options: EventBusOptions = {}) {
+    this.onError = options.onError;
+  }
 
   subscribe(handler: EventHandler): () => void {
     this.handlers.add(handler);
@@ -100,7 +122,11 @@ export class EventBus {
 
   async emit(event: StratusEvent): Promise<void> {
     for (const handler of this.handlers) {
-      await handler(event);
+      try {
+        await handler(event);
+      } catch (error) {
+        this.onError?.(error, event);
+      }
     }
   }
 }
@@ -164,6 +190,18 @@ export class ToolRegistry {
   get(name: string): Tool | undefined {
     return this.tools.get(name);
   }
+
+  list(): Tool[] {
+    return [...this.tools.values()];
+  }
+
+  describe(): ToolDescriptor[] {
+    return this.list().map((tool) => ({
+      name: tool.name,
+      ...(tool.description ? { description: tool.description } : {}),
+      ...(tool.parameters ? { parameters: tool.parameters } : {}),
+    }));
+  }
 }
 
 export class DefaultExecutor implements Executor {
@@ -196,6 +234,11 @@ export interface RunInput {
   metadata?: JsonObject;
 }
 
+export interface ResumeInput {
+  sessionId: string;
+  userMessage: string;
+}
+
 export interface AgentRunnerOptions {
   provider: ModelProvider;
   tools?: ToolRegistry;
@@ -204,7 +247,11 @@ export interface AgentRunnerOptions {
   store?: SessionStore;
   bus?: EventBus;
   plugins?: PluginRegistry;
+  /** Maximum provider turns per run before the session fails. */
+  maxTurns?: number;
 }
+
+const DEFAULT_MAX_TURNS = 8;
 
 export class AgentRunner {
   readonly bus: EventBus;
@@ -213,6 +260,7 @@ export class AgentRunner {
   readonly executor: Executor;
   readonly approvals: ApprovalPolicy;
   readonly plugins: PluginRegistry;
+  readonly maxTurns: number;
   private readonly options: AgentRunnerOptions;
 
   constructor(options: AgentRunnerOptions) {
@@ -223,6 +271,7 @@ export class AgentRunner {
     this.executor = options.executor ?? new DefaultExecutor();
     this.approvals = options.approvals ?? new AllowAllApprovalPolicy();
     this.plugins = options.plugins ?? new PluginRegistry();
+    this.maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
   }
 
   async initialize(): Promise<void> {
@@ -248,50 +297,87 @@ export class AgentRunner {
       sessionInput.metadata = input.metadata;
     }
 
-    let session = await this.store.create(sessionInput);
+    const session = await this.store.create(sessionInput);
 
     await this.bus.emit({ type: 'session.created', sessionId: session.id, agentId: session.agent.id });
     await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
 
-    try {
-      const response = await this.options.provider.generate({ session });
-      await this.bus.emit({ type: 'provider.response', sessionId: session.id, parts: response.parts });
+    return this.executeTurns(session);
+  }
 
-      for (const part of response.parts) {
-        if (part.type === 'text') {
+  async resume(input: ResumeInput): Promise<Session> {
+    const session = await this.store.get(input.sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${input.sessionId}`);
+    }
+
+    session.status = 'running';
+    delete session.lastError;
+    session.messages.push({
+      id: `${session.id}:user:${session.messages.length + 1}`,
+      role: 'user',
+      content: input.userMessage,
+      createdAt: new Date().toISOString(),
+    });
+
+    await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
+
+    return this.executeTurns(session);
+  }
+
+  private async executeTurns(initialSession: Session): Promise<Session> {
+    let session = initialSession;
+
+    try {
+      const tools = this.tools.describe();
+
+      for (let turn = 1; ; turn += 1) {
+        if (turn > this.maxTurns) {
+          throw new Error(`Session exceeded the maximum of ${this.maxTurns} provider turns.`);
+        }
+
+        const response = await this.options.provider.generate({
+          session,
+          ...(tools.length > 0 ? { tools } : {}),
+        });
+        await this.bus.emit({ type: 'provider.response', sessionId: session.id, parts: response.parts });
+
+        let sawToolCall = false;
+
+        for (const part of response.parts) {
+          if (part.type === 'text') {
+            session.messages.push({
+              id: `${session.id}:assistant:${session.messages.length + 1}`,
+              role: 'assistant',
+              content: part.text,
+              createdAt: new Date().toISOString(),
+            });
+            continue;
+          }
+
+          sawToolCall = true;
           session.messages.push({
             id: `${session.id}:assistant:${session.messages.length + 1}`,
             role: 'assistant',
-            content: part.text,
+            content: '',
             createdAt: new Date().toISOString(),
+            toolCalls: [part.call],
           });
-          continue;
+
+          const result = await this.executeToolCall(session, part.call);
+
+          session.messages.push({
+            id: `${session.id}:tool:${result.callId}`,
+            role: 'tool',
+            name: result.toolName,
+            content: JSON.stringify(result),
+            createdAt: new Date().toISOString(),
+            toolResult: result,
+          });
         }
 
-        const approved = await this.approvals.approve({ session, call: part.call });
-        if (!approved) {
-          throw new Error(`Tool call denied: ${part.call.toolName}`);
-        }
-
-        const tool = this.tools.get(part.call.toolName);
-        if (!tool) {
-          throw new Error(`Tool not found: ${part.call.toolName}`);
-        }
-
-        await this.bus.emit({ type: 'tool.called', sessionId: session.id, call: part.call });
-        const result = await this.executor.execute(part.call, tool, session);
-        await this.bus.emit({ type: 'tool.completed', sessionId: session.id, result });
-
-        session.messages.push({
-          id: `${session.id}:tool:${result.callId}`,
-          role: 'tool',
-          name: result.toolName,
-          content: JSON.stringify(result),
-          createdAt: new Date().toISOString(),
-        });
-
-        if (!result.ok) {
-          throw new Error(result.error ?? `Tool failed: ${result.toolName}`);
+        if (!sawToolCall) {
+          break;
         }
       }
 
@@ -313,5 +399,35 @@ export class AgentRunner {
       await this.bus.emit({ type: 'session.failed', sessionId: session.id, error: lastError });
       throw error;
     }
+  }
+
+  private async executeToolCall(session: Session, call: ToolCall): Promise<ToolResult> {
+    const approved = await this.approvals.approve({ session, call });
+    if (!approved) {
+      await this.bus.emit({ type: 'tool.denied', sessionId: session.id, call });
+      return {
+        callId: call.id,
+        toolName: call.toolName,
+        ok: false,
+        output: null,
+        error: `Tool call denied by approval policy: ${call.toolName}`,
+      };
+    }
+
+    const tool = this.tools.get(call.toolName);
+    if (!tool) {
+      return {
+        callId: call.id,
+        toolName: call.toolName,
+        ok: false,
+        output: null,
+        error: `Tool not found: ${call.toolName}`,
+      };
+    }
+
+    await this.bus.emit({ type: 'tool.called', sessionId: session.id, call });
+    const result = await this.executor.execute(call, tool, session);
+    await this.bus.emit({ type: 'tool.completed', sessionId: session.id, result });
+    return result;
   }
 }

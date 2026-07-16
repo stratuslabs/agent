@@ -44,6 +44,7 @@ test('parseCommand accepts positional prompts', () => {
     prompt: 'hello demo',
     format: 'text',
     events: true,
+    approvals: 'always',
   });
 });
 
@@ -53,6 +54,7 @@ test('parseCommand can read prompts from stdin', () => {
     prompt: 'inspect this tool',
     format: 'text',
     events: true,
+    approvals: 'always',
   });
 });
 
@@ -73,7 +75,32 @@ test('parseCommand accepts real-provider flags', () => {
     configPath: './config.json',
     format: 'text',
     events: true,
+    approvals: 'always',
   });
+});
+
+test('parseCommand accepts approvals and max-turns flags', () => {
+  assert.deepEqual(parseCommand(['run', '--approvals', 'never', '--max-turns', '3', 'hello']), {
+    command: 'run',
+    prompt: 'hello',
+    format: 'text',
+    events: true,
+    approvals: 'never',
+    maxTurns: 3,
+  });
+
+  assert.throws(
+    () => parseCommand(['run', '--approvals', 'sometimes', 'hello']),
+    /Unsupported approvals mode: sometimes/,
+  );
+  assert.throws(
+    () => parseCommand(['run', '--max-turns', 'zero', 'hello']),
+    /Invalid value for --max-turns/,
+  );
+  assert.throws(
+    () => parseCommand(['run', '--approvals', 'ask', '--stdin'], { stdin: 'hello' }),
+    /--approvals ask cannot be combined with --stdin/,
+  );
 });
 
 test('parseCommand accepts dashboard flags', () => {
@@ -101,9 +128,50 @@ test('runCli executes the demo tool loop', async () => {
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /Starting Stratus Agent local loop with provider=demo/);
   assert.match(output.stdout, /tool.called demo\.echo/);
+  assert.match(output.stdout, /→ tool call demo\.echo/);
   assert.match(output.stdout, /\[tool:demo\.echo\]/);
   assert.match(output.stdout, /"uppercase": "PLEASE USE THE ECHO TOOL"/);
+  assert.match(output.stdout, /The demo\.echo tool finished with/);
   assert.equal(output.stderr, '');
+});
+
+test('runCli denies tool calls when approvals are set to never', async () => {
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'please use the echo tool', '--approvals', 'never'],
+    streams,
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /tool.denied demo\.echo/);
+  assert.doesNotMatch(output.stdout, /tool.called demo\.echo/);
+  assert.match(output.stdout, /The demo\.echo tool did not run/);
+  assert.equal(output.stderr, '');
+});
+
+test('runCli prompts for approval in ask mode and honors the answer', async () => {
+  const approved = createStreams();
+  const approvedExit = await runCli({
+    argv: ['run', '--prompt', 'please use the echo tool', '--approvals', 'ask'],
+    streams: approved.streams,
+    env: { approvalInput: Readable.from(['y\n']) },
+  });
+
+  assert.equal(approvedExit, 0);
+  assert.match(approved.output.stdout, /Approve tool call demo\.echo/);
+  assert.match(approved.output.stdout, /tool.called demo\.echo/);
+  assert.match(approved.output.stdout, /"uppercase": "PLEASE USE THE ECHO TOOL"/);
+
+  const denied = createStreams();
+  const deniedExit = await runCli({
+    argv: ['run', '--prompt', 'please use the echo tool', '--approvals', 'ask'],
+    streams: denied.streams,
+    env: { approvalInput: Readable.from(['n\n']) },
+  });
+
+  assert.equal(deniedExit, 0);
+  assert.match(denied.output.stdout, /tool.denied demo\.echo/);
+  assert.match(denied.output.stdout, /The demo\.echo tool did not run/);
 });
 
 test('runCli can render machine-readable json output', async () => {
@@ -271,6 +339,77 @@ test('runCli executes the real provider path with env config', async () => {
   assert.match(requestBody, /"model":"gpt-4.1-mini"/);
   assert.match(output.stdout, /Starting Stratus Agent local loop with provider=openai model=gpt-4.1-mini/);
   assert.match(output.stdout, /\[assistant\] Hello from the API path\./);
+  assert.equal(output.stderr, '');
+});
+
+test('runCli completes a real-provider tool round trip across two turns', async () => {
+  const { streams, output } = createStreams();
+  const requestBodies: Array<{ messages: Array<Record<string, unknown>>; tools?: unknown[] }> = [];
+
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'shout hello', '--provider', 'openai'],
+    streams,
+    env: {
+      processEnv: {
+        OPENAI_API_KEY: 'test-key',
+      },
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}')) as (typeof requestBodies)[number];
+        requestBodies.push(body);
+
+        if (requestBodies.length === 1) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({
+              choices: [
+                {
+                  message: {
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: 'call-1',
+                        type: 'function',
+                        function: {
+                          name: 'demo.echo',
+                          arguments: JSON.stringify({ text: 'hello' }),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            }),
+          } as Response;
+        }
+
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            choices: [{ message: { content: 'The echo tool shouted: HELLO' } }],
+          }),
+        } as Response;
+      },
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(requestBodies.length, 2);
+
+  const firstTools = requestBodies[0]?.tools as Array<{ function?: { name?: string } }>;
+  assert.equal(firstTools?.[0]?.function?.name, 'demo.echo');
+
+  const secondMessages = requestBodies[1]?.messages ?? [];
+  const assistantToolCall = secondMessages.find((message) => Array.isArray(message.tool_calls));
+  const toolResult = secondMessages.find((message) => message.role === 'tool');
+  assert.ok(assistantToolCall, 'second request should replay the assistant tool call');
+  assert.equal(toolResult?.tool_call_id, 'call-1');
+  assert.match(String(toolResult?.content), /HELLO/);
+
+  assert.match(output.stdout, /tool.called demo\.echo/);
+  assert.match(output.stdout, /tool.completed demo\.echo ok=true/);
+  assert.match(output.stdout, /\[assistant\] The echo tool shouted: HELLO/);
   assert.equal(output.stderr, '');
 });
 

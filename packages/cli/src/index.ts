@@ -4,10 +4,13 @@ import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 import {
   AgentRunner,
+  AllowAllApprovalPolicy,
   EventBus,
   ToolRegistry,
+  type ApprovalPolicy,
   type JsonValue,
   type ModelProvider,
   type Session,
@@ -31,6 +34,7 @@ export interface CliStreams {
 export interface CliEnvironment {
   stdin?: string;
   stdinStream?: NodeJS.ReadableStream;
+  approvalInput?: NodeJS.ReadableStream;
   processEnv?: NodeJS.ProcessEnv;
   cwd?: string;
   fetch?: typeof fetch;
@@ -45,6 +49,7 @@ export interface CliRunOptions {
 }
 
 export type CliProviderName = 'demo' | 'openai';
+export type CliApprovalMode = 'always' | 'ask' | 'never';
 
 export interface ParsedRunCommand {
   command: 'run';
@@ -55,6 +60,8 @@ export interface ParsedRunCommand {
   configPath?: string;
   format: 'text' | 'json';
   events: boolean;
+  approvals: CliApprovalMode;
+  maxTurns?: number;
 }
 
 export interface ParsedDashboardCommand {
@@ -126,6 +133,8 @@ Options:
   --config         Load provider settings from a JSON config file
   --format         Output format: text or json (default: text)
   --no-events      Hide event-by-event progress lines in text mode
+  --approvals      Tool approval mode: always, ask, or never (default: always)
+  --max-turns      Maximum provider turns per run (default: 8)
   --port           Dashboard port, defaults to an open local port
   --host           Dashboard host (default: 127.0.0.1)
   --no-open        Do not open the browser automatically
@@ -152,6 +161,13 @@ const createDemoTool = () =>
   defineLocalCommandTool({
     name: 'demo.echo',
     description: 'Return a tiny transformed summary for CLI demos through a real local process.',
+    parameters: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'Text to echo back through the local process.' },
+      },
+      required: ['text'],
+    },
     async createCommand(input) {
       const text = typeof input.text === 'string' ? input.text : '';
       const normalized = text.trim() || 'empty input';
@@ -171,8 +187,20 @@ const createDemoProvider = (): ModelProvider =>
   defineProvider({
     name: 'demo',
     async generate({ session }) {
-      const prompt = session.messages.at(-1)?.content?.trim() ?? '';
       const builder = createProviderResponseBuilder();
+      const lastMessage = session.messages.at(-1);
+
+      if (lastMessage?.role === 'tool') {
+        const result = lastMessage.toolResult;
+        if (result?.ok) {
+          builder.addText(`The demo.echo tool finished with: ${JSON.stringify(result.output)}`);
+        } else {
+          builder.addText(`The demo.echo tool did not run (${result?.error ?? 'unknown error'}), so this run ends here.`);
+        }
+        return builder.done();
+      }
+
+      const prompt = [...session.messages].reverse().find((message) => message.role === 'user')?.content?.trim() ?? '';
       const wantsTool = /\b(tool|echo|uppercase|inspect)\b/i.test(prompt);
 
       builder.addText(`Demo provider ready. Prompt received: ${prompt || '(empty)'}`);
@@ -183,7 +211,6 @@ const createDemoProvider = (): ModelProvider =>
           toolName: 'demo.echo',
           input: { text: prompt },
         });
-        builder.addText('Demo provider queued demo.echo so you can see the local loop execute a tool.');
       } else {
         builder.addText('No tool call was needed, so this run stays text-only. Mention “tool” or “echo” to trigger the demo tool.');
       }
@@ -279,6 +306,8 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
   let configPath: string | undefined;
   let format: 'text' | 'json' = 'text';
   let events = true;
+  let approvals: CliApprovalMode = 'always';
+  let maxTurns: number | undefined;
   let useStdin = false;
   const positionals: string[] = [];
 
@@ -343,6 +372,26 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       continue;
     }
 
+    if (token === '--approvals') {
+      const value = readOptionValue(rest, index, '--approvals');
+      if (value !== 'always' && value !== 'ask' && value !== 'never') {
+        throw new Error(`Unsupported approvals mode: ${value}. Use always, ask, or never.`);
+      }
+      approvals = value;
+      index += 1;
+      continue;
+    }
+
+    if (token === '--max-turns') {
+      const value = Number(readOptionValue(rest, index, '--max-turns'));
+      if (!Number.isInteger(value) || value < 1) {
+        throw new Error(`Invalid value for --max-turns: ${rest[index + 1] ?? '(missing)'}`);
+      }
+      maxTurns = value;
+      index += 1;
+      continue;
+    }
+
     if (token.startsWith('-')) {
       throw new Error(`Unknown option: ${token}`);
     }
@@ -362,6 +411,10 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     throw new Error('A prompt is required. Pass it with --prompt, --stdin, or as a positional argument.');
   }
 
+  if (approvals === 'ask' && useStdin) {
+    throw new Error('--approvals ask cannot be combined with --stdin because both read from standard input.');
+  }
+
   return {
     command: 'run',
     prompt,
@@ -371,6 +424,8 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     ...(configPath ? { configPath } : {}),
     format,
     events,
+    approvals,
+    ...(maxTurns !== undefined ? { maxTurns } : {}),
   };
 };
 
@@ -386,6 +441,8 @@ export const formatEvent = (event: StratusEvent): string | null => {
       return `• tool.called ${event.call.toolName}`;
     case 'tool.completed':
       return `• tool.completed ${event.result.toolName} ok=${String(event.result.ok)}`;
+    case 'tool.denied':
+      return `• tool.denied ${event.call.toolName}`;
     case 'session.completed':
       return `• session.completed ${event.sessionId}`;
     case 'session.failed':
@@ -549,15 +606,63 @@ const createRuntimeProvider = (config: RuntimeConfig): ModelProvider => {
   });
 };
 
+const createApprovalPolicy = (
+  mode: CliApprovalMode,
+  streams: CliStreams,
+  env: CliEnvironment,
+): ApprovalPolicy => {
+  if (mode === 'always') {
+    return new AllowAllApprovalPolicy();
+  }
+
+  if (mode === 'never') {
+    return {
+      async approve() {
+        return false;
+      },
+    };
+  }
+
+  return {
+    async approve({ call }) {
+      const input = env.approvalInput ?? process.stdin;
+      const readline = createInterface({ input, terminal: false });
+
+      streams.stdout.write(`Approve tool call ${call.toolName} with input ${JSON.stringify(call.input)}? [y/N] `);
+
+      try {
+        const answer = await new Promise<string>((resolve) => {
+          readline.once('line', resolve);
+          readline.once('close', () => resolve(''));
+        });
+        writeLine(streams.stdout);
+        return /^y(es)?$/i.test(answer.trim());
+      } finally {
+        readline.close();
+      }
+    },
+  };
+};
+
 export const runSingleLoop = async (
   prompt: string,
   streams: CliStreams,
-  options: { events?: boolean; runtime: RuntimeConfig },
+  options: {
+    events?: boolean;
+    runtime: RuntimeConfig;
+    approvals?: CliApprovalMode;
+    maxTurns?: number;
+    env?: CliEnvironment;
+  },
 ): Promise<Session> => {
   const tools = new ToolRegistry();
   tools.register(createDemoTool());
 
-  const bus = new EventBus();
+  const bus = new EventBus({
+    onError: (error) => {
+      writeLine(streams.stderr, `Warning: event handler failed: ${error instanceof Error ? error.message : String(error)}`);
+    },
+  });
   if (options.events ?? true) {
     bus.subscribe(async (event) => {
       const line = formatEvent(event);
@@ -573,7 +678,9 @@ export const runSingleLoop = async (
     provider: runtimeProvider,
     tools,
     executor: createLocalCommandExecutor(),
+    approvals: createApprovalPolicy(options.approvals ?? 'always', streams, options.env ?? {}),
     bus,
+    ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
   });
 
   await runner.initialize();
@@ -616,6 +723,15 @@ export const printSessionSummary = (session: Session, streams: CliStreams): void
   writeLine(streams.stdout, 'Messages');
 
   for (const message of session.messages) {
+    if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
+      const calls = message.toolCalls
+        .map((call) => `${call.toolName}(${JSON.stringify(call.input)})`)
+        .join(', ');
+      const prefix = message.content ? `${message.content} ` : '';
+      writeLine(streams.stdout, `[assistant] ${prefix}→ tool call ${calls}`);
+      continue;
+    }
+
     const nameSuffix = message.name ? `:${message.name}` : '';
     const content = message.role === 'tool' ? stringifyValue(JSON.parse(message.content) as JsonValue) : message.content;
     writeLine(streams.stdout, `[${message.role}${nameSuffix}] ${content}`);
@@ -903,6 +1019,9 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     const session = await runSingleLoop(command.prompt, streams, {
       events: command.events && command.format === 'text',
       runtime,
+      approvals: command.approvals,
+      ...(command.maxTurns !== undefined ? { maxTurns: command.maxTurns } : {}),
+      env: resolvedEnv,
     });
 
     if (command.format === 'json') {

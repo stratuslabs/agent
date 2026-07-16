@@ -1,9 +1,11 @@
 import type {
+  JsonObject,
   ModelProvider,
   ProviderPart,
   ProviderRequest,
   ProviderResponse,
   ToolCall,
+  ToolDescriptor,
 } from '@stratusagent/core';
 
 export interface ProviderResponseBuilder {
@@ -67,16 +69,41 @@ export interface OpenAICompatibleProviderConfig {
   fetch?: typeof fetch;
 }
 
+interface OpenAICompatibleToolCall {
+  id?: string;
+  type?: string;
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+}
+
 interface OpenAICompatibleMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
+  content: string | null;
   name?: string;
+  tool_calls?: Array<{
+    id: string;
+    type: 'function';
+    function: { name: string; arguments: string };
+  }>;
+  tool_call_id?: string;
+}
+
+interface OpenAICompatibleToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description?: string;
+    parameters: JsonObject;
+  };
 }
 
 interface OpenAICompatibleResponse {
   choices?: Array<{
     message?: {
-      content?: string | Array<{ type?: string; text?: string }>;
+      content?: string | Array<{ type?: string; text?: string }> | null;
+      tool_calls?: OpenAICompatibleToolCall[];
     };
   }>;
   error?: {
@@ -293,6 +320,8 @@ export const createOpenAICompatibleProvider = ({
   return defineProvider({
     name,
     async generate(request) {
+      const tools = createOpenAICompatibleTools(request.tools);
+
       const response = await fetchImpl(`${normalizedBaseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -303,6 +332,7 @@ export const createOpenAICompatibleProvider = ({
         body: JSON.stringify({
           model,
           messages: createOpenAICompatibleMessages(request, systemPrompt),
+          ...(tools.length > 0 ? { tools } : {}),
         }),
       });
 
@@ -312,14 +342,72 @@ export const createOpenAICompatibleProvider = ({
         throw new Error(payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`);
       }
 
+      const builder = createProviderResponseBuilder();
+
       const text = extractOpenAICompatibleText(payload);
-      if (text.length === 0) {
+      if (text.length > 0) {
+        builder.addText(text);
+      }
+
+      const toolCalls = extractOpenAICompatibleToolCalls(payload);
+      for (const call of toolCalls) {
+        builder.addToolCall(call);
+      }
+
+      const result = builder.done();
+      if (result.parts.length === 0) {
         throw new Error('Provider returned an empty response.');
       }
 
-      return createProviderResponseBuilder().addText(text).done();
+      return result;
     },
   });
+};
+
+const createOpenAICompatibleTools = (
+  tools: ToolDescriptor[] | undefined,
+): OpenAICompatibleToolDefinition[] =>
+  (tools ?? []).map((tool) => ({
+    type: 'function',
+    function: {
+      name: tool.name,
+      ...(tool.description ? { description: tool.description } : {}),
+      parameters: tool.parameters ?? { type: 'object', properties: {} },
+    },
+  }));
+
+const extractOpenAICompatibleToolCalls = (payload: OpenAICompatibleResponse): ToolCall[] => {
+  const toolCalls = payload.choices?.[0]?.message?.tool_calls ?? [];
+  const calls: ToolCall[] = [];
+
+  for (const [index, toolCall] of toolCalls.entries()) {
+    const name = toolCall.function?.name;
+    if (!name) {
+      continue;
+    }
+
+    const rawArguments = toolCall.function?.arguments ?? '{}';
+    let input: JsonObject;
+    try {
+      const parsed: unknown = rawArguments.trim().length === 0 ? {} : JSON.parse(rawArguments);
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error('arguments must be a JSON object');
+      }
+      input = parsed as JsonObject;
+    } catch (error) {
+      throw new Error(
+        `Provider returned invalid arguments for tool ${name}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    calls.push({
+      id: toolCall.id ?? `tool-call-${index + 1}`,
+      toolName: name,
+      input,
+    });
+  }
+
+  return calls;
 };
 
 const parseOpenAICompatibleResponse = async (response: Response): Promise<OpenAICompatibleResponse> => {
@@ -346,6 +434,34 @@ const createOpenAICompatibleMessages = (
   }
 
   for (const message of request.session.messages) {
+    if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
+      messages.push({
+        role: 'assistant',
+        content: message.content.length > 0 ? message.content : null,
+        tool_calls: message.toolCalls.map((call) => ({
+          id: call.id,
+          type: 'function',
+          function: {
+            name: call.toolName,
+            arguments: JSON.stringify(call.input),
+          },
+        })),
+      });
+      continue;
+    }
+
+    if (message.role === 'tool') {
+      const result = message.toolResult;
+      messages.push({
+        role: 'tool',
+        content: result
+          ? JSON.stringify(result.ok ? result.output : { error: result.error ?? 'Tool failed' })
+          : message.content,
+        ...(result ? { tool_call_id: result.callId } : {}),
+      });
+      continue;
+    }
+
     messages.push({
       role: message.role,
       content: message.content,
