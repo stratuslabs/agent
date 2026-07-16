@@ -33,7 +33,9 @@ Stratus Agent needs **Node.js 22.6+** (the test runner uses `--experimental-stri
 On macOS:
 
 ```bash
-brew install node@22          # or: nvm install 22
+brew install node             # installs the latest Node, which satisfies >= 22.6
+# or, to pin the Node 22 line: nvm install 22
+# (avoid `brew install node@22` — it is keg-only, so node/corepack won't be on PATH without extra steps)
 corepack enable && corepack prepare pnpm@10.18.3 --activate
 ```
 
