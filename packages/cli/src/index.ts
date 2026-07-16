@@ -1052,9 +1052,21 @@ export const runSetup = async (
 ): Promise<number> => {
   const cwd = readWorkingDirectory(env);
   const processEnv = readProcessEnv(env);
-  const configPath = path.resolve(cwd, command.configPath ?? DEFAULT_CONFIG_FILENAME);
-  // A non-default path is not auto-discovered by `stratus run`, so suggested
-  // commands must carry it explicitly.
+
+  // Mirror resolveConfigPath's precedence (--config, then STRATUS_CONFIG /
+  // STRATUSCLAW_CONFIG, then the default filename) so the file written here
+  // is the one `stratus run` actually loads afterwards.
+  const envConfigVar = readNonEmptyString(processEnv.STRATUS_CONFIG)
+    ? 'STRATUS_CONFIG'
+    : readNonEmptyString(processEnv.STRATUSCLAW_CONFIG)
+      ? 'STRATUSCLAW_CONFIG'
+      : undefined;
+  const envConfigPath = envConfigVar ? String(processEnv[envConfigVar]).trim() : undefined;
+  const chosenPath = command.configPath ?? envConfigPath ?? DEFAULT_CONFIG_FILENAME;
+  const configPath = path.resolve(cwd, chosenPath);
+  // A path passed via --config is not auto-discovered by `stratus run`, so
+  // suggested commands must carry it explicitly. Env-derived paths need no
+  // flag because `run` reads the same variable.
   const runConfigFlag = command.configPath ? ` --config ${command.configPath}` : '';
   const prompter = createSetupPrompter(streams, env);
 
@@ -1062,6 +1074,9 @@ export const runSetup = async (
     writeLine(streams.stdout, 'Stratus Agent setup');
     writeLine(streams.stdout, 'This walkthrough writes a stratus.config.json so `stratus run` works out of the box.');
     writeLine(streams.stdout, 'Press Enter to accept the [default] for any question.');
+    if (!command.configPath && envConfigVar) {
+      writeLine(streams.stdout, `${envConfigVar} is set, so the config will be written to ${configPath}.`);
+    }
     writeLine(streams.stdout);
 
     if (await fileExists(configPath)) {

@@ -171,6 +171,28 @@ test('runCli setup includes a custom config path in the suggested next commands'
   assert.match(output.stdout, /stratus run --config \.\/custom\.json "say hello"/);
 });
 
+test('runCli setup writes to the STRATUS_CONFIG path that run will load', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  const envConfigPath = path.join(tempDir, 'nested', '..', 'env-config.json');
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: tempDir,
+      processEnv: { STRATUS_CONFIG: envConfigPath },
+      setupInput: Readable.from(['2\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /STRATUS_CONFIG is set, so the config will be written to/);
+  const written = JSON.parse(await readFile(path.join(tempDir, 'env-config.json'), 'utf8'));
+  assert.deepEqual(written, { provider: 'demo' });
+  assert.doesNotMatch(output.stdout, /stratus run --config/);
+});
+
 test('runCli setup writes a demo config without asking provider questions', async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
   const { streams, output } = createStreams();
