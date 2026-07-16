@@ -1,9 +1,11 @@
 import type {
+  JsonObject,
   ModelProvider,
   ProviderPart,
   ProviderRequest,
   ProviderResponse,
   ToolCall,
+  ToolDescriptor,
 } from '@stratusagent/core';
 
 export interface ProviderResponseBuilder {
@@ -67,16 +69,41 @@ export interface OpenAICompatibleProviderConfig {
   fetch?: typeof fetch;
 }
 
+interface OpenAICompatibleToolCall {
+  id?: string;
+  type?: string;
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+}
+
 interface OpenAICompatibleMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
+  content: string | null;
   name?: string;
+  tool_calls?: Array<{
+    id: string;
+    type: 'function';
+    function: { name: string; arguments: string };
+  }>;
+  tool_call_id?: string;
+}
+
+interface OpenAICompatibleToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description?: string;
+    parameters: JsonObject;
+  };
 }
 
 interface OpenAICompatibleResponse {
   choices?: Array<{
     message?: {
-      content?: string | Array<{ type?: string; text?: string }>;
+      content?: string | Array<{ type?: string; text?: string }> | null;
+      tool_calls?: OpenAICompatibleToolCall[];
     };
   }>;
   error?: {
@@ -293,6 +320,9 @@ export const createOpenAICompatibleProvider = ({
   return defineProvider({
     name,
     async generate(request) {
+      const toolNames = createOpenAICompatibleToolNameMapping(request.tools);
+      const tools = createOpenAICompatibleTools(request.tools, toolNames);
+
       const response = await fetchImpl(`${normalizedBaseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -302,7 +332,8 @@ export const createOpenAICompatibleProvider = ({
         },
         body: JSON.stringify({
           model,
-          messages: createOpenAICompatibleMessages(request, systemPrompt),
+          messages: createOpenAICompatibleMessages(request, systemPrompt, toolNames),
+          ...(tools.length > 0 ? { tools } : {}),
         }),
       });
 
@@ -312,14 +343,117 @@ export const createOpenAICompatibleProvider = ({
         throw new Error(payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`);
       }
 
+      const builder = createProviderResponseBuilder();
+
       const text = extractOpenAICompatibleText(payload);
-      if (text.length === 0) {
+      if (text.length > 0) {
+        builder.addText(text);
+      }
+
+      const toolCalls = extractOpenAICompatibleToolCalls(payload, toolNames);
+      for (const call of toolCalls) {
+        builder.addToolCall(call);
+      }
+
+      const result = builder.done();
+      if (result.parts.length === 0) {
         throw new Error('Provider returned an empty response.');
       }
 
-      return createProviderResponseBuilder().addText(text).done();
+      return result;
     },
   });
+};
+
+interface OpenAICompatibleToolNameMapping {
+  toWire: Map<string, string>;
+  fromWire: Map<string, string>;
+}
+
+// OpenAI only accepts function names matching ^[a-zA-Z0-9_-]{1,64}$, so
+// registry names like "demo.echo" must be sanitized for the wire and
+// translated back when the model calls them.
+export const sanitizeOpenAICompatibleToolName = (name: string): string => {
+  const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+  return sanitized.length > 0 ? sanitized : 'tool';
+};
+
+const createOpenAICompatibleToolNameMapping = (
+  tools: ToolDescriptor[] | undefined,
+): OpenAICompatibleToolNameMapping => {
+  const toWire = new Map<string, string>();
+  const fromWire = new Map<string, string>();
+
+  for (const tool of tools ?? []) {
+    if (toWire.has(tool.name)) {
+      continue;
+    }
+
+    const base = sanitizeOpenAICompatibleToolName(tool.name);
+    let wireName = base;
+    for (let suffix = 2; fromWire.has(wireName); suffix += 1) {
+      wireName = `${base.slice(0, 60)}_${suffix}`;
+    }
+
+    toWire.set(tool.name, wireName);
+    fromWire.set(wireName, tool.name);
+  }
+
+  return { toWire, fromWire };
+};
+
+const toWireToolName = (name: string, mapping: OpenAICompatibleToolNameMapping): string =>
+  mapping.toWire.get(name) ?? sanitizeOpenAICompatibleToolName(name);
+
+const createOpenAICompatibleTools = (
+  tools: ToolDescriptor[] | undefined,
+  toolNames: OpenAICompatibleToolNameMapping,
+): OpenAICompatibleToolDefinition[] =>
+  (tools ?? []).map((tool) => ({
+    type: 'function',
+    function: {
+      name: toWireToolName(tool.name, toolNames),
+      ...(tool.description ? { description: tool.description } : {}),
+      parameters: tool.parameters ?? { type: 'object', properties: {} },
+    },
+  }));
+
+const extractOpenAICompatibleToolCalls = (
+  payload: OpenAICompatibleResponse,
+  toolNames: OpenAICompatibleToolNameMapping,
+): ToolCall[] => {
+  const toolCalls = payload.choices?.[0]?.message?.tool_calls ?? [];
+  const calls: ToolCall[] = [];
+
+  for (const [index, toolCall] of toolCalls.entries()) {
+    const wireName = toolCall.function?.name;
+    if (!wireName) {
+      continue;
+    }
+
+    const name = toolNames.fromWire.get(wireName) ?? wireName;
+    const rawArguments = toolCall.function?.arguments ?? '{}';
+    let input: JsonObject;
+    try {
+      const parsed: unknown = rawArguments.trim().length === 0 ? {} : JSON.parse(rawArguments);
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error('arguments must be a JSON object');
+      }
+      input = parsed as JsonObject;
+    } catch (error) {
+      throw new Error(
+        `Provider returned invalid arguments for tool ${name}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    calls.push({
+      id: toolCall.id ?? `tool-call-${index + 1}`,
+      toolName: name,
+      input,
+    });
+  }
+
+  return calls;
 };
 
 const parseOpenAICompatibleResponse = async (response: Response): Promise<OpenAICompatibleResponse> => {
@@ -337,7 +471,8 @@ const parseOpenAICompatibleResponse = async (response: Response): Promise<OpenAI
 
 const createOpenAICompatibleMessages = (
   request: ProviderRequest,
-  systemPrompt?: string,
+  systemPrompt: string | undefined,
+  toolNames: OpenAICompatibleToolNameMapping,
 ): OpenAICompatibleMessage[] => {
   const messages: OpenAICompatibleMessage[] = [];
 
@@ -346,6 +481,34 @@ const createOpenAICompatibleMessages = (
   }
 
   for (const message of request.session.messages) {
+    if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
+      messages.push({
+        role: 'assistant',
+        content: message.content.length > 0 ? message.content : null,
+        tool_calls: message.toolCalls.map((call) => ({
+          id: call.id,
+          type: 'function',
+          function: {
+            name: toWireToolName(call.toolName, toolNames),
+            arguments: JSON.stringify(call.input),
+          },
+        })),
+      });
+      continue;
+    }
+
+    if (message.role === 'tool') {
+      const result = message.toolResult;
+      messages.push({
+        role: 'tool',
+        content: result
+          ? JSON.stringify(result.ok ? result.output : { error: result.error ?? 'Tool failed' })
+          : message.content,
+        ...(result ? { tool_call_id: result.callId } : {}),
+      });
+      continue;
+    }
+
     messages.push({
       role: message.role,
       content: message.content,

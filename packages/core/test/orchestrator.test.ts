@@ -4,17 +4,19 @@ import assert from 'node:assert/strict';
 import {
   AgentRunner,
   EventBus,
+  InMemorySessionStore,
   PluginRegistry,
   ToolRegistry,
   type Executor,
   type ModelProvider,
   type Session,
+  type StratusEvent,
   type Tool,
   type ToolCall,
   type ToolResult,
 } from '../src/index.ts';
 
-test('agent runner completes a basic provider -> tool orchestration flow', async () => {
+test('agent runner loops provider -> tool -> provider until no tool calls remain', async () => {
   const events: string[] = [];
   const bus = new EventBus();
   bus.subscribe((event) => {
@@ -26,6 +28,11 @@ test('agent runner completes a basic provider -> tool orchestration flow', async
 
   const echoTool: Tool = {
     name: 'echo',
+    parameters: {
+      type: 'object',
+      properties: { text: { type: 'string' } },
+      required: ['text'],
+    },
     async execute(input) {
       traces.push(`tool:${String(input.text)}`);
       return { echoed: String(input.text).toUpperCase() };
@@ -34,8 +41,15 @@ test('agent runner completes a basic provider -> tool orchestration flow', async
 
   const provider: ModelProvider = {
     name: 'fake-provider',
-    async generate({ session }) {
-      traces.push(`provider:${session.messages.at(-1)?.content ?? ''}`);
+    async generate({ session, tools: offeredTools }) {
+      traces.push(`provider:${session.messages.at(-1)?.role ?? ''}`);
+      assert.equal(offeredTools?.[0]?.name, 'echo');
+      assert.equal(offeredTools?.[0]?.parameters?.type, 'object');
+
+      if (session.messages.at(-1)?.role === 'tool') {
+        return { parts: [{ type: 'text', text: 'All set' }] };
+      }
+
       return {
         parts: [
           { type: 'text', text: 'Working on it' },
@@ -47,7 +61,6 @@ test('agent runner completes a basic provider -> tool orchestration flow', async
               input: { text: 'hello stratus' },
             },
           },
-          { type: 'text', text: 'Done' },
         ],
       };
     },
@@ -74,9 +87,10 @@ test('agent runner completes a basic provider -> tool orchestration flow', async
 
   assert.equal(session.status, 'completed');
   assert.deepEqual(traces, [
-    'provider:Say hi',
+    'provider:user',
     'executor:echo:session-1',
     'tool:hello stratus',
+    'provider:tool',
   ]);
   assert.deepEqual(events, [
     'session.created',
@@ -84,12 +98,17 @@ test('agent runner completes a basic provider -> tool orchestration flow', async
     'provider.response',
     'tool.called',
     'tool.completed',
+    'provider.response',
     'session.updated',
     'session.completed',
   ]);
   assert.equal(session.messages[1]?.content, 'Working on it');
-  assert.equal(session.messages[3]?.content, 'Done');
-  assert.match(session.messages[2]?.content ?? '', /HELLO STRATUS/);
+  assert.deepEqual(session.messages[2]?.toolCalls, [
+    { id: 'call-1', toolName: 'echo', input: { text: 'hello stratus' } },
+  ]);
+  assert.match(session.messages[3]?.content ?? '', /HELLO STRATUS/);
+  assert.equal(session.messages[3]?.toolResult?.ok, true);
+  assert.equal(session.messages[4]?.content, 'All set');
 });
 
 test('plugins can register tools before a run', async () => {
@@ -110,7 +129,11 @@ test('plugins can register tools before a run', async () => {
 
   const provider: ModelProvider = {
     name: 'plugin-provider',
-    async generate() {
+    async generate({ session }) {
+      if (session.messages.at(-1)?.role === 'tool') {
+        return { parts: [{ type: 'text', text: 'Pinged.' }] };
+      }
+
       return {
         parts: [
           {
@@ -133,4 +156,194 @@ test('plugins can register tools before a run', async () => {
 
   assert.equal(session.status, 'completed');
   assert.equal(tools.get('ping')?.name, 'ping');
+});
+
+test('denied tool calls are fed back to the provider instead of failing the session', async () => {
+  const events: StratusEvent[] = [];
+  const bus = new EventBus();
+  bus.subscribe((event) => {
+    events.push(event);
+  });
+
+  const tools = new ToolRegistry();
+  let toolRan = false;
+  tools.register({
+    name: 'guarded',
+    async execute() {
+      toolRan = true;
+      return { ok: true };
+    },
+  });
+
+  const provider: ModelProvider = {
+    name: 'denied-provider',
+    async generate({ session }) {
+      const last = session.messages.at(-1);
+      if (last?.role === 'tool') {
+        assert.equal(last.toolResult?.ok, false);
+        assert.match(last.toolResult?.error ?? '', /denied by approval policy/);
+        return { parts: [{ type: 'text', text: 'Understood, skipping the tool.' }] };
+      }
+
+      return {
+        parts: [
+          { type: 'tool-call', call: { id: 'call-3', toolName: 'guarded', input: {} } },
+        ],
+      };
+    },
+  };
+
+  const runner = new AgentRunner({
+    provider,
+    tools,
+    bus,
+    approvals: {
+      async approve() {
+        return false;
+      },
+    },
+  });
+
+  const session = await runner.run({
+    sessionId: 'session-3',
+    agent: { id: 'agent-3', name: 'Guarded Agent' },
+    userMessage: 'Try the guarded tool',
+  });
+
+  assert.equal(session.status, 'completed');
+  assert.equal(toolRan, false);
+  assert.ok(events.some((event) => event.type === 'tool.denied'));
+  assert.ok(!events.some((event) => event.type === 'tool.called'));
+  assert.equal(session.messages.at(-1)?.content, 'Understood, skipping the tool.');
+});
+
+test('unknown tools produce a failure result the provider can react to', async () => {
+  const provider: ModelProvider = {
+    name: 'missing-tool-provider',
+    async generate({ session }) {
+      const last = session.messages.at(-1);
+      if (last?.role === 'tool') {
+        assert.match(last.toolResult?.error ?? '', /Tool not found: nope/);
+        return { parts: [{ type: 'text', text: 'That tool does not exist.' }] };
+      }
+
+      return {
+        parts: [
+          { type: 'tool-call', call: { id: 'call-4', toolName: 'nope', input: {} } },
+        ],
+      };
+    },
+  };
+
+  const runner = new AgentRunner({ provider });
+  const session = await runner.run({
+    sessionId: 'session-4',
+    agent: { id: 'agent-4', name: 'Curious Agent' },
+    userMessage: 'Use a tool that does not exist',
+  });
+
+  assert.equal(session.status, 'completed');
+  assert.equal(session.messages.at(-1)?.content, 'That tool does not exist.');
+});
+
+test('sessions fail when the provider never stops requesting tools', async () => {
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'loop',
+    async execute() {
+      return { again: true };
+    },
+  });
+
+  let calls = 0;
+  const provider: ModelProvider = {
+    name: 'looping-provider',
+    async generate() {
+      calls += 1;
+      return {
+        parts: [
+          { type: 'tool-call', call: { id: `call-${calls}`, toolName: 'loop', input: {} } },
+        ],
+      };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools, maxTurns: 3 });
+
+  await assert.rejects(
+    () => runner.run({
+      sessionId: 'session-5',
+      agent: { id: 'agent-5', name: 'Loop Agent' },
+      userMessage: 'Loop forever',
+    }),
+    /maximum of 3 provider turns/,
+  );
+
+  assert.equal(calls, 3);
+  const session = await runner.store.get('session-5');
+  assert.equal(session?.status, 'failed');
+  assert.match(session?.lastError ?? '', /maximum of 3 provider turns/);
+});
+
+test('resume continues an existing session with new user input', async () => {
+  const store = new InMemorySessionStore();
+  const provider: ModelProvider = {
+    name: 'chatty-provider',
+    async generate({ session }) {
+      const userTurns = session.messages.filter((message) => message.role === 'user').length;
+      return { parts: [{ type: 'text', text: `Reply ${userTurns}` }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, store });
+
+  await runner.run({
+    sessionId: 'session-6',
+    agent: { id: 'agent-6', name: 'Chat Agent' },
+    userMessage: 'First message',
+  });
+
+  const resumed = await runner.resume({
+    sessionId: 'session-6',
+    userMessage: 'Second message',
+  });
+
+  assert.equal(resumed.status, 'completed');
+  const contents = resumed.messages.map((message) => message.content);
+  assert.deepEqual(contents, ['First message', 'Reply 1', 'Second message', 'Reply 2']);
+
+  await assert.rejects(
+    () => runner.resume({ sessionId: 'missing', userMessage: 'Hello?' }),
+    /Session not found: missing/,
+  );
+});
+
+test('event handler errors are isolated and never fail the run', async () => {
+  const captured: unknown[] = [];
+  const bus = new EventBus({
+    onError: (error) => {
+      captured.push(error);
+    },
+  });
+  bus.subscribe(() => {
+    throw new Error('subscriber exploded');
+  });
+
+  const provider: ModelProvider = {
+    name: 'quiet-provider',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'Done.' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, bus });
+  const session = await runner.run({
+    sessionId: 'session-7',
+    agent: { id: 'agent-7', name: 'Stable Agent' },
+    userMessage: 'Hello',
+  });
+
+  assert.equal(session.status, 'completed');
+  assert.ok(captured.length > 0);
+  assert.match(String(captured[0]), /subscriber exploded/);
 });

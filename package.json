@@ -9,5 +9,10 @@
     "demo": "pnpm cli run --prompt \"please use the echo tool\"",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git"
   }
 }

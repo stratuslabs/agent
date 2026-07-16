@@ -14,16 +14,17 @@ Right now, the best way to try it is a local loop in the terminal or a minimal l
 
 ## Current status
 
-This repo is early.
+This repo is early, but the core loop is complete.
 
 Today it is useful for:
-- running the demo agent loop locally
-- running a single text-only session against a real OpenAI-compatible provider
+- running a multi-turn agent loop locally: provider → tools → provider until the model finishes
+- running real tool-calling sessions against an OpenAI-compatible provider (tools are advertised with JSON schemas, tool calls execute locally, and results are fed back to the model)
+- gating tool execution with an approval policy (`--approvals always|ask|never`)
+- continuing an existing session with follow-up user messages via `runner.resume()`
 - opening a tiny local dashboard for browser-based smoke testing
 - seeing how provider output becomes session events
-- seeing a simple tool call execute end to end through a real local process
 
-It is not yet a full production agent platform.
+It is not yet a full production agent platform: durable storage, remote executors, vendor SDK adapters, and retries/queues remain out of scope for v1 (see `docs/architecture/stratus-v1.md`).
 
 ## Quickstart
 
@@ -111,12 +112,19 @@ Messages
 [assistant] Demo provider ready. Prompt received: say helloNo tool call was needed, so this run stays text-only. Mention “tool” or “echo” to trigger the demo tool.
 ```
 
-A prompt that mentions `tool` or `echo` will also show tool events and a tool message in the session:
+A prompt that mentions `tool` or `echo` runs the full multi-turn loop: the provider requests a tool, the tool executes locally, and the result goes back to the provider for a final answer:
 
 ```text
-• provider.response 3 part(s)
+• provider.response 2 part(s)
 • tool.called demo.echo
 • tool.completed demo.echo ok=true
+• provider.response 1 part(s)
+```
+
+```text
+[assistant] → tool call demo.echo({"text":"please use the echo tool"})
+[tool:demo.echo] { "ok": true, "output": { "uppercase": "PLEASE USE THE ECHO TOOL", ... } }
+[assistant] The demo.echo tool finished with: {"received":"please use the echo tool", ...}
 ```
 
 The dashboard prints a line like this when it starts:
@@ -147,6 +155,8 @@ Current options:
 - `--config`, load provider settings from a JSON config file
 - `--format`, choose `text` or `json`
 - `--no-events`, hide event logs in text mode
+- `--approvals`, tool approval mode: `always`, `ask` (interactive y/N prompt), or `never`
+- `--max-turns`, maximum provider turns per run (default: 8)
 - `--port`, set the dashboard port
 - `--host`, set the dashboard host
 - `--no-open`, skip automatic browser opening
