@@ -49,14 +49,20 @@ pnpm install --frozen-lockfile
 pnpm build && pnpm typecheck && pnpm test
 ```
 
-If the test suite is green you're ready for the Quickstart below. To talk to a real provider, copy the example config and set your API key:
+If the test suite is green you're ready for the Quickstart below. To configure a provider, run the interactive walkthrough:
 
 ```bash
-cp stratus.config.json.example stratus.config.json
-export OPENAI_API_KEY=your-key
+node packages/cli/dist/bin.js setup
 ```
 
-`stratus.config.json` is gitignored, so your local provider settings never end up in a commit.
+It asks a few questions (provider, model, base URL, which env var holds your API key), writes `stratus.config.json`, and prints the exact commands to run next. Prefer doing it by hand? Copy `stratus.config.json.example` instead. Either way the file is gitignored, so your local provider settings never end up in a commit.
+
+Once the packages are published to npm, this whole section becomes two commands:
+
+```bash
+npm install -g @stratusagent/cli
+stratus setup
+```
 
 ## Quickstart
 

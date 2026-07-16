@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { Readable } from 'node:stream';
@@ -110,6 +110,269 @@ test('parseCommand accepts dashboard flags', () => {
     host: '0.0.0.0',
     openBrowser: false,
   });
+});
+
+test('parseCommand accepts the setup command', () => {
+  assert.deepEqual(parseCommand(['setup']), { command: 'setup' });
+  assert.deepEqual(parseCommand(['setup', '--config', './custom.json']), {
+    command: 'setup',
+    configPath: './custom.json',
+  });
+  assert.throws(() => parseCommand(['setup', '--bogus']), /Unknown option: --bogus/);
+});
+
+test('runCli setup walks through an openai config and reports the missing key', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: tempDir,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '\n', 'https://example.test/v1\n', '\n', 'Be brief.\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+
+  const written = JSON.parse(await readFile(path.join(tempDir, 'stratus.config.json'), 'utf8'));
+  assert.deepEqual(written, {
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://example.test/v1',
+    apiKeyEnv: 'OPENAI_API_KEY',
+    systemPrompt: 'Be brief.',
+  });
+
+  assert.match(output.stdout, /Wrote .*stratus\.config\.json/);
+  assert.match(output.stdout, /OPENAI_API_KEY is NOT set/);
+  assert.match(output.stdout, /export OPENAI_API_KEY=your-key/);
+  assert.equal(output.stderr, '');
+});
+
+test('runCli setup includes a custom config path in the suggested next commands', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup', '--config', './custom.json'],
+    streams,
+    env: {
+      cwd: tempDir,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '\n', '\n', '\n', '\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Wrote .*custom\.json/);
+  assert.match(output.stdout, /stratus run --config \.\/custom\.json "say hello"/);
+});
+
+test('runCli setup shell-quotes config paths containing spaces in next commands', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup', '--config', './my config.json'],
+    streams,
+    env: {
+      cwd: tempDir,
+      processEnv: {},
+      setupInput: Readable.from(['2\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /stratus run --config '\.\/my config\.json' "please use the echo tool"/);
+});
+
+test('runCli setup warns when an exported STRATUS_PROVIDER overrides the chosen provider', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: tempDir,
+      processEnv: { STRATUS_PROVIDER: 'openai' },
+      setupInput: Readable.from(['2\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /STRATUS_PROVIDER=openai is exported and takes precedence/);
+  assert.match(output.stdout, /unset STRATUS_PROVIDER/);
+  assert.match(output.stdout, /stratus run --provider demo "please use the echo tool"/);
+
+  const clean = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams: clean.streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      processEnv: {},
+      setupInput: Readable.from(['2\n']),
+    },
+  });
+  assert.doesNotMatch(clean.output.stdout, /--provider/);
+});
+
+test('runCli setup writes to the STRATUS_CONFIG path that run will load', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  const envConfigPath = path.join(tempDir, 'nested', '..', 'env-config.json');
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: tempDir,
+      processEnv: { STRATUS_CONFIG: envConfigPath },
+      setupInput: Readable.from(['2\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /STRATUS_CONFIG is set, so the config will be written to/);
+  const written = JSON.parse(await readFile(path.join(tempDir, 'env-config.json'), 'utf8'));
+  assert.deepEqual(written, { provider: 'demo' });
+  assert.doesNotMatch(output.stdout, /stratus run --config/);
+});
+
+test('runCli setup warns when exported model or base-url overrides the configured values', async () => {
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      processEnv: {
+        STRATUS_MODEL: 'gpt-old',
+        STRATUS_BASE_URL: 'https://old.example.test/v1',
+        OPENAI_API_KEY: 'set-key',
+      },
+      setupInput: Readable.from(['1\n', 'gpt-4.1-mini\n', 'https://new.example.test/v1\n', '\n', '\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /STRATUS_MODEL=gpt-old is exported and takes precedence/);
+  assert.match(output.stdout, /STRATUS_BASE_URL=https:\/\/old\.example\.test\/v1 is exported and takes precedence/);
+  assert.match(output.stdout, /stratus run --model gpt-4\.1-mini --base-url https:\/\/new\.example\.test\/v1 "say hello"/);
+});
+
+test('runCli setup warns when an exported system prompt overrides the configured one', async () => {
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      processEnv: { STRATUS_SYSTEM_PROMPT: 'Old env prompt.', OPENAI_API_KEY: 'set-key' },
+      setupInput: Readable.from(['1\n', '\n', '\n', '\n', 'New configured prompt.\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /STRATUS_SYSTEM_PROMPT=Old env prompt\. is exported and takes precedence/);
+  assert.match(output.stdout, /unset STRATUS_SYSTEM_PROMPT/);
+  assert.doesNotMatch(output.stdout, /--system-prompt/);
+});
+
+test('runCli setup bases the key readiness check on exported API key overrides', async () => {
+  const redirected = createStreams();
+  const redirectedExit = await runCli({
+    argv: ['setup'],
+    streams: redirected.streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      processEnv: { STRATUS_API_KEY_ENV: 'MY_KEY', OPENAI_API_KEY: 'set-but-ignored' },
+      setupInput: Readable.from(['1\n', '\n', '\n', '\n', '\n']),
+    },
+  });
+
+  assert.equal(redirectedExit, 0);
+  assert.match(redirected.output.stdout, /STRATUS_API_KEY_ENV=MY_KEY is exported and takes precedence/);
+  assert.match(redirected.output.stdout, /MY_KEY is NOT set/);
+  assert.match(redirected.output.stdout, /export MY_KEY=your-key/);
+  assert.doesNotMatch(redirected.output.stdout, /OPENAI_API_KEY is set in your environment/);
+
+  const directKey = createStreams();
+  const directKeyExit = await runCli({
+    argv: ['setup'],
+    streams: directKey.streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      processEnv: { STRATUS_API_KEY: 'direct-key' },
+      setupInput: Readable.from(['1\n', '\n', '\n', '\n', '\n']),
+    },
+  });
+
+  assert.equal(directKeyExit, 0);
+  assert.match(directKey.output.stdout, /STRATUS_API_KEY is set in your environment — you are ready to go/);
+});
+
+test('runCli setup writes a demo config without asking provider questions', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: tempDir,
+      processEnv: {},
+      setupInput: Readable.from(['2\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  const written = JSON.parse(await readFile(path.join(tempDir, 'stratus.config.json'), 'utf8'));
+  assert.deepEqual(written, { provider: 'demo' });
+  assert.match(output.stdout, /no API key needed/);
+});
+
+test('runCli setup refuses to overwrite an existing config unless confirmed', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  const configPath = path.join(tempDir, 'stratus.config.json');
+  await writeFile(configPath, JSON.stringify({ provider: 'demo' }));
+
+  const declined = createStreams();
+  const declinedExit = await runCli({
+    argv: ['setup'],
+    streams: declined.streams,
+    env: {
+      cwd: tempDir,
+      processEnv: {},
+      setupInput: Readable.from(['n\n']),
+    },
+  });
+
+  assert.equal(declinedExit, 0);
+  assert.match(declined.output.stdout, /Keeping the existing config/);
+  assert.equal(await readFile(configPath, 'utf8'), JSON.stringify({ provider: 'demo' }));
+
+  const accepted = createStreams();
+  const acceptedExit = await runCli({
+    argv: ['setup'],
+    streams: accepted.streams,
+    env: {
+      cwd: tempDir,
+      processEnv: { OPENAI_API_KEY: 'already-set' },
+      setupInput: Readable.from(['y\n', '1\n', '\n', '\n', '\n', '\n']),
+    },
+  });
+
+  assert.equal(acceptedExit, 0);
+  const rewritten = JSON.parse(await readFile(configPath, 'utf8'));
+  assert.equal(rewritten.provider, 'openai');
+  assert.match(accepted.output.stdout, /OPENAI_API_KEY is set in your environment/);
 });
 
 test('runCli prints help text', async () => {

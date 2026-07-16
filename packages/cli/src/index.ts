@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import path from 'node:path';
@@ -35,6 +35,7 @@ export interface CliEnvironment {
   stdin?: string;
   stdinStream?: NodeJS.ReadableStream;
   approvalInput?: NodeJS.ReadableStream;
+  setupInput?: NodeJS.ReadableStream;
   processEnv?: NodeJS.ProcessEnv;
   cwd?: string;
   fetch?: typeof fetch;
@@ -71,11 +72,20 @@ export interface ParsedDashboardCommand {
   openBrowser: boolean;
 }
 
+export interface ParsedSetupCommand {
+  command: 'setup';
+  configPath?: string;
+}
+
 export interface ParsedHelpCommand {
   command: 'help';
 }
 
-export type ParsedCommand = ParsedRunCommand | ParsedDashboardCommand | ParsedHelpCommand;
+export type ParsedCommand =
+  | ParsedRunCommand
+  | ParsedDashboardCommand
+  | ParsedSetupCommand
+  | ParsedHelpCommand;
 
 interface CliConfigFile {
   provider?: CliProviderName;
@@ -111,6 +121,7 @@ const DASHBOARD_TITLE = 'Stratus Agent Dashboard';
 const HELP_TEXT = `Stratus Agent CLI
 
 Usage:
+  stratus setup
   stratus run --prompt "Use the demo tool"
   stratus run "Say hello"
   echo "Use the echo tool" | stratus run --stdin
@@ -120,6 +131,7 @@ Usage:
   stratus dashboard --port 4123 --host 0.0.0.0 --no-open
 
 Commands:
+  setup            Interactive walkthrough that writes stratus.config.json
   run              Execute one local Stratus Agent session
   dashboard        Start the local Stratus Agent dashboard and open it in your browser
   help             Show this help message
@@ -130,7 +142,7 @@ Options:
   --provider       Provider to use: demo or openai
   --model          Model name for real providers (default: gpt-4.1-mini)
   --base-url       Override the OpenAI-compatible API base URL
-  --config         Load provider settings from a JSON config file
+  --config         Config file path (run: load settings from it, setup: write it)
   --format         Output format: text or json (default: text)
   --no-events      Hide event-by-event progress lines in text mode
   --approvals      Tool approval mode: always, ask, or never (default: always)
@@ -293,6 +305,28 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     }
 
     return { command: 'dashboard', ...(port !== undefined ? { port } : {}), host, openBrowser };
+  }
+
+  if (command === 'setup') {
+    let configPath: string | undefined;
+
+    for (let index = 0; index < rest.length; index += 1) {
+      const token = rest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--config') {
+        configPath = readOptionValue(rest, index, '--config');
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+
+    return { command: 'setup', ...(configPath ? { configPath } : {}) };
   }
 
   if (command !== 'run') {
@@ -958,6 +992,241 @@ export const startDashboardServer = async (
   };
 };
 
+// Printed commands must survive copy-paste into a shell, so anything outside
+// the safe character set gets single-quoted.
+const quoteShellArg = (value: string): string =>
+  /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+
+interface SetupPrompter {
+  ask(question: string): Promise<string>;
+  close(): void;
+}
+
+const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPrompter => {
+  const input = env.setupInput ?? process.stdin;
+  const readline = createInterface({ input, terminal: false });
+  const pendingLines: string[] = [];
+  let closed = false;
+
+  readline.on('line', (line) => {
+    pendingLines.push(line);
+  });
+  readline.once('close', () => {
+    closed = true;
+  });
+
+  return {
+    async ask(question) {
+      streams.stdout.write(question);
+
+      while (pendingLines.length === 0) {
+        if (closed) {
+          return '';
+        }
+        await new Promise<void>((resolve) => {
+          readline.once('line', () => resolve());
+          readline.once('close', () => resolve());
+        });
+      }
+
+      const answer = pendingLines.shift() ?? '';
+      return answer.trim();
+    },
+    close() {
+      readline.close();
+    },
+  };
+};
+
+const fileExists = async (filePath: string): Promise<boolean> => {
+  try {
+    await readFile(filePath, 'utf8');
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
+    throw error;
+  }
+};
+
+export const runSetup = async (
+  command: ParsedSetupCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const cwd = readWorkingDirectory(env);
+  const processEnv = readProcessEnv(env);
+
+  // Mirror resolveConfigPath's precedence (--config, then STRATUS_CONFIG /
+  // STRATUSCLAW_CONFIG, then the default filename) so the file written here
+  // is the one `stratus run` actually loads afterwards.
+  const envConfigVar = readNonEmptyString(processEnv.STRATUS_CONFIG)
+    ? 'STRATUS_CONFIG'
+    : readNonEmptyString(processEnv.STRATUSCLAW_CONFIG)
+      ? 'STRATUSCLAW_CONFIG'
+      : undefined;
+  const envConfigPath = envConfigVar ? String(processEnv[envConfigVar]).trim() : undefined;
+  const chosenPath = command.configPath ?? envConfigPath ?? DEFAULT_CONFIG_FILENAME;
+  const configPath = path.resolve(cwd, chosenPath);
+  // A path passed via --config is not auto-discovered by `stratus run`, so
+  // suggested commands must carry it explicitly. Env-derived paths need no
+  // flag because `run` reads the same variable.
+  const runConfigFlag = command.configPath ? ` --config ${quoteShellArg(command.configPath)}` : '';
+  const prompter = createSetupPrompter(streams, env);
+
+  try {
+    writeLine(streams.stdout, 'Stratus Agent setup');
+    writeLine(streams.stdout, 'This walkthrough writes a stratus.config.json so `stratus run` works out of the box.');
+    writeLine(streams.stdout, 'Press Enter to accept the [default] for any question.');
+    if (!command.configPath && envConfigVar) {
+      writeLine(streams.stdout, `${envConfigVar} is set, so the config will be written to ${configPath}.`);
+    }
+    writeLine(streams.stdout);
+
+    if (await fileExists(configPath)) {
+      const overwrite = await prompter.ask(`${configPath} already exists. Overwrite it? [y/N] `);
+      if (!/^y(es)?$/i.test(overwrite)) {
+        writeLine(streams.stdout, 'Keeping the existing config. Nothing was changed.');
+        return 0;
+      }
+      writeLine(streams.stdout);
+    }
+
+    const providerAnswer = await prompter.ask(
+      'Which provider do you want to use?\n  1) openai — any OpenAI-compatible API (needs an API key)\n  2) demo — built-in provider, no key required\nChoose [1]: ',
+    );
+    const provider: CliProviderName = providerAnswer === '2' || /^demo$/i.test(providerAnswer) ? 'demo' : 'openai';
+
+    // Exported STRATUS_*/STRATUSCLAW_* variables outrank the config file in
+    // resolveRuntimeConfig, so any conflicting value would make the suggested
+    // bare command behave differently from what setup just wrote. Detect each
+    // conflict, warn about it, and add the matching flag so the printed
+    // command wins regardless.
+    const detectEnvOverride = (
+      primary: string,
+      legacy: string,
+      chosen: string,
+      flagName?: string,
+    ): { envVar: string; envValue: string; flag?: string } | undefined => {
+      const envVar = readNonEmptyString(processEnv[primary])
+        ? primary
+        : readNonEmptyString(processEnv[legacy])
+          ? legacy
+          : undefined;
+      if (!envVar) {
+        return undefined;
+      }
+      const envValue = String(processEnv[envVar]).trim();
+      if (envValue === chosen) {
+        return undefined;
+      }
+      return {
+        envVar,
+        envValue,
+        ...(flagName ? { flag: `${flagName} ${quoteShellArg(chosen)}` } : {}),
+      };
+    };
+
+    const warnAboutEnvOverrides = (
+      conflicts: Array<{ envVar: string; envValue: string; flag?: string }>,
+    ): void => {
+      for (const conflict of conflicts) {
+        writeLine(
+          streams.stdout,
+          `Note: ${conflict.envVar}=${conflict.envValue} is exported and takes precedence over the config file (run \`unset ${conflict.envVar}\` to clear it).`,
+        );
+      }
+      if (conflicts.some((conflict) => conflict.flag)) {
+        writeLine(streams.stdout, 'The suggested commands below include flags so they use what you just configured.');
+      }
+      if (conflicts.length > 0) {
+        writeLine(streams.stdout);
+      }
+    };
+
+    if (provider === 'demo') {
+      const conflicts = [
+        detectEnvOverride('STRATUS_PROVIDER', 'STRATUSCLAW_PROVIDER', provider, '--provider'),
+      ].filter((conflict) => conflict !== undefined);
+      const extraFlags = conflicts.map((conflict) => ` ${conflict.flag}`).join('');
+
+      await writeFile(configPath, `${JSON.stringify({ provider: 'demo' }, null, 2)}\n`);
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, `Wrote ${configPath}`);
+      writeLine(streams.stdout);
+      warnAboutEnvOverrides(conflicts);
+      writeLine(streams.stdout, 'You are ready to go — no API key needed. Try:');
+      writeLine(streams.stdout, `  stratus run${extraFlags}${runConfigFlag} "please use the echo tool"`);
+      writeLine(streams.stdout, '  stratus dashboard');
+      return 0;
+    }
+
+    const model = (await prompter.ask(`Model [${DEFAULT_OPENAI_MODEL}]: `)) || DEFAULT_OPENAI_MODEL;
+    const baseUrl = (await prompter.ask(`Base URL [${DEFAULT_OPENAI_BASE_URL}]: `)) || DEFAULT_OPENAI_BASE_URL;
+    const apiKeyEnv = (await prompter.ask('Environment variable holding your API key [OPENAI_API_KEY]: ')) || 'OPENAI_API_KEY';
+    const systemPrompt = await prompter.ask('System prompt (optional, Enter to skip): ');
+
+    const config: Record<string, string> = { provider, model, baseUrl, apiKeyEnv };
+    if (systemPrompt) {
+      config.systemPrompt = systemPrompt;
+    }
+
+    await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+
+    const conflicts = [
+      detectEnvOverride('STRATUS_PROVIDER', 'STRATUSCLAW_PROVIDER', provider, '--provider'),
+      detectEnvOverride('STRATUS_MODEL', 'STRATUSCLAW_MODEL', model, '--model'),
+      detectEnvOverride('STRATUS_BASE_URL', 'STRATUSCLAW_BASE_URL', baseUrl, '--base-url'),
+      // No run flag exists for the system prompt, so this one is warn-only.
+      detectEnvOverride('STRATUS_SYSTEM_PROMPT', 'STRATUSCLAW_SYSTEM_PROMPT', systemPrompt),
+    ].filter((conflict) => conflict !== undefined);
+    const extraFlags = conflicts.flatMap((conflict) => (conflict.flag ? [` ${conflict.flag}`] : [])).join('');
+
+    writeLine(streams.stdout);
+    writeLine(streams.stdout, `Wrote ${configPath}`);
+    writeLine(streams.stdout);
+    warnAboutEnvOverrides(conflicts);
+
+    // Readiness must mirror resolveRuntimeConfig's key lookup: a direct
+    // STRATUS_API_KEY wins, then an exported *_API_KEY_ENV redirects which
+    // variable is read, and only then does the config file's apiKeyEnv apply.
+    const keyEnvOverrideVar = readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
+      ? 'STRATUS_API_KEY_ENV'
+      : readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV)
+        ? 'STRATUSCLAW_API_KEY_ENV'
+        : undefined;
+    const effectiveApiKeyEnv = keyEnvOverrideVar ? String(processEnv[keyEnvOverrideVar]).trim() : apiKeyEnv;
+    const directKeyVar = readNonEmptyString(processEnv.STRATUS_API_KEY)
+      ? 'STRATUS_API_KEY'
+      : readNonEmptyString(processEnv.STRATUSCLAW_API_KEY)
+        ? 'STRATUSCLAW_API_KEY'
+        : undefined;
+
+    if (keyEnvOverrideVar && effectiveApiKeyEnv !== apiKeyEnv) {
+      writeLine(streams.stdout, `Note: ${keyEnvOverrideVar}=${effectiveApiKeyEnv} is exported and takes precedence over the config file's apiKeyEnv,`);
+      writeLine(streams.stdout, `so \`stratus run\` will read ${effectiveApiKeyEnv}. Run \`unset ${keyEnvOverrideVar}\` to use ${apiKeyEnv} instead.`);
+      writeLine(streams.stdout);
+    }
+
+    if (directKeyVar) {
+      writeLine(streams.stdout, `${directKeyVar} is set in your environment — you are ready to go. Try:`);
+    } else if (processEnv[effectiveApiKeyEnv]) {
+      writeLine(streams.stdout, `${effectiveApiKeyEnv} is set in your environment — you are ready to go. Try:`);
+    } else {
+      writeLine(streams.stdout, `${effectiveApiKeyEnv} is NOT set in your environment yet. Set it first:`);
+      writeLine(streams.stdout, `  export ${effectiveApiKeyEnv}=your-key`);
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, 'Then try:');
+    }
+    writeLine(streams.stdout, `  stratus run${extraFlags}${runConfigFlag} "say hello"`);
+    writeLine(streams.stdout, '  stratus dashboard');
+    return 0;
+  } finally {
+    prompter.close();
+  }
+};
+
 export const runDashboard = async (
   command: ParsedDashboardCommand,
   streams: CliStreams,
@@ -1005,6 +1274,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     if (command.command === 'help') {
       writeLine(streams.stdout, HELP_TEXT);
       return 0;
+    }
+
+    if (command.command === 'setup') {
+      return runSetup(command, streams, resolvedEnv);
     }
 
     if (command.command === 'dashboard') {
