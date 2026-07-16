@@ -2,3 +2,7 @@ node_modules
 .pnpm-store
 packages/*/dist
 packages/*/*.tsbuildinfo
+
+# Local provider config (copy from stratus.config.json.example)
+stratus.config.json
+stratusclaw.config.json
