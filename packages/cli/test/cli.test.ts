@@ -171,6 +171,56 @@ test('runCli setup includes a custom config path in the suggested next commands'
   assert.match(output.stdout, /stratus run --config \.\/custom\.json "say hello"/);
 });
 
+test('runCli setup shell-quotes config paths containing spaces in next commands', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup', '--config', './my config.json'],
+    streams,
+    env: {
+      cwd: tempDir,
+      processEnv: {},
+      setupInput: Readable.from(['2\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /stratus run --config '\.\/my config\.json' "please use the echo tool"/);
+});
+
+test('runCli setup warns when an exported STRATUS_PROVIDER overrides the chosen provider', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: tempDir,
+      processEnv: { STRATUS_PROVIDER: 'openai' },
+      setupInput: Readable.from(['2\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /STRATUS_PROVIDER=openai is exported and takes precedence/);
+  assert.match(output.stdout, /unset STRATUS_PROVIDER/);
+  assert.match(output.stdout, /stratus run --provider demo "please use the echo tool"/);
+
+  const clean = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams: clean.streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      processEnv: {},
+      setupInput: Readable.from(['2\n']),
+    },
+  });
+  assert.doesNotMatch(clean.output.stdout, /--provider/);
+});
+
 test('runCli setup writes to the STRATUS_CONFIG path that run will load', async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
   const envConfigPath = path.join(tempDir, 'nested', '..', 'env-config.json');

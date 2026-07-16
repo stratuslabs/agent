@@ -992,6 +992,11 @@ export const startDashboardServer = async (
   };
 };
 
+// Printed commands must survive copy-paste into a shell, so anything outside
+// the safe character set gets single-quoted.
+const quoteShellArg = (value: string): string =>
+  /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+
 interface SetupPrompter {
   ask(question: string): Promise<string>;
   close(): void;
@@ -1067,7 +1072,7 @@ export const runSetup = async (
   // A path passed via --config is not auto-discovered by `stratus run`, so
   // suggested commands must carry it explicitly. Env-derived paths need no
   // flag because `run` reads the same variable.
-  const runConfigFlag = command.configPath ? ` --config ${command.configPath}` : '';
+  const runConfigFlag = command.configPath ? ` --config ${quoteShellArg(command.configPath)}` : '';
   const prompter = createSetupPrompter(streams, env);
 
   try {
@@ -1093,13 +1098,34 @@ export const runSetup = async (
     );
     const provider: CliProviderName = providerAnswer === '2' || /^demo$/i.test(providerAnswer) ? 'demo' : 'openai';
 
+    // An exported STRATUS_PROVIDER/STRATUSCLAW_PROVIDER outranks the config
+    // file in resolveRuntimeConfig, so a conflicting value would make the
+    // suggested bare command run a different provider than we just set up.
+    const envProviderVar = readNonEmptyString(processEnv.STRATUS_PROVIDER)
+      ? 'STRATUS_PROVIDER'
+      : readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER)
+        ? 'STRATUSCLAW_PROVIDER'
+        : undefined;
+    const envProvider = envProviderVar ? String(processEnv[envProviderVar]).trim() : undefined;
+    const providerOverridden = envProvider !== undefined && envProvider !== provider;
+    const providerFlag = providerOverridden ? ` --provider ${provider}` : '';
+
+    const warnAboutProviderOverride = (): void => {
+      if (providerOverridden && envProviderVar) {
+        writeLine(streams.stdout, `Note: ${envProviderVar}=${envProvider} is exported and takes precedence over the config file.`);
+        writeLine(streams.stdout, `Either run \`unset ${envProviderVar}\` or keep the --provider flag shown below.`);
+        writeLine(streams.stdout);
+      }
+    };
+
     if (provider === 'demo') {
       await writeFile(configPath, `${JSON.stringify({ provider: 'demo' }, null, 2)}\n`);
       writeLine(streams.stdout);
       writeLine(streams.stdout, `Wrote ${configPath}`);
       writeLine(streams.stdout);
+      warnAboutProviderOverride();
       writeLine(streams.stdout, 'You are ready to go — no API key needed. Try:');
-      writeLine(streams.stdout, `  stratus run${runConfigFlag} "please use the echo tool"`);
+      writeLine(streams.stdout, `  stratus run${providerFlag}${runConfigFlag} "please use the echo tool"`);
       writeLine(streams.stdout, '  stratus dashboard');
       return 0;
     }
@@ -1119,6 +1145,7 @@ export const runSetup = async (
     writeLine(streams.stdout);
     writeLine(streams.stdout, `Wrote ${configPath}`);
     writeLine(streams.stdout);
+    warnAboutProviderOverride();
 
     if (processEnv[apiKeyEnv]) {
       writeLine(streams.stdout, `${apiKeyEnv} is set in your environment — you are ready to go. Try:`);
@@ -1128,7 +1155,7 @@ export const runSetup = async (
       writeLine(streams.stdout);
       writeLine(streams.stdout, 'Then try:');
     }
-    writeLine(streams.stdout, `  stratus run${runConfigFlag} "say hello"`);
+    writeLine(streams.stdout, `  stratus run${providerFlag}${runConfigFlag} "say hello"`);
     writeLine(streams.stdout, '  stratus dashboard');
     return 0;
   } finally {
