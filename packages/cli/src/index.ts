@@ -1053,6 +1053,9 @@ export const runSetup = async (
   const cwd = readWorkingDirectory(env);
   const processEnv = readProcessEnv(env);
   const configPath = path.resolve(cwd, command.configPath ?? DEFAULT_CONFIG_FILENAME);
+  // A non-default path is not auto-discovered by `stratus run`, so suggested
+  // commands must carry it explicitly.
+  const runConfigFlag = command.configPath ? ` --config ${command.configPath}` : '';
   const prompter = createSetupPrompter(streams, env);
 
   try {
@@ -1081,7 +1084,7 @@ export const runSetup = async (
       writeLine(streams.stdout, `Wrote ${configPath}`);
       writeLine(streams.stdout);
       writeLine(streams.stdout, 'You are ready to go — no API key needed. Try:');
-      writeLine(streams.stdout, '  stratus run "please use the echo tool"');
+      writeLine(streams.stdout, `  stratus run${runConfigFlag} "please use the echo tool"`);
       writeLine(streams.stdout, '  stratus dashboard');
       return 0;
     }
@@ -1110,7 +1113,7 @@ export const runSetup = async (
       writeLine(streams.stdout);
       writeLine(streams.stdout, 'Then try:');
     }
-    writeLine(streams.stdout, '  stratus run "say hello"');
+    writeLine(streams.stdout, `  stratus run${runConfigFlag} "say hello"`);
     writeLine(streams.stdout, '  stratus dashboard');
     return 0;
   } finally {

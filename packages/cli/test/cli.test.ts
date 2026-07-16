@@ -152,6 +152,25 @@ test('runCli setup walks through an openai config and reports the missing key', 
   assert.equal(output.stderr, '');
 });
 
+test('runCli setup includes a custom config path in the suggested next commands', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup', '--config', './custom.json'],
+    streams,
+    env: {
+      cwd: tempDir,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '\n', '\n', '\n', '\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Wrote .*custom\.json/);
+  assert.match(output.stdout, /stratus run --config \.\/custom\.json "say hello"/);
+});
+
 test('runCli setup writes a demo config without asking provider questions', async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
   const { streams, output } = createStreams();
