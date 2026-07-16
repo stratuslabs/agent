@@ -480,6 +480,14 @@ const createOpenAICompatibleMessages = (
     messages.push({ role: 'system', content: systemPrompt });
   }
 
+  if (request.memory && request.memory.length > 0) {
+    const facts = request.memory.map((entry) => `- ${entry.content}`).join('\n');
+    messages.push({
+      role: 'system',
+      content: `Things you remember from previous conversations (your own long-term memory):\n${facts}`,
+    });
+  }
+
   for (const message of request.session.messages) {
     if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
       messages.push({

@@ -25,6 +25,7 @@ import {
   createProviderResponseBuilder,
   defineProvider,
 } from '@stratusagent/providers';
+import { defineAgent } from '@stratusagent/agents';
 
 export interface CliStreams {
   stdout: Pick<typeof process.stdout, 'write'>;
@@ -77,6 +78,13 @@ export interface ParsedSetupCommand {
   configPath?: string;
 }
 
+export interface ParsedAgentNewCommand {
+  command: 'agent-new';
+  name?: string;
+  instructions?: string;
+  format: 'text' | 'json';
+}
+
 export interface ParsedHelpCommand {
   command: 'help';
 }
@@ -85,6 +93,7 @@ export type ParsedCommand =
   | ParsedRunCommand
   | ParsedDashboardCommand
   | ParsedSetupCommand
+  | ParsedAgentNewCommand
   | ParsedHelpCommand;
 
 interface CliConfigFile {
@@ -133,8 +142,14 @@ Usage:
 Commands:
   setup            Interactive walkthrough that writes stratus.config.json
   run              Execute one local Stratus Agent session
+  agent new        Create an agent identity (generates a human-ish name + avatar theme)
   dashboard        Start the local Stratus Agent dashboard and open it in your browser
   help             Show this help message
+
+Agent options:
+  --name           Agent name (omit to have one generated)
+  --instructions   The agent's persona/instructions
+  --format         Output format for agent new: text or json
 
 Options:
   --prompt, -p     Prompt to send to the local agent loop
@@ -305,6 +320,57 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     }
 
     return { command: 'dashboard', ...(port !== undefined ? { port } : {}), host, openBrowser };
+  }
+
+  if (command === 'agent') {
+    const [subcommand, ...agentRest] = rest;
+    if (subcommand === '--help' || subcommand === '-h') {
+      return { command: 'help' };
+    }
+    if (subcommand !== 'new') {
+      throw new Error(`Unknown agent subcommand: ${subcommand ?? '(missing)'}. Try: stratus agent new`);
+    }
+
+    let name: string | undefined;
+    let instructions: string | undefined;
+    let format: 'text' | 'json' = 'text';
+
+    for (let index = 0; index < agentRest.length; index += 1) {
+      const token = agentRest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--name') {
+        name = readOptionValue(agentRest, index, '--name');
+        index += 1;
+        continue;
+      }
+      if (token === '--instructions') {
+        instructions = readOptionValue(agentRest, index, '--instructions');
+        index += 1;
+        continue;
+      }
+      if (token === '--format') {
+        const value = readOptionValue(agentRest, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported format: ${value}`);
+        }
+        format = value;
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+
+    return {
+      command: 'agent-new',
+      ...(name ? { name } : {}),
+      ...(instructions ? { instructions } : {}),
+      format,
+    };
   }
 
   if (command === 'setup') {
@@ -1227,6 +1293,33 @@ export const runSetup = async (
   }
 };
 
+export const runAgentNew = (
+  command: ParsedAgentNewCommand,
+  streams: CliStreams,
+): number => {
+  const agent = defineAgent({
+    ...(command.name ? { name: command.name } : {}),
+    ...(command.instructions ? { instructions: command.instructions } : {}),
+  });
+
+  if (command.format === 'json') {
+    writeLine(streams.stdout, JSON.stringify(agent, null, 2));
+    return 0;
+  }
+
+  writeLine(streams.stdout, `Say hello to ${agent.name}.`);
+  writeLine(streams.stdout);
+  writeLine(streams.stdout, `  id      ${agent.id}`);
+  writeLine(streams.stdout, `  avatar  ${agent.avatar?.style} theme, hue ${agent.avatar?.hue}, palette ${agent.avatar?.palette.join(' ')}`);
+  if (agent.instructions) {
+    writeLine(streams.stdout, `  soul    ${agent.instructions}`);
+  }
+  writeLine(streams.stdout);
+  writeLine(streams.stdout, 'Definition (save this — soul files are coming in #13):');
+  writeLine(streams.stdout, JSON.stringify(agent, null, 2));
+  return 0;
+};
+
 export const runDashboard = async (
   command: ParsedDashboardCommand,
   streams: CliStreams,
@@ -1274,6 +1367,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     if (command.command === 'help') {
       writeLine(streams.stdout, HELP_TEXT);
       return 0;
+    }
+
+    if (command.command === 'agent-new') {
+      return runAgentNew(command, streams);
     }
 
     if (command.command === 'setup') {

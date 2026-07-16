@@ -20,6 +20,55 @@ export interface AgentDescriptor {
   instructions?: string;
 }
 
+export interface AvatarTheme {
+  seed: string;
+  hue: number;
+  palette: string[];
+  style: string;
+}
+
+/**
+ * A full agent identity. An agent is one "person": the same definition —
+ * memory, tool access, credentials — applies no matter which channel,
+ * thread, or session the agent is talking through.
+ */
+export interface AgentDefinition extends AgentDescriptor {
+  avatar?: AvatarTheme;
+  /** Tool names this agent may call. Omitted = every registered tool. */
+  tools?: string[];
+  /** Credential names this agent may resolve. Omitted = none. */
+  credentials?: string[];
+}
+
+export class AgentRegistry {
+  private agents = new Map<string, AgentDefinition>();
+
+  register(agent: AgentDefinition): AgentDefinition {
+    this.agents.set(agent.id, agent);
+    return agent;
+  }
+
+  get(id: string): AgentDefinition | undefined {
+    return this.agents.get(id);
+  }
+
+  getByName(name: string): AgentDefinition | undefined {
+    return this.list().find((agent) => agent.name === name);
+  }
+
+  require(id: string): AgentDefinition {
+    const agent = this.agents.get(id);
+    if (!agent) {
+      throw new Error(`Agent not found: ${id}`);
+    }
+    return agent;
+  }
+
+  list(): AgentDefinition[] {
+    return [...this.agents.values()];
+  }
+}
+
 export interface Session {
   id: string;
   agent: AgentDescriptor;
@@ -55,9 +104,93 @@ export interface ToolDescriptor {
   parameters?: JsonObject;
 }
 
+/**
+ * One remembered fact. Memory is keyed by agent, never by session or
+ * channel, so an agent carries the same knowledge everywhere it appears.
+ */
+export interface MemoryEntry {
+  id: string;
+  agentId: string;
+  content: string;
+  createdAt: string;
+  metadata?: JsonObject;
+}
+
+export interface AgentMemoryStore {
+  append(agentId: string, content: string, metadata?: JsonObject): Promise<MemoryEntry>;
+  list(agentId: string): Promise<MemoryEntry[]>;
+}
+
+export class InMemoryAgentMemoryStore implements AgentMemoryStore {
+  private entries = new Map<string, MemoryEntry[]>();
+  private counter = 0;
+
+  async append(agentId: string, content: string, metadata?: JsonObject): Promise<MemoryEntry> {
+    this.counter += 1;
+    const entry: MemoryEntry = {
+      id: `${agentId}:memory:${this.counter}`,
+      agentId,
+      content,
+      createdAt: new Date().toISOString(),
+      ...(metadata ? { metadata } : {}),
+    };
+    const existing = this.entries.get(agentId) ?? [];
+    existing.push(entry);
+    this.entries.set(agentId, existing);
+    return entry;
+  }
+
+  async list(agentId: string): Promise<MemoryEntry[]> {
+    return [...(this.entries.get(agentId) ?? [])];
+  }
+}
+
+/**
+ * Resolves named credentials for an agent. Implementations must enforce the
+ * agent's `credentials` allowlist so secrets stay scoped per agent.
+ */
+export interface CredentialResolver {
+  resolve(agent: AgentDefinition, name: string): Promise<string | undefined>;
+}
+
+export interface ScopedCredentials {
+  get(name: string): Promise<string>;
+}
+
+export class EnvCredentialResolver implements CredentialResolver {
+  private readonly env: Record<string, string | undefined>;
+
+  // Pass process.env (or any map) explicitly — core stays platform-agnostic.
+  constructor(env: Record<string, string | undefined>) {
+    this.env = env;
+  }
+
+  async resolve(agent: AgentDefinition, name: string): Promise<string | undefined> {
+    if (!agent.credentials?.includes(name)) {
+      throw new Error(`Agent ${agent.id} is not allowed to access credential: ${name}`);
+    }
+    return this.env[name];
+  }
+}
+
+export const scopeCredentials = (
+  agent: AgentDefinition,
+  resolver: CredentialResolver,
+): ScopedCredentials => ({
+  async get(name) {
+    const value = await resolver.resolve(agent, name);
+    if (value === undefined) {
+      throw new Error(`Credential not found: ${name}`);
+    }
+    return value;
+  },
+});
+
 export interface ProviderRequest {
   session: Session;
   tools?: ToolDescriptor[];
+  /** Agent-scoped long-term memory, newest last. */
+  memory?: MemoryEntry[];
 }
 
 export interface ProviderResponse {
@@ -247,6 +380,10 @@ export interface AgentRunnerOptions {
   store?: SessionStore;
   bus?: EventBus;
   plugins?: PluginRegistry;
+  /** Known agent definitions; enables per-agent tool allowlists. */
+  agents?: AgentRegistry;
+  /** Agent-scoped long-term memory, injected into every provider request. */
+  memory?: AgentMemoryStore;
   /** Maximum provider turns per run before the session fails. */
   maxTurns?: number;
 }
@@ -260,6 +397,8 @@ export class AgentRunner {
   readonly executor: Executor;
   readonly approvals: ApprovalPolicy;
   readonly plugins: PluginRegistry;
+  readonly agents: AgentRegistry;
+  readonly memory: AgentMemoryStore | undefined;
   readonly maxTurns: number;
   private readonly options: AgentRunnerOptions;
 
@@ -271,6 +410,8 @@ export class AgentRunner {
     this.executor = options.executor ?? new DefaultExecutor();
     this.approvals = options.approvals ?? new AllowAllApprovalPolicy();
     this.plugins = options.plugins ?? new PluginRegistry();
+    this.agents = options.agents ?? new AgentRegistry();
+    this.memory = options.memory;
     this.maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
   }
 
@@ -325,20 +466,32 @@ export class AgentRunner {
     return this.executeTurns(session);
   }
 
+  /** Tool names this session's agent may use, or undefined for no limit. */
+  private allowedToolsFor(session: Session): Set<string> | undefined {
+    const definition = this.agents.get(session.agent.id);
+    return definition?.tools ? new Set(definition.tools) : undefined;
+  }
+
   private async executeTurns(initialSession: Session): Promise<Session> {
     let session = initialSession;
 
     try {
-      const tools = this.tools.describe();
+      const allowedTools = this.allowedToolsFor(session);
+      const tools = this.tools
+        .describe()
+        .filter((tool) => allowedTools === undefined || allowedTools.has(tool.name));
 
       for (let turn = 1; ; turn += 1) {
         if (turn > this.maxTurns) {
           throw new Error(`Session exceeded the maximum of ${this.maxTurns} provider turns.`);
         }
 
+        const memory = this.memory ? await this.memory.list(session.agent.id) : [];
+
         const response = await this.options.provider.generate({
           session,
           ...(tools.length > 0 ? { tools } : {}),
+          ...(memory.length > 0 ? { memory } : {}),
         });
         await this.bus.emit({ type: 'provider.response', sessionId: session.id, parts: response.parts });
 
@@ -402,6 +555,17 @@ export class AgentRunner {
   }
 
   private async executeToolCall(session: Session, call: ToolCall): Promise<ToolResult> {
+    const allowedTools = this.allowedToolsFor(session);
+    if (allowedTools !== undefined && !allowedTools.has(call.toolName)) {
+      return {
+        callId: call.id,
+        toolName: call.toolName,
+        ok: false,
+        output: null,
+        error: `Tool not permitted for agent ${session.agent.id}: ${call.toolName}`,
+      };
+    }
+
     const approved = await this.approvals.approve({ session, call });
     if (!approved) {
       await this.bus.emit({ type: 'tool.denied', sessionId: session.id, call });

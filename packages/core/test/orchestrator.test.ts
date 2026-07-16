@@ -318,6 +318,29 @@ test('resume continues an existing session with new user input', async () => {
   );
 });
 
+test('credentials are scoped per agent and denied outside the allowlist', async () => {
+  const { EnvCredentialResolver, scopeCredentials } = await import('../src/index.ts');
+
+  const resolver = new EnvCredentialResolver({
+    SLACK_TOKEN: 'xoxb-secret',
+    ADMIN_KEY: 'root-secret',
+  });
+
+  const supportAgent = {
+    id: 'support',
+    name: 'Support',
+    credentials: ['SLACK_TOKEN'],
+  };
+
+  const scoped = scopeCredentials(supportAgent, resolver);
+  assert.equal(await scoped.get('SLACK_TOKEN'), 'xoxb-secret');
+  await assert.rejects(() => scoped.get('ADMIN_KEY'), /not allowed to access credential: ADMIN_KEY/);
+
+  const noCredsAgent = { id: 'bare', name: 'Bare' };
+  const bare = scopeCredentials(noCredsAgent, resolver);
+  await assert.rejects(() => bare.get('SLACK_TOKEN'), /not allowed to access credential/);
+});
+
 test('event handler errors are isolated and never fail the run', async () => {
   const captured: unknown[] = [];
   const bus = new EventBus({

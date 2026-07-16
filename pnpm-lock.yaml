@@ -8,8 +8,21 @@ importers:
 
   .: {}
 
+  packages/agents:
+    dependencies:
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/cli:
     dependencies:
+      '@stratusagent/agents':
+        specifier: workspace:*
+        version: link:../agents
       '@stratusagent/core':
         specifier: workspace:*
         version: link:../core
