@@ -1147,11 +1147,34 @@ export const runSetup = async (
     writeLine(streams.stdout);
     warnAboutProviderOverride();
 
-    if (processEnv[apiKeyEnv]) {
-      writeLine(streams.stdout, `${apiKeyEnv} is set in your environment — you are ready to go. Try:`);
+    // Readiness must mirror resolveRuntimeConfig's key lookup: a direct
+    // STRATUS_API_KEY wins, then an exported *_API_KEY_ENV redirects which
+    // variable is read, and only then does the config file's apiKeyEnv apply.
+    const keyEnvOverrideVar = readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
+      ? 'STRATUS_API_KEY_ENV'
+      : readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV)
+        ? 'STRATUSCLAW_API_KEY_ENV'
+        : undefined;
+    const effectiveApiKeyEnv = keyEnvOverrideVar ? String(processEnv[keyEnvOverrideVar]).trim() : apiKeyEnv;
+    const directKeyVar = readNonEmptyString(processEnv.STRATUS_API_KEY)
+      ? 'STRATUS_API_KEY'
+      : readNonEmptyString(processEnv.STRATUSCLAW_API_KEY)
+        ? 'STRATUSCLAW_API_KEY'
+        : undefined;
+
+    if (keyEnvOverrideVar && effectiveApiKeyEnv !== apiKeyEnv) {
+      writeLine(streams.stdout, `Note: ${keyEnvOverrideVar}=${effectiveApiKeyEnv} is exported and takes precedence over the config file's apiKeyEnv,`);
+      writeLine(streams.stdout, `so \`stratus run\` will read ${effectiveApiKeyEnv}. Run \`unset ${keyEnvOverrideVar}\` to use ${apiKeyEnv} instead.`);
+      writeLine(streams.stdout);
+    }
+
+    if (directKeyVar) {
+      writeLine(streams.stdout, `${directKeyVar} is set in your environment — you are ready to go. Try:`);
+    } else if (processEnv[effectiveApiKeyEnv]) {
+      writeLine(streams.stdout, `${effectiveApiKeyEnv} is set in your environment — you are ready to go. Try:`);
     } else {
-      writeLine(streams.stdout, `${apiKeyEnv} is NOT set in your environment yet. Set it first:`);
-      writeLine(streams.stdout, `  export ${apiKeyEnv}=your-key`);
+      writeLine(streams.stdout, `${effectiveApiKeyEnv} is NOT set in your environment yet. Set it first:`);
+      writeLine(streams.stdout, `  export ${effectiveApiKeyEnv}=your-key`);
       writeLine(streams.stdout);
       writeLine(streams.stdout, 'Then try:');
     }

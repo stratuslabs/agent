@@ -243,6 +243,39 @@ test('runCli setup writes to the STRATUS_CONFIG path that run will load', async 
   assert.doesNotMatch(output.stdout, /stratus run --config/);
 });
 
+test('runCli setup bases the key readiness check on exported API key overrides', async () => {
+  const redirected = createStreams();
+  const redirectedExit = await runCli({
+    argv: ['setup'],
+    streams: redirected.streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      processEnv: { STRATUS_API_KEY_ENV: 'MY_KEY', OPENAI_API_KEY: 'set-but-ignored' },
+      setupInput: Readable.from(['1\n', '\n', '\n', '\n', '\n']),
+    },
+  });
+
+  assert.equal(redirectedExit, 0);
+  assert.match(redirected.output.stdout, /STRATUS_API_KEY_ENV=MY_KEY is exported and takes precedence/);
+  assert.match(redirected.output.stdout, /MY_KEY is NOT set/);
+  assert.match(redirected.output.stdout, /export MY_KEY=your-key/);
+  assert.doesNotMatch(redirected.output.stdout, /OPENAI_API_KEY is set in your environment/);
+
+  const directKey = createStreams();
+  const directKeyExit = await runCli({
+    argv: ['setup'],
+    streams: directKey.streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      processEnv: { STRATUS_API_KEY: 'direct-key' },
+      setupInput: Readable.from(['1\n', '\n', '\n', '\n', '\n']),
+    },
+  });
+
+  assert.equal(directKeyExit, 0);
+  assert.match(directKey.output.stdout, /STRATUS_API_KEY is set in your environment — you are ready to go/);
+});
+
 test('runCli setup writes a demo config without asking provider questions', async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
   const { streams, output } = createStreams();
