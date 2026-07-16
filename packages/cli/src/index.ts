@@ -1098,34 +1098,60 @@ export const runSetup = async (
     );
     const provider: CliProviderName = providerAnswer === '2' || /^demo$/i.test(providerAnswer) ? 'demo' : 'openai';
 
-    // An exported STRATUS_PROVIDER/STRATUSCLAW_PROVIDER outranks the config
-    // file in resolveRuntimeConfig, so a conflicting value would make the
-    // suggested bare command run a different provider than we just set up.
-    const envProviderVar = readNonEmptyString(processEnv.STRATUS_PROVIDER)
-      ? 'STRATUS_PROVIDER'
-      : readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER)
-        ? 'STRATUSCLAW_PROVIDER'
-        : undefined;
-    const envProvider = envProviderVar ? String(processEnv[envProviderVar]).trim() : undefined;
-    const providerOverridden = envProvider !== undefined && envProvider !== provider;
-    const providerFlag = providerOverridden ? ` --provider ${provider}` : '';
+    // Exported STRATUS_*/STRATUSCLAW_* variables outrank the config file in
+    // resolveRuntimeConfig, so any conflicting value would make the suggested
+    // bare command behave differently from what setup just wrote. Detect each
+    // conflict, warn about it, and add the matching flag so the printed
+    // command wins regardless.
+    const detectEnvOverride = (
+      primary: string,
+      legacy: string,
+      chosen: string,
+      flagName: string,
+    ): { envVar: string; envValue: string; flag: string } | undefined => {
+      const envVar = readNonEmptyString(processEnv[primary])
+        ? primary
+        : readNonEmptyString(processEnv[legacy])
+          ? legacy
+          : undefined;
+      if (!envVar) {
+        return undefined;
+      }
+      const envValue = String(processEnv[envVar]).trim();
+      if (envValue === chosen) {
+        return undefined;
+      }
+      return { envVar, envValue, flag: `${flagName} ${quoteShellArg(chosen)}` };
+    };
 
-    const warnAboutProviderOverride = (): void => {
-      if (providerOverridden && envProviderVar) {
-        writeLine(streams.stdout, `Note: ${envProviderVar}=${envProvider} is exported and takes precedence over the config file.`);
-        writeLine(streams.stdout, `Either run \`unset ${envProviderVar}\` or keep the --provider flag shown below.`);
+    const warnAboutEnvOverrides = (
+      conflicts: Array<{ envVar: string; envValue: string; flag: string }>,
+    ): void => {
+      for (const conflict of conflicts) {
+        writeLine(
+          streams.stdout,
+          `Note: ${conflict.envVar}=${conflict.envValue} is exported and takes precedence over the config file (run \`unset ${conflict.envVar}\` to clear it).`,
+        );
+      }
+      if (conflicts.length > 0) {
+        writeLine(streams.stdout, 'The suggested commands below include flags so they use what you just configured.');
         writeLine(streams.stdout);
       }
     };
 
     if (provider === 'demo') {
+      const conflicts = [
+        detectEnvOverride('STRATUS_PROVIDER', 'STRATUSCLAW_PROVIDER', provider, '--provider'),
+      ].filter((conflict) => conflict !== undefined);
+      const extraFlags = conflicts.map((conflict) => ` ${conflict.flag}`).join('');
+
       await writeFile(configPath, `${JSON.stringify({ provider: 'demo' }, null, 2)}\n`);
       writeLine(streams.stdout);
       writeLine(streams.stdout, `Wrote ${configPath}`);
       writeLine(streams.stdout);
-      warnAboutProviderOverride();
+      warnAboutEnvOverrides(conflicts);
       writeLine(streams.stdout, 'You are ready to go — no API key needed. Try:');
-      writeLine(streams.stdout, `  stratus run${providerFlag}${runConfigFlag} "please use the echo tool"`);
+      writeLine(streams.stdout, `  stratus run${extraFlags}${runConfigFlag} "please use the echo tool"`);
       writeLine(streams.stdout, '  stratus dashboard');
       return 0;
     }
@@ -1142,10 +1168,17 @@ export const runSetup = async (
 
     await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 
+    const conflicts = [
+      detectEnvOverride('STRATUS_PROVIDER', 'STRATUSCLAW_PROVIDER', provider, '--provider'),
+      detectEnvOverride('STRATUS_MODEL', 'STRATUSCLAW_MODEL', model, '--model'),
+      detectEnvOverride('STRATUS_BASE_URL', 'STRATUSCLAW_BASE_URL', baseUrl, '--base-url'),
+    ].filter((conflict) => conflict !== undefined);
+    const extraFlags = conflicts.map((conflict) => ` ${conflict.flag}`).join('');
+
     writeLine(streams.stdout);
     writeLine(streams.stdout, `Wrote ${configPath}`);
     writeLine(streams.stdout);
-    warnAboutProviderOverride();
+    warnAboutEnvOverrides(conflicts);
 
     // Readiness must mirror resolveRuntimeConfig's key lookup: a direct
     // STRATUS_API_KEY wins, then an exported *_API_KEY_ENV redirects which
@@ -1178,7 +1211,7 @@ export const runSetup = async (
       writeLine(streams.stdout);
       writeLine(streams.stdout, 'Then try:');
     }
-    writeLine(streams.stdout, `  stratus run${providerFlag}${runConfigFlag} "say hello"`);
+    writeLine(streams.stdout, `  stratus run${extraFlags}${runConfigFlag} "say hello"`);
     writeLine(streams.stdout, '  stratus dashboard');
     return 0;
   } finally {

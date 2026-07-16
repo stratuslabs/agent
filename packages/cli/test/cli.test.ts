@@ -243,6 +243,29 @@ test('runCli setup writes to the STRATUS_CONFIG path that run will load', async 
   assert.doesNotMatch(output.stdout, /stratus run --config/);
 });
 
+test('runCli setup warns when exported model or base-url overrides the configured values', async () => {
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      processEnv: {
+        STRATUS_MODEL: 'gpt-old',
+        STRATUS_BASE_URL: 'https://old.example.test/v1',
+        OPENAI_API_KEY: 'set-key',
+      },
+      setupInput: Readable.from(['1\n', 'gpt-4.1-mini\n', 'https://new.example.test/v1\n', '\n', '\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /STRATUS_MODEL=gpt-old is exported and takes precedence/);
+  assert.match(output.stdout, /STRATUS_BASE_URL=https:\/\/old\.example\.test\/v1 is exported and takes precedence/);
+  assert.match(output.stdout, /stratus run --model gpt-4\.1-mini --base-url https:\/\/new\.example\.test\/v1 "say hello"/);
+});
+
 test('runCli setup bases the key readiness check on exported API key overrides', async () => {
   const redirected = createStreams();
   const redirectedExit = await runCli({
