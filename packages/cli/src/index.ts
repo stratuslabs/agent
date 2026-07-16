@@ -628,14 +628,15 @@ const createApprovalPolicy = (
       const input = env.approvalInput ?? process.stdin;
       const readline = createInterface({ input, terminal: false });
 
-      streams.stdout.write(`Approve tool call ${call.toolName} with input ${JSON.stringify(call.input)}? [y/N] `);
+      // Prompt on stderr so stdout stays parseable (e.g. --format json).
+      streams.stderr.write(`Approve tool call ${call.toolName} with input ${JSON.stringify(call.input)}? [y/N] `);
 
       try {
         const answer = await new Promise<string>((resolve) => {
           readline.once('line', resolve);
           readline.once('close', () => resolve(''));
         });
-        writeLine(streams.stdout);
+        writeLine(streams.stderr);
         return /^y(es)?$/i.test(answer.trim());
       } finally {
         readline.close();

@@ -158,7 +158,8 @@ test('runCli prompts for approval in ask mode and honors the answer', async () =
   });
 
   assert.equal(approvedExit, 0);
-  assert.match(approved.output.stdout, /Approve tool call demo\.echo/);
+  assert.match(approved.output.stderr, /Approve tool call demo\.echo/);
+  assert.doesNotMatch(approved.output.stdout, /Approve tool call/);
   assert.match(approved.output.stdout, /tool.called demo\.echo/);
   assert.match(approved.output.stdout, /"uppercase": "PLEASE USE THE ECHO TOOL"/);
 
@@ -172,6 +173,27 @@ test('runCli prompts for approval in ask mode and honors the answer', async () =
   assert.equal(deniedExit, 0);
   assert.match(denied.output.stdout, /tool.denied demo\.echo/);
   assert.match(denied.output.stdout, /The demo\.echo tool did not run/);
+});
+
+test('runCli keeps stdout parseable when combining json format with ask approvals', async () => {
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'please use the echo tool', '--format', 'json', '--approvals', 'ask'],
+    streams,
+    env: { approvalInput: Readable.from(['y\n']) },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stderr, /Approve tool call demo\.echo/);
+
+  const payload = JSON.parse(output.stdout);
+  assert.equal(payload.session.status, 'completed');
+  assert.ok(
+    payload.session.messages.some(
+      (message: { role: string; toolResult?: { ok?: boolean } }) =>
+        message.role === 'tool' && message.toolResult?.ok === true,
+    ),
+  );
 });
 
 test('runCli can render machine-readable json output', async () => {
