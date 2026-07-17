@@ -36,13 +36,13 @@ Stratus agents are designed to feel like a person you work with, not a stateless
 - **Delegation.** An orchestrator agent uses the `agent.delegate` tool to hand a task to a teammate and gets their reply back — the teammate runs with *their own* memory, tools, and credentials.
 - **Routing.** `createAgentRouter` maps inbound work (a channel, a mention, a message) to the right agent, so the same person consistently answers in the same places.
 
-Creating an agent takes one call — or one command. If you don't name them, we will, and every agent gets a deterministic avatar theme derived from their name so they look the same on every surface:
+Creating an agent takes one call — or one command. If you don't name them, we will, and every agent gets a deterministic color palette derived from their name, rendered in the one shared Stratus avatar style — so the team looks cohesive and each agent looks the same on every surface:
 
 ```bash
 stratus agent new
 # Say hello to Freya.
 #   id      freya-k3x9
-#   avatar  mosaic theme, hue 211, palette #3d7dd9 #8fb8ea #d9993d
+#   avatar  stratus theme, hue 211, palette #3d7dd9 #8fb8ea #d9993d
 ```
 
 ```ts

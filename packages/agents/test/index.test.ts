@@ -36,7 +36,9 @@ test('generateAvatarTheme derives a stable palette from the name', () => {
   for (const color of theme.palette) {
     assert.match(color, /^#[0-9a-f]{6}$/);
   }
-  assert.ok(theme.style.length > 0);
+  // Every Stratus agent shares the one house style.
+  assert.equal(theme.style, 'stratus');
+  assert.equal(generateAvatarTheme('Uma').style, 'stratus');
 });
 
 test('defineAgent fills in identity, avatar, and slug id with zero input', () => {

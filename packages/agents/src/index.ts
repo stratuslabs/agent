@@ -23,7 +23,13 @@ const AGENT_NAMES = [
   'Reza', 'Sunny', 'Tobias', 'Vada', 'Wren', 'Yara', 'Zeke',
 ] as const;
 
-const AVATAR_STYLES = ['geometric', 'gradient', 'orbit', 'mosaic', 'wave'] as const;
+/**
+ * The one house style every Stratus agent avatar is drawn in. Surfaces
+ * (CLI, web, macOS) render this style; agents differ by their name-derived
+ * hue and palette, so the team looks cohesive while each member is
+ * recognizable.
+ */
+export const AVATAR_STYLE = 'stratus';
 
 /** Deterministic 32-bit hash so the same seed always yields the same identity. */
 const hashSeed = (seed: string): number => {
@@ -59,9 +65,9 @@ export const generateAgentName = (seed?: string): string => {
 };
 
 /**
- * Derive an avatar theme from a name: a stable hue, a small palette, and a
- * rendering style. Consumers (CLI, web, macOS) draw the actual image from
- * this so the agent looks the same on every surface.
+ * Derive an avatar theme from a name: a stable hue and a small palette in
+ * the shared Stratus house style. Consumers (CLI, web, macOS) draw the
+ * actual image from this so the agent looks the same on every surface.
  */
 export const generateAvatarTheme = (name: string): AvatarTheme => {
   const value = hashSeed(name);
@@ -74,7 +80,7 @@ export const generateAvatarTheme = (name: string): AvatarTheme => {
       hslToHex((hue + 30) % 360, 65, 70),
       hslToHex((hue + 180) % 360, 60, 45),
     ],
-    style: AVATAR_STYLES[value % AVATAR_STYLES.length] ?? 'geometric',
+    style: AVATAR_STYLE,
   };
 };
 
