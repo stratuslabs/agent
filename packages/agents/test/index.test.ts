@@ -42,8 +42,14 @@ test('generateAvatarTheme derives a stable palette from the name', () => {
 test('defineAgent fills in identity, avatar, and slug id with zero input', () => {
   const agent = defineAgent({ seed: 'zero-input' });
   assert.match(agent.name, /^[A-Z][a-z]+ [A-Z]/);
-  assert.match(agent.id, /^[a-z0-9-]+$/);
+  assert.match(agent.id, /^[a-z0-9-]+-[0-9a-z]{4}$/);
   assert.equal(agent.avatar?.seed, agent.name);
+
+  // Generated ids are deterministic per seed, distinct across seeds, and
+  // unique even for two unseeded agents that could share a display name.
+  assert.equal(agent.id, defineAgent({ seed: 'zero-input' }).id);
+  assert.notEqual(agent.id, defineAgent({ seed: 'other-seed' }).id);
+  assert.notEqual(defineAgent().id, defineAgent().id);
 
   const custom = defineAgent({
     name: 'Vera Thorne',

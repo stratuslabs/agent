@@ -102,14 +102,28 @@ export interface DefineAgentInput {
   seed?: string;
 }
 
+// Ids for generated names carry a short unique suffix: the name pool is
+// small, and two agents that draw the same name must still be two people —
+// memory and access scopes are keyed by id. Deterministic when seeded.
+const generatedIdSuffix = (seed?: string): string => {
+  const value = seed !== undefined
+    ? hashSeed(`${seed}:id`)
+    : Math.floor(Math.random() * 0xffffffff);
+  return value.toString(36).padStart(4, '0').slice(0, 4);
+};
+
 /**
  * One-call agent creation. Everything is optional: with no input you get a
  * fresh identity with a human-ish name and a matching avatar theme.
+ * Explicitly named agents keep a clean, predictable slug id.
  */
 export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
+  const nameWasGenerated = input.name === undefined;
   const name = input.name ?? generateAgentName(input.seed);
   return {
-    id: input.id ?? slugify(name),
+    id: input.id ?? (nameWasGenerated
+      ? `${slugify(name)}-${generatedIdSuffix(input.seed)}`
+      : slugify(name)),
     name,
     ...(input.instructions ? { instructions: input.instructions } : {}),
     avatar: input.avatar ?? generateAvatarTheme(name),
