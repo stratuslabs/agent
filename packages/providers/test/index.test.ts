@@ -397,6 +397,45 @@ test('createOpenAICompatibleProvider maps tool call and tool result messages for
   assert.deepEqual(response.parts, [{ type: 'text', text: 'The echo returned HELLO.' }]);
 });
 
+test('createOpenAICompatibleProvider injects the agent persona as a system message', async () => {
+  let requestBody: { messages?: Array<{ role: string; content: string }> } = {};
+
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    systemPrompt: 'Global rules apply.',
+    fetch: async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as typeof requestBody;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ choices: [{ message: { content: 'Hello!' } }] }),
+      } as Response;
+    },
+  });
+
+  const base = createRequest();
+  const request: ProviderRequest = {
+    session: {
+      ...base.session,
+      agent: {
+        id: 'priya-salinger',
+        name: 'Priya Salinger',
+        instructions: 'You answer precisely and cite sources.',
+      },
+    },
+  };
+
+  await provider.generate(request);
+
+  const systemMessages = (requestBody.messages ?? []).filter((message) => message.role === 'system');
+  assert.equal(systemMessages[0]?.content, 'Global rules apply.');
+  assert.equal(
+    systemMessages[1]?.content,
+    'You are Priya Salinger. You answer precisely and cite sources.',
+  );
+});
+
 test('createOpenAICompatibleProvider renders agent memory as a system message', async () => {
   let requestBody: { messages?: Array<{ role: string; content: string }> } = {};
 
