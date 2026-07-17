@@ -252,19 +252,26 @@ export const createAgentRouter = (
   rules: AgentRouteRule[],
   fallback: AgentDefinition,
 ): AgentRouter => {
-  // Global/sticky regexes mutate lastIndex on test(), which would make
-  // routing alternate between hit and miss — normalize them up front.
+  // Global/sticky regexes mutate lastIndex on test(). Clone them (so the
+  // caller's regex is never touched) keeping all flags — sticky stays
+  // anchored — and reset lastIndex before every test for stable results.
   const normalized = rules.map((rule) => ({
     ...rule,
-    match: rule.match instanceof RegExp && (rule.match.global || rule.match.sticky)
-      ? new RegExp(rule.match.source, rule.match.flags.replace(/[gy]/g, ''))
+    match: rule.match instanceof RegExp
+      ? new RegExp(rule.match.source, rule.match.flags)
       : rule.match,
   }));
 
   return {
     route(input) {
       for (const rule of normalized) {
-        const matched = rule.match instanceof RegExp ? rule.match.test(input) : rule.match(input);
+        let matched: boolean;
+        if (rule.match instanceof RegExp) {
+          rule.match.lastIndex = 0;
+          matched = rule.match.test(input);
+        } else {
+          matched = rule.match(input);
+        }
         if (matched) {
           return rule.agent;
         }

@@ -288,4 +288,10 @@ test('router sends inputs to the right agent with a fallback', () => {
   assert.equal(statefulRouter.route('#support: one').id, support.id);
   assert.equal(statefulRouter.route('#support: two').id, support.id);
   assert.equal(statefulRouter.route('#support: three').id, support.id);
+
+  // Sticky regexes keep their anchored-at-start semantics.
+  const stickyRouter = createAgentRouter([{ match: /support/y, agent: support }], general);
+  assert.equal(stickyRouter.route('support ticket').id, support.id);
+  assert.equal(stickyRouter.route('please contact support').id, general.id);
+  assert.equal(stickyRouter.route('support again').id, support.id);
 });
