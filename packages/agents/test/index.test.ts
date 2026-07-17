@@ -167,10 +167,24 @@ test('orchestrators delegate to other agents and get their reply back', async ()
   assert.equal(session.status, 'completed');
   assert.equal(session.messages.at(-1)?.content, 'Priya says: The answer is 42.');
 
-  const subSession = await runner.store.get('root-1:delegate:priya-salinger:1');
+  const subSession = await runner.store.get('root-1:delegate:priya-salinger:1:1');
   assert.equal(subSession?.status, 'completed');
   assert.equal(subSession?.metadata?.delegatedBy, orchestrator.id);
   assert.equal(subSession?.metadata?.rootSessionId, 'root-1');
+
+  // Repeated delegation to the same target must never collide on session id.
+  const delegate = createDelegateTool({ registry, runner });
+  const first = (await delegate.execute(
+    { agent: 'Priya Salinger', prompt: 'once more' },
+    session,
+  )) as { sessionId: string };
+  const second = (await delegate.execute(
+    { agent: 'Priya Salinger', prompt: 'and again' },
+    session,
+  )) as { sessionId: string };
+  assert.notEqual(first.sessionId, second.sessionId);
+  assert.ok(await runner.store.get(first.sessionId));
+  assert.ok(await runner.store.get(second.sessionId));
 });
 
 test('delegate tool rejects self-delegation, unknown agents, and depth overruns', async () => {

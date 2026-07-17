@@ -318,6 +318,45 @@ test('resume continues an existing session with new user input', async () => {
   );
 });
 
+test('tool allowlists apply to unregistered agents passed directly to run', async () => {
+  const tools = new ToolRegistry();
+  let toolRan = false;
+  tools.register({
+    name: 'secret-tool',
+    async execute() {
+      toolRan = true;
+      return { ok: true };
+    },
+  });
+
+  const provider: ModelProvider = {
+    name: 'direct-agent-provider',
+    async generate({ session, tools: offered }) {
+      assert.equal(offered, undefined, 'unregistered restricted agent should be offered no tools');
+      if (session.messages.at(-1)?.role === 'tool') {
+        assert.match(session.messages.at(-1)?.toolResult?.error ?? '', /not permitted for agent direct-1/);
+        return { parts: [{ type: 'text', text: 'Blocked, as expected.' }] };
+      }
+      return {
+        parts: [
+          { type: 'tool-call', call: { id: 'call-5', toolName: 'secret-tool', input: {} } },
+        ],
+      };
+    },
+  };
+
+  // No AgentRegistry at all — the allowlist rides on the definition itself.
+  const runner = new AgentRunner({ provider, tools });
+  const session = await runner.run({
+    sessionId: 'session-direct',
+    agent: { id: 'direct-1', name: 'Direct Agent', tools: [] },
+    userMessage: 'try the secret tool',
+  });
+
+  assert.equal(session.status, 'completed');
+  assert.equal(toolRan, false);
+});
+
 test('credentials are scoped per agent and denied outside the allowlist', async () => {
   const { EnvCredentialResolver, scopeCredentials } = await import('../src/index.ts');
 

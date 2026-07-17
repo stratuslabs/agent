@@ -468,8 +468,11 @@ export class AgentRunner {
 
   /** Tool names this session's agent may use, or undefined for no limit. */
   private allowedToolsFor(session: Session): Set<string> | undefined {
-    const definition = this.agents.get(session.agent.id);
-    return definition?.tools ? new Set(definition.tools) : undefined;
+    // The definition handed to run()/resume() travels with the session, so an
+    // agent's own allowlist applies even when it was never registered.
+    const sessionAgent = session.agent as AgentDefinition;
+    const tools = sessionAgent.tools ?? this.agents.get(session.agent.id)?.tools;
+    return tools ? new Set(tools) : undefined;
   }
 
   private async executeTurns(initialSession: Session): Promise<Session> {

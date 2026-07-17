@@ -165,7 +165,13 @@ export const createDelegateTool = ({
   registry,
   runner,
   maxDepth = DEFAULT_MAX_DELEGATION_DEPTH,
-}: DelegateToolOptions): Tool => ({
+}: DelegateToolOptions): Tool => {
+  // Sub-session ids must be unique even when one orchestrator delegates to
+  // the same target repeatedly — a deterministic id would overwrite the
+  // earlier delegated session in the store.
+  let delegationCount = 0;
+
+  return {
   name: DELEGATE_TOOL_NAME,
   description: 'Delegate a task to another agent by name and get their reply back.',
   parameters: {
@@ -198,8 +204,9 @@ export const createDelegateTool = ({
       throw new Error('An agent cannot delegate to itself.');
     }
 
+    delegationCount += 1;
     const result = await runner.run({
-      sessionId: `${session.id}:delegate:${target.id}:${depth + 1}`,
+      sessionId: `${session.id}:delegate:${target.id}:${depth + 1}:${delegationCount}`,
       agent: target,
       userMessage: prompt,
       metadata: {
@@ -221,7 +228,8 @@ export const createDelegateTool = ({
       sessionId: result.id,
     };
   },
-});
+  };
+};
 
 export interface AgentRouteRule {
   /** Regex or predicate matched against the routing key (e.g. channel or message). */
