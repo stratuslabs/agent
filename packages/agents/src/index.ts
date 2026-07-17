@@ -9,23 +9,18 @@ import {
   type Tool,
 } from '@stratusagent/core';
 
-const FIRST_NAMES = [
+// First names only — agents should feel like a teammate you call by name.
+// Uniqueness comes from the generated id suffix, never from the name.
+const AGENT_NAMES = [
   'Ada', 'Amara', 'Arlo', 'Asha', 'August', 'Beatrix', 'Caleb', 'Camila',
   'Dara', 'Devon', 'Eleni', 'Elio', 'Esme', 'Felix', 'Freya', 'Gideon',
   'Hana', 'Hugo', 'Imani', 'Ines', 'Jasper', 'Juno', 'Kai', 'Kira',
   'Leandro', 'Lucia', 'Mabel', 'Mateo', 'Nadia', 'Nico', 'Odessa', 'Otis',
   'Priya', 'Quinn', 'Rafael', 'Romy', 'Sana', 'Silas', 'Tamsin', 'Theo',
   'Uma', 'Vera', 'Wesley', 'Xiomara', 'Yusuf', 'Zadie',
-] as const;
-
-const LAST_NAMES = [
-  'Alvarez', 'Ashford', 'Banks', 'Bellamy', 'Calloway', 'Castillo', 'Dawes',
-  'Delgado', 'Ellery', 'Emerson', 'Farrow', 'Fontaine', 'Gallagher', 'Greer',
-  'Hale', 'Hawthorne', 'Ibarra', 'Iverson', 'Jennings', 'Juarez', 'Keating',
-  'Kimura', 'Lockwood', 'Lucero', 'Mercer', 'Moreau', 'Nakamura', 'North',
-  'Okafor', 'Osei', 'Padilla', 'Pryor', 'Quintana', 'Reyes', 'Rowan',
-  'Salinger', 'Sato', 'Thorne', 'Ueda', 'Vance', 'Whitaker', 'Winslow',
-  'Xu', 'Yates', 'Zamora',
+  'Alba', 'Bruno', 'Celia', 'Dashiell', 'Edie', 'Ferris', 'Greta', 'Hollis',
+  'Ida', 'Jules', 'Koa', 'Lior', 'Marisol', 'Nyla', 'Oren', 'Paloma',
+  'Reza', 'Sunny', 'Tobias', 'Vada', 'Wren', 'Yara', 'Zeke',
 ] as const;
 
 const AVATAR_STYLES = ['geometric', 'gradient', 'orbit', 'mosaic', 'wave'] as const;
@@ -53,16 +48,14 @@ const hslToHex = (hue: number, saturation: number, lightness: number): string =>
 };
 
 /**
- * Generate a human-ish agent name. Deterministic when a seed is supplied;
+ * Generate a human-ish first name. Deterministic when a seed is supplied;
  * random otherwise.
  */
 export const generateAgentName = (seed?: string): string => {
   const value = seed !== undefined
     ? hashSeed(seed)
     : Math.floor(Math.random() * 0xffffffff);
-  const first = FIRST_NAMES[value % FIRST_NAMES.length];
-  const last = LAST_NAMES[Math.floor(value / FIRST_NAMES.length) % LAST_NAMES.length];
-  return `${first} ${last}`;
+  return AGENT_NAMES[value % AGENT_NAMES.length] ?? 'Quinn';
 };
 
 /**

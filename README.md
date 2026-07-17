@@ -40,8 +40,8 @@ Creating an agent takes one call — or one command. If you don't name them, we 
 
 ```bash
 stratus agent new
-# Say hello to Freya Nakamura.
-#   id      freya-nakamura
+# Say hello to Freya.
+#   id      freya-k3x9
 #   avatar  mosaic theme, hue 211, palette #3d7dd9 #8fb8ea #d9993d
 ```
 
@@ -49,7 +49,7 @@ stratus agent new
 import { defineAgent } from '@stratusagent/agents';
 
 const scout = defineAgent({ instructions: 'You research things thoroughly.' });
-// scout.name → "Arlo Whitaker", scout.avatar → matching palette + style
+// scout.name → "Arlo", scout.avatar → matching palette + style
 ```
 
 ## Local setup (fresh machine)

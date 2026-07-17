@@ -18,13 +18,13 @@ import {
   generateAvatarTheme,
 } from '../src/index.ts';
 
-test('generateAgentName is human-ish and deterministic for a seed', () => {
+test('generateAgentName is a human-ish first name, deterministic for a seed', () => {
   const seeded = generateAgentName('fixed-seed');
   assert.equal(seeded, generateAgentName('fixed-seed'));
-  assert.match(seeded, /^[A-Z][a-z]+ [A-Z][a-z]+/);
+  assert.match(seeded, /^[A-Z][a-z]+$/);
 
   const random = generateAgentName();
-  assert.match(random, /^[A-Z][a-z]+ [A-Z]/);
+  assert.match(random, /^[A-Z][a-z]+$/);
 });
 
 test('generateAvatarTheme derives a stable palette from the name', () => {
@@ -41,7 +41,7 @@ test('generateAvatarTheme derives a stable palette from the name', () => {
 
 test('defineAgent fills in identity, avatar, and slug id with zero input', () => {
   const agent = defineAgent({ seed: 'zero-input' });
-  assert.match(agent.name, /^[A-Z][a-z]+ [A-Z]/);
+  assert.match(agent.name, /^[A-Z][a-z]+$/);
   assert.match(agent.id, /^[a-z0-9-]+-[0-9a-z]{4}$/);
   assert.equal(agent.avatar?.seed, agent.name);
 

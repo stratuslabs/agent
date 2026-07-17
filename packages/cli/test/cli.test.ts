@@ -394,7 +394,7 @@ test('runCli agent new generates a full identity with name and avatar theme', as
   const generatedExit = await runCli({ argv: ['agent', 'new'], streams: generated.streams });
 
   assert.equal(generatedExit, 0);
-  assert.match(generated.output.stdout, /Say hello to [A-Z][a-z]+ [A-Z]/);
+  assert.match(generated.output.stdout, /Say hello to [A-Z][a-z]+\./);
   assert.match(generated.output.stdout, /avatar {2}\w+ theme, hue \d+/);
 
   const bad = createStreams();
