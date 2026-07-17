@@ -167,7 +167,10 @@ test('orchestrators delegate to other agents and get their reply back', async ()
   assert.equal(session.status, 'completed');
   assert.equal(session.messages.at(-1)?.content, 'Priya says: The answer is 42.');
 
-  const subSession = await runner.store.get('root-1:delegate:priya-salinger:1:1');
+  const toolMessage = session.messages.find((message) => message.role === 'tool');
+  const output = toolMessage?.toolResult?.output as { sessionId?: string } | null;
+  assert.match(output?.sessionId ?? '', /^root-1:delegate:priya-salinger:1:/);
+  const subSession = await runner.store.get(output?.sessionId ?? '');
   assert.equal(subSession?.status, 'completed');
   assert.equal(subSession?.metadata?.delegatedBy, orchestrator.id);
   assert.equal(subSession?.metadata?.rootSessionId, 'root-1');
@@ -279,4 +282,10 @@ test('router sends inputs to the right agent with a fallback', () => {
   assert.equal(router.route('#support: my login is broken').id, support.id);
   assert.equal(router.route('can someone deploy the fix?').id, engineer.id);
   assert.equal(router.route('hello there').id, general.id);
+
+  // Global/sticky regexes must not alternate between hit and miss.
+  const statefulRouter = createAgentRouter([{ match: /^#support/g, agent: support }], general);
+  assert.equal(statefulRouter.route('#support: one').id, support.id);
+  assert.equal(statefulRouter.route('#support: two').id, support.id);
+  assert.equal(statefulRouter.route('#support: three').id, support.id);
 });

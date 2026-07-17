@@ -167,9 +167,11 @@ export const createDelegateTool = ({
   maxDepth = DEFAULT_MAX_DELEGATION_DEPTH,
 }: DelegateToolOptions): Tool => {
   // Sub-session ids must be unique even when one orchestrator delegates to
-  // the same target repeatedly — a deterministic id would overwrite the
-  // earlier delegated session in the store.
+  // the same target repeatedly, and must stay unique across tool rebuilds
+  // sharing one SessionStore — so a counter alone is not enough.
   let delegationCount = 0;
+  const uniqueSuffix = (): string =>
+    `${delegationCount}-${Math.random().toString(36).slice(2, 10)}`;
 
   return {
   name: DELEGATE_TOOL_NAME,
@@ -206,7 +208,7 @@ export const createDelegateTool = ({
 
     delegationCount += 1;
     const result = await runner.run({
-      sessionId: `${session.id}:delegate:${target.id}:${depth + 1}:${delegationCount}`,
+      sessionId: `${session.id}:delegate:${target.id}:${depth + 1}:${uniqueSuffix()}`,
       agent: target,
       userMessage: prompt,
       metadata: {
@@ -249,17 +251,28 @@ export interface AgentRouter {
 export const createAgentRouter = (
   rules: AgentRouteRule[],
   fallback: AgentDefinition,
-): AgentRouter => ({
-  route(input) {
-    for (const rule of rules) {
-      const matched = rule.match instanceof RegExp ? rule.match.test(input) : rule.match(input);
-      if (matched) {
-        return rule.agent;
+): AgentRouter => {
+  // Global/sticky regexes mutate lastIndex on test(), which would make
+  // routing alternate between hit and miss — normalize them up front.
+  const normalized = rules.map((rule) => ({
+    ...rule,
+    match: rule.match instanceof RegExp && (rule.match.global || rule.match.sticky)
+      ? new RegExp(rule.match.source, rule.match.flags.replace(/[gy]/g, ''))
+      : rule.match,
+  }));
+
+  return {
+    route(input) {
+      for (const rule of normalized) {
+        const matched = rule.match instanceof RegExp ? rule.match.test(input) : rule.match(input);
+        if (matched) {
+          return rule.agent;
+        }
       }
-    }
-    return fallback;
-  },
-});
+      return fallback;
+    },
+  };
+};
 
 /** Register a set of agents and get the registry back. */
 export const createAgentTeam = (agents: AgentDefinition[]): AgentRegistry => {
