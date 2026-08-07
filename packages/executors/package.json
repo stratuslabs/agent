@@ -29,5 +29,15 @@
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",
     "directory": "packages/executors"
+  },
+  "description": "Shared executor helpers and result normalization for Stratus Agent tools",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }

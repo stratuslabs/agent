@@ -37,5 +37,15 @@
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",
     "directory": "packages/cli"
+  },
+  "description": "Stratus Agent CLI: setup walkthrough, agent creation, local runs, and dashboard",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }

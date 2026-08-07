@@ -26,5 +26,15 @@
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",
     "directory": "packages/core"
+  },
+  "description": "Stratus Agent kernel: session, provider, tool, memory, and orchestration contracts with a multi-turn agent loop",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }

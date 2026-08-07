@@ -29,5 +29,15 @@
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",
     "directory": "packages/agents"
+  },
+  "description": "Stratus agent identities: one-call creation with generated names and avatar themes, per-agent memory, delegation, and routing",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }
