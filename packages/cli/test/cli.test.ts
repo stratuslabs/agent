@@ -9,6 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  createFileMemoryStore,
   HELP_TEXT,
   parseCommand,
   resolveRuntimeConfig,
@@ -1138,7 +1139,10 @@ test('runCli persists agent memory across runs through memory.remember', async (
   });
 
   assert.equal(firstRun, 0);
-  const stored = JSON.parse(await readFile(path.join(tempDir, '.stratus', 'memory.json'), 'utf8'));
+  const stored = (await readFile(path.join(tempDir, '.stratus', 'memory.jsonl'), 'utf8'))
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line));
   assert.equal(stored.length, 1);
   assert.equal(stored[0].agentId, 'anthropic-agent');
   assert.equal(stored[0].content, 'The user prefers short answers.');
@@ -1169,4 +1173,92 @@ test('runCli persists agent memory across runs through memory.remember', async (
 
   assert.equal(secondRun, 0);
   assert.match(systemPrompts.at(-1) ?? '', /The user prefers short answers\./);
+});
+
+test('an unnamed soul keeps the same generated identity across invocations', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const soulPath = path.join(tempDir, 'nameless.md');
+  await writeFile(soulPath, 'Always answer in haiku.\n');
+
+  const resolveTwice = () => resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    format: 'text',
+    events: true,
+    soul: soulPath,
+  }, { cwd: tempDir, processEnv: {} });
+
+  const first = await resolveTwice();
+  const second = await resolveTwice();
+
+  // Persisted memory is keyed by agent id, so a soul without a name must
+  // resolve to the same generated identity every run.
+  assert.ok(first.soul?.agent.id);
+  assert.equal(first.soul?.agent.id, second.soul?.agent.id);
+  assert.equal(first.soul?.agent.name, second.soul?.agent.name);
+});
+
+test('resolveRuntimeConfig treats provider-less config settings as openai-specific', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  await writeFile(path.join(tempDir, 'stratus.config.json'), JSON.stringify({
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://example.test/v1',
+    apiKeyEnv: 'CUSTOM_OPENAI_KEY',
+  }));
+
+  // Legacy configs predate the anthropic provider, so their settings must
+  // not leak into an anthropic run...
+  const anthropicRuntime = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    provider: 'anthropic',
+    format: 'text',
+    events: true,
+  }, {
+    cwd: tempDir,
+    processEnv: { ANTHROPIC_API_KEY: 'anthropic-key', CUSTOM_OPENAI_KEY: 'openai-key' },
+  });
+
+  assert.deepEqual(anthropicRuntime, {
+    provider: 'anthropic',
+    apiKey: 'anthropic-key',
+    model: 'claude-opus-5',
+  });
+
+  // ...while still applying to openai runs as before.
+  const openaiRuntime = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    provider: 'openai',
+    format: 'text',
+    events: true,
+  }, {
+    cwd: tempDir,
+    processEnv: { CUSTOM_OPENAI_KEY: 'openai-key' },
+  });
+
+  assert.deepEqual(openaiRuntime, {
+    provider: 'openai',
+    apiKey: 'openai-key',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://example.test/v1',
+  });
+});
+
+test('concurrent memory appends never clobber each other', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const store = createFileMemoryStore(path.join(tempDir, '.stratus', 'memory.jsonl'));
+  const other = createFileMemoryStore(path.join(tempDir, '.stratus', 'memory.jsonl'));
+
+  // Two stores over the same file, appending interleaved — as two CLI runs
+  // in the same working directory would.
+  await Promise.all([
+    ...Array.from({ length: 5 }, (_, i) => store.append('ava', `fact a${i}`)),
+    ...Array.from({ length: 5 }, (_, i) => other.append('ava', `fact b${i}`)),
+  ]);
+
+  const entries = await store.list('ava');
+  assert.equal(entries.length, 10);
+  const contents = new Set(entries.map((entry) => entry.content));
+  assert.equal(contents.size, 10);
 });

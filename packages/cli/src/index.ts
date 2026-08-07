@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import path from 'node:path';
@@ -281,11 +281,13 @@ const createDemoProvider = (): ModelProvider =>
     },
   });
 
-const MEMORY_FILE_RELATIVE_PATH = path.join('.stratus', 'memory.json');
+const MEMORY_FILE_RELATIVE_PATH = path.join('.stratus', 'memory.jsonl');
 
 // Agents keep the same memory across CLI runs: every remembered fact lands
-// in .stratus/memory.json (keyed by agent id), so the Ava you talk to
-// tomorrow is the Ava you talked to today.
+// in .stratus/memory.jsonl (keyed by agent id), so the Ava you talk to
+// tomorrow is the Ava you talked to today. One JSON entry per line, written
+// with O_APPEND: concurrent runs each add their own line instead of
+// re-writing the file, so no run can clobber another's remembered fact.
 export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
   const readEntries = async (): Promise<MemoryEntry[]> => {
     let raw: string;
@@ -298,26 +300,29 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       throw error;
     }
 
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) {
-      throw new Error(`Memory file must contain a JSON array: ${filePath}`);
-    }
-    return parsed as MemoryEntry[];
+    return raw
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => {
+        try {
+          return JSON.parse(line) as MemoryEntry;
+        } catch {
+          throw new Error(`Memory file has an invalid line: ${filePath}`);
+        }
+      });
   };
 
   return {
     async append(agentId: string, content: string, metadata?: JsonObject) {
-      const entries = await readEntries();
       const entry: MemoryEntry = {
-        id: `${agentId}:memory:${entries.length + 1}:${randomUUID()}`,
+        id: `${agentId}:memory:${randomUUID()}`,
         agentId,
         content,
         createdAt: new Date().toISOString(),
         ...(metadata ? { metadata } : {}),
       };
-      entries.push(entry);
       await mkdir(path.dirname(filePath), { recursive: true });
-      await writeFile(filePath, `${JSON.stringify(entries, null, 2)}\n`);
+      await appendFile(filePath, `${JSON.stringify(entry)}\n`);
       return entry;
     },
     async list(agentId: string) {
@@ -747,7 +752,10 @@ const resolveSoul = async (
   }
 
   try {
-    return parseSoul(raw);
+    // Seeding with the resolved path keeps an unnamed soul's generated
+    // identity (name, id, avatar) stable across runs — persisted memory is
+    // keyed by that id, so it must not change between invocations.
+    return parseSoul(raw, { seed: resolvedPath });
   } catch (error) {
     throw new Error(
       `Could not parse soul file ${resolvedPath}: ${error instanceof Error ? error.message : String(error)}`,
@@ -780,8 +788,10 @@ export const resolveRuntimeConfig = async (
   // A config file's model/baseUrl/apiKeyEnv were written for the provider
   // named in that file. When a flag, env var, or soul selects a different
   // provider, those values would point at the wrong API (e.g. an OpenAI
-  // base URL handed to the Anthropic SDK), so they are ignored.
-  const fileConfigApplies = fileConfig.provider === undefined || fileConfig.provider === provider;
+  // base URL handed to the Anthropic SDK), so they are ignored. A file with
+  // no provider key predates the anthropic option, so its settings are
+  // treated as openai-specific.
+  const fileConfigApplies = (fileConfig.provider ?? 'openai') === provider;
 
   const model = command.model
     ?? readNonEmptyString(processEnv.STRATUS_MODEL)

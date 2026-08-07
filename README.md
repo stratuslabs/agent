@@ -33,7 +33,7 @@ It is not yet a full production agent platform: durable storage, remote executor
 
 Stratus agents are designed to feel like a person you work with, not a stateless bot:
 
-- **One identity everywhere.** An agent's memory is keyed to the agent — never to a session or channel — so what they learn in one thread they know in every other conversation. Agents can save facts with the built-in `memory.remember` tool, and their memory is handed to the model on every turn. CLI runs persist it to `.stratus/memory.json` (gitignored), so the agent you talk to tomorrow remembers today.
+- **One identity everywhere.** An agent's memory is keyed to the agent — never to a session or channel — so what they learn in one thread they know in every other conversation. Agents can save facts with the built-in `memory.remember` tool, and their memory is handed to the model on every turn. CLI runs persist it to `.stratus/memory.jsonl` (gitignored), so the agent you talk to tomorrow remembers today.
 - **Scoped access.** Each agent has its own tool allowlist and its own credential allowlist. An agent can only call the tools it was given, and can only resolve the secrets it was granted.
 - **Delegation.** An orchestrator agent uses the `agent.delegate` tool to hand a task to a teammate and gets their reply back — the teammate runs with *their own* memory, tools, and credentials.
 - **Routing.** `createAgentRouter` maps inbound work (a channel, a mention, a message) to the right agent, so the same person consistently answers in the same places.
