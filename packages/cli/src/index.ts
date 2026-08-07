@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import path from 'node:path';
@@ -10,8 +10,11 @@ import {
   AllowAllApprovalPolicy,
   EventBus,
   ToolRegistry,
+  type AgentMemoryStore,
   type ApprovalPolicy,
+  type JsonObject,
   type JsonValue,
+  type MemoryEntry,
   type ModelProvider,
   type Session,
   type StratusEvent,
@@ -29,7 +32,13 @@ import {
   createAnthropicProvider,
   DEFAULT_ANTHROPIC_MODEL,
 } from '@stratusagent/provider-anthropic';
-import { defineAgent, formatSoul, parseSoul, type ParsedSoul } from '@stratusagent/agents';
+import {
+  createRememberTool,
+  defineAgent,
+  formatSoul,
+  parseSoul,
+  type ParsedSoul,
+} from '@stratusagent/agents';
 
 export interface CliStreams {
   stdout: Pick<typeof process.stdout, 'write'>;
@@ -271,6 +280,52 @@ const createDemoProvider = (): ModelProvider =>
       return builder.done();
     },
   });
+
+const MEMORY_FILE_RELATIVE_PATH = path.join('.stratus', 'memory.json');
+
+// Agents keep the same memory across CLI runs: every remembered fact lands
+// in .stratus/memory.json (keyed by agent id), so the Ava you talk to
+// tomorrow is the Ava you talked to today.
+export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
+  const readEntries = async (): Promise<MemoryEntry[]> => {
+    let raw: string;
+    try {
+      raw = await readFile(filePath, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    }
+
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      throw new Error(`Memory file must contain a JSON array: ${filePath}`);
+    }
+    return parsed as MemoryEntry[];
+  };
+
+  return {
+    async append(agentId: string, content: string, metadata?: JsonObject) {
+      const entries = await readEntries();
+      const entry: MemoryEntry = {
+        id: `${agentId}:memory:${entries.length + 1}:${randomUUID()}`,
+        agentId,
+        content,
+        createdAt: new Date().toISOString(),
+        ...(metadata ? { metadata } : {}),
+      };
+      entries.push(entry);
+      await mkdir(path.dirname(filePath), { recursive: true });
+      await writeFile(filePath, `${JSON.stringify(entries, null, 2)}\n`);
+      return entry;
+    },
+    async list(agentId: string) {
+      const entries = await readEntries();
+      return entries.filter((entry) => entry.agentId === agentId);
+    },
+  };
+};
 
 const readPromptFromEnvironment = (env: CliEnvironment): string => (env.stdin ?? '').trim();
 
@@ -722,23 +777,29 @@ export const resolveRuntimeConfig = async (
     return { provider: 'demo', ...(soul ? { soul } : {}) };
   }
 
+  // A config file's model/baseUrl/apiKeyEnv were written for the provider
+  // named in that file. When a flag, env var, or soul selects a different
+  // provider, those values would point at the wrong API (e.g. an OpenAI
+  // base URL handed to the Anthropic SDK), so they are ignored.
+  const fileConfigApplies = fileConfig.provider === undefined || fileConfig.provider === provider;
+
   const model = command.model
     ?? readNonEmptyString(processEnv.STRATUS_MODEL)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL)
     ?? readNonEmptyString(soul?.model)
-    ?? fileConfig.model
+    ?? (fileConfigApplies ? fileConfig.model : undefined)
     ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_MODEL : DEFAULT_OPENAI_MODEL);
 
   const baseUrl = command.baseUrl
     ?? readNonEmptyString(processEnv.STRATUS_BASE_URL)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_BASE_URL)
-    ?? fileConfig.baseUrl
+    ?? (fileConfigApplies ? fileConfig.baseUrl : undefined)
     // The Anthropic SDK knows its own endpoint; only openai needs a default.
     ?? (provider === 'anthropic' ? undefined : DEFAULT_OPENAI_BASE_URL);
 
   const apiKeyEnvName = readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV)
-    ?? fileConfig.apiKeyEnv
+    ?? (fileConfigApplies ? fileConfig.apiKeyEnv : undefined)
     ?? (provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY');
 
   const apiKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
@@ -857,8 +918,13 @@ export const runSingleLoop = async (
     env?: CliEnvironment;
   },
 ): Promise<Session> => {
+  const memory = createFileMemoryStore(
+    path.join(readWorkingDirectory(options.env ?? {}), MEMORY_FILE_RELATIVE_PATH),
+  );
+
   const tools = new ToolRegistry();
   tools.register(createDemoTool());
+  tools.register(createRememberTool(memory));
 
   const bus = new EventBus({
     onError: (error) => {
@@ -882,6 +948,7 @@ export const runSingleLoop = async (
     executor: createLocalCommandExecutor(),
     approvals: createApprovalPolicy(options.approvals ?? 'always', streams, options.env ?? {}),
     bus,
+    memory,
     ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
   });
 

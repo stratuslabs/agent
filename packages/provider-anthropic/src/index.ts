@@ -153,8 +153,17 @@ const createAnthropicMessages = (
     groups.push({ role, blocks });
   };
 
-  for (const message of request.session.messages) {
-    if (message.role === 'system') {
+  // One raw response covers several runner messages (its text message plus
+  // one message per tool call), so it must be replayed exactly once — every
+  // call id from a response maps to the same cached array.
+  const emittedRaw = new Set<ContentBlock[]>();
+  const rawFor = (calls: ToolCall[] | undefined): ContentBlock[] | undefined =>
+    calls?.map((call) => rawTurns.get(call.id)).find((blocks) => blocks !== undefined);
+
+  const messages = request.session.messages;
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (!message || message.role === 'system') {
       continue;
     }
 
@@ -178,25 +187,15 @@ const createAnthropicMessages = (
       if (message.toolCalls && message.toolCalls.length > 0) {
         // Replay the API's own content blocks when we have them: with
         // thinking enabled, the thinking block that preceded a tool_use must
-        // be returned verbatim or the API rejects the request.
-        const raw = message.toolCalls
-          .map((call) => rawTurns.get(call.id))
-          .find((blocks) => blocks !== undefined);
+        // be returned verbatim or the API rejects the request. The raw turn
+        // is atomic — it already contains the text and every tool_use block
+        // of that response — so later runner messages it covers are skipped.
+        const raw = rawFor(message.toolCalls);
         if (raw) {
-          // The raw turn covers every block from that response (thinking,
-          // text, and all tool_use blocks), so replace whatever this group
-          // has accumulated for the same turn.
-          const previous = groups.at(-1);
-          const rawIds = new Set(
-            raw.filter((block) => block.type === 'tool_use').map((block) => block.id),
-          );
-          if (
-            previous?.role === 'assistant' &&
-            previous.blocks.some((block) => block.type === 'tool_use' && rawIds.has(block.id))
-          ) {
-            continue;
+          if (!emittedRaw.has(raw)) {
+            emittedRaw.add(raw);
+            push('assistant', raw as ContentBlockParam[]);
           }
-          push('assistant', raw as ContentBlockParam[]);
           continue;
         }
         push('assistant', reconstructAssistantBlocks(message.content, message.toolCalls, mapping));
@@ -204,6 +203,14 @@ const createAnthropicMessages = (
       }
 
       if (message.content.length > 0) {
+        // The runner records a response's text ahead of its tool calls. If
+        // the next message replays that same response's raw turn, the text
+        // is already inside it.
+        const next = messages[index + 1];
+        const nextRaw = next?.role === 'assistant' ? rawFor(next.toolCalls) : undefined;
+        if (nextRaw && !emittedRaw.has(nextRaw)) {
+          continue;
+        }
         push('assistant', [{ type: 'text', text: message.content }]);
       }
       continue;

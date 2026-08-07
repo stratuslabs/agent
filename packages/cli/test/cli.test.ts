@@ -1067,3 +1067,106 @@ test('runCli agent new renders a ready-to-run soul file', async () => {
   assert.match(output.stdout, /model: claude-opus-5\n/);
   assert.match(output.stdout, /Be kind\./);
 });
+
+test("resolveRuntimeConfig ignores another provider's config file settings", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  await writeFile(path.join(tempDir, 'stratus.config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://example.test/v1',
+    apiKeyEnv: 'CUSTOM_OPENAI_KEY',
+  }));
+
+  // The config file was written for openai; selecting anthropic must not
+  // inherit its base URL, model, or key env.
+  const runtime = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    provider: 'anthropic',
+    format: 'text',
+    events: true,
+  }, {
+    cwd: tempDir,
+    processEnv: {
+      ANTHROPIC_API_KEY: 'anthropic-key',
+      CUSTOM_OPENAI_KEY: 'openai-key',
+    },
+  });
+
+  assert.deepEqual(runtime, {
+    provider: 'anthropic',
+    apiKey: 'anthropic-key',
+    model: 'claude-opus-5',
+  });
+});
+
+test('runCli persists agent memory across runs through memory.remember', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const systemPrompts: string[] = [];
+  let firstRunCalls = 0;
+
+  const firstRun = await runCli({
+    argv: ['run', '--prompt', 'remember that I prefer short answers', '--provider', 'anthropic'],
+    streams: createStreams().streams,
+    env: {
+      cwd: tempDir,
+      processEnv: { ANTHROPIC_API_KEY: 'test-key' },
+      fetch: (async (_url: unknown, init?: { body?: unknown }) => {
+        const body = JSON.parse(String(init?.body ?? '{}'));
+        systemPrompts.push(String(body.system ?? ''));
+        firstRunCalls += 1;
+        const content = firstRunCalls === 1
+          ? [{
+              type: 'tool_use',
+              id: 'toolu_mem',
+              name: 'memory_remember',
+              input: { fact: 'The user prefers short answers.' },
+            }]
+          : [{ type: 'text', text: 'Noted — short answers from here on.' }];
+        return new Response(JSON.stringify({
+          id: 'msg_1',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-opus-5',
+          content,
+          stop_reason: firstRunCalls === 1 ? 'tool_use' : 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 5, output_tokens: 5 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(firstRun, 0);
+  const stored = JSON.parse(await readFile(path.join(tempDir, '.stratus', 'memory.json'), 'utf8'));
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].agentId, 'anthropic-agent');
+  assert.equal(stored[0].content, 'The user prefers short answers.');
+
+  // A brand-new run — new session, same working directory — sees the memory.
+  const secondRun = await runCli({
+    argv: ['run', '--prompt', 'hi again', '--provider', 'anthropic'],
+    streams: createStreams().streams,
+    env: {
+      cwd: tempDir,
+      processEnv: { ANTHROPIC_API_KEY: 'test-key' },
+      fetch: (async (_url: unknown, init?: { body?: unknown }) => {
+        const body = JSON.parse(String(init?.body ?? '{}'));
+        systemPrompts.push(String(body.system ?? ''));
+        return new Response(JSON.stringify({
+          id: 'msg_2',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-opus-5',
+          content: [{ type: 'text', text: 'Hey! Keeping it short.' }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 5, output_tokens: 5 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(secondRun, 0);
+  assert.match(systemPrompts.at(-1) ?? '', /The user prefers short answers\./);
+});

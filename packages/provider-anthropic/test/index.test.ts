@@ -288,3 +288,79 @@ test('thinking can be disabled and empty responses throw', async () => {
   assert.equal(body.model, 'claude-sonnet-5');
   assert.equal(body.max_tokens, 2048);
 });
+
+test('a response with text and multiple tool calls replays as one atomic turn', async () => {
+  const multiCallTurn = [
+    { type: 'thinking', thinking: 'Two tools needed.', signature: 'sig_multi' },
+    { type: 'text', text: 'Running both tools.' },
+    { type: 'tool_use', id: 'toolu_a', name: 'demo_echo', input: { text: 'one' } },
+    { type: 'tool_use', id: 'toolu_b', name: 'demo_echo', input: { text: 'two' } },
+  ];
+  const { fetchImpl, requests } = createMockFetch([
+    apiMessage(multiCallTurn, 'tool_use'),
+    apiMessage([{ type: 'text', text: 'Both done.' }]),
+  ]);
+
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const session = createSession();
+  const tools: ProviderRequest['tools'] = [
+    { name: 'demo.echo', parameters: { type: 'object', properties: {} } },
+  ];
+
+  const first = await provider.generate({ session, tools });
+  const calls = first.parts.filter((part) => part.type === 'tool-call');
+  assert.equal(calls.length, 2);
+
+  // Mirror what AgentRunner records for [text, call, call]: one text message,
+  // then per call an assistant message followed by its tool result.
+  session.messages.push(
+    {
+      id: 'session-1:assistant:2',
+      role: 'assistant',
+      content: 'Running both tools.',
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: 'session-1:assistant:3',
+      role: 'assistant',
+      content: '',
+      createdAt: new Date().toISOString(),
+      toolCalls: [calls[0]!.call],
+    },
+    {
+      id: 'session-1:tool:toolu_a',
+      role: 'tool',
+      name: 'demo.echo',
+      content: '{}',
+      createdAt: new Date().toISOString(),
+      toolResult: { callId: 'toolu_a', toolName: 'demo.echo', ok: true, output: { echoed: 'one' } },
+    },
+    {
+      id: 'session-1:assistant:5',
+      role: 'assistant',
+      content: '',
+      createdAt: new Date().toISOString(),
+      toolCalls: [calls[1]!.call],
+    },
+    {
+      id: 'session-1:tool:toolu_b',
+      role: 'tool',
+      name: 'demo.echo',
+      content: '{}',
+      createdAt: new Date().toISOString(),
+      toolResult: { callId: 'toolu_b', toolName: 'demo.echo', ok: true, output: { echoed: 'two' } },
+    },
+  );
+
+  await provider.generate({ session, tools });
+
+  const replay = requests[1]!.body.messages;
+  // user, ONE assistant turn (the raw response, text included exactly once),
+  // ONE user turn carrying both tool results.
+  assert.equal(replay.length, 3);
+  assert.deepEqual(replay[1], { role: 'assistant', content: multiCallTurn });
+  assert.deepEqual(
+    replay[2].content.map((block: { tool_use_id: string }) => block.tool_use_id),
+    ['toolu_a', 'toolu_b'],
+  );
+});
