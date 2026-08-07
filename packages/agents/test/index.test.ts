@@ -198,6 +198,42 @@ test('orchestrators delegate to other agents and get their reply back', async ()
   assert.ok(await runner.store.get(second.sessionId));
 });
 
+test('delegation by an ambiguous display name fails instead of picking an agent', async () => {
+  const umaOne = defineAgent({ name: 'Uma', id: 'uma-one' });
+  const umaTwo = defineAgent({ name: 'Uma', id: 'uma-two' });
+  const orchestrator = defineAgent({ name: 'Theo' });
+  const registry = createAgentTeam([umaOne, umaTwo, orchestrator]);
+
+  const provider: ModelProvider = {
+    name: 'noop',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'ok' }] };
+    },
+  };
+  const runner = new AgentRunner({ provider, agents: registry });
+  const tool = createDelegateTool({ registry, runner });
+
+  const session: Session = {
+    id: 's',
+    agent: orchestrator,
+    status: 'running',
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  };
+
+  await assert.rejects(
+    () => tool.execute({ agent: 'Uma', prompt: 'hi' }, session),
+    /Agent name is ambiguous: Uma \(ids: uma-one, uma-two\)/,
+  );
+
+  // Ids always stay unambiguous.
+  const result = (await tool.execute({ agent: 'uma-two', prompt: 'hi' }, session)) as {
+    agent: string;
+  };
+  assert.equal(result.agent, 'Uma');
+});
+
 test('delegate tool rejects self-delegation, unknown agents, and depth overruns', async () => {
   const orchestrator = defineAgent({ name: 'Kai Ibarra' });
   const registry = createAgentTeam([orchestrator]);

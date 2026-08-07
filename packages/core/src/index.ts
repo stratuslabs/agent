@@ -52,8 +52,20 @@ export class AgentRegistry {
     return this.agents.get(id);
   }
 
+  /**
+   * Look up an agent by display name. Names are not required to be unique
+   * (ids are), so an ambiguous name throws rather than silently picking one
+   * — routing work to the wrong identity would cross memory and access
+   * scopes.
+   */
   getByName(name: string): AgentDefinition | undefined {
-    return this.list().find((agent) => agent.name === name);
+    const matches = this.list().filter((agent) => agent.name === name);
+    if (matches.length > 1) {
+      throw new Error(
+        `Agent name is ambiguous: ${name} (ids: ${matches.map((agent) => agent.id).join(', ')}). Use the id instead.`,
+      );
+    }
+    return matches[0];
   }
 
   require(id: string): AgentDefinition {
