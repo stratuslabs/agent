@@ -15,6 +15,9 @@ import type {
 
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5';
 const DEFAULT_MAX_TOKENS = 4096;
+// Raw-turn caches are kept for this many distinct sessions (LRU) so a
+// long-lived provider instance doesn't accumulate thinking blocks forever.
+const MAX_CACHED_SESSIONS = 32;
 
 export interface AnthropicProviderConfig {
   apiKey: string;
@@ -274,14 +277,35 @@ export const createAnthropicProvider = ({
     ...(fetchImpl ? { fetch: fetchImpl } : {}),
   });
 
-  // Raw assistant turns keyed by tool_use id, so history replay can hand the
-  // API back its own thinking blocks. Scoped to this provider instance,
-  // which lives for the whole run.
-  const rawTurns = new Map<string, ContentBlock[]>();
+  // Raw assistant turns keyed by session, then by tool_use id, so history
+  // replay can hand the API back its own thinking blocks. Bounded: only the
+  // most recently active sessions keep their cache — an evicted session
+  // falls back to reconstructed tool_use blocks.
+  const rawTurnsBySession = new Map<string, Map<string, ContentBlock[]>>();
+
+  const rawTurnsFor = (sessionId: string): Map<string, ContentBlock[]> => {
+    let turns = rawTurnsBySession.get(sessionId);
+    if (turns) {
+      // Re-insert so Map iteration order doubles as LRU order.
+      rawTurnsBySession.delete(sessionId);
+    } else {
+      turns = new Map();
+    }
+    rawTurnsBySession.set(sessionId, turns);
+    while (rawTurnsBySession.size > MAX_CACHED_SESSIONS) {
+      const oldest = rawTurnsBySession.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      rawTurnsBySession.delete(oldest);
+    }
+    return turns;
+  };
 
   return {
     name,
     async generate(request: ProviderRequest) {
+      const rawTurns = rawTurnsFor(request.session.id);
       const mapping = createToolNameMapping(request.tools);
       const tools = createAnthropicTools(request.tools, mapping);
       const system = createSystemPrompt(request, systemPrompt);

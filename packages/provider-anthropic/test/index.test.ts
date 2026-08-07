@@ -364,3 +364,56 @@ test('a response with text and multiple tool calls replays as one atomic turn', 
     ['toolu_a', 'toolu_b'],
   );
 });
+
+test('raw-turn caches are scoped per session and evicted LRU', async () => {
+  const thinkingTurn = [
+    { type: 'thinking', thinking: 'Echo it.', signature: 'sig_lru' },
+    { type: 'tool_use', id: 'toolu_lru', name: 'demo_echo', input: { text: 'hi' } },
+  ];
+  const { fetchImpl, requests } = createMockFetch([
+    apiMessage(thinkingTurn, 'tool_use'),
+    apiMessage([{ type: 'text', text: 'filler' }]),
+  ]);
+
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const tools: ProviderRequest['tools'] = [
+    { name: 'demo.echo', parameters: { type: 'object', properties: {} } },
+  ];
+
+  const session = createSession();
+  const first = await provider.generate({ session, tools });
+  const call = first.parts.find((part) => part.type === 'tool-call');
+  assert.ok(call && call.type === 'tool-call');
+  session.messages.push(
+    {
+      id: 'session-1:assistant:2',
+      role: 'assistant',
+      content: '',
+      createdAt: new Date().toISOString(),
+      toolCalls: [call.call],
+    },
+    {
+      id: 'session-1:tool:toolu_lru',
+      role: 'tool',
+      name: 'demo.echo',
+      content: '{}',
+      createdAt: new Date().toISOString(),
+      toolResult: { callId: 'toolu_lru', toolName: 'demo.echo', ok: true, output: { ok: true } },
+    },
+  );
+
+  // Enough other sessions to push session-1 out of the bounded cache.
+  for (let index = 0; index < 33; index += 1) {
+    await provider.generate({ session: createSession({ id: `filler-${index}` }) });
+  }
+
+  await provider.generate({ session, tools });
+
+  const replay = requests.at(-1)!.body.messages;
+  // The cache for session-1 was evicted, so the assistant turn falls back to
+  // a reconstructed tool_use block instead of the raw thinking turn.
+  assert.deepEqual(replay[1], {
+    role: 'assistant',
+    content: [{ type: 'tool_use', id: 'toolu_lru', name: 'demo_echo', input: { text: 'hi' } }],
+  });
+});

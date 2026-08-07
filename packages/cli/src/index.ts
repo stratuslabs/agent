@@ -793,10 +793,16 @@ export const resolveRuntimeConfig = async (
   // treated as openai-specific.
   const fileConfigApplies = (fileConfig.provider ?? 'openai') === provider;
 
+  // A soul's model was chosen for the soul's own provider. If a flag or env
+  // var overrides that provider, the model hint would target the wrong API
+  // (e.g. a Claude model sent to OpenAI), so it only applies when the soul
+  // names no provider or names the selected one.
+  const soulModelApplies = soul?.provider === undefined || soul.provider === provider;
+
   const model = command.model
     ?? readNonEmptyString(processEnv.STRATUS_MODEL)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL)
-    ?? readNonEmptyString(soul?.model)
+    ?? (soulModelApplies ? readNonEmptyString(soul?.model) : undefined)
     ?? (fileConfigApplies ? fileConfig.model : undefined)
     ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_MODEL : DEFAULT_OPENAI_MODEL);
 

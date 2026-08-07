@@ -1262,3 +1262,32 @@ test('concurrent memory appends never clobber each other', async () => {
   const contents = new Set(entries.map((entry) => entry.content));
   assert.equal(contents.size, 10);
 });
+
+test("resolveRuntimeConfig drops a soul's model when its provider is overridden", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const soulPath = path.join(tempDir, 'ava.md');
+  await writeFile(soulPath, `---
+name: Ava
+provider: anthropic
+model: claude-opus-5
+---
+Be warm.
+`);
+
+  // The soul's Claude model must not follow an explicit switch to openai.
+  const runtime = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    provider: 'openai',
+    format: 'text',
+    events: true,
+    soul: soulPath,
+  }, {
+    cwd: tempDir,
+    processEnv: { OPENAI_API_KEY: 'openai-key' },
+  });
+
+  assert.equal(runtime.provider, 'openai');
+  assert.equal(runtime.provider === 'openai' && runtime.model, 'gpt-4.1-mini');
+  assert.equal(runtime.soul?.agent.name, 'Ava');
+});
