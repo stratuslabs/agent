@@ -4,6 +4,7 @@
   "references": [
     { "path": "./packages/core" },
     { "path": "./packages/providers" },
+    { "path": "./packages/provider-anthropic" },
     { "path": "./packages/executors" },
     { "path": "./packages/executor-local" },
     { "path": "./packages/cli" }

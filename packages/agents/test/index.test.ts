@@ -14,8 +14,10 @@ import {
   createDelegateTool,
   createRememberTool,
   defineAgent,
+  formatSoul,
   generateAgentName,
   generateAvatarTheme,
+  parseSoul,
 } from '../src/index.ts';
 
 test('generateAgentName is a human-ish first name, deterministic for a seed', () => {
@@ -338,4 +340,85 @@ test('router sends inputs to the right agent with a fallback', () => {
   assert.equal(stickyRouter.route('support ticket').id, support.id);
   assert.equal(stickyRouter.route('please contact support').id, general.id);
   assert.equal(stickyRouter.route('support again').id, support.id);
+});
+
+test('parseSoul turns a full soul file into an agent definition', () => {
+  const soul = parseSoul(`---
+name: Ava
+provider: anthropic
+model: claude-opus-5
+tools:
+  - demo.echo
+  - memory.remember
+credentials:
+  - ANTHROPIC_API_KEY
+---
+
+You are warm and precise. You keep replies short and never use jargon.
+`);
+
+  assert.equal(soul.agent.name, 'Ava');
+  assert.equal(soul.agent.id, 'ava');
+  assert.equal(soul.provider, 'anthropic');
+  assert.equal(soul.model, 'claude-opus-5');
+  assert.deepEqual(soul.agent.tools, ['demo.echo', 'memory.remember']);
+  assert.deepEqual(soul.agent.credentials, ['ANTHROPIC_API_KEY']);
+  assert.equal(
+    soul.agent.instructions,
+    'You are warm and precise. You keep replies short and never use jargon.',
+  );
+  assert.equal(soul.agent.avatar?.seed, 'Ava');
+});
+
+test('parseSoul treats a file without frontmatter as pure persona', () => {
+  const soul = parseSoul('Always answer in haiku.\n', { seed: 'haiku-soul' });
+
+  assert.equal(soul.agent.instructions, 'Always answer in haiku.');
+  assert.equal(soul.provider, undefined);
+  assert.equal(soul.model, undefined);
+  // No name in the soul: one is generated, deterministically under a seed.
+  assert.equal(soul.agent.name, parseSoul('Other prose', { seed: 'haiku-soul' }).agent.name);
+});
+
+test('parseSoul supports inline lists, quotes, comments, and explicit ids', () => {
+  const soul = parseSoul(`---
+# identity
+name: "Kai"
+id: kai-prod
+tools: [demo.echo, 'memory.remember']
+---
+Be direct.`);
+
+  assert.equal(soul.agent.name, 'Kai');
+  assert.equal(soul.agent.id, 'kai-prod');
+  assert.deepEqual(soul.agent.tools, ['demo.echo', 'memory.remember']);
+  assert.equal(soul.agent.instructions, 'Be direct.');
+});
+
+test('parseSoul rejects malformed frontmatter with helpful errors', () => {
+  assert.throws(() => parseSoul('---\nname: Ava\n'), /never closed/);
+  assert.throws(() => parseSoul('---\nnickname: Av\n---\nHi'), /Unknown soul frontmatter key/);
+  assert.throws(() => parseSoul('---\nname:\n---\nHi'), /has no value/);
+  assert.throws(() => parseSoul('---\n  - stray\n---\nHi'), /outside a list/);
+  assert.throws(() => parseSoul('---\nnot a mapping\n---\nHi'), /key: value/);
+});
+
+test('formatSoul round-trips through parseSoul', () => {
+  const original = parseSoul(`---
+name: Wren
+provider: anthropic
+model: claude-opus-5
+tools:
+  - demo.echo
+---
+Curious, a little playful, always cites sources.`);
+
+  const reparsed = parseSoul(formatSoul(original));
+
+  assert.equal(reparsed.agent.name, original.agent.name);
+  assert.equal(reparsed.agent.id, original.agent.id);
+  assert.equal(reparsed.provider, original.provider);
+  assert.equal(reparsed.model, original.model);
+  assert.deepEqual(reparsed.agent.tools, original.agent.tools);
+  assert.equal(reparsed.agent.instructions, original.agent.instructions);
 });

@@ -29,6 +29,9 @@ importers:
       '@stratusagent/executor-local':
         specifier: workspace:*
         version: link:../executor-local
+      '@stratusagent/provider-anthropic':
+        specifier: workspace:*
+        version: link:../provider-anthropic
       '@stratusagent/providers':
         specifier: workspace:*
         version: link:../providers
@@ -72,6 +75,22 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  packages/provider-anthropic:
+    dependencies:
+      '@anthropic-ai/sdk':
+        specifier: ^0.70.0
+        version: 0.70.1
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/providers:
     dependencies:
       '@stratusagent/core':
@@ -84,8 +103,28 @@ importers:
 
 packages:
 
+  '@anthropic-ai/sdk@0.70.1':
+    resolution: {integrity: sha512-AGEhifuvE22VxfQ5ROxViTgM8NuVQzEvqcN8bttR4AP24ythmNE/cL/SrOz79xiv7/osrsmCyErjsistJi7Z8A==}
+    hasBin: true
+    peerDependencies:
+      zod: ^3.25.0 || ^4.0.0
+    peerDependenciesMeta:
+      zod:
+        optional: true
+
+  '@babel/runtime@7.29.7':
+    resolution: {integrity: sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw==}
+    engines: {node: '>=6.9.0'}
+
   '@types/node@24.12.2':
     resolution: {integrity: sha512-A1sre26ke7HDIuY/M23nd9gfB+nrmhtYyMINbjI1zHJxYteKR6qSMX56FsmjMcDb3SMcjJg5BiRRgOCC/yBD0g==}
+
+  json-schema-to-ts@3.1.1:
+    resolution: {integrity: sha512-+DWg8jCJG2TEnpy7kOm/7/AxaYoaRbjVB4LFZLySZlWn8exGs3A4OLJR966cVvU26N7X9TWxl+Jsw7dzAqKT6g==}
+    engines: {node: '>=16'}
+
+  ts-algebra@2.0.0:
+    resolution: {integrity: sha512-FPAhNPFMrkwz76P7cdjdmiShwMynZYN6SgOujD1urY4oNm80Ou9oMdmbR45LotcKOXoy7wSmHkRFE6Mxbrhefw==}
 
   typescript@5.9.3:
     resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
@@ -97,9 +136,22 @@ packages:
 
 snapshots:
 
+  '@anthropic-ai/sdk@0.70.1':
+    dependencies:
+      json-schema-to-ts: 3.1.1
+
+  '@babel/runtime@7.29.7': {}
+
   '@types/node@24.12.2':
     dependencies:
       undici-types: 7.16.0
+
+  json-schema-to-ts@3.1.1:
+    dependencies:
+      '@babel/runtime': 7.29.7
+      ts-algebra: 2.0.0
+
+  ts-algebra@2.0.0: {}
 
   typescript@5.9.3: {}
 

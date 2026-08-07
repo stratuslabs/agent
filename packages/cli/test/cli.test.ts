@@ -131,7 +131,7 @@ test('runCli setup walks through an openai config and reports the missing key', 
     env: {
       cwd: tempDir,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '\n', 'https://example.test/v1\n', '\n', 'Be brief.\n']),
+      setupInput: Readable.from(['2\n', '\n', 'https://example.test/v1\n', '\n', 'Be brief.\n']),
     },
   });
 
@@ -162,7 +162,7 @@ test('runCli setup includes a custom config path in the suggested next commands'
     env: {
       cwd: tempDir,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '\n', '\n', '\n', '\n']),
+      setupInput: Readable.from(['2\n', '\n', '\n', '\n', '\n']),
     },
   });
 
@@ -181,7 +181,7 @@ test('runCli setup shell-quotes config paths containing spaces in next commands'
     env: {
       cwd: tempDir,
       processEnv: {},
-      setupInput: Readable.from(['2\n']),
+      setupInput: Readable.from(['3\n']),
     },
   });
 
@@ -199,7 +199,7 @@ test('runCli setup warns when an exported STRATUS_PROVIDER overrides the chosen 
     env: {
       cwd: tempDir,
       processEnv: { STRATUS_PROVIDER: 'openai' },
-      setupInput: Readable.from(['2\n']),
+      setupInput: Readable.from(['3\n']),
     },
   });
 
@@ -215,7 +215,7 @@ test('runCli setup warns when an exported STRATUS_PROVIDER overrides the chosen 
     env: {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       processEnv: {},
-      setupInput: Readable.from(['2\n']),
+      setupInput: Readable.from(['3\n']),
     },
   });
   assert.doesNotMatch(clean.output.stdout, /--provider/);
@@ -232,7 +232,7 @@ test('runCli setup writes to the STRATUS_CONFIG path that run will load', async 
     env: {
       cwd: tempDir,
       processEnv: { STRATUS_CONFIG: envConfigPath },
-      setupInput: Readable.from(['2\n']),
+      setupInput: Readable.from(['3\n']),
     },
   });
 
@@ -256,7 +256,7 @@ test('runCli setup warns when exported model or base-url overrides the configure
         STRATUS_BASE_URL: 'https://old.example.test/v1',
         OPENAI_API_KEY: 'set-key',
       },
-      setupInput: Readable.from(['1\n', 'gpt-4.1-mini\n', 'https://new.example.test/v1\n', '\n', '\n']),
+      setupInput: Readable.from(['2\n', 'gpt-4.1-mini\n', 'https://new.example.test/v1\n', '\n', '\n']),
     },
   });
 
@@ -275,7 +275,7 @@ test('runCli setup warns when an exported system prompt overrides the configured
     env: {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       processEnv: { STRATUS_SYSTEM_PROMPT: 'Old env prompt.', OPENAI_API_KEY: 'set-key' },
-      setupInput: Readable.from(['1\n', '\n', '\n', '\n', 'New configured prompt.\n']),
+      setupInput: Readable.from(['2\n', '\n', '\n', '\n', 'New configured prompt.\n']),
     },
   });
 
@@ -293,7 +293,7 @@ test('runCli setup bases the key readiness check on exported API key overrides',
     env: {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       processEnv: { STRATUS_API_KEY_ENV: 'MY_KEY', OPENAI_API_KEY: 'set-but-ignored' },
-      setupInput: Readable.from(['1\n', '\n', '\n', '\n', '\n']),
+      setupInput: Readable.from(['2\n', '\n', '\n', '\n', '\n']),
     },
   });
 
@@ -310,7 +310,7 @@ test('runCli setup bases the key readiness check on exported API key overrides',
     env: {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       processEnv: { STRATUS_API_KEY: 'direct-key' },
-      setupInput: Readable.from(['1\n', '\n', '\n', '\n', '\n']),
+      setupInput: Readable.from(['2\n', '\n', '\n', '\n', '\n']),
     },
   });
 
@@ -328,7 +328,7 @@ test('runCli setup writes a demo config without asking provider questions', asyn
     env: {
       cwd: tempDir,
       processEnv: {},
-      setupInput: Readable.from(['2\n']),
+      setupInput: Readable.from(['3\n']),
     },
   });
 
@@ -365,7 +365,7 @@ test('runCli setup refuses to overwrite an existing config unless confirmed', as
     env: {
       cwd: tempDir,
       processEnv: { OPENAI_API_KEY: 'already-set' },
-      setupInput: Readable.from(['y\n', '1\n', '\n', '\n', '\n', '\n']),
+      setupInput: Readable.from(['y\n', '2\n', '\n', '\n', '\n', '\n']),
     },
   });
 
@@ -833,4 +833,237 @@ test('source bin script works with piped stdin', async () => {
   assert.match(stdout, /Starting Stratus Agent local loop with provider=demo/);
   assert.match(stdout, /please inspect this tool/);
   assert.equal(stderr, '');
+});
+
+test('parseCommand accepts the anthropic provider and soul flag', () => {
+  assert.deepEqual(parseCommand(['run', '--provider', 'anthropic', '--soul', './ava.md', 'hello']), {
+    command: 'run',
+    prompt: 'hello',
+    provider: 'anthropic',
+    soul: './ava.md',
+    format: 'text',
+    events: true,
+    approvals: 'always',
+  });
+
+  assert.throws(() => parseCommand(['run', '--provider', 'claude', 'hello']), /Unsupported provider/);
+});
+
+test('runCli setup walks through an anthropic config without a base URL question', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: tempDir,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '\n', '\n', '\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+
+  const written = JSON.parse(await readFile(path.join(tempDir, 'stratus.config.json'), 'utf8'));
+  assert.deepEqual(written, {
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    apiKeyEnv: 'ANTHROPIC_API_KEY',
+  });
+
+  assert.doesNotMatch(output.stdout, /Base URL/);
+  assert.match(output.stdout, /ANTHROPIC_API_KEY is NOT set/);
+  assert.match(output.stdout, /export ANTHROPIC_API_KEY=your-key/);
+  assert.equal(output.stderr, '');
+});
+
+test('resolveRuntimeConfig defaults anthropic to claude-opus-5 and its own key env', async () => {
+  const runtime = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    provider: 'anthropic',
+    format: 'text',
+    events: true,
+  }, {
+    processEnv: {
+      ANTHROPIC_API_KEY: 'env-key',
+    },
+  });
+
+  assert.deepEqual(runtime, {
+    provider: 'anthropic',
+    apiKey: 'env-key',
+    model: 'claude-opus-5',
+  });
+
+  await assert.rejects(
+    () => resolveRuntimeConfig({
+      command: 'run',
+      prompt: 'hello',
+      provider: 'anthropic',
+      format: 'text',
+      events: true,
+    }, { processEnv: {} }),
+    /Missing API key for provider=anthropic.*ANTHROPIC_API_KEY/,
+  );
+});
+
+test('resolveRuntimeConfig reads provider, model, and identity from a soul file', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const soulPath = path.join(tempDir, 'ava.md');
+  await writeFile(soulPath, `---
+name: Ava
+provider: anthropic
+model: claude-test-model
+---
+Be warm and concise.
+`);
+
+  const runtime = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    format: 'text',
+    events: true,
+    soul: soulPath,
+  }, {
+    cwd: tempDir,
+    processEnv: { ANTHROPIC_API_KEY: 'env-key' },
+  });
+
+  assert.equal(runtime.provider, 'anthropic');
+  assert.equal(runtime.provider === 'anthropic' && runtime.model, 'claude-test-model');
+  assert.equal(runtime.soul?.agent.name, 'Ava');
+  assert.equal(runtime.soul?.agent.instructions, 'Be warm and concise.');
+
+  // Explicit flags still outrank the soul's provider hint.
+  const overridden = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    provider: 'demo',
+    format: 'text',
+    events: true,
+    soul: soulPath,
+  }, {
+    cwd: tempDir,
+    processEnv: {},
+  });
+
+  assert.equal(overridden.provider, 'demo');
+  assert.equal(overridden.soul?.agent.name, 'Ava');
+
+  await assert.rejects(
+    () => resolveRuntimeConfig({
+      command: 'run',
+      prompt: 'hello',
+      format: 'text',
+      events: true,
+      soul: path.join(tempDir, 'missing.md'),
+    }, { cwd: tempDir, processEnv: {} }),
+    /Soul file not found/,
+  );
+});
+
+test('resolveRuntimeConfig picks up a soul from the config file', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  await writeFile(path.join(tempDir, 'scout.md'), 'Report findings, not essays.\n');
+  await writeFile(path.join(tempDir, 'stratus.config.json'), JSON.stringify({
+    provider: 'demo',
+    soul: './scout.md',
+  }));
+
+  const runtime = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    format: 'text',
+    events: true,
+  }, {
+    cwd: tempDir,
+    processEnv: {},
+  });
+
+  assert.equal(runtime.provider, 'demo');
+  assert.equal(runtime.soul?.agent.instructions, 'Report findings, not essays.');
+});
+
+test('runCli runs as the soul-defined agent', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const soulPath = path.join(tempDir, 'ava.md');
+  await writeFile(soulPath, `---
+name: Ava
+---
+Be warm and concise.
+`);
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--soul', soulPath, '--format', 'json', 'hello'],
+    streams,
+    env: { cwd: tempDir, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 0);
+  const payload = JSON.parse(output.stdout);
+  assert.equal(payload.session.agent.name, 'Ava');
+  assert.equal(payload.session.agent.id, 'ava');
+  assert.equal(payload.session.agent.instructions, 'Be warm and concise.');
+
+  const text = createStreams();
+  await runCli({
+    argv: ['run', '--soul', soulPath, 'hello'],
+    streams: text.streams,
+    env: { cwd: tempDir, processEnv: {} },
+  });
+  assert.match(text.output.stdout, /provider=demo as Ava/);
+});
+
+test('runCli executes the anthropic provider path with env config', async () => {
+  const { streams, output } = createStreams();
+  const requestBodies: Array<Record<string, any>> = [];
+
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'say hello', '--provider', 'anthropic'],
+    streams,
+    env: {
+      processEnv: {
+        ANTHROPIC_API_KEY: 'test-key',
+      },
+      fetch: (async (_url: unknown, init?: { body?: unknown }) => {
+        requestBodies.push(JSON.parse(String(init?.body ?? '{}')));
+        return new Response(JSON.stringify({
+          id: 'msg_1',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-opus-5',
+          content: [{ type: 'text', text: 'Hello from Claude.' }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 5, output_tokens: 5 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(requestBodies[0]?.model, 'claude-opus-5');
+  const tools = requestBodies[0]?.tools as Array<{ name?: string }>;
+  assert.equal(tools?.[0]?.name, 'demo_echo');
+  assert.match(output.stdout, /Starting Stratus Agent local loop with provider=anthropic model=claude-opus-5/);
+  assert.match(output.stdout, /\[assistant\] Hello from Claude\./);
+  assert.equal(output.stderr, '');
+});
+
+test('runCli agent new renders a ready-to-run soul file', async () => {
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['agent', 'new', '--name', 'Vera', '--instructions', 'Be kind.', '--format', 'soul'],
+    streams,
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /^---\n/);
+  assert.match(output.stdout, /name: Vera\n/);
+  assert.match(output.stdout, /provider: anthropic\n/);
+  assert.match(output.stdout, /model: claude-opus-5\n/);
+  assert.match(output.stdout, /Be kind\./);
 });

@@ -131,6 +131,193 @@ export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
   };
 };
 
+/**
+ * A parsed soul file: the agent it defines plus optional runtime hints.
+ * Souls are markdown with frontmatter — the frontmatter carries structured
+ * identity (name, tools, credentials, provider, model) and the body is the
+ * persona itself, written in prose.
+ */
+export interface ParsedSoul {
+  agent: AgentDefinition;
+  /** Provider the soul prefers (e.g. "anthropic"). Runtimes may override. */
+  provider?: string;
+  /** Model the soul prefers (e.g. "claude-opus-5"). Runtimes may override. */
+  model?: string;
+}
+
+export interface ParseSoulOptions {
+  /** Seed for deterministic identity generation when the soul has no name. */
+  seed?: string;
+}
+
+const SOUL_SCALAR_KEYS = ['name', 'id', 'provider', 'model'] as const;
+const SOUL_LIST_KEYS = ['tools', 'credentials'] as const;
+
+type SoulScalarKey = (typeof SOUL_SCALAR_KEYS)[number];
+type SoulListKey = (typeof SOUL_LIST_KEYS)[number];
+
+const unquote = (value: string): string => {
+  const trimmed = value.trim();
+  if (
+    trimmed.length >= 2 &&
+    ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+      (trimmed.startsWith("'") && trimmed.endsWith("'")))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+};
+
+interface SoulFrontmatter {
+  scalars: Partial<Record<SoulScalarKey, string>>;
+  lists: Partial<Record<SoulListKey, string[]>>;
+}
+
+// A deliberately tiny frontmatter dialect: `key: value` scalars and block
+// lists of `- item` lines. Enough for souls, no YAML dependency.
+const parseSoulFrontmatter = (lines: string[]): SoulFrontmatter => {
+  const scalars: SoulFrontmatter['scalars'] = {};
+  const lists: SoulFrontmatter['lists'] = {};
+  let currentList: string[] | undefined;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    if (line.trim().length === 0 || line.trim().startsWith('#')) {
+      continue;
+    }
+
+    const listItem = /^\s+-\s*(.*)$/.exec(line);
+    if (listItem) {
+      if (!currentList) {
+        throw new Error(`Soul frontmatter has a list item outside a list: "${line.trim()}"`);
+      }
+      const item = unquote(listItem[1] ?? '');
+      if (item.length > 0) {
+        currentList.push(item);
+      }
+      continue;
+    }
+
+    const entry = /^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)$/.exec(line);
+    if (!entry) {
+      throw new Error(`Soul frontmatter line is not "key: value": "${line.trim()}"`);
+    }
+
+    const key = entry[1] ?? '';
+    const value = entry[2] ?? '';
+    currentList = undefined;
+
+    if ((SOUL_LIST_KEYS as readonly string[]).includes(key)) {
+      const list: string[] = [];
+      lists[key as SoulListKey] = list;
+      const inline = value.trim();
+      if (inline.length > 0) {
+        // Inline form: tools: [a, b]
+        const match = /^\[(.*)\]$/.exec(inline);
+        if (!match) {
+          throw new Error(`Soul frontmatter list "${key}" must be a block list or [a, b]: "${inline}"`);
+        }
+        for (const item of (match[1] ?? '').split(',')) {
+          const cleaned = unquote(item);
+          if (cleaned.length > 0) {
+            list.push(cleaned);
+          }
+        }
+      } else {
+        currentList = list;
+      }
+      continue;
+    }
+
+    if (!(SOUL_SCALAR_KEYS as readonly string[]).includes(key)) {
+      throw new Error(
+        `Unknown soul frontmatter key: "${key}". Supported keys: ${[...SOUL_SCALAR_KEYS, ...SOUL_LIST_KEYS].join(', ')}.`,
+      );
+    }
+
+    const scalar = unquote(value);
+    if (scalar.length === 0) {
+      throw new Error(`Soul frontmatter key "${key}" has no value.`);
+    }
+    scalars[key as SoulScalarKey] = scalar;
+  }
+
+  return { scalars, lists };
+};
+
+/**
+ * Parse a soul file (markdown with optional frontmatter) into an agent
+ * definition. The body becomes the agent's instructions; a missing name is
+ * generated, so the smallest possible soul is just prose.
+ */
+export const parseSoul = (source: string, options: ParseSoulOptions = {}): ParsedSoul => {
+  const normalized = source.replace(/\r\n/g, '\n');
+  let frontmatter: SoulFrontmatter = { scalars: {}, lists: {} };
+  let body = normalized;
+
+  const opener = /^---[ \t]*\n/.exec(normalized);
+  if (opener) {
+    const closer = /\n---[ \t]*(\n|$)/.exec(normalized.slice(opener[0].length - 1));
+    if (!closer || closer.index === undefined) {
+      throw new Error('Soul frontmatter opened with --- but never closed.');
+    }
+    const frontmatterEnd = opener[0].length - 1 + closer.index;
+    frontmatter = parseSoulFrontmatter(
+      normalized.slice(opener[0].length, frontmatterEnd).split('\n'),
+    );
+    body = normalized.slice(frontmatterEnd + closer[0].length);
+  }
+
+  const instructions = body.trim();
+  const { scalars, lists } = frontmatter;
+
+  const agent = defineAgent({
+    ...(scalars.name ? { name: scalars.name } : {}),
+    ...(scalars.id ? { id: scalars.id } : {}),
+    ...(instructions ? { instructions } : {}),
+    ...(lists.tools ? { tools: lists.tools } : {}),
+    ...(lists.credentials ? { credentials: lists.credentials } : {}),
+    ...(options.seed !== undefined ? { seed: options.seed } : {}),
+  });
+
+  return {
+    agent,
+    ...(scalars.provider ? { provider: scalars.provider } : {}),
+    ...(scalars.model ? { model: scalars.model } : {}),
+  };
+};
+
+/**
+ * Render an agent definition as a soul file, ready to save and edit. The
+ * inverse of parseSoul for round-tripping `stratus agent new` output.
+ */
+export const formatSoul = (soul: ParsedSoul): string => {
+  const lines: string[] = ['---', `name: ${soul.agent.name}`, `id: ${soul.agent.id}`];
+
+  if (soul.provider) {
+    lines.push(`provider: ${soul.provider}`);
+  }
+  if (soul.model) {
+    lines.push(`model: ${soul.model}`);
+  }
+  for (const [key, values] of [
+    ['tools', soul.agent.tools],
+    ['credentials', soul.agent.credentials],
+  ] as const) {
+    if (values && values.length > 0) {
+      lines.push(`${key}:`);
+      for (const value of values) {
+        lines.push(`  - ${value}`);
+      }
+    }
+  }
+
+  lines.push('---', '');
+  lines.push(soul.agent.instructions ?? 'Describe who this agent is and how they talk.');
+  lines.push('');
+  return lines.join('\n');
+};
+
 export const MEMORY_TOOL_NAME = 'memory.remember';
 
 /**
