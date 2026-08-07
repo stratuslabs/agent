@@ -1,5 +1,5 @@
 {
-  "name": "@stratusagent/core",
+  "name": "@stratusagent/agents",
   "version": "0.1.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -15,8 +15,11 @@
   ],
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
     "test": "node --test --experimental-strip-types"
+  },
+  "dependencies": {
+    "@stratusagent/core": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.9.3"
@@ -25,9 +28,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",
-    "directory": "packages/core"
+    "directory": "packages/agents"
   },
-  "description": "Stratus Agent kernel: session, provider, tool, memory, and orchestration contracts with a multi-turn agent loop",
+  "description": "Stratus agent identities: one-call creation with generated names and avatar themes, per-agent memory, delegation, and routing",
   "keywords": [
     "stratus",
     "agent",

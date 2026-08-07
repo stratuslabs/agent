@@ -375,6 +375,34 @@ test('runCli setup refuses to overwrite an existing config unless confirmed', as
   assert.match(accepted.output.stdout, /OPENAI_API_KEY is set in your environment/);
 });
 
+test('runCli agent new generates a full identity with name and avatar theme', async () => {
+  const named = createStreams();
+  const namedExit = await runCli({
+    argv: ['agent', 'new', '--name', 'Vera Thorne', '--instructions', 'Be kind.', '--format', 'json'],
+    streams: named.streams,
+  });
+
+  assert.equal(namedExit, 0);
+  const definition = JSON.parse(named.output.stdout);
+  assert.equal(definition.name, 'Vera Thorne');
+  assert.equal(definition.id, 'vera-thorne');
+  assert.equal(definition.instructions, 'Be kind.');
+  assert.equal(definition.avatar.seed, 'Vera Thorne');
+  assert.equal(definition.avatar.palette.length, 3);
+
+  const generated = createStreams();
+  const generatedExit = await runCli({ argv: ['agent', 'new'], streams: generated.streams });
+
+  assert.equal(generatedExit, 0);
+  assert.match(generated.output.stdout, /Say hello to [A-Z][a-z]+\./);
+  assert.match(generated.output.stdout, /avatar {2}\w+ theme, hue \d+/);
+
+  const bad = createStreams();
+  const badExit = await runCli({ argv: ['agent', 'delete'], streams: bad.streams });
+  assert.equal(badExit, 1);
+  assert.match(bad.output.stderr, /Unknown agent subcommand: delete/);
+});
+
 test('runCli prints help text', async () => {
   const { streams, output } = createStreams();
   const exitCode = await runCli({ argv: ['help'], streams });

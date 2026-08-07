@@ -480,6 +480,24 @@ const createOpenAICompatibleMessages = (
     messages.push({ role: 'system', content: systemPrompt });
   }
 
+  // The agent's own persona travels with the session and must reach the
+  // model — this is what makes a delegated specialist act like themselves.
+  const instructions = request.session.agent.instructions;
+  if (instructions && instructions.length > 0) {
+    messages.push({
+      role: 'system',
+      content: `You are ${request.session.agent.name}. ${instructions}`,
+    });
+  }
+
+  if (request.memory && request.memory.length > 0) {
+    const facts = request.memory.map((entry) => `- ${entry.content}`).join('\n');
+    messages.push({
+      role: 'system',
+      content: `Things you remember from previous conversations (your own long-term memory):\n${facts}`,
+    });
+  }
+
   for (const message of request.session.messages) {
     if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
       messages.push({

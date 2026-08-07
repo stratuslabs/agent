@@ -7,6 +7,7 @@ Right now, the best way to try it is a local loop in the terminal or a minimal l
 ## What it includes
 
 - `@stratusagent/core`, the runtime primitives and agent loop
+- `@stratusagent/agents`, agent identities, memory, delegation, and routing
 - `@stratusagent/providers`, helpers for building model providers
 - `@stratusagent/executors`, helpers for execution behavior
 - `@stratusagent/executor-local`, a concrete local child-process executor adapter
@@ -25,6 +26,31 @@ Today it is useful for:
 - seeing how provider output becomes session events
 
 It is not yet a full production agent platform: durable storage, remote executors, vendor SDK adapters, and retries/queues remain out of scope for v1 (see `docs/architecture/stratus-v1.md`).
+
+## Agents are people
+
+Stratus agents are designed to feel like a person you work with, not a stateless bot:
+
+- **One identity everywhere.** An agent's memory is keyed to the agent — never to a session or channel — so what they learn in one thread they know in every other conversation. Agents can save facts with the built-in `memory.remember` tool, and their memory is handed to the model on every turn.
+- **Scoped access.** Each agent has its own tool allowlist and its own credential allowlist. An agent can only call the tools it was given, and can only resolve the secrets it was granted.
+- **Delegation.** An orchestrator agent uses the `agent.delegate` tool to hand a task to a teammate and gets their reply back — the teammate runs with *their own* memory, tools, and credentials.
+- **Routing.** `createAgentRouter` maps inbound work (a channel, a mention, a message) to the right agent, so the same person consistently answers in the same places.
+
+Creating an agent takes one call — or one command. If you don't name them, we will, and every agent gets a deterministic color palette derived from their name, rendered in the one shared Stratus avatar style — so the team looks cohesive and each agent looks the same on every surface:
+
+```bash
+stratus agent new
+# Say hello to Freya.
+#   id      freya-k3x9
+#   avatar  stratus theme, hue 211, palette #3d7dd9 #8fb8ea #d9993d
+```
+
+```ts
+import { defineAgent } from '@stratusagent/agents';
+
+const scout = defineAgent({ instructions: 'You research things thoroughly.' });
+// scout.name → "Arlo", scout.avatar → matching palette + style
+```
 
 ## Local setup (fresh machine)
 
@@ -211,6 +237,7 @@ node packages/cli/dist/bin.js dashboard
 
 ```text
 packages/
+  agents/
   cli/
   core/
   executor-local/

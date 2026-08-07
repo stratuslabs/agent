@@ -25,7 +25,8 @@
   "dependencies": {
     "@stratusagent/core": "workspace:*",
     "@stratusagent/executor-local": "workspace:*",
-    "@stratusagent/providers": "workspace:*"
+    "@stratusagent/providers": "workspace:*",
+    "@stratusagent/agents": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.6.0",
@@ -36,5 +37,15 @@
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",
     "directory": "packages/cli"
+  },
+  "description": "Stratus Agent CLI: setup walkthrough, agent creation, local runs, and dashboard",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }

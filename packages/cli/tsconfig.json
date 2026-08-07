@@ -4,10 +4,30 @@
     "rootDir": "./src",
     "outDir": "./dist",
     "composite": true,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "rewriteRelativeImportExtensions": true
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["dist", "test"],
-  "references": [{ "path": "../core" }, { "path": "../providers" }, { "path": "../executor-local" }]
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "dist",
+    "test"
+  ],
+  "references": [
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../providers"
+    },
+    {
+      "path": "../executor-local"
+    },
+    {
+      "path": "../agents"
+    }
+  ]
 }

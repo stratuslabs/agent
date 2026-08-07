@@ -397,6 +397,89 @@ test('createOpenAICompatibleProvider maps tool call and tool result messages for
   assert.deepEqual(response.parts, [{ type: 'text', text: 'The echo returned HELLO.' }]);
 });
 
+test('createOpenAICompatibleProvider injects the agent persona as a system message', async () => {
+  let requestBody: { messages?: Array<{ role: string; content: string }> } = {};
+
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    systemPrompt: 'Global rules apply.',
+    fetch: async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as typeof requestBody;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ choices: [{ message: { content: 'Hello!' } }] }),
+      } as Response;
+    },
+  });
+
+  const base = createRequest();
+  const request: ProviderRequest = {
+    session: {
+      ...base.session,
+      agent: {
+        id: 'priya-salinger',
+        name: 'Priya Salinger',
+        instructions: 'You answer precisely and cite sources.',
+      },
+    },
+  };
+
+  await provider.generate(request);
+
+  const systemMessages = (requestBody.messages ?? []).filter((message) => message.role === 'system');
+  assert.equal(systemMessages[0]?.content, 'Global rules apply.');
+  assert.equal(
+    systemMessages[1]?.content,
+    'You are Priya Salinger. You answer precisely and cite sources.',
+  );
+});
+
+test('createOpenAICompatibleProvider renders agent memory as a system message', async () => {
+  let requestBody: { messages?: Array<{ role: string; content: string }> } = {};
+
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as typeof requestBody;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ choices: [{ message: { content: 'Hi again!' } }] }),
+      } as Response;
+    },
+  });
+
+  const request: ProviderRequest = {
+    ...createRequest(),
+    memory: [
+      {
+        id: 'm1',
+        agentId: 'agent-1',
+        content: 'The user prefers dark mode.',
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: 'm2',
+        agentId: 'agent-1',
+        content: 'Their name is Sam.',
+        createdAt: new Date().toISOString(),
+      },
+    ],
+  };
+
+  await provider.generate(request);
+
+  const memoryMessage = requestBody.messages?.find(
+    (message) => message.role === 'system' && message.content.includes('long-term memory'),
+  );
+  assert.ok(memoryMessage, 'memory should be rendered as a system message');
+  assert.match(memoryMessage.content, /- The user prefers dark mode\./);
+  assert.match(memoryMessage.content, /- Their name is Sam\./);
+});
+
 test('createOpenAICompatibleProvider sanitizes tool names and resolves collisions', async () => {
   assert.equal(sanitizeOpenAICompatibleToolName('demo.echo'), 'demo_echo');
   assert.equal(sanitizeOpenAICompatibleToolName('files:read/all'), 'files_read_all');
