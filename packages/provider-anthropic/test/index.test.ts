@@ -417,3 +417,81 @@ test('raw-turn caches are scoped per session and evicted LRU', async () => {
     content: [{ type: 'tool_use', id: 'toolu_lru', name: 'demo_echo', input: { text: 'hi' } }],
   });
 });
+
+test('in-flight sessions are pinned against LRU eviction', async () => {
+  const thinkingTurn = [
+    { type: 'thinking', thinking: 'Echo it.', signature: 'sig_pin' },
+    { type: 'tool_use', id: 'toolu_pin', name: 'demo_echo', input: { text: 'hi' } },
+  ];
+
+  // The first request (the pinned session's) blocks until released; every
+  // other request resolves immediately. That lets a crowd of sessions come
+  // and go while the pinned session's API call is still in flight.
+  const requests: RecordedRequest[] = [];
+  let releaseFirst: (() => void) | undefined;
+  let callIndex = 0;
+  const fetchImpl = (async (_url: any, init?: any) => {
+    requests.push({ url: '', body: JSON.parse(init?.body ?? '{}'), headers: {} });
+    const isPinnedFirstTurn = callIndex === 0;
+    callIndex += 1;
+    if (isPinnedFirstTurn) {
+      await new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+    }
+    const payload = isPinnedFirstTurn
+      ? apiMessage(thinkingTurn, 'tool_use')
+      : apiMessage([{ type: 'text', text: 'ok' }]);
+    return new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const tools: ProviderRequest['tools'] = [
+    { name: 'demo.echo', parameters: { type: 'object', properties: {} } },
+  ];
+
+  const session = createSession();
+  const pinned = provider.generate({ session, tools });
+  while (!releaseFirst) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+
+  // 40 sessions run to completion — well past the cache cap — while the
+  // pinned session is still awaiting its response.
+  for (let index = 0; index < 40; index += 1) {
+    await provider.generate({ session: createSession({ id: `filler-${index}` }) });
+  }
+
+  releaseFirst();
+  const first = await pinned;
+
+  const call = first.parts.find((part) => part.type === 'tool-call');
+  assert.ok(call && call.type === 'tool-call');
+  session.messages.push(
+    {
+      id: 'session-1:assistant:2',
+      role: 'assistant',
+      content: '',
+      createdAt: new Date().toISOString(),
+      toolCalls: [call.call],
+    },
+    {
+      id: 'session-1:tool:toolu_pin',
+      role: 'tool',
+      name: 'demo.echo',
+      content: '{}',
+      createdAt: new Date().toISOString(),
+      toolResult: { callId: 'toolu_pin', toolName: 'demo.echo', ok: true, output: { ok: true } },
+    },
+  );
+
+  await provider.generate({ session, tools });
+
+  // Despite 40 concurrent sessions, the in-flight session kept its cache:
+  // the follow-up replays the raw thinking turn, not a reconstruction.
+  const replay = requests.at(-1)!.body.messages;
+  assert.deepEqual(replay[1], { role: 'assistant', content: thinkingTurn });
+});

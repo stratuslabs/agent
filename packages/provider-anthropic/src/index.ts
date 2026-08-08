@@ -280,62 +280,96 @@ export const createAnthropicProvider = ({
   // Raw assistant turns keyed by session, then by tool_use id, so history
   // replay can hand the API back its own thinking blocks. Bounded: only the
   // most recently active sessions keep their cache — an evicted session
-  // falls back to reconstructed tool_use blocks.
-  const rawTurnsBySession = new Map<string, Map<string, ContentBlock[]>>();
+  // falls back to reconstructed tool_use blocks. Sessions with a request in
+  // flight are pinned, so eviction can never orphan a response that has not
+  // been stored yet; the map may briefly exceed the cap under heavy
+  // concurrency and trims back once requests settle.
+  interface SessionCache {
+    turns: Map<string, ContentBlock[]>;
+    inFlight: number;
+  }
+  const rawTurnsBySession = new Map<string, SessionCache>();
 
-  const rawTurnsFor = (sessionId: string): Map<string, ContentBlock[]> => {
-    let turns = rawTurnsBySession.get(sessionId);
-    if (turns) {
+  const acquireSessionCache = (sessionId: string): SessionCache => {
+    let cache = rawTurnsBySession.get(sessionId);
+    if (cache) {
       // Re-insert so Map iteration order doubles as LRU order.
       rawTurnsBySession.delete(sessionId);
     } else {
-      turns = new Map();
+      cache = { turns: new Map(), inFlight: 0 };
     }
-    rawTurnsBySession.set(sessionId, turns);
-    while (rawTurnsBySession.size > MAX_CACHED_SESSIONS) {
-      const oldest = rawTurnsBySession.keys().next().value;
-      if (oldest === undefined) {
+    cache.inFlight += 1;
+    rawTurnsBySession.set(sessionId, cache);
+    return cache;
+  };
+
+  const releaseSessionCache = (sessionId: string, cache: SessionCache): void => {
+    cache.inFlight -= 1;
+    // A session that just finished a turn is the most recently used —
+    // refresh its LRU position so eviction pressure hits stale sessions
+    // first, not the one about to send its tool results back.
+    if (rawTurnsBySession.get(sessionId) === cache) {
+      rawTurnsBySession.delete(sessionId);
+      rawTurnsBySession.set(sessionId, cache);
+    }
+    if (rawTurnsBySession.size <= MAX_CACHED_SESSIONS) {
+      return;
+    }
+    for (const [id, candidate] of rawTurnsBySession) {
+      if (rawTurnsBySession.size <= MAX_CACHED_SESSIONS) {
         break;
       }
-      rawTurnsBySession.delete(oldest);
+      if (candidate.inFlight === 0) {
+        rawTurnsBySession.delete(id);
+      }
     }
-    return turns;
   };
 
   return {
     name,
     async generate(request: ProviderRequest) {
-      const rawTurns = rawTurnsFor(request.session.id);
-      const mapping = createToolNameMapping(request.tools);
-      const tools = createAnthropicTools(request.tools, mapping);
-      const system = createSystemPrompt(request, systemPrompt);
-
-      const response = await client.messages.create({
-        model,
-        max_tokens: maxTokens,
-        ...(system ? { system } : {}),
-        ...(tools.length > 0 ? { tools } : {}),
-        // Claude Opus 5 thinks adaptively when `thinking` is omitted.
-        ...(thinking === 'disabled' ? { thinking: { type: 'disabled' as const } } : {}),
-        messages: createAnthropicMessages(request, mapping, rawTurns),
-      });
-
-      const { text, calls } = extractParts(response.content, mapping);
-
-      for (const call of calls) {
-        rawTurns.set(call.id, response.content);
+      const sessionCache = acquireSessionCache(request.session.id);
+      try {
+        return await generateWithCache(request, sessionCache.turns);
+      } finally {
+        releaseSessionCache(request.session.id, sessionCache);
       }
-
-      const parts = [
-        ...(text.length > 0 ? [{ type: 'text' as const, text }] : []),
-        ...calls.map((call) => ({ type: 'tool-call' as const, call })),
-      ];
-
-      if (parts.length === 0) {
-        throw new Error('Claude returned an empty response.');
-      }
-
-      return { parts };
     },
   };
+
+  async function generateWithCache(
+    request: ProviderRequest,
+    rawTurns: Map<string, ContentBlock[]>,
+  ) {
+    const mapping = createToolNameMapping(request.tools);
+    const tools = createAnthropicTools(request.tools, mapping);
+    const system = createSystemPrompt(request, systemPrompt);
+
+    const response = await client.messages.create({
+      model,
+      max_tokens: maxTokens,
+      ...(system ? { system } : {}),
+      ...(tools.length > 0 ? { tools } : {}),
+      // Claude Opus 5 thinks adaptively when `thinking` is omitted.
+      ...(thinking === 'disabled' ? { thinking: { type: 'disabled' as const } } : {}),
+      messages: createAnthropicMessages(request, mapping, rawTurns),
+    });
+
+    const { text, calls } = extractParts(response.content, mapping);
+
+    for (const call of calls) {
+      rawTurns.set(call.id, response.content);
+    }
+
+    const parts = [
+      ...(text.length > 0 ? [{ type: 'text' as const, text }] : []),
+      ...calls.map((call) => ({ type: 'tool-call' as const, call })),
+    ];
+
+    if (parts.length === 0) {
+      throw new Error('Claude returned an empty response.');
+    }
+
+    return { parts };
+  }
 };
