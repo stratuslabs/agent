@@ -4,6 +4,8 @@ import type { MemoryEntry, ProviderRequest, Session } from '@stratusagent/core';
 import {
   createAnthropicProvider,
   DEFAULT_ANTHROPIC_MODEL,
+  RAW_TURNS_METADATA_KEY,
+  redactAnthropicRawTurns,
   sanitizeAnthropicToolName,
 } from '../src/index.ts';
 
@@ -442,4 +444,36 @@ test('raw turns persist with the session across provider instances and serializa
     replay[2].content.map((block: { tool_use_id: string }) => block.tool_use_id),
     ['toolu_a', 'toolu_b'],
   );
+});
+
+test('redactAnthropicRawTurns strips replay state from exported sessions', async () => {
+  const { fetchImpl } = createMockFetch([
+    apiMessage(
+      [
+        { type: 'thinking', thinking: 'Private reasoning.', signature: 'sig_redact' },
+        { type: 'tool_use', id: 'toolu_r', name: 'demo_echo', input: {} },
+      ],
+      'tool_use',
+    ),
+  ]);
+
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const session = createSession({ metadata: { provider: 'anthropic' } });
+  await provider.generate({
+    session,
+    tools: [{ name: 'demo.echo', parameters: { type: 'object', properties: {} } }],
+  });
+
+  assert.ok(session.metadata?.[RAW_TURNS_METADATA_KEY]);
+
+  const redacted = redactAnthropicRawTurns(session);
+  assert.equal(redacted.metadata?.[RAW_TURNS_METADATA_KEY], undefined);
+  // Other metadata survives, the original session is untouched, and
+  // sessions without replay state pass through unchanged.
+  assert.equal(redacted.metadata?.provider, 'anthropic');
+  assert.ok(session.metadata?.[RAW_TURNS_METADATA_KEY]);
+  assert.doesNotMatch(JSON.stringify(redacted), /Private reasoning/);
+
+  const plain = createSession();
+  assert.equal(redactAnthropicRawTurns(plain), plain);
 });

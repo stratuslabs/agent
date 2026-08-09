@@ -9,6 +9,7 @@ import type {
   JsonObject,
   ModelProvider,
   ProviderRequest,
+  Session,
   ToolCall,
   ToolDescriptor,
 } from '@stratusagent/core';
@@ -113,6 +114,23 @@ const createSystemPrompt = (
 };
 
 type RawTurns = Record<string, ContentBlock[]>;
+
+/**
+ * Return a copy of the session without Anthropic replay state. The raw
+ * turns stored under RAW_TURNS_METADATA_KEY exist only so history replay
+ * can hand Claude back its own thinking blocks verbatim — they contain
+ * reasoning that is deliberately never surfaced as output, so any code
+ * that exports, prints, or logs a session for people should pass it
+ * through this first. Session stores must keep the field: replay needs it.
+ */
+export const redactAnthropicRawTurns = (session: Session): Session => {
+  if (!session.metadata || !(RAW_TURNS_METADATA_KEY in session.metadata)) {
+    return session;
+  }
+  const { [RAW_TURNS_METADATA_KEY]: _rawTurns, ...metadata } = session.metadata;
+  const { metadata: _metadata, ...rest } = session;
+  return Object.keys(metadata).length > 0 ? { ...rest, metadata } : rest;
+};
 
 // With thinking enabled, the thinking block that preceded a tool_use must be
 // returned verbatim on the next request or the API rejects it. Those raw

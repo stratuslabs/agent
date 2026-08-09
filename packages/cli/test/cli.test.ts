@@ -1291,3 +1291,47 @@ Be warm.
   assert.equal(runtime.provider === 'openai' && runtime.model, 'gpt-4.1-mini');
   assert.equal(runtime.soul?.agent.name, 'Ava');
 });
+
+test('runCli json output never exposes Claude replay state or thinking text', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const { streams, output } = createStreams();
+  let calls = 0;
+
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'remember that I like jazz', '--provider', 'anthropic', '--format', 'json'],
+    streams,
+    env: {
+      cwd: tempDir,
+      processEnv: { ANTHROPIC_API_KEY: 'test-key' },
+      fetch: (async () => {
+        calls += 1;
+        const content = calls === 1
+          ? [
+              { type: 'thinking', thinking: 'Private reasoning about jazz.', signature: 'sig_cli' },
+              { type: 'tool_use', id: 'toolu_jazz', name: 'memory_remember', input: { fact: 'The user likes jazz.' } },
+            ]
+          : [{ type: 'text', text: 'Noted!' }];
+        return new Response(JSON.stringify({
+          id: 'msg_1',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-opus-5',
+          content,
+          stop_reason: calls === 1 ? 'tool_use' : 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 5, output_tokens: 5 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  const payload = JSON.parse(output.stdout);
+  assert.equal(payload.session.status, 'completed');
+  // Replay state stays in the stored session, never in user-facing output.
+  assert.equal(payload.session.metadata.anthropicRawTurns, undefined);
+  assert.doesNotMatch(output.stdout, /Private reasoning/);
+  assert.doesNotMatch(output.stdout, /sig_cli/);
+  // The rest of the metadata is still there.
+  assert.equal(payload.session.metadata.provider, 'anthropic');
+});

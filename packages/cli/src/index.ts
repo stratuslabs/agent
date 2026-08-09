@@ -31,6 +31,7 @@ import {
 import {
   createAnthropicProvider,
   DEFAULT_ANTHROPIC_MODEL,
+  redactAnthropicRawTurns,
 } from '@stratusagent/provider-anthropic';
 import {
   createRememberTool,
@@ -1618,7 +1619,9 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     if (command.format === 'json') {
       writeLine(streams.stdout, JSON.stringify({
         provider: runtime.provider,
-        session,
+        // Replay state (Claude's raw thinking turns) stays in the stored
+        // session but never in user-facing output.
+        session: redactAnthropicRawTurns(session),
       }, null, 2));
       return 0;
     }
