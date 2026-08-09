@@ -15,9 +15,8 @@ import type {
 
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5';
 const DEFAULT_MAX_TOKENS = 4096;
-// Raw-turn caches are kept for this many distinct sessions (LRU) so a
-// long-lived provider instance doesn't accumulate thinking blocks forever.
-const MAX_CACHED_SESSIONS = 32;
+// Session metadata key holding raw assistant turns, keyed by tool_use id.
+export const RAW_TURNS_METADATA_KEY = 'anthropicRawTurns';
 
 export interface AnthropicProviderConfig {
   apiKey: string;
@@ -113,6 +112,25 @@ const createSystemPrompt = (
   return sections.length > 0 ? sections.join('\n\n') : undefined;
 };
 
+type RawTurns = Record<string, ContentBlock[]>;
+
+// With thinking enabled, the thinking block that preceded a tool_use must be
+// returned verbatim on the next request or the API rejects it. Those raw
+// turns are session state, not provider state: they live in the session's
+// metadata so they survive tool execution and approval waits, provider
+// restarts, and resuming the session in another process — and they are
+// garbage-collected with the session itself.
+const rawTurnsFrom = (session: ProviderRequest['session']): RawTurns => {
+  const metadata = (session.metadata ??= {});
+  const existing = metadata[RAW_TURNS_METADATA_KEY];
+  if (typeof existing === 'object' && existing !== null && !Array.isArray(existing)) {
+    return existing as unknown as RawTurns;
+  }
+  const fresh: RawTurns = {};
+  metadata[RAW_TURNS_METADATA_KEY] = fresh as unknown as JsonObject;
+  return fresh;
+};
+
 const reconstructAssistantBlocks = (
   content: string,
   toolCalls: ToolCall[],
@@ -136,7 +154,7 @@ const reconstructAssistantBlocks = (
 const createAnthropicMessages = (
   request: ProviderRequest,
   mapping: ToolNameMapping,
-  rawTurns: Map<string, ContentBlock[]>,
+  rawTurns: RawTurns,
 ): MessageParam[] => {
   // Build (role, blocks) groups first, merging consecutive same-role turns:
   // the runner records text and each tool call as separate messages, but on
@@ -157,11 +175,14 @@ const createAnthropicMessages = (
   };
 
   // One raw response covers several runner messages (its text message plus
-  // one message per tool call), so it must be replayed exactly once — every
-  // call id from a response maps to the same cached array.
-  const emittedRaw = new Set<ContentBlock[]>();
+  // one message per tool call), so it must be replayed exactly once. Dedup
+  // tracks the tool_use ids already emitted rather than array identity,
+  // because a session revived from storage has a distinct array per key.
+  const emittedCallIds = new Set<string>();
   const rawFor = (calls: ToolCall[] | undefined): ContentBlock[] | undefined =>
-    calls?.map((call) => rawTurns.get(call.id)).find((blocks) => blocks !== undefined);
+    calls?.map((call) => rawTurns[call.id]).find((blocks) => blocks !== undefined);
+  const alreadyEmitted = (calls: ToolCall[] | undefined): boolean =>
+    (calls ?? []).some((call) => emittedCallIds.has(call.id));
 
   const messages = request.session.messages;
   for (let index = 0; index < messages.length; index += 1) {
@@ -195,8 +216,12 @@ const createAnthropicMessages = (
         // of that response — so later runner messages it covers are skipped.
         const raw = rawFor(message.toolCalls);
         if (raw) {
-          if (!emittedRaw.has(raw)) {
-            emittedRaw.add(raw);
+          if (!alreadyEmitted(message.toolCalls)) {
+            for (const block of raw) {
+              if (block.type === 'tool_use') {
+                emittedCallIds.add(block.id);
+              }
+            }
             push('assistant', raw as ContentBlockParam[]);
           }
           continue;
@@ -211,7 +236,7 @@ const createAnthropicMessages = (
         // is already inside it.
         const next = messages[index + 1];
         const nextRaw = next?.role === 'assistant' ? rawFor(next.toolCalls) : undefined;
-        if (nextRaw && !emittedRaw.has(nextRaw)) {
+        if (nextRaw && !alreadyEmitted(next?.role === 'assistant' ? next.toolCalls : undefined)) {
           continue;
         }
         push('assistant', [{ type: 'text', text: message.content }]);
@@ -277,99 +302,40 @@ export const createAnthropicProvider = ({
     ...(fetchImpl ? { fetch: fetchImpl } : {}),
   });
 
-  // Raw assistant turns keyed by session, then by tool_use id, so history
-  // replay can hand the API back its own thinking blocks. Bounded: only the
-  // most recently active sessions keep their cache — an evicted session
-  // falls back to reconstructed tool_use blocks. Sessions with a request in
-  // flight are pinned, so eviction can never orphan a response that has not
-  // been stored yet; the map may briefly exceed the cap under heavy
-  // concurrency and trims back once requests settle.
-  interface SessionCache {
-    turns: Map<string, ContentBlock[]>;
-    inFlight: number;
-  }
-  const rawTurnsBySession = new Map<string, SessionCache>();
-
-  const acquireSessionCache = (sessionId: string): SessionCache => {
-    let cache = rawTurnsBySession.get(sessionId);
-    if (cache) {
-      // Re-insert so Map iteration order doubles as LRU order.
-      rawTurnsBySession.delete(sessionId);
-    } else {
-      cache = { turns: new Map(), inFlight: 0 };
-    }
-    cache.inFlight += 1;
-    rawTurnsBySession.set(sessionId, cache);
-    return cache;
-  };
-
-  const releaseSessionCache = (sessionId: string, cache: SessionCache): void => {
-    cache.inFlight -= 1;
-    // A session that just finished a turn is the most recently used —
-    // refresh its LRU position so eviction pressure hits stale sessions
-    // first, not the one about to send its tool results back.
-    if (rawTurnsBySession.get(sessionId) === cache) {
-      rawTurnsBySession.delete(sessionId);
-      rawTurnsBySession.set(sessionId, cache);
-    }
-    if (rawTurnsBySession.size <= MAX_CACHED_SESSIONS) {
-      return;
-    }
-    for (const [id, candidate] of rawTurnsBySession) {
-      if (rawTurnsBySession.size <= MAX_CACHED_SESSIONS) {
-        break;
-      }
-      if (candidate.inFlight === 0) {
-        rawTurnsBySession.delete(id);
-      }
-    }
-  };
-
   return {
     name,
     async generate(request: ProviderRequest) {
-      const sessionCache = acquireSessionCache(request.session.id);
-      try {
-        return await generateWithCache(request, sessionCache.turns);
-      } finally {
-        releaseSessionCache(request.session.id, sessionCache);
+      const rawTurns = rawTurnsFrom(request.session);
+      const mapping = createToolNameMapping(request.tools);
+      const tools = createAnthropicTools(request.tools, mapping);
+      const system = createSystemPrompt(request, systemPrompt);
+
+      const response = await client.messages.create({
+        model,
+        max_tokens: maxTokens,
+        ...(system ? { system } : {}),
+        ...(tools.length > 0 ? { tools } : {}),
+        // Claude Opus 5 thinks adaptively when `thinking` is omitted.
+        ...(thinking === 'disabled' ? { thinking: { type: 'disabled' as const } } : {}),
+        messages: createAnthropicMessages(request, mapping, rawTurns),
+      });
+
+      const { text, calls } = extractParts(response.content, mapping);
+
+      for (const call of calls) {
+        rawTurns[call.id] = response.content;
       }
+
+      const parts = [
+        ...(text.length > 0 ? [{ type: 'text' as const, text }] : []),
+        ...calls.map((call) => ({ type: 'tool-call' as const, call })),
+      ];
+
+      if (parts.length === 0) {
+        throw new Error('Claude returned an empty response.');
+      }
+
+      return { parts };
     },
   };
-
-  async function generateWithCache(
-    request: ProviderRequest,
-    rawTurns: Map<string, ContentBlock[]>,
-  ) {
-    const mapping = createToolNameMapping(request.tools);
-    const tools = createAnthropicTools(request.tools, mapping);
-    const system = createSystemPrompt(request, systemPrompt);
-
-    const response = await client.messages.create({
-      model,
-      max_tokens: maxTokens,
-      ...(system ? { system } : {}),
-      ...(tools.length > 0 ? { tools } : {}),
-      // Claude Opus 5 thinks adaptively when `thinking` is omitted.
-      ...(thinking === 'disabled' ? { thinking: { type: 'disabled' as const } } : {}),
-      messages: createAnthropicMessages(request, mapping, rawTurns),
-    });
-
-    const { text, calls } = extractParts(response.content, mapping);
-
-    for (const call of calls) {
-      rawTurns.set(call.id, response.content);
-    }
-
-    const parts = [
-      ...(text.length > 0 ? [{ type: 'text' as const, text }] : []),
-      ...calls.map((call) => ({ type: 'tool-call' as const, call })),
-    ];
-
-    if (parts.length === 0) {
-      throw new Error('Claude returned an empty response.');
-    }
-
-    return { parts };
-  }
 };

@@ -365,133 +365,81 @@ test('a response with text and multiple tool calls replays as one atomic turn', 
   );
 });
 
-test('raw-turn caches are scoped per session and evicted LRU', async () => {
-  const thinkingTurn = [
-    { type: 'thinking', thinking: 'Echo it.', signature: 'sig_lru' },
-    { type: 'tool_use', id: 'toolu_lru', name: 'demo_echo', input: { text: 'hi' } },
+test('raw turns persist with the session across provider instances and serialization', async () => {
+  const multiCallTurn = [
+    { type: 'thinking', thinking: 'Two tools needed.', signature: 'sig_persist' },
+    { type: 'text', text: 'Running both tools.' },
+    { type: 'tool_use', id: 'toolu_a', name: 'demo_echo', input: { text: 'one' } },
+    { type: 'tool_use', id: 'toolu_b', name: 'demo_echo', input: { text: 'two' } },
   ];
-  const { fetchImpl, requests } = createMockFetch([
-    apiMessage(thinkingTurn, 'tool_use'),
-    apiMessage([{ type: 'text', text: 'filler' }]),
-  ]);
+  const first = createMockFetch([apiMessage(multiCallTurn, 'tool_use')]);
+  const second = createMockFetch([apiMessage([{ type: 'text', text: 'Both done.' }])]);
 
-  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
   const tools: ProviderRequest['tools'] = [
     { name: 'demo.echo', parameters: { type: 'object', properties: {} } },
   ];
 
   const session = createSession();
-  const first = await provider.generate({ session, tools });
-  const call = first.parts.find((part) => part.type === 'tool-call');
-  assert.ok(call && call.type === 'tool-call');
+  const firstProvider = createAnthropicProvider({ apiKey: 'test-key', fetch: first.fetchImpl });
+  const response = await firstProvider.generate({ session, tools });
+  const calls = response.parts.filter((part) => part.type === 'tool-call');
+  assert.equal(calls.length, 2);
+
   session.messages.push(
     {
       id: 'session-1:assistant:2',
       role: 'assistant',
-      content: '',
+      content: 'Running both tools.',
       createdAt: new Date().toISOString(),
-      toolCalls: [call.call],
     },
     {
-      id: 'session-1:tool:toolu_lru',
-      role: 'tool',
-      name: 'demo.echo',
-      content: '{}',
-      createdAt: new Date().toISOString(),
-      toolResult: { callId: 'toolu_lru', toolName: 'demo.echo', ok: true, output: { ok: true } },
-    },
-  );
-
-  // Enough other sessions to push session-1 out of the bounded cache.
-  for (let index = 0; index < 33; index += 1) {
-    await provider.generate({ session: createSession({ id: `filler-${index}` }) });
-  }
-
-  await provider.generate({ session, tools });
-
-  const replay = requests.at(-1)!.body.messages;
-  // The cache for session-1 was evicted, so the assistant turn falls back to
-  // a reconstructed tool_use block instead of the raw thinking turn.
-  assert.deepEqual(replay[1], {
-    role: 'assistant',
-    content: [{ type: 'tool_use', id: 'toolu_lru', name: 'demo_echo', input: { text: 'hi' } }],
-  });
-});
-
-test('in-flight sessions are pinned against LRU eviction', async () => {
-  const thinkingTurn = [
-    { type: 'thinking', thinking: 'Echo it.', signature: 'sig_pin' },
-    { type: 'tool_use', id: 'toolu_pin', name: 'demo_echo', input: { text: 'hi' } },
-  ];
-
-  // The first request (the pinned session's) blocks until released; every
-  // other request resolves immediately. That lets a crowd of sessions come
-  // and go while the pinned session's API call is still in flight.
-  const requests: RecordedRequest[] = [];
-  let releaseFirst: (() => void) | undefined;
-  let callIndex = 0;
-  const fetchImpl = (async (_url: any, init?: any) => {
-    requests.push({ url: '', body: JSON.parse(init?.body ?? '{}'), headers: {} });
-    const isPinnedFirstTurn = callIndex === 0;
-    callIndex += 1;
-    if (isPinnedFirstTurn) {
-      await new Promise<void>((resolve) => {
-        releaseFirst = resolve;
-      });
-    }
-    const payload = isPinnedFirstTurn
-      ? apiMessage(thinkingTurn, 'tool_use')
-      : apiMessage([{ type: 'text', text: 'ok' }]);
-    return new Response(JSON.stringify(payload), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    });
-  }) as typeof fetch;
-
-  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
-  const tools: ProviderRequest['tools'] = [
-    { name: 'demo.echo', parameters: { type: 'object', properties: {} } },
-  ];
-
-  const session = createSession();
-  const pinned = provider.generate({ session, tools });
-  while (!releaseFirst) {
-    await new Promise((resolve) => setTimeout(resolve, 1));
-  }
-
-  // 40 sessions run to completion — well past the cache cap — while the
-  // pinned session is still awaiting its response.
-  for (let index = 0; index < 40; index += 1) {
-    await provider.generate({ session: createSession({ id: `filler-${index}` }) });
-  }
-
-  releaseFirst();
-  const first = await pinned;
-
-  const call = first.parts.find((part) => part.type === 'tool-call');
-  assert.ok(call && call.type === 'tool-call');
-  session.messages.push(
-    {
-      id: 'session-1:assistant:2',
+      id: 'session-1:assistant:3',
       role: 'assistant',
       content: '',
       createdAt: new Date().toISOString(),
-      toolCalls: [call.call],
+      toolCalls: [calls[0]!.call],
     },
     {
-      id: 'session-1:tool:toolu_pin',
+      id: 'session-1:tool:toolu_a',
       role: 'tool',
       name: 'demo.echo',
       content: '{}',
       createdAt: new Date().toISOString(),
-      toolResult: { callId: 'toolu_pin', toolName: 'demo.echo', ok: true, output: { ok: true } },
+      toolResult: { callId: 'toolu_a', toolName: 'demo.echo', ok: true, output: { echoed: 'one' } },
+    },
+    {
+      id: 'session-1:assistant:5',
+      role: 'assistant',
+      content: '',
+      createdAt: new Date().toISOString(),
+      toolCalls: [calls[1]!.call],
+    },
+    {
+      id: 'session-1:tool:toolu_b',
+      role: 'tool',
+      name: 'demo.echo',
+      content: '{}',
+      createdAt: new Date().toISOString(),
+      toolResult: { callId: 'toolu_b', toolName: 'demo.echo', ok: true, output: { echoed: 'two' } },
     },
   );
 
-  await provider.generate({ session, tools });
+  // The session goes through a store round-trip (serialize + parse) and the
+  // follow-up turn is served by a DIFFERENT provider instance — modelling a
+  // slow tool wait, a process restart, or a resume elsewhere. The raw turn
+  // travels in session.metadata, so nothing is lost.
+  const revived = JSON.parse(JSON.stringify(session)) as Session;
+  const secondProvider = createAnthropicProvider({ apiKey: 'test-key', fetch: second.fetchImpl });
+  await secondProvider.generate({ session: revived, tools });
 
-  // Despite 40 concurrent sessions, the in-flight session kept its cache:
-  // the follow-up replays the raw thinking turn, not a reconstruction.
-  const replay = requests.at(-1)!.body.messages;
-  assert.deepEqual(replay[1], { role: 'assistant', content: thinkingTurn });
+  const replay = second.requests[0]!.body.messages;
+  // Still one atomic assistant turn (thinking intact, text exactly once)
+  // followed by one user turn with both results — even though each cached
+  // key now holds a distinct parsed copy of the raw turn.
+  assert.equal(replay.length, 3);
+  assert.deepEqual(replay[1], { role: 'assistant', content: multiCallTurn });
+  assert.deepEqual(
+    replay[2].content.map((block: { tool_use_id: string }) => block.tool_use_id),
+    ['toolu_a', 'toolu_b'],
+  );
 });
