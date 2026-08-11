@@ -7,8 +7,9 @@ Right now, the best way to try it is a local loop in the terminal or a minimal l
 ## What it includes
 
 - `@stratusagent/core`, the runtime primitives and agent loop
-- `@stratusagent/agents`, agent identities, memory, delegation, and routing
+- `@stratusagent/agents`, agent identities, souls, memory, delegation, and routing
 - `@stratusagent/providers`, helpers for building model providers
+- `@stratusagent/provider-anthropic`, the Claude provider on the official Anthropic SDK
 - `@stratusagent/executors`, helpers for execution behavior
 - `@stratusagent/executor-local`, a concrete local child-process executor adapter
 - `@stratusagent/cli`, the local CLI entrypoint
@@ -19,7 +20,8 @@ This repo is early, but the core loop is complete.
 
 Today it is useful for:
 - running a multi-turn agent loop locally: provider → tools → provider until the model finishes
-- running real tool-calling sessions against an OpenAI-compatible provider (tools are advertised with JSON schemas, tool calls execute locally, and results are fed back to the model)
+- running real tool-calling sessions against Claude (via the official Anthropic SDK) or any OpenAI-compatible provider (tools are advertised with JSON schemas, tool calls execute locally, and results are fed back to the model)
+- defining agents as soul files — markdown personas you run with `stratus run --soul ./ava.md "hi"`
 - gating tool execution with an approval policy (`--approvals always|ask|never`)
 - continuing an existing session with follow-up user messages via `runner.resume()`
 - opening a tiny local dashboard for browser-based smoke testing
@@ -31,7 +33,7 @@ It is not yet a full production agent platform: durable storage, remote executor
 
 Stratus agents are designed to feel like a person you work with, not a stateless bot:
 
-- **One identity everywhere.** An agent's memory is keyed to the agent — never to a session or channel — so what they learn in one thread they know in every other conversation. Agents can save facts with the built-in `memory.remember` tool, and their memory is handed to the model on every turn.
+- **One identity everywhere.** An agent's memory is keyed to the agent — never to a session or channel — so what they learn in one thread they know in every other conversation. Agents can save facts with the built-in `memory.remember` tool, and their memory is handed to the model on every turn. CLI runs persist it to `.stratus/memory.jsonl` (gitignored), so the agent you talk to tomorrow remembers today.
 - **Scoped access.** Each agent has its own tool allowlist and its own credential allowlist. An agent can only call the tools it was given, and can only resolve the secrets it was granted.
 - **Delegation.** An orchestrator agent uses the `agent.delegate` tool to hand a task to a teammate and gets their reply back — the teammate runs with *their own* memory, tools, and credentials.
 - **Routing.** `createAgentRouter` maps inbound work (a channel, a mention, a message) to the right agent, so the same person consistently answers in the same places.
@@ -51,6 +53,32 @@ import { defineAgent } from '@stratusagent/agents';
 const scout = defineAgent({ instructions: 'You research things thoroughly.' });
 // scout.name → "Arlo", scout.avatar → matching palette + style
 ```
+
+### Soul files
+
+An agent can live in a file. A soul file is markdown with frontmatter — the frontmatter carries the structured identity (name, provider, model, tool and credential allowlists) and the body is the persona itself, written in prose:
+
+```markdown
+---
+name: Ava
+provider: anthropic
+model: claude-opus-5
+tools:
+  - demo.echo
+  - memory.remember
+---
+
+You are a sharp, warm generalist assistant. Answer first, explain second...
+```
+
+Run it directly, point your config at it, or generate one to start from:
+
+```bash
+stratus run --soul ./examples/souls/ava.md "hello"
+stratus agent new --format soul > my-agent.md   # generated identity, ready to edit
+```
+
+Two well-written example souls live in `examples/souls/` — they double as the format docs. A soul's provider/model are hints: `--provider`/`--model` flags and `STRATUS_*` env vars still win.
 
 ## Local setup (fresh machine)
 
@@ -128,7 +156,16 @@ The command prints the local URL, opens your default browser, and exposes a tiny
 
 ### 5) Run a real provider path
 
-With environment variables:
+The flagship path is Claude via the official Anthropic SDK:
+
+```bash
+export ANTHROPIC_API_KEY=your-key
+pnpm cli run --provider anthropic "say hello"
+```
+
+The Claude provider defaults to `claude-opus-5` and handles multi-turn tool calling, the agent's persona and memory, and adaptive thinking out of the box.
+
+Any OpenAI-compatible API works too:
 
 ```bash
 export STRATUS_PROVIDER=openai
@@ -141,17 +178,17 @@ Or with a config file `stratus.config.json` (start from `stratus.config.json.exa
 
 ```json
 {
-  "provider": "openai",
-  "model": "gpt-4.1-mini",
-  "baseUrl": "https://api.openai.com/v1",
-  "apiKeyEnv": "OPENAI_API_KEY"
+  "provider": "anthropic",
+  "model": "claude-opus-5",
+  "apiKeyEnv": "ANTHROPIC_API_KEY",
+  "soul": "./examples/souls/ava.md"
 }
 ```
 
 Then:
 
 ```bash
-export OPENAI_API_KEY=your-key
+export ANTHROPIC_API_KEY=your-key
 pnpm cli run "say hello"
 ```
 
@@ -204,6 +241,8 @@ Opened your default browser.
 ```bash
 stratus run --prompt "Use the demo tool"
 stratus run "Say hello"
+stratus run --provider anthropic "Say hello"
+stratus run --soul ./examples/souls/ava.md "Say hello"
 stratus run --provider openai --model gpt-4.1-mini "Say hello"
 stratus dashboard
 stratus dashboard --port 4123 --host 127.0.0.1 --no-open
@@ -213,9 +252,10 @@ Current options:
 
 - `--prompt`, `-p`, pass the prompt explicitly
 - `--stdin`, read the prompt from stdin
-- `--provider`, choose `demo` or `openai`
-- `--model`, set the model for real providers
-- `--base-url`, override the OpenAI-compatible API base URL
+- `--provider`, choose `anthropic`, `openai`, or `demo`
+- `--model`, set the model for real providers (anthropic defaults to `claude-opus-5`)
+- `--base-url`, override the provider API base URL
+- `--soul`, run as the agent defined by a soul file (also `STRATUS_SOUL` or the config `soul` key)
 - `--config`, load provider settings from a JSON config file
 - `--format`, choose `text` or `json`
 - `--no-events`, hide event logs in text mode
@@ -242,7 +282,10 @@ packages/
   core/
   executor-local/
   executors/
+  provider-anthropic/
   providers/
+examples/
+  souls/
 docs/
   architecture/
 ```

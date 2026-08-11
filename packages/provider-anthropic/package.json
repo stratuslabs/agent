@@ -1,0 +1,47 @@
+{
+  "name": "@stratusagent/provider-anthropic",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.70.0",
+    "@stratusagent/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3"
+  },
+  "description": "Anthropic Claude provider for Stratus Agent: tool calling, per-agent personas, and memory, powered by the official SDK",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "claude",
+    "anthropic"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/provider-anthropic"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

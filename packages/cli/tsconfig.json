@@ -24,6 +24,9 @@
       "path": "../providers"
     },
     {
+      "path": "../provider-anthropic"
+    },
+    {
       "path": "../executor-local"
     },
     {

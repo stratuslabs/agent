@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import path from 'node:path';
@@ -10,8 +10,11 @@ import {
   AllowAllApprovalPolicy,
   EventBus,
   ToolRegistry,
+  type AgentMemoryStore,
   type ApprovalPolicy,
+  type JsonObject,
   type JsonValue,
+  type MemoryEntry,
   type ModelProvider,
   type Session,
   type StratusEvent,
@@ -25,7 +28,18 @@ import {
   createProviderResponseBuilder,
   defineProvider,
 } from '@stratusagent/providers';
-import { defineAgent } from '@stratusagent/agents';
+import {
+  createAnthropicProvider,
+  DEFAULT_ANTHROPIC_MODEL,
+  redactAnthropicRawTurns,
+} from '@stratusagent/provider-anthropic';
+import {
+  createRememberTool,
+  defineAgent,
+  formatSoul,
+  parseSoul,
+  type ParsedSoul,
+} from '@stratusagent/agents';
 
 export interface CliStreams {
   stdout: Pick<typeof process.stdout, 'write'>;
@@ -50,7 +64,7 @@ export interface CliRunOptions {
   env?: CliEnvironment;
 }
 
-export type CliProviderName = 'demo' | 'openai';
+export type CliProviderName = 'demo' | 'openai' | 'anthropic';
 export type CliApprovalMode = 'always' | 'ask' | 'never';
 
 export interface ParsedRunCommand {
@@ -60,6 +74,8 @@ export interface ParsedRunCommand {
   model?: string;
   baseUrl?: string;
   configPath?: string;
+  /** Path to a soul file defining the agent to run as. */
+  soul?: string;
   format: 'text' | 'json';
   events: boolean;
   approvals: CliApprovalMode;
@@ -82,7 +98,7 @@ export interface ParsedAgentNewCommand {
   command: 'agent-new';
   name?: string;
   instructions?: string;
-  format: 'text' | 'json';
+  format: 'text' | 'json' | 'soul';
 }
 
 export interface ParsedHelpCommand {
@@ -102,10 +118,12 @@ interface CliConfigFile {
   baseUrl?: string;
   apiKeyEnv?: string;
   systemPrompt?: string;
+  /** Path to a soul file, resolved relative to the working directory. */
+  soul?: string;
 }
 
 type RuntimeConfig =
-  | { provider: 'demo' }
+  | { provider: 'demo'; soul?: ParsedSoul }
   | {
       provider: 'openai';
       model: string;
@@ -113,6 +131,16 @@ type RuntimeConfig =
       apiKey: string;
       systemPrompt?: string;
       fetch?: typeof fetch;
+      soul?: ParsedSoul;
+    }
+  | {
+      provider: 'anthropic';
+      model: string;
+      baseUrl?: string;
+      apiKey: string;
+      systemPrompt?: string;
+      fetch?: typeof fetch;
+      soul?: ParsedSoul;
     };
 
 export interface DashboardServerHandle {
@@ -133,6 +161,8 @@ Usage:
   stratus setup
   stratus run --prompt "Use the demo tool"
   stratus run "Say hello"
+  ANTHROPIC_API_KEY=... stratus run --provider anthropic "Say hello"
+  stratus run --soul ./examples/souls/ava.md "Say hello"
   echo "Use the echo tool" | stratus run --stdin
   STRATUS_PROVIDER=openai OPENAI_API_KEY=... stratus run "Say hello"
   stratus run --config ./stratus.config.json --provider openai "Say hello"
@@ -149,14 +179,15 @@ Commands:
 Agent options:
   --name           Agent name (omit to have one generated)
   --instructions   The agent's persona/instructions
-  --format         Output format for agent new: text or json
+  --format         Output format for agent new: text, json, or soul (a ready-to-edit soul file)
 
 Options:
   --prompt, -p     Prompt to send to the local agent loop
   --stdin          Read the prompt from stdin
-  --provider       Provider to use: demo or openai
-  --model          Model name for real providers (default: gpt-4.1-mini)
-  --base-url       Override the OpenAI-compatible API base URL
+  --provider       Provider to use: anthropic, openai, or demo
+  --model          Model name for real providers (anthropic default: ${DEFAULT_ANTHROPIC_MODEL}, openai default: gpt-4.1-mini)
+  --base-url       Override the provider API base URL
+  --soul           Run as the agent defined by a soul file (markdown + frontmatter, see examples/souls)
   --config         Config file path (run: load settings from it, setup: write it)
   --format         Output format: text or json (default: text)
   --no-events      Hide event-by-event progress lines in text mode
@@ -169,7 +200,12 @@ Options:
 
 Config file:
   The CLI looks for ./stratus.config.json by default, or a path from --config / STRATUS_CONFIG.
+  A "soul" key (or STRATUS_SOUL) points at a soul file so every run uses that agent.
   Legacy STRATUSCLAW_* env vars and stratusclaw.config.json are still supported for compatibility.
+
+Soul files:
+  A soul file is markdown with frontmatter (name, provider, model, tools, credentials)
+  followed by the agent's persona in prose. See examples/souls/ava.md.
 `;
 
 const writeLine = (stream: Pick<typeof process.stdout, 'write'>, line = ''): void => {
@@ -246,6 +282,57 @@ const createDemoProvider = (): ModelProvider =>
     },
   });
 
+const MEMORY_FILE_RELATIVE_PATH = path.join('.stratus', 'memory.jsonl');
+
+// Agents keep the same memory across CLI runs: every remembered fact lands
+// in .stratus/memory.jsonl (keyed by agent id), so the Ava you talk to
+// tomorrow is the Ava you talked to today. One JSON entry per line, written
+// with O_APPEND: concurrent runs each add their own line instead of
+// re-writing the file, so no run can clobber another's remembered fact.
+export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
+  const readEntries = async (): Promise<MemoryEntry[]> => {
+    let raw: string;
+    try {
+      raw = await readFile(filePath, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    }
+
+    return raw
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => {
+        try {
+          return JSON.parse(line) as MemoryEntry;
+        } catch {
+          throw new Error(`Memory file has an invalid line: ${filePath}`);
+        }
+      });
+  };
+
+  return {
+    async append(agentId: string, content: string, metadata?: JsonObject) {
+      const entry: MemoryEntry = {
+        id: `${agentId}:memory:${randomUUID()}`,
+        agentId,
+        content,
+        createdAt: new Date().toISOString(),
+        ...(metadata ? { metadata } : {}),
+      };
+      await mkdir(path.dirname(filePath), { recursive: true });
+      await appendFile(filePath, `${JSON.stringify(entry)}\n`);
+      return entry;
+    },
+    async list(agentId: string) {
+      const entries = await readEntries();
+      return entries.filter((entry) => entry.agentId === agentId);
+    },
+  };
+};
+
 const readPromptFromEnvironment = (env: CliEnvironment): string => (env.stdin ?? '').trim();
 
 const readPromptFromStdin = async (stdin: NodeJS.ReadableStream): Promise<string> => {
@@ -260,7 +347,7 @@ const readPromptFromStdin = async (stdin: NodeJS.ReadableStream): Promise<string
 };
 
 const parseProviderName = (value: string, label: string): CliProviderName => {
-  if (value === 'demo' || value === 'openai') {
+  if (value === 'demo' || value === 'openai' || value === 'anthropic') {
     return value;
   }
 
@@ -333,7 +420,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
 
     let name: string | undefined;
     let instructions: string | undefined;
-    let format: 'text' | 'json' = 'text';
+    let format: 'text' | 'json' | 'soul' = 'text';
 
     for (let index = 0; index < agentRest.length; index += 1) {
       const token = agentRest[index];
@@ -355,7 +442,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       }
       if (token === '--format') {
         const value = readOptionValue(agentRest, index, '--format');
-        if (value !== 'text' && value !== 'json') {
+        if (value !== 'text' && value !== 'json' && value !== 'soul') {
           throw new Error(`Unsupported format: ${value}`);
         }
         format = value;
@@ -404,6 +491,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
   let model: string | undefined;
   let baseUrl: string | undefined;
   let configPath: string | undefined;
+  let soul: string | undefined;
   let format: 'text' | 'json' = 'text';
   let events = true;
   let approvals: CliApprovalMode = 'always';
@@ -453,6 +541,12 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
 
     if (token === '--config') {
       configPath = readOptionValue(rest, index, '--config');
+      index += 1;
+      continue;
+    }
+
+    if (token === '--soul') {
+      soul = readOptionValue(rest, index, '--soul');
       index += 1;
       continue;
     }
@@ -522,6 +616,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     ...(model ? { model } : {}),
     ...(baseUrl ? { baseUrl } : {}),
     ...(configPath ? { configPath } : {}),
+    ...(soul ? { soul } : {}),
     format,
     events,
     approvals,
@@ -578,6 +673,9 @@ const loadConfigFile = async (configPath: string): Promise<CliConfigFile> => {
   if (typeof config.systemPrompt === 'string' && config.systemPrompt.length > 0) {
     resolved.systemPrompt = config.systemPrompt;
   }
+  if (typeof config.soul === 'string' && config.soul.length > 0) {
+    resolved.soul = config.soul;
+  }
 
   return resolved;
 };
@@ -626,6 +724,46 @@ const readNonEmptyString = <T = string>(
   return map ? map(trimmed) : trimmed;
 };
 
+// A soul travels with the run: --soul outranks STRATUS_SOUL, which outranks
+// the config file's "soul" key.
+const resolveSoul = async (
+  command: ParsedRunCommand,
+  env: CliEnvironment,
+  fileConfig: CliConfigFile,
+): Promise<ParsedSoul | undefined> => {
+  const processEnv = readProcessEnv(env);
+  const soulPath = command.soul
+    ?? readNonEmptyString(processEnv.STRATUS_SOUL)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_SOUL)
+    ?? fileConfig.soul;
+
+  if (!soulPath) {
+    return undefined;
+  }
+
+  const resolvedPath = path.resolve(readWorkingDirectory(env), String(soulPath));
+  let raw: string;
+  try {
+    raw = await readFile(resolvedPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`Soul file not found: ${resolvedPath}`);
+    }
+    throw error;
+  }
+
+  try {
+    // Seeding with the resolved path keeps an unnamed soul's generated
+    // identity (name, id, avatar) stable across runs — persisted memory is
+    // keyed by that id, so it must not change between invocations.
+    return parseSoul(raw, { seed: resolvedPath });
+  } catch (error) {
+    throw new Error(
+      `Could not parse soul file ${resolvedPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+};
+
 export const resolveRuntimeConfig = async (
   command: ParsedRunCommand,
   env: CliEnvironment = {},
@@ -633,48 +771,75 @@ export const resolveRuntimeConfig = async (
   const processEnv = readProcessEnv(env);
   const configPath = await resolveConfigPath(command, env);
   const fileConfig = configPath ? await loadConfigFile(configPath) : {};
+  const soul = await resolveSoul(command, env, fileConfig);
 
+  // Explicit flags and env vars outrank the soul's own provider/model hints,
+  // which outrank the config file's defaults.
   const provider = command.provider
     ?? readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
     ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'))
+    ?? readNonEmptyString(soul?.provider, (value) => parseProviderName(value, 'soul file'))
     ?? fileConfig.provider
     ?? 'demo';
 
   if (provider === 'demo') {
-    return { provider: 'demo' };
+    return { provider: 'demo', ...(soul ? { soul } : {}) };
   }
+
+  // A config file's model/baseUrl/apiKeyEnv were written for the provider
+  // named in that file. When a flag, env var, or soul selects a different
+  // provider, those values would point at the wrong API (e.g. an OpenAI
+  // base URL handed to the Anthropic SDK), so they are ignored. A file with
+  // no provider key predates the anthropic option, so its settings are
+  // treated as openai-specific.
+  const fileConfigApplies = (fileConfig.provider ?? 'openai') === provider;
+
+  // A soul's model was chosen for the soul's own provider. If a flag or env
+  // var overrides that provider, the model hint would target the wrong API
+  // (e.g. a Claude model sent to OpenAI), so it only applies when the soul
+  // names no provider or names the selected one.
+  const soulModelApplies = soul?.provider === undefined || soul.provider === provider;
 
   const model = command.model
     ?? readNonEmptyString(processEnv.STRATUS_MODEL)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL)
-    ?? fileConfig.model
-    ?? DEFAULT_OPENAI_MODEL;
+    ?? (soulModelApplies ? readNonEmptyString(soul?.model) : undefined)
+    ?? (fileConfigApplies ? fileConfig.model : undefined)
+    ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_MODEL : DEFAULT_OPENAI_MODEL);
 
   const baseUrl = command.baseUrl
     ?? readNonEmptyString(processEnv.STRATUS_BASE_URL)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_BASE_URL)
-    ?? fileConfig.baseUrl
-    ?? DEFAULT_OPENAI_BASE_URL;
+    ?? (fileConfigApplies ? fileConfig.baseUrl : undefined)
+    // The Anthropic SDK knows its own endpoint; only openai needs a default.
+    ?? (provider === 'anthropic' ? undefined : DEFAULT_OPENAI_BASE_URL);
 
   const apiKeyEnvName = readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV)
-    ?? fileConfig.apiKeyEnv
-    ?? 'OPENAI_API_KEY';
+    ?? (fileConfigApplies ? fileConfig.apiKeyEnv : undefined)
+    ?? (provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY');
 
   const apiKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY)
     ?? readNonEmptyString(processEnv[String(apiKeyEnvName)]);
 
   if (!apiKey) {
-    throw new Error(`Missing API key for provider=openai. Set STRATUS_API_KEY or ${apiKeyEnvName}.`);
+    throw new Error(`Missing API key for provider=${provider}. Set STRATUS_API_KEY or ${apiKeyEnvName}.`);
   }
 
-  const resolved: RuntimeConfig = {
-    provider: 'openai',
-    model: String(model),
-    baseUrl: String(baseUrl),
-    apiKey: String(apiKey),
-  };
+  const resolved: RuntimeConfig = provider === 'anthropic'
+    ? {
+        provider: 'anthropic',
+        model: String(model),
+        ...(baseUrl ? { baseUrl: String(baseUrl) } : {}),
+        apiKey: String(apiKey),
+      }
+    : {
+        provider: 'openai',
+        model: String(model),
+        baseUrl: String(baseUrl),
+        apiKey: String(apiKey),
+      };
 
   const systemPrompt = readNonEmptyString(processEnv.STRATUS_SYSTEM_PROMPT)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_SYSTEM_PROMPT)
@@ -688,12 +853,26 @@ export const resolveRuntimeConfig = async (
     resolved.fetch = env.fetch;
   }
 
+  if (soul) {
+    resolved.soul = soul;
+  }
+
   return resolved;
 };
 
 const createRuntimeProvider = (config: RuntimeConfig): ModelProvider => {
   if (config.provider === 'demo') {
     return createDemoProvider();
+  }
+
+  if (config.provider === 'anthropic') {
+    return createAnthropicProvider({
+      model: config.model,
+      apiKey: config.apiKey,
+      ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
+      ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
+      ...(config.fetch ? { fetch: config.fetch } : {}),
+    });
   }
 
   return createOpenAICompatibleProvider({
@@ -756,8 +935,13 @@ export const runSingleLoop = async (
     env?: CliEnvironment;
   },
 ): Promise<Session> => {
+  const memory = createFileMemoryStore(
+    path.join(readWorkingDirectory(options.env ?? {}), MEMORY_FILE_RELATIVE_PATH),
+  );
+
   const tools = new ToolRegistry();
   tools.register(createDemoTool());
+  tools.register(createRememberTool(memory));
 
   const bus = new EventBus({
     onError: (error) => {
@@ -781,29 +965,38 @@ export const runSingleLoop = async (
     executor: createLocalCommandExecutor(),
     approvals: createApprovalPolicy(options.approvals ?? 'always', streams, options.env ?? {}),
     bus,
+    memory,
     ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
   });
 
   await runner.initialize();
 
-  const agent = options.runtime.provider === 'demo'
-    ? {
-        id: 'demo-agent',
-        name: 'Demo Agent',
-        instructions: 'Keep the loop tiny and readable.',
-      }
-    : {
-        id: 'openai-agent',
-        name: 'OpenAI Agent',
-        instructions: 'Respond clearly and directly to the user request.',
-      };
+  // A soul is a full identity — it replaces the built-in per-provider agent.
+  const agent = options.runtime.soul?.agent
+    ?? (options.runtime.provider === 'demo'
+      ? {
+          id: 'demo-agent',
+          name: 'Demo Agent',
+          instructions: 'Keep the loop tiny and readable.',
+        }
+      : options.runtime.provider === 'anthropic'
+        ? {
+            id: 'anthropic-agent',
+            name: 'Claude Agent',
+            instructions: 'Respond clearly and directly to the user request.',
+          }
+        : {
+            id: 'openai-agent',
+            name: 'OpenAI Agent',
+            instructions: 'Respond clearly and directly to the user request.',
+          });
 
   const metadata = options.runtime.provider === 'demo'
     ? { provider: 'demo' as const }
     : {
-        provider: 'openai' as const,
+        provider: options.runtime.provider,
         model: options.runtime.model,
-        baseUrl: options.runtime.baseUrl,
+        ...(options.runtime.provider === 'openai' ? { baseUrl: options.runtime.baseUrl } : {}),
       };
 
   return runner.run({
@@ -840,11 +1033,13 @@ export const printSessionSummary = (session: Session, streams: CliStreams): void
 };
 
 const formatRuntimeBanner = (runtime: RuntimeConfig): string => {
+  const soulSuffix = runtime.soul ? ` as ${runtime.soul.agent.name}` : '';
+
   if (runtime.provider === 'demo') {
-    return 'Starting Stratus Agent local loop with provider=demo';
+    return `Starting Stratus Agent local loop with provider=demo${soulSuffix}`;
   }
 
-  return `Starting Stratus Agent local loop with provider=openai model=${runtime.model}`;
+  return `Starting Stratus Agent local loop with provider=${runtime.provider} model=${runtime.model}${soulSuffix}`;
 };
 
 const escapeHtml = (value: string): string => value
@@ -1160,9 +1355,13 @@ export const runSetup = async (
     }
 
     const providerAnswer = await prompter.ask(
-      'Which provider do you want to use?\n  1) openai — any OpenAI-compatible API (needs an API key)\n  2) demo — built-in provider, no key required\nChoose [1]: ',
+      'Which provider do you want to use?\n  1) anthropic — Claude via the Anthropic API (needs an API key)\n  2) openai — any OpenAI-compatible API (needs an API key)\n  3) demo — built-in provider, no key required\nChoose [1]: ',
     );
-    const provider: CliProviderName = providerAnswer === '2' || /^demo$/i.test(providerAnswer) ? 'demo' : 'openai';
+    const provider: CliProviderName = providerAnswer === '3' || /^demo$/i.test(providerAnswer)
+      ? 'demo'
+      : providerAnswer === '2' || /^openai$/i.test(providerAnswer)
+        ? 'openai'
+        : 'anthropic';
 
     // Exported STRATUS_*/STRATUSCLAW_* variables outrank the config file in
     // resolveRuntimeConfig, so any conflicting value would make the suggested
@@ -1228,12 +1427,21 @@ export const runSetup = async (
       return 0;
     }
 
-    const model = (await prompter.ask(`Model [${DEFAULT_OPENAI_MODEL}]: `)) || DEFAULT_OPENAI_MODEL;
-    const baseUrl = (await prompter.ask(`Base URL [${DEFAULT_OPENAI_BASE_URL}]: `)) || DEFAULT_OPENAI_BASE_URL;
-    const apiKeyEnv = (await prompter.ask('Environment variable holding your API key [OPENAI_API_KEY]: ')) || 'OPENAI_API_KEY';
+    const defaultModel = provider === 'anthropic' ? DEFAULT_ANTHROPIC_MODEL : DEFAULT_OPENAI_MODEL;
+    const defaultApiKeyEnv = provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY';
+
+    const model = (await prompter.ask(`Model [${defaultModel}]: `)) || defaultModel;
+    // The Anthropic SDK knows its own endpoint, so only openai asks for one.
+    const baseUrl = provider === 'anthropic'
+      ? ''
+      : (await prompter.ask(`Base URL [${DEFAULT_OPENAI_BASE_URL}]: `)) || DEFAULT_OPENAI_BASE_URL;
+    const apiKeyEnv = (await prompter.ask(`Environment variable holding your API key [${defaultApiKeyEnv}]: `)) || defaultApiKeyEnv;
     const systemPrompt = await prompter.ask('System prompt (optional, Enter to skip): ');
 
-    const config: Record<string, string> = { provider, model, baseUrl, apiKeyEnv };
+    const config: Record<string, string> = { provider, model, apiKeyEnv };
+    if (baseUrl) {
+      config.baseUrl = baseUrl;
+    }
     if (systemPrompt) {
       config.systemPrompt = systemPrompt;
     }
@@ -1243,7 +1451,9 @@ export const runSetup = async (
     const conflicts = [
       detectEnvOverride('STRATUS_PROVIDER', 'STRATUSCLAW_PROVIDER', provider, '--provider'),
       detectEnvOverride('STRATUS_MODEL', 'STRATUSCLAW_MODEL', model, '--model'),
-      detectEnvOverride('STRATUS_BASE_URL', 'STRATUSCLAW_BASE_URL', baseUrl, '--base-url'),
+      // With anthropic the SDK default endpoint is used (no configured URL),
+      // so an exported base URL is warn-only rather than flag-corrected.
+      detectEnvOverride('STRATUS_BASE_URL', 'STRATUSCLAW_BASE_URL', baseUrl, baseUrl ? '--base-url' : undefined),
       // No run flag exists for the system prompt, so this one is warn-only.
       detectEnvOverride('STRATUS_SYSTEM_PROMPT', 'STRATUSCLAW_SYSTEM_PROMPT', systemPrompt),
     ].filter((conflict) => conflict !== undefined);
@@ -1307,6 +1517,13 @@ export const runAgentNew = (
     return 0;
   }
 
+  if (command.format === 'soul') {
+    streams.stdout.write(
+      formatSoul({ agent, provider: 'anthropic', model: DEFAULT_ANTHROPIC_MODEL }),
+    );
+    return 0;
+  }
+
   writeLine(streams.stdout, `Say hello to ${agent.name}.`);
   writeLine(streams.stdout);
   writeLine(streams.stdout, `  id      ${agent.id}`);
@@ -1315,7 +1532,11 @@ export const runAgentNew = (
     writeLine(streams.stdout, `  soul    ${agent.instructions}`);
   }
   writeLine(streams.stdout);
-  writeLine(streams.stdout, 'Definition (save this — soul files are coming in #13):');
+  writeLine(streams.stdout, 'Save this as a soul file and run it:');
+  writeLine(streams.stdout, `  stratus agent new --name ${quoteShellArg(agent.name)}${command.instructions ? ` --instructions ${quoteShellArg(command.instructions)}` : ''} --format soul > my-agent.md`);
+  writeLine(streams.stdout, '  stratus run --soul my-agent.md "hello"');
+  writeLine(streams.stdout);
+  writeLine(streams.stdout, 'Definition (JSON):');
   writeLine(streams.stdout, JSON.stringify(agent, null, 2));
   return 0;
 };
@@ -1398,7 +1619,9 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     if (command.format === 'json') {
       writeLine(streams.stdout, JSON.stringify({
         provider: runtime.provider,
-        session,
+        // Replay state (Claude's raw thinking turns) stays in the stored
+        // session but never in user-facing output.
+        session: redactAnthropicRawTurns(session),
       }, null, 2));
       return 0;
     }
