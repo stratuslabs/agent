@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
+import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import {
@@ -53,6 +54,8 @@ export interface CliEnvironment {
   setupInput?: NodeJS.ReadableStream;
   processEnv?: NodeJS.ProcessEnv;
   cwd?: string;
+  /** Home directory override (tests). Defaults to os.homedir(). */
+  homeDir?: string;
   fetch?: typeof fetch;
   openExternal?: (url: string) => Promise<void> | void;
   dashboardAutoShutdownMs?: number;
@@ -137,11 +140,22 @@ type RuntimeConfig =
       provider: 'anthropic';
       model: string;
       baseUrl?: string;
-      apiKey: string;
+      apiKey?: string;
+      /** Claude subscription auth (Claude Code setup token). */
+      authToken?: string;
       systemPrompt?: string;
       fetch?: typeof fetch;
       soul?: ParsedSoul;
     };
+
+/** A stored sign-in for a provider, kept in ~/.stratus/credentials.json. */
+export interface StoredCredential {
+  type: 'api_key' | 'oauth_token';
+  value: string;
+}
+
+type CredentialProviderName = 'anthropic' | 'openai';
+type CredentialsFile = Partial<Record<CredentialProviderName, StoredCredential>>;
 
 export interface DashboardServerHandle {
   url: string;
@@ -150,6 +164,11 @@ export interface DashboardServerHandle {
 
 const DEFAULT_CONFIG_FILENAME = 'stratus.config.json';
 const LEGACY_CONFIG_FILENAME = 'stratusclaw.config.json';
+const STRATUS_HOME_DIRNAME = '.stratus';
+const GLOBAL_CONFIG_FILENAME = 'config.json';
+const CREDENTIALS_FILENAME = 'credentials.json';
+const AGENTS_DIRNAME = 'agents';
+const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_OPENAI_MODEL = 'gpt-4.1-mini';
 const DEFAULT_DASHBOARD_HOST = '127.0.0.1';
@@ -170,7 +189,10 @@ Usage:
   stratus dashboard --port 4123 --host 0.0.0.0 --no-open
 
 Commands:
-  setup            Interactive walkthrough that writes stratus.config.json
+  setup            Menu-driven onboarding: pick a provider, sign in (Claude
+                   subscription or API key), create your agent, and test it —
+                   settings go to ~/.stratus/config.json, sign-ins to
+                   ~/.stratus/credentials.json (0600)
   run              Execute one local Stratus Agent session
   agent new        Create an agent identity (generates a human-ish name + avatar theme)
   dashboard        Start the local Stratus Agent dashboard and open it in your browser
@@ -199,7 +221,8 @@ Options:
   --help, -h       Show this help message
 
 Config file:
-  The CLI looks for ./stratus.config.json by default, or a path from --config / STRATUS_CONFIG.
+  The CLI looks for ./stratus.config.json first, then a path from --config / STRATUS_CONFIG,
+  then the global ~/.stratus/config.json written by \`stratus setup\`.
   A "soul" key (or STRATUS_SOUL) points at a soul file so every run uses that agent.
   Legacy STRATUSCLAW_* env vars and stratusclaw.config.json are still supported for compatibility.
 
@@ -356,6 +379,56 @@ const parseProviderName = (value: string, label: string): CliProviderName => {
 
 const readProcessEnv = (env: CliEnvironment): NodeJS.ProcessEnv => env.processEnv ?? process.env;
 const readWorkingDirectory = (env: CliEnvironment): string => env.cwd ?? process.cwd();
+const readHomeDirectory = (env: CliEnvironment): string => env.homeDir ?? os.homedir();
+
+const stratusHomePath = (env: CliEnvironment): string =>
+  path.join(readHomeDirectory(env), STRATUS_HOME_DIRNAME);
+const globalConfigPath = (env: CliEnvironment): string =>
+  path.join(stratusHomePath(env), GLOBAL_CONFIG_FILENAME);
+const credentialsPath = (env: CliEnvironment): string =>
+  path.join(stratusHomePath(env), CREDENTIALS_FILENAME);
+const agentsDirPath = (env: CliEnvironment): string =>
+  path.join(stratusHomePath(env), AGENTS_DIRNAME);
+
+const loadCredentials = async (env: CliEnvironment): Promise<CredentialsFile> => {
+  let raw: string;
+  try {
+    raw = await readFile(credentialsPath(env), 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return {};
+    }
+    throw error;
+  }
+
+  const parsed = JSON.parse(raw) as unknown;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`Credentials file must contain a JSON object: ${credentialsPath(env)}`);
+  }
+
+  const credentials: CredentialsFile = {};
+  for (const provider of ['anthropic', 'openai'] as const) {
+    const entry = (parsed as Record<string, unknown>)[provider];
+    if (
+      typeof entry === 'object' && entry !== null && !Array.isArray(entry) &&
+      ((entry as StoredCredential).type === 'api_key' || (entry as StoredCredential).type === 'oauth_token') &&
+      typeof (entry as StoredCredential).value === 'string'
+    ) {
+      credentials[provider] = entry as StoredCredential;
+    }
+  }
+  return credentials;
+};
+
+// Credentials never live in a project directory or a shell profile — they
+// are written once by `stratus setup` and read on every run, 0600 so only
+// the owner can read them.
+const saveCredentials = async (env: CliEnvironment, credentials: CredentialsFile): Promise<void> => {
+  const filePath = credentialsPath(env);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, `${JSON.stringify(credentials, null, 2)}\n`, { mode: 0o600 });
+  await chmod(filePath, 0o600);
+};
 
 const readOptionValue = (tokens: string[], index: number, flag: string): string => {
   const value = tokens[index + 1];
@@ -692,8 +765,14 @@ const resolveConfigPath = async (
     return path.resolve(cwd, explicit);
   }
 
-  for (const candidate of [DEFAULT_CONFIG_FILENAME, LEGACY_CONFIG_FILENAME]) {
-    const candidatePath = path.join(cwd, candidate);
+  // Project-local configs win; the global ~/.stratus/config.json written by
+  // `stratus setup` is the fallback that makes the CLI work from anywhere.
+  const candidates = [
+    path.join(cwd, DEFAULT_CONFIG_FILENAME),
+    path.join(cwd, LEGACY_CONFIG_FILENAME),
+    globalConfigPath(env),
+  ];
+  for (const candidatePath of candidates) {
     try {
       await readFile(candidatePath, 'utf8');
       return candidatePath;
@@ -819,12 +898,24 @@ export const resolveRuntimeConfig = async (
     ?? (fileConfigApplies ? fileConfig.apiKeyEnv : undefined)
     ?? (provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY');
 
-  const apiKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
+  // Env vars outrank the stored sign-in from `stratus setup`.
+  const envApiKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY)
     ?? readNonEmptyString(processEnv[String(apiKeyEnvName)]);
+  const storedCredential = envApiKey
+    ? undefined
+    : (await loadCredentials(env))[provider as CredentialProviderName];
 
-  if (!apiKey) {
-    throw new Error(`Missing API key for provider=${provider}. Set STRATUS_API_KEY or ${apiKeyEnvName}.`);
+  const apiKey = envApiKey
+    ?? (storedCredential?.type === 'api_key' ? storedCredential.value : undefined);
+  const authToken = provider === 'anthropic' && storedCredential?.type === 'oauth_token'
+    ? storedCredential.value
+    : undefined;
+
+  if (!apiKey && !authToken) {
+    throw new Error(
+      `Missing API key for provider=${provider}. Run \`stratus setup\` to sign in, or set STRATUS_API_KEY or ${apiKeyEnvName}.`,
+    );
   }
 
   const resolved: RuntimeConfig = provider === 'anthropic'
@@ -832,7 +923,8 @@ export const resolveRuntimeConfig = async (
         provider: 'anthropic',
         model: String(model),
         ...(baseUrl ? { baseUrl: String(baseUrl) } : {}),
-        apiKey: String(apiKey),
+        ...(apiKey ? { apiKey: String(apiKey) } : {}),
+        ...(authToken ? { authToken } : {}),
       }
     : {
         provider: 'openai',
@@ -868,7 +960,8 @@ const createRuntimeProvider = (config: RuntimeConfig): ModelProvider => {
   if (config.provider === 'anthropic') {
     return createAnthropicProvider({
       model: config.model,
-      apiKey: config.apiKey,
+      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+      ...(config.authToken ? { authToken: config.authToken } : {}),
       ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
       ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
       ...(config.fetch ? { fetch: config.fetch } : {}),
@@ -1260,6 +1353,7 @@ const quoteShellArg = (value: string): string =>
 
 interface SetupPrompter {
   ask(question: string): Promise<string>;
+  isClosed(): boolean;
   close(): void;
 }
 
@@ -1293,23 +1387,60 @@ const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPro
       const answer = pendingLines.shift() ?? '';
       return answer.trim();
     },
+    isClosed() {
+      return closed && pendingLines.length === 0;
+    },
     close() {
       readline.close();
     },
   };
 };
 
-const fileExists = async (filePath: string): Promise<boolean> => {
+// Live check that a pasted key actually works, so the user finds out inside
+// setup instead of on their first run.
+const verifyProviderKey = async (
+  provider: 'anthropic' | 'openai',
+  key: string,
+  baseUrl: string | undefined,
+  fetchImpl: typeof fetch | undefined,
+): Promise<{ status: 'ok' | 'rejected' | 'unreachable'; detail?: string }> => {
+  if (typeof fetchImpl !== 'function') {
+    return { status: 'unreachable', detail: 'fetch is unavailable' };
+  }
+
+  const root = (baseUrl ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_OPENAI_BASE_URL)).replace(/\/+$/, '');
+  const url = provider === 'anthropic' ? `${root}/v1/models` : `${root}/models`;
+  const headers = provider === 'anthropic'
+    ? { 'x-api-key': key, 'anthropic-version': '2023-06-01' }
+    : { authorization: `Bearer ${key}` };
+
   try {
-    await readFile(filePath, 'utf8');
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return false;
+    const response = await fetchImpl(url, { headers });
+    if (response.ok) {
+      return { status: 'ok' };
     }
-    throw error;
+    return { status: 'rejected', detail: `HTTP ${response.status}` };
+  } catch (error) {
+    return { status: 'unreachable', detail: error instanceof Error ? error.message : String(error) };
   }
 };
+
+const DEFAULT_SOUL_STARTER = [
+  'You are a helpful, warm generalist. Answer first, explain second, and',
+  'keep replies short unless the question genuinely needs depth. Use',
+  'memory.remember for durable facts about the people you work with.',
+].join('\n');
+
+interface SetupState {
+  provider: CliProviderName;
+  model?: string;
+  baseUrl?: string;
+  apiKeyEnv?: string;
+  systemPrompt?: string;
+  soulPath?: string;
+  credentials: CredentialsFile;
+  credentialsDirty: boolean;
+}
 
 export const runSetup = async (
   command: ParsedSetupCommand,
@@ -1319,184 +1450,449 @@ export const runSetup = async (
   const cwd = readWorkingDirectory(env);
   const processEnv = readProcessEnv(env);
 
-  // Mirror resolveConfigPath's precedence (--config, then STRATUS_CONFIG /
-  // STRATUSCLAW_CONFIG, then the default filename) so the file written here
-  // is the one `stratus run` actually loads afterwards.
+  // Config target: --config, then STRATUS_CONFIG / STRATUSCLAW_CONFIG, then
+  // the global ~/.stratus/config.json — the file `stratus run` falls back to
+  // from any directory, which is what makes setup a one-time step.
   const envConfigVar = readNonEmptyString(processEnv.STRATUS_CONFIG)
     ? 'STRATUS_CONFIG'
     : readNonEmptyString(processEnv.STRATUSCLAW_CONFIG)
       ? 'STRATUSCLAW_CONFIG'
       : undefined;
   const envConfigPath = envConfigVar ? String(processEnv[envConfigVar]).trim() : undefined;
-  const chosenPath = command.configPath ?? envConfigPath ?? DEFAULT_CONFIG_FILENAME;
-  const configPath = path.resolve(cwd, chosenPath);
+  const configPath = command.configPath
+    ? path.resolve(cwd, command.configPath)
+    : envConfigPath
+      ? path.resolve(cwd, envConfigPath)
+      : globalConfigPath(env);
   // A path passed via --config is not auto-discovered by `stratus run`, so
-  // suggested commands must carry it explicitly. Env-derived paths need no
-  // flag because `run` reads the same variable.
+  // suggested commands must carry it explicitly.
   const runConfigFlag = command.configPath ? ` --config ${quoteShellArg(command.configPath)}` : '';
+
+  // Seed from what is already configured, so re-running setup edits instead
+  // of clobbering.
+  let existing: CliConfigFile = {};
+  try {
+    existing = await loadConfigFile(configPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      writeLine(streams.stderr, `Warning: could not read ${configPath} (${error instanceof Error ? error.message : String(error)}); starting fresh.`);
+    }
+  }
+
+  const state: SetupState = {
+    provider: existing.provider ?? 'anthropic',
+    ...(existing.model ? { model: existing.model } : {}),
+    ...(existing.baseUrl ? { baseUrl: existing.baseUrl } : {}),
+    ...(existing.apiKeyEnv ? { apiKeyEnv: existing.apiKeyEnv } : {}),
+    ...(existing.systemPrompt ? { systemPrompt: existing.systemPrompt } : {}),
+    ...(existing.soul ? { soulPath: existing.soul } : {}),
+    credentials: await loadCredentials(env),
+    credentialsDirty: false,
+  };
+
   const prompter = createSetupPrompter(streams, env);
 
-  try {
-    writeLine(streams.stdout, 'Stratus Agent setup');
-    writeLine(streams.stdout, 'This walkthrough writes a stratus.config.json so `stratus run` works out of the box.');
-    writeLine(streams.stdout, 'Press Enter to accept the [default] for any question.');
-    if (!command.configPath && envConfigVar) {
-      writeLine(streams.stdout, `${envConfigVar} is set, so the config will be written to ${configPath}.`);
-    }
-    writeLine(streams.stdout);
+  const defaultModelFor = (provider: CliProviderName): string =>
+    provider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL;
+  const defaultKeyEnvFor = (provider: CliProviderName): string =>
+    provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
 
-    if (await fileExists(configPath)) {
-      const overwrite = await prompter.ask(`${configPath} already exists. Overwrite it? [y/N] `);
-      if (!/^y(es)?$/i.test(overwrite)) {
-        writeLine(streams.stdout, 'Keeping the existing config. Nothing was changed.');
-        return 0;
-      }
-      writeLine(streams.stdout);
+  const signInSummary = (): string => {
+    if (state.provider === 'demo') {
+      return 'no account needed';
     }
+    const credential = state.credentials[state.provider];
+    if (credential) {
+      return credential.type === 'oauth_token'
+        ? 'signed in with your Claude subscription'
+        : 'signed in with an API key';
+    }
+    const keyEnv = state.apiKeyEnv ?? defaultKeyEnvFor(state.provider);
+    if (readNonEmptyString(processEnv.STRATUS_API_KEY) ?? readNonEmptyString(processEnv[keyEnv])) {
+      return `using ${readNonEmptyString(processEnv.STRATUS_API_KEY) ? 'STRATUS_API_KEY' : keyEnv} from your environment`;
+    }
+    return 'not signed in yet';
+  };
 
-    const providerAnswer = await prompter.ask(
-      'Which provider do you want to use?\n  1) anthropic — Claude via the Anthropic API (needs an API key)\n  2) openai — any OpenAI-compatible API (needs an API key)\n  3) demo — built-in provider, no key required\nChoose [1]: ',
+  const agentSummary = (): string => {
+    if (!state.soulPath) {
+      return 'none — every run uses the built-in default agent';
+    }
+    return state.soulPath;
+  };
+
+  const storeCredential = (provider: CredentialProviderName, credential: StoredCredential): void => {
+    state.credentials[provider] = credential;
+    state.credentialsDirty = true;
+  };
+
+  const signInAnthropic = async (): Promise<void> => {
+    const answer = await prompter.ask(
+      'How should Stratus connect to Claude?\n'
+      + '  1) Claude subscription (Pro/Max) — sign in through Claude Code, no per-token cost\n'
+      + '  2) Anthropic API key — pay per use (console.anthropic.com)\n'
+      + '  3) Skip for now\n'
+      + 'Choose [1]: ',
     );
-    const provider: CliProviderName = providerAnswer === '3' || /^demo$/i.test(providerAnswer)
-      ? 'demo'
-      : providerAnswer === '2' || /^openai$/i.test(providerAnswer)
-        ? 'openai'
-        : 'anthropic';
 
-    // Exported STRATUS_*/STRATUSCLAW_* variables outrank the config file in
-    // resolveRuntimeConfig, so any conflicting value would make the suggested
-    // bare command behave differently from what setup just wrote. Detect each
-    // conflict, warn about it, and add the matching flag so the printed
-    // command wins regardless.
-    const detectEnvOverride = (
-      primary: string,
-      legacy: string,
-      chosen: string,
-      flagName?: string,
-    ): { envVar: string; envValue: string; flag?: string } | undefined => {
-      const envVar = readNonEmptyString(processEnv[primary])
-        ? primary
-        : readNonEmptyString(processEnv[legacy])
-          ? legacy
-          : undefined;
-      if (!envVar) {
-        return undefined;
+    if (answer === '3' || /^skip$/i.test(answer)) {
+      return;
+    }
+
+    if (answer === '2' || /^(api|key)/i.test(answer)) {
+      const key = await prompter.ask('Paste your Anthropic API key (starts with sk-ant-, Enter to skip): ');
+      if (!key) {
+        writeLine(streams.stdout, 'Skipped — you can sign in any time by re-running this menu.');
+        return;
       }
-      const envValue = String(processEnv[envVar]).trim();
-      if (envValue === chosen) {
+      writeLine(streams.stdout, 'Checking the key against the Anthropic API…');
+      const verdict = await verifyProviderKey('anthropic', key, undefined, env.fetch ?? globalThis.fetch);
+      if (verdict.status === 'ok') {
+        storeCredential('anthropic', { type: 'api_key', value: key });
+        writeLine(streams.stdout, '✓ Key verified — you are signed in to Anthropic.');
+      } else if (verdict.status === 'rejected') {
+        writeLine(streams.stdout, `✗ Anthropic rejected that key (${verdict.detail}). It was NOT saved — check console.anthropic.com and try again from this menu.`);
+      } else {
+        storeCredential('anthropic', { type: 'api_key', value: key });
+        writeLine(streams.stdout, `! Could not reach the Anthropic API to verify (${verdict.detail}). Saved the key anyway — it will be checked on your first run.`);
+      }
+      return;
+    }
+
+    // Default: subscription sign-in via Claude Code.
+    writeLine(streams.stdout, 'Your Claude Pro/Max subscription covers usage made through Claude Code.');
+    writeLine(streams.stdout, 'In another terminal on this machine, run:');
+    writeLine(streams.stdout, '  claude setup-token');
+    writeLine(streams.stdout, '(requires Claude Code installed and signed in to your Claude account)');
+    const token = await prompter.ask('Paste the setup token it prints (starts with sk-ant-oat, Enter to skip): ');
+    if (!token) {
+      writeLine(streams.stdout, 'Skipped — you can sign in any time by re-running this menu.');
+      return;
+    }
+    storeCredential('anthropic', { type: 'oauth_token', value: token });
+    writeLine(streams.stdout, '✓ Subscription token saved. It is verified on your first run.');
+  };
+
+  const signInOpenAI = async (): Promise<void> => {
+    const baseUrlAnswer = await prompter.ask(`API base URL [${state.baseUrl ?? DEFAULT_OPENAI_BASE_URL}]: `);
+    if (baseUrlAnswer) {
+      state.baseUrl = baseUrlAnswer;
+    }
+    const key = await prompter.ask('Paste your API key (Enter to skip): ');
+    if (!key) {
+      writeLine(streams.stdout, 'Skipped — you can sign in any time by re-running this menu.');
+      return;
+    }
+    writeLine(streams.stdout, 'Checking the key…');
+    const verdict = await verifyProviderKey('openai', key, state.baseUrl, env.fetch ?? globalThis.fetch);
+    if (verdict.status === 'ok') {
+      storeCredential('openai', { type: 'api_key', value: key });
+      writeLine(streams.stdout, '✓ Key verified — you are signed in.');
+    } else if (verdict.status === 'rejected') {
+      writeLine(streams.stdout, `✗ The API rejected that key (${verdict.detail}). It was NOT saved — try again from this menu.`);
+    } else {
+      storeCredential('openai', { type: 'api_key', value: key });
+      writeLine(streams.stdout, `! Could not reach the API to verify (${verdict.detail}). Saved the key anyway — it will be checked on your first run.`);
+    }
+  };
+
+  const chooseProvider = async (): Promise<void> => {
+    const answer = await prompter.ask(
+      'Which provider should power your agents?\n'
+      + '  1) Claude (Anthropic) — recommended\n'
+      + '  2) OpenAI-compatible — OpenAI, local models, or proxies\n'
+      + '  3) Demo — built-in fake model, offline, no account\n'
+      + 'Choose [1]: ',
+    );
+
+    if (answer === '3' || /^demo$/i.test(answer)) {
+      state.provider = 'demo';
+      writeLine(streams.stdout, 'Demo selected — no sign-in needed. Mention "echo" or "tool" in a prompt to see tool calls.');
+      return;
+    }
+
+    if (answer === '2' || /^openai$/i.test(answer)) {
+      state.provider = 'openai';
+      await signInOpenAI();
+      return;
+    }
+
+    state.provider = 'anthropic';
+    await signInAnthropic();
+  };
+
+  const chooseModel = async (): Promise<void> => {
+    if (state.provider === 'demo') {
+      writeLine(streams.stdout, 'The demo provider has no model to choose.');
+      return;
+    }
+    const answer = await prompter.ask(`Model [${state.model ?? defaultModelFor(state.provider)}]: `);
+    if (answer) {
+      state.model = answer;
+    }
+  };
+
+  const chooseAgent = async (): Promise<void> => {
+    const answer = await prompter.ask(
+      'Your default agent:\n'
+      + '  1) Create a new agent\n'
+      + '  2) Use an existing soul file\n'
+      + '  3) No default agent\n'
+      + 'Choose [1]: ',
+    );
+
+    if (answer === '3' || /^none$/i.test(answer)) {
+      delete state.soulPath;
+      writeLine(streams.stdout, 'Cleared — runs use the built-in default agent.');
+      return;
+    }
+
+    if (answer === '2') {
+      const soulAnswer = await prompter.ask('Path to the soul file: ');
+      if (!soulAnswer) {
+        return;
+      }
+      const resolved = path.resolve(cwd, soulAnswer);
+      try {
+        const soul = parseSoul(await readFile(resolved, 'utf8'), { seed: resolved });
+        state.soulPath = resolved;
+        writeLine(streams.stdout, `Loaded ${soul.agent.name} from ${resolved}.`);
+      } catch (error) {
+        writeLine(streams.stdout, `Could not load that soul file: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return;
+    }
+
+    const name = await prompter.ask('Name your agent (Enter to have one generated): ');
+    const instructions = await prompter.ask('Describe their personality in a sentence or two (Enter for a starter you can edit later): ');
+    const agent = defineAgent({
+      ...(name ? { name } : {}),
+      instructions: instructions || DEFAULT_SOUL_STARTER,
+    });
+    const soul = formatSoul({
+      agent,
+      ...(state.provider !== 'demo' ? { provider: state.provider, model: state.model ?? defaultModelFor(state.provider) } : {}),
+    });
+    const soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
+    await mkdir(path.dirname(soulPath), { recursive: true });
+    await writeFile(soulPath, soul);
+    state.soulPath = soulPath;
+    writeLine(streams.stdout, `Say hello to ${agent.name}.`);
+    writeLine(streams.stdout, `Their soul lives at ${soulPath} — edit it any time to change how they talk.`);
+  };
+
+  const buildTestRuntime = async (): Promise<RuntimeConfig | undefined> => {
+    let soul: ParsedSoul | undefined;
+    if (state.soulPath) {
+      try {
+        soul = parseSoul(await readFile(state.soulPath, 'utf8'), { seed: state.soulPath });
+      } catch (error) {
+        writeLine(streams.stdout, `Warning: could not load the soul file (${error instanceof Error ? error.message : String(error)}); testing without it.`);
+      }
+    }
+
+    if (state.provider === 'demo') {
+      return { provider: 'demo', ...(soul ? { soul } : {}) };
+    }
+
+    const credential = state.credentials[state.provider];
+    const keyEnv = state.apiKeyEnv ?? defaultKeyEnvFor(state.provider);
+    const envKey = readNonEmptyString(processEnv.STRATUS_API_KEY) ?? readNonEmptyString(processEnv[keyEnv]);
+    const model = state.model ?? defaultModelFor(state.provider);
+
+    if (state.provider === 'anthropic') {
+      const apiKey = credential?.type === 'api_key' ? credential.value : envKey;
+      const authToken = credential?.type === 'oauth_token' ? credential.value : undefined;
+      if (!apiKey && !authToken) {
+        writeLine(streams.stdout, 'You are not signed in yet — pick option 1 first (or export ANTHROPIC_API_KEY).');
         return undefined;
       }
       return {
-        envVar,
-        envValue,
-        ...(flagName ? { flag: `${flagName} ${quoteShellArg(chosen)}` } : {}),
+        provider: 'anthropic',
+        model,
+        ...(apiKey ? { apiKey } : {}),
+        ...(authToken ? { authToken } : {}),
+        ...(state.systemPrompt ? { systemPrompt: state.systemPrompt } : {}),
+        ...(env.fetch ? { fetch: env.fetch } : {}),
+        ...(soul ? { soul } : {}),
       };
+    }
+
+    const apiKey = credential?.type === 'api_key' ? credential.value : envKey;
+    if (!apiKey) {
+      writeLine(streams.stdout, 'You are not signed in yet — pick option 1 first (or export OPENAI_API_KEY).');
+      return undefined;
+    }
+    return {
+      provider: 'openai',
+      model,
+      baseUrl: state.baseUrl ?? DEFAULT_OPENAI_BASE_URL,
+      apiKey,
+      ...(state.systemPrompt ? { systemPrompt: state.systemPrompt } : {}),
+      ...(env.fetch ? { fetch: env.fetch } : {}),
+      ...(soul ? { soul } : {}),
     };
+  };
 
-    const warnAboutEnvOverrides = (
-      conflicts: Array<{ envVar: string; envValue: string; flag?: string }>,
-    ): void => {
-      for (const conflict of conflicts) {
-        writeLine(
-          streams.stdout,
-          `Note: ${conflict.envVar}=${conflict.envValue} is exported and takes precedence over the config file (run \`unset ${conflict.envVar}\` to clear it).`,
-        );
-      }
-      if (conflicts.some((conflict) => conflict.flag)) {
-        writeLine(streams.stdout, 'The suggested commands below include flags so they use what you just configured.');
-      }
-      if (conflicts.length > 0) {
-        writeLine(streams.stdout);
-      }
+  const testRun = async (): Promise<void> => {
+    const runtime = await buildTestRuntime();
+    if (!runtime) {
+      return;
+    }
+    writeLine(streams.stdout, `Running a quick hello (${formatRuntimeBanner(runtime).replace('Starting Stratus Agent local loop with ', '')})…`);
+    try {
+      const session = await runSingleLoop(
+        'Say hello and introduce yourself in one short sentence.',
+        streams,
+        { events: false, runtime, env },
+      );
+      printSessionSummary(session, streams);
+      writeLine(streams.stdout);
+    } catch (error) {
+      writeLine(streams.stdout, `Test run failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  const detectEnvOverride = (
+    primary: string,
+    legacy: string,
+    chosen: string,
+    flagName?: string,
+  ): { envVar: string; envValue: string; flag?: string } | undefined => {
+    const envVar = readNonEmptyString(processEnv[primary])
+      ? primary
+      : readNonEmptyString(processEnv[legacy])
+        ? legacy
+        : undefined;
+    if (!envVar) {
+      return undefined;
+    }
+    const envValue = String(processEnv[envVar]).trim();
+    if (envValue === chosen) {
+      return undefined;
+    }
+    return {
+      envVar,
+      envValue,
+      ...(flagName ? { flag: `${flagName} ${quoteShellArg(chosen)}` } : {}),
     };
+  };
 
-    if (provider === 'demo') {
-      const conflicts = [
-        detectEnvOverride('STRATUS_PROVIDER', 'STRATUSCLAW_PROVIDER', provider, '--provider'),
-      ].filter((conflict) => conflict !== undefined);
-      const extraFlags = conflicts.map((conflict) => ` ${conflict.flag}`).join('');
-
-      await writeFile(configPath, `${JSON.stringify({ provider: 'demo' }, null, 2)}\n`);
-      writeLine(streams.stdout);
-      writeLine(streams.stdout, `Wrote ${configPath}`);
-      writeLine(streams.stdout);
-      warnAboutEnvOverrides(conflicts);
-      writeLine(streams.stdout, 'You are ready to go — no API key needed. Try:');
-      writeLine(streams.stdout, `  stratus run${extraFlags}${runConfigFlag} "please use the echo tool"`);
-      writeLine(streams.stdout, '  stratus dashboard');
-      return 0;
+  const save = async (): Promise<void> => {
+    const config: Record<string, string> = { provider: state.provider };
+    if (state.provider !== 'demo') {
+      config.model = state.model ?? defaultModelFor(state.provider);
+    }
+    if (state.provider === 'openai') {
+      config.baseUrl = state.baseUrl ?? DEFAULT_OPENAI_BASE_URL;
+    }
+    if (state.apiKeyEnv) {
+      config.apiKeyEnv = state.apiKeyEnv;
+    }
+    if (state.systemPrompt) {
+      config.systemPrompt = state.systemPrompt;
+    }
+    if (state.soulPath) {
+      config.soul = state.soulPath;
     }
 
-    const defaultModel = provider === 'anthropic' ? DEFAULT_ANTHROPIC_MODEL : DEFAULT_OPENAI_MODEL;
-    const defaultApiKeyEnv = provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY';
-
-    const model = (await prompter.ask(`Model [${defaultModel}]: `)) || defaultModel;
-    // The Anthropic SDK knows its own endpoint, so only openai asks for one.
-    const baseUrl = provider === 'anthropic'
-      ? ''
-      : (await prompter.ask(`Base URL [${DEFAULT_OPENAI_BASE_URL}]: `)) || DEFAULT_OPENAI_BASE_URL;
-    const apiKeyEnv = (await prompter.ask(`Environment variable holding your API key [${defaultApiKeyEnv}]: `)) || defaultApiKeyEnv;
-    const systemPrompt = await prompter.ask('System prompt (optional, Enter to skip): ');
-
-    const config: Record<string, string> = { provider, model, apiKeyEnv };
-    if (baseUrl) {
-      config.baseUrl = baseUrl;
-    }
-    if (systemPrompt) {
-      config.systemPrompt = systemPrompt;
-    }
-
+    await mkdir(path.dirname(configPath), { recursive: true });
     await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
-
-    const conflicts = [
-      detectEnvOverride('STRATUS_PROVIDER', 'STRATUSCLAW_PROVIDER', provider, '--provider'),
-      detectEnvOverride('STRATUS_MODEL', 'STRATUSCLAW_MODEL', model, '--model'),
-      // With anthropic the SDK default endpoint is used (no configured URL),
-      // so an exported base URL is warn-only rather than flag-corrected.
-      detectEnvOverride('STRATUS_BASE_URL', 'STRATUSCLAW_BASE_URL', baseUrl, baseUrl ? '--base-url' : undefined),
-      // No run flag exists for the system prompt, so this one is warn-only.
-      detectEnvOverride('STRATUS_SYSTEM_PROMPT', 'STRATUSCLAW_SYSTEM_PROMPT', systemPrompt),
-    ].filter((conflict) => conflict !== undefined);
-    const extraFlags = conflicts.flatMap((conflict) => (conflict.flag ? [` ${conflict.flag}`] : [])).join('');
 
     writeLine(streams.stdout);
     writeLine(streams.stdout, `Wrote ${configPath}`);
+    if (state.credentialsDirty) {
+      await saveCredentials(env, state.credentials);
+      writeLine(streams.stdout, `Saved your sign-in to ${credentialsPath(env)} (readable only by you).`);
+    }
     writeLine(streams.stdout);
-    warnAboutEnvOverrides(conflicts);
 
-    // Readiness must mirror resolveRuntimeConfig's key lookup: a direct
-    // STRATUS_API_KEY wins, then an exported *_API_KEY_ENV redirects which
-    // variable is read, and only then does the config file's apiKeyEnv apply.
-    const keyEnvOverrideVar = readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
-      ? 'STRATUS_API_KEY_ENV'
-      : readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV)
-        ? 'STRATUSCLAW_API_KEY_ENV'
-        : undefined;
-    const effectiveApiKeyEnv = keyEnvOverrideVar ? String(processEnv[keyEnvOverrideVar]).trim() : apiKeyEnv;
-    const directKeyVar = readNonEmptyString(processEnv.STRATUS_API_KEY)
-      ? 'STRATUS_API_KEY'
-      : readNonEmptyString(processEnv.STRATUSCLAW_API_KEY)
-        ? 'STRATUSCLAW_API_KEY'
-        : undefined;
+    // Exported STRATUS_* variables outrank the config file, so warn when one
+    // would make `stratus run` behave differently from what was just saved.
+    const conflicts = [
+      detectEnvOverride('STRATUS_PROVIDER', 'STRATUSCLAW_PROVIDER', state.provider, '--provider'),
+      ...(state.provider !== 'demo'
+        ? [detectEnvOverride('STRATUS_MODEL', 'STRATUSCLAW_MODEL', state.model ?? defaultModelFor(state.provider), '--model')]
+        : []),
+      ...(state.provider === 'openai'
+        ? [detectEnvOverride('STRATUS_BASE_URL', 'STRATUSCLAW_BASE_URL', state.baseUrl ?? DEFAULT_OPENAI_BASE_URL, '--base-url')]
+        : [detectEnvOverride('STRATUS_BASE_URL', 'STRATUSCLAW_BASE_URL', '')]),
+      detectEnvOverride('STRATUS_SYSTEM_PROMPT', 'STRATUSCLAW_SYSTEM_PROMPT', state.systemPrompt ?? ''),
+    ].filter((conflict) => conflict !== undefined);
 
-    if (keyEnvOverrideVar && effectiveApiKeyEnv !== apiKeyEnv) {
-      writeLine(streams.stdout, `Note: ${keyEnvOverrideVar}=${effectiveApiKeyEnv} is exported and takes precedence over the config file's apiKeyEnv,`);
-      writeLine(streams.stdout, `so \`stratus run\` will read ${effectiveApiKeyEnv}. Run \`unset ${keyEnvOverrideVar}\` to use ${apiKeyEnv} instead.`);
+    for (const conflict of conflicts) {
+      writeLine(
+        streams.stdout,
+        `Note: ${conflict.envVar}=${conflict.envValue} is exported and takes precedence over the config file (run \`unset ${conflict.envVar}\` to clear it).`,
+      );
+    }
+    if (conflicts.some((conflict) => conflict.flag)) {
+      writeLine(streams.stdout, 'The suggested commands below include flags so they use what you just configured.');
+    }
+    if (conflicts.length > 0) {
       writeLine(streams.stdout);
     }
+    const extraFlags = conflicts.flatMap((conflict) => (conflict.flag ? [` ${conflict.flag}`] : [])).join('');
 
-    if (directKeyVar) {
-      writeLine(streams.stdout, `${directKeyVar} is set in your environment — you are ready to go. Try:`);
-    } else if (processEnv[effectiveApiKeyEnv]) {
-      writeLine(streams.stdout, `${effectiveApiKeyEnv} is set in your environment — you are ready to go. Try:`);
+    if (state.provider === 'demo') {
+      writeLine(streams.stdout, 'You are ready to go — no account needed. Try:');
+    } else if (readNonEmptyString(processEnv.STRATUS_API_KEY)) {
+      writeLine(streams.stdout, 'STRATUS_API_KEY is exported and takes precedence over your saved sign-in. You are ready to go. Try:');
+    } else if (state.credentials[state.provider]) {
+      writeLine(streams.stdout, `You are ${signInSummary()} — ready to go. Try:`);
     } else {
-      writeLine(streams.stdout, `${effectiveApiKeyEnv} is NOT set in your environment yet. Set it first:`);
-      writeLine(streams.stdout, `  export ${effectiveApiKeyEnv}=your-key`);
-      writeLine(streams.stdout);
-      writeLine(streams.stdout, 'Then try:');
+      const keyEnv = state.apiKeyEnv ?? defaultKeyEnvFor(state.provider);
+      if (readNonEmptyString(processEnv[keyEnv])) {
+        writeLine(streams.stdout, `${keyEnv} is set in your environment — you are ready to go. Try:`);
+      } else {
+        writeLine(streams.stdout, 'You are NOT signed in yet — re-run `stratus setup` and pick option 1, or:');
+        writeLine(streams.stdout, `  export ${keyEnv}=your-key`);
+        writeLine(streams.stdout);
+        writeLine(streams.stdout, 'Then try:');
+      }
     }
     writeLine(streams.stdout, `  stratus run${extraFlags}${runConfigFlag} "say hello"`);
     writeLine(streams.stdout, '  stratus dashboard');
+  };
+
+  try {
+    writeLine(streams.stdout, 'Stratus Agent setup');
+    writeLine(streams.stdout, 'Pick a provider, sign in, and create your agent — all from this menu.');
+    if (envConfigVar && !command.configPath) {
+      writeLine(streams.stdout, `${envConfigVar} is set, so the config will be written to ${configPath}.`);
+    }
+
+    while (true) {
+      writeLine(streams.stdout);
+      const choice = await prompter.ask(
+        `  1) Provider & sign-in   ${state.provider} — ${signInSummary()}\n`
+        + `  2) Model                ${state.provider === 'demo' ? 'n/a (demo)' : state.model ?? `${defaultModelFor(state.provider)} (default)`}\n`
+        + `  3) Agent                ${agentSummary()}\n`
+        + '  4) Test run             say hello with the current settings\n'
+        + '  5) Save & finish\n'
+        + 'Choose [1-5]: ',
+      );
+
+      if (prompter.isClosed() && choice === '') {
+        break;
+      }
+
+      if (choice === '1') {
+        await chooseProvider();
+      } else if (choice === '2') {
+        await chooseModel();
+      } else if (choice === '3') {
+        await chooseAgent();
+      } else if (choice === '4') {
+        await testRun();
+      } else if (choice === '5' || /^(save|done|finish|q(uit)?)$/i.test(choice)) {
+        break;
+      } else {
+        writeLine(streams.stdout, 'Pick a number between 1 and 5.');
+      }
+    }
+
+    await save();
     return 0;
   } finally {
     prompter.close();
