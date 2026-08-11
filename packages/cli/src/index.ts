@@ -123,6 +123,19 @@ interface CliConfigFile {
   systemPrompt?: string;
   /** Path to a soul file, resolved relative to the working directory. */
   soul?: string;
+  /** Model to retry with when the default model errors mid-run. */
+  fallbackModel?: string;
+  /** Provider serving the fallback model. Defaults to the main provider. */
+  fallbackProvider?: CliProviderName;
+}
+
+/** A resolved, ready-to-run fallback model (always a real provider). */
+interface FallbackRuntime {
+  provider: 'anthropic' | 'openai';
+  model: string;
+  baseUrl?: string;
+  apiKey?: string;
+  authToken?: string;
 }
 
 type RuntimeConfig =
@@ -135,6 +148,7 @@ type RuntimeConfig =
       systemPrompt?: string;
       fetch?: typeof fetch;
       soul?: ParsedSoul;
+      fallback?: FallbackRuntime;
     }
   | {
       provider: 'anthropic';
@@ -146,6 +160,7 @@ type RuntimeConfig =
       systemPrompt?: string;
       fetch?: typeof fetch;
       soul?: ParsedSoul;
+      fallback?: FallbackRuntime;
     };
 
 /** A stored sign-in for a provider, kept in ~/.stratus/credentials.json. */
@@ -749,6 +764,12 @@ const loadConfigFile = async (configPath: string): Promise<CliConfigFile> => {
   if (typeof config.soul === 'string' && config.soul.length > 0) {
     resolved.soul = config.soul;
   }
+  if (typeof config.fallbackModel === 'string' && config.fallbackModel.length > 0) {
+    resolved.fallbackModel = config.fallbackModel;
+  }
+  if (typeof config.fallbackProvider === 'string') {
+    resolved.fallbackProvider = parseProviderName(config.fallbackProvider, `config ${configPath}`);
+  }
 
   return resolved;
 };
@@ -898,13 +919,15 @@ export const resolveRuntimeConfig = async (
     ?? (fileConfigApplies ? fileConfig.apiKeyEnv : undefined)
     ?? (provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY');
 
+  const credentials = await loadCredentials(env);
+
   // Env vars outrank the stored sign-in from `stratus setup`.
   const envApiKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY)
     ?? readNonEmptyString(processEnv[String(apiKeyEnvName)]);
   const storedCredential = envApiKey
     ? undefined
-    : (await loadCredentials(env))[provider as CredentialProviderName];
+    : credentials[provider as CredentialProviderName];
 
   const apiKey = envApiKey
     ?? (storedCredential?.type === 'api_key' ? storedCredential.value : undefined);
@@ -949,12 +972,80 @@ export const resolveRuntimeConfig = async (
     resolved.soul = soul;
   }
 
+  // A configured fallback model kicks in when the default model errors
+  // mid-run. It needs its own working sign-in; without one the fallback is
+  // quietly skipped rather than failing the run it exists to rescue.
+  if (fileConfig.fallbackModel) {
+    const fallbackProvider = fileConfig.fallbackProvider ?? (provider as CliProviderName);
+    if (fallbackProvider !== 'demo') {
+      const fallbackEnvKeyName = fallbackProvider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY';
+      const fallbackCredential = credentials[fallbackProvider];
+      const fallbackApiKey = (fallbackProvider === provider ? apiKey : undefined)
+        ?? (fallbackCredential?.type === 'api_key' ? fallbackCredential.value : undefined)
+        ?? readNonEmptyString(processEnv[fallbackEnvKeyName]);
+      const fallbackAuthToken = fallbackProvider === 'anthropic' && fallbackCredential?.type === 'oauth_token'
+        ? fallbackCredential.value
+        : undefined;
+
+      if (fallbackApiKey || fallbackAuthToken) {
+        resolved.fallback = {
+          provider: fallbackProvider,
+          model: fileConfig.fallbackModel,
+          ...(fallbackProvider === 'openai'
+            ? { baseUrl: (fallbackProvider === provider ? String(baseUrl) : undefined) ?? DEFAULT_OPENAI_BASE_URL }
+            : {}),
+          ...(fallbackApiKey ? { apiKey: String(fallbackApiKey) } : {}),
+          ...(fallbackAuthToken ? { authToken: fallbackAuthToken } : {}),
+        };
+      }
+    }
+  }
+
   return resolved;
 };
 
-const createRuntimeProvider = (config: RuntimeConfig): ModelProvider => {
+// Wraps the fallback runtime as a provider: the primary model serves every
+// turn until it throws, then the run switches to the fallback for good.
+const createFallbackWrappedProvider = (
+  primary: ModelProvider,
+  fallback: ModelProvider,
+  onFallback: (error: unknown) => void,
+): ModelProvider => {
+  let usingFallback = false;
+
+  return {
+    name: primary.name,
+    async generate(request) {
+      if (!usingFallback) {
+        try {
+          return await primary.generate(request);
+        } catch (error) {
+          usingFallback = true;
+          onFallback(error);
+        }
+      }
+      return fallback.generate(request);
+    },
+  };
+};
+
+const createRuntimeProvider = (
+  config: RuntimeConfig,
+  onFallback?: (error: unknown) => void,
+): ModelProvider => {
   if (config.provider === 'demo') {
     return createDemoProvider();
+  }
+
+  if (config.fallback) {
+    const { fallback, ...primaryConfig } = config;
+    const primary = createRuntimeProvider(primaryConfig);
+    const fallbackProvider = createRuntimeProvider({
+      ...fallback,
+      ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
+      ...(config.fetch ? { fetch: config.fetch } : {}),
+    } as RuntimeConfig);
+    return createFallbackWrappedProvider(primary, fallbackProvider, onFallback ?? (() => {}));
   }
 
   if (config.provider === 'anthropic') {
@@ -1050,7 +1141,13 @@ export const runSingleLoop = async (
     });
   }
 
-  const runtimeProvider = createRuntimeProvider(options.runtime);
+  const runtimeProvider = createRuntimeProvider(options.runtime, (error) => {
+    const fallback = options.runtime.provider === 'demo' ? undefined : options.runtime.fallback;
+    writeLine(
+      streams.stderr,
+      `Warning: the default model failed (${error instanceof Error ? error.message : String(error)}); falling back to ${fallback?.model ?? 'the fallback model'}.`,
+    );
+  });
 
   const runner = new AgentRunner({
     provider: runtimeProvider,
@@ -1132,7 +1229,8 @@ const formatRuntimeBanner = (runtime: RuntimeConfig): string => {
     return `Starting Stratus Agent local loop with provider=demo${soulSuffix}`;
   }
 
-  return `Starting Stratus Agent local loop with provider=${runtime.provider} model=${runtime.model}${soulSuffix}`;
+  const fallbackSuffix = runtime.fallback ? ` fallback=${runtime.fallback.model}` : '';
+  return `Starting Stratus Agent local loop with provider=${runtime.provider} model=${runtime.model}${fallbackSuffix}${soulSuffix}`;
 };
 
 const escapeHtml = (value: string): string => value
@@ -1434,6 +1532,8 @@ const DEFAULT_SOUL_STARTER = [
 interface SetupState {
   provider: CliProviderName;
   model?: string;
+  fallbackModel?: string;
+  fallbackProvider?: CliProviderName;
   baseUrl?: string;
   apiKeyEnv?: string;
   systemPrompt?: string;
@@ -1441,6 +1541,16 @@ interface SetupState {
   credentials: CredentialsFile;
   credentialsDirty: boolean;
 }
+
+// Shown when live model listing is unavailable (e.g. subscription tokens
+// cannot call the models endpoint, or the machine is offline).
+const KNOWN_CLAUDE_MODELS = [
+  'claude-opus-5',
+  'claude-sonnet-5',
+  'claude-haiku-4-5',
+  'claude-opus-4-6',
+  'claude-sonnet-4-6',
+];
 
 export const runSetup = async (
   command: ParsedSetupCommand,
@@ -1486,6 +1596,8 @@ export const runSetup = async (
     ...(existing.apiKeyEnv ? { apiKeyEnv: existing.apiKeyEnv } : {}),
     ...(existing.systemPrompt ? { systemPrompt: existing.systemPrompt } : {}),
     ...(existing.soul ? { soulPath: existing.soul } : {}),
+    ...(existing.fallbackModel ? { fallbackModel: existing.fallbackModel } : {}),
+    ...(existing.fallbackProvider ? { fallbackProvider: existing.fallbackProvider } : {}),
     credentials: await loadCredentials(env),
     credentialsDirty: false,
   };
@@ -1496,6 +1608,47 @@ export const runSetup = async (
     provider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL;
   const defaultKeyEnvFor = (provider: CliProviderName): string =>
     provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+
+  const credentialLabel = (credential: StoredCredential): string =>
+    credential.type === 'oauth_token' ? 'Claude subscription' : 'API key';
+
+  const providerSignInStatus = (provider: CredentialProviderName): string => {
+    const credential = state.credentials[provider];
+    if (credential) {
+      return `signed in (${credentialLabel(credential)})`;
+    }
+    if (readNonEmptyString(processEnv[defaultKeyEnvFor(provider)])) {
+      return `using ${defaultKeyEnvFor(provider)} from your environment`;
+    }
+    return 'not signed in';
+  };
+
+  const providersSummary = (): string => {
+    const parts: string[] = [];
+    for (const provider of ['anthropic', 'openai'] as const) {
+      const credential = state.credentials[provider];
+      if (credential) {
+        parts.push(`${provider} (${credentialLabel(credential)})`);
+      } else if (readNonEmptyString(processEnv[defaultKeyEnvFor(provider)])) {
+        parts.push(`${provider} (env key)`);
+      }
+    }
+    if (parts.length === 0) {
+      return state.provider === 'demo' ? 'demo — offline, no account' : 'none signed in yet';
+    }
+    if (state.provider === 'demo') {
+      parts.push('default: demo');
+    }
+    return parts.join(' · ');
+  };
+
+  const modelsSummary = (): string => {
+    if (state.provider === 'demo') {
+      return 'demo (no model)';
+    }
+    const base = `default ${state.model ?? `${defaultModelFor(state.provider)} (default)`}`;
+    return state.fallbackModel ? `${base} · fallback ${state.fallbackModel}` : `${base} · no fallback`;
+  };
 
   const signInSummary = (): string => {
     if (state.provider === 'demo') {
@@ -1527,13 +1680,22 @@ export const runSetup = async (
   };
 
   const signInAnthropic = async (): Promise<void> => {
+    const signedIn = state.credentials.anthropic !== undefined;
     const answer = await prompter.ask(
       'How should Stratus connect to Claude?\n'
       + '  1) Claude subscription (Pro/Max) — sign in through Claude Code, no per-token cost\n'
       + '  2) Anthropic API key — pay per use (console.anthropic.com)\n'
       + '  3) Skip for now\n'
+      + (signedIn ? '  4) Sign out\n' : '')
       + 'Choose [1]: ',
     );
+
+    if (signedIn && (answer === '4' || /^sign ?out$/i.test(answer))) {
+      delete state.credentials.anthropic;
+      state.credentialsDirty = true;
+      writeLine(streams.stdout, 'Signed out of Anthropic.');
+      return;
+    }
 
     if (answer === '3' || /^skip$/i.test(answer)) {
       return;
@@ -1596,14 +1758,32 @@ export const runSetup = async (
     }
   };
 
-  const chooseProvider = async (): Promise<void> => {
+  // Signing in makes that provider the default only when the current
+  // default cannot actually run (demo, or a provider with no sign-in).
+  const maybeSwitchDefault = (provider: CredentialProviderName): void => {
+    if (state.provider === 'demo') {
+      state.provider = provider;
+      return;
+    }
+    if (state.provider !== provider && !state.credentials[state.provider]
+      && !readNonEmptyString(processEnv[defaultKeyEnvFor(state.provider)])) {
+      state.provider = provider;
+    }
+  };
+
+  const chooseProviders = async (): Promise<void> => {
     const answer = await prompter.ask(
-      'Which provider should power your agents?\n'
-      + '  1) Claude (Anthropic) — recommended\n'
-      + '  2) OpenAI-compatible — OpenAI, local models, or proxies\n'
+      'Providers — sign in to one or more:\n'
+      + `  1) Claude (Anthropic) — ${providerSignInStatus('anthropic')}\n`
+      + `  2) OpenAI-compatible — ${providerSignInStatus('openai')}\n`
       + '  3) Demo — built-in fake model, offline, no account\n'
+      + '  4) Back\n'
       + 'Choose [1]: ',
     );
+
+    if (answer === '4' || /^back$/i.test(answer)) {
+      return;
+    }
 
     if (answer === '3' || /^demo$/i.test(answer)) {
       state.provider = 'demo';
@@ -1612,24 +1792,154 @@ export const runSetup = async (
     }
 
     if (answer === '2' || /^openai$/i.test(answer)) {
-      state.provider = 'openai';
       await signInOpenAI();
+      if (state.credentials.openai) {
+        maybeSwitchDefault('openai');
+      }
       return;
     }
 
-    state.provider = 'anthropic';
     await signInAnthropic();
+    if (state.credentials.anthropic) {
+      maybeSwitchDefault('anthropic');
+    }
   };
 
-  const chooseModel = async (): Promise<void> => {
-    if (state.provider === 'demo') {
-      writeLine(streams.stdout, 'The demo provider has no model to choose.');
+  // Every model the current sign-ins can actually reach, fetched live where
+  // possible. Subscription tokens cannot call the models endpoint, so those
+  // fall back to the known Claude lineup.
+  const collectAvailableModels = async (): Promise<Array<{ provider: CredentialProviderName; id: string }>> => {
+    const fetchImpl = env.fetch ?? globalThis.fetch;
+    const models: Array<{ provider: CredentialProviderName; id: string }> = [];
+
+    for (const provider of ['anthropic', 'openai'] as const) {
+      const credential = state.credentials[provider];
+      const envKey = readNonEmptyString(processEnv[defaultKeyEnvFor(provider)]);
+      if (!credential && !envKey) {
+        continue;
+      }
+
+      if (provider === 'anthropic') {
+        if (credential?.type === 'oauth_token' || typeof fetchImpl !== 'function') {
+          models.push(...KNOWN_CLAUDE_MODELS.map((id) => ({ provider, id })));
+          continue;
+        }
+        try {
+          const response = await fetchImpl(`${DEFAULT_ANTHROPIC_BASE_URL}/v1/models?limit=100`, {
+            headers: { 'x-api-key': String(credential?.value ?? envKey), 'anthropic-version': '2023-06-01' },
+          });
+          const payload = await response.json() as { data?: Array<{ id?: string }> };
+          const ids = (payload.data ?? []).map((entry) => entry.id).filter((id): id is string => typeof id === 'string');
+          models.push(...(ids.length > 0 ? ids : KNOWN_CLAUDE_MODELS).map((id) => ({ provider, id })));
+        } catch {
+          models.push(...KNOWN_CLAUDE_MODELS.map((id) => ({ provider, id })));
+        }
+        continue;
+      }
+
+      if (typeof fetchImpl !== 'function') {
+        continue;
+      }
+      try {
+        const root = (state.baseUrl ?? DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '');
+        const response = await fetchImpl(`${root}/models`, {
+          headers: { authorization: `Bearer ${String(credential?.value ?? envKey)}` },
+        });
+        const payload = await response.json() as { data?: Array<{ id?: string }> };
+        const ids = (payload.data ?? [])
+          .map((entry) => entry.id)
+          .filter((id): id is string => typeof id === 'string')
+          .sort();
+        models.push(...ids.map((id) => ({ provider, id })));
+      } catch {
+        // No reachable model list for this provider; skip it.
+      }
+    }
+
+    return models;
+  };
+
+  const pickModel = async (kind: 'default' | 'fallback'): Promise<void> => {
+    const available = await collectAvailableModels();
+    if (available.length === 0) {
+      writeLine(streams.stdout, 'No models available yet — sign in to a provider first (menu 1).');
       return;
     }
-    const answer = await prompter.ask(`Model [${state.model ?? defaultModelFor(state.provider)}]: `);
-    if (answer) {
-      state.model = answer;
+
+    const shown = available.slice(0, 30);
+    const lines = shown.map((entry, index) => `  ${index + 1}) ${entry.id} — ${entry.provider}`);
+    if (available.length > shown.length) {
+      lines.push(`  …and ${available.length - shown.length} more — type the model id instead.`);
     }
+    const answer = await prompter.ask(
+      `Available models:\n${lines.join('\n')}\nChoose a number, or type a model id [1]: `,
+    );
+
+    let choice: { provider: CredentialProviderName; id: string } | undefined;
+    if (!answer) {
+      choice = shown[0];
+    } else if (/^\d+$/.test(answer)) {
+      choice = shown[Number(answer) - 1];
+      if (!choice) {
+        writeLine(streams.stdout, `Pick a number between 1 and ${shown.length}.`);
+        return;
+      }
+    } else if (answer.includes(':')) {
+      const [providerPart, ...idParts] = answer.split(':');
+      const id = idParts.join(':').trim();
+      if ((providerPart === 'anthropic' || providerPart === 'openai') && id) {
+        choice = { provider: providerPart, id };
+      } else {
+        writeLine(streams.stdout, 'Use provider:model, e.g. anthropic:claude-opus-5.');
+        return;
+      }
+    } else {
+      const inferred = state.provider !== 'demo' ? state.provider : available[0]!.provider;
+      choice = { provider: inferred, id: answer };
+    }
+
+    if (!choice) {
+      return;
+    }
+
+    if (kind === 'default') {
+      state.provider = choice.provider;
+      state.model = choice.id;
+      writeLine(streams.stdout, `Default model set to ${choice.id} (${choice.provider}).`);
+    } else {
+      state.fallbackProvider = choice.provider;
+      state.fallbackModel = choice.id;
+      if (choice.id === (state.model ?? defaultModelFor(state.provider)) && choice.provider === state.provider) {
+        writeLine(streams.stdout, 'Note: the fallback matches the default model, so it will not add resilience.');
+      }
+      writeLine(streams.stdout, `Fallback model set to ${choice.id} (${choice.provider}) — used when the default model errors mid-run.`);
+    }
+  };
+
+  const chooseModels = async (): Promise<void> => {
+    const answer = await prompter.ask(
+      `Models — ${modelsSummary()}\n`
+      + '  1) Choose the default model\n'
+      + '  2) Choose a fallback model\n'
+      + '  3) Clear the fallback\n'
+      + '  4) Back\n'
+      + 'Choose [1]: ',
+    );
+
+    if (answer === '2') {
+      await pickModel('fallback');
+      return;
+    }
+    if (answer === '3') {
+      delete state.fallbackModel;
+      delete state.fallbackProvider;
+      writeLine(streams.stdout, 'Fallback cleared.');
+      return;
+    }
+    if (answer === '4' || /^back$/i.test(answer)) {
+      return;
+    }
+    await pickModel('default');
   };
 
   const chooseAgent = async (): Promise<void> => {
@@ -1795,6 +2105,10 @@ export const runSetup = async (
     if (state.soulPath) {
       config.soul = state.soulPath;
     }
+    if (state.provider !== 'demo' && state.fallbackModel) {
+      config.fallbackModel = state.fallbackModel;
+      config.fallbackProvider = state.fallbackProvider ?? state.provider;
+    }
 
     await mkdir(path.dirname(configPath), { recursive: true });
     await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
@@ -1865,8 +2179,8 @@ export const runSetup = async (
     while (true) {
       writeLine(streams.stdout);
       const choice = await prompter.ask(
-        `  1) Provider & sign-in   ${state.provider} — ${signInSummary()}\n`
-        + `  2) Model                ${state.provider === 'demo' ? 'n/a (demo)' : state.model ?? `${defaultModelFor(state.provider)} (default)`}\n`
+        `  1) Providers            ${providersSummary()}\n`
+        + `  2) Models               ${modelsSummary()}\n`
         + `  3) Agent                ${agentSummary()}\n`
         + '  4) Test run             say hello with the current settings\n'
         + '  5) Save & finish\n'
@@ -1878,9 +2192,9 @@ export const runSetup = async (
       }
 
       if (choice === '1') {
-        await chooseProvider();
+        await chooseProviders();
       } else if (choice === '2') {
-        await chooseModel();
+        await chooseModels();
       } else if (choice === '3') {
         await chooseAgent();
       } else if (choice === '4') {

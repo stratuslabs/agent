@@ -1320,3 +1320,124 @@ test('run uses the stored sign-in from the global config and credentials', async
   });
   assert.deepEqual(envWins, { provider: 'anthropic', apiKey: 'env-key', model: 'claude-opus-5' });
 });
+
+test('setup Models menu picks default and fallback from live available models', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+
+  const routedFetch = (async (url: any) => {
+    const target = String(url);
+    if (target.includes('api.anthropic.com')) {
+      return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }, { id: 'claude-sonnet-5' }] }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
+  }) as typeof fetch;
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: routedFetch,
+      setupInput: Readable.from([
+        '1\n', '1\n', '2\n', 'sk-ant-key\n',      // Providers → Claude → API key
+        '1\n', '2\n', '\n', 'sk-openai-key\n',    // Providers → OpenAI → default base URL → key
+        '2\n', '1\n', '2\n',                      // Models → default → claude-sonnet-5
+        '2\n', '2\n', '3\n',                      // Models → fallback → gpt-4.1-mini
+        '5\n',
+      ]),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /1\) claude-opus-5 — anthropic/);
+  assert.match(output.stdout, /3\) gpt-4\.1-mini — openai/);
+  assert.match(output.stdout, /Default model set to claude-sonnet-5 \(anthropic\)\./);
+  assert.match(output.stdout, /Fallback model set to gpt-4\.1-mini \(openai\)/);
+  assert.match(output.stdout, /default claude-sonnet-5 · fallback gpt-4\.1-mini/);
+
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config, {
+    provider: 'anthropic',
+    model: 'claude-sonnet-5',
+    fallbackModel: 'gpt-4.1-mini',
+    fallbackProvider: 'openai',
+  });
+
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials, {
+    anthropic: { type: 'api_key', value: 'sk-ant-key' },
+    openai: { type: 'api_key', value: 'sk-openai-key' },
+  });
+});
+
+test('resolveRuntimeConfig resolves a fallback model with its own sign-in', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    fallbackModel: 'gpt-4.1-mini',
+    fallbackProvider: 'openai',
+  }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    anthropic: { type: 'api_key', value: 'sk-ant' },
+    openai: { type: 'api_key', value: 'sk-openai' },
+  }));
+
+  const baseCommand = { command: 'run' as const, prompt: 'hello', format: 'text' as const, events: true };
+  const runtime = await resolveRuntimeConfig(baseCommand, { cwd: elsewhere, homeDir: home, processEnv: {} });
+
+  assert.equal(runtime.provider, 'anthropic');
+  assert.deepEqual(runtime.provider === 'anthropic' && runtime.fallback, {
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://api.openai.com/v1',
+    apiKey: 'sk-openai',
+  });
+
+  // Without a working sign-in for the fallback provider, the fallback is
+  // skipped rather than failing the run.
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    anthropic: { type: 'api_key', value: 'sk-ant' },
+  }));
+  const withoutFallbackAuth = await resolveRuntimeConfig(baseCommand, { cwd: elsewhere, homeDir: home, processEnv: {} });
+  assert.equal(withoutFallbackAuth.provider === 'anthropic' && withoutFallbackAuth.fallback, undefined);
+});
+
+test('runCli fails over to the fallback model when the default model errors', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  await writeFile(path.join(tempDir, 'stratus.config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    fallbackModel: 'gpt-4.1-mini',
+    fallbackProvider: 'openai',
+  }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'say hello'],
+    streams,
+    env: {
+      cwd: tempDir,
+      homeDir: tempHome,
+      processEnv: { ANTHROPIC_API_KEY: 'sk-ant', OPENAI_API_KEY: 'sk-openai' },
+      fetch: (async (url: any) => {
+        if (String(url).includes('api.anthropic.com')) {
+          return new Response(JSON.stringify({ error: { type: 'authentication_error', message: 'bad key' } }), { status: 401 });
+        }
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: 'Hello from the fallback model.' } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /provider=anthropic model=claude-opus-5 fallback=gpt-4\.1-mini/);
+  assert.match(output.stderr, /the default model failed .*falling back to gpt-4\.1-mini/);
+  assert.match(output.stdout, /\[assistant\] Hello from the fallback model\./);
+});

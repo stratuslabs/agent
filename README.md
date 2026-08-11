@@ -114,6 +114,7 @@ Setup is the whole onboarding: a small menu where you pick a provider, sign in, 
 - **Sign in from the menu.** For Claude, choose how you pay: **Claude subscription (Pro/Max)** — sign in through Claude Code (`claude setup-token`) so usage is covered by your plan — or **Anthropic API key**, pasted straight into the prompt and verified against the live API before it's accepted. OpenAI-compatible keys work the same way.
 - **Credentials are stored for you** in `~/.stratus/credentials.json` (owner-read-only), and settings in `~/.stratus/config.json`, so `stratus run` works from any directory afterwards. A project-local `stratus.config.json` still wins when present, and env vars outrank both.
 - **Create your agent inside setup** — name them (or let Stratus name them), describe their personality, and their soul file lands in `~/.stratus/agents/` ready to edit.
+- **Default and fallback models.** The Models menu lists every model your sign-ins can actually reach (fetched live from the provider APIs) and lets you pick a **default** and a **fallback** — when the default model errors mid-run, the run automatically retries on the fallback, even across providers.
 - **Test without leaving the menu** — option 4 runs a real "say hello" with your current settings.
 
 Prefer doing it by hand? Copy `stratus.config.json.example` into your project instead.
