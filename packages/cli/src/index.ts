@@ -127,6 +127,8 @@ interface CliConfigFile {
   fallbackModel?: string;
   /** Provider serving the fallback model. Defaults to the main provider. */
   fallbackProvider?: CliProviderName;
+  /** Base URL for an openai-compatible fallback (e.g. a local model). */
+  fallbackBaseUrl?: string;
 }
 
 /** A resolved, ready-to-run fallback model (always a real provider). */
@@ -770,6 +772,9 @@ const loadConfigFile = async (configPath: string): Promise<CliConfigFile> => {
   if (typeof config.fallbackProvider === 'string') {
     resolved.fallbackProvider = parseProviderName(config.fallbackProvider, `config ${configPath}`);
   }
+  if (typeof config.fallbackBaseUrl === 'string' && config.fallbackBaseUrl.length > 0) {
+    resolved.fallbackBaseUrl = config.fallbackBaseUrl;
+  }
 
   return resolved;
 };
@@ -978,21 +983,27 @@ export const resolveRuntimeConfig = async (
   if (fileConfig.fallbackModel) {
     const fallbackProvider = fileConfig.fallbackProvider ?? (provider as CliProviderName);
     if (fallbackProvider !== 'demo') {
-      const fallbackEnvKeyName = fallbackProvider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY';
-      const fallbackCredential = credentials[fallbackProvider];
+      // Same precedence as the primary sign-in: environment keys outrank
+      // the stored credential.
+      const fallbackEnvKey = readNonEmptyString(processEnv[fallbackProvider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY']);
+      const fallbackCredential = fallbackEnvKey ? undefined : credentials[fallbackProvider];
       const fallbackApiKey = (fallbackProvider === provider ? apiKey : undefined)
-        ?? (fallbackCredential?.type === 'api_key' ? fallbackCredential.value : undefined)
-        ?? readNonEmptyString(processEnv[fallbackEnvKeyName]);
-      const fallbackAuthToken = fallbackProvider === 'anthropic' && fallbackCredential?.type === 'oauth_token'
+        ?? fallbackEnvKey
+        ?? (fallbackCredential?.type === 'api_key' ? fallbackCredential.value : undefined);
+      const fallbackAuthToken = fallbackProvider !== provider && fallbackProvider === 'anthropic' && fallbackCredential?.type === 'oauth_token'
         ? fallbackCredential.value
-        : undefined;
+        : (fallbackProvider === provider ? authToken : undefined);
 
       if (fallbackApiKey || fallbackAuthToken) {
         resolved.fallback = {
           provider: fallbackProvider,
           model: fileConfig.fallbackModel,
           ...(fallbackProvider === 'openai'
-            ? { baseUrl: (fallbackProvider === provider ? String(baseUrl) : undefined) ?? DEFAULT_OPENAI_BASE_URL }
+            ? {
+                baseUrl: fileConfig.fallbackBaseUrl
+                  ?? (fallbackProvider === provider ? String(baseUrl) : undefined)
+                  ?? DEFAULT_OPENAI_BASE_URL,
+              }
             : {}),
           ...(fallbackApiKey ? { apiKey: String(fallbackApiKey) } : {}),
           ...(fallbackAuthToken ? { authToken: fallbackAuthToken } : {}),
@@ -1451,13 +1462,34 @@ const quoteShellArg = (value: string): string =>
 
 interface SetupPrompter {
   ask(question: string): Promise<string>;
+  /** Like ask, but typed characters are not echoed on interactive TTYs. */
+  askSecret(question: string): Promise<string>;
   isClosed(): boolean;
   close(): void;
 }
 
 const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPrompter => {
   const input = env.setupInput ?? process.stdin;
-  const readline = createInterface({ input, terminal: false });
+  // On a real TTY the readline must own the terminal so we can suppress the
+  // echo of pasted secrets; piped input (tests, scripts) never echoes.
+  const interactive = env.setupInput === undefined && process.stdin.isTTY === true;
+  const readline = createInterface(
+    interactive
+      ? { input, output: process.stdout, terminal: true }
+      : { input, terminal: false },
+  );
+  let secretMode = false;
+  if (interactive) {
+    const internal = readline as unknown as { _writeToOutput?: (chunk: string) => void };
+    const original = internal._writeToOutput?.bind(readline);
+    internal._writeToOutput = (chunk: string) => {
+      if (!secretMode) {
+        original?.(chunk);
+      }
+      // Secrets: swallow the echo entirely — the prompt itself is written
+      // through streams.stdout before secretMode turns on.
+    };
+  }
   const pendingLines: string[] = [];
   let closed = false;
 
@@ -1468,22 +1500,35 @@ const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPro
     closed = true;
   });
 
+  const nextLine = async (): Promise<string> => {
+    while (pendingLines.length === 0) {
+      if (closed) {
+        return '';
+      }
+      await new Promise<void>((resolve) => {
+        readline.once('line', () => resolve());
+        readline.once('close', () => resolve());
+      });
+    }
+    return (pendingLines.shift() ?? '').trim();
+  };
+
   return {
     async ask(question) {
       streams.stdout.write(question);
-
-      while (pendingLines.length === 0) {
-        if (closed) {
-          return '';
+      return nextLine();
+    },
+    async askSecret(question) {
+      streams.stdout.write(question);
+      secretMode = true;
+      try {
+        return await nextLine();
+      } finally {
+        secretMode = false;
+        if (interactive) {
+          streams.stdout.write('\n');
         }
-        await new Promise<void>((resolve) => {
-          readline.once('line', () => resolve());
-          readline.once('close', () => resolve());
-        });
       }
-
-      const answer = pendingLines.shift() ?? '';
-      return answer.trim();
     },
     isClosed() {
       return closed && pendingLines.length === 0;
@@ -1517,7 +1562,13 @@ const verifyProviderKey = async (
     if (response.ok) {
       return { status: 'ok' };
     }
-    return { status: 'rejected', detail: `HTTP ${response.status}` };
+    // Only an explicit auth failure condemns the key. Compatible endpoints
+    // (local models, proxies) often lack GET /models entirely — a 404/405
+    // there says nothing about the key, so it stays saveable.
+    if (response.status === 401 || response.status === 403) {
+      return { status: 'rejected', detail: `HTTP ${response.status}` };
+    }
+    return { status: 'unreachable', detail: `the endpoint did not support a key check (HTTP ${response.status})` };
   } catch (error) {
     return { status: 'unreachable', detail: error instanceof Error ? error.message : String(error) };
   }
@@ -1534,6 +1585,7 @@ interface SetupState {
   model?: string;
   fallbackModel?: string;
   fallbackProvider?: CliProviderName;
+  fallbackBaseUrl?: string;
   baseUrl?: string;
   apiKeyEnv?: string;
   systemPrompt?: string;
@@ -1597,7 +1649,12 @@ export const runSetup = async (
     ...(existing.systemPrompt ? { systemPrompt: existing.systemPrompt } : {}),
     ...(existing.soul ? { soulPath: existing.soul } : {}),
     ...(existing.fallbackModel ? { fallbackModel: existing.fallbackModel } : {}),
-    ...(existing.fallbackProvider ? { fallbackProvider: existing.fallbackProvider } : {}),
+    // Pin an implicit fallback provider now, so a later default-provider
+    // switch cannot silently change what the fallback means.
+    ...(existing.fallbackModel || existing.fallbackProvider
+      ? { fallbackProvider: existing.fallbackProvider ?? existing.provider ?? 'anthropic' }
+      : {}),
+    ...(existing.fallbackBaseUrl ? { fallbackBaseUrl: existing.fallbackBaseUrl } : {}),
     credentials: await loadCredentials(env),
     credentialsDirty: false,
   };
@@ -1702,7 +1759,7 @@ export const runSetup = async (
     }
 
     if (answer === '2' || /^(api|key)/i.test(answer)) {
-      const key = await prompter.ask('Paste your Anthropic API key (starts with sk-ant-, Enter to skip): ');
+      const key = await prompter.askSecret('Paste your Anthropic API key (starts with sk-ant-, Enter to skip; input is hidden): ');
       if (!key) {
         writeLine(streams.stdout, 'Skipped — you can sign in any time by re-running this menu.');
         return;
@@ -1726,7 +1783,7 @@ export const runSetup = async (
     writeLine(streams.stdout, 'In another terminal on this machine, run:');
     writeLine(streams.stdout, '  claude setup-token');
     writeLine(streams.stdout, '(requires Claude Code installed and signed in to your Claude account)');
-    const token = await prompter.ask('Paste the setup token it prints (starts with sk-ant-oat, Enter to skip): ');
+    const token = await prompter.askSecret('Paste the setup token it prints (starts with sk-ant-oat, Enter to skip; input is hidden): ');
     if (!token) {
       writeLine(streams.stdout, 'Skipped — you can sign in any time by re-running this menu.');
       return;
@@ -1740,7 +1797,7 @@ export const runSetup = async (
     if (baseUrlAnswer) {
       state.baseUrl = baseUrlAnswer;
     }
-    const key = await prompter.ask('Paste your API key (Enter to skip): ');
+    const key = await prompter.askSecret('Paste your API key (Enter to skip; input is hidden): ');
     if (!key) {
       writeLine(streams.stdout, 'Skipped — you can sign in any time by re-running this menu.');
       return;
@@ -1758,16 +1815,42 @@ export const runSetup = async (
     }
   };
 
-  // Signing in makes that provider the default only when the current
-  // default cannot actually run (demo, or a provider with no sign-in).
-  const maybeSwitchDefault = (provider: CredentialProviderName): void => {
-    if (state.provider === 'demo') {
-      state.provider = provider;
+  // Changing the default provider invalidates settings that were chosen
+  // for the old one: the model and apiKeyEnv are cleared (defaults take
+  // over), while the openai base URL is kept — it belongs to the openai
+  // sign-in and still serves openai fallbacks. A soul that pins a provider
+  // outranks the config at run time, so that earns a warning, not a reset.
+  const switchDefaultProvider = async (next: CliProviderName): Promise<void> => {
+    if (state.provider === next) {
       return;
     }
-    if (state.provider !== provider && !state.credentials[state.provider]
-      && !readNonEmptyString(processEnv[defaultKeyEnvFor(state.provider)])) {
-      state.provider = provider;
+    state.provider = next;
+    delete state.model;
+    delete state.apiKeyEnv;
+    if (state.soulPath) {
+      try {
+        const soul = parseSoul(await readFile(state.soulPath, 'utf8'), { seed: state.soulPath });
+        if (soul.provider && soul.provider !== next) {
+          writeLine(
+            streams.stdout,
+            `Heads up: your default agent (${soul.agent.name}) pins provider ${soul.provider} in their soul, which outranks this choice at run time. Edit ${state.soulPath} or clear the agent (menu 3).`,
+          );
+        }
+      } catch {
+        // A broken soul file surfaces when it is actually used.
+      }
+    }
+  };
+
+  // Signing in makes that provider the default only when the current
+  // default cannot actually run (demo, or a provider with no sign-in).
+  const maybeSwitchDefault = async (provider: CredentialProviderName): Promise<void> => {
+    if (
+      state.provider === 'demo'
+      || (state.provider !== provider && !state.credentials[state.provider]
+        && !readNonEmptyString(processEnv[defaultKeyEnvFor(state.provider)]))
+    ) {
+      await switchDefaultProvider(provider);
     }
   };
 
@@ -1786,7 +1869,7 @@ export const runSetup = async (
     }
 
     if (answer === '3' || /^demo$/i.test(answer)) {
-      state.provider = 'demo';
+      await switchDefaultProvider('demo');
       writeLine(streams.stdout, 'Demo selected — no sign-in needed. Mention "echo" or "tool" in a prompt to see tool calls.');
       return;
     }
@@ -1794,14 +1877,14 @@ export const runSetup = async (
     if (answer === '2' || /^openai$/i.test(answer)) {
       await signInOpenAI();
       if (state.credentials.openai) {
-        maybeSwitchDefault('openai');
+        await maybeSwitchDefault('openai');
       }
       return;
     }
 
     await signInAnthropic();
     if (state.credentials.anthropic) {
-      maybeSwitchDefault('anthropic');
+      await maybeSwitchDefault('anthropic');
     }
   };
 
@@ -1894,7 +1977,11 @@ export const runSetup = async (
         return;
       }
     } else {
-      const inferred = state.provider !== 'demo' ? state.provider : available[0]!.provider;
+      // A typed id that appears in the collected list belongs to that
+      // provider, wherever the default currently points.
+      const listed = available.find((entry) => entry.id === answer);
+      const inferred = listed?.provider
+        ?? (state.provider !== 'demo' ? state.provider : available[0]!.provider);
       choice = { provider: inferred, id: answer };
     }
 
@@ -1903,12 +1990,17 @@ export const runSetup = async (
     }
 
     if (kind === 'default') {
-      state.provider = choice.provider;
+      await switchDefaultProvider(choice.provider);
       state.model = choice.id;
       writeLine(streams.stdout, `Default model set to ${choice.id} (${choice.provider}).`);
     } else {
       state.fallbackProvider = choice.provider;
       state.fallbackModel = choice.id;
+      if (choice.provider === 'openai' && state.baseUrl) {
+        state.fallbackBaseUrl = state.baseUrl;
+      } else {
+        delete state.fallbackBaseUrl;
+      }
       if (choice.id === (state.model ?? defaultModelFor(state.provider)) && choice.provider === state.provider) {
         writeLine(streams.stdout, 'Note: the fallback matches the default model, so it will not add resilience.');
       }
@@ -2005,13 +2097,15 @@ export const runSetup = async (
       return { provider: 'demo', ...(soul ? { soul } : {}) };
     }
 
-    const credential = state.credentials[state.provider];
+    // Mirror resolveRuntimeConfig exactly: environment keys outrank the
+    // stored sign-in, so the inline test exercises what a real run will use.
     const keyEnv = state.apiKeyEnv ?? defaultKeyEnvFor(state.provider);
     const envKey = readNonEmptyString(processEnv.STRATUS_API_KEY) ?? readNonEmptyString(processEnv[keyEnv]);
+    const credential = envKey ? undefined : state.credentials[state.provider];
     const model = state.model ?? defaultModelFor(state.provider);
 
     if (state.provider === 'anthropic') {
-      const apiKey = credential?.type === 'api_key' ? credential.value : envKey;
+      const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);
       const authToken = credential?.type === 'oauth_token' ? credential.value : undefined;
       if (!apiKey && !authToken) {
         writeLine(streams.stdout, 'You are not signed in yet — pick option 1 first (or export ANTHROPIC_API_KEY).');
@@ -2028,7 +2122,7 @@ export const runSetup = async (
       };
     }
 
-    const apiKey = credential?.type === 'api_key' ? credential.value : envKey;
+    const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);
     if (!apiKey) {
       writeLine(streams.stdout, 'You are not signed in yet — pick option 1 first (or export OPENAI_API_KEY).');
       return undefined;
@@ -2108,6 +2202,9 @@ export const runSetup = async (
     if (state.provider !== 'demo' && state.fallbackModel) {
       config.fallbackModel = state.fallbackModel;
       config.fallbackProvider = state.fallbackProvider ?? state.provider;
+      if (config.fallbackProvider === 'openai' && state.fallbackBaseUrl) {
+        config.fallbackBaseUrl = state.fallbackBaseUrl;
+      }
     }
 
     await mkdir(path.dirname(configPath), { recursive: true });

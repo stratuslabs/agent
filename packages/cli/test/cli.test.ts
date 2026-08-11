@@ -1343,7 +1343,7 @@ test('setup Models menu picks default and fallback from live available models', 
       fetch: routedFetch,
       setupInput: Readable.from([
         '1\n', '1\n', '2\n', 'sk-ant-key\n',      // Providers → Claude → API key
-        '1\n', '2\n', '\n', 'sk-openai-key\n',    // Providers → OpenAI → default base URL → key
+        '1\n', '2\n', 'https://local.test/v1\n', 'sk-openai-key\n', // Providers → OpenAI → custom base URL → key
         '2\n', '1\n', '2\n',                      // Models → default → claude-sonnet-5
         '2\n', '2\n', '3\n',                      // Models → fallback → gpt-4.1-mini
         '5\n',
@@ -1364,6 +1364,7 @@ test('setup Models menu picks default and fallback from live available models', 
     model: 'claude-sonnet-5',
     fallbackModel: 'gpt-4.1-mini',
     fallbackProvider: 'openai',
+    fallbackBaseUrl: 'https://local.test/v1',
   });
 
   const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
@@ -1382,6 +1383,7 @@ test('resolveRuntimeConfig resolves a fallback model with its own sign-in', asyn
     model: 'claude-opus-5',
     fallbackModel: 'gpt-4.1-mini',
     fallbackProvider: 'openai',
+    fallbackBaseUrl: 'https://local.test/v1',
   }));
   await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
     anthropic: { type: 'api_key', value: 'sk-ant' },
@@ -1395,9 +1397,21 @@ test('resolveRuntimeConfig resolves a fallback model with its own sign-in', asyn
   assert.deepEqual(runtime.provider === 'anthropic' && runtime.fallback, {
     provider: 'openai',
     model: 'gpt-4.1-mini',
-    baseUrl: 'https://api.openai.com/v1',
+    baseUrl: 'https://local.test/v1',
     apiKey: 'sk-openai',
   });
+
+  // Environment keys outrank the stored fallback credential, mirroring the
+  // primary sign-in precedence.
+  const envPreferred = await resolveRuntimeConfig(baseCommand, {
+    cwd: elsewhere,
+    homeDir: home,
+    processEnv: { OPENAI_API_KEY: 'env-openai' },
+  });
+  assert.equal(
+    envPreferred.provider === 'anthropic' && envPreferred.fallback?.apiKey,
+    'env-openai',
+  );
 
   // Without a working sign-in for the fallback provider, the fallback is
   // skipped rather than failing the run.
@@ -1440,4 +1454,168 @@ test('runCli fails over to the fallback model when the default model errors', as
   assert.match(output.stdout, /provider=anthropic model=claude-opus-5 fallback=gpt-4\.1-mini/);
   assert.match(output.stderr, /the default model failed .*falling back to gpt-4\.1-mini/);
   assert.match(output.stdout, /\[assistant\] Hello from the fallback model\./);
+});
+
+test('switching the default provider clears settings chosen for the old one', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    apiKeyEnv: 'CUSTOM_OPENAI_KEY',
+    baseUrl: 'https://local.test/v1',
+  }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-key\n', '5\n']),
+      fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  // The openai model and apiKeyEnv were provider-bound and must not leak
+  // into the anthropic default.
+  assert.equal(config.provider, 'anthropic');
+  assert.equal(config.model, 'claude-opus-5');
+  assert.equal(config.apiKeyEnv, undefined);
+  // After the switch, the menu shows the new provider's default model.
+  assert.match(output.stdout, /default claude-opus-5 \(default\)/);
+});
+
+test('switching provider warns when the default soul pins another provider', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const soulPath = path.join(home, '.stratus', 'agents', 'ava.md');
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  await writeFile(soulPath, `---
+name: Ava
+provider: anthropic
+---
+Be warm.
+`);
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    soul: soulPath,
+  }));
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '3\n', '5\n']),
+    },
+  });
+
+  assert.match(output.stdout, /Ava\) pins provider anthropic in their soul, which outranks this choice/);
+});
+
+test('setup saves a key when the endpoint has no /models to verify against', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '2\n', 'https://local.test/v1\n', 'sk-local\n', '5\n']),
+      fetch: (async () => new Response('not found', { status: 404 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // 404/405 means the compatible endpoint lacks GET /models — that says
+  // nothing about the key, so it is saved and checked on first run.
+  assert.match(output.stdout, /did not support a key check \(HTTP 404\)/);
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials, { openai: { type: 'api_key', value: 'sk-local' } });
+});
+
+test('the inline test run uses the same env-over-stored key precedence as real runs', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'stored-key' } }),
+  );
+
+  const seenKeys: Array<string | undefined> = [];
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'env-key' },
+      setupInput: Readable.from(['4\n', '5\n']),
+      fetch: (async (_url: any, init?: any) => {
+        const headers: Record<string, string> = {};
+        new Headers(init?.headers ?? {}).forEach((value, key) => {
+          headers[key] = value;
+        });
+        seenKeys.push(headers['x-api-key']);
+        return new Response(JSON.stringify({
+          id: 'msg_1',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-opus-5',
+          content: [{ type: 'text', text: 'Hello!' }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(seenKeys[0], 'env-key');
+});
+
+test('a typed model id resolves to the provider that lists it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async (url: any) => {
+        if (String(url).includes('api.anthropic.com')) {
+          return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
+      }) as typeof fetch,
+      setupInput: Readable.from([
+        '1\n', '1\n', '2\n', 'sk-ant-key\n',
+        '1\n', '2\n', '\n', 'sk-openai-key\n',
+        '2\n', '2\n', 'gpt-4.1-mini\n',   // fallback typed by id — listed under openai
+        '5\n',
+      ]),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // Default provider is anthropic, but the typed id belongs to openai.
+  assert.match(output.stdout, /Fallback model set to gpt-4\.1-mini \(openai\)/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.fallbackProvider, 'openai');
 });
