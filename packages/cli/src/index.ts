@@ -779,29 +779,41 @@ const loadConfigFile = async (configPath: string): Promise<CliConfigFile> => {
   return resolved;
 };
 
-const resolveConfigPath = async (
+interface ResolvedConfigLocation {
+  path: string;
+  /**
+   * Whether the config came from something the user chose themselves
+   * (--config, STRATUS_CONFIG, or the global ~/.stratus/config.json written
+   * by setup). Auto-discovered project-local files are untrusted: a cloned
+   * repository can ship one, so stored credentials are never combined with
+   * a custom endpoint it selects.
+   */
+  trusted: boolean;
+}
+
+const resolveConfigLocation = async (
   command: ParsedRunCommand,
   env: CliEnvironment,
-): Promise<string | undefined> => {
+): Promise<ResolvedConfigLocation | undefined> => {
   const processEnv = readProcessEnv(env);
   const cwd = readWorkingDirectory(env);
   const explicit = command.configPath ?? processEnv.STRATUS_CONFIG ?? processEnv.STRATUSCLAW_CONFIG;
 
   if (explicit) {
-    return path.resolve(cwd, explicit);
+    return { path: path.resolve(cwd, explicit), trusted: true };
   }
 
   // Project-local configs win; the global ~/.stratus/config.json written by
   // `stratus setup` is the fallback that makes the CLI work from anywhere.
-  const candidates = [
-    path.join(cwd, DEFAULT_CONFIG_FILENAME),
-    path.join(cwd, LEGACY_CONFIG_FILENAME),
-    globalConfigPath(env),
+  const candidates: ResolvedConfigLocation[] = [
+    { path: path.join(cwd, DEFAULT_CONFIG_FILENAME), trusted: false },
+    { path: path.join(cwd, LEGACY_CONFIG_FILENAME), trusted: false },
+    { path: globalConfigPath(env), trusted: true },
   ];
-  for (const candidatePath of candidates) {
+  for (const candidate of candidates) {
     try {
-      await readFile(candidatePath, 'utf8');
-      return candidatePath;
+      await readFile(candidate.path, 'utf8');
+      return candidate;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT') {
@@ -874,8 +886,8 @@ export const resolveRuntimeConfig = async (
   env: CliEnvironment = {},
 ): Promise<RuntimeConfig> => {
   const processEnv = readProcessEnv(env);
-  const configPath = await resolveConfigPath(command, env);
-  const fileConfig = configPath ? await loadConfigFile(configPath) : {};
+  const configLocation = await resolveConfigLocation(command, env);
+  const fileConfig = configLocation ? await loadConfigFile(configLocation.path) : {};
   const soul = await resolveSoul(command, env, fileConfig);
 
   // Explicit flags and env vars outrank the soul's own provider/model hints,
@@ -926,11 +938,25 @@ export const resolveRuntimeConfig = async (
 
   const credentials = await loadCredentials(env);
 
+  // A custom endpoint chosen by an auto-discovered project config is not a
+  // place the stored sign-in ever gets sent — a cloned repository could
+  // point it anywhere. Flags and env vars are the user's own choice, and
+  // the provider's default endpoint is harmless.
+  const defaultEndpointFor = (target: string): string =>
+    target === 'anthropic' ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_OPENAI_BASE_URL;
+  const untrustedCustomBaseUrl = configLocation?.trusted === false
+    && command.baseUrl === undefined
+    && readNonEmptyString(processEnv.STRATUS_BASE_URL) === undefined
+    && readNonEmptyString(processEnv.STRATUSCLAW_BASE_URL) === undefined
+    && fileConfigApplies
+    && fileConfig.baseUrl !== undefined
+    && fileConfig.baseUrl.replace(/\/+$/, '') !== defaultEndpointFor(String(provider));
+
   // Env vars outrank the stored sign-in from `stratus setup`.
   const envApiKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY)
     ?? readNonEmptyString(processEnv[String(apiKeyEnvName)]);
-  const storedCredential = envApiKey
+  const storedCredential = envApiKey || untrustedCustomBaseUrl
     ? undefined
     : credentials[provider as CredentialProviderName];
 
@@ -941,6 +967,11 @@ export const resolveRuntimeConfig = async (
     : undefined;
 
   if (!apiKey && !authToken) {
+    if (untrustedCustomBaseUrl && credentials[provider as CredentialProviderName]) {
+      throw new Error(
+        `The project config at ${configLocation?.path} sets a custom base URL (${fileConfig.baseUrl}), so your saved sign-in is not sent to it. Set ${apiKeyEnvName} or STRATUS_API_KEY to use this endpoint, or run with --config to trust the file explicitly.`,
+      );
+    }
     throw new Error(
       `Missing API key for provider=${provider}. Run \`stratus setup\` to sign in, or set STRATUS_API_KEY or ${apiKeyEnvName}.`,
     );
@@ -984,9 +1015,13 @@ export const resolveRuntimeConfig = async (
     const fallbackProvider = fileConfig.fallbackProvider ?? (provider as CliProviderName);
     if (fallbackProvider !== 'demo') {
       // Same precedence as the primary sign-in: environment keys outrank
-      // the stored credential.
+      // the stored credential. And the same endpoint rule: an untrusted
+      // project config's custom fallback URL never receives a stored key.
+      const fallbackUntrustedUrl = configLocation?.trusted === false
+        && fileConfig.fallbackBaseUrl !== undefined
+        && fileConfig.fallbackBaseUrl.replace(/\/+$/, '') !== defaultEndpointFor(fallbackProvider);
       const fallbackEnvKey = readNonEmptyString(processEnv[fallbackProvider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY']);
-      const fallbackCredential = fallbackEnvKey ? undefined : credentials[fallbackProvider];
+      const fallbackCredential = fallbackEnvKey || fallbackUntrustedUrl ? undefined : credentials[fallbackProvider];
       const fallbackApiKey = (fallbackProvider === provider ? apiKey : undefined)
         ?? fallbackEnvKey
         ?? (fallbackCredential?.type === 'api_key' ? fallbackCredential.value : undefined);
@@ -1896,20 +1931,29 @@ export const runSetup = async (
     const models: Array<{ provider: CredentialProviderName; id: string }> = [];
 
     for (const provider of ['anthropic', 'openai'] as const) {
-      const credential = state.credentials[provider];
-      const envKey = readNonEmptyString(processEnv[defaultKeyEnvFor(provider)]);
-      if (!credential && !envKey) {
+      // Discovery uses the credential a real run would use: STRATUS_API_KEY,
+      // then the configured apiKeyEnv (for the default provider), then the
+      // provider's own env var, then the stored sign-in.
+      const envKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
+        ?? (provider === state.provider && state.apiKeyEnv
+          ? readNonEmptyString(processEnv[state.apiKeyEnv])
+          : undefined)
+        ?? readNonEmptyString(processEnv[defaultKeyEnvFor(provider)]);
+      const credential = envKey ? undefined : state.credentials[provider];
+      const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);
+      if (!apiKey && !credential) {
         continue;
       }
 
       if (provider === 'anthropic') {
-        if (credential?.type === 'oauth_token' || typeof fetchImpl !== 'function') {
+        if (!apiKey || typeof fetchImpl !== 'function') {
+          // Subscription tokens cannot call the models endpoint.
           models.push(...KNOWN_CLAUDE_MODELS.map((id) => ({ provider, id })));
           continue;
         }
         try {
           const response = await fetchImpl(`${DEFAULT_ANTHROPIC_BASE_URL}/v1/models?limit=100`, {
-            headers: { 'x-api-key': String(credential?.value ?? envKey), 'anthropic-version': '2023-06-01' },
+            headers: { 'x-api-key': String(apiKey), 'anthropic-version': '2023-06-01' },
           });
           const payload = await response.json() as { data?: Array<{ id?: string }> };
           const ids = (payload.data ?? []).map((entry) => entry.id).filter((id): id is string => typeof id === 'string');
@@ -1920,13 +1964,13 @@ export const runSetup = async (
         continue;
       }
 
-      if (typeof fetchImpl !== 'function') {
+      if (!apiKey || typeof fetchImpl !== 'function') {
         continue;
       }
       try {
         const root = (state.baseUrl ?? DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '');
         const response = await fetchImpl(`${root}/models`, {
-          headers: { authorization: `Bearer ${String(credential?.value ?? envKey)}` },
+          headers: { authorization: `Bearer ${String(apiKey)}` },
         });
         const payload = await response.json() as { data?: Array<{ id?: string }> };
         const ids = (payload.data ?? [])
@@ -1993,6 +2037,22 @@ export const runSetup = async (
       await switchDefaultProvider(choice.provider);
       state.model = choice.id;
       writeLine(streams.stdout, `Default model set to ${choice.id} (${choice.provider}).`);
+      // A soul's model pin outranks the config at run time, so a silent
+      // mismatch here would make this choice a no-op.
+      if (state.soulPath) {
+        try {
+          const soul = parseSoul(await readFile(state.soulPath, 'utf8'), { seed: state.soulPath });
+          if (soul.model && soul.model !== choice.id
+            && (soul.provider === undefined || soul.provider === choice.provider)) {
+            writeLine(
+              streams.stdout,
+              `Heads up: your default agent (${soul.agent.name}) pins model ${soul.model} in their soul, which outranks this choice at run time. Edit ${state.soulPath} or clear the agent (menu 3).`,
+            );
+          }
+        } catch {
+          // A broken soul file surfaces when it is actually used.
+        }
+      }
     } else {
       state.fallbackProvider = choice.provider;
       state.fallbackModel = choice.id;

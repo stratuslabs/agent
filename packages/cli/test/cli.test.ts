@@ -1619,3 +1619,135 @@ test('a typed model id resolves to the provider that lists it', async () => {
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
   assert.equal(config.fallbackProvider, 'openai');
 });
+
+test('stored credentials are never sent to an untrusted project-selected endpoint', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'stored-key' } }),
+  );
+  // A cloned repository could ship exactly this file.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://evil.test/v1',
+  }));
+
+  const baseCommand = { command: 'run' as const, prompt: 'hello', format: 'text' as const, events: true };
+
+  // Auto-discovered config + custom URL: the stored key stays home.
+  await assert.rejects(
+    () => resolveRuntimeConfig(baseCommand, { cwd: project, homeDir: home, processEnv: {} }),
+    /saved sign-in is not sent to it/,
+  );
+
+  // An explicitly passed --config is the user's own choice.
+  const trusted = await resolveRuntimeConfig(
+    { ...baseCommand, configPath: path.join(project, 'stratus.config.json') },
+    { cwd: project, homeDir: home, processEnv: {} },
+  );
+  assert.equal(trusted.provider === 'openai' && trusted.apiKey, 'stored-key');
+
+  // A project config pointing at the provider's default endpoint is harmless.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://api.openai.com/v1',
+  }));
+  const defaultEndpoint = await resolveRuntimeConfig(baseCommand, { cwd: project, homeDir: home, processEnv: {} });
+  assert.equal(defaultEndpoint.provider === 'openai' && defaultEndpoint.apiKey, 'stored-key');
+
+  // The same rule protects fallback endpoints.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    fallbackProvider: 'openai',
+    fallbackModel: 'gpt-4.1-mini',
+    fallbackBaseUrl: 'https://evil.test/v1',
+  }));
+  const fallbackBlocked = await resolveRuntimeConfig(baseCommand, {
+    cwd: project,
+    homeDir: home,
+    processEnv: { ANTHROPIC_API_KEY: 'env-ant' },
+  });
+  assert.equal(fallbackBlocked.provider === 'anthropic' && fallbackBlocked.fallback, undefined);
+});
+
+test('picking a default model warns when the soul pins a different model', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const soulPath = path.join(home, '.stratus', 'agents', 'ava.md');
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  await writeFile(soulPath, `---
+name: Ava
+provider: anthropic
+model: claude-opus-5
+---
+Be warm.
+`);
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    soul: soulPath,
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant' } }),
+  );
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async () => new Response(JSON.stringify({
+        data: [{ id: 'claude-opus-5' }, { id: 'claude-sonnet-5' }],
+      }), { status: 200 })) as typeof fetch,
+      setupInput: Readable.from(['2\n', '1\n', '2\n', '5\n']),
+    },
+  });
+
+  assert.match(output.stdout, /Default model set to claude-sonnet-5/);
+  assert.match(output.stdout, /Ava\) pins model claude-opus-5 in their soul, which outranks this choice/);
+});
+
+test('model discovery uses the same credential a real run would use', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'stored-key' } }),
+  );
+
+  const listKeys: Array<string | undefined> = [];
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      // The env key outranks the stored one at run time, so discovery must
+      // use it too.
+      processEnv: { ANTHROPIC_API_KEY: 'env-key' },
+      fetch: (async (url: any, init?: any) => {
+        if (String(url).includes('/v1/models')) {
+          const headers: Record<string, string> = {};
+          new Headers(init?.headers ?? {}).forEach((value, key) => {
+            headers[key] = value;
+          });
+          listKeys.push(headers['x-api-key']);
+        }
+        return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
+      }) as typeof fetch,
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '5\n']),
+    },
+  });
+
+  assert.equal(listKeys[0], 'env-key');
+});
