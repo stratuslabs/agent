@@ -1370,7 +1370,7 @@ test('setup Models menu picks default and fallback from live available models', 
   const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
   assert.deepEqual(credentials, {
     anthropic: { type: 'api_key', value: 'sk-ant-key' },
-    openai: { type: 'api_key', value: 'sk-openai-key' },
+    openai: { type: 'api_key', value: 'sk-openai-key', baseUrl: 'https://local.test/v1' },
   });
 });
 
@@ -1542,7 +1542,9 @@ test('setup saves a key when the endpoint has no /models to verify against', asy
   // nothing about the key, so it is saved and checked on first run.
   assert.match(output.stdout, /did not support a key check \(HTTP 404\)/);
   const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
-  assert.deepEqual(credentials, { openai: { type: 'api_key', value: 'sk-local' } });
+  assert.deepEqual(credentials, {
+    openai: { type: 'api_key', value: 'sk-local', baseUrl: 'https://local.test/v1' },
+  });
 });
 
 test('the inline test run uses the same env-over-stored key precedence as real runs', async () => {
@@ -1750,4 +1752,94 @@ test('model discovery uses the same credential a real run would use', async () =
   });
 
   assert.equal(listKeys[0], 'env-key');
+});
+
+test('a stored primary key never follows an untrusted same-provider fallback URL', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'stored-key' } }),
+  );
+  // Default endpoint for the primary (harmless), attacker URL for the
+  // fallback of the SAME provider — the primary's stored key must not
+  // follow it there.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    fallbackProvider: 'openai',
+    fallbackModel: 'gpt-4o-mini',
+    fallbackBaseUrl: 'https://evil.test/v1',
+  }));
+
+  const baseCommand = { command: 'run' as const, prompt: 'hello', format: 'text' as const, events: true };
+
+  const blocked = await resolveRuntimeConfig(baseCommand, { cwd: project, homeDir: home, processEnv: {} });
+  assert.equal(blocked.provider === 'openai' && blocked.apiKey, 'stored-key');
+  assert.equal(blocked.provider === 'openai' && blocked.fallback, undefined);
+
+  // An env-supplied key is the user's own ambient choice and may follow it.
+  const envAllowed = await resolveRuntimeConfig(baseCommand, {
+    cwd: project,
+    homeDir: home,
+    processEnv: { OPENAI_API_KEY: 'env-key' },
+  });
+  assert.deepEqual(envAllowed.provider === 'openai' && envAllowed.fallback, {
+    provider: 'openai',
+    model: 'gpt-4o-mini',
+    baseUrl: 'https://evil.test/v1',
+    apiKey: 'env-key',
+  });
+});
+
+test('a secondary openai sign-in keeps its endpoint with the credential', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams } = createStreams();
+
+  // Default stays anthropic; openai is signed in as a secondary provider
+  // with a custom (local) endpoint.
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async (url: any) => {
+        if (String(url).includes('api.anthropic.com')) {
+          return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ data: [{ id: 'local-llama' }] }), { status: 200 });
+      }) as typeof fetch,
+      setupInput: Readable.from([
+        '1\n', '1\n', '2\n', 'sk-ant-key\n',
+        '1\n', '2\n', 'https://local.test/v1\n', 'sk-local\n',
+        '5\n',
+      ]),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials.openai, { type: 'api_key', value: 'sk-local', baseUrl: 'https://local.test/v1' });
+
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.provider, 'anthropic');
+
+  // A later openai run pairs the stored key with ITS endpoint, not
+  // api.openai.com.
+  const runtime = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    provider: 'openai',
+    format: 'text',
+    events: true,
+  }, {
+    cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-')),
+    homeDir: home,
+    processEnv: {},
+  });
+  assert.equal(runtime.provider === 'openai' && runtime.baseUrl, 'https://local.test/v1');
+  assert.equal(runtime.provider === 'openai' && runtime.apiKey, 'sk-local');
 });

@@ -169,6 +169,12 @@ type RuntimeConfig =
 export interface StoredCredential {
   type: 'api_key' | 'oauth_token';
   value: string;
+  /**
+   * The endpoint this credential belongs to (openai-compatible services).
+   * Kept with the credential so a key for a local model or proxy is never
+   * sent to a different service, whatever the current default provider is.
+   */
+  baseUrl?: string;
 }
 
 type CredentialProviderName = 'anthropic' | 'openai';
@@ -924,13 +930,6 @@ export const resolveRuntimeConfig = async (
     ?? (fileConfigApplies ? fileConfig.model : undefined)
     ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_MODEL : DEFAULT_OPENAI_MODEL);
 
-  const baseUrl = command.baseUrl
-    ?? readNonEmptyString(processEnv.STRATUS_BASE_URL)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_BASE_URL)
-    ?? (fileConfigApplies ? fileConfig.baseUrl : undefined)
-    // The Anthropic SDK knows its own endpoint; only openai needs a default.
-    ?? (provider === 'anthropic' ? undefined : DEFAULT_OPENAI_BASE_URL);
-
   const apiKeyEnvName = readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV)
     ?? (fileConfigApplies ? fileConfig.apiKeyEnv : undefined)
@@ -965,6 +964,15 @@ export const resolveRuntimeConfig = async (
   const authToken = provider === 'anthropic' && storedCredential?.type === 'oauth_token'
     ? storedCredential.value
     : undefined;
+
+  const baseUrl = command.baseUrl
+    ?? readNonEmptyString(processEnv.STRATUS_BASE_URL)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_BASE_URL)
+    ?? (fileConfigApplies ? fileConfig.baseUrl : undefined)
+    // A stored openai-compatible sign-in carries its own endpoint.
+    ?? (provider === 'openai' ? storedCredential?.baseUrl : undefined)
+    // The Anthropic SDK knows its own endpoint; only openai needs a default.
+    ?? (provider === 'anthropic' ? undefined : DEFAULT_OPENAI_BASE_URL);
 
   if (!apiKey && !authToken) {
     if (untrustedCustomBaseUrl && credentials[provider as CredentialProviderName]) {
@@ -1016,18 +1024,23 @@ export const resolveRuntimeConfig = async (
     if (fallbackProvider !== 'demo') {
       // Same precedence as the primary sign-in: environment keys outrank
       // the stored credential. And the same endpoint rule: an untrusted
-      // project config's custom fallback URL never receives a stored key.
-      const fallbackUntrustedUrl = configLocation?.trusted === false
+      // project config's custom fallback URL never receives a stored key —
+      // including the primary's stored key when both share a provider.
+      // Only env-supplied keys follow such a URL.
+      const fallbackUntrustedUrl = fallbackProvider === 'openai'
+        && configLocation?.trusted === false
         && fileConfig.fallbackBaseUrl !== undefined
-        && fileConfig.fallbackBaseUrl.replace(/\/+$/, '') !== defaultEndpointFor(fallbackProvider);
+        && fileConfig.fallbackBaseUrl.replace(/\/+$/, '') !== DEFAULT_OPENAI_BASE_URL;
       const fallbackEnvKey = readNonEmptyString(processEnv[fallbackProvider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY']);
       const fallbackCredential = fallbackEnvKey || fallbackUntrustedUrl ? undefined : credentials[fallbackProvider];
-      const fallbackApiKey = (fallbackProvider === provider ? apiKey : undefined)
+      const primaryReusable = fallbackProvider === provider
+        && (envApiKey !== undefined || !fallbackUntrustedUrl);
+      const fallbackApiKey = (primaryReusable ? apiKey : undefined)
         ?? fallbackEnvKey
         ?? (fallbackCredential?.type === 'api_key' ? fallbackCredential.value : undefined);
       const fallbackAuthToken = fallbackProvider !== provider && fallbackProvider === 'anthropic' && fallbackCredential?.type === 'oauth_token'
         ? fallbackCredential.value
-        : (fallbackProvider === provider ? authToken : undefined);
+        : (primaryReusable ? authToken : undefined);
 
       if (fallbackApiKey || fallbackAuthToken) {
         resolved.fallback = {
@@ -1037,6 +1050,7 @@ export const resolveRuntimeConfig = async (
             ? {
                 baseUrl: fileConfig.fallbackBaseUrl
                   ?? (fallbackProvider === provider ? String(baseUrl) : undefined)
+                  ?? fallbackCredential?.baseUrl
                   ?? DEFAULT_OPENAI_BASE_URL,
               }
             : {}),
@@ -1838,14 +1852,19 @@ export const runSetup = async (
       return;
     }
     writeLine(streams.stdout, 'Checking the key…');
+    // The endpoint travels with the credential, so this sign-in keeps
+    // working even when another provider is the default.
+    const endpoint = state.baseUrl && state.baseUrl !== DEFAULT_OPENAI_BASE_URL
+      ? { baseUrl: state.baseUrl }
+      : {};
     const verdict = await verifyProviderKey('openai', key, state.baseUrl, env.fetch ?? globalThis.fetch);
     if (verdict.status === 'ok') {
-      storeCredential('openai', { type: 'api_key', value: key });
+      storeCredential('openai', { type: 'api_key', value: key, ...endpoint });
       writeLine(streams.stdout, '✓ Key verified — you are signed in.');
     } else if (verdict.status === 'rejected') {
       writeLine(streams.stdout, `✗ The API rejected that key (${verdict.detail}). It was NOT saved — try again from this menu.`);
     } else {
-      storeCredential('openai', { type: 'api_key', value: key });
+      storeCredential('openai', { type: 'api_key', value: key, ...endpoint });
       writeLine(streams.stdout, `! Could not reach the API to verify (${verdict.detail}). Saved the key anyway — it will be checked on your first run.`);
     }
   };
@@ -1968,7 +1987,7 @@ export const runSetup = async (
         continue;
       }
       try {
-        const root = (state.baseUrl ?? DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '');
+        const root = (state.baseUrl ?? state.credentials.openai?.baseUrl ?? DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '');
         const response = await fetchImpl(`${root}/models`, {
           headers: { authorization: `Bearer ${String(apiKey)}` },
         });
@@ -2056,8 +2075,9 @@ export const runSetup = async (
     } else {
       state.fallbackProvider = choice.provider;
       state.fallbackModel = choice.id;
-      if (choice.provider === 'openai' && state.baseUrl) {
-        state.fallbackBaseUrl = state.baseUrl;
+      const openaiEndpoint = state.baseUrl ?? state.credentials.openai?.baseUrl;
+      if (choice.provider === 'openai' && openaiEndpoint && openaiEndpoint !== DEFAULT_OPENAI_BASE_URL) {
+        state.fallbackBaseUrl = openaiEndpoint;
       } else {
         delete state.fallbackBaseUrl;
       }
@@ -2190,7 +2210,7 @@ export const runSetup = async (
     return {
       provider: 'openai',
       model,
-      baseUrl: state.baseUrl ?? DEFAULT_OPENAI_BASE_URL,
+      baseUrl: state.baseUrl ?? credential?.baseUrl ?? DEFAULT_OPENAI_BASE_URL,
       apiKey,
       ...(state.systemPrompt ? { systemPrompt: state.systemPrompt } : {}),
       ...(env.fetch ? { fetch: env.fetch } : {}),
