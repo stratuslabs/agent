@@ -3081,10 +3081,10 @@ export const runAgentNew = async (
 
       // Frontmatter pins what a run from this directory would actually use:
       // env vars outrank the active config file (project-local or explicit
-      // first, global otherwise) — the same precedence as stratus run.
-      // Anthropic is the flagship default on a fresh machine; an explicit
-      // demo setup gets no pin at all, so the soul keeps following the
-      // configured offline provider instead of demanding credentials.
+      // first, global otherwise), and no provider anywhere falls back to
+      // demo — the exact precedence of stratus run. Demo produces no pin
+      // at all: the soul keeps following the machine's configuration
+      // instead of demanding credentials nothing has signed in for.
       const processEnv = readProcessEnv(env);
       const configLocation = await resolveConfigLocation({}, env);
       // Creating an agent must not be blocked by a broken config — it only
@@ -3100,7 +3100,7 @@ export const runAgentNew = async (
       const soulProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
         ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'))
         ?? activeConfig.provider
-        ?? 'anthropic';
+        ?? 'demo';
       // The active config's model was written for the provider named in
       // that config; it only travels into the soul when they still match.
       const configModelApplies = (activeConfig.provider ?? 'openai') === soulProvider;
