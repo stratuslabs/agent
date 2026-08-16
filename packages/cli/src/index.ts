@@ -955,9 +955,13 @@ export const resolveRuntimeConfig = async (
   const envApiKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY)
     ?? readNonEmptyString(processEnv[String(apiKeyEnvName)]);
-  const storedCredential = envApiKey || untrustedCustomBaseUrl
+  const candidateCredential = credentials[provider as CredentialProviderName];
+  // A bound credential ignores config URLs entirely, so an untrusted
+  // project URL cannot redirect it — only unbound stored keys are blocked.
+  const credentialIsBound = candidateCredential?.type === 'api_key' && candidateCredential.baseUrl !== undefined;
+  const storedCredential = envApiKey || (untrustedCustomBaseUrl && !credentialIsBound)
     ? undefined
-    : credentials[provider as CredentialProviderName];
+    : candidateCredential;
 
   const apiKey = envApiKey
     ?? (storedCredential?.type === 'api_key' ? storedCredential.value : undefined);
@@ -968,9 +972,9 @@ export const resolveRuntimeConfig = async (
   // A stored key bound to an endpoint is used ONLY with that endpoint — a
   // config file can never redirect it, not even to the official default
   // URL (a project config could otherwise reroute a local-service key to
-  // api.openai.com). An explicit flag or env URL that disagrees refuses
-  // the stored key instead of leaking it.
-  const boundBaseUrl = !envApiKey && provider === 'openai' && storedCredential?.type === 'api_key'
+  // the official API). An explicit flag or env URL that disagrees refuses
+  // the stored key instead of leaking it. This applies to both providers.
+  const boundBaseUrl = !envApiKey && storedCredential?.type === 'api_key'
     ? storedCredential.baseUrl
     : undefined;
   const explicitBaseUrl = command.baseUrl
@@ -979,7 +983,7 @@ export const resolveRuntimeConfig = async (
   if (boundBaseUrl && explicitBaseUrl
     && String(explicitBaseUrl).replace(/\/+$/, '') !== boundBaseUrl.replace(/\/+$/, '')) {
     throw new Error(
-      `Your saved openai sign-in is bound to ${boundBaseUrl} and is not sent to ${explicitBaseUrl}. Set ${apiKeyEnvName} or STRATUS_API_KEY to use that endpoint.`,
+      `Your saved ${provider} sign-in is bound to ${boundBaseUrl} and is not sent to ${explicitBaseUrl}. Set ${apiKeyEnvName} or STRATUS_API_KEY to use that endpoint.`,
     );
   }
 
@@ -1072,8 +1076,9 @@ export const resolveRuntimeConfig = async (
         // configured endpoint — retrying the same credential against the
         // official endpoint instead of the configured service would leak
         // it and likely fail.
-        const fallbackAnthropicBaseUrl = fallbackProvider === 'anthropic' && fallbackProvider === provider && baseUrl
-          ? String(baseUrl)
+        const fallbackAnthropicBaseUrl = fallbackProvider === 'anthropic'
+          ? (fallbackProvider === provider && baseUrl ? String(baseUrl) : undefined)
+            ?? (fallbackCredential?.type === 'api_key' ? fallbackCredential.baseUrl : undefined)
           : undefined;
         resolved.fallback = {
           provider: fallbackProvider,
@@ -1850,19 +1855,21 @@ export const runSetup = async (
         return;
       }
       writeLine(streams.stdout, 'Checking the key against the Anthropic API…');
-      const verdict = await verifyProviderKey(
-        'anthropic',
-        key,
-        state.provider === 'anthropic' ? state.baseUrl : undefined,
-        env.fetch ?? globalThis.fetch,
-      );
+      // The key is verified against the configured endpoint and bound to
+      // it, so a later provider switch (or an anthropic fallback) can never
+      // send a proxy credential to the official endpoint.
+      const verifyEndpoint = state.provider === 'anthropic' ? state.baseUrl : undefined;
+      const binding = verifyEndpoint && verifyEndpoint.replace(/\/+$/, '') !== DEFAULT_ANTHROPIC_BASE_URL
+        ? { baseUrl: verifyEndpoint }
+        : {};
+      const verdict = await verifyProviderKey('anthropic', key, verifyEndpoint, env.fetch ?? globalThis.fetch);
       if (verdict.status === 'ok') {
-        storeCredential('anthropic', { type: 'api_key', value: key });
+        storeCredential('anthropic', { type: 'api_key', value: key, ...binding });
         writeLine(streams.stdout, '✓ Key verified — you are signed in to Anthropic.');
       } else if (verdict.status === 'rejected') {
         writeLine(streams.stdout, `✗ Anthropic rejected that key (${verdict.detail}). It was NOT saved — check console.anthropic.com and try again from this menu.`);
       } else {
-        storeCredential('anthropic', { type: 'api_key', value: key });
+        storeCredential('anthropic', { type: 'api_key', value: key, ...binding });
         writeLine(streams.stdout, `! Could not reach the Anthropic API to verify (${verdict.detail}). Saved the key anyway — it will be checked on your first run.`);
       }
       return;
@@ -1956,11 +1963,14 @@ export const runSetup = async (
     if (provider === 'demo') {
       return true;
     }
+    const keyEnvSelector = provider === state.provider
+      ? readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
+        ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV)
+        ?? state.apiKeyEnv
+      : undefined;
     return state.credentials[provider] !== undefined
       || readNonEmptyString(processEnv.STRATUS_API_KEY) !== undefined
-      || (provider === state.provider && state.apiKeyEnv
-        ? readNonEmptyString(processEnv[state.apiKeyEnv]) !== undefined
-        : false)
+      || (keyEnvSelector ? readNonEmptyString(processEnv[String(keyEnvSelector)]) !== undefined : false)
       || readNonEmptyString(processEnv[defaultKeyEnvFor(provider)]) !== undefined;
   };
 
@@ -2272,7 +2282,11 @@ export const runSetup = async (
               ?? (state.provider === 'openai' ? state.baseUrl : undefined)
               ?? DEFAULT_OPENAI_BASE_URL,
           }
-        : (fallbackProvider === state.provider && state.baseUrl ? { baseUrl: state.baseUrl } : {})),
+        : (() => {
+            const url = (fallbackProvider === state.provider ? state.baseUrl : undefined)
+              ?? (credential?.type === 'api_key' ? credential.baseUrl : undefined);
+            return url ? { baseUrl: url } : {};
+          })()),
       ...(apiKey ? { apiKey } : {}),
       ...(authToken ? { authToken } : {}),
     };
@@ -2292,11 +2306,19 @@ export const runSetup = async (
       return { provider: 'demo', ...(soul ? { soul } : {}) };
     }
 
-    // Mirror resolveRuntimeConfig exactly: environment keys outrank the
-    // stored sign-in, so the inline test exercises what a real run will use.
-    const keyEnv = state.apiKeyEnv ?? defaultKeyEnvFor(state.provider);
-    const envKey = readNonEmptyString(processEnv.STRATUS_API_KEY) ?? readNonEmptyString(processEnv[keyEnv]);
+    // Mirror resolveRuntimeConfig exactly: environment keys (including the
+    // STRATUS_API_KEY_ENV selector) outrank the stored sign-in, and a
+    // stored key's bound endpoint is authoritative — so the inline test
+    // exercises precisely what a real run will use.
+    const keyEnv = readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
+      ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV)
+      ?? state.apiKeyEnv
+      ?? defaultKeyEnvFor(state.provider);
+    const envKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
+      ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY)
+      ?? readNonEmptyString(processEnv[String(keyEnv)]);
     const credential = envKey ? undefined : state.credentials[state.provider];
+    const boundUrl = credential?.type === 'api_key' ? credential.baseUrl : undefined;
     const model = state.model ?? defaultModelFor(state.provider);
 
     if (state.provider === 'anthropic') {
@@ -2307,10 +2329,11 @@ export const runSetup = async (
         return undefined;
       }
       const fallback = buildTestFallback();
+      const anthropicUrl = boundUrl ?? state.baseUrl;
       return {
         provider: 'anthropic',
         model,
-        ...(state.baseUrl ? { baseUrl: state.baseUrl } : {}),
+        ...(anthropicUrl ? { baseUrl: anthropicUrl } : {}),
         ...(apiKey ? { apiKey } : {}),
         ...(authToken ? { authToken } : {}),
         ...(state.systemPrompt ? { systemPrompt: state.systemPrompt } : {}),
@@ -2329,7 +2352,7 @@ export const runSetup = async (
     return {
       provider: 'openai',
       model,
-      baseUrl: state.baseUrl ?? credential?.baseUrl ?? DEFAULT_OPENAI_BASE_URL,
+      baseUrl: boundUrl ?? state.baseUrl ?? DEFAULT_OPENAI_BASE_URL,
       apiKey,
       ...(state.systemPrompt ? { systemPrompt: state.systemPrompt } : {}),
       ...(env.fetch ? { fetch: env.fetch } : {}),
