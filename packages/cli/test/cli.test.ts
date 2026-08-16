@@ -2329,3 +2329,73 @@ test('the inline test run honors the STRATUS_API_KEY_ENV selector', async () => 
 
   assert.equal(seenKeys[0], 'selector-key');
 });
+
+test('a rejected replacement sign-in leaves the previous endpoint untouched', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://api.openai.com/v1',
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'old-key' } }),
+  );
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      // The replacement key for the new endpoint is rejected.
+      fetch: (async () => new Response('{}', { status: 401 })) as typeof fetch,
+      setupInput: Readable.from(['1\n', '2\n', 'https://new.test/v1\n', 'bad-key\n', '5\n']),
+    },
+  });
+
+  assert.match(output.stdout, /The endpoint was left unchanged as well\./);
+  // The old key keeps its old endpoint — the config must not pair it with
+  // the endpoint the rejected sign-in named.
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.baseUrl, 'https://api.openai.com/v1');
+});
+
+test('discovery honors a secondary anthropic credential bound endpoint', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // openai is the default; the anthropic key is bound to a proxy.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+  }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    openai: { type: 'api_key', value: 'sk-openai' },
+    anthropic: { type: 'api_key', value: 'sk-ant-proxy', baseUrl: 'https://ant-proxy.test' },
+  }));
+
+  const anthropicUrls: string[] = [];
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async (url: any) => {
+        if (String(url).includes('/v1/models')) {
+          anthropicUrls.push(String(url));
+          return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
+      }) as typeof fetch,
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '5\n']),
+    },
+  });
+
+  assert.equal(anthropicUrls[0], 'https://ant-proxy.test/v1/models?limit=100');
+});

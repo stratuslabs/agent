@@ -1896,12 +1896,23 @@ export const runSetup = async (
     const baseUrlAnswer = await prompter.ask(`API base URL [${currentEndpoint}]: `);
     const chosenEndpoint = baseUrlAnswer || currentEndpoint;
     // state.baseUrl describes the DEFAULT provider's endpoint; a secondary
-    // openai sign-in keeps its endpoint on the credential instead.
-    if (state.provider === 'openai') {
-      state.baseUrl = chosenEndpoint;
-    }
+    // openai sign-in keeps its endpoint on the credential instead. The
+    // change is committed only once a sign-in is accepted — a rejected key
+    // must not leave a new endpoint paired with the old credential.
+    const commitEndpoint = (): void => {
+      if (state.provider === 'openai') {
+        state.baseUrl = chosenEndpoint;
+      }
+    };
     const key = await prompter.askSecret('Paste your API key (Enter to skip; input is hidden): ');
     if (!key) {
+      // Without a stored credential there is no old key the new endpoint
+      // could be mispaired with.
+      if (!state.credentials.openai) {
+        commitEndpoint();
+      } else if (chosenEndpoint !== currentEndpoint) {
+        writeLine(streams.stdout, 'Endpoint left unchanged — paste a key for the new endpoint to switch to it.');
+      }
       writeLine(streams.stdout, 'Skipped — you can sign in any time by re-running this menu.');
       return;
     }
@@ -1912,11 +1923,16 @@ export const runSetup = async (
     const verdict = await verifyProviderKey('openai', key, chosenEndpoint, env.fetch ?? globalThis.fetch);
     if (verdict.status === 'ok') {
       storeCredential('openai', { type: 'api_key', value: key, ...endpoint });
+      commitEndpoint();
       writeLine(streams.stdout, '✓ Key verified — you are signed in.');
     } else if (verdict.status === 'rejected') {
       writeLine(streams.stdout, `✗ The API rejected that key (${verdict.detail}). It was NOT saved — try again from this menu.`);
+      if (chosenEndpoint !== currentEndpoint) {
+        writeLine(streams.stdout, 'The endpoint was left unchanged as well.');
+      }
     } else {
       storeCredential('openai', { type: 'api_key', value: key, ...endpoint });
+      commitEndpoint();
       writeLine(streams.stdout, `! Could not reach the API to verify (${verdict.detail}). Saved the key anyway — it will be checked on your first run.`);
     }
   };
@@ -2045,9 +2061,11 @@ export const runSetup = async (
           models.push(...KNOWN_CLAUDE_MODELS.map((id) => ({ provider, id })));
           continue;
         }
-        // The same endpoint a real run uses: a configured anthropic base
-        // URL (a proxy) must receive the key, not api.anthropic.com.
-        const anthropicRoot = ((state.provider === 'anthropic' ? state.baseUrl : undefined)
+        // The same endpoint a real run uses: the stored key's bound URL is
+        // authoritative, then a configured anthropic base URL (a proxy) —
+        // never the official endpoint by accident.
+        const anthropicRoot = ((credential?.type === 'api_key' ? credential.baseUrl : undefined)
+          ?? (state.provider === 'anthropic' ? state.baseUrl : undefined)
           ?? DEFAULT_ANTHROPIC_BASE_URL).replace(/\/+$/, '');
         try {
           const response = await fetchImpl(`${anthropicRoot}/v1/models?limit=100`, {
