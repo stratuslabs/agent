@@ -909,6 +909,132 @@ test("resolveRuntimeConfig ignores another provider's config file settings", asy
   });
 });
 
+test('parseCommand accepts the chat command with run-style flags', () => {
+  assert.deepEqual(parseCommand(['chat']), { command: 'chat', events: false, approvals: 'always' });
+  assert.deepEqual(parseCommand(['chat', '--provider', 'anthropic', '--model', 'claude-opus-5', '--soul', './ava.md', '--max-turns', '4', '--events']), {
+    command: 'chat',
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    soul: './ava.md',
+    maxTurns: 4,
+    events: true,
+    approvals: 'always',
+  });
+  assert.throws(() => parseCommand(['chat', '--approvals', 'sometimes']), /Invalid value for --approvals/);
+  assert.throws(() => parseCommand(['chat', '--bogus']), /Unknown option: --bogus/);
+});
+
+test('runCli chat holds one session across piped turns', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['chat', '--provider', 'demo'],
+    streams,
+    env: {
+      cwd,
+      homeDir: home,
+      processEnv: {},
+      stdinStream: Readable.from(['hello\nplease use the echo tool\n/exit\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /you › hello/);
+  assert.match(output.stdout, /Stratus › Demo provider ready\. Prompt received: hello/);
+  // Second turn runs a tool inside the same chat.
+  assert.match(output.stdout, /· using demo\.echo/);
+  assert.match(output.stdout, /PLEASE USE THE ECHO TOOL/);
+  // Piped transcripts stay plain — no ANSI styling.
+  assert.doesNotMatch(output.stdout, /\[/);
+});
+
+test('runCli chat resumes the same session so the transcript grows across turns', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const { streams, output } = createStreams();
+  const requestMessages: Array<Array<{ role: string; content: unknown }>> = [];
+
+  const exitCode = await runCli({
+    argv: ['chat', '--provider', 'anthropic'],
+    streams,
+    env: {
+      cwd,
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'test-key' },
+      stdinStream: Readable.from(['my name is Dylan\nwhat is my name?\n/exit\n']),
+      fetch: (async (_url: unknown, init?: { body?: unknown }) => {
+        const body = JSON.parse(String(init?.body ?? '{}'));
+        requestMessages.push(body.messages);
+        const text = requestMessages.length === 1 ? 'Nice to meet you, Dylan!' : 'You are Dylan.';
+        return new Response(JSON.stringify({
+          id: `msg_${requestMessages.length}`,
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-opus-5',
+          content: [{ type: 'text', text }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 5, output_tokens: 5 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Stratus › Nice to meet you, Dylan!/);
+  assert.match(output.stdout, /Stratus › You are Dylan\./);
+  // The second request must carry the whole conversation so far — this is
+  // the session-resume plumbing channels will reuse.
+  assert.equal(requestMessages.length, 2);
+  assert.equal(requestMessages[0]?.length, 1);
+  const secondTurn = JSON.stringify(requestMessages[1]);
+  assert.match(secondTurn, /my name is Dylan/);
+  assert.match(secondTurn, /Nice to meet you, Dylan!/);
+  assert.match(secondTurn, /what is my name\?/);
+});
+
+test('runCli chat survives a failed turn and keeps the conversation going', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const { streams, output } = createStreams();
+  let calls = 0;
+
+  const exitCode = await runCli({
+    argv: ['chat', '--provider', 'anthropic'],
+    streams,
+    env: {
+      cwd,
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'test-key' },
+      stdinStream: Readable.from(['hi\nhi again\n/exit\n']),
+      fetch: (async () => {
+        calls += 1;
+        if (calls === 1) {
+          // 400s are not retried by the SDK, so the first turn fails cleanly.
+          return new Response(JSON.stringify({ error: { type: 'invalid_request_error', message: 'boom' } }), { status: 400, headers: { 'content-type': 'application/json' } });
+        }
+        return new Response(JSON.stringify({
+          id: 'msg_ok',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-opus-5',
+          content: [{ type: 'text', text: 'Back on track.' }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 5, output_tokens: 5 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stderr, /Error: /);
+  assert.match(output.stdout, /that turn failed — the conversation is still here/);
+  assert.match(output.stdout, /Stratus › Back on track\./);
+});
+
 test('runCli persists agent memory across runs through memory.remember', async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
   const systemPrompts: string[] = [];
