@@ -3086,6 +3086,31 @@ const personaSnippet = (instructions: string | undefined): string | undefined =>
   return firstLine.length > 78 ? `${firstLine.slice(0, 77)}…` : firstLine;
 };
 
+// Tolerant config discovery for commands that only need the config as a
+// hint (listing, agent creation): a config that exists but cannot be read
+// or parsed degrades to a warning instead of blocking the command.
+const discoverActiveConfig = async (
+  env: CliEnvironment,
+  warn: (message: string) => void,
+): Promise<{ location?: ResolvedConfigLocation; config: CliConfigFile }> => {
+  let location: ResolvedConfigLocation | undefined;
+  try {
+    location = await resolveConfigLocation({}, env);
+  } catch (error) {
+    warn(`ignoring unreadable config (${error instanceof Error ? error.message : String(error)})`);
+    return { config: {} };
+  }
+  if (!location) {
+    return { config: {} };
+  }
+  try {
+    return { location, config: await loadConfigFile(location.path) };
+  } catch (error) {
+    warn(`ignoring unreadable config ${location.path} (${error instanceof Error ? error.message : String(error)})`);
+    return { location, config: {} };
+  }
+};
+
 export const runAgents = async (
   command: ParsedAgentsCommand,
   streams: CliStreams,
@@ -3097,29 +3122,34 @@ export const runAgents = async (
   const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
 
   const processEnv = readProcessEnv(env);
-  const configLocation = await resolveConfigLocation({}, env);
   // Listing must never be blocked by a broken config — it only feeds the
-  // default marker and the "follows your setup" line.
-  let activeConfig: CliConfigFile = {};
-  if (configLocation) {
-    try {
-      activeConfig = await loadConfigFile(configLocation.path);
-    } catch (error) {
-      writeLine(streams.stderr, `Warning: ignoring unreadable config ${configLocation.path} (${error instanceof Error ? error.message : String(error)}).`);
-    }
-  }
+  // default marker and the "runs on" lines.
+  const { config: activeConfig } = await discoverActiveConfig(env, (message) => {
+    writeLine(streams.stderr, `Warning: ${message}.`);
+  });
 
-  // What an unflagged `stratus run` from this directory would use — the
-  // same precedence as resolveRuntimeConfig.
-  const activeProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'))
-    ?? activeConfig.provider
-    ?? 'demo';
-  const configModelApplies = (activeConfig.provider ?? 'openai') === activeProvider;
-  const activeModel = readNonEmptyString(processEnv.STRATUS_MODEL)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL)
-    ?? (configModelApplies ? activeConfig.model : undefined)
-    ?? (activeProvider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
+  const envProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'));
+  const envModel = readNonEmptyString(processEnv.STRATUS_MODEL)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL);
+
+  // What a run as this soul would actually use right now — the same
+  // precedence as resolveRuntimeConfig (env vars, soul hints, config,
+  // demo), so a model-only or provider-only pin still resolves honestly.
+  const runsOnFor = (soulProvider?: string, soulModel?: string): { provider: string; model?: string } => {
+    const provider = envProvider ?? soulProvider ?? activeConfig.provider ?? 'demo';
+    if (provider === 'demo') {
+      return { provider };
+    }
+    const soulModelApplies = soulProvider === undefined || soulProvider === provider;
+    const configModelApplies = (activeConfig.provider ?? 'openai') === provider;
+    const model = envModel
+      ?? (soulModelApplies ? soulModel : undefined)
+      ?? (configModelApplies ? activeConfig.model : undefined)
+      ?? (provider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
+    return { provider, model };
+  };
+
   const defaultSoulPath = readNonEmptyString(processEnv.STRATUS_SOUL)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_SOUL)
     ?? activeConfig.soul;
@@ -3133,8 +3163,11 @@ export const runAgents = async (
     isDefault: boolean;
     builtIn: boolean;
     soulPath?: string;
+    /** The soul's own frontmatter pin, verbatim. */
     provider?: string;
     model?: string;
+    /** What a run as this agent resolves to right now. */
+    runsOn: { provider: string; model?: string };
     memories: number;
     persona?: string;
     avatar?: string;
@@ -3160,6 +3193,7 @@ export const runAgents = async (
       soulPath,
       ...(parsed.provider ? { provider: parsed.provider } : {}),
       ...(parsed.model ? { model: parsed.model } : {}),
+      runsOn: runsOnFor(parsed.provider, parsed.model),
       memories: (await memory.list(agent.id)).length,
       ...(persona ? { persona } : {}),
       ...(agent.avatar ? { avatar: `${agent.avatar.style} theme, hue ${agent.avatar.hue}, palette ${agent.avatar.palette.join(' ')}` } : {}),
@@ -3193,6 +3227,7 @@ export const runAgents = async (
     name: DEFAULT_STRATUS_AGENT.name,
     isDefault: resolvedDefaultSoul === undefined,
     builtIn: true,
+    runsOn: runsOnFor(),
     memories: (await memory.list(DEFAULT_STRATUS_AGENT.id)).length,
     ...(builtInPersona ? { persona: builtInPersona } : {}),
   });
@@ -3214,9 +3249,8 @@ export const runAgents = async (
     return 0;
   }
 
-  const followsSetup = activeProvider === 'demo'
-    ? 'follows your setup — currently demo (offline)'
-    : `follows your setup — currently ${activeProvider} · ${activeModel}`;
+  const describeRunsOn = (runsOn: { provider: string; model?: string }): string =>
+    (runsOn.provider === 'demo' ? 'demo (offline)' : `${runsOn.provider}${runsOn.model ? ` · ${runsOn.model}` : ''}`);
 
   writeLine(streams.stdout, 'Agents');
   for (const agent of listings) {
@@ -3230,7 +3264,7 @@ export const runAgents = async (
     if (agent.soulPath) {
       writeLine(streams.stdout, `    soul      ${agent.soulPath}`);
     }
-    writeLine(streams.stdout, `    runs on   ${agent.provider ? `${agent.provider}${agent.model ? ` · ${agent.model}` : ''}` : followsSetup}`);
+    writeLine(streams.stdout, `    runs on   ${agent.provider ? describeRunsOn(agent.runsOn) : `follows your setup — currently ${describeRunsOn(agent.runsOn)}`}`);
     writeLine(streams.stdout, `    memory    ${agent.memories === 0 ? 'nothing yet' : `${agent.memories} remembered fact${agent.memories === 1 ? '' : 's'}`}`);
     if (agent.persona) {
       writeLine(streams.stdout, `    persona   ${agent.persona}`);
@@ -3288,17 +3322,11 @@ export const runAgentNew = async (
       // at all: the soul keeps following the machine's configuration
       // instead of demanding credentials nothing has signed in for.
       const processEnv = readProcessEnv(env);
-      const configLocation = await resolveConfigLocation({}, env);
       // Creating an agent must not be blocked by a broken config — it only
       // feeds the soul's provider/model hint, so fall back to defaults.
-      let activeConfig: CliConfigFile = {};
-      if (configLocation) {
-        try {
-          activeConfig = await loadConfigFile(configLocation.path);
-        } catch (error) {
-          writeLine(streams.stdout, `Note: ignoring unreadable config ${configLocation.path} (${error instanceof Error ? error.message : String(error)}).`);
-        }
-      }
+      const { location: configLocation, config: activeConfig } = await discoverActiveConfig(env, (message) => {
+        writeLine(streams.stdout, `Note: ${message}.`);
+      });
       const soulProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
         ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'))
         ?? activeConfig.provider

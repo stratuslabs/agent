@@ -191,6 +191,46 @@ test('runCli agents lists souls, the built-in default, and memory counts', async
   assert.equal(stratus.default, false);
   // The legacy anthropic-agent fact is inherited by the built-in Stratus.
   assert.equal(stratus.memories, 1);
+  // Every entry carries its resolved backend, pinned or not.
+  assert.deepEqual(ava.runsOn, { provider: 'anthropic', model: 'claude-opus-5' });
+  assert.deepEqual(stratus.runsOn, { provider: 'anthropic', model: 'claude-opus-5' });
+});
+
+test('runCli agents resolves model-only soul pins and survives a bad config dir', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // A soul that pins a model but not a provider.
+  await writeFile(path.join(agentsDir, 'nova.md'), [
+    '---',
+    'name: Nova',
+    'id: nova',
+    'model: claude-haiku-4-5',
+    '---',
+    '',
+    'Fast and cheap.',
+    '',
+  ].join('\n'));
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5' })}\n`);
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({ argv: ['agents'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.equal(exitCode, 0);
+  // The soul's own model wins over the config's, exactly as a run would resolve it.
+  assert.match(output.stdout, /follows your setup — currently anthropic · claude-haiku-4-5/);
+  // The built-in default still shows the config's model.
+  assert.match(output.stdout, /currently anthropic · claude-opus-5/);
+
+  // A config that exists but cannot be read (here: a directory) degrades to
+  // a warning instead of failing the listing.
+  const badHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(badHome, '.stratus', 'config.json'), { recursive: true });
+  const bad = createStreams();
+  const badExit = await runCli({ argv: ['agents'], streams: bad.streams, env: { cwd, homeDir: badHome, processEnv: {} } });
+  assert.equal(badExit, 0);
+  assert.match(bad.output.stderr, /Warning: ignoring unreadable config/);
+  assert.match(bad.output.stdout, /Stratus {2}\(default, built-in\)/);
 });
 
 test('runCli agents on a fresh machine shows only the built-in default', async () => {
