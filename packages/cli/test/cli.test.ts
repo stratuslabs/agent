@@ -873,7 +873,7 @@ test('runCli persists agent memory across runs through memory.remember', async (
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line));
   assert.equal(stored.length, 1);
-  assert.equal(stored[0].agentId, 'anthropic-agent');
+  assert.equal(stored[0].agentId, 'stratus');
   assert.equal(stored[0].content, 'The user prefers short answers.');
 
   // A brand-new run — new session, same working directory — sees the memory.
