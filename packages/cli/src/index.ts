@@ -1430,6 +1430,7 @@ const createApprovalPolicy = (
   mode: CliApprovalMode,
   streams: CliStreams,
   env: CliEnvironment,
+  ask?: (prompt: string) => Promise<string>,
 ): ApprovalPolicy => {
   if (mode === 'always') {
     return new AllowAllApprovalPolicy();
@@ -1439,6 +1440,17 @@ const createApprovalPolicy = (
     return {
       async approve() {
         return false;
+      },
+    };
+  }
+
+  // A caller that already owns stdin (chat's readline) supplies its own
+  // asker — two readers on one stream would race for the same bytes.
+  if (ask) {
+    return {
+      async approve({ call }) {
+        const answer = await ask(`Approve tool call ${call.toolName} with input ${JSON.stringify(call.input)}? [y/N] `);
+        return /^y(es)?$/i.test(answer.trim());
       },
     };
   }
@@ -1475,6 +1487,8 @@ const createAgentRuntime = async (
     events?: boolean;
     /** Replaces the default event printer when provided. */
     onEvent?: (event: StratusEvent) => void;
+    /** Answers --approvals ask questions when the caller owns stdin. */
+    askApproval?: (prompt: string) => Promise<string>;
     runtime: RuntimeConfig;
     approvals?: CliApprovalMode;
     maxTurns?: number;
@@ -1520,7 +1534,7 @@ const createAgentRuntime = async (
     provider: runtimeProvider,
     tools,
     executor: createLocalCommandExecutor(),
-    approvals: createApprovalPolicy(options.approvals ?? 'always', streams, options.env ?? {}),
+    approvals: createApprovalPolicy(options.approvals ?? 'always', streams, options.env ?? {}, options.askApproval),
     bus,
     memory,
     ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
@@ -1623,9 +1637,78 @@ export const runChat = async (
   const bold = (text: string): string => (interactive ? `\u001b[1m${text}\u001b[0m` : text);
   const dim = (text: string): string => (interactive ? `\u001b[2m${text}\u001b[0m` : text);
 
+  const input = env.stdinStream ?? process.stdin;
+  const rl = interactive
+    ? createInterface({
+        input,
+        output: streams.stdout as unknown as NodeJS.WritableStream,
+        prompt: '\u001b[36myou ›\u001b[0m ',
+        terminal: true,
+      })
+    : createInterface({ input, terminal: false });
+  // One reader owns stdin. Every line lands in this queue, and whoever is
+  // waiting — the chat loop, or an approval question mid-turn — takes the
+  // next one. A second readline would race for the same bytes, and
+  // rl.question cannot be used while the interface is being iterated.
+  const lineQueue: string[] = [];
+  let inputClosed = false;
+  let pendingApproval: ((answer: string) => void) | undefined;
+  let notifyLine: (() => void) | undefined;
+  rl.on('line', (rawLine) => {
+    if (pendingApproval) {
+      const resolve = pendingApproval;
+      pendingApproval = undefined;
+      resolve(rawLine);
+      return;
+    }
+    lineQueue.push(rawLine);
+    notifyLine?.();
+  });
+  rl.on('close', () => {
+    inputClosed = true;
+    if (pendingApproval) {
+      const resolve = pendingApproval;
+      pendingApproval = undefined;
+      resolve('');
+    }
+    notifyLine?.();
+  });
+
+  const nextLine = (): Promise<string | undefined> => {
+    if (lineQueue.length > 0) {
+      return Promise.resolve(lineQueue.shift());
+    }
+    if (inputClosed) {
+      return Promise.resolve(undefined);
+    }
+    return new Promise((resolve) => {
+      notifyLine = () => {
+        notifyLine = undefined;
+        resolve(lineQueue.shift());
+      };
+    });
+  };
+
+  // An approval consumes the next unconsumed line (typed live, or already
+  // queued from piped input). A closed stream denies instead of hanging.
+  const askApproval = (prompt: string): Promise<string> => {
+    streams.stderr.write(prompt);
+    const queued = lineQueue.shift();
+    if (queued !== undefined) {
+      return Promise.resolve(queued);
+    }
+    if (inputClosed) {
+      return Promise.resolve('');
+    }
+    return new Promise((resolve) => {
+      pendingApproval = resolve;
+    });
+  };
+
   const { runner, agent, metadata } = await createAgentRuntime(streams, {
     runtime,
     approvals: command.approvals,
+    askApproval,
     ...(command.maxTurns !== undefined ? { maxTurns: command.maxTurns } : {}),
     env,
     onEvent: (event) => {
@@ -1660,16 +1743,16 @@ export const runChat = async (
     writeLine(streams.stdout);
   }
 
-  const input = env.stdinStream ?? process.stdin;
-  const rl = interactive
-    ? createInterface({
-        input,
-        output: streams.stdout as unknown as NodeJS.WritableStream,
-        prompt: '\u001b[36myou ›\u001b[0m ',
-        terminal: true,
-      })
-    : createInterface({ input, terminal: false });
+  // Ctrl+C between turns closes the chat gracefully; mid-turn there is
+  // nothing to cancel in the kernel yet, so leave immediately instead of
+  // silently waiting out a slow provider call.
+  let turnInFlight = false;
   rl.on('SIGINT', () => {
+    if (turnInFlight) {
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, dim('Interrupted.'));
+      process.exit(130);
+    }
     rl.close();
   });
 
@@ -1681,7 +1764,11 @@ export const runChat = async (
   if (interactive) {
     rl.prompt();
   }
-  for await (const rawLine of rl) {
+  for (;;) {
+    const rawLine = await nextLine();
+    if (rawLine === undefined) {
+      break;
+    }
     const line = rawLine.trim();
     if (line.length === 0) {
       if (interactive) {
@@ -1704,6 +1791,7 @@ export const runChat = async (
       writeLine(streams.stdout, `you › ${line}`);
     }
     try {
+      turnInFlight = true;
       let session: Session;
       if (sessionId === undefined) {
         const id = randomUUID();
@@ -1716,6 +1804,8 @@ export const runChat = async (
     } catch (error) {
       writeLine(streams.stderr, `Error: ${error instanceof Error ? error.message : String(error)}`);
       writeLine(streams.stdout, dim('(that turn failed — the conversation is still here, try again)'));
+    } finally {
+      turnInFlight = false;
     }
     writeLine(streams.stdout);
     if (interactive) {

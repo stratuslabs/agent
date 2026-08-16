@@ -990,6 +990,45 @@ test('runCli chat holds one session across piped turns', async () => {
   assert.doesNotMatch(output.stdout, /\[/);
 });
 
+test('runCli chat routes approval answers through the chat readline', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['chat', '--provider', 'demo', '--approvals', 'ask'],
+    streams,
+    env: {
+      cwd,
+      homeDir: home,
+      processEnv: {},
+      // The 'y' answers the approval question — it must not become a chat message.
+      stdinStream: Readable.from(['please use the echo tool\ny\n/exit\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stderr, /Approve tool call demo\.echo/);
+  assert.match(output.stdout, /· using demo\.echo/);
+  assert.match(output.stdout, /PLEASE USE THE ECHO TOOL/);
+  assert.doesNotMatch(output.stdout, /you › y\b/);
+
+  // EOF before the answer denies instead of hanging.
+  const eof = createStreams();
+  const eofExit = await runCli({
+    argv: ['chat', '--provider', 'demo', '--approvals', 'ask'],
+    streams: eof.streams,
+    env: {
+      cwd,
+      homeDir: home,
+      processEnv: {},
+      stdinStream: Readable.from(['please use the echo tool\n']),
+    },
+  });
+  assert.equal(eofExit, 0);
+  assert.match(eof.output.stdout, /· demo\.echo denied/);
+});
+
 test('runCli chat resumes the same session so the transcript grows across turns', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
