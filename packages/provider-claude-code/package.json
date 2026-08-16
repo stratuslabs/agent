@@ -1,5 +1,5 @@
 {
-  "name": "@stratusagent/provider-anthropic",
+  "name": "@stratusagent/provider-claude-code",
   "version": "0.2.1",
   "type": "module",
   "main": "./dist/index.js",
@@ -19,27 +19,28 @@
     "test": "node --test --experimental-strip-types"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.117.1",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.0",
     "@stratusagent/core": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.6.0",
     "typescript": "^5.9.3"
   },
-  "description": "Anthropic Claude provider for Stratus Agent: tool calling, per-agent personas, and memory, powered by the official SDK",
+  "description": "Claude subscription runtime for Stratus Agent: runs turns through the Claude Agent SDK so Pro/Max plans cover usage",
   "keywords": [
     "stratus",
     "agent",
     "ai",
     "llm",
     "claude",
-    "anthropic"
+    "claude-code",
+    "subscription"
   ],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",
-    "directory": "packages/provider-anthropic"
+    "directory": "packages/provider-claude-code"
   },
   "publishConfig": {
     "access": "public"

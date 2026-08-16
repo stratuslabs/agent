@@ -10,6 +10,7 @@ Right now, the best way to try it is a local loop in the terminal or a minimal l
 - `@stratusagent/agents`, agent identities, souls, memory, delegation, and routing
 - `@stratusagent/providers`, helpers for building model providers
 - `@stratusagent/provider-anthropic`, the Claude provider on the official Anthropic SDK
+- `@stratusagent/provider-claude-code`, the Claude subscription runtime on the Claude Agent SDK
 - `@stratusagent/executors`, helpers for execution behavior
 - `@stratusagent/executor-local`, a concrete local child-process executor adapter
 - `@stratusagent/cli`, the local CLI entrypoint
