@@ -5,7 +5,7 @@ The Claude provider for [Stratus Agent](https://github.com/stratuslabs/agent), b
 - **Multi-turn tool calling** — advertises kernel tools with wire-safe names, parses `tool_use` blocks, and replays results as `tool_result` blocks.
 - **Persona and memory** — the agent's identity and long-term memory are rendered as the system prompt, so an agent is the same person on every provider.
 - **Adaptive thinking, handled correctly** — `claude-opus-5` (the default) thinks adaptively; the thinking blocks that precede tool calls are persisted in session metadata and replayed verbatim, surviving tool waits, provider restarts, and resuming a session in another process. Use `redactAnthropicRawTurns(session)` before showing a session to people — replay state is never meant to be displayed.
-- **Two ways to pay** — an Anthropic API key, or a Claude Pro/Max subscription via a Claude Code setup token (`authToken`).
+- **Auth** — an Anthropic API key (`apiKey`), or an OAuth bearer token (`authToken`). Note: Claude Pro/Max setup tokens are only honored by Anthropic inside the Claude Code harness, so they do not work against the raw Messages API this provider calls — subscription-billed runs land with the Claude Agent SDK provider ([stratuslabs/agent#25](https://github.com/stratuslabs/agent/issues/25)). Use an API key today.
 
 ## Usage
 
@@ -13,7 +13,7 @@ The Claude provider for [Stratus Agent](https://github.com/stratuslabs/agent), b
 import { createAnthropicProvider } from '@stratusagent/provider-anthropic';
 
 const provider = createAnthropicProvider({
-  apiKey: process.env.ANTHROPIC_API_KEY,   // or authToken: <claude setup-token>
+  apiKey: process.env.ANTHROPIC_API_KEY,
   model: 'claude-opus-5',                  // default
 });
 ```

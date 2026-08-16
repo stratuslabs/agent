@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { appendFile, chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import os from 'node:os';
@@ -331,6 +331,36 @@ const createDemoProvider = (): ModelProvider =>
 const MEMORY_FILENAME = 'memory.jsonl';
 const memoryFilePath = (env: CliEnvironment): string =>
   path.join(stratusHomePath(env), MEMORY_FILENAME);
+
+// Memory used to live under the working directory. Fold any such file into
+// the global store the first time a run happens from that directory, then
+// mark it migrated — an upgrade must never look like the agent forgot.
+const migrateLegacyMemory = async (env: CliEnvironment): Promise<void> => {
+  const legacyPath = path.join(readWorkingDirectory(env), '.stratus', MEMORY_FILENAME);
+  const globalPath = memoryFilePath(env);
+  if (legacyPath === globalPath) {
+    return;
+  }
+
+  let legacy: string;
+  try {
+    legacy = await readFile(legacyPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+
+  const entries = legacy.split('\n').filter((line) => line.trim().length > 0);
+  if (entries.length > 0) {
+    await mkdir(path.dirname(globalPath), { recursive: true });
+    await appendFile(globalPath, `${entries.join('\n')}\n`);
+  }
+  // Rename rather than delete, so nothing is destroyed if the move went
+  // wrong — and so the same file is never imported twice.
+  await rename(legacyPath, `${legacyPath}.migrated`);
+};
 
 // Agents keep the same memory across CLI runs: every remembered fact lands
 // in ~/.stratus/memory.jsonl (keyed by agent id), so the Ava you talk to
@@ -1219,7 +1249,9 @@ export const runSingleLoop = async (
     env?: CliEnvironment;
   },
 ): Promise<Session> => {
-  const memory = createFileMemoryStore(memoryFilePath(options.env ?? {}));
+  const runEnv = options.env ?? {};
+  await migrateLegacyMemory(runEnv);
+  const memory = createFileMemoryStore(memoryFilePath(runEnv));
 
   const tools = new ToolRegistry();
   tools.register(createDemoTool());

@@ -2399,3 +2399,52 @@ test('discovery honors a secondary anthropic credential bound endpoint', async (
 
   assert.equal(anthropicUrls[0], 'https://ant-proxy.test/v1/models?limit=100');
 });
+
+test('legacy per-directory memories migrate into the global store on first run', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const projectDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  // Memories written by a pre-0.2.1 install, in the old per-directory spot.
+  await mkdir(path.join(projectDir, '.stratus'), { recursive: true });
+  const legacyEntry = {
+    id: 'ava:memory:legacy-1',
+    agentId: 'demo-agent',
+    content: 'The user prefers short answers.',
+    createdAt: new Date().toISOString(),
+  };
+  await writeFile(
+    path.join(projectDir, '.stratus', 'memory.jsonl'),
+    `${JSON.stringify(legacyEntry)}\n`,
+  );
+
+  const { streams } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', 'hello'],
+    streams,
+    env: { cwd: projectDir, homeDir: home, processEnv: {} },
+  });
+  assert.equal(exitCode, 0);
+
+  // The fact now lives in the global store…
+  const migrated = (await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8'))
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line));
+  assert.equal(migrated.length, 1);
+  assert.equal(migrated[0].content, 'The user prefers short answers.');
+
+  // …and the legacy file is marked so it can never be imported twice.
+  await assert.rejects(() => readFile(path.join(projectDir, '.stratus', 'memory.jsonl'), 'utf8'));
+  const kept = await readFile(path.join(projectDir, '.stratus', 'memory.jsonl.migrated'), 'utf8');
+  assert.match(kept, /short answers/);
+
+  // A second run from the same directory does not duplicate the entry.
+  await runCli({
+    argv: ['run', 'hello again'],
+    streams: createStreams().streams,
+    env: { cwd: projectDir, homeDir: home, processEnv: {} },
+  });
+  const after = (await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8'))
+    .split('\n')
+    .filter((line) => line.trim().length > 0);
+  assert.equal(after.length, 1);
+});
