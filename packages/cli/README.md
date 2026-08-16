@@ -1,6 +1,6 @@
 # @stratusagent/cli
 
-The Stratus Agent CLI — create agents that feel like people, sign in to Claude or any OpenAI-compatible provider from a menu, and run real tool-calling sessions from your terminal.
+Stratus Agent CLI — create always-on agents that get smarter over time. Quickly set up Stratus Agent on your machine, create new agents, connect AI providers, and configure channels.
 
 ## Install
 
