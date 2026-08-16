@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { Readable } from 'node:stream';
@@ -18,6 +18,8 @@ import {
 } from '../src/index.ts';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
+// Isolated HOME so tests never read or write the real ~/.stratus.
+const tempHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
 
 const createStreams = () => {
   let stdout = '';
@@ -120,260 +122,6 @@ test('parseCommand accepts the setup command', () => {
     configPath: './custom.json',
   });
   assert.throws(() => parseCommand(['setup', '--bogus']), /Unknown option: --bogus/);
-});
-
-test('runCli setup walks through an openai config and reports the missing key', async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
-  const { streams, output } = createStreams();
-
-  const exitCode = await runCli({
-    argv: ['setup'],
-    streams,
-    env: {
-      cwd: tempDir,
-      processEnv: {},
-      setupInput: Readable.from(['2\n', '\n', 'https://example.test/v1\n', '\n', 'Be brief.\n']),
-    },
-  });
-
-  assert.equal(exitCode, 0);
-
-  const written = JSON.parse(await readFile(path.join(tempDir, 'stratus.config.json'), 'utf8'));
-  assert.deepEqual(written, {
-    provider: 'openai',
-    model: 'gpt-4.1-mini',
-    baseUrl: 'https://example.test/v1',
-    apiKeyEnv: 'OPENAI_API_KEY',
-    systemPrompt: 'Be brief.',
-  });
-
-  assert.match(output.stdout, /Wrote .*stratus\.config\.json/);
-  assert.match(output.stdout, /OPENAI_API_KEY is NOT set/);
-  assert.match(output.stdout, /export OPENAI_API_KEY=your-key/);
-  assert.equal(output.stderr, '');
-});
-
-test('runCli setup includes a custom config path in the suggested next commands', async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
-  const { streams, output } = createStreams();
-
-  const exitCode = await runCli({
-    argv: ['setup', '--config', './custom.json'],
-    streams,
-    env: {
-      cwd: tempDir,
-      processEnv: {},
-      setupInput: Readable.from(['2\n', '\n', '\n', '\n', '\n']),
-    },
-  });
-
-  assert.equal(exitCode, 0);
-  assert.match(output.stdout, /Wrote .*custom\.json/);
-  assert.match(output.stdout, /stratus run --config \.\/custom\.json "say hello"/);
-});
-
-test('runCli setup shell-quotes config paths containing spaces in next commands', async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
-  const { streams, output } = createStreams();
-
-  const exitCode = await runCli({
-    argv: ['setup', '--config', './my config.json'],
-    streams,
-    env: {
-      cwd: tempDir,
-      processEnv: {},
-      setupInput: Readable.from(['3\n']),
-    },
-  });
-
-  assert.equal(exitCode, 0);
-  assert.match(output.stdout, /stratus run --config '\.\/my config\.json' "please use the echo tool"/);
-});
-
-test('runCli setup warns when an exported STRATUS_PROVIDER overrides the chosen provider', async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
-  const { streams, output } = createStreams();
-
-  const exitCode = await runCli({
-    argv: ['setup'],
-    streams,
-    env: {
-      cwd: tempDir,
-      processEnv: { STRATUS_PROVIDER: 'openai' },
-      setupInput: Readable.from(['3\n']),
-    },
-  });
-
-  assert.equal(exitCode, 0);
-  assert.match(output.stdout, /STRATUS_PROVIDER=openai is exported and takes precedence/);
-  assert.match(output.stdout, /unset STRATUS_PROVIDER/);
-  assert.match(output.stdout, /stratus run --provider demo "please use the echo tool"/);
-
-  const clean = createStreams();
-  await runCli({
-    argv: ['setup'],
-    streams: clean.streams,
-    env: {
-      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
-      processEnv: {},
-      setupInput: Readable.from(['3\n']),
-    },
-  });
-  assert.doesNotMatch(clean.output.stdout, /--provider/);
-});
-
-test('runCli setup writes to the STRATUS_CONFIG path that run will load', async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
-  const envConfigPath = path.join(tempDir, 'nested', '..', 'env-config.json');
-  const { streams, output } = createStreams();
-
-  const exitCode = await runCli({
-    argv: ['setup'],
-    streams,
-    env: {
-      cwd: tempDir,
-      processEnv: { STRATUS_CONFIG: envConfigPath },
-      setupInput: Readable.from(['3\n']),
-    },
-  });
-
-  assert.equal(exitCode, 0);
-  assert.match(output.stdout, /STRATUS_CONFIG is set, so the config will be written to/);
-  const written = JSON.parse(await readFile(path.join(tempDir, 'env-config.json'), 'utf8'));
-  assert.deepEqual(written, { provider: 'demo' });
-  assert.doesNotMatch(output.stdout, /stratus run --config/);
-});
-
-test('runCli setup warns when exported model or base-url overrides the configured values', async () => {
-  const { streams, output } = createStreams();
-
-  const exitCode = await runCli({
-    argv: ['setup'],
-    streams,
-    env: {
-      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
-      processEnv: {
-        STRATUS_MODEL: 'gpt-old',
-        STRATUS_BASE_URL: 'https://old.example.test/v1',
-        OPENAI_API_KEY: 'set-key',
-      },
-      setupInput: Readable.from(['2\n', 'gpt-4.1-mini\n', 'https://new.example.test/v1\n', '\n', '\n']),
-    },
-  });
-
-  assert.equal(exitCode, 0);
-  assert.match(output.stdout, /STRATUS_MODEL=gpt-old is exported and takes precedence/);
-  assert.match(output.stdout, /STRATUS_BASE_URL=https:\/\/old\.example\.test\/v1 is exported and takes precedence/);
-  assert.match(output.stdout, /stratus run --model gpt-4\.1-mini --base-url https:\/\/new\.example\.test\/v1 "say hello"/);
-});
-
-test('runCli setup warns when an exported system prompt overrides the configured one', async () => {
-  const { streams, output } = createStreams();
-
-  const exitCode = await runCli({
-    argv: ['setup'],
-    streams,
-    env: {
-      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
-      processEnv: { STRATUS_SYSTEM_PROMPT: 'Old env prompt.', OPENAI_API_KEY: 'set-key' },
-      setupInput: Readable.from(['2\n', '\n', '\n', '\n', 'New configured prompt.\n']),
-    },
-  });
-
-  assert.equal(exitCode, 0);
-  assert.match(output.stdout, /STRATUS_SYSTEM_PROMPT=Old env prompt\. is exported and takes precedence/);
-  assert.match(output.stdout, /unset STRATUS_SYSTEM_PROMPT/);
-  assert.doesNotMatch(output.stdout, /--system-prompt/);
-});
-
-test('runCli setup bases the key readiness check on exported API key overrides', async () => {
-  const redirected = createStreams();
-  const redirectedExit = await runCli({
-    argv: ['setup'],
-    streams: redirected.streams,
-    env: {
-      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
-      processEnv: { STRATUS_API_KEY_ENV: 'MY_KEY', OPENAI_API_KEY: 'set-but-ignored' },
-      setupInput: Readable.from(['2\n', '\n', '\n', '\n', '\n']),
-    },
-  });
-
-  assert.equal(redirectedExit, 0);
-  assert.match(redirected.output.stdout, /STRATUS_API_KEY_ENV=MY_KEY is exported and takes precedence/);
-  assert.match(redirected.output.stdout, /MY_KEY is NOT set/);
-  assert.match(redirected.output.stdout, /export MY_KEY=your-key/);
-  assert.doesNotMatch(redirected.output.stdout, /OPENAI_API_KEY is set in your environment/);
-
-  const directKey = createStreams();
-  const directKeyExit = await runCli({
-    argv: ['setup'],
-    streams: directKey.streams,
-    env: {
-      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
-      processEnv: { STRATUS_API_KEY: 'direct-key' },
-      setupInput: Readable.from(['2\n', '\n', '\n', '\n', '\n']),
-    },
-  });
-
-  assert.equal(directKeyExit, 0);
-  assert.match(directKey.output.stdout, /STRATUS_API_KEY is set in your environment — you are ready to go/);
-});
-
-test('runCli setup writes a demo config without asking provider questions', async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
-  const { streams, output } = createStreams();
-
-  const exitCode = await runCli({
-    argv: ['setup'],
-    streams,
-    env: {
-      cwd: tempDir,
-      processEnv: {},
-      setupInput: Readable.from(['3\n']),
-    },
-  });
-
-  assert.equal(exitCode, 0);
-  const written = JSON.parse(await readFile(path.join(tempDir, 'stratus.config.json'), 'utf8'));
-  assert.deepEqual(written, { provider: 'demo' });
-  assert.match(output.stdout, /no API key needed/);
-});
-
-test('runCli setup refuses to overwrite an existing config unless confirmed', async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
-  const configPath = path.join(tempDir, 'stratus.config.json');
-  await writeFile(configPath, JSON.stringify({ provider: 'demo' }));
-
-  const declined = createStreams();
-  const declinedExit = await runCli({
-    argv: ['setup'],
-    streams: declined.streams,
-    env: {
-      cwd: tempDir,
-      processEnv: {},
-      setupInput: Readable.from(['n\n']),
-    },
-  });
-
-  assert.equal(declinedExit, 0);
-  assert.match(declined.output.stdout, /Keeping the existing config/);
-  assert.equal(await readFile(configPath, 'utf8'), JSON.stringify({ provider: 'demo' }));
-
-  const accepted = createStreams();
-  const acceptedExit = await runCli({
-    argv: ['setup'],
-    streams: accepted.streams,
-    env: {
-      cwd: tempDir,
-      processEnv: { OPENAI_API_KEY: 'already-set' },
-      setupInput: Readable.from(['y\n', '2\n', '\n', '\n', '\n', '\n']),
-    },
-  });
-
-  assert.equal(acceptedExit, 0);
-  const rewritten = JSON.parse(await readFile(configPath, 'utf8'));
-  assert.equal(rewritten.provider, 'openai');
-  assert.match(accepted.output.stdout, /OPENAI_API_KEY is set in your environment/);
 });
 
 test('runCli agent new generates a full identity with name and avatar theme', async () => {
@@ -602,6 +350,7 @@ test('resolveRuntimeConfig falls back to legacy config filename', async () => {
     events: true,
   }, {
     cwd: tempDir,
+    homeDir: tempHome,
     processEnv: {
       CUSTOM_OPENAI_KEY: 'config-key',
     },
@@ -624,6 +373,7 @@ test('runCli executes the real provider path with env config', async () => {
     argv: ['run', '--prompt', 'say hello', '--provider', 'openai'],
     streams,
     env: {
+      homeDir: tempHome,
       processEnv: {
         OPENAI_API_KEY: 'test-key',
       },
@@ -664,6 +414,7 @@ test('runCli completes a real-provider tool round trip across two turns', async 
     argv: ['run', '--prompt', 'shout hello', '--provider', 'openai'],
     streams,
     env: {
+      homeDir: tempHome,
       processEnv: {
         OPENAI_API_KEY: 'test-key',
       },
@@ -794,7 +545,7 @@ test('runCli reports missing api key errors for real providers', async () => {
   const exitCode = await runCli({
     argv: ['run', '--prompt', 'hello', '--provider', 'openai'],
     streams,
-    env: { processEnv: {} },
+    env: { processEnv: {}, cwd: tempHome, homeDir: tempHome },
   });
 
   assert.equal(exitCode, 1);
@@ -850,35 +601,6 @@ test('parseCommand accepts the anthropic provider and soul flag', () => {
   assert.throws(() => parseCommand(['run', '--provider', 'claude', 'hello']), /Unsupported provider/);
 });
 
-test('runCli setup walks through an anthropic config without a base URL question', async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
-  const { streams, output } = createStreams();
-
-  const exitCode = await runCli({
-    argv: ['setup'],
-    streams,
-    env: {
-      cwd: tempDir,
-      processEnv: {},
-      setupInput: Readable.from(['1\n', '\n', '\n', '\n']),
-    },
-  });
-
-  assert.equal(exitCode, 0);
-
-  const written = JSON.parse(await readFile(path.join(tempDir, 'stratus.config.json'), 'utf8'));
-  assert.deepEqual(written, {
-    provider: 'anthropic',
-    model: 'claude-opus-5',
-    apiKeyEnv: 'ANTHROPIC_API_KEY',
-  });
-
-  assert.doesNotMatch(output.stdout, /Base URL/);
-  assert.match(output.stdout, /ANTHROPIC_API_KEY is NOT set/);
-  assert.match(output.stdout, /export ANTHROPIC_API_KEY=your-key/);
-  assert.equal(output.stderr, '');
-});
-
 test('resolveRuntimeConfig defaults anthropic to claude-opus-5 and its own key env', async () => {
   const runtime = await resolveRuntimeConfig({
     command: 'run',
@@ -887,6 +609,8 @@ test('resolveRuntimeConfig defaults anthropic to claude-opus-5 and its own key e
     format: 'text',
     events: true,
   }, {
+    cwd: tempHome,
+    homeDir: tempHome,
     processEnv: {
       ANTHROPIC_API_KEY: 'env-key',
     },
@@ -905,7 +629,7 @@ test('resolveRuntimeConfig defaults anthropic to claude-opus-5 and its own key e
       provider: 'anthropic',
       format: 'text',
       events: true,
-    }, { processEnv: {} }),
+    }, { processEnv: {}, cwd: tempHome, homeDir: tempHome }),
     /Missing API key for provider=anthropic.*ANTHROPIC_API_KEY/,
   );
 });
@@ -929,6 +653,7 @@ Be warm and concise.
     soul: soulPath,
   }, {
     cwd: tempDir,
+    homeDir: tempHome,
     processEnv: { ANTHROPIC_API_KEY: 'env-key' },
   });
 
@@ -947,6 +672,7 @@ Be warm and concise.
     soul: soulPath,
   }, {
     cwd: tempDir,
+    homeDir: tempHome,
     processEnv: {},
   });
 
@@ -980,6 +706,7 @@ test('resolveRuntimeConfig picks up a soul from the config file', async () => {
     events: true,
   }, {
     cwd: tempDir,
+    homeDir: tempHome,
     processEnv: {},
   });
 
@@ -1000,7 +727,7 @@ Be warm and concise.
   const exitCode = await runCli({
     argv: ['run', '--soul', soulPath, '--format', 'json', 'hello'],
     streams,
-    env: { cwd: tempDir, processEnv: {} },
+    env: { cwd: tempDir, homeDir: tempHome, processEnv: {} },
   });
 
   assert.equal(exitCode, 0);
@@ -1013,7 +740,7 @@ Be warm and concise.
   await runCli({
     argv: ['run', '--soul', soulPath, 'hello'],
     streams: text.streams,
-    env: { cwd: tempDir, processEnv: {} },
+    env: { cwd: tempDir, homeDir: tempHome, processEnv: {} },
   });
   assert.match(text.output.stdout, /provider=demo as Ava/);
 });
@@ -1026,6 +753,7 @@ test('runCli executes the anthropic provider path with env config', async () => 
     argv: ['run', '--prompt', 'say hello', '--provider', 'anthropic'],
     streams,
     env: {
+      homeDir: tempHome,
       processEnv: {
         ANTHROPIC_API_KEY: 'test-key',
       },
@@ -1111,6 +839,7 @@ test('runCli persists agent memory across runs through memory.remember', async (
     streams: createStreams().streams,
     env: {
       cwd: tempDir,
+      homeDir: tempHome,
       processEnv: { ANTHROPIC_API_KEY: 'test-key' },
       fetch: (async (_url: unknown, init?: { body?: unknown }) => {
         const body = JSON.parse(String(init?.body ?? '{}'));
@@ -1153,6 +882,7 @@ test('runCli persists agent memory across runs through memory.remember', async (
     streams: createStreams().streams,
     env: {
       cwd: tempDir,
+      homeDir: tempHome,
       processEnv: { ANTHROPIC_API_KEY: 'test-key' },
       fetch: (async (_url: unknown, init?: { body?: unknown }) => {
         const body = JSON.parse(String(init?.body ?? '{}'));
@@ -1186,7 +916,7 @@ test('an unnamed soul keeps the same generated identity across invocations', asy
     format: 'text',
     events: true,
     soul: soulPath,
-  }, { cwd: tempDir, processEnv: {} });
+  }, { cwd: tempDir, homeDir: tempHome, processEnv: {} });
 
   const first = await resolveTwice();
   const second = await resolveTwice();
@@ -1216,6 +946,7 @@ test('resolveRuntimeConfig treats provider-less config settings as openai-specif
     events: true,
   }, {
     cwd: tempDir,
+    homeDir: tempHome,
     processEnv: { ANTHROPIC_API_KEY: 'anthropic-key', CUSTOM_OPENAI_KEY: 'openai-key' },
   });
 
@@ -1234,6 +965,7 @@ test('resolveRuntimeConfig treats provider-less config settings as openai-specif
     events: true,
   }, {
     cwd: tempDir,
+    homeDir: tempHome,
     processEnv: { CUSTOM_OPENAI_KEY: 'openai-key' },
   });
 
@@ -1284,6 +1016,7 @@ Be warm.
     soul: soulPath,
   }, {
     cwd: tempDir,
+    homeDir: tempHome,
     processEnv: { OPENAI_API_KEY: 'openai-key' },
   });
 
@@ -1302,6 +1035,7 @@ test('runCli json output never exposes Claude replay state or thinking text', as
     streams,
     env: {
       cwd: tempDir,
+      homeDir: tempHome,
       processEnv: { ANTHROPIC_API_KEY: 'test-key' },
       fetch: (async () => {
         calls += 1;
@@ -1334,4 +1068,1334 @@ test('runCli json output never exposes Claude replay state or thinking text', as
   assert.doesNotMatch(output.stdout, /sig_cli/);
   // The rest of the metadata is still there.
   assert.equal(payload.session.metadata.provider, 'anthropic');
+});
+
+test('setup signs into Claude with a pasted API key, verifies it, and saves credentials', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+  const requests: Array<{ url: string; headers: Record<string, string> }> = [];
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-test-key\n', '5\n']),
+      fetch: (async (url: any, init?: any) => {
+        const headers: Record<string, string> = {};
+        new Headers(init?.headers ?? {}).forEach((value, key) => {
+          headers[key] = value;
+        });
+        requests.push({ url: String(url), headers });
+        return new Response('{}', { status: 200 });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Checking the key against the Anthropic API/);
+  assert.match(output.stdout, /✓ Key verified — you are signed in to Anthropic\./);
+  assert.equal(requests[0]?.url, 'https://api.anthropic.com/v1/models');
+  assert.equal(requests[0]?.headers['x-api-key'], 'sk-ant-test-key');
+
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config, { provider: 'anthropic', model: 'claude-opus-5' });
+
+  const credentialsFile = path.join(home, '.stratus', 'credentials.json');
+  const credentials = JSON.parse(await readFile(credentialsFile, 'utf8'));
+  assert.deepEqual(credentials, { anthropic: { type: 'api_key', value: 'sk-ant-test-key' } });
+  if (process.platform !== 'win32') {
+    const mode = (await stat(credentialsFile)).mode & 0o777;
+    assert.equal(mode, 0o600);
+  }
+  assert.match(output.stdout, /signed in with an API key — ready to go/);
+});
+
+test('setup stores a Claude subscription setup token', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '1\n', '1\n', 'sk-ant-oat-123\n', '5\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /claude setup-token/);
+  assert.match(output.stdout, /✓ Subscription token saved\./);
+
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials, { anthropic: { type: 'oauth_token', value: 'sk-ant-oat-123' } });
+  assert.match(output.stdout, /signed in with your Claude subscription — ready to go/);
+});
+
+test('setup refuses a rejected API key and saves nothing', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'bad-key\n', '5\n']),
+      fetch: (async () => new Response('{}', { status: 401 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /✗ Anthropic rejected that key \(HTTP 401\)\. It was NOT saved/);
+  assert.match(output.stdout, /NOT signed in yet/);
+  await assert.rejects(() => readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+});
+
+test('setup creates an agent whose soul lives in ~/.stratus/agents', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '5\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Say hello to Ava\./);
+
+  const soulPath = path.join(home, '.stratus', 'agents', 'ava.md');
+  const soul = await readFile(soulPath, 'utf8');
+  assert.match(soul, /name: Ava\n/);
+  assert.match(soul, /Be kind and brief\./);
+
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.soul, soulPath);
+
+  // A run from a completely different directory finds the global config and
+  // becomes Ava.
+  const runtime = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    provider: 'demo',
+    format: 'text',
+    events: true,
+  }, {
+    cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-')),
+    homeDir: home,
+    processEnv: {},
+  });
+  assert.equal(runtime.soul?.agent.name, 'Ava');
+});
+
+test('setup demo path can test run inline before saving', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '3\n', '4\n', '5\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Demo selected — no sign-in needed/);
+  assert.match(output.stdout, /Running a quick hello/);
+  assert.match(output.stdout, /\[assistant\] Demo provider ready/);
+
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config, { provider: 'demo' });
+});
+
+test('setup warns when exported env vars override the saved config', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { STRATUS_PROVIDER: 'openai' },
+      setupInput: Readable.from(['1\n', '3\n', '5\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /STRATUS_PROVIDER=openai is exported and takes precedence/);
+  assert.match(output.stdout, /stratus run --provider demo "say hello"/);
+});
+
+test('setup honors STRATUS_CONFIG and --config for the write target', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  const envConfigPath = path.join(tempDir, 'env-config.json');
+
+  const viaEnv = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams: viaEnv.streams,
+    env: {
+      cwd: tempDir,
+      homeDir: home,
+      processEnv: { STRATUS_CONFIG: envConfigPath },
+      setupInput: Readable.from(['5\n']),
+    },
+  });
+  assert.match(viaEnv.output.stdout, /STRATUS_CONFIG is set, so the config will be written to/);
+  const envWritten = JSON.parse(await readFile(envConfigPath, 'utf8'));
+  assert.deepEqual(envWritten, { provider: 'anthropic', model: 'claude-opus-5' });
+
+  const viaFlag = createStreams();
+  await runCli({
+    argv: ['setup', '--config', './custom.json'],
+    streams: viaFlag.streams,
+    env: {
+      cwd: tempDir,
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '3\n', '5\n']),
+    },
+  });
+  assert.match(viaFlag.output.stdout, /stratus run --config \.\/custom\.json "say hello"/);
+  const flagWritten = JSON.parse(await readFile(path.join(tempDir, 'custom.json'), 'utf8'));
+  assert.deepEqual(flagWritten, { provider: 'demo' });
+});
+
+test('run uses the stored sign-in from the global config and credentials', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'stored-key' } }),
+  );
+
+  const baseCommand = { command: 'run' as const, prompt: 'hello', format: 'text' as const, events: true };
+
+  const runtime = await resolveRuntimeConfig(baseCommand, {
+    cwd: elsewhere,
+    homeDir: home,
+    processEnv: {},
+  });
+  assert.deepEqual(runtime, { provider: 'anthropic', apiKey: 'stored-key', model: 'claude-opus-5' });
+
+  // A subscription token resolves as authToken instead of apiKey.
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-xyz' } }),
+  );
+  const subscription = await resolveRuntimeConfig(baseCommand, {
+    cwd: elsewhere,
+    homeDir: home,
+    processEnv: {},
+  });
+  assert.deepEqual(subscription, { provider: 'anthropic', authToken: 'sk-ant-oat-xyz', model: 'claude-opus-5' });
+
+  // Env keys still outrank the stored sign-in.
+  const envWins = await resolveRuntimeConfig(baseCommand, {
+    cwd: elsewhere,
+    homeDir: home,
+    processEnv: { ANTHROPIC_API_KEY: 'env-key' },
+  });
+  assert.deepEqual(envWins, { provider: 'anthropic', apiKey: 'env-key', model: 'claude-opus-5' });
+});
+
+test('setup Models menu picks default and fallback from live available models', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+
+  const routedFetch = (async (url: any) => {
+    const target = String(url);
+    if (target.includes('api.anthropic.com')) {
+      return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }, { id: 'claude-sonnet-5' }] }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
+  }) as typeof fetch;
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: routedFetch,
+      setupInput: Readable.from([
+        '1\n', '1\n', '2\n', 'sk-ant-key\n',      // Providers → Claude → API key
+        '1\n', '2\n', 'https://local.test/v1\n', 'sk-openai-key\n', // Providers → OpenAI → custom base URL → key
+        '2\n', '1\n', '2\n',                      // Models → default → claude-sonnet-5
+        '2\n', '2\n', '3\n',                      // Models → fallback → gpt-4.1-mini
+        '5\n',
+      ]),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /1\) claude-opus-5 — anthropic/);
+  assert.match(output.stdout, /3\) gpt-4\.1-mini — openai/);
+  assert.match(output.stdout, /Default model set to claude-sonnet-5 \(anthropic\)\./);
+  assert.match(output.stdout, /Fallback model set to gpt-4\.1-mini \(openai\)/);
+  assert.match(output.stdout, /default claude-sonnet-5 · fallback gpt-4\.1-mini/);
+
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config, {
+    provider: 'anthropic',
+    model: 'claude-sonnet-5',
+    fallbackModel: 'gpt-4.1-mini',
+    fallbackProvider: 'openai',
+    fallbackBaseUrl: 'https://local.test/v1',
+  });
+
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials, {
+    anthropic: { type: 'api_key', value: 'sk-ant-key' },
+    openai: { type: 'api_key', value: 'sk-openai-key', baseUrl: 'https://local.test/v1' },
+  });
+});
+
+test('resolveRuntimeConfig resolves a fallback model with its own sign-in', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    fallbackModel: 'gpt-4.1-mini',
+    fallbackProvider: 'openai',
+    fallbackBaseUrl: 'https://local.test/v1',
+  }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    anthropic: { type: 'api_key', value: 'sk-ant' },
+    openai: { type: 'api_key', value: 'sk-openai' },
+  }));
+
+  const baseCommand = { command: 'run' as const, prompt: 'hello', format: 'text' as const, events: true };
+  const runtime = await resolveRuntimeConfig(baseCommand, { cwd: elsewhere, homeDir: home, processEnv: {} });
+
+  assert.equal(runtime.provider, 'anthropic');
+  assert.deepEqual(runtime.provider === 'anthropic' && runtime.fallback, {
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://local.test/v1',
+    apiKey: 'sk-openai',
+  });
+
+  // Environment keys outrank the stored fallback credential, mirroring the
+  // primary sign-in precedence.
+  const envPreferred = await resolveRuntimeConfig(baseCommand, {
+    cwd: elsewhere,
+    homeDir: home,
+    processEnv: { OPENAI_API_KEY: 'env-openai' },
+  });
+  assert.equal(
+    envPreferred.provider === 'anthropic' && envPreferred.fallback?.apiKey,
+    'env-openai',
+  );
+
+  // Without a working sign-in for the fallback provider, the fallback is
+  // skipped rather than failing the run.
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    anthropic: { type: 'api_key', value: 'sk-ant' },
+  }));
+  const withoutFallbackAuth = await resolveRuntimeConfig(baseCommand, { cwd: elsewhere, homeDir: home, processEnv: {} });
+  assert.equal(withoutFallbackAuth.provider === 'anthropic' && withoutFallbackAuth.fallback, undefined);
+});
+
+test('runCli fails over to the fallback model when the default model errors', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  await writeFile(path.join(tempDir, 'stratus.config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    fallbackModel: 'gpt-4.1-mini',
+    fallbackProvider: 'openai',
+  }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'say hello'],
+    streams,
+    env: {
+      cwd: tempDir,
+      homeDir: tempHome,
+      processEnv: { ANTHROPIC_API_KEY: 'sk-ant', OPENAI_API_KEY: 'sk-openai' },
+      fetch: (async (url: any) => {
+        if (String(url).includes('api.anthropic.com')) {
+          return new Response(JSON.stringify({ error: { type: 'authentication_error', message: 'bad key' } }), { status: 401 });
+        }
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: 'Hello from the fallback model.' } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /provider=anthropic model=claude-opus-5 fallback=gpt-4\.1-mini/);
+  assert.match(output.stderr, /the default model failed .*falling back to gpt-4\.1-mini/);
+  assert.match(output.stdout, /\[assistant\] Hello from the fallback model\./);
+});
+
+test('switching the default provider clears settings chosen for the old one', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    apiKeyEnv: 'CUSTOM_OPENAI_KEY',
+    baseUrl: 'https://local.test/v1',
+  }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-key\n', '5\n']),
+      fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  // The openai model and apiKeyEnv were provider-bound and must not leak
+  // into the anthropic default.
+  assert.equal(config.provider, 'anthropic');
+  assert.equal(config.model, 'claude-opus-5');
+  assert.equal(config.apiKeyEnv, undefined);
+  // After the switch, the menu shows the new provider's default model.
+  assert.match(output.stdout, /default claude-opus-5 \(default\)/);
+});
+
+test('switching provider warns when the default soul pins another provider', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const soulPath = path.join(home, '.stratus', 'agents', 'ava.md');
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  await writeFile(soulPath, `---
+name: Ava
+provider: anthropic
+---
+Be warm.
+`);
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    soul: soulPath,
+  }));
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '3\n', '5\n']),
+    },
+  });
+
+  assert.match(output.stdout, /Ava\) pins provider anthropic in their soul, which outranks this choice/);
+});
+
+test('setup saves a key when the endpoint has no /models to verify against', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '2\n', 'https://local.test/v1\n', 'sk-local\n', '5\n']),
+      fetch: (async () => new Response('not found', { status: 404 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // 404/405 means the compatible endpoint lacks GET /models — that says
+  // nothing about the key, so it is saved and checked on first run.
+  assert.match(output.stdout, /did not support a key check \(HTTP 404\)/);
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials, {
+    openai: { type: 'api_key', value: 'sk-local', baseUrl: 'https://local.test/v1' },
+  });
+});
+
+test('the inline test run uses the same env-over-stored key precedence as real runs', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'stored-key' } }),
+  );
+
+  const seenKeys: Array<string | undefined> = [];
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'env-key' },
+      setupInput: Readable.from(['4\n', '5\n']),
+      fetch: (async (_url: any, init?: any) => {
+        const headers: Record<string, string> = {};
+        new Headers(init?.headers ?? {}).forEach((value, key) => {
+          headers[key] = value;
+        });
+        seenKeys.push(headers['x-api-key']);
+        return new Response(JSON.stringify({
+          id: 'msg_1',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-opus-5',
+          content: [{ type: 'text', text: 'Hello!' }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(seenKeys[0], 'env-key');
+});
+
+test('a typed model id resolves to the provider that lists it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async (url: any) => {
+        if (String(url).includes('api.anthropic.com')) {
+          return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
+      }) as typeof fetch,
+      setupInput: Readable.from([
+        '1\n', '1\n', '2\n', 'sk-ant-key\n',
+        '1\n', '2\n', '\n', 'sk-openai-key\n',
+        '2\n', '2\n', 'gpt-4.1-mini\n',   // fallback typed by id — listed under openai
+        '5\n',
+      ]),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // Default provider is anthropic, but the typed id belongs to openai.
+  assert.match(output.stdout, /Fallback model set to gpt-4\.1-mini \(openai\)/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.fallbackProvider, 'openai');
+});
+
+test('stored credentials are never sent to an untrusted project-selected endpoint', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'stored-key' } }),
+  );
+  // A cloned repository could ship exactly this file.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://evil.test/v1',
+  }));
+
+  const baseCommand = { command: 'run' as const, prompt: 'hello', format: 'text' as const, events: true };
+
+  // Auto-discovered config + custom URL: the stored key stays home.
+  await assert.rejects(
+    () => resolveRuntimeConfig(baseCommand, { cwd: project, homeDir: home, processEnv: {} }),
+    /saved sign-in is not sent to it/,
+  );
+
+  // An explicitly passed --config is the user's own choice.
+  const trusted = await resolveRuntimeConfig(
+    { ...baseCommand, configPath: path.join(project, 'stratus.config.json') },
+    { cwd: project, homeDir: home, processEnv: {} },
+  );
+  assert.equal(trusted.provider === 'openai' && trusted.apiKey, 'stored-key');
+
+  // A project config pointing at the provider's default endpoint is harmless.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://api.openai.com/v1',
+  }));
+  const defaultEndpoint = await resolveRuntimeConfig(baseCommand, { cwd: project, homeDir: home, processEnv: {} });
+  assert.equal(defaultEndpoint.provider === 'openai' && defaultEndpoint.apiKey, 'stored-key');
+
+  // The same rule protects fallback endpoints.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    fallbackProvider: 'openai',
+    fallbackModel: 'gpt-4.1-mini',
+    fallbackBaseUrl: 'https://evil.test/v1',
+  }));
+  const fallbackBlocked = await resolveRuntimeConfig(baseCommand, {
+    cwd: project,
+    homeDir: home,
+    processEnv: { ANTHROPIC_API_KEY: 'env-ant' },
+  });
+  assert.equal(fallbackBlocked.provider === 'anthropic' && fallbackBlocked.fallback, undefined);
+});
+
+test('picking a default model warns when the soul pins a different model', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const soulPath = path.join(home, '.stratus', 'agents', 'ava.md');
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  await writeFile(soulPath, `---
+name: Ava
+provider: anthropic
+model: claude-opus-5
+---
+Be warm.
+`);
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    soul: soulPath,
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant' } }),
+  );
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async () => new Response(JSON.stringify({
+        data: [{ id: 'claude-opus-5' }, { id: 'claude-sonnet-5' }],
+      }), { status: 200 })) as typeof fetch,
+      setupInput: Readable.from(['2\n', '1\n', '2\n', '5\n']),
+    },
+  });
+
+  assert.match(output.stdout, /Default model set to claude-sonnet-5/);
+  assert.match(output.stdout, /Ava\) pins model claude-opus-5 in their soul, which outranks this choice/);
+});
+
+test('model discovery uses the same credential a real run would use', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'stored-key' } }),
+  );
+
+  const listKeys: Array<string | undefined> = [];
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      // The env key outranks the stored one at run time, so discovery must
+      // use it too.
+      processEnv: { ANTHROPIC_API_KEY: 'env-key' },
+      fetch: (async (url: any, init?: any) => {
+        if (String(url).includes('/v1/models')) {
+          const headers: Record<string, string> = {};
+          new Headers(init?.headers ?? {}).forEach((value, key) => {
+            headers[key] = value;
+          });
+          listKeys.push(headers['x-api-key']);
+        }
+        return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
+      }) as typeof fetch,
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '5\n']),
+    },
+  });
+
+  assert.equal(listKeys[0], 'env-key');
+});
+
+test('a stored primary key never follows an untrusted same-provider fallback URL', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'stored-key' } }),
+  );
+  // Default endpoint for the primary (harmless), attacker URL for the
+  // fallback of the SAME provider — the primary's stored key must not
+  // follow it there.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    fallbackProvider: 'openai',
+    fallbackModel: 'gpt-4o-mini',
+    fallbackBaseUrl: 'https://evil.test/v1',
+  }));
+
+  const baseCommand = { command: 'run' as const, prompt: 'hello', format: 'text' as const, events: true };
+
+  const blocked = await resolveRuntimeConfig(baseCommand, { cwd: project, homeDir: home, processEnv: {} });
+  assert.equal(blocked.provider === 'openai' && blocked.apiKey, 'stored-key');
+  assert.equal(blocked.provider === 'openai' && blocked.fallback, undefined);
+
+  // An env-supplied key is the user's own ambient choice and may follow it.
+  const envAllowed = await resolveRuntimeConfig(baseCommand, {
+    cwd: project,
+    homeDir: home,
+    processEnv: { OPENAI_API_KEY: 'env-key' },
+  });
+  assert.deepEqual(envAllowed.provider === 'openai' && envAllowed.fallback, {
+    provider: 'openai',
+    model: 'gpt-4o-mini',
+    baseUrl: 'https://evil.test/v1',
+    apiKey: 'env-key',
+  });
+});
+
+test('a secondary openai sign-in keeps its endpoint with the credential', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams } = createStreams();
+
+  // Default stays anthropic; openai is signed in as a secondary provider
+  // with a custom (local) endpoint.
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async (url: any) => {
+        if (String(url).includes('api.anthropic.com')) {
+          return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ data: [{ id: 'local-llama' }] }), { status: 200 });
+      }) as typeof fetch,
+      setupInput: Readable.from([
+        '1\n', '1\n', '2\n', 'sk-ant-key\n',
+        '1\n', '2\n', 'https://local.test/v1\n', 'sk-local\n',
+        '5\n',
+      ]),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials.openai, { type: 'api_key', value: 'sk-local', baseUrl: 'https://local.test/v1' });
+
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.provider, 'anthropic');
+
+  // A later openai run pairs the stored key with ITS endpoint, not
+  // api.openai.com.
+  const runtime = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    provider: 'openai',
+    format: 'text',
+    events: true,
+  }, {
+    cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-')),
+    homeDir: home,
+    processEnv: {},
+  });
+  assert.equal(runtime.provider === 'openai' && runtime.baseUrl, 'https://local.test/v1');
+  assert.equal(runtime.provider === 'openai' && runtime.apiKey, 'sk-local');
+});
+
+test('a bound stored key cannot be redirected, even to the official endpoint', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'sk-local', baseUrl: 'https://local.test/v1' } }),
+  );
+  // The official URL passes the "default endpoint is harmless" test, so a
+  // project config could otherwise reroute the local-service key to OpenAI.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://api.openai.com/v1',
+  }));
+
+  const baseCommand = { command: 'run' as const, prompt: 'hello', format: 'text' as const, events: true };
+
+  const runtime = await resolveRuntimeConfig(baseCommand, { cwd: project, homeDir: home, processEnv: {} });
+  assert.equal(runtime.provider === 'openai' && runtime.baseUrl, 'https://local.test/v1');
+  assert.equal(runtime.provider === 'openai' && runtime.apiKey, 'sk-local');
+
+  // An explicit flag that disagrees refuses the bound key instead of
+  // leaking it.
+  await assert.rejects(
+    () => resolveRuntimeConfig(
+      { ...baseCommand, baseUrl: 'https://other.test/v1' },
+      { cwd: project, homeDir: home, processEnv: {} },
+    ),
+    /bound to https:\/\/local\.test\/v1 and is not sent to/,
+  );
+
+  // Fallback keys from the store keep their bound endpoint the same way.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    fallbackProvider: 'openai',
+    fallbackModel: 'gpt-4.1-mini',
+    fallbackBaseUrl: 'https://api.openai.com/v1',
+  }));
+  const fallbackRuntime = await resolveRuntimeConfig(baseCommand, {
+    cwd: project,
+    homeDir: home,
+    processEnv: { ANTHROPIC_API_KEY: 'env-ant' },
+  });
+  assert.equal(
+    fallbackRuntime.provider === 'anthropic' && fallbackRuntime.fallback?.baseUrl,
+    'https://local.test/v1',
+  );
+});
+
+test('signing into a second provider keeps a STRATUS_API_KEY-powered default', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      // The generic key makes the anthropic default runnable, so signing
+      // into openai must not steal the default.
+      processEnv: { STRATUS_API_KEY: 'generic-key' },
+      fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
+      setupInput: Readable.from(['1\n', '2\n', '\n', 'sk-openai\n', '5\n']),
+    },
+  });
+
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.provider, 'anthropic');
+});
+
+test('the inline test run fails over on the configured fallback', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    fallbackProvider: 'openai',
+    fallbackModel: 'gpt-4.1-mini',
+  }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    anthropic: { type: 'api_key', value: 'sk-ant' },
+    openai: { type: 'api_key', value: 'sk-openai' },
+  }));
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async (url: any) => {
+        if (String(url).includes('api.anthropic.com')) {
+          return new Response(JSON.stringify({ error: { type: 'authentication_error', message: 'bad key' } }), { status: 401 });
+        }
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: 'Fallback says hello.' } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as typeof fetch,
+      setupInput: Readable.from(['4\n', '5\n']),
+    },
+  });
+
+  // The primary 401s, but option 4 exercises the same failover a real run
+  // would perform instead of reporting a failure.
+  assert.match(output.stderr, /falling back to gpt-4\.1-mini/);
+  assert.match(output.stdout, /\[assistant\] Fallback says hello\./);
+  assert.doesNotMatch(output.stdout, /Test run failed/);
+});
+
+test('setup warns when a project config shadows the global file it wrote', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '3\n', '5\n']),
+    },
+  });
+
+  assert.match(output.stdout, /stratus\.config\.json exists and takes precedence over the global config/);
+  const globalPath = path.join(home, '.stratus', 'config.json');
+  assert.ok(output.stdout.includes(`--config ${globalPath}`));
+});
+
+test('model discovery keeps a bound stored key on its own endpoint', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The loaded config points openai at the official URL, but the stored
+  // credential belongs to a local proxy.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://api.openai.com/v1',
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'sk-local', baseUrl: 'https://local.test/v1' } }),
+  );
+
+  const listRequests: Array<{ url: string; bearer?: string }> = [];
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async (url: any, init?: any) => {
+        const headers: Record<string, string> = {};
+        new Headers(init?.headers ?? {}).forEach((value, key) => {
+          headers[key] = value;
+        });
+        listRequests.push({ url: String(url), bearer: headers.authorization });
+        return new Response(JSON.stringify({ data: [{ id: 'local-llama' }] }), { status: 200 });
+      }) as typeof fetch,
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '5\n']),
+    },
+  });
+
+  assert.equal(listRequests[0]?.url, 'https://local.test/v1/models');
+  assert.equal(listRequests[0]?.bearer, 'Bearer sk-local');
+});
+
+test('discovery never sends the generic STRATUS_API_KEY to a secondary provider', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'sk-openai-own' } }),
+  );
+
+  const byHost: Record<string, string | undefined> = {};
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      // The generic key authenticates the anthropic default only.
+      processEnv: { STRATUS_API_KEY: 'generic-key' },
+      fetch: (async (url: any, init?: any) => {
+        const headers: Record<string, string> = {};
+        new Headers(init?.headers ?? {}).forEach((value, key) => {
+          headers[key] = value;
+        });
+        if (String(url).includes('api.anthropic.com')) {
+          byHost.anthropic = headers['x-api-key'];
+          return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
+        }
+        byHost.openai = headers.authorization;
+        return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
+      }) as typeof fetch,
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '5\n']),
+    },
+  });
+
+  assert.equal(byHost.anthropic, 'generic-key');
+  assert.equal(byHost.openai, 'Bearer sk-openai-own');
+});
+
+test('an implicit fallback does not follow a provider override', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // No fallbackProvider: this fallback was written for anthropic.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    fallbackModel: 'claude-sonnet-5',
+  }));
+
+  const baseCommand = { command: 'run' as const, prompt: 'hello', format: 'text' as const, events: true };
+
+  // Overriding to openai must not attach the Claude fallback model.
+  const overridden = await resolveRuntimeConfig(
+    { ...baseCommand, provider: 'openai' },
+    { cwd: elsewhere, homeDir: home, processEnv: { OPENAI_API_KEY: 'sk-openai' } },
+  );
+  assert.equal(overridden.provider === 'openai' && overridden.fallback, undefined);
+
+  // Without an override the implicit fallback still works…
+  const normal = await resolveRuntimeConfig(baseCommand, {
+    cwd: elsewhere,
+    homeDir: home,
+    processEnv: { ANTHROPIC_API_KEY: 'sk-ant' },
+  });
+  assert.equal(normal.provider === 'anthropic' && normal.fallback?.model, 'claude-sonnet-5');
+
+  // …and an explicit cross-provider fallback survives the override.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    fallbackModel: 'claude-sonnet-5',
+    fallbackProvider: 'anthropic',
+  }));
+  const explicit = await resolveRuntimeConfig(
+    { ...baseCommand, provider: 'openai' },
+    { cwd: elsewhere, homeDir: home, processEnv: { OPENAI_API_KEY: 'sk-openai', ANTHROPIC_API_KEY: 'sk-ant' } },
+  );
+  assert.deepEqual(explicit.provider === 'openai' && explicit.fallback, {
+    provider: 'anthropic',
+    model: 'claude-sonnet-5',
+    apiKey: 'sk-ant',
+  });
+});
+
+test('anthropic discovery, fallback, and save all honor a configured endpoint', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    baseUrl: 'https://ant-proxy.test',
+    fallbackModel: 'claude-sonnet-5',
+    fallbackProvider: 'anthropic',
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant' } }),
+  );
+
+  // Discovery hits the proxy, not api.anthropic.com.
+  const listUrls: string[] = [];
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async (url: any) => {
+        listUrls.push(String(url));
+        return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
+      }) as typeof fetch,
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '5\n']),
+    },
+  });
+  assert.equal(listUrls[0], 'https://ant-proxy.test/v1/models?limit=100');
+
+  // Saving kept the endpoint.
+  const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(saved.baseUrl, 'https://ant-proxy.test');
+
+  // The same-provider fallback retries against the proxy too.
+  const runtime = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    format: 'text',
+    events: true,
+  }, { cwd: elsewhere, homeDir: home, processEnv: {} });
+  assert.equal(runtime.provider === 'anthropic' && runtime.baseUrl, 'https://ant-proxy.test');
+  assert.equal(runtime.provider === 'anthropic' && runtime.fallback?.baseUrl, 'https://ant-proxy.test');
+});
+
+test('the model picker hides non-chat models and leads with chat ones', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'sk-openai' } }),
+  );
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async () => new Response(JSON.stringify({
+        data: [
+          { id: 'dall-e-3' },
+          { id: 'gpt-4.1-mini' },
+          { id: 'text-embedding-3-small' },
+          { id: 'whisper-1' },
+        ],
+      }), { status: 200 })) as typeof fetch,
+      // Accept the advertised default (empty answer picks entry #1).
+      setupInput: Readable.from(['2\n', '1\n', '\n', '5\n']),
+    },
+  });
+
+  assert.doesNotMatch(output.stdout, /text-embedding|whisper|dall-e/);
+  assert.match(output.stdout, /1\) gpt-4\.1-mini — openai/);
+  assert.match(output.stdout, /Default model set to gpt-4\.1-mini \(openai\)\./);
+});
+
+test('the inline test run keeps a bound stored key on its own endpoint', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  const configPath = path.join(tempDir, 'openai-config.json');
+  // The loaded config points at the official URL; the credential is bound
+  // to a local proxy.
+  await writeFile(configPath, JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://api.openai.com/v1',
+  }));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'sk-local', baseUrl: 'https://local.test/v1' } }),
+  );
+
+  const chatUrls: string[] = [];
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup', '--config', configPath],
+    streams,
+    env: {
+      cwd: tempDir,
+      homeDir: home,
+      processEnv: {},
+      fetch: (async (url: any) => {
+        if (String(url).includes('/chat/completions')) {
+          chatUrls.push(String(url));
+          return new Response(JSON.stringify({
+            choices: [{ message: { content: 'Hello from the proxy.' } }],
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      }) as typeof fetch,
+      setupInput: Readable.from(['4\n', '5\n']),
+    },
+  });
+
+  assert.equal(chatUrls[0], 'https://local.test/v1/chat/completions');
+});
+
+test('anthropic keys bind to the endpoint they were verified against', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    baseUrl: 'https://ant-proxy.test',
+  }));
+
+  const verifyUrls: string[] = [];
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async (url: any) => {
+        verifyUrls.push(String(url));
+        return new Response('{}', { status: 200 });
+      }) as typeof fetch,
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-proxy\n', '5\n']),
+    },
+  });
+
+  // Verified against the proxy, and bound to it in the store.
+  assert.equal(verifyUrls[0], 'https://ant-proxy.test/v1/models');
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials.anthropic, {
+    type: 'api_key',
+    value: 'sk-proxy',
+    baseUrl: 'https://ant-proxy.test',
+  });
+
+  // A later cross-provider anthropic fallback keeps the proxy endpoint.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    fallbackProvider: 'anthropic',
+    fallbackModel: 'claude-sonnet-5',
+  }));
+  const runtime = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    format: 'text',
+    events: true,
+  }, { cwd: elsewhere, homeDir: home, processEnv: { OPENAI_API_KEY: 'sk-openai' } });
+  assert.equal(runtime.provider === 'openai' && runtime.fallback?.baseUrl, 'https://ant-proxy.test');
+});
+
+test('the inline test run honors the STRATUS_API_KEY_ENV selector', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'stored-key' } }),
+  );
+
+  const seenKeys: Array<string | undefined> = [];
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      // The selector redirects the effective key to MY_KEY, exactly as a
+      // real run would resolve it.
+      processEnv: { STRATUS_API_KEY_ENV: 'MY_KEY', MY_KEY: 'selector-key' },
+      setupInput: Readable.from(['4\n', '5\n']),
+      fetch: (async (_url: any, init?: any) => {
+        const headers: Record<string, string> = {};
+        new Headers(init?.headers ?? {}).forEach((value, key) => {
+          headers[key] = value;
+        });
+        seenKeys.push(headers['x-api-key']);
+        return new Response(JSON.stringify({
+          id: 'msg_1',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-opus-5',
+          content: [{ type: 'text', text: 'Hello!' }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(seenKeys[0], 'selector-key');
+});
+
+test('a rejected replacement sign-in leaves the previous endpoint untouched', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://api.openai.com/v1',
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'old-key' } }),
+  );
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      // The replacement key for the new endpoint is rejected.
+      fetch: (async () => new Response('{}', { status: 401 })) as typeof fetch,
+      setupInput: Readable.from(['1\n', '2\n', 'https://new.test/v1\n', 'bad-key\n', '5\n']),
+    },
+  });
+
+  assert.match(output.stdout, /The endpoint was left unchanged as well\./);
+  // The old key keeps its old endpoint — the config must not pair it with
+  // the endpoint the rejected sign-in named.
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.baseUrl, 'https://api.openai.com/v1');
+});
+
+test('discovery honors a secondary anthropic credential bound endpoint', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // openai is the default; the anthropic key is bound to a proxy.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+  }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    openai: { type: 'api_key', value: 'sk-openai' },
+    anthropic: { type: 'api_key', value: 'sk-ant-proxy', baseUrl: 'https://ant-proxy.test' },
+  }));
+
+  const anthropicUrls: string[] = [];
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async (url: any) => {
+        if (String(url).includes('/v1/models')) {
+          anthropicUrls.push(String(url));
+          return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
+      }) as typeof fetch,
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '5\n']),
+    },
+  });
+
+  assert.equal(anthropicUrls[0], 'https://ant-proxy.test/v1/models?limit=100');
 });

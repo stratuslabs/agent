@@ -103,13 +103,21 @@ pnpm install --frozen-lockfile
 pnpm build && pnpm typecheck && pnpm test
 ```
 
-If the test suite is green you're ready for the Quickstart below. To configure a provider, run the interactive walkthrough:
+If the test suite is green you're ready for the Quickstart below. To configure a provider, run the setup menu:
 
 ```bash
 node packages/cli/dist/bin.js setup
 ```
 
-It asks a few questions (provider, model, base URL, which env var holds your API key), writes `stratus.config.json`, and prints the exact commands to run next. Prefer doing it by hand? Copy `stratus.config.json.example` instead. Either way the file is gitignored, so your local provider settings never end up in a commit.
+Setup is the whole onboarding: a small menu where you pick a provider, sign in, create your first agent, and test it — no config files to edit and no env vars to export:
+
+- **Sign in from the menu.** For Claude, choose how you pay: **Claude subscription (Pro/Max)** — sign in through Claude Code (`claude setup-token`) so usage is covered by your plan — or **Anthropic API key**, pasted straight into the prompt and verified against the live API before it's accepted. OpenAI-compatible keys work the same way.
+- **Credentials are stored for you** in `~/.stratus/credentials.json` (owner-read-only), and settings in `~/.stratus/config.json`, so `stratus run` works from any directory afterwards. A project-local `stratus.config.json` still wins when present, and env vars outrank both.
+- **Create your agent inside setup** — name them (or let Stratus name them), describe their personality, and their soul file lands in `~/.stratus/agents/` ready to edit.
+- **Default and fallback models.** The Models menu lists every model your sign-ins can actually reach (fetched live from the provider APIs) and lets you pick a **default** and a **fallback** — when the default model errors mid-run, the run automatically retries on the fallback, even across providers.
+- **Test without leaving the menu** — option 4 runs a real "say hello" with your current settings.
+
+Prefer doing it by hand? Copy `stratus.config.json.example` into your project instead.
 
 Once the packages are published to npm, this whole section becomes two commands:
 

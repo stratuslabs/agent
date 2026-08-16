@@ -20,7 +20,13 @@ const DEFAULT_MAX_TOKENS = 4096;
 export const RAW_TURNS_METADATA_KEY = 'anthropicRawTurns';
 
 export interface AnthropicProviderConfig {
-  apiKey: string;
+  /** Anthropic API key (pay per use). One of apiKey / authToken is required. */
+  apiKey?: string;
+  /**
+   * OAuth bearer token instead of an API key — e.g. a Claude Code setup
+   * token minted from a Claude Pro/Max subscription (`claude setup-token`).
+   */
+  authToken?: string;
   /** Defaults to claude-opus-5, Anthropic's most capable generally available model. */
   model?: string;
   name?: string;
@@ -306,6 +312,7 @@ const extractParts = (
  */
 export const createAnthropicProvider = ({
   apiKey,
+  authToken,
   model = DEFAULT_ANTHROPIC_MODEL,
   name = 'anthropic',
   maxTokens = DEFAULT_MAX_TOKENS,
@@ -314,8 +321,14 @@ export const createAnthropicProvider = ({
   thinking = 'default',
   fetch: fetchImpl,
 }: AnthropicProviderConfig): ModelProvider => {
+  if (!apiKey && !authToken) {
+    throw new Error('The Anthropic provider needs an apiKey or an authToken.');
+  }
+
   const client = new Anthropic({
-    apiKey,
+    // Explicit nulls stop the SDK from falling back to ambient env vars.
+    apiKey: apiKey ?? null,
+    authToken: authToken ?? null,
     ...(baseUrl ? { baseURL: baseUrl } : {}),
     ...(fetchImpl ? { fetch: fetchImpl } : {}),
   });
