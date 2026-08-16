@@ -124,6 +124,86 @@ test('parseCommand accepts the setup command', () => {
   assert.throws(() => parseCommand(['setup', '--bogus']), /Unknown option: --bogus/);
 });
 
+test('parseCommand accepts the agents command and the agent list alias', () => {
+  assert.deepEqual(parseCommand(['agents']), { command: 'agents', format: 'text' });
+  assert.deepEqual(parseCommand(['agents', '--format', 'json']), { command: 'agents', format: 'json' });
+  assert.deepEqual(parseCommand(['agent', 'list']), { command: 'agents', format: 'text' });
+  assert.throws(() => parseCommand(['agents', '--format', 'soul']), /Unsupported format: soul/);
+  assert.throws(() => parseCommand(['agents', '--bogus']), /Unknown option: --bogus/);
+});
+
+test('runCli agents lists souls, the built-in default, and memory counts', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  const avaPath = path.join(agentsDir, 'ava.md');
+  await writeFile(avaPath, [
+    '---',
+    'name: Ava',
+    'id: ava',
+    'provider: anthropic',
+    'model: claude-opus-5',
+    '---',
+    '',
+    'You are a sharp, warm generalist assistant.',
+    '',
+  ].join('\n'));
+  await writeFile(path.join(agentsDir, 'rex.md'), [
+    '---',
+    'name: Rex',
+    'id: rex',
+    '---',
+    '',
+    'You research things thoroughly.',
+    '',
+  ].join('\n'));
+  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), [
+    JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Likes jazz.', createdAt: '2026-01-01T00:00:00.000Z' }),
+    // A legacy default-agent fact: it must show up under Stratus.
+    JSON.stringify({ id: 'anthropic-agent:memory:1', agentId: 'anthropic-agent', content: 'Prefers short answers.', createdAt: '2026-01-02T00:00:00.000Z' }),
+    '',
+  ].join('\n'));
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5', soul: avaPath })}\n`);
+
+  const text = createStreams();
+  const textExit = await runCli({ argv: ['agents'], streams: text.streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.equal(textExit, 0);
+  assert.match(text.output.stdout, /Ava {2}\(default\)/);
+  assert.match(text.output.stdout, /runs on {3}anthropic · claude-opus-5/);
+  assert.match(text.output.stdout, /Stratus {2}\(built-in\)/);
+  assert.match(text.output.stdout, /1 remembered fact\b/);
+  // Rex has no soul-pinned provider and follows the active setup.
+  assert.match(text.output.stdout, /follows your setup — currently anthropic · claude-opus-5/);
+
+  const json = createStreams();
+  const jsonExit = await runCli({ argv: ['agent', 'list', '--format', 'json'], streams: json.streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.equal(jsonExit, 0);
+  const { agents } = JSON.parse(json.output.stdout);
+  assert.equal(agents.length, 3);
+  assert.deepEqual(agents.map((a: { id: string }) => a.id), ['ava', 'rex', 'stratus']);
+  const ava = agents[0];
+  assert.equal(ava.default, true);
+  assert.equal(ava.provider, 'anthropic');
+  assert.equal(ava.memories, 1);
+  const stratus = agents[2];
+  assert.equal(stratus.builtIn, true);
+  assert.equal(stratus.default, false);
+  // The legacy anthropic-agent fact is inherited by the built-in Stratus.
+  assert.equal(stratus.memories, 1);
+});
+
+test('runCli agents on a fresh machine shows only the built-in default', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({ argv: ['agents'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Stratus {2}\(default, built-in\)/);
+  assert.match(output.stdout, /currently demo \(offline\)/);
+  assert.match(output.stdout, /create your own with: stratus agent new/);
+});
+
 test('runCli agent new generates a full identity with name and avatar theme', async () => {
   const named = createStreams();
   const namedExit = await runCli({

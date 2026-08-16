@@ -34,8 +34,9 @@ stratus run "say hello"
 stratus run --soul ./ava.md "introduce yourself"
 stratus run --provider anthropic --model claude-opus-5 "hello"
 stratus run --prompt "use the echo tool" --format json
-stratus agent new                      # generate an agent identity
+stratus agent new                      # create an agent (guided on a terminal)
 stratus agent new --format soul > ava.md
+stratus agents                         # who's on the team: souls, models, memory
 stratus dashboard                      # local browser dashboard
 ```
 

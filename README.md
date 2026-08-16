@@ -253,6 +253,7 @@ stratus run "Say hello"
 stratus run --provider anthropic "Say hello"
 stratus run --soul ./examples/souls/ava.md "Say hello"
 stratus run --provider openai --model gpt-4.1-mini "Say hello"
+stratus agents
 stratus dashboard
 stratus dashboard --port 4123 --host 127.0.0.1 --no-open
 ```
