@@ -905,6 +905,51 @@ test('runCli persists agent memory across runs through memory.remember', async (
   assert.match(systemPrompts.at(-1) ?? '', /The user prefers short answers\./);
 });
 
+test('the built-in Stratus agent recalls memories saved under legacy default agent ids', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Facts remembered before the default agent was renamed to 'stratus'.
+  await writeFile(
+    path.join(home, '.stratus', 'memory.jsonl'),
+    [
+      JSON.stringify({ id: 'anthropic-agent:memory:legacy-1', agentId: 'anthropic-agent', content: 'The user is allergic to peanuts.', createdAt: '2026-01-01T00:00:00.000Z' }),
+      JSON.stringify({ id: 'demo-agent:memory:legacy-2', agentId: 'demo-agent', content: 'The user works in UTC+2.', createdAt: '2026-01-02T00:00:00.000Z' }),
+      JSON.stringify({ id: 'ava:memory:other-agent', agentId: 'ava', content: 'A souled agent fact that must stay private.', createdAt: '2026-01-03T00:00:00.000Z' }),
+      '',
+    ].join('\n'),
+  );
+
+  let system = '';
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'hi', '--provider', 'anthropic'],
+    streams: createStreams().streams,
+    env: {
+      cwd: tempDir,
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'test-key' },
+      fetch: (async (_url: unknown, init?: { body?: unknown }) => {
+        system = String(JSON.parse(String(init?.body ?? '{}')).system ?? '');
+        return new Response(JSON.stringify({
+          id: 'msg_legacy',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-opus-5',
+          content: [{ type: 'text', text: 'Hello!' }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 5, output_tokens: 5 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(system, /allergic to peanuts/);
+  assert.match(system, /works in UTC\+2/);
+  assert.doesNotMatch(system, /must stay private/);
+});
+
 test('an unnamed soul keeps the same generated identity across invocations', async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
   const soulPath = path.join(tempDir, 'nameless.md');

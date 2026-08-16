@@ -197,6 +197,24 @@ const DEFAULT_STRATUS_AGENT = {
   instructions: 'You are Stratus, a personal agent on the Stratus Agent platform. Be warm, direct, and concise. When asked who or what you are, you are Stratus — a Stratus agent — regardless of which model is serving the conversation.',
 };
 
+// Unsouled runs used to remember facts under a per-provider default agent.
+// Stratus inherits all of them: reads for the built-in agent also return
+// entries stored under the legacy ids, while new facts land under 'stratus'.
+const LEGACY_DEFAULT_AGENT_IDS = ['demo-agent', 'anthropic-agent', 'openai-agent'];
+
+const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryStore => ({
+  append: (agentId, content, metadata) => store.append(agentId, content, metadata),
+  async list(agentId) {
+    if (agentId !== DEFAULT_STRATUS_AGENT.id) {
+      return store.list(agentId);
+    }
+    const batches = await Promise.all(
+      [DEFAULT_STRATUS_AGENT.id, ...LEGACY_DEFAULT_AGENT_IDS].map((id) => store.list(id)),
+    );
+    return batches.flat().sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  },
+});
+
 const DEFAULT_CONFIG_FILENAME = 'stratus.config.json';
 const LEGACY_CONFIG_FILENAME = 'stratusclaw.config.json';
 const STRATUS_HOME_DIRNAME = '.stratus';
@@ -916,7 +934,7 @@ interface ResolvedConfigLocation {
 }
 
 const resolveConfigLocation = async (
-  command: ParsedRunCommand,
+  command: Pick<ParsedRunCommand, 'configPath'>,
   env: CliEnvironment,
 ): Promise<ResolvedConfigLocation | undefined> => {
   const processEnv = readProcessEnv(env);
@@ -1346,7 +1364,7 @@ export const runSingleLoop = async (
 ): Promise<Session> => {
   const runEnv = options.env ?? {};
   await migrateLegacyMemory(runEnv);
-  const memory = createFileMemoryStore(memoryFilePath(runEnv));
+  const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(runEnv)));
 
   const tools = new ToolRegistry();
   tools.register(createDemoTool());
@@ -3060,19 +3078,29 @@ export const runAgentNew = async (
 
       const agent = defineAgent({ name, instructions: instructions || DEFAULT_SOUL_STARTER });
 
-      // Frontmatter follows the machine's configured provider so the soul
-      // runs as-is; anthropic is the flagship default.
-      let existing: CliConfigFile = {};
-      try {
-        existing = await loadConfigFile(globalConfigPath(env));
-      } catch {
-        // no global config yet
-      }
-      const soulProvider = existing.provider && existing.provider !== 'demo' ? existing.provider : 'anthropic';
+      // Frontmatter pins what a run from this directory would actually use:
+      // env vars outrank the active config file (project-local or explicit
+      // first, global otherwise) — the same precedence as stratus run.
+      // Anthropic is the flagship default on a fresh machine; an explicit
+      // demo setup gets no pin at all, so the soul keeps following the
+      // configured offline provider instead of demanding credentials.
+      const processEnv = readProcessEnv(env);
+      const configLocation = await resolveConfigLocation({}, env);
+      const activeConfig = configLocation ? await loadConfigFile(configLocation.path) : {};
+      const soulProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
+        ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'))
+        ?? activeConfig.provider
+        ?? 'anthropic';
+      // The active config's model was written for the provider named in
+      // that config; it only travels into the soul when they still match.
+      const configModelApplies = (activeConfig.provider ?? 'openai') === soulProvider;
+      const soulModel = readNonEmptyString(processEnv.STRATUS_MODEL)
+        ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL)
+        ?? (configModelApplies ? activeConfig.model : undefined)
+        ?? (soulProvider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
       const soul = formatSoul({
         agent,
-        provider: soulProvider,
-        model: existing.model ?? (soulProvider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL),
+        ...(soulProvider !== 'demo' ? { provider: soulProvider, model: soulModel } : {}),
       });
       const soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
       await mkdir(path.dirname(soulPath), { recursive: true });
@@ -3083,9 +3111,20 @@ export const runAgentNew = async (
         'Not now',
       ]);
       if (makeDefault.kind === 'index' && makeDefault.index === 0) {
-        const config: Record<string, unknown> = { ...existing, provider: existing.provider ?? soulProvider, soul: soulPath };
+        // The default agent is a machine-wide setting, so it lands in the
+        // global config even when a project config is active here.
+        let globalConfig: CliConfigFile = {};
+        try {
+          globalConfig = await loadConfigFile(globalConfigPath(env));
+        } catch {
+          // no global config yet
+        }
+        const config: Record<string, unknown> = { ...globalConfig, provider: globalConfig.provider ?? soulProvider, soul: soulPath };
         await mkdir(path.dirname(globalConfigPath(env)), { recursive: true });
         await writeFile(globalConfigPath(env), `${JSON.stringify(config, null, 2)}\n`);
+        if (configLocation && configLocation.path !== globalConfigPath(env)) {
+          writeLine(streams.stdout, `Note: ${configLocation.path} takes precedence over the global config for runs started in this directory.`);
+        }
       }
 
       writeLine(streams.stdout);
