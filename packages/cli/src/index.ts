@@ -106,6 +106,11 @@ export interface ParsedAgentNewCommand {
   format: 'text' | 'json' | 'soul';
 }
 
+export interface ParsedAgentsCommand {
+  command: 'agents';
+  format: 'text' | 'json';
+}
+
 export interface ParsedHelpCommand {
   command: 'help';
 }
@@ -115,6 +120,7 @@ export type ParsedCommand =
   | ParsedDashboardCommand
   | ParsedSetupCommand
   | ParsedAgentNewCommand
+  | ParsedAgentsCommand
   | ParsedHelpCommand;
 
 interface CliConfigFile {
@@ -187,7 +193,7 @@ export interface DashboardServerHandle {
   close: () => Promise<void>;
 }
 
-export const CLI_VERSION = '0.2.2';
+export const CLI_VERSION = '0.2.3';
 
 // The agent every run uses when no soul is configured. A Stratus agent is
 // a Stratus agent — never "the model" — whichever provider serves it.
@@ -238,6 +244,7 @@ Usage:
   echo "Use the echo tool" | stratus run --stdin
   STRATUS_PROVIDER=openai OPENAI_API_KEY=... stratus run "Say hello"
   stratus run --config ./stratus.config.json --provider openai "Say hello"
+  stratus agents
   stratus dashboard
   stratus dashboard --port 4123 --host 0.0.0.0 --no-open
 
@@ -248,6 +255,8 @@ Commands:
                    ~/.stratus/credentials.json (0600)
   run              Execute one local Stratus Agent session
   agent new        Create an agent identity (generates a human-ish name + avatar theme)
+  agents           List your agents: who they are, where their souls live, what
+                   they run on, what they remember (also: stratus agent list)
   dashboard        Start the local Stratus Agent dashboard and open it in your browser
   help             Show this help message
 
@@ -641,13 +650,38 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     return { command: 'dashboard', ...(port !== undefined ? { port } : {}), host, openBrowser };
   }
 
+  if (command === 'agents' || (command === 'agent' && rest[0] === 'list')) {
+    const agentsRest = command === 'agents' ? rest : rest.slice(1);
+    let format: 'text' | 'json' = 'text';
+    for (let index = 0; index < agentsRest.length; index += 1) {
+      const token = agentsRest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--format') {
+        const value = readOptionValue(agentsRest, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported format: ${value}`);
+        }
+        format = value;
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+    return { command: 'agents', format };
+  }
+
   if (command === 'agent') {
     const [subcommand, ...agentRest] = rest;
     if (subcommand === '--help' || subcommand === '-h') {
       return { command: 'help' };
     }
     if (subcommand !== 'new') {
-      throw new Error(`Unknown agent subcommand: ${subcommand ?? '(missing)'}. Try: stratus agent new`);
+      throw new Error(`Unknown agent subcommand: ${subcommand ?? '(missing)'}. Try: stratus agent new, stratus agent list`);
     }
 
     let name: string | undefined;
@@ -3044,6 +3078,208 @@ export const runSetup = async (
   }
 };
 
+const personaSnippet = (instructions: string | undefined): string | undefined => {
+  const firstLine = instructions?.split('\n').map((line) => line.trim()).find((line) => line.length > 0);
+  if (!firstLine) {
+    return undefined;
+  }
+  return firstLine.length > 78 ? `${firstLine.slice(0, 77)}…` : firstLine;
+};
+
+// Tolerant config discovery for commands that only need the config as a
+// hint (listing, agent creation): a config that exists but cannot be read
+// or parsed degrades to a warning instead of blocking the command.
+const discoverActiveConfig = async (
+  env: CliEnvironment,
+  warn: (message: string) => void,
+): Promise<{ location?: ResolvedConfigLocation; config: CliConfigFile }> => {
+  let location: ResolvedConfigLocation | undefined;
+  try {
+    location = await resolveConfigLocation({}, env);
+  } catch (error) {
+    warn(`ignoring unreadable config (${error instanceof Error ? error.message : String(error)})`);
+    return { config: {} };
+  }
+  if (!location) {
+    return { config: {} };
+  }
+  try {
+    return { location, config: await loadConfigFile(location.path) };
+  } catch (error) {
+    warn(`ignoring unreadable config ${location.path} (${error instanceof Error ? error.message : String(error)})`);
+    return { location, config: {} };
+  }
+};
+
+export const runAgents = async (
+  command: ParsedAgentsCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  // Fold any legacy per-directory memory in first so the counts below
+  // reflect everything each agent actually remembers.
+  await migrateLegacyMemory(env);
+  const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
+
+  const processEnv = readProcessEnv(env);
+  // Listing must never be blocked by a broken config — it only feeds the
+  // default marker and the "runs on" lines.
+  const { config: activeConfig } = await discoverActiveConfig(env, (message) => {
+    writeLine(streams.stderr, `Warning: ${message}.`);
+  });
+
+  const envProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'));
+  const envModel = readNonEmptyString(processEnv.STRATUS_MODEL)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL);
+
+  // What a run as this soul would actually use right now — the same
+  // precedence as resolveRuntimeConfig (env vars, soul hints, config,
+  // demo), so a model-only or provider-only pin still resolves honestly.
+  const runsOnFor = (soulProvider?: string, soulModel?: string): { provider: string; model?: string } => {
+    const provider = envProvider ?? soulProvider ?? activeConfig.provider ?? 'demo';
+    if (provider === 'demo') {
+      return { provider };
+    }
+    const soulModelApplies = soulProvider === undefined || soulProvider === provider;
+    const configModelApplies = (activeConfig.provider ?? 'openai') === provider;
+    const model = envModel
+      ?? (soulModelApplies ? soulModel : undefined)
+      ?? (configModelApplies ? activeConfig.model : undefined)
+      ?? (provider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
+    return { provider, model };
+  };
+
+  const defaultSoulPath = readNonEmptyString(processEnv.STRATUS_SOUL)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_SOUL)
+    ?? activeConfig.soul;
+  const resolvedDefaultSoul = defaultSoulPath
+    ? path.resolve(readWorkingDirectory(env), defaultSoulPath)
+    : undefined;
+
+  interface AgentListing {
+    id: string;
+    name: string;
+    isDefault: boolean;
+    builtIn: boolean;
+    soulPath?: string;
+    /** The soul's own frontmatter pin, verbatim. */
+    provider?: string;
+    model?: string;
+    /** What a run as this agent resolves to right now. */
+    runsOn: { provider: string; model?: string };
+    memories: number;
+    persona?: string;
+    avatar?: string;
+  }
+
+  const listings: AgentListing[] = [];
+
+  const addSoul = async (soulPath: string): Promise<void> => {
+    let parsed: ParsedSoul;
+    try {
+      parsed = parseSoul(await readFile(soulPath, 'utf8'), { seed: soulPath });
+    } catch (error) {
+      writeLine(streams.stderr, `Warning: skipping ${soulPath}: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    const { agent } = parsed;
+    const persona = personaSnippet(agent.instructions);
+    listings.push({
+      id: agent.id,
+      name: agent.name,
+      isDefault: soulPath === resolvedDefaultSoul,
+      builtIn: false,
+      soulPath,
+      ...(parsed.provider ? { provider: parsed.provider } : {}),
+      ...(parsed.model ? { model: parsed.model } : {}),
+      runsOn: runsOnFor(parsed.provider, parsed.model),
+      memories: (await memory.list(agent.id)).length,
+      ...(persona ? { persona } : {}),
+      ...(agent.avatar ? { avatar: `${agent.avatar.style} theme, hue ${agent.avatar.hue}, palette ${agent.avatar.palette.join(' ')}` } : {}),
+    });
+  };
+
+  let rosterFiles: string[] = [];
+  try {
+    rosterFiles = (await readdir(agentsDirPath(env)))
+      .filter((file) => file.endsWith('.md'))
+      .sort()
+      .map((file) => path.join(agentsDirPath(env), file));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  for (const soulPath of rosterFiles) {
+    await addSoul(soulPath);
+  }
+  // A default soul can live outside ~/.stratus/agents (a project soul, a
+  // hand-written file) — the roster would be lying without it.
+  if (resolvedDefaultSoul && !rosterFiles.includes(resolvedDefaultSoul)) {
+    await addSoul(resolvedDefaultSoul);
+  }
+
+  // The built-in Stratus persona serves every run that has no soul.
+  const builtInPersona = personaSnippet(DEFAULT_STRATUS_AGENT.instructions);
+  listings.push({
+    id: DEFAULT_STRATUS_AGENT.id,
+    name: DEFAULT_STRATUS_AGENT.name,
+    isDefault: resolvedDefaultSoul === undefined,
+    builtIn: true,
+    runsOn: runsOnFor(),
+    memories: (await memory.list(DEFAULT_STRATUS_AGENT.id)).length,
+    ...(builtInPersona ? { persona: builtInPersona } : {}),
+  });
+
+  listings.sort((a, b) => {
+    if (a.isDefault !== b.isDefault) {
+      return a.isDefault ? -1 : 1;
+    }
+    if (a.builtIn !== b.builtIn) {
+      return a.builtIn ? 1 : -1;
+    }
+    return a.name.localeCompare(b.name);
+  });
+
+  if (command.format === 'json') {
+    writeLine(streams.stdout, JSON.stringify({
+      agents: listings.map(({ isDefault, ...rest }) => ({ ...rest, default: isDefault })),
+    }, null, 2));
+    return 0;
+  }
+
+  const describeRunsOn = (runsOn: { provider: string; model?: string }): string =>
+    (runsOn.provider === 'demo' ? 'demo (offline)' : `${runsOn.provider}${runsOn.model ? ` · ${runsOn.model}` : ''}`);
+
+  writeLine(streams.stdout, 'Agents');
+  for (const agent of listings) {
+    const labels = [
+      ...(agent.isDefault ? ['default'] : []),
+      ...(agent.builtIn ? ['built-in'] : []),
+    ];
+    writeLine(streams.stdout);
+    writeLine(streams.stdout, `  ${agent.name}${labels.length > 0 ? `  (${labels.join(', ')})` : ''}`);
+    writeLine(streams.stdout, `    id        ${agent.id}`);
+    if (agent.soulPath) {
+      writeLine(streams.stdout, `    soul      ${agent.soulPath}`);
+    }
+    writeLine(streams.stdout, `    runs on   ${agent.provider ? describeRunsOn(agent.runsOn) : `follows your setup — currently ${describeRunsOn(agent.runsOn)}`}`);
+    writeLine(streams.stdout, `    memory    ${agent.memories === 0 ? 'nothing yet' : `${agent.memories} remembered fact${agent.memories === 1 ? '' : 's'}`}`);
+    if (agent.persona) {
+      writeLine(streams.stdout, `    persona   ${agent.persona}`);
+    }
+    if (agent.avatar) {
+      writeLine(streams.stdout, `    avatar    ${agent.avatar}`);
+    }
+  }
+  writeLine(streams.stdout);
+  writeLine(streams.stdout, listings.length === 1
+    ? 'That is just the built-in default — create your own with: stratus agent new'
+    : 'Talk to the default with stratus run, or to anyone with stratus run --soul <file>.');
+  return 0;
+};
+
 export const runAgentNew = async (
   command: ParsedAgentNewCommand,
   streams: CliStreams,
@@ -3086,17 +3322,11 @@ export const runAgentNew = async (
       // at all: the soul keeps following the machine's configuration
       // instead of demanding credentials nothing has signed in for.
       const processEnv = readProcessEnv(env);
-      const configLocation = await resolveConfigLocation({}, env);
       // Creating an agent must not be blocked by a broken config — it only
       // feeds the soul's provider/model hint, so fall back to defaults.
-      let activeConfig: CliConfigFile = {};
-      if (configLocation) {
-        try {
-          activeConfig = await loadConfigFile(configLocation.path);
-        } catch (error) {
-          writeLine(streams.stdout, `Note: ignoring unreadable config ${configLocation.path} (${error instanceof Error ? error.message : String(error)}).`);
-        }
-      }
+      const { location: configLocation, config: activeConfig } = await discoverActiveConfig(env, (message) => {
+        writeLine(streams.stdout, `Note: ${message}.`);
+      });
       const soulProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
         ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'))
         ?? activeConfig.provider
@@ -3260,6 +3490,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'agent-new') {
       return runAgentNew(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'agents') {
+      return runAgents(command, streams, resolvedEnv);
     }
 
     if (command.command === 'setup') {
