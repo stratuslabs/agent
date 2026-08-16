@@ -119,14 +119,14 @@ export const createClaudeCodeProvider = ({
       tools: [],
       maxTurns,
       // The env REPLACES the subprocess environment, so inherit ours and
-      // then pin the auth: with a setup token, billing must come from the
-      // subscription — never silently from an ambient API key.
+      // then pin the auth: this provider is subscription-billed in both
+      // modes (setup token or existing sign-in), so an ambient API key must
+      // never silently turn a run into metered API usage.
       env: {
         ...process.env,
         CLAUDE_AGENT_SDK_CLIENT_APP: 'stratus-agent',
-        ...(authToken
-          ? { CLAUDE_CODE_OAUTH_TOKEN: authToken, ANTHROPIC_API_KEY: undefined }
-          : {}),
+        ANTHROPIC_API_KEY: undefined,
+        ...(authToken ? { CLAUDE_CODE_OAUTH_TOKEN: authToken } : {}),
       },
       ...(pathToClaudeCodeExecutable ? { pathToClaudeCodeExecutable } : {}),
     };

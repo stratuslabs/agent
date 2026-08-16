@@ -19,7 +19,7 @@
     "test": "node --test --experimental-strip-types"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.70.0",
+    "@anthropic-ai/sdk": "^0.117.1",
     "@stratusagent/core": "workspace:*"
   },
   "devDependencies": {
