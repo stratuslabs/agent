@@ -868,7 +868,7 @@ test('runCli persists agent memory across runs through memory.remember', async (
   });
 
   assert.equal(firstRun, 0);
-  const stored = (await readFile(path.join(tempDir, '.stratus', 'memory.jsonl'), 'utf8'))
+  const stored = (await readFile(path.join(tempHome, '.stratus', 'memory.jsonl'), 'utf8'))
     .split('\n')
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line));
@@ -2398,4 +2398,98 @@ test('discovery honors a secondary anthropic credential bound endpoint', async (
   });
 
   assert.equal(anthropicUrls[0], 'https://ant-proxy.test/v1/models?limit=100');
+});
+
+test('legacy per-directory memories migrate into the global store on first run', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const projectDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  // Memories written by a pre-0.2.1 install, in the old per-directory spot.
+  await mkdir(path.join(projectDir, '.stratus'), { recursive: true });
+  const legacyEntry = {
+    id: 'ava:memory:legacy-1',
+    agentId: 'demo-agent',
+    content: 'The user prefers short answers.',
+    createdAt: new Date().toISOString(),
+  };
+  await writeFile(
+    path.join(projectDir, '.stratus', 'memory.jsonl'),
+    `${JSON.stringify(legacyEntry)}\n`,
+  );
+
+  const { streams } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', 'hello'],
+    streams,
+    env: { cwd: projectDir, homeDir: home, processEnv: {} },
+  });
+  assert.equal(exitCode, 0);
+
+  // The fact now lives in the global store…
+  const migrated = (await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8'))
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line));
+  assert.equal(migrated.length, 1);
+  assert.equal(migrated[0].content, 'The user prefers short answers.');
+
+  // …and the legacy file is marked so it can never be imported twice.
+  await assert.rejects(() => readFile(path.join(projectDir, '.stratus', 'memory.jsonl'), 'utf8'));
+  const kept = await readFile(path.join(projectDir, '.stratus', 'memory.jsonl.migrated'), 'utf8');
+  assert.match(kept, /short answers/);
+
+  // A second run from the same directory does not duplicate the entry.
+  await runCli({
+    argv: ['run', 'hello again'],
+    streams: createStreams().streams,
+    env: { cwd: projectDir, homeDir: home, processEnv: {} },
+  });
+  const after = (await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8'))
+    .split('\n')
+    .filter((line) => line.trim().length > 0);
+  assert.equal(after.length, 1);
+});
+
+test('an interrupted memory migration finishes without duplicating facts', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const projectDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const entry = {
+    id: 'demo-agent:memory:crash-1',
+    agentId: 'demo-agent',
+    content: 'Half-migrated fact.',
+    createdAt: new Date().toISOString(),
+  };
+  // Simulate a crash between append and rename: the claimed file still
+  // exists AND the fact already reached the global store.
+  await mkdir(path.join(projectDir, '.stratus'), { recursive: true });
+  await writeFile(path.join(projectDir, '.stratus', 'memory.jsonl.migrating'), `${JSON.stringify(entry)}\n`);
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), `${JSON.stringify(entry)}\n`);
+
+  const exitCode = await runCli({
+    argv: ['run', 'hello'],
+    streams: createStreams().streams,
+    env: { cwd: projectDir, homeDir: home, processEnv: {} },
+  });
+  assert.equal(exitCode, 0);
+
+  // Recovery completed the claim without re-importing the entry…
+  const globalLines = (await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8'))
+    .split('\n')
+    .filter((line) => line.trim().length > 0);
+  assert.equal(globalLines.length, 1);
+  await assert.rejects(() => readFile(path.join(projectDir, '.stratus', 'memory.jsonl.migrating'), 'utf8'));
+  await readFile(path.join(projectDir, '.stratus', 'memory.jsonl.migrated'), 'utf8');
+});
+
+test('memory reads dedupe by entry id', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const store = createFileMemoryStore(path.join(dir, 'memory.jsonl'));
+  const entry = await store.append('ava', 'A fact.');
+  // Simulate a duplicated line from a historical race.
+  const raw = await readFile(path.join(dir, 'memory.jsonl'), 'utf8');
+  await writeFile(path.join(dir, 'memory.jsonl'), raw + raw);
+
+  const entries = await store.list('ava');
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0]?.id, entry.id);
 });

@@ -10,6 +10,7 @@ const scout = defineAgent({ instructions: 'You research things thoroughly.' });
 ```
 
 - `defineAgent` — one-call creation with a generated human-ish first name and a deterministic avatar theme
+- `parseSoul` / `formatSoul` — **soul files**: agents defined as markdown (frontmatter for name/provider/model/tools, prose for the personality), round-tripped to and from `AgentDefinition`
 - `createRememberTool` — agent-scoped long-term memory that follows the agent across every channel, thread, and session
 - `createDelegateTool` — orchestrator primitive: hand a task to another agent and get their reply back
 - `createAgentRouter` — route channels/mentions/messages to the right agent

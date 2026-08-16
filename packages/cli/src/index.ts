@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { appendFile, chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import os from 'node:os';
@@ -328,13 +328,111 @@ const createDemoProvider = (): ModelProvider =>
     },
   });
 
-const MEMORY_FILE_RELATIVE_PATH = path.join('.stratus', 'memory.jsonl');
+const MEMORY_FILENAME = 'memory.jsonl';
+const memoryFilePath = (env: CliEnvironment): string =>
+  path.join(stratusHomePath(env), MEMORY_FILENAME);
+
+// Memory used to live under the working directory. Fold any such file into
+// the global store the first time a run happens from that directory, then
+// archive it — an upgrade must never look like the agent forgot.
+//
+// Every import first takes exclusive ownership by atomically renaming its
+// source to a unique claim file: of any competing processes, exactly one
+// wins the rename and the rest see ENOENT. A crash mid-import leaves the
+// claim file behind; later runs re-claim it the same way and finish the
+// job, with entries deduped against the global store by id. Only records
+// that parse as real memory entries are imported — malformed lines stay in
+// the archive instead of poisoning the global store for every agent.
+const isMemoryEntryLine = (line: string): boolean => {
+  try {
+    const parsed = JSON.parse(line) as Partial<MemoryEntry> | null;
+    return typeof parsed === 'object' && parsed !== null
+      && typeof parsed.id === 'string'
+      && typeof parsed.agentId === 'string'
+      && typeof parsed.content === 'string';
+  } catch {
+    return false;
+  }
+};
+
+const migrateLegacyMemory = async (env: CliEnvironment): Promise<void> => {
+  const legacyPath = path.join(readWorkingDirectory(env), '.stratus', MEMORY_FILENAME);
+  const globalPath = memoryFilePath(env);
+  if (legacyPath === globalPath) {
+    return;
+  }
+  const legacyDir = path.dirname(legacyPath);
+  const archivePath = `${legacyPath}.migrated`;
+
+  const claimAndImport = async (sourcePath: string): Promise<void> => {
+    const claimPath = path.join(legacyDir, `${MEMORY_FILENAME}.migrating-${randomUUID()}`);
+    try {
+      await rename(sourcePath, claimPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return; // another process owns it, or there is nothing to migrate
+      }
+      throw error;
+    }
+
+    const claimed = await readFile(claimPath, 'utf8');
+
+    let existingIds: Set<string>;
+    try {
+      existingIds = new Set(
+        (await readFile(globalPath, 'utf8'))
+          .split('\n')
+          .filter(isMemoryEntryLine)
+          .map((line) => (JSON.parse(line) as MemoryEntry).id),
+      );
+    } catch {
+      existingIds = new Set();
+    }
+
+    const entries = claimed
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .filter(isMemoryEntryLine)
+      .filter((line) => !existingIds.has((JSON.parse(line) as MemoryEntry).id));
+    if (entries.length > 0) {
+      await mkdir(path.dirname(globalPath), { recursive: true });
+      await appendFile(globalPath, `${entries.join('\n')}\n`);
+    }
+
+    // Archive by appending (never overwriting an earlier archive), then
+    // drop the claim — its content is fully preserved in the archive.
+    if (claimed.length > 0) {
+      await appendFile(archivePath, claimed.endsWith('\n') || claimed.length === 0 ? claimed : `${claimed}\n`);
+    }
+    await unlink(claimPath);
+  };
+
+  await claimAndImport(legacyPath);
+
+  // Finish any claims a crashed run left behind (both the current unique
+  // names and the fixed .migrating name from earlier versions).
+  let leftovers: string[];
+  try {
+    leftovers = await readdir(legacyDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+  for (const name of leftovers) {
+    if (name.startsWith(`${MEMORY_FILENAME}.migrating`)) {
+      await claimAndImport(path.join(legacyDir, name));
+    }
+  }
+};
 
 // Agents keep the same memory across CLI runs: every remembered fact lands
-// in .stratus/memory.jsonl (keyed by agent id), so the Ava you talk to
-// tomorrow is the Ava you talked to today. One JSON entry per line, written
-// with O_APPEND: concurrent runs each add their own line instead of
-// re-writing the file, so no run can clobber another's remembered fact.
+// in ~/.stratus/memory.jsonl (keyed by agent id), so the Ava you talk to
+// tomorrow — from any directory — is the Ava you talked to today. One JSON
+// entry per line, written with O_APPEND: concurrent runs each add their own
+// line instead of re-writing the file, so no run can clobber another's
+// remembered fact.
 export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
   const readEntries = async (): Promise<MemoryEntry[]> => {
     let raw: string;
@@ -373,8 +471,16 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       return entry;
     },
     async list(agentId: string) {
-      const entries = await readEntries();
-      return entries.filter((entry) => entry.agentId === agentId);
+      // Dedupe by id at read time: even if a rare race double-imported a
+      // fact, the agent only ever sees it once.
+      const seen = new Set<string>();
+      return (await readEntries()).filter((entry) => {
+        if (entry.agentId !== agentId || seen.has(entry.id)) {
+          return false;
+        }
+        seen.add(entry.id);
+        return true;
+      });
     },
   };
 };
@@ -1216,9 +1322,9 @@ export const runSingleLoop = async (
     env?: CliEnvironment;
   },
 ): Promise<Session> => {
-  const memory = createFileMemoryStore(
-    path.join(readWorkingDirectory(options.env ?? {}), MEMORY_FILE_RELATIVE_PATH),
-  );
+  const runEnv = options.env ?? {};
+  await migrateLegacyMemory(runEnv);
+  const memory = createFileMemoryStore(memoryFilePath(runEnv));
 
   const tools = new ToolRegistry();
   tools.register(createDemoTool());
@@ -1546,36 +1652,237 @@ export const startDashboardServer = async (
 const quoteShellArg = (value: string): string =>
   /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
 
+/** How a menu was answered: a picked option, free text, or backed out. */
+type MenuAnswer =
+  | { kind: 'index'; index: number }
+  | { kind: 'text'; text: string }
+  | { kind: 'back' };
+
+interface MenuOptions {
+  /** Preselected option (defaults to 0). */
+  defaultIndex?: number;
+  /** Non-interactive mode: a non-numeric line becomes a 'text' answer. */
+  allowText?: boolean;
+  /** Extra line printed under the heading (e.g. overflow notes). */
+  footnote?: string;
+}
+
 interface SetupPrompter {
   ask(question: string): Promise<string>;
   /** Like ask, but typed characters are not echoed on interactive TTYs. */
   askSecret(question: string): Promise<string>;
+  /**
+   * Present a menu. On interactive TTYs this is arrow-key navigation with a
+   * highlighted cursor (↑/↓ or j/k to move, Enter to pick, digits to jump,
+   * Esc/q to back out). With piped input it renders the numbered list and
+   * reads one line, so scripts and tests drive it exactly as before.
+   */
+  select(heading: string, options: string[], opts?: MenuOptions): Promise<MenuAnswer>;
   isClosed(): boolean;
   close(): void;
 }
 
 const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPrompter => {
-  const input = env.setupInput ?? process.stdin;
-  // On a real TTY the readline must own the terminal so we can suppress the
-  // echo of pasted secrets; piped input (tests, scripts) never echoes.
+  // On a real TTY, menus are arrow-key driven and secrets are read without
+  // echo; with piped input (tests, scripts) everything is plain lines.
   const interactive = env.setupInput === undefined && process.stdin.isTTY === true;
-  const readline = createInterface(
-    interactive
-      ? { input, output: process.stdout, terminal: true }
-      : { input, terminal: false },
-  );
-  let secretMode = false;
+
   if (interactive) {
-    const internal = readline as unknown as { _writeToOutput?: (chunk: string) => void };
-    const original = internal._writeToOutput?.bind(readline);
-    internal._writeToOutput = (chunk: string) => {
-      if (!secretMode) {
-        original?.(chunk);
+    let closed = false;
+    process.stdin.once('end', () => {
+      closed = true;
+    });
+
+    const question = (prompt: string, secret: boolean): Promise<string> => {
+      const readline = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+      if (secret) {
+        const internal = readline as unknown as { _writeToOutput?: (chunk: string) => void };
+        const original = internal._writeToOutput?.bind(readline);
+        internal._writeToOutput = (chunk: string) => {
+          // Echo the prompt itself, swallow the typed secret.
+          if (chunk.startsWith(prompt)) {
+            original?.(prompt);
+          }
+        };
       }
-      // Secrets: swallow the echo entirely — the prompt itself is written
-      // through streams.stdout before secretMode turns on.
+      return new Promise((resolve) => {
+        readline.on('SIGINT', () => {
+          readline.close();
+          streams.stdout.write('\n');
+          process.exit(130);
+        });
+        readline.question(prompt, (answer) => {
+          readline.close();
+          if (secret) {
+            streams.stdout.write('\n');
+          }
+          resolve(answer.trim());
+        });
+      });
+    };
+
+    const selectInteractive = (
+      heading: string,
+      options: string[],
+      opts: MenuOptions,
+    ): Promise<MenuAnswer> => new Promise((resolve) => {
+      const stdin = process.stdin;
+      const out = streams.stdout;
+      let index = Math.min(Math.max(opts.defaultIndex ?? 0, 0), options.length - 1);
+
+      const wasRaw = stdin.isRaw === true;
+      stdin.setRawMode?.(true);
+      stdin.resume();
+
+      const render = (redraw: boolean): void => {
+        if (redraw) {
+          out.write(`\u001b[${options.length}A`);
+        } else {
+          out.write(`${heading}\n`);
+          if (opts.footnote) {
+            out.write(`${opts.footnote}\n`);
+          }
+        }
+        options.forEach((option, i) => {
+          const active = i === index;
+          out.write(`\u001b[2K\r${active ? '\u001b[36m\u276f ' : '  '}${i + 1}) ${option}${active ? '\u001b[0m' : ''}\n`);
+        });
+      };
+
+      const finish = (answer: MenuAnswer): void => {
+        if (pendingTimer !== undefined) {
+          clearTimeout(pendingTimer);
+          pendingTimer = undefined;
+        }
+        stdin.off('data', onData);
+        if (!wasRaw) {
+          stdin.setRawMode?.(false);
+        }
+        // Pause so keys typed between menus buffer for the next consumer
+        // instead of being dropped by a flowing stream with no listener.
+        stdin.pause();
+        if (pendingEscape.length > 0) {
+          stdin.unshift(Buffer.from(pendingEscape, 'utf8'));
+          pendingEscape = '';
+        }
+        resolve(answer);
+      };
+
+      const handleKey = (key: string): boolean => {
+        if (key === '\u0003') {
+          // Ctrl-C: restore the terminal and leave setup entirely.
+          stdin.setRawMode?.(false);
+          out.write('\n');
+          process.exit(130);
+        }
+        if (key === '\u001b[A' || key === '\u001bOA' || key === 'k') {
+          index = (index - 1 + options.length) % options.length;
+          render(true);
+          return false;
+        }
+        if (key === '\u001b[B' || key === '\u001bOB' || key === 'j' || key === '\t') {
+          index = (index + 1) % options.length;
+          render(true);
+          return false;
+        }
+        if (key === '\r' || key === '\n') {
+          finish({ kind: 'index', index });
+          return true;
+        }
+        if (key === '\u001b' || key === 'q') {
+          finish({ kind: 'back' });
+          return true;
+        }
+        if (/^[1-9]$/.test(key)) {
+          const jump = Number(key) - 1;
+          if (jump < options.length) {
+            index = jump;
+            render(true);
+            finish({ kind: 'index', index });
+            return true;
+          }
+        }
+        return false;
+      };
+
+      // Key repeat and pasted input arrive as one chunk containing several
+      // sequences — split it into individual keys before handling. Bytes
+      // that follow the selecting key (e.g. a pasted "2sk-ant-…") are
+      // pushed back onto stdin for whatever prompt comes next. Terminals
+      // and SSH can also split an escape sequence ACROSS chunks (ESC, then
+      // "[A"), so an incomplete escape tail is held briefly: completed by
+      // the next chunk, or treated as a real Esc press after a beat.
+      let pendingEscape = '';
+      let pendingTimer: ReturnType<typeof setTimeout> | undefined;
+
+      const processText = (text: string): void => {
+        let position = 0;
+        while (position < text.length) {
+          const remaining = text.length - position;
+          if (text[position] === '\u001b' && remaining < 3
+            && (remaining === 1 || text[position + 1] === '[' || text[position + 1] === 'O')) {
+            pendingEscape = text.slice(position);
+            pendingTimer = setTimeout(() => {
+              // No continuation arrived: it was a genuine Esc press.
+              pendingEscape = '';
+              pendingTimer = undefined;
+              handleKey('\u001b');
+            }, 75);
+            return;
+          }
+          let key: string;
+          if (text[position] === '\u001b' && (text[position + 1] === '[' || text[position + 1] === 'O')) {
+            key = text.slice(position, position + 3);
+            position += 3;
+          } else {
+            key = text[position]!;
+            position += 1;
+          }
+          if (handleKey(key)) {
+            const rest = text.slice(position);
+            if (rest.length > 0) {
+              stdin.unshift(Buffer.from(rest, 'utf8'));
+            }
+            return;
+          }
+        }
+      };
+
+      const onData = (chunk: Buffer): void => {
+        if (pendingTimer !== undefined) {
+          clearTimeout(pendingTimer);
+          pendingTimer = undefined;
+        }
+        const text = pendingEscape + chunk.toString('utf8');
+        pendingEscape = '';
+        processText(text);
+      };
+
+      render(false);
+      stdin.on('data', onData);
+    });
+
+    return {
+      ask: (q) => question(q, false),
+      askSecret: (q) => question(q, true),
+      async select(heading, options, opts = {}) {
+        if (options.length === 0) {
+          return { kind: 'back' };
+        }
+        return selectInteractive(heading, options, opts);
+      },
+      isClosed: () => closed,
+      close: () => {
+        // A resumed raw-mode stdin keeps the event loop alive; release it
+        // so the process can exit once setup returns.
+        process.stdin.setRawMode?.(false);
+        process.stdin.pause();
+      },
     };
   }
+
+  const input = env.setupInput ?? process.stdin;
+  const readline = createInterface({ input, terminal: false });
   const pendingLines: string[] = [];
   let closed = false;
 
@@ -1599,27 +1906,69 @@ const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPro
     return (pendingLines.shift() ?? '').trim();
   };
 
+  const selectPlain = async (
+    heading: string,
+    options: string[],
+    opts: MenuOptions,
+  ): Promise<MenuAnswer> => {
+    const defaultIndex = Math.min(Math.max(opts.defaultIndex ?? 0, 0), options.length - 1);
+    while (true) {
+      streams.stdout.write(`${heading}\n`);
+      if (opts.footnote) {
+        streams.stdout.write(`${opts.footnote}\n`);
+      }
+      for (const [i, option] of options.entries()) {
+        streams.stdout.write(`  ${i + 1}) ${option}\n`);
+      }
+      streams.stdout.write(`Choose [${defaultIndex + 1}]: `);
+      const line = await nextLine();
+
+      if (line === '') {
+        if (closed && pendingLines.length === 0) {
+          return { kind: 'back' };
+        }
+        return { kind: 'index', index: defaultIndex };
+      }
+      if (/^\d+$/.test(line)) {
+        const picked = Number(line) - 1;
+        if (picked >= 0 && picked < options.length) {
+          return { kind: 'index', index: picked };
+        }
+        writeLine(streams.stdout, `Pick a number between 1 and ${options.length}.`);
+        continue;
+      }
+      if (/^(back|b|q(uit)?)$/i.test(line)) {
+        return { kind: 'back' };
+      }
+      if (opts.allowText) {
+        return { kind: 'text', text: line };
+      }
+      const matched = options.findIndex((option) => option.toLowerCase().includes(line.toLowerCase()));
+      if (matched !== -1) {
+        return { kind: 'index', index: matched };
+      }
+      writeLine(streams.stdout, `Pick a number between 1 and ${options.length}.`);
+    }
+  };
+
   return {
-    async ask(question) {
-      streams.stdout.write(question);
+    async ask(q) {
+      streams.stdout.write(q);
       return nextLine();
     },
-    async askSecret(question) {
-      streams.stdout.write(question);
-      secretMode = true;
-      try {
-        return await nextLine();
-      } finally {
-        secretMode = false;
-        if (interactive) {
-          streams.stdout.write('\n');
-        }
+    async askSecret(q) {
+      // Piped input never echoes, so plain reads are safe here.
+      streams.stdout.write(q);
+      return nextLine();
+    },
+    async select(heading, options, opts = {}) {
+      if (options.length === 0) {
+        return { kind: 'back' };
       }
+      return selectPlain(heading, options, opts);
     },
-    isClosed() {
-      return closed && pendingLines.length === 0;
-    },
-    close() {
+    isClosed: () => closed && pendingLines.length === 0,
+    close: () => {
       readline.close();
     },
   };
@@ -1828,27 +2177,25 @@ export const runSetup = async (
 
   const signInAnthropic = async (): Promise<void> => {
     const signedIn = state.credentials.anthropic !== undefined;
-    const answer = await prompter.ask(
-      'How should Stratus connect to Claude?\n'
-      + '  1) Claude subscription (Pro/Max) — sign in through Claude Code, no per-token cost\n'
-      + '  2) Anthropic API key — pay per use (console.anthropic.com)\n'
-      + '  3) Skip for now\n'
-      + (signedIn ? '  4) Sign out\n' : '')
-      + 'Choose [1]: ',
-    );
+    const answer = await prompter.select('How should Stratus connect to Claude?', [
+      'Claude subscription (Pro/Max) — sign in through Claude Code, no per-token cost',
+      'Anthropic API key — pay per use (console.anthropic.com)',
+      'Skip for now',
+      ...(signedIn ? ['Sign out'] : []),
+    ]);
 
-    if (signedIn && (answer === '4' || /^sign ?out$/i.test(answer))) {
+    if (signedIn && answer.kind === 'index' && answer.index === 3) {
       delete state.credentials.anthropic;
       state.credentialsDirty = true;
       writeLine(streams.stdout, 'Signed out of Anthropic.');
       return;
     }
 
-    if (answer === '3' || /^skip$/i.test(answer)) {
+    if (answer.kind !== 'index' || answer.index === 2) {
       return;
     }
 
-    if (answer === '2' || /^(api|key)/i.test(answer)) {
+    if (answer.index === 1) {
       const key = await prompter.askSecret('Paste your Anthropic API key (starts with sk-ant-, Enter to skip; input is hidden): ');
       if (!key) {
         writeLine(streams.stdout, 'Skipped — you can sign in any time by re-running this menu.');
@@ -1999,26 +2346,24 @@ export const runSetup = async (
   };
 
   const chooseProviders = async (): Promise<void> => {
-    const answer = await prompter.ask(
-      'Providers — sign in to one or more:\n'
-      + `  1) Claude (Anthropic) — ${providerSignInStatus('anthropic')}\n`
-      + `  2) OpenAI-compatible — ${providerSignInStatus('openai')}\n`
-      + '  3) Demo — built-in fake model, offline, no account\n'
-      + '  4) Back\n'
-      + 'Choose [1]: ',
-    );
+    const answer = await prompter.select('Providers — sign in to one or more:', [
+      `Claude (Anthropic) — ${providerSignInStatus('anthropic')}`,
+      `OpenAI-compatible — ${providerSignInStatus('openai')}`,
+      'Demo — built-in fake model, offline, no account',
+      'Back',
+    ]);
 
-    if (answer === '4' || /^back$/i.test(answer)) {
+    if (answer.kind !== 'index' || answer.index === 3) {
       return;
     }
 
-    if (answer === '3' || /^demo$/i.test(answer)) {
+    if (answer.index === 2) {
       await switchDefaultProvider('demo');
       writeLine(streams.stdout, 'Demo selected — no sign-in needed. Mention "echo" or "tool" in a prompt to see tool calls.');
       return;
     }
 
-    if (answer === '2' || /^openai$/i.test(answer)) {
+    if (answer.index === 1) {
       await signInOpenAI();
       if (state.credentials.openai) {
         await maybeSwitchDefault('openai');
@@ -2122,39 +2467,47 @@ export const runSetup = async (
     }
 
     const shown = available.slice(0, 30);
-    const lines = shown.map((entry, index) => `  ${index + 1}) ${entry.id} — ${entry.provider}`);
-    if (available.length > shown.length) {
-      lines.push(`  …and ${available.length - shown.length} more — type the model id instead.`);
-    }
-    const answer = await prompter.ask(
-      `Available models:\n${lines.join('\n')}\nChoose a number, or type a model id [1]: `,
-    );
+    const labels = shown.map((entry) => `${entry.id} — ${entry.provider}`);
+    const typeItOption = labels.length;
+    labels.push('Type a model id…');
+    const footnote = available.length > shown.length
+      ? `  …and ${available.length - shown.length} more — pick "Type a model id…" to name one.`
+      : undefined;
 
-    let choice: { provider: CredentialProviderName; id: string } | undefined;
-    if (!answer) {
-      choice = shown[0];
-    } else if (/^\d+$/.test(answer)) {
-      choice = shown[Number(answer) - 1];
-      if (!choice) {
-        writeLine(streams.stdout, `Pick a number between 1 and ${shown.length}.`);
-        return;
-      }
-    } else if (answer.includes(':')) {
-      const [providerPart, ...idParts] = answer.split(':');
-      const id = idParts.join(':').trim();
-      if ((providerPart === 'anthropic' || providerPart === 'openai') && id) {
-        choice = { provider: providerPart, id };
-      } else {
+    const answer = await prompter.select('Available models:', labels, {
+      allowText: true,
+      ...(footnote ? { footnote } : {}),
+    });
+    if (answer.kind === 'back') {
+      return;
+    }
+
+    const parseTyped = (typed: string): { provider: CredentialProviderName; id: string } | undefined => {
+      if (typed.includes(':')) {
+        const [providerPart, ...idParts] = typed.split(':');
+        const id = idParts.join(':').trim();
+        if ((providerPart === 'anthropic' || providerPart === 'openai') && id) {
+          return { provider: providerPart, id };
+        }
         writeLine(streams.stdout, 'Use provider:model, e.g. anthropic:claude-opus-5.');
-        return;
+        return undefined;
       }
-    } else {
       // A typed id that appears in the collected list belongs to that
       // provider, wherever the default currently points.
-      const listed = available.find((entry) => entry.id === answer);
+      const listed = available.find((entry) => entry.id === typed);
       const inferred = listed?.provider
         ?? (state.provider !== 'demo' ? state.provider : available[0]!.provider);
-      choice = { provider: inferred, id: answer };
+      return { provider: inferred, id: typed };
+    };
+
+    let choice: { provider: CredentialProviderName; id: string } | undefined;
+    if (answer.kind === 'text') {
+      choice = parseTyped(answer.text);
+    } else if (answer.index === typeItOption) {
+      const typed = await prompter.ask('Model id (or provider:model): ');
+      choice = typed ? parseTyped(typed) : undefined;
+    } else {
+      choice = shown[answer.index];
     }
 
     if (!choice) {
@@ -2199,47 +2552,47 @@ export const runSetup = async (
   };
 
   const chooseModels = async (): Promise<void> => {
-    const answer = await prompter.ask(
-      `Models — ${modelsSummary()}\n`
-      + '  1) Choose the default model\n'
-      + '  2) Choose a fallback model\n'
-      + '  3) Clear the fallback\n'
-      + '  4) Back\n'
-      + 'Choose [1]: ',
-    );
+    const answer = await prompter.select(`Models — ${modelsSummary()}`, [
+      'Choose the default model',
+      'Choose a fallback model',
+      'Clear the fallback',
+      'Back',
+    ]);
 
-    if (answer === '2') {
+    if (answer.kind !== 'index' || answer.index === 3) {
+      return;
+    }
+    if (answer.index === 1) {
       await pickModel('fallback');
       return;
     }
-    if (answer === '3') {
+    if (answer.index === 2) {
       delete state.fallbackModel;
       delete state.fallbackProvider;
       writeLine(streams.stdout, 'Fallback cleared.');
-      return;
-    }
-    if (answer === '4' || /^back$/i.test(answer)) {
       return;
     }
     await pickModel('default');
   };
 
   const chooseAgent = async (): Promise<void> => {
-    const answer = await prompter.ask(
-      'Your default agent:\n'
-      + '  1) Create a new agent\n'
-      + '  2) Use an existing soul file\n'
-      + '  3) No default agent\n'
-      + 'Choose [1]: ',
-    );
+    const answer = await prompter.select('Your default agent:', [
+      'Create a new agent',
+      'Use an existing soul file',
+      'No default agent',
+    ]);
 
-    if (answer === '3' || /^none$/i.test(answer)) {
+    if (answer.kind !== 'index') {
+      return;
+    }
+
+    if (answer.index === 2) {
       delete state.soulPath;
       writeLine(streams.stdout, 'Cleared — runs use the built-in default agent.');
       return;
     }
 
-    if (answer === '2') {
+    if (answer.index === 1) {
       const soulAnswer = await prompter.ask('Path to the soul file: ');
       if (!soulAnswer) {
         return;
@@ -2394,7 +2747,15 @@ export const runSetup = async (
       printSessionSummary(session, streams);
       writeLine(streams.stdout);
     } catch (error) {
-      writeLine(streams.stdout, `Test run failed: ${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      writeLine(streams.stdout, `Test run failed: ${message}`);
+      if (runtime.provider === 'anthropic' && runtime.authToken && /\b(401|403|429)\b/.test(message)) {
+        writeLine(streams.stdout, 'Subscription setup tokens are built for the Claude Code integration, which Stratus does not route through yet — sign in with an Anthropic API key instead (Providers menu → Claude → API key).');
+      } else if (/\b429\b/.test(message)) {
+        writeLine(streams.stdout, 'A 429 means the provider rate-limited the request. On a new Anthropic account this usually means no purchased credits yet — check console.anthropic.com → Billing and Limits, then try again.');
+      } else if (/\b(401|403)\b/.test(message)) {
+        writeLine(streams.stdout, 'The provider rejected the credential — re-run sign-in from the Providers menu.');
+      }
     }
   };
 
@@ -2541,31 +2902,27 @@ export const runSetup = async (
 
     while (true) {
       writeLine(streams.stdout);
-      const choice = await prompter.ask(
-        `  1) Providers            ${providersSummary()}\n`
-        + `  2) Models               ${modelsSummary()}\n`
-        + `  3) Agent                ${agentSummary()}\n`
-        + '  4) Test run             say hello with the current settings\n'
-        + '  5) Save & finish\n'
-        + 'Choose [1-5]: ',
-      );
+      const choice = await prompter.select('', [
+        `Providers            ${providersSummary()}`,
+        `Models               ${modelsSummary()}`,
+        `Agent                ${agentSummary()}`,
+        'Test run             say hello with the current settings',
+        'Save & finish',
+      ]);
 
-      if (prompter.isClosed() && choice === '') {
+      // Backing out of the top level (Esc, or the input ending) saves.
+      if (choice.kind !== 'index' || choice.index === 4) {
         break;
       }
 
-      if (choice === '1') {
+      if (choice.index === 0) {
         await chooseProviders();
-      } else if (choice === '2') {
+      } else if (choice.index === 1) {
         await chooseModels();
-      } else if (choice === '3') {
+      } else if (choice.index === 2) {
         await chooseAgent();
-      } else if (choice === '4') {
+      } else if (choice.index === 3) {
         await testRun();
-      } else if (choice === '5' || /^(save|done|finish|q(uit)?)$/i.test(choice)) {
-        break;
-      } else {
-        writeLine(streams.stdout, 'Pick a number between 1 and 5.');
       }
     }
 
