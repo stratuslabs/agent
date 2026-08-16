@@ -3076,7 +3076,8 @@ export const runAgentNew = async (
         ...(command.instructions ? [{ prefill: command.instructions }] : []),
       );
 
-      const agent = defineAgent({ name, instructions: instructions || DEFAULT_SOUL_STARTER });
+      const persona = instructions || DEFAULT_SOUL_STARTER;
+      let agent = defineAgent({ name, instructions: persona });
 
       // Frontmatter pins what a run from this directory would actually use:
       // env vars outrank the active config file (project-local or explicit
@@ -3086,7 +3087,16 @@ export const runAgentNew = async (
       // configured offline provider instead of demanding credentials.
       const processEnv = readProcessEnv(env);
       const configLocation = await resolveConfigLocation({}, env);
-      const activeConfig = configLocation ? await loadConfigFile(configLocation.path) : {};
+      // Creating an agent must not be blocked by a broken config — it only
+      // feeds the soul's provider/model hint, so fall back to defaults.
+      let activeConfig: CliConfigFile = {};
+      if (configLocation) {
+        try {
+          activeConfig = await loadConfigFile(configLocation.path);
+        } catch (error) {
+          writeLine(streams.stdout, `Note: ignoring unreadable config ${configLocation.path} (${error instanceof Error ? error.message : String(error)}).`);
+        }
+      }
       const soulProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
         ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'))
         ?? activeConfig.provider
@@ -3098,32 +3108,56 @@ export const runAgentNew = async (
         ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL)
         ?? (configModelApplies ? activeConfig.model : undefined)
         ?? (soulProvider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
-      const soul = formatSoul({
-        agent,
-        ...(soulProvider !== 'demo' ? { provider: soulProvider, model: soulModel } : {}),
-      });
-      const soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
-      await mkdir(path.dirname(soulPath), { recursive: true });
-      await writeFile(soulPath, soul);
+      const soulPin = soulProvider !== 'demo' ? { provider: soulProvider, model: soulModel } : {};
+
+      // The name stays theirs, but the id — the soul filename and the
+      // memory key — must be unique: the suggestion pool is small, so a
+      // repeat name would otherwise silently overwrite an earlier agent's
+      // soul and share their memory. 'wx' makes each claim atomic; on a
+      // collision the id gets a fresh suffix and we try again.
+      await mkdir(agentsDirPath(env), { recursive: true });
+      const baseId = agent.id;
+      let soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
+      for (;;) {
+        try {
+          await writeFile(soulPath, formatSoul({ agent, ...soulPin }), { flag: 'wx' });
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+            throw error;
+          }
+          agent = defineAgent({ id: `${baseId}-${randomUUID().slice(0, 4)}`, name, instructions: persona });
+          soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
+        }
+      }
 
       const makeDefault = await prompter.select(`Make ${agent.name} your default agent?`, [
         'Yes — every stratus run talks to them',
         'Not now',
       ]);
+      let madeDefault = false;
       if (makeDefault.kind === 'index' && makeDefault.index === 0) {
         // The default agent is a machine-wide setting, so it lands in the
         // global config even when a project config is active here.
-        let globalConfig: CliConfigFile = {};
+        let globalConfig: CliConfigFile | undefined;
         try {
           globalConfig = await loadConfigFile(globalConfigPath(env));
-        } catch {
-          // no global config yet
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            globalConfig = {};
+          } else {
+            // A malformed config is recoverable by hand — never overwrite it.
+            writeLine(streams.stdout, `Could not read ${globalConfigPath(env)} (${error instanceof Error ? error.message : String(error)}), so it was left untouched. Fix it, then make ${agent.name} the default from stratus setup.`);
+          }
         }
-        const config: Record<string, unknown> = { ...globalConfig, provider: globalConfig.provider ?? soulProvider, soul: soulPath };
-        await mkdir(path.dirname(globalConfigPath(env)), { recursive: true });
-        await writeFile(globalConfigPath(env), `${JSON.stringify(config, null, 2)}\n`);
-        if (configLocation && configLocation.path !== globalConfigPath(env)) {
-          writeLine(streams.stdout, `Note: ${configLocation.path} takes precedence over the global config for runs started in this directory.`);
+        if (globalConfig !== undefined) {
+          const config: Record<string, unknown> = { ...globalConfig, provider: globalConfig.provider ?? soulProvider, soul: soulPath };
+          await mkdir(path.dirname(globalConfigPath(env)), { recursive: true });
+          await writeFile(globalConfigPath(env), `${JSON.stringify(config, null, 2)}\n`);
+          madeDefault = true;
+          if (configLocation && configLocation.path !== globalConfigPath(env)) {
+            writeLine(streams.stdout, `Note: ${configLocation.path} takes precedence over the global config for runs started in this directory.`);
+          }
         }
       }
 
@@ -3132,7 +3166,7 @@ export const runAgentNew = async (
       writeLine(streams.stdout, `Their soul lives at ${soulPath} — edit it any time to change how they talk.`);
       writeLine(streams.stdout);
       writeLine(streams.stdout, 'Try:');
-      writeLine(streams.stdout, makeDefault.kind === 'index' && makeDefault.index === 0
+      writeLine(streams.stdout, madeDefault
         ? '  stratus run "introduce yourself"'
         : `  stratus run --soul ${quoteShellArg(soulPath)} "introduce yourself"`);
       return 0;
