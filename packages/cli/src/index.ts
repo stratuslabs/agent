@@ -39,6 +39,7 @@ import {
   createRememberTool,
   defineAgent,
   formatSoul,
+  generateAgentName,
   parseSoul,
   type ParsedSoul,
 } from '@stratusagent/agents';
@@ -185,6 +186,34 @@ export interface DashboardServerHandle {
   url: string;
   close: () => Promise<void>;
 }
+
+export const CLI_VERSION = '0.2.2';
+
+// The agent every run uses when no soul is configured. A Stratus agent is
+// a Stratus agent — never "the model" — whichever provider serves it.
+const DEFAULT_STRATUS_AGENT = {
+  id: 'stratus',
+  name: 'Stratus',
+  instructions: 'You are Stratus, a personal agent on the Stratus Agent platform. Be warm, direct, and concise. When asked who or what you are, you are Stratus — a Stratus agent — regardless of which model is serving the conversation.',
+};
+
+// Unsouled runs used to remember facts under a per-provider default agent.
+// Stratus inherits all of them: reads for the built-in agent also return
+// entries stored under the legacy ids, while new facts land under 'stratus'.
+const LEGACY_DEFAULT_AGENT_IDS = ['demo-agent', 'anthropic-agent', 'openai-agent'];
+
+const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryStore => ({
+  append: (agentId, content, metadata) => store.append(agentId, content, metadata),
+  async list(agentId) {
+    if (agentId !== DEFAULT_STRATUS_AGENT.id) {
+      return store.list(agentId);
+    }
+    const batches = await Promise.all(
+      [DEFAULT_STRATUS_AGENT.id, ...LEGACY_DEFAULT_AGENT_IDS].map((id) => store.list(id)),
+    );
+    return batches.flat().sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  },
+});
 
 const DEFAULT_CONFIG_FILENAME = 'stratus.config.json';
 const LEGACY_CONFIG_FILENAME = 'stratusclaw.config.json';
@@ -905,7 +934,7 @@ interface ResolvedConfigLocation {
 }
 
 const resolveConfigLocation = async (
-  command: ParsedRunCommand,
+  command: Pick<ParsedRunCommand, 'configPath'>,
   env: CliEnvironment,
 ): Promise<ResolvedConfigLocation | undefined> => {
   const processEnv = readProcessEnv(env);
@@ -1335,7 +1364,7 @@ export const runSingleLoop = async (
 ): Promise<Session> => {
   const runEnv = options.env ?? {};
   await migrateLegacyMemory(runEnv);
-  const memory = createFileMemoryStore(memoryFilePath(runEnv));
+  const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(runEnv)));
 
   const tools = new ToolRegistry();
   tools.register(createDemoTool());
@@ -1375,25 +1404,9 @@ export const runSingleLoop = async (
 
   await runner.initialize();
 
-  // A soul is a full identity — it replaces the built-in per-provider agent.
-  const agent = options.runtime.soul?.agent
-    ?? (options.runtime.provider === 'demo'
-      ? {
-          id: 'demo-agent',
-          name: 'Demo Agent',
-          instructions: 'Keep the loop tiny and readable.',
-        }
-      : options.runtime.provider === 'anthropic'
-        ? {
-            id: 'anthropic-agent',
-            name: 'Claude Agent',
-            instructions: 'Respond clearly and directly to the user request.',
-          }
-        : {
-            id: 'openai-agent',
-            name: 'OpenAI Agent',
-            instructions: 'Respond clearly and directly to the user request.',
-          });
+  // A soul is a full identity — without one, every provider serves the
+  // same built-in Stratus persona.
+  const agent = options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT;
 
   const metadata = options.runtime.provider === 'demo'
     ? { provider: 'demo' as const }
@@ -1598,7 +1611,7 @@ export const startDashboardServer = async (
       sendJson(response, 200, {
         ok: true,
         service: 'stratus-dashboard',
-        version: '0.2.1',
+        version: CLI_VERSION,
         now: new Date().toISOString(),
       });
       return;
@@ -1678,10 +1691,32 @@ interface MenuOptions {
   footnote?: string;
 }
 
+// The fixed header drawn at the top of every interactive screen.
+const stratusHeaderLines = (): string[] => {
+  const title = 'Stratus Agent';
+  const version = `v${CLI_VERSION}`;
+  const gap = '   ';
+  const content = `  ${title}${gap}${version}  `;
+  return [
+    `\u001b[2m╭${'─'.repeat(content.length)}╮\u001b[0m`,
+    `\u001b[2m│\u001b[0m  \u001b[1m${title}\u001b[0m${gap}\u001b[2m${version}\u001b[0m  \u001b[2m│\u001b[0m`,
+    `\u001b[2m╰${'─'.repeat(content.length)}╯\u001b[0m`,
+  ];
+};
+
+interface PrompterView {
+  /** Lines drawn at the top of every interactive menu screen. */
+  header(): string[];
+  /** Recent status lines to carry onto the next screen (consumed). */
+  consumeNotices(): string[];
+}
+
 interface SetupPrompter {
-  ask(question: string): Promise<string>;
+  ask(question: string, opts?: { prefill?: string }): Promise<string>;
   /** Like ask, but typed characters are not echoed on interactive TTYs. */
   askSecret(question: string): Promise<string>;
+  /** True when menus are arrow-key driven on a real terminal. */
+  isInteractive(): boolean;
   /**
    * Present a menu. On interactive TTYs this is arrow-key navigation with a
    * highlighted cursor (↑/↓ or j/k to move, Enter to pick, digits to jump,
@@ -1693,7 +1728,11 @@ interface SetupPrompter {
   close(): void;
 }
 
-const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPrompter => {
+const createSetupPrompter = (
+  streams: CliStreams,
+  env: CliEnvironment,
+  view?: PrompterView,
+): SetupPrompter => {
   // On a real TTY, menus are arrow-key driven and secrets are read without
   // echo; with piped input (tests, scripts) everything is plain lines.
   const interactive = env.setupInput === undefined && process.stdin.isTTY === true;
@@ -1704,7 +1743,7 @@ const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPro
       closed = true;
     });
 
-    const question = (prompt: string, secret: boolean): Promise<string> => {
+    const question = (prompt: string, secret: boolean, prefill?: string): Promise<string> => {
       const readline = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
       if (secret) {
         const internal = readline as unknown as { _writeToOutput?: (chunk: string) => void };
@@ -1729,7 +1768,27 @@ const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPro
           }
           resolve(answer.trim());
         });
+        if (prefill) {
+          // Pre-typed and editable: backspace over it or press Enter to keep.
+          readline.write(prefill);
+        }
       });
+    };
+
+    // Each menu replaces the screen: clear, draw the header, carry over the
+    // most recent status lines, then the menu itself.
+    const drawScreen = (out: Pick<typeof process.stdout, 'write'>): void => {
+      out.write('\u001b[2J\u001b[H');
+      for (const line of view?.header() ?? []) {
+        out.write(`${line}\n`);
+      }
+      const notices = view?.consumeNotices() ?? [];
+      if (notices.length > 0) {
+        for (const line of notices) {
+          out.write(`\u001b[2m${line}\u001b[0m\n`);
+        }
+        out.write('\n');
+      }
     };
 
     const selectInteractive = (
@@ -1749,7 +1808,10 @@ const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPro
         if (redraw) {
           out.write(`\u001b[${options.length}A`);
         } else {
-          out.write(`${heading}\n`);
+          drawScreen(out);
+          if (heading.length > 0) {
+            out.write(`${heading}\n`);
+          }
           if (opts.footnote) {
             out.write(`${opts.footnote}\n`);
           }
@@ -1874,8 +1936,9 @@ const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPro
     });
 
     return {
-      ask: (q) => question(q, false),
+      ask: (q, opts) => question(q, false, opts?.prefill),
       askSecret: (q) => question(q, true),
+      isInteractive: () => true,
       async select(heading, options, opts = {}) {
         if (options.length === 0) {
           return { kind: 'back' };
@@ -1963,15 +2026,17 @@ const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPro
   };
 
   return {
-    async ask(q) {
+    async ask(q, opts) {
       streams.stdout.write(q);
-      return nextLine();
+      const line = await nextLine();
+      return line || (opts?.prefill ?? '');
     },
     async askSecret(q) {
       // Piped input never echoes, so plain reads are safe here.
       streams.stdout.write(q);
       return nextLine();
     },
+    isInteractive: () => false,
     async select(heading, options, opts = {}) {
       if (options.length === 0) {
         return { kind: 'back' };
@@ -2091,6 +2156,32 @@ export const runSetup = async (
     }
   }
 
+  // Interactive mode is a screen-based interface: every menu clears and
+  // redraws under a fixed header, and status lines printed between menus
+  // are carried onto the next screen (dimmed) so nothing is missed.
+  const interactive = env.setupInput === undefined && process.stdin.isTTY === true;
+  const baseStreams = streams;
+  const recentNotices: string[] = [];
+  if (interactive) {
+    streams = {
+      stderr: baseStreams.stderr,
+      stdout: {
+        write(chunk: string) {
+          for (const raw of String(chunk).split('\n')) {
+            const line = raw.trimEnd();
+            if (line.trim().length > 0) {
+              recentNotices.push(line);
+              if (recentNotices.length > 8) {
+                recentNotices.shift();
+              }
+            }
+          }
+          return baseStreams.stdout.write(chunk);
+        },
+      },
+    };
+  }
+
   const state: SetupState = {
     provider: existing.provider ?? 'anthropic',
     ...(existing.model ? { model: existing.model } : {}),
@@ -2109,7 +2200,10 @@ export const runSetup = async (
     credentialsDirty: false,
   };
 
-  const prompter = createSetupPrompter(streams, env);
+  const prompter = createSetupPrompter(baseStreams, env, {
+    header: stratusHeaderLines,
+    consumeNotices: () => recentNotices.splice(0),
+  });
 
   const defaultModelFor = (provider: CliProviderName): string =>
     provider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL;
@@ -2757,6 +2851,10 @@ export const runSetup = async (
       );
       printSessionSummary(session, streams);
       writeLine(streams.stdout);
+      if (prompter.isInteractive()) {
+        await prompter.ask('Press Enter to return to the menu… ');
+        recentNotices.length = 0;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       writeLine(streams.stdout, `Test run failed: ${message}`);
@@ -2905,8 +3003,10 @@ export const runSetup = async (
   };
 
   try {
-    writeLine(streams.stdout, 'Stratus Agent setup');
-    writeLine(streams.stdout, 'Pick a provider, sign in, and create your agent — all from this menu.');
+    if (!interactive) {
+      writeLine(streams.stdout, 'Stratus Agent setup');
+      writeLine(streams.stdout, 'Pick a provider, sign in, and create your agent — all from this menu.');
+    }
     if (envConfigVar && !command.configPath) {
       writeLine(streams.stdout, `${envConfigVar} is set, so the config will be written to ${configPath}.`);
     }
@@ -2944,10 +3044,137 @@ export const runSetup = async (
   }
 };
 
-export const runAgentNew = (
+export const runAgentNew = async (
   command: ParsedAgentNewCommand,
   streams: CliStreams,
-): number => {
+  env: CliEnvironment = {},
+): Promise<number> => {
+  // On a real terminal, creating an agent is the same guided experience as
+  // setup: a headed screen, a prefilled (editable) name, a personality, and
+  // an offer to make them the default. Scripted formats and piped input
+  // keep the plain one-shot output.
+  const interactive = env.setupInput === undefined
+    && process.stdin.isTTY === true
+    && command.format === 'text';
+
+  if (interactive) {
+    const prompter = createSetupPrompter(streams, env, {
+      header: stratusHeaderLines,
+      consumeNotices: () => [],
+    });
+    try {
+      streams.stdout.write('\u001b[2J\u001b[H');
+      for (const line of stratusHeaderLines()) {
+        writeLine(streams.stdout, line);
+      }
+      writeLine(streams.stdout);
+
+      const suggested = command.name ?? generateAgentName();
+      const name = (await prompter.ask('Choose your name: ', { prefill: suggested })) || suggested;
+      const instructions = await prompter.ask(
+        'Describe their personality (Enter for a starter you can edit later): ',
+        ...(command.instructions ? [{ prefill: command.instructions }] : []),
+      );
+
+      const persona = instructions || DEFAULT_SOUL_STARTER;
+      let agent = defineAgent({ name, instructions: persona });
+
+      // Frontmatter pins what a run from this directory would actually use:
+      // env vars outrank the active config file (project-local or explicit
+      // first, global otherwise), and no provider anywhere falls back to
+      // demo — the exact precedence of stratus run. Demo produces no pin
+      // at all: the soul keeps following the machine's configuration
+      // instead of demanding credentials nothing has signed in for.
+      const processEnv = readProcessEnv(env);
+      const configLocation = await resolveConfigLocation({}, env);
+      // Creating an agent must not be blocked by a broken config — it only
+      // feeds the soul's provider/model hint, so fall back to defaults.
+      let activeConfig: CliConfigFile = {};
+      if (configLocation) {
+        try {
+          activeConfig = await loadConfigFile(configLocation.path);
+        } catch (error) {
+          writeLine(streams.stdout, `Note: ignoring unreadable config ${configLocation.path} (${error instanceof Error ? error.message : String(error)}).`);
+        }
+      }
+      const soulProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
+        ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'))
+        ?? activeConfig.provider
+        ?? 'demo';
+      // The active config's model was written for the provider named in
+      // that config; it only travels into the soul when they still match.
+      const configModelApplies = (activeConfig.provider ?? 'openai') === soulProvider;
+      const soulModel = readNonEmptyString(processEnv.STRATUS_MODEL)
+        ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL)
+        ?? (configModelApplies ? activeConfig.model : undefined)
+        ?? (soulProvider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
+      const soulPin = soulProvider !== 'demo' ? { provider: soulProvider, model: soulModel } : {};
+
+      // The name stays theirs, but the id — the soul filename and the
+      // memory key — must be unique: the suggestion pool is small, so a
+      // repeat name would otherwise silently overwrite an earlier agent's
+      // soul and share their memory. 'wx' makes each claim atomic; on a
+      // collision the id gets a fresh suffix and we try again.
+      await mkdir(agentsDirPath(env), { recursive: true });
+      const baseId = agent.id;
+      let soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
+      for (;;) {
+        try {
+          await writeFile(soulPath, formatSoul({ agent, ...soulPin }), { flag: 'wx' });
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+            throw error;
+          }
+          agent = defineAgent({ id: `${baseId}-${randomUUID().slice(0, 4)}`, name, instructions: persona });
+          soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
+        }
+      }
+
+      const makeDefault = await prompter.select(`Make ${agent.name} your default agent?`, [
+        'Yes — every stratus run talks to them',
+        'Not now',
+      ]);
+      let madeDefault = false;
+      if (makeDefault.kind === 'index' && makeDefault.index === 0) {
+        // The default agent is a machine-wide setting, so it lands in the
+        // global config even when a project config is active here.
+        let globalConfig: CliConfigFile | undefined;
+        try {
+          globalConfig = await loadConfigFile(globalConfigPath(env));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            globalConfig = {};
+          } else {
+            // A malformed config is recoverable by hand — never overwrite it.
+            writeLine(streams.stdout, `Could not read ${globalConfigPath(env)} (${error instanceof Error ? error.message : String(error)}), so it was left untouched. Fix it, then make ${agent.name} the default from stratus setup.`);
+          }
+        }
+        if (globalConfig !== undefined) {
+          const config: Record<string, unknown> = { ...globalConfig, provider: globalConfig.provider ?? soulProvider, soul: soulPath };
+          await mkdir(path.dirname(globalConfigPath(env)), { recursive: true });
+          await writeFile(globalConfigPath(env), `${JSON.stringify(config, null, 2)}\n`);
+          madeDefault = true;
+          if (configLocation && configLocation.path !== globalConfigPath(env)) {
+            writeLine(streams.stdout, `Note: ${configLocation.path} takes precedence over the global config for runs started in this directory.`);
+          }
+        }
+      }
+
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, `Say hello to ${agent.name}.`);
+      writeLine(streams.stdout, `Their soul lives at ${soulPath} — edit it any time to change how they talk.`);
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, 'Try:');
+      writeLine(streams.stdout, madeDefault
+        ? '  stratus run "introduce yourself"'
+        : `  stratus run --soul ${quoteShellArg(soulPath)} "introduce yourself"`);
+      return 0;
+    } finally {
+      prompter.close();
+    }
+  }
+
   const agent = defineAgent({
     ...(command.name ? { name: command.name } : {}),
     ...(command.instructions ? { instructions: command.instructions } : {}),
@@ -3032,7 +3259,7 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     }
 
     if (command.command === 'agent-new') {
-      return runAgentNew(command, streams);
+      return runAgentNew(command, streams, resolvedEnv);
     }
 
     if (command.command === 'setup') {
