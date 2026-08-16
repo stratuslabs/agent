@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { appendFile, chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import os from 'node:os';
@@ -334,77 +334,97 @@ const memoryFilePath = (env: CliEnvironment): string =>
 
 // Memory used to live under the working directory. Fold any such file into
 // the global store the first time a run happens from that directory, then
-// mark it migrated — an upgrade must never look like the agent forgot.
+// archive it — an upgrade must never look like the agent forgot.
 //
-// The import claims the file with an atomic rename BEFORE reading it, so
-// two concurrent first runs cannot both import; entries already present in
-// the global store (by id) are skipped, so a run interrupted mid-import
-// finishes idempotently on the next attempt.
+// Every import first takes exclusive ownership by atomically renaming its
+// source to a unique claim file: of any competing processes, exactly one
+// wins the rename and the rest see ENOENT. A crash mid-import leaves the
+// claim file behind; later runs re-claim it the same way and finish the
+// job, with entries deduped against the global store by id. Only records
+// that parse as real memory entries are imported — malformed lines stay in
+// the archive instead of poisoning the global store for every agent.
+const isMemoryEntryLine = (line: string): boolean => {
+  try {
+    const parsed = JSON.parse(line) as Partial<MemoryEntry> | null;
+    return typeof parsed === 'object' && parsed !== null
+      && typeof parsed.id === 'string'
+      && typeof parsed.agentId === 'string'
+      && typeof parsed.content === 'string';
+  } catch {
+    return false;
+  }
+};
+
 const migrateLegacyMemory = async (env: CliEnvironment): Promise<void> => {
   const legacyPath = path.join(readWorkingDirectory(env), '.stratus', MEMORY_FILENAME);
   const globalPath = memoryFilePath(env);
   if (legacyPath === globalPath) {
     return;
   }
-  const claimPath = `${legacyPath}.migrating`;
-  const donePath = `${legacyPath}.migrated`;
+  const legacyDir = path.dirname(legacyPath);
+  const archivePath = `${legacyPath}.migrated`;
 
-  try {
-    await rename(legacyPath, claimPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+  const claimAndImport = async (sourcePath: string): Promise<void> => {
+    const claimPath = path.join(legacyDir, `${MEMORY_FILENAME}.migrating-${randomUUID()}`);
+    try {
+      await rename(sourcePath, claimPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return; // another process owns it, or there is nothing to migrate
+      }
       throw error;
     }
-    // Nothing to claim — but a crash may have left a claimed file behind;
-    // fall through and finish that import if so.
-  }
 
-  let claimed: string;
+    const claimed = await readFile(claimPath, 'utf8');
+
+    let existingIds: Set<string>;
+    try {
+      existingIds = new Set(
+        (await readFile(globalPath, 'utf8'))
+          .split('\n')
+          .filter(isMemoryEntryLine)
+          .map((line) => (JSON.parse(line) as MemoryEntry).id),
+      );
+    } catch {
+      existingIds = new Set();
+    }
+
+    const entries = claimed
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .filter(isMemoryEntryLine)
+      .filter((line) => !existingIds.has((JSON.parse(line) as MemoryEntry).id));
+    if (entries.length > 0) {
+      await mkdir(path.dirname(globalPath), { recursive: true });
+      await appendFile(globalPath, `${entries.join('\n')}\n`);
+    }
+
+    // Archive by appending (never overwriting an earlier archive), then
+    // drop the claim — its content is fully preserved in the archive.
+    if (claimed.length > 0) {
+      await appendFile(archivePath, claimed.endsWith('\n') || claimed.length === 0 ? claimed : `${claimed}\n`);
+    }
+    await unlink(claimPath);
+  };
+
+  await claimAndImport(legacyPath);
+
+  // Finish any claims a crashed run left behind (both the current unique
+  // names and the fixed .migrating name from earlier versions).
+  let leftovers: string[];
   try {
-    claimed = await readFile(claimPath, 'utf8');
+    leftovers = await readdir(legacyDir);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return;
     }
     throw error;
   }
-
-  let existingIds: Set<string>;
-  try {
-    existingIds = new Set(
-      (await readFile(globalPath, 'utf8'))
-        .split('\n')
-        .filter((line) => line.trim().length > 0)
-        .map((line) => {
-          try {
-            return (JSON.parse(line) as { id?: string }).id ?? '';
-          } catch {
-            return '';
-          }
-        }),
-    );
-  } catch {
-    existingIds = new Set();
+  for (const name of leftovers) {
+    if (name.startsWith(`${MEMORY_FILENAME}.migrating`)) {
+      await claimAndImport(path.join(legacyDir, name));
+    }
   }
-
-  const entries = claimed
-    .split('\n')
-    .filter((line) => line.trim().length > 0)
-    .filter((line) => {
-      try {
-        const id = (JSON.parse(line) as { id?: string }).id;
-        return typeof id !== 'string' || !existingIds.has(id);
-      } catch {
-        return true;
-      }
-    });
-  if (entries.length > 0) {
-    await mkdir(path.dirname(globalPath), { recursive: true });
-    await appendFile(globalPath, `${entries.join('\n')}\n`);
-  }
-  // Rename rather than delete, so nothing is destroyed if the move went
-  // wrong — and so the same file is never imported twice.
-  await rename(claimPath, donePath);
 };
 
 // Agents keep the same memory across CLI runs: every remembered fact lands
@@ -1730,6 +1750,10 @@ const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPro
       };
 
       const finish = (answer: MenuAnswer): void => {
+        if (pendingTimer !== undefined) {
+          clearTimeout(pendingTimer);
+          pendingTimer = undefined;
+        }
         stdin.off('data', onData);
         if (!wasRaw) {
           stdin.setRawMode?.(false);
@@ -1737,6 +1761,10 @@ const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPro
         // Pause so keys typed between menus buffer for the next consumer
         // instead of being dropped by a flowing stream with no listener.
         stdin.pause();
+        if (pendingEscape.length > 0) {
+          stdin.unshift(Buffer.from(pendingEscape, 'utf8'));
+          pendingEscape = '';
+        }
         resolve(answer);
       };
 
@@ -1747,12 +1775,12 @@ const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPro
           out.write('\n');
           process.exit(130);
         }
-        if (key === '\u001b[A' || key === 'k') {
+        if (key === '\u001b[A' || key === '\u001bOA' || key === 'k') {
           index = (index - 1 + options.length) % options.length;
           render(true);
           return false;
         }
-        if (key === '\u001b[B' || key === 'j' || key === '\t') {
+        if (key === '\u001b[B' || key === '\u001bOB' || key === 'j' || key === '\t') {
           index = (index + 1) % options.length;
           render(true);
           return false;
@@ -1780,13 +1808,30 @@ const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPro
       // Key repeat and pasted input arrive as one chunk containing several
       // sequences — split it into individual keys before handling. Bytes
       // that follow the selecting key (e.g. a pasted "2sk-ant-…") are
-      // pushed back onto stdin for whatever prompt comes next.
-      const onData = (chunk: Buffer): void => {
-        const text = chunk.toString('utf8');
+      // pushed back onto stdin for whatever prompt comes next. Terminals
+      // and SSH can also split an escape sequence ACROSS chunks (ESC, then
+      // "[A"), so an incomplete escape tail is held briefly: completed by
+      // the next chunk, or treated as a real Esc press after a beat.
+      let pendingEscape = '';
+      let pendingTimer: ReturnType<typeof setTimeout> | undefined;
+
+      const processText = (text: string): void => {
         let position = 0;
         while (position < text.length) {
+          const remaining = text.length - position;
+          if (text[position] === '\u001b' && remaining < 3
+            && (remaining === 1 || text[position + 1] === '[' || text[position + 1] === 'O')) {
+            pendingEscape = text.slice(position);
+            pendingTimer = setTimeout(() => {
+              // No continuation arrived: it was a genuine Esc press.
+              pendingEscape = '';
+              pendingTimer = undefined;
+              handleKey('\u001b');
+            }, 75);
+            return;
+          }
           let key: string;
-          if (text.startsWith('\u001b[', position)) {
+          if (text[position] === '\u001b' && (text[position + 1] === '[' || text[position + 1] === 'O')) {
             key = text.slice(position, position + 3);
             position += 3;
           } else {
@@ -1801,6 +1846,16 @@ const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPro
             return;
           }
         }
+      };
+
+      const onData = (chunk: Buffer): void => {
+        if (pendingTimer !== undefined) {
+          clearTimeout(pendingTimer);
+          pendingTimer = undefined;
+        }
+        const text = pendingEscape + chunk.toString('utf8');
+        pendingEscape = '';
+        processText(text);
       };
 
       render(false);
