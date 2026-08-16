@@ -1632,7 +1632,12 @@ export const runChat = async (
     ...(command.configPath ? { configPath: command.configPath } : {}),
   }, env);
 
-  const interactive = env.setupInput === undefined && process.stdin.isTTY === true;
+  // Interactive means the real terminal: an injected stdinStream is by
+  // definition not a TTY conversation, so it never gets prompts, ANSI
+  // styling, or a terminal readline wired to a stream that can't take it.
+  const interactive = env.setupInput === undefined
+    && env.stdinStream === undefined
+    && process.stdin.isTTY === true;
   // Styling is for eyes: piped transcripts stay plain text.
   const bold = (text: string): string => (interactive ? `\u001b[1m${text}\u001b[0m` : text);
   const dim = (text: string): string => (interactive ? `\u001b[2m${text}\u001b[0m` : text);
