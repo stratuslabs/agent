@@ -2106,3 +2106,88 @@ test('an implicit fallback does not follow a provider override', async () => {
     apiKey: 'sk-ant',
   });
 });
+
+test('anthropic discovery, fallback, and save all honor a configured endpoint', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    baseUrl: 'https://ant-proxy.test',
+    fallbackModel: 'claude-sonnet-5',
+    fallbackProvider: 'anthropic',
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant' } }),
+  );
+
+  // Discovery hits the proxy, not api.anthropic.com.
+  const listUrls: string[] = [];
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async (url: any) => {
+        listUrls.push(String(url));
+        return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
+      }) as typeof fetch,
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '5\n']),
+    },
+  });
+  assert.equal(listUrls[0], 'https://ant-proxy.test/v1/models?limit=100');
+
+  // Saving kept the endpoint.
+  const saved = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(saved.baseUrl, 'https://ant-proxy.test');
+
+  // The same-provider fallback retries against the proxy too.
+  const runtime = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: 'hello',
+    format: 'text',
+    events: true,
+  }, { cwd: elsewhere, homeDir: home, processEnv: {} });
+  assert.equal(runtime.provider === 'anthropic' && runtime.baseUrl, 'https://ant-proxy.test');
+  assert.equal(runtime.provider === 'anthropic' && runtime.fallback?.baseUrl, 'https://ant-proxy.test');
+});
+
+test('the model picker hides non-chat models and leads with chat ones', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'sk-openai' } }),
+  );
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async () => new Response(JSON.stringify({
+        data: [
+          { id: 'dall-e-3' },
+          { id: 'gpt-4.1-mini' },
+          { id: 'text-embedding-3-small' },
+          { id: 'whisper-1' },
+        ],
+      }), { status: 200 })) as typeof fetch,
+      // Accept the advertised default (empty answer picks entry #1).
+      setupInput: Readable.from(['2\n', '1\n', '\n', '5\n']),
+    },
+  });
+
+  assert.doesNotMatch(output.stdout, /text-embedding|whisper|dall-e/);
+  assert.match(output.stdout, /1\) gpt-4\.1-mini — openai/);
+  assert.match(output.stdout, /Default model set to gpt-4\.1-mini \(openai\)\./);
+});

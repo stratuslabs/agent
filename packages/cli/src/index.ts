@@ -1068,6 +1068,13 @@ export const resolveRuntimeConfig = async (
         const fallbackBoundUrl = fallbackCredential?.type === 'api_key'
           ? fallbackCredential.baseUrl
           : (primaryReusable && !envApiKey ? boundBaseUrl : undefined);
+        // An anthropic fallback on the same provider keeps the primary's
+        // configured endpoint — retrying the same credential against the
+        // official endpoint instead of the configured service would leak
+        // it and likely fail.
+        const fallbackAnthropicBaseUrl = fallbackProvider === 'anthropic' && fallbackProvider === provider && baseUrl
+          ? String(baseUrl)
+          : undefined;
         resolved.fallback = {
           provider: fallbackProvider,
           model: fileConfig.fallbackModel,
@@ -1078,7 +1085,7 @@ export const resolveRuntimeConfig = async (
                   ?? (fallbackProvider === provider ? String(baseUrl) : undefined)
                   ?? DEFAULT_OPENAI_BASE_URL,
               }
-            : {}),
+            : (fallbackAnthropicBaseUrl ? { baseUrl: fallbackAnthropicBaseUrl } : {})),
           ...(fallbackApiKey ? { apiKey: String(fallbackApiKey) } : {}),
           ...(fallbackAuthToken ? { authToken: fallbackAuthToken } : {}),
         };
@@ -1670,6 +1677,10 @@ interface SetupState {
 
 // Shown when live model listing is unavailable (e.g. subscription tokens
 // cannot call the models endpoint, or the machine is offline).
+// Model ids that cannot serve /chat/completions and must not become the
+// default: embeddings, audio, images, moderation, and legacy completions.
+const NON_CHAT_MODEL_PATTERN = /embed|whisper|tts|audio|dall-e|image|moderation|realtime|transcribe|davinci|babbage|curie|(^|[-_])ada([-_]|$)/i;
+
 const KNOWN_CLAUDE_MODELS = [
   'claude-opus-5',
   'claude-sonnet-5',
@@ -1839,7 +1850,12 @@ export const runSetup = async (
         return;
       }
       writeLine(streams.stdout, 'Checking the key against the Anthropic API…');
-      const verdict = await verifyProviderKey('anthropic', key, undefined, env.fetch ?? globalThis.fetch);
+      const verdict = await verifyProviderKey(
+        'anthropic',
+        key,
+        state.provider === 'anthropic' ? state.baseUrl : undefined,
+        env.fetch ?? globalThis.fetch,
+      );
       if (verdict.status === 'ok') {
         storeCredential('anthropic', { type: 'api_key', value: key });
         writeLine(streams.stdout, '✓ Key verified — you are signed in to Anthropic.');
@@ -1867,9 +1883,15 @@ export const runSetup = async (
   };
 
   const signInOpenAI = async (): Promise<void> => {
-    const baseUrlAnswer = await prompter.ask(`API base URL [${state.baseUrl ?? DEFAULT_OPENAI_BASE_URL}]: `);
-    if (baseUrlAnswer) {
-      state.baseUrl = baseUrlAnswer;
+    const currentEndpoint = (state.provider === 'openai' ? state.baseUrl : undefined)
+      ?? state.credentials.openai?.baseUrl
+      ?? DEFAULT_OPENAI_BASE_URL;
+    const baseUrlAnswer = await prompter.ask(`API base URL [${currentEndpoint}]: `);
+    const chosenEndpoint = baseUrlAnswer || currentEndpoint;
+    // state.baseUrl describes the DEFAULT provider's endpoint; a secondary
+    // openai sign-in keeps its endpoint on the credential instead.
+    if (state.provider === 'openai') {
+      state.baseUrl = chosenEndpoint;
     }
     const key = await prompter.askSecret('Paste your API key (Enter to skip; input is hidden): ');
     if (!key) {
@@ -1879,10 +1901,8 @@ export const runSetup = async (
     writeLine(streams.stdout, 'Checking the key…');
     // The endpoint travels with the credential, so this sign-in keeps
     // working even when another provider is the default.
-    const endpoint = state.baseUrl && state.baseUrl !== DEFAULT_OPENAI_BASE_URL
-      ? { baseUrl: state.baseUrl }
-      : {};
-    const verdict = await verifyProviderKey('openai', key, state.baseUrl, env.fetch ?? globalThis.fetch);
+    const endpoint = chosenEndpoint !== DEFAULT_OPENAI_BASE_URL ? { baseUrl: chosenEndpoint } : {};
+    const verdict = await verifyProviderKey('openai', key, chosenEndpoint, env.fetch ?? globalThis.fetch);
     if (verdict.status === 'ok') {
       storeCredential('openai', { type: 'api_key', value: key, ...endpoint });
       writeLine(streams.stdout, '✓ Key verified — you are signed in.');
@@ -1906,6 +1926,13 @@ export const runSetup = async (
     state.provider = next;
     delete state.model;
     delete state.apiKeyEnv;
+    // state.baseUrl is the DEFAULT provider's endpoint; the old provider's
+    // URL must not follow the switch. An openai default reseeds from the
+    // credential's bound endpoint.
+    delete state.baseUrl;
+    if (next === 'openai' && state.credentials.openai?.baseUrl) {
+      state.baseUrl = state.credentials.openai.baseUrl;
+    }
     if (state.soulPath) {
       try {
         const soul = parseSoul(await readFile(state.soulPath, 'utf8'), { seed: state.soulPath });
@@ -2008,8 +2035,12 @@ export const runSetup = async (
           models.push(...KNOWN_CLAUDE_MODELS.map((id) => ({ provider, id })));
           continue;
         }
+        // The same endpoint a real run uses: a configured anthropic base
+        // URL (a proxy) must receive the key, not api.anthropic.com.
+        const anthropicRoot = ((state.provider === 'anthropic' ? state.baseUrl : undefined)
+          ?? DEFAULT_ANTHROPIC_BASE_URL).replace(/\/+$/, '');
         try {
-          const response = await fetchImpl(`${DEFAULT_ANTHROPIC_BASE_URL}/v1/models?limit=100`, {
+          const response = await fetchImpl(`${anthropicRoot}/v1/models?limit=100`, {
             headers: { 'x-api-key': String(apiKey), 'anthropic-version': '2023-06-01' },
           });
           const payload = await response.json() as { data?: Array<{ id?: string }> };
@@ -2026,18 +2057,26 @@ export const runSetup = async (
       }
       try {
         // A stored key's bound endpoint is authoritative, exactly as at run
-        // time; only env-supplied keys follow state.baseUrl.
+        // time; only env-supplied keys follow the default provider's URL.
         const root = ((credential?.type === 'api_key' ? credential.baseUrl : undefined)
-          ?? state.baseUrl
+          ?? (state.provider === 'openai' ? state.baseUrl : undefined)
           ?? DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '');
         const response = await fetchImpl(`${root}/models`, {
           headers: { authorization: `Bearer ${String(apiKey)}` },
         });
         const payload = await response.json() as { data?: Array<{ id?: string }> };
-        const ids = (payload.data ?? [])
+        const allIds = (payload.data ?? [])
           .map((entry) => entry.id)
-          .filter((id): id is string => typeof id === 'string')
-          .sort();
+          .filter((id): id is string => typeof id === 'string');
+        // Runs always call /chat/completions, so embedding, audio, image,
+        // moderation, and legacy completion models would save a default
+        // that cannot execute. If filtering leaves nothing (an exotic local
+        // service), show everything rather than an empty menu.
+        const chatIds = allIds.filter((id) => !NON_CHAT_MODEL_PATTERN.test(id));
+        const ids = (chatIds.length > 0 ? chatIds : allIds).sort((a, b) => {
+          const rank = (id: string): number => (/^gpt/i.test(id) ? 0 : /^o\d/i.test(id) ? 1 : 2);
+          return rank(a) - rank(b) || a.localeCompare(b);
+        });
         models.push(...ids.map((id) => ({ provider, id })));
       } catch {
         // No reachable model list for this provider; skip it.
@@ -2117,7 +2156,8 @@ export const runSetup = async (
     } else {
       state.fallbackProvider = choice.provider;
       state.fallbackModel = choice.id;
-      const openaiEndpoint = state.baseUrl ?? state.credentials.openai?.baseUrl;
+      const openaiEndpoint = (state.provider === 'openai' ? state.baseUrl : undefined)
+        ?? state.credentials.openai?.baseUrl;
       if (choice.provider === 'openai' && openaiEndpoint && openaiEndpoint !== DEFAULT_OPENAI_BASE_URL) {
         state.fallbackBaseUrl = openaiEndpoint;
       } else {
@@ -2229,10 +2269,10 @@ export const runSetup = async (
         ? {
             baseUrl: (credential?.type === 'api_key' ? credential.baseUrl : undefined)
               ?? state.fallbackBaseUrl
-              ?? state.baseUrl
+              ?? (state.provider === 'openai' ? state.baseUrl : undefined)
               ?? DEFAULT_OPENAI_BASE_URL,
           }
-        : {}),
+        : (fallbackProvider === state.provider && state.baseUrl ? { baseUrl: state.baseUrl } : {})),
       ...(apiKey ? { apiKey } : {}),
       ...(authToken ? { authToken } : {}),
     };
@@ -2270,6 +2310,7 @@ export const runSetup = async (
       return {
         provider: 'anthropic',
         model,
+        ...(state.baseUrl ? { baseUrl: state.baseUrl } : {}),
         ...(apiKey ? { apiKey } : {}),
         ...(authToken ? { authToken } : {}),
         ...(state.systemPrompt ? { systemPrompt: state.systemPrompt } : {}),
@@ -2348,7 +2389,11 @@ export const runSetup = async (
       config.model = state.model ?? defaultModelFor(state.provider);
     }
     if (state.provider === 'openai') {
-      config.baseUrl = state.baseUrl ?? DEFAULT_OPENAI_BASE_URL;
+      config.baseUrl = state.baseUrl ?? state.credentials.openai?.baseUrl ?? DEFAULT_OPENAI_BASE_URL;
+    } else if (state.provider === 'anthropic' && state.baseUrl) {
+      // A configured anthropic endpoint (a proxy) must survive re-running
+      // setup, or runs silently revert to the official endpoint.
+      config.baseUrl = state.baseUrl;
     }
     if (state.apiKeyEnv) {
       config.apiKeyEnv = state.apiKeyEnv;
