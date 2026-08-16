@@ -27,6 +27,9 @@
       "path": "../provider-anthropic"
     },
     {
+      "path": "../provider-claude-code"
+    },
+    {
       "path": "../executor-local"
     },
     {

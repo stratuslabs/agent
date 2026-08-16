@@ -34,6 +34,7 @@ import {
   DEFAULT_ANTHROPIC_MODEL,
   redactAnthropicRawTurns,
 } from '@stratusagent/provider-anthropic';
+import { createClaudeCodeProvider } from '@stratusagent/provider-claude-code';
 import {
   createRememberTool,
   defineAgent,
@@ -1252,6 +1253,16 @@ const createRuntimeProvider = (
   }
 
   if (config.provider === 'anthropic') {
+    // Subscription setup tokens are only honored inside the Claude Code
+    // harness, so they route through the Agent SDK runtime; API keys use
+    // the raw Messages API.
+    if (config.authToken && !config.apiKey) {
+      return createClaudeCodeProvider({
+        authToken: config.authToken,
+        model: config.model,
+        ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
+      });
+    }
     return createAnthropicProvider({
       model: config.model,
       ...(config.apiKey ? { apiKey: config.apiKey } : {}),
@@ -2749,8 +2760,8 @@ export const runSetup = async (
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       writeLine(streams.stdout, `Test run failed: ${message}`);
-      if (runtime.provider === 'anthropic' && runtime.authToken && /\b(401|403|429)\b/.test(message)) {
-        writeLine(streams.stdout, 'Subscription setup tokens are built for the Claude Code integration, which Stratus does not route through yet — sign in with an Anthropic API key instead (Providers menu → Claude → API key).');
+      if (runtime.provider === 'anthropic' && runtime.authToken && /Claude Code|\b(401|403|429)\b/.test(message)) {
+        writeLine(streams.stdout, 'Subscription runs go through Claude Code. Make sure it is installed (npm install -g @anthropic-ai/claude-code) and signed in (run `claude`), or sign in with an Anthropic API key instead (Providers menu → Claude → API key).');
       } else if (/\b429\b/.test(message)) {
         writeLine(streams.stdout, 'A 429 means the provider rate-limited the request. On a new Anthropic account this usually means no purchased credits yet — check console.anthropic.com → Billing and Limits, then try again.');
       } else if (/\b(401|403)\b/.test(message)) {

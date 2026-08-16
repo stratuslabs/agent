@@ -1,0 +1,48 @@
+{
+  "name": "@stratusagent/provider-claude-code",
+  "version": "0.2.1",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.0",
+    "@stratusagent/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3"
+  },
+  "description": "Claude subscription runtime for Stratus Agent: runs turns through the Claude Agent SDK so Pro/Max plans cover usage",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "claude",
+    "claude-code",
+    "subscription"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/provider-claude-code"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
