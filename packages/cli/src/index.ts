@@ -335,16 +335,33 @@ const memoryFilePath = (env: CliEnvironment): string =>
 // Memory used to live under the working directory. Fold any such file into
 // the global store the first time a run happens from that directory, then
 // mark it migrated — an upgrade must never look like the agent forgot.
+//
+// The import claims the file with an atomic rename BEFORE reading it, so
+// two concurrent first runs cannot both import; entries already present in
+// the global store (by id) are skipped, so a run interrupted mid-import
+// finishes idempotently on the next attempt.
 const migrateLegacyMemory = async (env: CliEnvironment): Promise<void> => {
   const legacyPath = path.join(readWorkingDirectory(env), '.stratus', MEMORY_FILENAME);
   const globalPath = memoryFilePath(env);
   if (legacyPath === globalPath) {
     return;
   }
+  const claimPath = `${legacyPath}.migrating`;
+  const donePath = `${legacyPath}.migrated`;
 
-  let legacy: string;
   try {
-    legacy = await readFile(legacyPath, 'utf8');
+    await rename(legacyPath, claimPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+    // Nothing to claim — but a crash may have left a claimed file behind;
+    // fall through and finish that import if so.
+  }
+
+  let claimed: string;
+  try {
+    claimed = await readFile(claimPath, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return;
@@ -352,14 +369,42 @@ const migrateLegacyMemory = async (env: CliEnvironment): Promise<void> => {
     throw error;
   }
 
-  const entries = legacy.split('\n').filter((line) => line.trim().length > 0);
+  let existingIds: Set<string>;
+  try {
+    existingIds = new Set(
+      (await readFile(globalPath, 'utf8'))
+        .split('\n')
+        .filter((line) => line.trim().length > 0)
+        .map((line) => {
+          try {
+            return (JSON.parse(line) as { id?: string }).id ?? '';
+          } catch {
+            return '';
+          }
+        }),
+    );
+  } catch {
+    existingIds = new Set();
+  }
+
+  const entries = claimed
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .filter((line) => {
+      try {
+        const id = (JSON.parse(line) as { id?: string }).id;
+        return typeof id !== 'string' || !existingIds.has(id);
+      } catch {
+        return true;
+      }
+    });
   if (entries.length > 0) {
     await mkdir(path.dirname(globalPath), { recursive: true });
     await appendFile(globalPath, `${entries.join('\n')}\n`);
   }
   // Rename rather than delete, so nothing is destroyed if the move went
   // wrong — and so the same file is never imported twice.
-  await rename(legacyPath, `${legacyPath}.migrated`);
+  await rename(claimPath, donePath);
 };
 
 // Agents keep the same memory across CLI runs: every remembered fact lands
@@ -406,8 +451,16 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       return entry;
     },
     async list(agentId: string) {
-      const entries = await readEntries();
-      return entries.filter((entry) => entry.agentId === agentId);
+      // Dedupe by id at read time: even if a rare race double-imported a
+      // fact, the agent only ever sees it once.
+      const seen = new Set<string>();
+      return (await readEntries()).filter((entry) => {
+        if (entry.agentId !== agentId || seen.has(entry.id)) {
+          return false;
+        }
+        seen.add(entry.id);
+        return true;
+      });
     },
   };
 };
@@ -1725,7 +1778,9 @@ const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPro
       };
 
       // Key repeat and pasted input arrive as one chunk containing several
-      // sequences — split it into individual keys before handling.
+      // sequences — split it into individual keys before handling. Bytes
+      // that follow the selecting key (e.g. a pasted "2sk-ant-…") are
+      // pushed back onto stdin for whatever prompt comes next.
       const onData = (chunk: Buffer): void => {
         const text = chunk.toString('utf8');
         let position = 0;
@@ -1739,6 +1794,10 @@ const createSetupPrompter = (streams: CliStreams, env: CliEnvironment): SetupPro
             position += 1;
           }
           if (handleKey(key)) {
+            const rest = text.slice(position);
+            if (rest.length > 0) {
+              stdin.unshift(Buffer.from(rest, 'utf8'));
+            }
             return;
           }
         }
