@@ -1587,7 +1587,7 @@ export const startDashboardServer = async (
       sendJson(response, 200, {
         ok: true,
         service: 'stratus-dashboard',
-        version: '0.2.0',
+        version: '0.2.1',
         now: new Date().toISOString(),
       });
       return;
