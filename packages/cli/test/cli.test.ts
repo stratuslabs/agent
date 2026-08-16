@@ -1843,3 +1843,141 @@ test('a secondary openai sign-in keeps its endpoint with the credential', async 
   assert.equal(runtime.provider === 'openai' && runtime.baseUrl, 'https://local.test/v1');
   assert.equal(runtime.provider === 'openai' && runtime.apiKey, 'sk-local');
 });
+
+test('a bound stored key cannot be redirected, even to the official endpoint', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'sk-local', baseUrl: 'https://local.test/v1' } }),
+  );
+  // The official URL passes the "default endpoint is harmless" test, so a
+  // project config could otherwise reroute the local-service key to OpenAI.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://api.openai.com/v1',
+  }));
+
+  const baseCommand = { command: 'run' as const, prompt: 'hello', format: 'text' as const, events: true };
+
+  const runtime = await resolveRuntimeConfig(baseCommand, { cwd: project, homeDir: home, processEnv: {} });
+  assert.equal(runtime.provider === 'openai' && runtime.baseUrl, 'https://local.test/v1');
+  assert.equal(runtime.provider === 'openai' && runtime.apiKey, 'sk-local');
+
+  // An explicit flag that disagrees refuses the bound key instead of
+  // leaking it.
+  await assert.rejects(
+    () => resolveRuntimeConfig(
+      { ...baseCommand, baseUrl: 'https://other.test/v1' },
+      { cwd: project, homeDir: home, processEnv: {} },
+    ),
+    /bound to https:\/\/local\.test\/v1 and is not sent to/,
+  );
+
+  // Fallback keys from the store keep their bound endpoint the same way.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    fallbackProvider: 'openai',
+    fallbackModel: 'gpt-4.1-mini',
+    fallbackBaseUrl: 'https://api.openai.com/v1',
+  }));
+  const fallbackRuntime = await resolveRuntimeConfig(baseCommand, {
+    cwd: project,
+    homeDir: home,
+    processEnv: { ANTHROPIC_API_KEY: 'env-ant' },
+  });
+  assert.equal(
+    fallbackRuntime.provider === 'anthropic' && fallbackRuntime.fallback?.baseUrl,
+    'https://local.test/v1',
+  );
+});
+
+test('signing into a second provider keeps a STRATUS_API_KEY-powered default', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      // The generic key makes the anthropic default runnable, so signing
+      // into openai must not steal the default.
+      processEnv: { STRATUS_API_KEY: 'generic-key' },
+      fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
+      setupInput: Readable.from(['1\n', '2\n', '\n', 'sk-openai\n', '5\n']),
+    },
+  });
+
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.provider, 'anthropic');
+});
+
+test('the inline test run fails over on the configured fallback', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    fallbackProvider: 'openai',
+    fallbackModel: 'gpt-4.1-mini',
+  }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    anthropic: { type: 'api_key', value: 'sk-ant' },
+    openai: { type: 'api_key', value: 'sk-openai' },
+  }));
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async (url: any) => {
+        if (String(url).includes('api.anthropic.com')) {
+          return new Response(JSON.stringify({ error: { type: 'authentication_error', message: 'bad key' } }), { status: 401 });
+        }
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: 'Fallback says hello.' } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }) as typeof fetch,
+      setupInput: Readable.from(['4\n', '5\n']),
+    },
+  });
+
+  // The primary 401s, but option 4 exercises the same failover a real run
+  // would perform instead of reporting a failure.
+  assert.match(output.stderr, /falling back to gpt-4\.1-mini/);
+  assert.match(output.stdout, /\[assistant\] Fallback says hello\./);
+  assert.doesNotMatch(output.stdout, /Test run failed/);
+});
+
+test('setup warns when a project config shadows the global file it wrote', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['1\n', '3\n', '5\n']),
+    },
+  });
+
+  assert.match(output.stdout, /stratus\.config\.json exists and takes precedence over the global config/);
+  const globalPath = path.join(home, '.stratus', 'config.json');
+  assert.ok(output.stdout.includes(`--config ${globalPath}`));
+});

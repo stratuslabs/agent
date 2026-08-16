@@ -965,12 +965,27 @@ export const resolveRuntimeConfig = async (
     ? storedCredential.value
     : undefined;
 
-  const baseUrl = command.baseUrl
+  // A stored key bound to an endpoint is used ONLY with that endpoint — a
+  // config file can never redirect it, not even to the official default
+  // URL (a project config could otherwise reroute a local-service key to
+  // api.openai.com). An explicit flag or env URL that disagrees refuses
+  // the stored key instead of leaking it.
+  const boundBaseUrl = !envApiKey && provider === 'openai' && storedCredential?.type === 'api_key'
+    ? storedCredential.baseUrl
+    : undefined;
+  const explicitBaseUrl = command.baseUrl
     ?? readNonEmptyString(processEnv.STRATUS_BASE_URL)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_BASE_URL)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_BASE_URL);
+  if (boundBaseUrl && explicitBaseUrl
+    && String(explicitBaseUrl).replace(/\/+$/, '') !== boundBaseUrl.replace(/\/+$/, '')) {
+    throw new Error(
+      `Your saved openai sign-in is bound to ${boundBaseUrl} and is not sent to ${explicitBaseUrl}. Set ${apiKeyEnvName} or STRATUS_API_KEY to use that endpoint.`,
+    );
+  }
+
+  const baseUrl = boundBaseUrl
+    ?? explicitBaseUrl
     ?? (fileConfigApplies ? fileConfig.baseUrl : undefined)
-    // A stored openai-compatible sign-in carries its own endpoint.
-    ?? (provider === 'openai' ? storedCredential?.baseUrl : undefined)
     // The Anthropic SDK knows its own endpoint; only openai needs a default.
     ?? (provider === 'anthropic' ? undefined : DEFAULT_OPENAI_BASE_URL);
 
@@ -1043,14 +1058,20 @@ export const resolveRuntimeConfig = async (
         : (primaryReusable ? authToken : undefined);
 
       if (fallbackApiKey || fallbackAuthToken) {
+        // When the fallback key comes out of the credential store (its own
+        // entry, or the primary's reused stored key), its bound endpoint is
+        // authoritative — config URLs cannot redirect it.
+        const fallbackBoundUrl = fallbackCredential?.type === 'api_key'
+          ? fallbackCredential.baseUrl
+          : (primaryReusable && !envApiKey ? boundBaseUrl : undefined);
         resolved.fallback = {
           provider: fallbackProvider,
           model: fileConfig.fallbackModel,
           ...(fallbackProvider === 'openai'
             ? {
-                baseUrl: fileConfig.fallbackBaseUrl
+                baseUrl: fallbackBoundUrl
+                  ?? fileConfig.fallbackBaseUrl
                   ?? (fallbackProvider === provider ? String(baseUrl) : undefined)
-                  ?? fallbackCredential?.baseUrl
                   ?? DEFAULT_OPENAI_BASE_URL,
               }
             : {}),
@@ -1896,14 +1917,26 @@ export const runSetup = async (
     }
   };
 
+  // Whether a provider could actually serve a run right now, through any
+  // credential source a real run would consider: the stored sign-in, the
+  // generic STRATUS_API_KEY, a configured apiKeyEnv, or the provider's own
+  // env var.
+  const providerUsable = (provider: CliProviderName): boolean => {
+    if (provider === 'demo') {
+      return true;
+    }
+    return state.credentials[provider] !== undefined
+      || readNonEmptyString(processEnv.STRATUS_API_KEY) !== undefined
+      || (provider === state.provider && state.apiKeyEnv
+        ? readNonEmptyString(processEnv[state.apiKeyEnv]) !== undefined
+        : false)
+      || readNonEmptyString(processEnv[defaultKeyEnvFor(provider)]) !== undefined;
+  };
+
   // Signing in makes that provider the default only when the current
-  // default cannot actually run (demo, or a provider with no sign-in).
+  // default cannot actually run (demo, or a provider with no usable key).
   const maybeSwitchDefault = async (provider: CredentialProviderName): Promise<void> => {
-    if (
-      state.provider === 'demo'
-      || (state.provider !== provider && !state.credentials[state.provider]
-        && !readNonEmptyString(processEnv[defaultKeyEnvFor(state.provider)]))
-    ) {
+    if (state.provider === 'demo' || (state.provider !== provider && !providerUsable(state.provider))) {
       await switchDefaultProvider(provider);
     }
   };
@@ -2163,6 +2196,37 @@ export const runSetup = async (
     writeLine(streams.stdout, `Their soul lives at ${soulPath} — edit it any time to change how they talk.`);
   };
 
+  // Mirror the saved config's fallback so option 4 exercises the same
+  // failover a real run would perform.
+  const buildTestFallback = (): FallbackRuntime | undefined => {
+    if (!state.fallbackModel || state.provider === 'demo') {
+      return undefined;
+    }
+    const fallbackProvider = (state.fallbackProvider ?? state.provider) as CredentialProviderName;
+    const envKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
+      ?? readNonEmptyString(processEnv[defaultKeyEnvFor(fallbackProvider)]);
+    const credential = envKey ? undefined : state.credentials[fallbackProvider];
+    const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);
+    const authToken = credential?.type === 'oauth_token' ? credential.value : undefined;
+    if (!apiKey && !authToken) {
+      return undefined;
+    }
+    return {
+      provider: fallbackProvider,
+      model: state.fallbackModel,
+      ...(fallbackProvider === 'openai'
+        ? {
+            baseUrl: (credential?.type === 'api_key' ? credential.baseUrl : undefined)
+              ?? state.fallbackBaseUrl
+              ?? state.baseUrl
+              ?? DEFAULT_OPENAI_BASE_URL,
+          }
+        : {}),
+      ...(apiKey ? { apiKey } : {}),
+      ...(authToken ? { authToken } : {}),
+    };
+  };
+
   const buildTestRuntime = async (): Promise<RuntimeConfig | undefined> => {
     let soul: ParsedSoul | undefined;
     if (state.soulPath) {
@@ -2191,6 +2255,7 @@ export const runSetup = async (
         writeLine(streams.stdout, 'You are not signed in yet — pick option 1 first (or export ANTHROPIC_API_KEY).');
         return undefined;
       }
+      const fallback = buildTestFallback();
       return {
         provider: 'anthropic',
         model,
@@ -2199,6 +2264,7 @@ export const runSetup = async (
         ...(state.systemPrompt ? { systemPrompt: state.systemPrompt } : {}),
         ...(env.fetch ? { fetch: env.fetch } : {}),
         ...(soul ? { soul } : {}),
+        ...(fallback ? { fallback } : {}),
       };
     }
 
@@ -2207,6 +2273,7 @@ export const runSetup = async (
       writeLine(streams.stdout, 'You are not signed in yet — pick option 1 first (or export OPENAI_API_KEY).');
       return undefined;
     }
+    const fallback = buildTestFallback();
     return {
       provider: 'openai',
       model,
@@ -2215,6 +2282,7 @@ export const runSetup = async (
       ...(state.systemPrompt ? { systemPrompt: state.systemPrompt } : {}),
       ...(env.fetch ? { fetch: env.fetch } : {}),
       ...(soul ? { soul } : {}),
+      ...(fallback ? { fallback } : {}),
     };
   };
 
@@ -2263,6 +2331,7 @@ export const runSetup = async (
   };
 
   const save = async (): Promise<void> => {
+    let shadowConfigFlag = '';
     const config: Record<string, string> = { provider: state.provider };
     if (state.provider !== 'demo') {
       config.model = state.model ?? defaultModelFor(state.provider);
@@ -2292,6 +2361,26 @@ export const runSetup = async (
 
     writeLine(streams.stdout);
     writeLine(streams.stdout, `Wrote ${configPath}`);
+
+    // A project-local config in this directory outranks the global file for
+    // bare runs started here — say so, and make the suggested command pick
+    // the file that was just written.
+    if (configPath === globalConfigPath(env)) {
+      for (const shadow of [DEFAULT_CONFIG_FILENAME, LEGACY_CONFIG_FILENAME]) {
+        const shadowPath = path.join(cwd, shadow);
+        try {
+          await readFile(shadowPath, 'utf8');
+          writeLine(streams.stdout, `Note: ${shadowPath} exists and takes precedence over the global config for runs started in this directory.`);
+          writeLine(streams.stdout, 'The suggested commands below include --config so they use what you just saved.');
+          shadowConfigFlag = ` --config ${quoteShellArg(configPath)}`;
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            throw error;
+          }
+        }
+      }
+    }
     if (state.credentialsDirty) {
       await saveCredentials(env, state.credentials);
       writeLine(streams.stdout, `Saved your sign-in to ${credentialsPath(env)} (readable only by you).`);
@@ -2342,7 +2431,7 @@ export const runSetup = async (
         writeLine(streams.stdout, 'Then try:');
       }
     }
-    writeLine(streams.stdout, `  stratus run${extraFlags}${runConfigFlag} "say hello"`);
+    writeLine(streams.stdout, `  stratus run${extraFlags}${runConfigFlag}${shadowConfigFlag} "say hello"`);
     writeLine(streams.stdout, '  stratus dashboard');
   };
 
