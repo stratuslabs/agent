@@ -1034,7 +1034,11 @@ export const resolveRuntimeConfig = async (
   // A configured fallback model kicks in when the default model errors
   // mid-run. It needs its own working sign-in; without one the fallback is
   // quietly skipped rather than failing the run it exists to rescue.
-  if (fileConfig.fallbackModel) {
+  // An implicit fallback (no fallbackProvider key) was written for the
+  // config's own provider — when a flag, env var, or soul overrides that
+  // provider, the fallback model would target the wrong API, so it is
+  // ignored. An explicit fallbackProvider stays valid regardless.
+  if (fileConfig.fallbackModel && (fileConfig.fallbackProvider !== undefined || fileConfigApplies)) {
     const fallbackProvider = fileConfig.fallbackProvider ?? (provider as CliProviderName);
     if (fallbackProvider !== 'demo') {
       // Same precedence as the primary sign-in: environment keys outrank
@@ -1983,13 +1987,14 @@ export const runSetup = async (
     const models: Array<{ provider: CredentialProviderName; id: string }> = [];
 
     for (const provider of ['anthropic', 'openai'] as const) {
-      // Discovery uses the credential a real run would use: STRATUS_API_KEY,
-      // then the configured apiKeyEnv (for the default provider), then the
-      // provider's own env var, then the stored sign-in.
-      const envKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
-        ?? (provider === state.provider && state.apiKeyEnv
-          ? readNonEmptyString(processEnv[state.apiKeyEnv])
-          : undefined)
+      // Discovery uses the credential a real run would use. STRATUS_API_KEY
+      // and a configured apiKeyEnv authenticate the DEFAULT provider only —
+      // a secondary provider relies on its own env var or stored sign-in,
+      // never the default provider's secret.
+      const envKey = (provider === state.provider
+        ? readNonEmptyString(processEnv.STRATUS_API_KEY)
+          ?? (state.apiKeyEnv ? readNonEmptyString(processEnv[state.apiKeyEnv]) : undefined)
+        : undefined)
         ?? readNonEmptyString(processEnv[defaultKeyEnvFor(provider)]);
       const credential = envKey ? undefined : state.credentials[provider];
       const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);
@@ -2020,7 +2025,11 @@ export const runSetup = async (
         continue;
       }
       try {
-        const root = (state.baseUrl ?? state.credentials.openai?.baseUrl ?? DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '');
+        // A stored key's bound endpoint is authoritative, exactly as at run
+        // time; only env-supplied keys follow state.baseUrl.
+        const root = ((credential?.type === 'api_key' ? credential.baseUrl : undefined)
+          ?? state.baseUrl
+          ?? DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '');
         const response = await fetchImpl(`${root}/models`, {
           headers: { authorization: `Bearer ${String(apiKey)}` },
         });
@@ -2203,7 +2212,9 @@ export const runSetup = async (
       return undefined;
     }
     const fallbackProvider = (state.fallbackProvider ?? state.provider) as CredentialProviderName;
-    const envKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
+    const envKey = (fallbackProvider === state.provider
+      ? readNonEmptyString(processEnv.STRATUS_API_KEY)
+      : undefined)
       ?? readNonEmptyString(processEnv[defaultKeyEnvFor(fallbackProvider)]);
     const credential = envKey ? undefined : state.credentials[fallbackProvider];
     const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);

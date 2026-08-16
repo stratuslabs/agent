@@ -1981,3 +1981,128 @@ test('setup warns when a project config shadows the global file it wrote', async
   const globalPath = path.join(home, '.stratus', 'config.json');
   assert.ok(output.stdout.includes(`--config ${globalPath}`));
 });
+
+test('model discovery keeps a bound stored key on its own endpoint', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The loaded config points openai at the official URL, but the stored
+  // credential belongs to a local proxy.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'gpt-4.1-mini',
+    baseUrl: 'https://api.openai.com/v1',
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'sk-local', baseUrl: 'https://local.test/v1' } }),
+  );
+
+  const listRequests: Array<{ url: string; bearer?: string }> = [];
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      fetch: (async (url: any, init?: any) => {
+        const headers: Record<string, string> = {};
+        new Headers(init?.headers ?? {}).forEach((value, key) => {
+          headers[key] = value;
+        });
+        listRequests.push({ url: String(url), bearer: headers.authorization });
+        return new Response(JSON.stringify({ data: [{ id: 'local-llama' }] }), { status: 200 });
+      }) as typeof fetch,
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '5\n']),
+    },
+  });
+
+  assert.equal(listRequests[0]?.url, 'https://local.test/v1/models');
+  assert.equal(listRequests[0]?.bearer, 'Bearer sk-local');
+});
+
+test('discovery never sends the generic STRATUS_API_KEY to a secondary provider', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'sk-openai-own' } }),
+  );
+
+  const byHost: Record<string, string | undefined> = {};
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      // The generic key authenticates the anthropic default only.
+      processEnv: { STRATUS_API_KEY: 'generic-key' },
+      fetch: (async (url: any, init?: any) => {
+        const headers: Record<string, string> = {};
+        new Headers(init?.headers ?? {}).forEach((value, key) => {
+          headers[key] = value;
+        });
+        if (String(url).includes('api.anthropic.com')) {
+          byHost.anthropic = headers['x-api-key'];
+          return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
+        }
+        byHost.openai = headers.authorization;
+        return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
+      }) as typeof fetch,
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '5\n']),
+    },
+  });
+
+  assert.equal(byHost.anthropic, 'generic-key');
+  assert.equal(byHost.openai, 'Bearer sk-openai-own');
+});
+
+test('an implicit fallback does not follow a provider override', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // No fallbackProvider: this fallback was written for anthropic.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    fallbackModel: 'claude-sonnet-5',
+  }));
+
+  const baseCommand = { command: 'run' as const, prompt: 'hello', format: 'text' as const, events: true };
+
+  // Overriding to openai must not attach the Claude fallback model.
+  const overridden = await resolveRuntimeConfig(
+    { ...baseCommand, provider: 'openai' },
+    { cwd: elsewhere, homeDir: home, processEnv: { OPENAI_API_KEY: 'sk-openai' } },
+  );
+  assert.equal(overridden.provider === 'openai' && overridden.fallback, undefined);
+
+  // Without an override the implicit fallback still works…
+  const normal = await resolveRuntimeConfig(baseCommand, {
+    cwd: elsewhere,
+    homeDir: home,
+    processEnv: { ANTHROPIC_API_KEY: 'sk-ant' },
+  });
+  assert.equal(normal.provider === 'anthropic' && normal.fallback?.model, 'claude-sonnet-5');
+
+  // …and an explicit cross-provider fallback survives the override.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    fallbackModel: 'claude-sonnet-5',
+    fallbackProvider: 'anthropic',
+  }));
+  const explicit = await resolveRuntimeConfig(
+    { ...baseCommand, provider: 'openai' },
+    { cwd: elsewhere, homeDir: home, processEnv: { OPENAI_API_KEY: 'sk-openai', ANTHROPIC_API_KEY: 'sk-ant' } },
+  );
+  assert.deepEqual(explicit.provider === 'openai' && explicit.fallback, {
+    provider: 'anthropic',
+    model: 'claude-sonnet-5',
+    apiKey: 'sk-ant',
+  });
+});
