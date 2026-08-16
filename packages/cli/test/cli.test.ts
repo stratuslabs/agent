@@ -868,7 +868,7 @@ test('runCli persists agent memory across runs through memory.remember', async (
   });
 
   assert.equal(firstRun, 0);
-  const stored = (await readFile(path.join(tempDir, '.stratus', 'memory.jsonl'), 'utf8'))
+  const stored = (await readFile(path.join(tempHome, '.stratus', 'memory.jsonl'), 'utf8'))
     .split('\n')
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line));

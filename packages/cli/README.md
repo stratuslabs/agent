@@ -19,8 +19,9 @@ stratus setup
   5) Save & finish
 ```
 
-- **Providers** — sign in to one or more. For Claude, choose how you pay: your **Claude Pro/Max subscription** (sign in through Claude Code: run `claude setup-token` and paste the token) or an **Anthropic API key**, pasted straight into the prompt (input is hidden) and verified against the live API before it is accepted. OpenAI-compatible services work the same way, including local models and proxies via a custom base URL.
-- **Models** — pick a **default** and a **fallback** from the models your sign-ins can actually reach, fetched live from the provider APIs. If the default model errors mid-run, the run automatically retries on the fallback — even across providers.
+- **Providers** — sign in to one or more. For Claude, choose how you pay: your **Claude Pro/Max subscription** (sign in through Claude Code: run `claude setup-token` and paste the token) or an **Anthropic API key**, pasted straight into the prompt (input is hidden) and checked against the live API when the endpoint supports it — a rejected key is refused; an unreachable endpoint saves the key and verifies it on your first run. OpenAI-compatible services work the same way, including local models and proxies via a custom base URL.
+- **Models** — pick a **default** and a **fallback**, listed live from the provider APIs where possible (subscription sign-ins and offline setups fall back to the known Claude lineup). If the default model errors mid-run, the run automatically retries on the fallback — even across providers.
+- **Menus are keyboard-driven** — arrow keys (or `j`/`k`) to move, Enter to pick, digits to jump, Esc to go back.
 - **Agent** — name your agent (or accept a generated identity), describe their personality, and their soul file lands in `~/.stratus/agents/`, ready to edit.
 - **Test run** — say hello with the current settings before saving anything.
 
@@ -55,7 +56,7 @@ tools:
 You are a sharp, warm generalist. Answer first, explain second...
 ```
 
-Agents remember: facts saved with the built-in `memory.remember` tool persist to `.stratus/memory.jsonl`, keyed to the agent — so the Ava you talk to tomorrow remembers today, in any directory, on any channel.
+Agents remember: facts saved with the built-in `memory.remember` tool persist to `~/.stratus/memory.jsonl`, keyed to the agent — so the Ava you talk to tomorrow remembers today, from any directory.
 
 ## Options
 
@@ -71,5 +72,7 @@ Agents remember: facts saved with the built-in `memory.remember` tool persist to
 | `--format` | `text` or `json` |
 
 Precedence: flags → `STRATUS_*` env vars → soul file hints → config file. Project-local `stratus.config.json` outranks the global `~/.stratus/config.json`; stored sign-ins are endpoint-bound and never sent to endpoints a project config selects.
+
+Today the CLI covers setup, one-shot runs, agent creation, and the local dashboard; channels and the always-on agent service are the next milestones.
 
 Part of [Stratus Agent](https://github.com/stratuslabs/agent) — a tiny TypeScript agent runtime.
