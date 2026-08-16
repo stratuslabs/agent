@@ -193,7 +193,7 @@ export interface DashboardServerHandle {
   close: () => Promise<void>;
 }
 
-export const CLI_VERSION = '0.2.2';
+export const CLI_VERSION = '0.2.3';
 
 // The agent every run uses when no soul is configured. A Stratus agent is
 // a Stratus agent — never "the model" — whichever provider serves it.
