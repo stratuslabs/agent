@@ -61,7 +61,7 @@ Everything optional is a package, installed only where needed:
 - **Providers** (exist): `provider-anthropic`, `provider-claude-code`, the OpenAI-compatible adapter in `providers`.
 - **Channels** (new): `@stratusagent/channels` defines the contract — inbound message → router → session mapping, outbound post/edit/typing, per-agent bot identity. `@stratusagent/channel-slack` is the first adapter; others (Discord, Telegram, email) follow the same shape.
 - **Tool packs** (new): `tool-fs`, `tool-shell`, `tool-browser`, folding in the existing `stratuslabs/tool-browser` and `tool-screenshot` work. A pack is a `Plugin` that registers tools; an agent opts in via its soul's tool allowlist.
-- **Permissions** (new): a policy engine behind the existing `ApprovalPolicy` seam — safe-command allowlist, per-agent persistent whitelist, shell-metacharacter detection, headless mode, remote approval.
+- **Permissions** (new): a policy engine behind the existing `ApprovalPolicy` seam — safe-command allowlist, per-agent persistent whitelist, shell control-operator detection, headless mode, remote approval.
 - **Memory** (later): stays markdown/JSONL-first. A SQLite store with budget-aware retrieval is a future optional package behind the same `AgentMemoryStore` interface, not a prerequisite for anything.
 
 ### L2 — The gateway
@@ -108,7 +108,7 @@ The runtime is one persistent Node process everywhere; only the recipe changes:
 
 Rules every step of the roadmap honors:
 
-- A safe-command allowlist is only safe with **shell-metacharacter detection**: any `|`, `;`, `` ` ``, `&&`, `$(`, or redirection disqualifies a command from auto-approval regardless of its base command.
+- A safe-command allowlist is only safe with **control-operator detection**: any shell control operator — `|`, `&`, `;`, `&&`, `||`, newlines, backticks, `$(`, subshell parens, or redirection — disqualifies a command from auto-approval regardless of its base command.
 - Watchdogs are **activity-based**: abort a turn when no event has arrived for N seconds, not on total elapsed time.
 - Every `tool_use` must have a matching `tool_result`, re-checked after any history compaction.
 - One typed event stream serves every consumer — CLI, channels, dashboard, approvals — with no side channels.

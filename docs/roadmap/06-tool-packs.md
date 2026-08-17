@@ -30,7 +30,7 @@ The permission engine (03) exists precisely so agents can be trusted with these,
 ## Acceptance criteria
 
 - An agent whose soul lists `fs.read` + `fs.search` can answer questions about files under its configured root, and *cannot* write (kernel allowlist gate, tested).
-- `shell.run` in headless mode: safe-listed command executes; metacharacter chain is denied (03 integration test through a real pack).
+- `shell.run` in headless mode: safe-listed command executes; a control-operator chain is denied (03 integration test through a real pack).
 - A Slack agent can be asked "screenshot example.com and show me" end-to-end: browser tool runs (with approval if gated), screenshot lands in Slack.
 - Env scrubbing verified: a shell tool cannot read `ANTHROPIC_API_KEY` or anything from `~/.stratus/credentials.json` via environment.
 - Packs are independently installable — a build with only `tool-fs` present works; nothing in gateway/CLI hard-imports any pack.
