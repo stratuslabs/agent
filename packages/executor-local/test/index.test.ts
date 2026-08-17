@@ -192,3 +192,35 @@ test('local command executor kills the child when the turn aborts', async () => 
   // The child died with the abort, not with its own 5s timer.
   assert.ok(Date.now() - startedAt < 4000);
 });
+
+test('cancellation kills the whole process tree, not just the direct child', async () => {
+  const tool = defineLocalCommandTool({
+    name: 'tree',
+    createCommand() {
+      // A shell whose grandchild would outlive a direct-child-only kill.
+      return {
+        command: 'sh',
+        args: ['-c', `${JSON.stringify(process.execPath)} -e "setTimeout(() => {}, 5000)" & wait`],
+      };
+    },
+  });
+
+  const controller = new AbortController();
+  const executor = createLocalCommandExecutor();
+  const startedAt = Date.now();
+  setTimeout(() => controller.abort(), 100);
+
+  const result = await executor.execute(
+    { id: 'call-tree', toolName: 'tree', input: {} },
+    tool,
+    session,
+    { signal: controller.signal },
+  );
+
+  assert.equal(result.ok, false);
+  const output = result.output as Record<string, unknown>;
+  assert.equal(output.aborted, true);
+  // The wait ended because the grandchild died with the group — well
+  // before its own 5s timer.
+  assert.ok(Date.now() - startedAt < 4000);
+});

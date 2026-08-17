@@ -201,7 +201,23 @@ const runLocalCommand = async (
     cwd: invocation.cwd,
     env: invocation.env ? { ...process.env, ...invocation.env } : process.env,
     shell: invocation.shell ?? false,
+    // Own process group (POSIX), so cancellation and timeouts can kill the
+    // whole tree — a shell's or tool's own children included — rather than
+    // only the direct child.
+    ...(process.platform !== 'win32' ? { detached: true } : {}),
   });
+
+  const killTree = (): void => {
+    if (process.platform !== 'win32' && typeof child.pid === 'number') {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+        return;
+      } catch {
+        // Group already gone or not a leader; fall through to direct kill.
+      }
+    }
+    child.kill('SIGKILL');
+  };
 
   child.stdout.on('data', (chunk) => {
     stdout += stdoutDecoder.write(chunk);
@@ -219,7 +235,7 @@ const runLocalCommand = async (
 
   const timer = setTimeout(() => {
     timedOut = true;
-    child.kill('SIGKILL');
+    killTree();
   }, options.timeoutMs);
   timer.unref();
 
@@ -227,7 +243,7 @@ const runLocalCommand = async (
   // leave no orphaned subprocess behind.
   const onAbort = (): void => {
     aborted = true;
-    child.kill('SIGKILL');
+    killTree();
   };
   if (options.signal?.aborted) {
     onAbort();
