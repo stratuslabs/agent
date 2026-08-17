@@ -21,12 +21,14 @@ Everything in the v2 vision presumes a process that outlives a terminal command:
   - An activity watchdog helper in the gateway: abort a turn when no event has arrived for N seconds (progress-based, not wall-clock).
 - Session identity convention: callers pass stable session ids (channels will use thread-derived keys) so any inbound message can resume its conversation across daemon restarts.
 - Extract the triplicated persona/memory system-prompt rendering from the three provider packages into one shared helper (natural to do while touching providers for streaming).
+- Wire delegation into the runtime: register `agent.delegate` (`createDelegateTool` from `@stratusagent/agents`, today exercised only by tests) in the gateway's tool registry against the loaded roster, so orchestrator agents can delegate from real entrypoints — and later steps (08's sub-leases) hook a live seam. Delegated runs flow through the same approval, event, and persistence machinery as any turn.
 
 **Out:** channels (02), HTTP API (05), any scheduler/cron, multi-tenancy, queueing. The gateway at this step is only reachable in-process and via signals — that's fine; step 02 gives it its first real front door.
 
 ## Design sketch
 
 - `createGateway(config)` → `{ start(), stop(), dispatch(input): AsyncIterable<StratusEvent> }` where `dispatch` is the one entrypoint channels/API will call: it resolves the agent (router or explicit id), loads-or-creates the session by id, **refreshes the session's stored agent definition from the roster** (a session pins its agent *id*; instructions, tools, and credentials re-resolve each turn so a soul edit reaches existing conversations instead of replaying a stale snapshot), and runs a turn.
+- **Per-agent provider routing**: `AgentRunner` is constructed with one fixed provider, but roster agents pin their own provider/model in soul frontmatter — refreshing the agent definition alone cannot honor that. The gateway keeps a runner per resolved (provider, model) — a pool sharing one session store, event bus, tool registry, and approval policy — and `dispatch` selects by the agent's resolved configuration (soul frontmatter → global defaults). Two agents must never share a billing path or provider credentials by accident.
 - SQLite via `node:sqlite` to keep the zero-heavy-deps ethos; one `sessions` table (id, agent_id, status, JSON body, timestamps) is enough — no ORM. `node:sqlite` is unflagged only on **Node 22.13+** (22.6–22.12 require `--experimental-sqlite`), so this step raises the documented repo floor from 22.6 to 22.13 — still the Node 22 line, and cheaper than a native dependency or flag juggling in launchd plists.
 - Config: the CLI's state wiring — `resolveRuntimeConfig` precedence (flags → env → config file → defaults), credential store access, soul roster loading, and the file memory store — is **extracted into a shared lower-level package** (working name `@stratusagent/state`) that both the CLI and the gateway depend on. The CLI must depend on the gateway to implement `stratus serve`, so the gateway importing from the CLI would be a package cycle; extraction, not duplication. Gateway-specific keys live under a `gateway` section of `~/.stratus/config.json`.
 - Single-flight per session (a second dispatch to a busy session queues or rejects — pick one and document it), concurrent across sessions.
@@ -37,6 +39,7 @@ Everything in the v2 vision presumes a process that outlives a terminal command:
 - Kill and restart the daemon mid-conversation: a follow-up message with the same session id continues the conversation with full history, including after a tool-use turn on the Anthropic provider.
 - A turn aborted via the watchdog or signal leaves the session in a consistent `failed` state and the daemon healthy.
 - Streaming: with the Anthropic provider, `provider.delta` events arrive before the final `provider.response`; `pnpm test` covers delta ordering with a scripted provider.
+- Two roster agents pinned to different providers/models each run through their own (verified with scripted providers in one gateway).
 - Existing CLI behavior (`run`, `chat`) unchanged; all packages still build/typecheck/test green.
 
 ## Open questions

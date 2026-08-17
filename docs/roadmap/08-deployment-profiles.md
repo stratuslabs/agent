@@ -31,7 +31,7 @@ Only after 01–06: both profiles are compositions of the gateway, channels, per
 ### C. Credential leases
 
 - A `CredentialResolver` implementation where sensitive credentials are granted as **leases**: `{ scope, expiresAt, maxUses, reason }`, auto-revoked on expiry/use-count/daemon restart, every resolution logged.
-- Delegated sub-agents get **sub-leases** that can never exceed the parent's scope or duration (hooks into `agent.delegate`).
+- Delegated sub-agents get **sub-leases** that can never exceed the parent's scope or duration (hooks into `agent.delegate`, which step 01 wires into the gateway runtime).
 - Applied first to the VM profile (where agents hold real third-party credentials); local deployments can adopt it opportunistically.
 
 **Out:** marketplace, org/team accounts and SSO, container isolation as a default (revisit if a deployment's threat model demands it), any product-specific features.

@@ -113,6 +113,7 @@ Rules every step of the roadmap honors:
 - Every `tool_use` must have a matching `tool_result`, re-checked after any history compaction.
 - One typed event stream serves every consumer — CLI, channels, dashboard, approvals — with no side channels.
 - Tool subprocesses get a **scrubbed environment**: only explicitly granted variables, never the daemon's env (which holds credentials).
+- Agent ids are **path-safe slugs** (`[a-z0-9][a-z0-9-]*`), validated once at the parse/load boundary — ids reach filesystem paths (whitelists, workspaces), and an explicit soul-frontmatter id is untrusted input.
 
 ## Explicitly out of scope (for this whole arc)
 
