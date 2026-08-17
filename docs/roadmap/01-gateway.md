@@ -21,7 +21,7 @@ Everything in the v2 vision presumes a process that outlives a terminal command:
   - An activity watchdog helper in the gateway: abort a turn when no event has arrived for N seconds (progress-based, not wall-clock).
 - Session identity convention: callers pass stable session ids (channels will use thread-derived keys) so any inbound message can resume its conversation across daemon restarts.
 - Extract the triplicated persona/memory system-prompt rendering from the three provider packages into one shared helper (natural to do while touching providers for streaming).
-- Wire delegation into the runtime: register `agent.delegate` (`createDelegateTool` from `@stratusagent/agents`, today exercised only by tests) in the gateway's tool registry against the loaded roster, so orchestrator agents can delegate from real entrypoints — and later steps (08's sub-leases) hook a live seam. Delegated runs flow through the same approval, event, and persistence machinery as any turn.
+- Wire delegation into the runtime: register `agent.delegate` in the gateway's tool registry against the loaded roster, so orchestrator agents can delegate from real entrypoints — and later steps (08's sub-leases) hook a live seam. Delegation must be **dispatcher-backed, not runner-capturing**: today's `createDelegateTool` (from `@stratusagent/agents`, exercised only by tests) closes over a single `AgentRunner`, which with a per-provider runner pool would run every delegated target on the delegator's provider and credentials. The gateway registers a variant that calls the gateway dispatcher, so a delegated run selects the target agent's resolved (provider, model) exactly like a direct dispatch, and flows through the same approval, event, and persistence machinery as any turn.
 
 **Out:** channels (02), HTTP API (05), any scheduler/cron, multi-tenancy, queueing. The gateway at this step is only reachable in-process and via signals — that's fine; step 02 gives it its first real front door.
 
@@ -40,6 +40,7 @@ Everything in the v2 vision presumes a process that outlives a terminal command:
 - A turn aborted via the watchdog or signal leaves the session in a consistent `failed` state and the daemon healthy.
 - Streaming: with the Anthropic provider, `provider.delta` events arrive before the final `provider.response`; `pnpm test` covers delta ordering with a scripted provider.
 - Two roster agents pinned to different providers/models each run through their own (verified with scripted providers in one gateway).
+- An agent on provider A delegating via `agent.delegate` to a target pinned to provider B runs the target on B — never on the delegator's provider or credentials (scripted-provider test).
 - Existing CLI behavior (`run`, `chat`) unchanged; all packages still build/typecheck/test green.
 
 ## Open questions
