@@ -201,3 +201,42 @@ test('a mid-stream primary failure emits a reset delta before the fallback strea
   // Consumers see: partial primary → reset (discard it) → clean fallback.
   assert.deepEqual(seen, ['text:partial pri', 'reset', 'text:fallback says hi']);
 });
+
+test('a primary that dies before its first delta still emits the reset', async () => {
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const session = {
+    id: 'silent-switch',
+    agent: { id: 'a', name: 'A' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  };
+
+  const primary = {
+    name: 'p',
+    async generate() {
+      throw new Error('down before streaming anything');
+    },
+  };
+  const fallback = {
+    name: 'f',
+    async generate() {
+      return { parts: [{ type: 'text' as const, text: 'quiet fallback' }] };
+    },
+  };
+
+  const seen: string[] = [];
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, () => {});
+  await wrapped.generate({
+    session,
+    onDelta: async (delta: { type: string }) => {
+      seen.push(delta.type);
+    },
+  } as never);
+
+  // The reset is the one in-band signal that the turn switched providers —
+  // watchers (the gateway's idle watchdog) need it even when there was no
+  // partial output to discard.
+  assert.deepEqual(seen, ['reset']);
+});

@@ -56,8 +56,12 @@ export class SqliteSessionStore implements SessionStore {
   constructor(filePath: string) {
     // Sessions hold complete conversations (prompts, replies, tool output,
     // provider replay state) — owner-only, like the credentials file. The
-    // chmods cover databases created earlier under a looser umask too.
-    mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    // chmods cover pre-existing files and directories too: mkdir's mode
+    // only applies to directories it creates, so an upgrade over a 0755
+    // ~/.stratus must be tightened explicitly.
+    const dir = path.dirname(filePath);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
     this.db = new DatabaseSync(filePath);
     for (const sensitive of [filePath, `${filePath}-wal`, `${filePath}-shm`, `${filePath}-journal`]) {
       try {
@@ -341,15 +345,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     config.provider === 'anthropic' && Boolean(config.apiKey);
 
   /**
-   * Progress-based abort: the timer resets on every event the session
-   * emits, so a healthy long turn keeps itself alive while a stalled one
-   * is cut loose. Tool executions carry their own executor timeouts
-   * underneath this.
+   * Progress-based abort, armed only while the turn is actually awaiting a
+   * streaming provider — the one phase where silence means a stall. Tool
+   * executions and approval waits emit no deltas (executor timeouts cover
+   * them), so the timer suspends at each provider.response and re-arms once
+   * every tool call from that response has settled and the loop heads back
+   * to the provider. A mid-turn switch to a non-streaming fallback
+   * (signalled by a reset delta) suspends it for the rest of the turn: the
+   * switch is session-sticky, so every later call this turn is silent too.
    */
   const withWatchdog = async <T>(
     sessionId: string,
     external: AbortSignal | undefined,
     idleEnabled: boolean,
+    fallbackStreams: boolean,
     run: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> => {
     const effectiveIdleMs = idleEnabled ? idleTimeoutMs : 0;
@@ -367,15 +376,27 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
 
     let timer: NodeJS.Timeout | undefined;
+    let armed = true;
+    let pendingTools = 0;
+    let suspendedForTurn = false;
+
+    const suspendTimer = (): void => {
+      armed = false;
+      if (timer) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+    };
+
     const resetTimer = (): void => {
-      if (effectiveIdleMs <= 0) {
+      if (!armed || effectiveIdleMs <= 0) {
         return;
       }
       if (timer) {
         clearTimeout(timer);
       }
-      // Deliberately not unref'd: while a turn is in flight, this timer is
-      // what guarantees the process can always make progress on it.
+      // Deliberately not unref'd: while a provider await is in flight, this
+      // timer is what guarantees the process can always make progress on it.
       timer = setTimeout(() => {
         timedOut = true;
         warn(`watchdog: no activity on session ${sessionId} for ${effectiveIdleMs}ms; aborting the turn`);
@@ -384,8 +405,39 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     };
 
     const unsubscribe = bus.subscribe((event: StratusEvent) => {
-      if ('sessionId' in event && event.sessionId === sessionId) {
-        resetTimer();
+      if (!('sessionId' in event) || event.sessionId !== sessionId) {
+        return;
+      }
+      switch (event.type) {
+        case 'provider.delta':
+          // A reset marks a mid-turn, session-sticky switch to the fallback
+          // provider. When that fallback emits no deltas, silence is
+          // healthy for the remainder of the turn.
+          if (event.delta.type === 'reset' && !fallbackStreams) {
+            suspendedForTurn = true;
+            suspendTimer();
+          } else {
+            resetTimer();
+          }
+          break;
+        case 'provider.response':
+          // The provider finished; the loop enters its tool phase
+          // (approval waits included). The response says exactly how many
+          // tool calls must settle before the loop returns to the provider.
+          pendingTools = event.parts.filter((part) => part.type !== 'text').length;
+          suspendTimer();
+          break;
+        case 'tool.completed':
+        case 'tool.denied':
+          pendingTools = Math.max(0, pendingTools - 1);
+          if (pendingTools === 0 && !suspendedForTurn) {
+            armed = true;
+            resetTimer();
+          }
+          break;
+        default:
+          resetTimer();
+          break;
       }
     });
     resetTimer();
@@ -456,11 +508,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
 
     const switchedToFallback = existing?.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true;
+    const fallbackStreams = config.provider !== 'demo' && config.fallback
+      ? fallbackStreamsDeltas(config.fallback)
+      : false;
     const effectiveStreams = switchedToFallback && config.provider !== 'demo' && config.fallback
       ? fallbackStreamsDeltas(config.fallback)
       : streamsDeltas(config);
 
-    return withWatchdog(input.sessionId, input.signal, effectiveStreams, async (signal) => {
+    return withWatchdog(input.sessionId, input.signal, effectiveStreams, fallbackStreams, async (signal) => {
       if (existing) {
         // Refresh the stored definition before resuming, so the turn runs
         // with the current instructions, tools, and credentials.

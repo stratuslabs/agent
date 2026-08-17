@@ -889,22 +889,8 @@ export const createFallbackWrappedProvider = (
       const switched = request.session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true
         || fallbackSessions.has(request.session.id);
       if (!switched) {
-        // Track whether the primary streamed anything: a partial attempt
-        // must be explicitly reset before the fallback streams, or a
-        // consumer would fuse both attempts into one garbled message.
-        let primaryStreamed = false;
-        const onDelta = request.onDelta;
-        const primaryRequest = onDelta
-          ? {
-              ...request,
-              onDelta: async (delta: Parameters<typeof onDelta>[0]) => {
-                primaryStreamed = true;
-                await onDelta(delta);
-              },
-            }
-          : request;
         try {
-          return await primary.generate(primaryRequest);
+          return await primary.generate(request);
         } catch (error) {
           // A turn that already executed tools must not be replayed on
           // another provider — the side effects (a remembered fact, a
@@ -921,7 +907,13 @@ export const createFallbackWrappedProvider = (
           fallbackSessions.add(request.session.id);
           (request.session.metadata ??= {})[FALLBACK_ACTIVE_METADATA_KEY] = true;
           onFallback(error);
-          if (primaryStreamed && request.onDelta) {
+          // A reset always precedes the fallback attempt when a sink is
+          // attached: it discards whatever partial primary output the
+          // consumer buffered, and it is the one in-band signal that this
+          // turn switched providers — watchers (the gateway's idle
+          // watchdog) rely on it even when the primary died before its
+          // first delta.
+          if (request.onDelta) {
             await request.onDelta({ type: 'reset' });
           }
         }

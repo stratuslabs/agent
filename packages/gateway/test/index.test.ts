@@ -21,6 +21,42 @@ const openAiText = (text: string): Response =>
     { status: 200, headers: { 'content-type': 'application/json' } },
   );
 
+// A minimal Anthropic SSE stream: the gateway's streaming path (anthropic +
+// apiKey) drives the SDK's stream parser, which wants real event framing.
+const anthropicSse = (events: Array<{ type: string }>): Response =>
+  new Response(
+    events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''),
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  );
+
+const anthropicMessageStart = {
+  type: 'message_start',
+  message: {
+    id: 'msg_1', type: 'message', role: 'assistant', model: 'model-x', content: [],
+    stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 },
+  },
+};
+
+const anthropicSseText = (text: string): Response =>
+  anthropicSse([
+    anthropicMessageStart,
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 2 } },
+    { type: 'message_stop' },
+  ]);
+
+const anthropicSseToolCall = (wireName: string, args: object): Response =>
+  anthropicSse([
+    anthropicMessageStart,
+    { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: wireName, input: {} } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(args) } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 2 } },
+    { type: 'message_stop' },
+  ]);
+
 const openAiToolCall = (name: string, args: object): Response =>
   new Response(
     JSON.stringify({
@@ -328,6 +364,21 @@ test('the session database and its directory are owner-only', async () => {
   assert.equal(((await stat(dbPath)).mode & 0o777), 0o600);
 });
 
+test('a pre-existing loose session directory is tightened to owner-only', async () => {
+  const { stat } = await import('node:fs/promises');
+  const home = await newHome();
+  // The upgrade path: ~/.stratus already exists with the default 0755 from
+  // an earlier install. mkdir's mode only applies to directories it
+  // creates, so the constructor must chmod explicitly.
+  const dir = path.join(home, 'state');
+  await mkdir(dir, { recursive: true, mode: 0o755 });
+  const dbPath = path.join(dir, 'sessions.db');
+  const store = new SqliteSessionStore(dbPath);
+  store.close();
+
+  assert.equal(((await stat(dir)).mode & 0o777), 0o700);
+});
+
 test('a queued dispatch whose signal aborted while waiting never mutates the session', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
@@ -406,4 +457,86 @@ test('the idle watchdog honors a session sticky-switched to a non-streaming fall
 
   assert.equal(session.status, 'completed');
   assert.match(session.messages.at(-1)?.content ?? '', /slow but healthy fallback/);
+});
+
+test('the watchdog suspends across a slow tool phase and re-arms for the next provider call', async () => {
+  const home = await newHome();
+  // A streaming primary calls agent.delegate; the delegated agent's provider
+  // takes longer than the idle timeout. The tool phase emits no deltas, so
+  // the watchdog must suspend at provider.response and only re-arm once the
+  // tool settles — otherwise every slow tool or approval wait dies at the
+  // idle timeout.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'bea.md', '---\nname: Bea\nprovider: openai\nmodel: model-b\n---\n\nYou are Bea.\n');
+
+  let anthropicCalls = 0;
+  const fetchImpl = (async (url: unknown) => {
+    if (String(url).includes('anthropic')) {
+      anthropicCalls += 1;
+      return anthropicCalls === 1
+        ? anthropicSseToolCall('agent_delegate', { agent: 'bea', prompt: 'take your time' })
+        : anthropicSseText('bea finally answered');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    return openAiText('slow but healthy delegate');
+  }) as typeof fetch;
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { ANTHROPIC_API_KEY: 'sk-a', OPENAI_API_KEY: 'sk-o' },
+    fetch: fetchImpl,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 100, warn: () => {} });
+  await gateway.start();
+
+  const session = await gateway.dispatch({ sessionId: 'tool-phase-1', agentId: 'ava', userMessage: 'delegate this' });
+  await gateway.stop();
+
+  assert.equal(session.status, 'completed');
+  assert.equal(anthropicCalls, 2);
+  assert.match(session.messages.at(-1)?.content ?? '', /bea finally answered/);
+});
+
+test('a mid-turn switch to a non-streaming fallback suspends the watchdog for the turn', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The primary dies before the session ever recorded a durable switch, so
+  // this turn started watchdog-eligible. The reset delta emitted at the
+  // switch must suspend the timer: the OpenAI fallback emits no deltas, and
+  // its slow-but-healthy turn would otherwise be killed as a stall.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'model-p',
+    fallbackModel: 'model-f',
+    fallbackProvider: 'openai',
+  }));
+
+  const fetchImpl = (async (url: unknown) => {
+    if (String(url).includes('anthropic')) {
+      // A 400 fails the primary immediately — the SDK does not retry it,
+      // so the switch happens while the watchdog is still freshly armed.
+      return new Response(
+        JSON.stringify({ error: { type: 'invalid_request_error', message: 'primary down' } }),
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    return openAiText('fallback rode out the silence');
+  }) as typeof fetch;
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { ANTHROPIC_API_KEY: 'sk-a', OPENAI_API_KEY: 'sk-o' },
+    fetch: fetchImpl,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 100, warn: () => {} });
+  await gateway.start();
+
+  const session = await gateway.dispatch({ sessionId: 'mid-turn-1', userMessage: 'hang in there' });
+  await gateway.stop();
+
+  assert.equal(session.status, 'completed');
+  assert.match(session.messages.at(-1)?.content ?? '', /fallback rode out the silence/);
 });
