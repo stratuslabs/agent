@@ -82,13 +82,21 @@ export class SqliteSessionStore implements SessionStore {
       chmodSync(dir, 0o700);
     }
     this.db = new DatabaseSync(filePath);
-    for (const sensitive of [filePath, `${filePath}-wal`, `${filePath}-shm`, `${filePath}-journal`]) {
-      try {
-        chmodSync(sensitive, 0o600);
-      } catch {
-        // Journal side-files only exist while active; nothing to tighten.
-      }
+    // The database file is tightened FIRST: SQLite derives sidecar
+    // permissions from the main file's mode, so everything created later
+    // inherits owner-only.
+    try {
+      chmodSync(filePath, 0o600);
+    } catch {
+      // The open above created it; a chmod failure surfaces below anyway.
     }
+    // WAL, not the default DELETE journal: DELETE mode recreates a
+    // rollback journal on EVERY write, which a one-time chmod could never
+    // cover in a traversable caller-supplied directory. WAL keeps one
+    // persistent sidecar pair per connection — forced into existence here
+    // (the user_version pragma is a real page-one write) so the loop
+    // below covers them for the connection's whole lifetime.
+    this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
@@ -99,6 +107,14 @@ export class SqliteSessionStore implements SessionStore {
         updated_at TEXT NOT NULL
       )
     `);
+    this.db.exec('PRAGMA user_version = 0');
+    for (const sensitive of [filePath, `${filePath}-wal`, `${filePath}-shm`, `${filePath}-journal`]) {
+      try {
+        chmodSync(sensitive, 0o600);
+      } catch {
+        // A sidecar that does not exist has nothing to tighten.
+      }
+    }
   }
 
   async create(input: Omit<Session, 'createdAt' | 'updatedAt'>): Promise<Session> {

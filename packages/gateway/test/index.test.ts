@@ -1395,3 +1395,35 @@ test('an empty STRATUS_PROVIDER is no default at all for the credential scrub', 
   assert.match(session.messages.at(-1)?.content ?? '', /still anthropic/);
   assert.ok(apiKeys.some((key) => key === 'sk-generic'));
 });
+
+test('WAL sidecars are owner-only for their whole lifetime, reopens included', async () => {
+  const { stat } = await import('node:fs/promises');
+  const home = await newHome();
+  const dir = path.join(home, 'shared');
+  await mkdir(dir, { recursive: true, mode: 0o755 });
+  const dbPath = path.join(dir, 'sessions.db');
+
+  const assertSidecarsTight = async (): Promise<void> => {
+    for (const sidecar of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+      const mode = (await stat(sidecar)).mode & 0o777;
+      assert.equal(mode, 0o600, `${path.basename(sidecar)} must be owner-only, was ${mode.toString(8)}`);
+    }
+  };
+
+  // Fresh database: the sidecars exist (WAL mode, forced write) and are
+  // tightened before the constructor returns — later transactions reuse
+  // them instead of minting umask-mode rollback journals per write.
+  const store = new SqliteSessionStore(dbPath);
+  await store.create({ id: 'w1', agent: { id: 'a', name: 'A' }, status: 'running', messages: [] });
+  await assertSidecarsTight();
+  store.close();
+
+  // Reopen over the existing database: same guarantee.
+  const reopened = new SqliteSessionStore(dbPath);
+  await reopened.save({
+    id: 'w1', agent: { id: 'a', name: 'A' }, status: 'completed', messages: [],
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+  });
+  await assertSidecarsTight();
+  reopened.close();
+});
