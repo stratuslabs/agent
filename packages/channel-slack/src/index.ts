@@ -145,6 +145,14 @@ class ReplyRenderer {
       this.scheduleEdit();
       return;
     }
+    if (event.type === 'provider.delta' && event.delta.type === 'reset') {
+      // The provider abandoned its partial attempt (e.g. fallback after a
+      // mid-stream failure): discard everything streamed so far so two
+      // attempts never fuse into one message.
+      this.buffer = '';
+      this.scheduleEdit();
+      return;
+    }
     if (event.type === 'tool.called') {
       this.toolLine = `⚙ ${event.call.toolName}…`;
       this.scheduleEdit();

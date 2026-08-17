@@ -456,3 +456,39 @@ test('file-bearing tool results upload into the conversation', async () => {
   ]);
   assert.equal(web.updates.at(-1)?.text, 'here you go');
 });
+
+test('a reset delta discards partial streamed text before the retry streams', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const bus = new EventBus();
+
+  const gateway: GatewayLike = {
+    bus,
+    agents: () => [{ id: 'ava', name: 'Ava' }],
+    async dispatch(input) {
+      await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: 'doomed partial' } });
+      await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'reset' } });
+      await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: 'clean retry' } });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return sessionWithReply(input.sessionId, 'clean retry, finished');
+    },
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> retry please'));
+  await adapter.stop();
+
+  const finalEdit = web.updates.at(-1)?.text ?? '';
+  assert.equal(finalEdit, 'clean retry, finished');
+  // No edit after the reset may carry the abandoned attempt's text.
+  const resetIndex = web.updates.findIndex((update) => !update.text.includes('doomed'));
+  for (const update of web.updates.slice(Math.max(resetIndex, 0))) {
+    assert.ok(!update.text.includes('doomed partial') || web.updates.indexOf(update) < resetIndex + 1, `late edit leaked partial text: ${update.text}`);
+  }
+});
