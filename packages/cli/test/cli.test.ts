@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import {
   createFileMemoryStore,
   createLogWriter,
+  currentLogOffset,
   HELP_TEXT,
   parseCommand,
   resolveRuntimeConfig,
@@ -3838,4 +3839,91 @@ test('parseCommand parses logs options', () => {
     sessionId: 's1',
   });
   assert.deepEqual(parseCommand(['serve', '--no-log-file']), { command: 'serve', events: true, logToFile: false });
+});
+
+test('following the log keeps the records that rotation moved aside', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  // Sized so the fifth write is the one that rotates: the follower is then
+  // mid-file when its bytes move to .1, which is the case that silently
+  // loses the events around a rotation.
+  const writer = createLogWriter({ dir, maxBytes: 220, keep: 3 });
+  const line = async (n: number): Promise<void> =>
+    writer.write({ ts: new Date(n * 1000).toISOString(), level: 'info', msg: `burst ${n}` });
+
+  await line(1);
+  await line(2);
+  // Where a follower would have been when the rotation happened.
+  const from = await currentLogOffset(dir);
+  await line(3);
+  await line(4);
+  await line(5);
+
+  const rotated = (await readdir(dir)).filter((name) => name.startsWith('stratusd.jsonl.'));
+  assert.deepEqual(rotated, ['stratusd.jsonl.1'], 'exactly one rotation, or the test is not measuring this');
+
+  const seen: string[] = [];
+  const controller = new AbortController();
+  const tail = tailLog({
+    dir,
+    intervalMs: 5,
+    startOffset: from,
+    signal: controller.signal,
+    onRecord: (record) => seen.push(String(record.msg)),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  controller.abort();
+  await tail;
+
+  // 3 and 4 were in the file that became .1; 5 is in its replacement.
+  assert.deepEqual(seen, ['burst 3', 'burst 4', 'burst 5']);
+});
+
+test('a zero backlog limit prints nothing', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  const writer = createLogWriter({ dir });
+  for (let index = 0; index < 5; index += 1) {
+    await writer.write({ ts: new Date(index * 1000).toISOString(), level: 'info', msg: `line ${index}` });
+  }
+
+  // slice(-0) is slice(0) — `-n 0 -f` would otherwise replay the whole file.
+  assert.deepEqual(await readRecentRecords(dir, 0), []);
+});
+
+test('following resumes from before the backlog was read', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  const writer = createLogWriter({ dir });
+  await writer.write({ ts: new Date(0).toISOString(), level: 'info', msg: 'old' });
+
+  // The daemon keeps writing while a backlog prints. Capturing the offset
+  // first is what keeps these records from falling between the two reads.
+  const from = await currentLogOffset(dir);
+  await writer.write({ ts: new Date(1000).toISOString(), level: 'info', msg: 'written during the backlog print' });
+
+  const seen: string[] = [];
+  const controller = new AbortController();
+  const tail = tailLog({
+    dir,
+    intervalMs: 5,
+    startOffset: from,
+    signal: controller.signal,
+    onRecord: (record) => seen.push(String(record.msg)),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  controller.abort();
+  await tail;
+
+  assert.deepEqual(seen, ['written during the backlog print']);
+});
+
+test('streamed deltas never reach the log writer', async () => {
+  // EventBus.emit awaits subscribers and a streaming provider awaits the
+  // delta sink, so a write here would sit on the critical path of every
+  // token. Deltas carry no detail worth keeping either.
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  const writer = createLogWriter({ dir });
+  await writer.write({ ts: new Date(0).toISOString(), level: 'event', event: 'tool.called', agentId: 'ava', sessionId: 's' });
+
+  const records = await readRecentRecords(dir, 10);
+  assert.ok(records.every((record) => record.event !== 'provider.delta'));
+  assert.equal(records.length, 1);
 });

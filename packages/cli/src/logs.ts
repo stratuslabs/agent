@@ -159,6 +159,13 @@ export const readRecentRecords = async (
       .sort((left, right) => Number(left.split('.').pop()) - Number(right.split('.').pop())),
   ];
 
+  // slice(-0) is slice(0), which would return everything — the opposite of
+  // what `-n 0` asks for, and `-n 0 -f` is the ordinary way to follow
+  // without replaying the file.
+  if (limit === 0) {
+    return [];
+  }
+
   const collected: LogRecord[] = [];
   for (const name of ordered) {
     const { readFile } = await import('node:fs/promises');
@@ -172,12 +179,22 @@ export const readRecentRecords = async (
   return collected.slice(-limit);
 };
 
+/** The current end of the live log — the offset a follower should resume from. */
+export const currentLogOffset = async (dir: string): Promise<number> =>
+  stat(path.join(dir, LOG_FILENAME)).then((info) => info.size).catch(() => 0);
+
 export interface TailOptions {
   dir: string;
   filter?: LogFilter;
   /** Poll interval; the daemon writes from another process, so there is nothing to await. */
   intervalMs?: number;
   signal?: AbortSignal;
+  /**
+   * Byte offset to resume from. Callers that print a backlog first must
+   * capture this BEFORE reading it (`currentLogOffset`), or records written
+   * in between are in neither the backlog nor the stream.
+   */
+  startOffset?: number;
   onRecord: (record: LogRecord) => void;
 }
 
@@ -190,50 +207,68 @@ export const tailLog = async (options: TailOptions): Promise<void> => {
   const intervalMs = options.intervalMs ?? 400;
   const filter = options.filter ?? {};
   const logPath = path.join(options.dir, LOG_FILENAME);
-  let offset = await stat(logPath).then((info) => info.size).catch(() => 0);
+  let offset = options.startOffset ?? await currentLogOffset(options.dir);
   let carry = '';
+
+  /** Reads from `from` to EOF, emitting whole lines. Returns the new offset. */
+  const drain = async (target: string, from: number): Promise<number> => {
+    const handle = await open(target, 'r').catch(() => undefined);
+    if (!handle) {
+      return from;
+    }
+    try {
+      const size = await handle.stat().then((info) => info.size);
+      if (size <= from) {
+        return from;
+      }
+      const length = size - from;
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, from);
+      const text = carry + buffer.subarray(0, bytesRead).toString('utf8');
+      // A partial trailing line is held back until its newline lands.
+      const lastBreak = text.lastIndexOf('\n');
+      carry = lastBreak >= 0 ? text.slice(lastBreak + 1) : text;
+      for (const record of parseLogLines(lastBreak >= 0 ? text.slice(0, lastBreak) : '')) {
+        if (matchesFilter(record, filter)) {
+          options.onRecord(record);
+        }
+      }
+      return from + bytesRead;
+    } finally {
+      await handle.close();
+    }
+  };
 
   while (!options.signal?.aborted) {
     const size = await stat(logPath).then((info) => info.size).catch(() => -1);
     if (size >= 0) {
       if (size < offset) {
-        // The file shrank: rotation replaced it, so read the new one whole.
+        // Rotation: the bytes we had not read yet moved to .1 with the rest
+        // of the old file. Draining it first is the difference between
+        // seeing the events around a rotation and silently losing them —
+        // and a rotation happens mid-burst, when they matter most.
+        await drain(path.join(options.dir, rotatedName(1)), offset).catch(() => offset);
         offset = 0;
         carry = '';
       }
-      if (size > offset) {
-        const handle = await open(logPath, 'r').catch(() => undefined);
-        if (handle) {
-          try {
-            const length = size - offset;
-            const buffer = Buffer.alloc(length);
-            const { bytesRead } = await handle.read(buffer, 0, length, offset);
-            offset += bytesRead;
-            const text = carry + buffer.subarray(0, bytesRead).toString('utf8');
-            // A partial trailing line is held back until its newline lands.
-            const lastBreak = text.lastIndexOf('\n');
-            carry = lastBreak >= 0 ? text.slice(lastBreak + 1) : text;
-            const complete = lastBreak >= 0 ? text.slice(0, lastBreak) : '';
-            for (const record of parseLogLines(complete)) {
-              if (matchesFilter(record, filter)) {
-                options.onRecord(record);
-              }
-            }
-          } finally {
-            await handle.close();
-          }
-        }
-      }
+      offset = await drain(logPath, offset);
     }
     if (options.signal?.aborted) {
       return;
     }
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, intervalMs);
-      options.signal?.addEventListener('abort', () => {
+      // Both paths detach the listener: {once:true} only fires on abort, so
+      // a poll loop running for days would otherwise retain one closure per
+      // tick — roughly 216,000 a day at the default interval.
+      const onAbort = (): void => {
         clearTimeout(timer);
         resolve();
-      }, { once: true });
+      };
+      const timer = setTimeout(() => {
+        options.signal?.removeEventListener('abort', onAbort);
+        resolve();
+      }, intervalMs);
+      options.signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 };

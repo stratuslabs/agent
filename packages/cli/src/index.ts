@@ -93,6 +93,7 @@ import {
 
 import {
   createLogWriter,
+  currentLogOffset,
   formatLogRecord,
   readRecentRecords,
   tailLog,
@@ -102,6 +103,7 @@ import {
 
 export {
   createLogWriter,
+  currentLogOffset,
   formatLogRecord,
   parseLogLines,
   readRecentRecords,
@@ -3872,6 +3874,10 @@ export const runLogs = async (
     writeLine(streams.stdout, command.format === 'json' ? JSON.stringify(record) : formatLogRecord(record));
   };
 
+  // Captured BEFORE the backlog is read: the daemon keeps writing while a
+  // large backlog prints, and a follower that takes its offset afterwards
+  // skips everything written in between — permanently.
+  const followFrom = command.follow ? await currentLogOffset(dir) : 0;
   const recent = await readRecentRecords(dir, command.limit, filter);
   for (const record of recent) {
     emit(record);
@@ -3893,7 +3899,7 @@ export const runLogs = async (
     stop();
   }
   try {
-    await tailLog({ dir, filter, signal: controller.signal, onRecord: emit });
+    await tailLog({ dir, filter, startOffset: followFrom, signal: controller.signal, onRecord: emit });
   } finally {
     process.off('SIGINT', stop);
     process.off('SIGTERM', stop);
@@ -4230,27 +4236,45 @@ export const runServe = async (
     // restart never re-creates, so an unmapped id falls back to the
     // durable store — which is exactly the case where attribution matters.
     const agentBySession = new Map<string, string>();
-    gateway.bus.subscribe(async (event) => {
+    // EventBus.emit awaits its subscribers, and a streaming provider awaits
+    // the delta sink — so anything awaited here lands on the critical path
+    // of every streamed token. This handler is deliberately synchronous:
+    // provider.delta is dropped outright (it carries no detail worth
+    // keeping, one record per token), the timestamp is taken now, and the
+    // write is queued without awaiting it.
+    gateway.bus.subscribe((event) => {
+      if (event.type === 'provider.delta') {
+        return;
+      }
+      const ts = new Date().toISOString();
       if (event.type === 'session.created') {
         agentBySession.set(event.sessionId, event.agentId);
       }
-      let agentId = agentBySession.get(event.sessionId);
-      if (!agentId) {
-        const session = await gateway.store.get(event.sessionId).catch(() => undefined);
-        agentId = session?.agent.id;
-        if (agentId) {
-          agentBySession.set(event.sessionId, agentId);
-        }
-      }
       const detail = eventDetail(event);
-      await logWriter.write({
-        ts: new Date().toISOString(),
-        level: 'event',
+      const base = {
+        ts,
+        level: 'event' as const,
         event: event.type,
         sessionId: event.sessionId,
-        ...(agentId ? { agentId } : {}),
         ...(detail ? { detail } : {}),
-      });
+      };
+      const known = agentBySession.get(event.sessionId);
+      if (known) {
+        void logWriter.write({ ...base, agentId: known });
+      } else {
+        // A session resumed after a restart never re-creates, so its agent
+        // is only in the store. That lookup is deferred off this path; the
+        // timestamp above keeps ordering honest.
+        void gateway.store.get(event.sessionId)
+          .then((session) => {
+            const agentId = session?.agent.id;
+            if (agentId) {
+              agentBySession.set(event.sessionId, agentId);
+            }
+            return logWriter.write({ ...base, ...(agentId ? { agentId } : {}) });
+          })
+          .catch(() => logWriter.write(base));
+      }
       if (event.type === 'session.completed' || event.type === 'session.failed') {
         agentBySession.delete(event.sessionId);
       }
