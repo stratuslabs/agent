@@ -3401,7 +3401,7 @@ test('doctor ignores an apiKeyEnv belonging to a different provider', async () =
   });
 
   assert.equal(exitCode, 0, 'the subscription is intact, so nothing is wrong');
-  assert.match(output.stdout, /anthropic Claude subscription \(Pro\/Max\)$/m);
+  assert.match(output.stdout, /anthropic Claude subscription \(Pro\/Max\) — runs go through the Claude Code runtime/);
   assert.doesNotMatch(output.stdout, /billed per token/);
 });
 
@@ -3471,7 +3471,9 @@ test('doctor reports an unreadable soul as fatal, not as a fallback', async () =
   assert.equal(exitCode, 1);
   // resolveRuntimeConfig propagates loadSoulFile's error — promising a
   // built-in fallback would send someone looking for a run that never happens.
-  assert.match(output.stdout, /Every run fails until it is fixed/);
+  // The verdict is the resolver's own error, with the consequence spelled out.
+  assert.match(output.stdout, /No run can start: Soul file not found: \/nowhere\/ghost\.md/);
+  assert.match(output.stdout, /the built-in agent is not substituted/);
   assert.match(output.stdout, /agent {5}unresolved — the configured soul could not be read/);
   assert.doesNotMatch(output.stdout, /built-in — no soul configured/);
 });
@@ -3492,8 +3494,10 @@ test('doctor attributes a legacy provider override to the legacy variable', asyn
     },
   });
 
-  assert.match(output.stdout, /provider {2}anthropic\n {12}from STRATUSCLAW_PROVIDER/);
-  assert.match(output.stdout, /model {5}claude-opus-5\n {12}from STRATUSCLAW_MODEL/);
+  // No anthropic sign-in, so no run can start — but the intended provider
+  // and the variable that chose it are still what the reader needs.
+  assert.match(output.stdout, /provider {2}anthropic \(unreachable\)\n {12}from STRATUSCLAW_PROVIDER/);
+  assert.match(output.stdout, /No run can start: Missing API key for provider=anthropic/);
 });
 
 test('doctor reports a stored sign-in refused by an untrusted project endpoint', async () => {
@@ -3519,7 +3523,7 @@ test('doctor reports a stored sign-in refused by an untrusted project endpoint',
   });
 
   assert.equal(exitCode, 1, 'the run would fail, so this is not a healthy setup');
-  assert.match(output.stdout, /not sent to the endpoint this config selects/);
+  assert.match(output.stdout, /No run can start:/);
   assert.match(output.stdout, /sets a custom base URL \(https:\/\/evil\.test\/v1\)/);
 });
 
@@ -3577,9 +3581,131 @@ test('doctor reports the fallback and flags one with no sign-in', async () => {
   });
 
   assert.equal(exitCode, 1);
-  // Where a failing run goes next is part of "why is my usage where it is".
-  assert.match(output.stdout, /fallback {2}openai · gpt-4\.1-mini/);
-  assert.match(output.stdout, /The fallback targets openai but there is no sign-in for it/);
+  // The resolver drops a fallback it cannot use, so the config still names
+  // one while a failing primary has nothing to retry on.
+  assert.match(output.stdout, /A fallback model \(gpt-4\.1-mini\) is configured but could not be resolved/);
+  assert.doesNotMatch(output.stdout, /fallback {2}openai/);
+});
+
+test('doctor treats a malformed config as fatal instead of showing defaults', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ this is not json');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 1);
+  // resolveRuntimeConfig propagates the parse failure, so no run reaches
+  // provider or credential resolution at all.
+  assert.match(output.stdout, /could not be parsed/);
+  assert.match(output.stdout, /Every run fails until it is fixed or removed/);
+  assert.doesNotMatch(output.stdout, /running as if it were empty/);
+});
+
+test('doctor diagnoses a bound key pointed at a different endpoint', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai' }));
+  // The saved key belongs to one service; STRATUS_BASE_URL names another.
+  // The resolver refuses to send it there, so the run always fails.
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'sk-local', baseUrl: 'http://localhost:1234/v1' } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: { STRATUS_BASE_URL: 'https://api.openai.com/v1' },
+    },
+  });
+
+  assert.equal(exitCode, 1, 'a run that always fails is not "No problems found"');
+  assert.match(output.stdout, /No run can start:/);
+  assert.match(output.stdout, /bound to http:\/\/localhost:1234\/v1/);
+});
+
+test('doctor reports a usable fallback and the warning covers a demoted one', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // OpenAI primary, Anthropic fallback: a saved subscription plus an
+  // environment key means a fallback retry is billed per token.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    fallbackProvider: 'anthropic',
+    fallbackModel: 'claude-opus-5',
+  }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    openai: { type: 'api_key', value: 'sk-openai' },
+    anthropic: { type: 'oauth_token', value: 'sk-ant-oat-x' },
+  }));
+
+  const doctor = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams: doctor.streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'sk-ant-env' },
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.match(doctor.output.stdout, /fallback {2}anthropic · claude-opus-5/);
+  assert.match(doctor.output.stdout, /fallback runs are billed per token/);
+
+  // The same case has to warn on an ordinary run, where the primary is
+  // anthropic-free and the old check returned early.
+  const run = createStreams();
+  await runCli({
+    argv: ['run', 'hello'],
+    streams: run.streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'sk-ant-env' },
+      fetch: (async () => new Response('{}', { status: 401 })) as typeof fetch,
+    },
+  });
+  assert.match(run.output.stderr, /a fallback retry would be billed per token/);
+});
+
+test('serve warns at startup when an env key demotes the subscription', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-x' } }),
+  );
+
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+  await runCli({
+    argv: ['serve', '--no-events'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: { ANTHROPIC_API_KEY: 'sk-ant-env' },
+      shutdownSignal: controller.signal,
+    },
+  });
+
+  // A daemon bills every dispatch for as long as it runs, with nobody
+  // watching — the costliest place for this to go unsaid.
+  assert.match(output.stderr, /ANTHROPIC_API_KEY in your environment outranks the Claude subscription sign-in/);
 });
 
 test('the log writer appends owner-only JSONL and rotates by size', async () => {
