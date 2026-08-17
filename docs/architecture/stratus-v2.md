@@ -37,13 +37,22 @@ A new agent deployment is a **configuration** — souls + tool packs + channel +
 
 ### L0 — Kernel
 
-The kernel keeps the v1 discipline: contracts, the runner loop, in-memory defaults, zero dependencies. Only three additions earn a place in core, because every layer above needs them:
+The kernel keeps the v1 discipline: contracts, the runner loop, in-memory defaults, zero dependencies. The rule is not "core never changes" — it is that **contracts may grow in small, enumerated ways; behavior, policy, vendors, and persistence never enter**. The full budget of kernel changes for this roadmap:
+
+Landing with the gateway (step 01), because every layer above needs them:
 
 1. **Streaming.** The `StratusEvent` union grows delta events (text and tool-call deltas) so channels can edit messages as tokens arrive and UIs can render live. Non-streaming providers keep working; deltas are additive.
 2. **Cancellation.** `run`/`resume` accept an abort signal. A daemon cannot exist without a way to stop a turn.
 3. **Durability in practice.** The `SessionStore` seam already exists; the gateway supplies a real implementation and the kernel guarantees sessions round-trip through it (including provider metadata like the Anthropic raw-turn cache).
 
-One cleanup rides along: persona + memory system-prompt rendering is currently duplicated in all three provider packages and becomes a single shared contract.
+Contract extensions owned by later steps:
+
+4. Approval-request/resolve event variants and a risk level on `ToolDescriptor` (step 03).
+5. A callable tool-dispatch seam on `ProviderRequest`, so providers that host an inner loop execute tools through the kernel chain instead of around it (step 04).
+6. Glob support in per-agent tool allowlists (step 06).
+7. Provider usage/cost data on `session.completed` events (step 08).
+
+Anything beyond this list gets decided in this document first, not in an implementation PR. One cleanup rides along: persona + memory system-prompt rendering is currently duplicated in all three provider packages and becomes a single shared contract.
 
 ### L1 — Capability packages
 
@@ -89,7 +98,7 @@ The runtime is one persistent Node process everywhere; only the recipe changes:
 ## Key decisions
 
 1. **The kernel owns the loop; providers are model clients.** The Claude Agent SDK is bridged into the kernel's contracts (tools exposed to it via in-process MCP, calling back through `ToolRegistry` → `ApprovalPolicy` → `Executor`), never the other way around. An SDK that owns the loop becomes a side door around permissions and memory; that is ruled out by design. Both billing paths (Anthropic API key, Claude subscription) are provider concerns; nothing else in the stack knows the difference.
-2. **Each agent is a real Slack app.** Slack offers no way to give one bot multiple identities with presence and DMs, so per-agent avatars and presence mean one Slack app (one bot token) per agent, generated from a manifest template. The Slack adapter holds a token → agent map; the session key is `(team, channel, thread_ts)` so threads are resumable conversations.
+2. **Each agent is a real Slack app.** Slack offers no way to give one bot multiple identities with presence and DMs, so per-agent avatars and presence mean one Slack app (one bot token) per agent, generated from a manifest template. The Slack adapter holds a token → agent map; the session key is `(agent, team, channel, thread_ts)` so threads are resumable conversations and a session never crosses agent identities, even when two agents share a thread.
 3. **Surfaces are clients of one API.** Adding a surface must be cheap forever. The control API is the only doorway; the loop is never duplicated.
 4. **Persistent process, not serverless.** See L4.
 5. **Markdown-first memory.** Soul files and JSONL memory are the source of truth users can read and edit. Smarter stores come later behind the existing seam; they never replace the files as the interface.

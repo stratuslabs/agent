@@ -19,7 +19,7 @@ Phase 1–2 made the fleet live and trustworthy, but the only ways in are Slack 
   - `WS /api/events` — the live `StratusEvent` stream (deltas included), filterable by session/agent. One stream serves chat rendering, monitoring, and approval UIs alike.
   - `GET/POST /api/approvals` — list pending approvals (03) and resolve them.
   - `GET /api/health` — daemon status, uptime, provider reachability, per-agent state.
-- **Auth**: bearer token generated into `~/.stratus/gateway-token` (0600). Localhost binding is the default posture; remote access is the operator's tunnel choice (Tailscale documented as the recommended pattern for reaching a machine at home). No user accounts — that belongs to the hosted profile (08).
+- **Auth**: a bearer token generated into `~/.stratus/gateway-token` (0600) for programmatic clients (CLI, macOS app), which send it as an `Authorization` header. Browsers can do neither — page JavaScript can't read the token file, and the WebSocket API can't attach headers to the upgrade — so the dashboard bootstraps differently: `stratus dashboard` opens the browser at a **one-time-token URL** (`/auth?ott=…`, single-use, short-lived), which the gateway exchanges for an HttpOnly `SameSite=Strict` session cookie; cookies ride along on the WS upgrade, so `/api/events` authenticates the same way. Every endpoint requires a valid bearer token *or* session cookie. Localhost binding is the default posture; remote access is the operator's tunnel choice (Tailscale documented as the recommended pattern for reaching a machine at home). No user accounts — that belongs to the hosted profile (08).
 - **Web dashboard**: served by the gateway at `/`, replacing the smoke-test page. Single static bundle, no build-step framework lock-in decision needed in this spec — requirements are: roster view with avatars, session list + live chat view (streaming, tool status lines), pending-approvals panel, health strip. Dark, in the existing dashboard's visual direction.
 - CLI: `stratus dashboard` now opens the gateway's UI (starting the gateway if needed); remote-client flags (`--gateway <url>`) for `stratus agents` as the first remote-consuming command.
 
@@ -36,7 +36,7 @@ Phase 1–2 made the fleet live and trustworthy, but the only ways in are Slack 
 
 - With `stratusd` running, the dashboard shows the live roster; opening an agent shows its sessions; sending a message renders streaming deltas and tool status lines in real time.
 - A pending approval raised from Slack also appears in the dashboard and can be resolved there (and vice-versa), proving the single-event-stream design.
-- All endpoints reject requests without the bearer token; the token file is 0600.
+- All endpoints (WS upgrade included) reject requests carrying neither a valid bearer token nor a valid session cookie; the token file is 0600; a one-time URL token is rejected on second use and after expiry.
 - `stratus agents --gateway http://127.0.0.1:<port>` returns the same roster as local resolution.
 - API integration tests run against an in-process gateway with the demo provider — no network, no real Slack.
 
