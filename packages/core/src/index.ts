@@ -692,14 +692,14 @@ export class AgentRunner {
    * if the kernel loop had called them.
    */
   async executeHostedToolCall(session: Session, call: ToolCall, context?: ExecutionContext): Promise<ToolResult> {
-    const result = await this.executeToolCall(session, call, context?.signal);
-
     // Persistence is part of this seam's contract, not a courtesy: a
     // provider-driven loop consumes tool results internally and returns
     // only final text, so without recording here the durable session would
     // omit every hosted tool action — including its side effects. The
-    // paired messages match what the kernel loop writes, and the save
-    // makes the record survive even if the provider turn later fails.
+    // paired messages match what the kernel loop writes, in the same
+    // order: the call is saved before it runs and the result immediately
+    // after, so a daemon killed mid-tool never holds a session whose side
+    // effects happened without a recorded attempt.
     session.messages.push({
       id: `${session.id}:assistant:${session.messages.length + 1}`,
       role: 'assistant',
@@ -707,6 +707,10 @@ export class AgentRunner {
       createdAt: new Date().toISOString(),
       toolCalls: [call],
     });
+    await this.store.save(session);
+
+    const result = await this.executeToolCall(session, call, context?.signal);
+
     session.messages.push({
       id: `${session.id}:tool:${result.callId}`,
       role: 'tool',

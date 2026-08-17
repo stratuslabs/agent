@@ -636,3 +636,43 @@ test('the watchdog re-arms after a rejected tool call and still catches a stalle
   await gateway.stop();
   assert.equal(anthropicCalls, 2);
 });
+
+test('a soul provider pin beats the daemon environment defaults', async () => {
+  const home = await newHome();
+  // STRATUS_PROVIDER / STRATUS_MODEL inherited by the daemon's process are
+  // defaults with the same standing as the gateway selection — a soul
+  // pinned to another provider must not be routed through them.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  const urls: string[] = [];
+  const fetchImpl = (async (url: unknown) => {
+    urls.push(String(url));
+    if (String(url).includes('anthropic')) {
+      return anthropicSseText('from anthropic');
+    }
+    return openAiText('from openai');
+  }) as typeof fetch;
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: {
+      STRATUS_PROVIDER: 'openai',
+      STRATUS_MODEL: 'model-env',
+      ANTHROPIC_API_KEY: 'sk-a',
+      OPENAI_API_KEY: 'sk-o',
+    },
+    fetch: fetchImpl,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+
+  const pinned = await gateway.dispatch({ sessionId: 'env-pin-1', agentId: 'ava', userMessage: 'hi' });
+  // The unpinned default agent still follows the environment default.
+  const unpinned = await gateway.dispatch({ sessionId: 'env-pin-2', userMessage: 'hi' });
+  await gateway.stop();
+
+  assert.match(pinned.messages.at(-1)?.content ?? '', /from anthropic/);
+  assert.match(unpinned.messages.at(-1)?.content ?? '', /from openai/);
+  assert.ok(urls.some((url) => url.includes('anthropic')));
+});

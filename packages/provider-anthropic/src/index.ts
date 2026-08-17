@@ -362,11 +362,21 @@ export const createAnthropicProvider = ({
         // piling every remaining delta into an unbounded queue.
         const stream = client.messages.stream(params, requestOptions);
         const onDelta = request.onDelta;
+        // Tool input streams as JSON fragments after the block's start
+        // event. Forwarding them keeps consumers (and activity watchdogs)
+        // fed while Claude spends time generating a large tool argument.
+        const toolNamesByIndex = new Map<number, string>();
         for await (const event of stream) {
           if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
             await onDelta({ type: 'text', text: event.delta.text });
+          } else if (event.type === 'content_block_delta' && event.delta.type === 'input_json_delta') {
+            const toolName = toolNamesByIndex.get(event.index);
+            if (toolName !== undefined) {
+              await onDelta({ type: 'tool-call', toolName, inputFragment: event.delta.partial_json });
+            }
           } else if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
             const toolName = mapping.fromWire.get(event.content_block.name) ?? event.content_block.name;
+            toolNamesByIndex.set(event.index, toolName);
             await onDelta({ type: 'tool-call', toolName });
           }
         }

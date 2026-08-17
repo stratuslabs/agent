@@ -650,9 +650,15 @@ test('resumed input is durable before any provider work begins', async () => {
 test('hosted tool calls persist their paired messages to the stored session', async () => {
   const store = new InMemorySessionStore();
   const tools = new ToolRegistry();
+  // The call must be durable before the tool runs — a daemon killed
+  // mid-tool must never hold a session whose side effects have no
+  // recorded attempt (a recovery would replay them).
+  let callDurableAtExecution = false;
   tools.register({
     name: 'demo.echo',
     async execute(input) {
+      const mid = await store.get('hosted-1');
+      callDurableAtExecution = Boolean(mid?.messages.some((m) => m.toolCalls?.[0]?.id === 'hc-1'));
       return { echoed: input };
     },
   });
@@ -682,6 +688,7 @@ test('hosted tool calls persist their paired messages to the stored session', as
   assert.ok(callMessage, 'the tool call must be recorded in durable history');
   assert.ok(resultMessage, 'the tool result must be recorded in durable history');
   assert.equal(resultMessage.toolResult?.ok, true);
+  assert.ok(callDurableAtExecution, 'the tool call must be saved before the tool executes');
 });
 
 test('kernel tool activity is saved as it happens, not only at turn end', async () => {

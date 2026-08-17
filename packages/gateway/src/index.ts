@@ -501,27 +501,42 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     // Config re-resolves per dispatch, so a changed model, credential, or
     // soul pin applies without a restart. The pool dedupes runners by the
-    // resolved configuration. The gateway-wide selection is a default, not
-    // an override: resolveRuntimeConfig gives selection.provider/model top
-    // precedence (they are explicit flags on the CLI), so any default the
-    // soul pins over is dropped here — an agent pinned to a provider keeps
-    // it whatever the gateway was started with, and a default model never
-    // rides along to a different provider than it was chosen for.
+    // resolved configuration. The gateway-wide selection and the daemon's
+    // environment are defaults, not overrides: resolveRuntimeConfig gives
+    // both higher precedence than the soul (they are explicit flags and
+    // env vars on the CLI), so any default the soul pins over is dropped
+    // here — an agent pinned to a provider keeps it whatever the gateway
+    // was started with, and a default model never rides along to a
+    // different provider than it was chosen for.
     const selection: RuntimeSelection = { ...options.selection };
+    let resolveEnv = env;
     if (source.soulPath) {
       selection.soul = source.soulPath;
       const pins = source.soul;
-      if (pins?.provider) {
-        delete selection.provider;
-        if (pins.provider !== options.selection?.provider) {
-          delete selection.model;
+      if (pins?.provider || pins?.model) {
+        const processEnv = { ...(env.processEnv ?? process.env) };
+        const defaultProvider = options.selection?.provider
+          ?? processEnv.STRATUS_PROVIDER
+          ?? processEnv.STRATUSCLAW_PROVIDER;
+        if (pins.provider) {
+          delete selection.provider;
+          delete processEnv.STRATUS_PROVIDER;
+          delete processEnv.STRATUSCLAW_PROVIDER;
+          if (pins.provider !== defaultProvider) {
+            delete selection.model;
+            delete processEnv.STRATUS_MODEL;
+            delete processEnv.STRATUSCLAW_MODEL;
+          }
         }
-      }
-      if (pins?.model) {
-        delete selection.model;
+        if (pins.model) {
+          delete selection.model;
+          delete processEnv.STRATUS_MODEL;
+          delete processEnv.STRATUSCLAW_MODEL;
+        }
+        resolveEnv = { ...env, processEnv };
       }
     }
-    const config = await resolveRuntimeConfig(selection, env);
+    const config = await resolveRuntimeConfig(selection, resolveEnv);
     const runner = runnerFor(config);
 
     const metadata: JsonObject = {
