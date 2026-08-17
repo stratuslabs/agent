@@ -52,9 +52,6 @@ importers:
       '@stratusagent/agents':
         specifier: workspace:*
         version: link:../agents
-      '@stratusagent/channel-slack':
-        specifier: workspace:*
-        version: link:../channel-slack
       '@stratusagent/core':
         specifier: workspace:*
         version: link:../core
@@ -77,6 +74,9 @@ importers:
         specifier: workspace:*
         version: link:../state
     devDependencies:
+      '@stratusagent/channel-slack':
+        specifier: workspace:*
+        version: link:../channel-slack
       '@types/node':
         specifier: ^24.6.0
         version: 24.12.2

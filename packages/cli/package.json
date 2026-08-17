@@ -24,7 +24,6 @@
   },
   "dependencies": {
     "@stratusagent/agents": "workspace:*",
-    "@stratusagent/channel-slack": "workspace:*",
     "@stratusagent/core": "workspace:*",
     "@stratusagent/executor-local": "workspace:*",
     "@stratusagent/gateway": "workspace:*",
@@ -34,6 +33,7 @@
     "@stratusagent/state": "workspace:*"
   },
   "devDependencies": {
+    "@stratusagent/channel-slack": "workspace:*",
     "@types/node": "^24.6.0",
     "typescript": "^5.9.3"
   },
@@ -52,5 +52,13 @@
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "peerDependencies": {
+    "@stratusagent/channel-slack": "workspace:*"
+  },
+  "peerDependenciesMeta": {
+    "@stratusagent/channel-slack": {
+      "optional": true
+    }
   }
 }
