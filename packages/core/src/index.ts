@@ -569,6 +569,16 @@ export class AgentRunner {
     }
   }
 
+  /**
+   * Executes one tool call with this runner's allowlist, approval policy,
+   * events, and executor — for providers that drive their own inner loop
+   * (e.g. the Claude Code runtime) but must run Stratus tools exactly as
+   * if the kernel loop had called them.
+   */
+  async executeHostedToolCall(session: Session, call: ToolCall): Promise<ToolResult> {
+    return this.executeToolCall(session, call);
+  }
+
   private async executeToolCall(session: Session, call: ToolCall): Promise<ToolResult> {
     const allowedTools = this.allowedToolsFor(session);
     if (allowedTools !== undefined && !allowedTools.has(call.toolName)) {
