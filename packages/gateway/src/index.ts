@@ -690,12 +690,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           delete selection.provider;
           delete processEnv.STRATUS_PROVIDER;
           delete processEnv.STRATUSCLAW_PROVIDER;
-          if (defaultProvider !== undefined && pins.provider !== defaultProvider) {
+          if (defaultProvider !== undefined && defaultProvider !== 'demo' && pins.provider !== defaultProvider) {
             // The default model, endpoint, and generic credentials were all
             // chosen for the default provider — none may ride along to the
             // soul's: a base URL would point the pinned provider at the
             // wrong service, and a generic API key would be sent to it.
-            // With NO default selected anywhere, there is nothing those
+            // With NO default selected anywhere — or the credential-less
+            // demo provider as the default — there is nothing those
             // values could have been chosen for except whatever provider
             // the soul selects — exactly the resolver's own reading of a
             // generic credential — so they stay.

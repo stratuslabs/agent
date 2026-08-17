@@ -376,8 +376,14 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       // mode option covers fresh creation.
       try {
         await chmod(filePath, 0o600);
-      } catch {
-        // Not created yet — the append below creates it owner-only.
+      } catch (error) {
+        // Only a missing file is fine (the append below creates it
+        // owner-only). Any other failure means the file EXISTS but cannot
+        // be tightened — never write conversation content into a file
+        // that stays readable by others.
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
       }
       await appendFile(filePath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
       return entry;

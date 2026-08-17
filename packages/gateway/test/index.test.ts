@@ -1482,3 +1482,29 @@ test('the generic key serves a pinned soul when nothing else selects a provider'
   assert.match(session.messages.at(-1)?.content ?? '', /soul-only selection works/);
   assert.ok(apiKeys.some((key) => key === 'sk-generic'));
 });
+
+test('a demo daemon default never sheds the generic key from a pinned soul', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  const apiKeys: string[] = [];
+  const fetchImpl = (async (url: unknown, init?: RequestInit) => {
+    apiKeys.push(new Headers(init?.headers ?? {}).get('x-api-key') ?? '');
+    if (String(url).includes('anthropic')) {
+      return anthropicSseText('demo default, real soul');
+    }
+    return openAiText('unexpected');
+  }) as typeof fetch;
+
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_API_KEY: 'sk-generic' }, fetch: fetchImpl };
+  // The demo provider consumes no credentials, so it cannot be what the
+  // generic key was installed for.
+  const gateway = createGateway({ env, idleTimeoutMs: 0, selection: { provider: 'demo' } });
+  await gateway.start();
+  const session = await gateway.dispatch({ sessionId: 'demo-default-1', agentId: 'ava', userMessage: 'hi' });
+  await gateway.stop();
+
+  assert.equal(session.status, 'completed');
+  assert.match(session.messages.at(-1)?.content ?? '', /demo default, real soul/);
+  assert.ok(apiKeys.some((key) => key === 'sk-generic'));
+});
