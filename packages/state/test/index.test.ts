@@ -69,3 +69,42 @@ test('runtime config defaults to the demo provider with no configuration', async
   });
   assert.equal(config.provider, 'demo');
 });
+
+test('fallback stickiness is per session, never per pooled provider', async () => {
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const makeSession = (id: string) => ({
+    id,
+    agent: { id: 'a', name: 'A' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  });
+
+  const primary = {
+    name: 'primary',
+    async generate({ session }: { session: { id: string } }) {
+      if (session.id === 'flaky') {
+        throw new Error('primary down for flaky');
+      }
+      return { parts: [{ type: 'text' as const, text: 'primary' }] };
+    },
+  };
+  const fallback = {
+    name: 'fallback',
+    async generate() {
+      return { parts: [{ type: 'text' as const, text: 'fallback' }] };
+    },
+  };
+
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, () => {});
+
+  const flaky = await wrapped.generate({ session: makeSession('flaky') } as never);
+  assert.equal((flaky.parts[0] as { text: string }).text, 'fallback');
+  // A different session on the same pooled provider stays on the primary.
+  const healthy = await wrapped.generate({ session: makeSession('healthy') } as never);
+  assert.equal((healthy.parts[0] as { text: string }).text, 'primary');
+  // The flaky session itself stays switched for good.
+  const flakyAgain = await wrapped.generate({ session: makeSession('flaky') } as never);
+  assert.equal((flakyAgain.parts[0] as { text: string }).text, 'fallback');
+});

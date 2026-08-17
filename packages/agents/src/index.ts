@@ -358,6 +358,8 @@ export type DelegateDispatch = (input: {
   agent: AgentDefinition;
   userMessage: string;
   metadata: JsonObject;
+  /** The parent turn's abort signal — a cancelled parent cancels the delegated run too. */
+  signal?: AbortSignal;
 }) => Promise<Session>;
 
 export type DelegateToolOptions = {
@@ -398,7 +400,7 @@ export const createDelegateTool = ({
     },
     required: ['agent', 'prompt'],
   },
-  async execute(input: JsonObject, session: Session) {
+  async execute(input: JsonObject, session: Session, context) {
     const targetRef = typeof input.agent === 'string' ? input.agent : '';
     const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
     if (!targetRef || !prompt) {
@@ -432,6 +434,9 @@ export const createDelegateTool = ({
           ? session.metadata.rootSessionId
           : session.id,
       },
+      // A cancelled parent turn cancels the delegated run with it —
+      // otherwise the parent cannot settle until the target gives up.
+      ...(context?.signal ? { signal: context.signal } : {}),
     });
 
     const reply = [...result.messages]

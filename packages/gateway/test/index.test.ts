@@ -143,19 +143,24 @@ test('delegation runs the target on the target\'s own provider config', async ()
   assert.match(output.reply, /model-b/);
 });
 
-test('the watchdog aborts a turn with no activity and fails the session cleanly', async () => {
+test('the watchdog aborts a stalled streaming turn and fails the session cleanly', async () => {
   const home = await newHome();
-  await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: openai\nmodel: model-slow\n---\n\nYou stall.\n');
+  // The idle watchdog applies to delta-streaming providers (Anthropic API
+  // path); a request that never resolves until its signal fires simulates
+  // a stall, and the abort must cancel the underlying request.
+  await writeSoul(home, 'slow.md', '---\nname: Slow\nprovider: anthropic\nmodel: model-slow\n---\n\nYou stall.\n');
 
-  // A provider request that never resolves until its signal fires — the
-  // watchdog must cut the turn, and the abort must cancel the request.
   const fetchImpl = ((_url: unknown, init?: RequestInit) =>
     new Promise((_resolve, reject) => {
+      if (init?.signal?.aborted) {
+        reject(new DOMException('aborted', 'AbortError'));
+        return;
+      }
       init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
     })) as typeof fetch;
 
-  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
-  const gateway = createGateway({ env, idleTimeoutMs: 200, warn: () => {} });
+  const env = { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 300, warn: () => {} });
   await gateway.start();
 
   await assert.rejects(
@@ -166,6 +171,50 @@ test('the watchdog aborts a turn with no activity and fails the session cleanly'
   const stored = await gateway.store.get('stalled-1');
   assert.equal(stored?.status, 'failed');
   await gateway.stop();
+});
+
+test('the idle watchdog stays off for non-streaming providers', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'steady.md', '---\nname: Steady\nprovider: openai\nmodel: model-a\n---\n\nYou take your time.\n');
+
+  // Slower than the idle timeout, but healthy: a non-streaming provider
+  // emits no deltas, so the watchdog must not treat silence as a stall.
+  const fetchImpl = (async () => {
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    return openAiText('worth the wait');
+  }) as typeof fetch;
+
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 100, warn: () => {} });
+  await gateway.start();
+  const session = await gateway.dispatch({ sessionId: 'steady-1', agentId: 'steady', userMessage: 'take your time' });
+  await gateway.stop();
+
+  assert.equal(session.status, 'completed');
+  assert.match(session.messages.at(-1)?.content ?? '', /worth the wait/);
+});
+
+test('a rotated credential reaches the provider on the next dispatch', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  const authHeaders: string[] = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    authHeaders.push(String((init?.headers as Record<string, string>)?.authorization ?? ''));
+    return openAiText('ok');
+  }) as typeof fetch;
+
+  const processEnv: NodeJS.ProcessEnv = { OPENAI_API_KEY: 'sk-before' };
+  const env = { homeDir: home, cwd: home, processEnv, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+
+  await gateway.dispatch({ sessionId: 'rotate-1', agentId: 'ava', userMessage: 'one' });
+  processEnv.OPENAI_API_KEY = 'sk-after';
+  await gateway.dispatch({ sessionId: 'rotate-2', agentId: 'ava', userMessage: 'two' });
+  await gateway.stop();
+
+  assert.deepEqual(authHeaders, ['Bearer sk-before', 'Bearer sk-after']);
 });
 
 test('a session never crosses agent identities', async () => {

@@ -862,18 +862,21 @@ export const createDemoProvider = (): ModelProvider =>
   });
 
 // Wraps the fallback runtime as a provider: the primary model serves every
-// turn until it throws, then the run switches to the fallback for good.
-const createFallbackWrappedProvider = (
+// turn until it throws, then that session switches to the fallback for
+// good. Stickiness is per session, never per provider instance — a pooled
+// provider serves many sessions (the gateway), and one session's transient
+// failure must not silently reroute every other conversation.
+export const createFallbackWrappedProvider = (
   primary: ModelProvider,
   fallback: ModelProvider,
   onFallback: (error: unknown) => void,
 ): ModelProvider => {
-  let usingFallback = false;
+  const fallbackSessions = new Set<string>();
 
   return {
     name: primary.name,
     async generate(request) {
-      if (!usingFallback) {
+      if (!fallbackSessions.has(request.session.id)) {
         try {
           return await primary.generate(request);
         } catch (error) {
@@ -883,7 +886,7 @@ const createFallbackWrappedProvider = (
           if (hasHostedToolSideEffects(error)) {
             throw error;
           }
-          usingFallback = true;
+          fallbackSessions.add(request.session.id);
           onFallback(error);
         }
       }

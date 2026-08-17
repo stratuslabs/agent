@@ -422,3 +422,40 @@ Curious, a little playful, always cites sources.`);
   assert.deepEqual(reparsed.agent.tools, original.agent.tools);
   assert.equal(reparsed.agent.instructions, original.agent.instructions);
 });
+
+test('delegation forwards the parent turn abort signal into the dispatcher', async () => {
+  const orchestrator = defineAgent({ name: 'Orchestrator', instructions: 'You orchestrate.' });
+  const target = defineAgent({ name: 'Target', instructions: 'You help.' });
+  const registry = createAgentTeam([orchestrator, target]);
+
+  let receivedSignal: AbortSignal | undefined;
+  const tool = createDelegateTool({
+    registry,
+    dispatch: async (input) => {
+      receivedSignal = input.signal;
+      return {
+        id: input.sessionId,
+        agent: input.agent,
+        status: 'completed',
+        messages: [
+          { id: 'm1', role: 'assistant', content: 'done', createdAt: new Date().toISOString() },
+        ],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+    },
+  });
+
+  const controller = new AbortController();
+  const session = {
+    id: 'parent-1',
+    agent: orchestrator,
+    status: 'running' as const,
+    messages: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  await tool.execute({ agent: 'Target', prompt: 'go' }, session, { signal: controller.signal });
+  assert.equal(receivedSignal, controller.signal);
+});

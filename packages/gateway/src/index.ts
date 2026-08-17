@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -249,18 +250,26 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       agentId: input.agent.id,
       userMessage: input.userMessage,
       metadata: input.metadata,
+      // A cancelled parent turn cancels its delegated runs too.
+      ...(input.signal ? { signal: input.signal } : {}),
     }),
   }));
 
   const runners = new Map<string, AgentRunner>();
 
-  const runnerKeyFor = (config: RuntimeConfig): string =>
-    JSON.stringify([
-      config.provider,
-      'model' in config ? config.model : '',
-      'baseUrl' in config ? config.baseUrl ?? '' : '',
-      config.provider === 'anthropic' && config.authToken && !config.apiKey ? 'subscription' : 'key',
-    ]);
+  // Every provider-construction input participates in the key — model,
+  // endpoint, credentials, system prompt, fallback config. A rotated
+  // credential therefore resolves to a NEW runner on the next dispatch
+  // instead of silently reusing a provider built with the old secret.
+  // (Hashed so raw secrets never sit in a map key; the soul is excluded
+  // because provider construction ignores it.)
+  const runnerKeyFor = (config: RuntimeConfig): string => {
+    const { soul: _soul, fetch: _fetch, ...providerInputs } = config as RuntimeConfig & {
+      soul?: unknown;
+      fetch?: unknown;
+    };
+    return createHash('sha256').update(JSON.stringify(providerInputs)).digest('hex');
+  };
 
   const runnerFor = (config: RuntimeConfig): AgentRunner => {
     const key = runnerKeyFor(config);
@@ -305,17 +314,31 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // ---- watchdog -----------------------------------------------------------
 
   /**
+   * True when this configuration's provider actually emits deltas: the
+   * Anthropic API path streams; the Claude Code runtime, OpenAI-compatible
+   * adapters, and the demo provider resolve in one piece. An activity
+   * watchdog is only honest where activity signals exist — for
+   * non-streaming providers the idle timer would be a wall-clock timeout
+   * that kills slow-but-healthy turns, so it stays off for them (their
+   * tool phases are covered by executor timeouts regardless).
+   */
+  const streamsDeltas = (config: RuntimeConfig): boolean =>
+    config.provider === 'anthropic' && Boolean(config.apiKey);
+
+  /**
    * Progress-based abort: the timer resets on every event the session
-   * emits (deltas included — gateway runners always stream), so a healthy
-   * long turn keeps itself alive while a stalled one is cut loose. Tool
-   * executions carry their own executor timeouts underneath this.
+   * emits, so a healthy long turn keeps itself alive while a stalled one
+   * is cut loose. Tool executions carry their own executor timeouts
+   * underneath this.
    */
   const withWatchdog = async <T>(
     sessionId: string,
     external: AbortSignal | undefined,
+    idleEnabled: boolean,
     run: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> => {
-    if (idleTimeoutMs <= 0 && !external) {
+    const effectiveIdleMs = idleEnabled ? idleTimeoutMs : 0;
+    if (effectiveIdleMs <= 0 && !external) {
       return run(new AbortController().signal);
     }
 
@@ -330,7 +353,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     let timer: NodeJS.Timeout | undefined;
     const resetTimer = (): void => {
-      if (idleTimeoutMs <= 0) {
+      if (effectiveIdleMs <= 0) {
         return;
       }
       if (timer) {
@@ -340,9 +363,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // what guarantees the process can always make progress on it.
       timer = setTimeout(() => {
         timedOut = true;
-        warn(`watchdog: no activity on session ${sessionId} for ${idleTimeoutMs}ms; aborting the turn`);
+        warn(`watchdog: no activity on session ${sessionId} for ${effectiveIdleMs}ms; aborting the turn`);
         controller.abort();
-      }, idleTimeoutMs);
+      }, effectiveIdleMs);
     };
 
     const unsubscribe = bus.subscribe((event: StratusEvent) => {
@@ -356,7 +379,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return await run(controller.signal);
     } catch (error) {
       if (timedOut && error instanceof RunAbortedError) {
-        throw new RunAbortedError(`Run aborted: no activity for ${idleTimeoutMs}ms`);
+        throw new RunAbortedError(`Run aborted: no activity for ${effectiveIdleMs}ms`);
       }
       throw error;
     } finally {
@@ -398,7 +421,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       ...input.metadata,
     };
 
-    return withWatchdog(input.sessionId, input.signal, async (signal) => {
+    return withWatchdog(input.sessionId, input.signal, streamsDeltas(config), async (signal) => {
       const existing = await store.get(input.sessionId);
       if (existing) {
         if (existing.agent.id !== agent.id) {
