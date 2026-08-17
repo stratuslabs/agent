@@ -542,6 +542,13 @@ export class AgentRunner {
       throw new Error(`Session not found: ${input.sessionId}`);
     }
 
+    // Mid-turn saves make tool calls durable before their results; a
+    // daemon killed in between leaves a call with no result, and provider
+    // wire formats reject a tool call that is never answered. Close each
+    // dangling call with an explicit interrupted result so the durable
+    // conversation stays resumable.
+    this.reconcileInterruptedToolCalls(session);
+
     session.status = 'running';
     delete session.lastError;
     session.messages.push({
@@ -561,6 +568,51 @@ export class AgentRunner {
     await this.bus.emit({ type: 'session.updated', sessionId: working.id, status: working.status });
 
     return this.executeTurns(working, input.signal);
+  }
+
+  /**
+   * Appends a synthetic failed result directly after every tool call that
+   * has none — the durable trace of a turn interrupted between the call's
+   * save and its result's. The model sees an honest record ("interrupted,
+   * never ran to completion") instead of a wire-format violation, and a
+   * resume can decide to retry rather than assume the side effect landed.
+   */
+  private reconcileInterruptedToolCalls(session: Session): void {
+    const answered = new Set<string>();
+    for (const message of session.messages) {
+      if (message.role === 'tool' && message.toolResult) {
+        answered.add(message.toolResult.callId);
+      }
+    }
+
+    for (let index = 0; index < session.messages.length; index += 1) {
+      const message = session.messages[index];
+      if (message?.role !== 'assistant' || !message.toolCalls) {
+        continue;
+      }
+      for (const call of message.toolCalls) {
+        if (answered.has(call.id)) {
+          continue;
+        }
+        answered.add(call.id);
+        const result: ToolResult = {
+          callId: call.id,
+          toolName: call.toolName,
+          ok: false,
+          output: null,
+          error: 'Tool execution was interrupted before a result was recorded; it may not have run to completion.',
+        };
+        index += 1;
+        session.messages.splice(index, 0, {
+          id: `${session.id}:tool:${call.id}`,
+          role: 'tool',
+          name: call.toolName,
+          content: JSON.stringify(result),
+          createdAt: new Date().toISOString(),
+          toolResult: result,
+        });
+      }
+    }
   }
 
   /** Tool names this session's agent may use, or undefined for no limit. */

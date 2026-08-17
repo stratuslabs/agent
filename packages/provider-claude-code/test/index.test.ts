@@ -360,3 +360,48 @@ test('the idle timer suspends across hosted tool waits and its abort reaches hos
   assert.ok(signal, 'hosted tools must receive the abort signal even without a caller signal');
   assert.equal(signal.aborted, false, 'the idle timer must not fire during a hosted tool wait');
 });
+
+test('transcripts replay hosted tool calls alongside their results', async () => {
+  // The next query must see what was asked, not just what came back — a
+  // memory id without the remembered fact is half the history.
+  const prompts: string[] = [];
+  const provider = createClaudeCodeProvider({
+    queryFn: ({ prompt }) => {
+      prompts.push(prompt);
+      return (async function* () {
+        yield { type: 'result', subtype: 'success', result: 'ok' } as never;
+      })();
+    },
+  });
+
+  const now = new Date().toISOString();
+  await provider.generate({
+    session: createSession({
+      messages: [
+        { id: 'u1', role: 'user', content: 'remember that I like tea', createdAt: now },
+        {
+          id: 'a1',
+          role: 'assistant',
+          content: '',
+          createdAt: now,
+          toolCalls: [{ id: 'c1', toolName: 'memory.remember', input: { fact: 'likes tea' } }],
+        },
+        {
+          id: 't1',
+          role: 'tool',
+          name: 'memory.remember',
+          content: '{"ok":true}',
+          createdAt: now,
+          toolResult: { callId: 'c1', toolName: 'memory.remember', ok: true, output: { id: 'mem-1' } },
+        },
+        { id: 'u2', role: 'user', content: 'what do I like?', createdAt: now },
+      ],
+    }),
+  } as never);
+
+  const prompt = prompts[0] ?? '';
+  assert.match(prompt, /assistant called tool memory\.remember/);
+  assert.match(prompt, /likes tea/);
+  // The empty runner message that carried the call renders nothing extra.
+  assert.doesNotMatch(prompt, /\[assistant\] \n/);
+});

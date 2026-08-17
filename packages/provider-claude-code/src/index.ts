@@ -277,6 +277,18 @@ const createPrompt = (request: ProviderRequest): string => {
       lines.push(`[tool ${message.name ?? 'result'}] ${message.content}`);
       continue;
     }
+    // A tool call is part of the assistant's turn: without it, the next
+    // query would see a result with no record of what was asked (e.g. a
+    // memory id but not the remembered fact) and reason over half the
+    // history. Its runner message carries empty content, so skip that.
+    if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
+      for (const call of message.toolCalls) {
+        lines.push(`[assistant called tool ${call.toolName}] ${JSON.stringify(call.input)}`);
+      }
+      if (message.content.length === 0) {
+        continue;
+      }
+    }
     lines.push(`[${message.role}] ${message.content}`);
   }
   lines.push('', 'Continue the conversation by replying to the latest user message.');

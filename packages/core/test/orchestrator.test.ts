@@ -784,3 +784,50 @@ test('rejected tool calls settle with a tool.completed event', async () => {
   assert.equal(settled.type === 'tool.completed' && settled.result.ok, false);
   assert.match(settled.type === 'tool.completed' ? settled.result.error ?? '' : '', /Tool not found: ghost/);
 });
+
+test('resume reconciles a tool call whose result was never recorded', async () => {
+  const store = new InMemorySessionStore();
+  const now = new Date().toISOString();
+  // The durable shape a daemon crash leaves behind: the call was saved
+  // before execution, the result never landed.
+  await store.create({
+    id: 'dangling-1',
+    agent: { id: 'a', name: 'A' },
+    status: 'running',
+    messages: [
+      { id: 'u1', role: 'user', content: 'remember it', createdAt: now },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '',
+        createdAt: now,
+        toolCalls: [{ id: 'c-lost', toolName: 'remember', input: { fact: 'x' } }],
+      },
+    ],
+  });
+
+  let sawInterruptedResult = false;
+  const provider: ModelProvider = {
+    name: 'p',
+    async generate({ session }) {
+      // The provider must see a well-formed history: every call answered.
+      sawInterruptedResult = session.messages.some(
+        (m) => m.role === 'tool' && m.toolResult?.callId === 'c-lost' && m.toolResult.ok === false,
+      );
+      return { parts: [{ type: 'text', text: 'recovered' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, store });
+  const session = await runner.resume({ sessionId: 'dangling-1', userMessage: 'continue' });
+
+  assert.equal(session.status, 'completed');
+  assert.ok(sawInterruptedResult, 'the dangling call must be answered before provider work');
+  const callIndex = session.messages.findIndex((m) => m.toolCalls?.[0]?.id === 'c-lost');
+  const synthetic = session.messages[callIndex + 1];
+  assert.equal(synthetic?.role, 'tool');
+  assert.equal(synthetic?.toolResult?.callId, 'c-lost');
+  assert.equal(synthetic?.toolResult?.ok, false);
+  assert.match(synthetic?.toolResult?.error ?? '', /interrupted/i);
+  assert.equal(session.messages.at(-1)?.content, 'recovered');
+});
