@@ -25,6 +25,7 @@ Agents may run on either billing path, and today they aren't equivalent: the cla
 
 - The provider builds the MCP server per `generate` call from `ProviderRequest.tools` (the runner already resolves the agent's allowlist), so tool scope always matches the agent, including delegated sub-agents which carry their own allowlists.
 - Approval blocking: an SDK tool call awaiting remote approval simply awaits the kernel promise — the SDK sees a slow tool, not a special state. The activity watchdog (01) must therefore treat "awaiting approval" as progress, not a stall.
+- **Restart survival is explicitly narrower on this path.** Step 03's checkpointed recovery is keyed to a kernel provider-response part; it cannot reconstruct the SDK's inner loop or the MCP handler awaiting the decision — that state dies with the daemon. So this provider is excluded from the resume-the-exact-call guarantee: if `stratusd` restarts while an SDK-path call awaits approval, recovery fails the turn cleanly — the pending approval prompt is expired/updated, the session is marked `failed` with an explicit reason, and the user is told to resend. Honest degradation beats a half-specified continuation protocol.
 - Keep the existing billing hygiene: blank `ANTHROPIC_API_KEY` in the SDK environment, set `CLAUDE_CODE_OAUTH_TOKEN`, keep `CLAUDE_AGENT_SDK_CLIENT_APP: 'stratus-agent'`.
 - If SDK sessions prove unreliable for resume-across-restarts, fall back to replaying kernel history into a fresh SDK session — correctness over cleverness; note the cost in the PR.
 
@@ -34,8 +35,10 @@ Agents may run on either billing path, and today they aren't equivalent: the cla
 - A gated tool call from the SDK path triggers the same Slack approval buttons as the API-key path, and **Deny** returns a failed tool result the model handles gracefully.
 - The SDK cannot invoke any capability outside the agent's allowlist (test: an agent without `demo.echo` asks for it; call is rejected at the kernel gate, not by prompt luck).
 - Parity suite green on both providers; no behavior change on `provider-anthropic`.
+- A daemon restart during an SDK-path pending approval fails that turn cleanly: the approval prompt is expired (no orphaned buttons), the session shows a distinguishable failure reason, and the pending call was never executed.
 
 ## Open questions
 
 - Streaming deltas out of the SDK: partial-message events vary by SDK version — confirm what the pinned `@anthropic-ai/claude-agent-sdk` emits and map what's available; text-only deltas are acceptable for v1 of this step.
 - Where SDK session state lives on disk (the SDK manages its own storage) and whether it needs to be included in any backup/retention story from 01.
+- Whether a durable continuation for the SDK inner loop is ever worth building (replay the SDK session up to the pending call on restart?) or clean failure remains the long-term answer.

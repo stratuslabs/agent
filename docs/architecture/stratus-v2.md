@@ -42,7 +42,7 @@ The kernel keeps the v1 discipline: contracts, the runner loop, in-memory defaul
 Landing with the gateway (step 01), because every layer above needs them:
 
 1. **Streaming.** The `StratusEvent` union grows delta events (text and tool-call deltas) so channels can edit messages as tokens arrive and UIs can render live. Non-streaming providers keep working; deltas are additive.
-2. **Cancellation.** `run`/`resume` accept an abort signal. A daemon cannot exist without a way to stop a turn.
+2. **Cancellation.** `run`/`resume` accept an abort signal, and it propagates through the `Executor`/`Tool` contracts so in-flight subprocesses die with the turn. A daemon cannot exist without a way to stop a turn.
 3. **Durability in practice.** The `SessionStore` seam already exists; the gateway supplies a real implementation and the kernel guarantees sessions round-trip through it (including provider metadata like the Anthropic raw-turn cache).
 
 Contract extensions owned by later steps:
