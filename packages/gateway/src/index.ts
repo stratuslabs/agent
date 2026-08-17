@@ -246,10 +246,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const id = config.soul.agent.id;
     // The normal setup layout has the default soul in ~/.stratus/agents
     // too: keep the roster registration — its soulPath drives per-dispatch
-    // refresh — and only register a pathless source for a config-only soul.
+    // refresh. A config-only soul registers with the path it resolved
+    // from, so it refreshes (and keeps its pins current) exactly like a
+    // roster soul, resumed sessions included.
     const existing = sources.get(id);
     if (!existing?.soulPath) {
-      registerSource({ definition: config.soul.agent, soul: config.soul });
+      registerSource({
+        definition: config.soul.agent,
+        soul: config.soul,
+        ...(config.soulPath ? { soulPath: config.soulPath } : {}),
+      });
     }
     return id;
   };
@@ -327,8 +333,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // (Hashed so raw secrets never sit in a map key; the soul is excluded
   // because provider construction ignores it.)
   const runnerKeyFor = (config: RuntimeConfig): string => {
-    const { soul: _soul, fetch: _fetch, ...providerInputs } = config as RuntimeConfig & {
+    const { soul: _soul, soulPath: _soulPath, fetch: _fetch, ...providerInputs } = config as RuntimeConfig & {
       soul?: unknown;
+      soulPath?: unknown;
       fetch?: unknown;
     };
     return createHash('sha256').update(JSON.stringify(providerInputs)).digest('hex');

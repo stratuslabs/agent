@@ -69,7 +69,7 @@ export interface FallbackRuntime {
 }
 
 export type RuntimeConfig =
-  | { provider: 'demo'; soul?: ParsedSoul }
+  | { provider: 'demo'; soul?: ParsedSoul; soulPath?: string }
   | {
       provider: 'openai';
       model: string;
@@ -78,6 +78,8 @@ export type RuntimeConfig =
       systemPrompt?: string;
       fetch?: typeof fetch;
       soul?: ParsedSoul;
+      /** Absolute path the soul was loaded from, for callers that re-read it. */
+      soulPath?: string;
       fallback?: FallbackRuntime;
     }
   | {
@@ -90,6 +92,8 @@ export type RuntimeConfig =
       systemPrompt?: string;
       fetch?: typeof fetch;
       soul?: ParsedSoul;
+      /** Absolute path the soul was loaded from, for callers that re-read it. */
+      soulPath?: string;
       fallback?: FallbackRuntime;
     };
 
@@ -505,11 +509,11 @@ export const discoverActiveConfig = async (
 
 // A soul travels with the run: an explicit soul path outranks STRATUS_SOUL,
 // which outranks the config file's "soul" key.
-export const resolveSoul = async (
+export const resolveSoulPath = (
   selection: RuntimeSelection,
   env: StateEnvironment,
   fileConfig: StratusConfigFile,
-): Promise<ParsedSoul | undefined> => {
+): string | undefined => {
   const processEnv = readProcessEnv(env);
   const soulPath = selection.soul
     ?? readNonEmptyString(processEnv.STRATUS_SOUL)
@@ -520,7 +524,18 @@ export const resolveSoul = async (
     return undefined;
   }
 
-  const resolvedPath = path.resolve(readWorkingDirectory(env), String(soulPath));
+  return path.resolve(readWorkingDirectory(env), String(soulPath));
+};
+
+export const resolveSoul = async (
+  selection: RuntimeSelection,
+  env: StateEnvironment,
+  fileConfig: StratusConfigFile,
+): Promise<ParsedSoul | undefined> => {
+  const resolvedPath = resolveSoulPath(selection, env, fileConfig);
+  if (!resolvedPath) {
+    return undefined;
+  }
   return loadSoulFile(resolvedPath);
 };
 
@@ -592,7 +607,8 @@ export const resolveRuntimeConfig = async (
   const processEnv = readProcessEnv(env);
   const configLocation = await resolveConfigLocation(selection, env);
   const fileConfig = configLocation ? await loadConfigFile(configLocation.path) : {};
-  const soul = await resolveSoul(selection, env, fileConfig);
+  const soulPath = resolveSoulPath(selection, env, fileConfig);
+  const soul = soulPath ? await loadSoulFile(soulPath) : undefined;
 
   // Explicit flags and env vars outrank the soul's own provider/model hints,
   // which outrank the config file's defaults.
@@ -604,7 +620,7 @@ export const resolveRuntimeConfig = async (
     ?? 'demo';
 
   if (provider === 'demo') {
-    return { provider: 'demo', ...(soul ? { soul } : {}) };
+    return { provider: 'demo', ...(soul ? { soul } : {}), ...(soulPath ? { soulPath } : {}) };
   }
 
   // A config file's model/baseUrl/apiKeyEnv were written for the provider
@@ -731,6 +747,9 @@ export const resolveRuntimeConfig = async (
 
   if (soul) {
     resolved.soul = soul;
+  }
+  if (soulPath) {
+    resolved.soulPath = soulPath;
   }
 
   // A configured fallback model kicks in when the default model errors

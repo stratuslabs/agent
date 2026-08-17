@@ -916,3 +916,27 @@ test('an agentId-less session resumes with its stored agent after the default so
   );
   assert.equal(fresh.agent.name, 'Mira');
 });
+
+test('an edited config-only default soul reaches resumed sessions on their next turn', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\n---\n\nYou are Nova, mark one.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
+
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+
+  const opened = await gateway.dispatch({ sessionId: 'edited-default-1', userMessage: 'hello' });
+  assert.match(opened.agent.instructions ?? '', /mark one/);
+
+  // Edit the soul in place (same identity). The next turn of the SAME
+  // session must run with the new persona — a config-only soul refreshes
+  // per dispatch exactly like a roster soul.
+  await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\n---\n\nYou are Nova, mark two.\n');
+  const resumed = await gateway.dispatch({ sessionId: 'edited-default-1', userMessage: 'and now?' });
+  await gateway.stop();
+
+  assert.equal(resumed.agent.name, 'Nova');
+  assert.match(resumed.agent.instructions ?? '', /mark two/);
+});
