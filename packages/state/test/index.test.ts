@@ -108,3 +108,57 @@ test('fallback stickiness is per session, never per pooled provider', async () =
   const flakyAgain = await wrapped.generate({ session: makeSession('flaky') } as never);
   assert.equal((flakyAgain.parts[0] as { text: string }).text, 'fallback');
 });
+
+test('fallback stickiness survives a wrapper rebuild via session metadata', async () => {
+  const { createFallbackWrappedProvider, FALLBACK_ACTIVE_METADATA_KEY } = await import('../src/index.ts');
+  const session = {
+    id: 'restarted',
+    agent: { id: 'a', name: 'A' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+    metadata: { [FALLBACK_ACTIVE_METADATA_KEY]: true },
+  };
+
+  let primaryCalls = 0;
+  const primary = {
+    name: 'primary',
+    async generate() {
+      primaryCalls += 1;
+      return { parts: [{ type: 'text' as const, text: 'primary' }] };
+    },
+  };
+  const fallback = {
+    name: 'fallback',
+    async generate() {
+      return { parts: [{ type: 'text' as const, text: 'fallback' }] };
+    },
+  };
+
+  // A fresh wrapper (restarted daemon / rebuilt runner) still honors the
+  // durable switch recorded on the session.
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, () => {});
+  const result = await wrapped.generate({ session } as never);
+  assert.equal((result.parts[0] as { text: string }).text, 'fallback');
+  assert.equal(primaryCalls, 0);
+});
+
+test('a fallback switch records itself in session metadata', async () => {
+  const { createFallbackWrappedProvider, FALLBACK_ACTIVE_METADATA_KEY } = await import('../src/index.ts');
+  const session = {
+    id: 'switching',
+    agent: { id: 'a', name: 'A' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  } as { id: string; metadata?: Record<string, unknown> };
+
+  const primary = { name: 'p', async generate() { throw new Error('down'); } };
+  const fallback = { name: 'f', async generate() { return { parts: [{ type: 'text' as const, text: 'ok' }] }; } };
+
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, () => {});
+  await wrapped.generate({ session } as never);
+  assert.equal(session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY], true);
+});

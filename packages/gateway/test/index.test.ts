@@ -327,3 +327,34 @@ test('the session database and its directory are owner-only', async () => {
   assert.equal(((await stat(path.dirname(dbPath))).mode & 0o777), 0o700);
   assert.equal(((await stat(dbPath)).mode & 0o777), 0o600);
 });
+
+test('a queued dispatch whose signal aborted while waiting never mutates the session', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    return openAiText(`echo ${body.messages.at(-1)?.content ?? ''}`);
+  }) as typeof fetch;
+
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+
+  const controller = new AbortController();
+  const first = gateway.dispatch({ sessionId: 'q-1', agentId: 'ava', userMessage: 'first' });
+  const second = gateway.dispatch({ sessionId: 'q-1', agentId: 'ava', userMessage: 'second', signal: controller.signal });
+  controller.abort(); // fires while `second` waits behind `first`
+
+  const settled = await first;
+  await assert.rejects(() => second, (error: Error) => error instanceof RunAbortedError);
+
+  assert.equal(settled.status, 'completed');
+  const stored = await gateway.store.get('q-1');
+  await gateway.stop();
+  // The cancelled message never entered durable history and the session
+  // was not marked failed by work that never ran.
+  assert.deepEqual(stored?.messages.filter((m) => m.role === 'user').map((m) => m.content), ['first']);
+  assert.equal(stored?.status, 'completed');
+});

@@ -411,6 +411,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   let stopping = false;
 
   const dispatchInternal = async (input: DispatchInput): Promise<Session> => {
+    // A dispatch whose signal fired while it queued behind another turn
+    // must not touch durable state: without this check, the runner would
+    // load the session, append the cancelled user message, and save it as
+    // failed — polluting future model history with input never processed.
+    if (input.signal?.aborted) {
+      throw new RunAbortedError();
+    }
+
     const agentId = input.agentId ?? DEFAULT_STRATUS_AGENT.id;
     const source = await refreshAgent(agentId);
     const agent = source.definition;

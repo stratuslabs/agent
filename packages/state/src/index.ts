@@ -861,11 +861,21 @@ export const createDemoProvider = (): ModelProvider =>
     },
   });
 
+/**
+ * Session metadata flag marking a conversation as switched to its fallback
+ * model. Lives on the session (persisted by the runner's saves) so the
+ * documented session-sticky behavior survives daemon restarts and runner
+ * rebuilds — a conversation never silently returns to the primary provider.
+ */
+export const FALLBACK_ACTIVE_METADATA_KEY = 'fallbackActive';
+
 // Wraps the fallback runtime as a provider: the primary model serves every
 // turn until it throws, then that session switches to the fallback for
 // good. Stickiness is per session, never per provider instance — a pooled
 // provider serves many sessions (the gateway), and one session's transient
-// failure must not silently reroute every other conversation.
+// failure must not silently reroute every other conversation. The switch
+// is recorded in session metadata so it is as durable as the session; the
+// in-memory set only covers the window before the next save.
 export const createFallbackWrappedProvider = (
   primary: ModelProvider,
   fallback: ModelProvider,
@@ -876,7 +886,9 @@ export const createFallbackWrappedProvider = (
   return {
     name: primary.name,
     async generate(request) {
-      if (!fallbackSessions.has(request.session.id)) {
+      const switched = request.session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true
+        || fallbackSessions.has(request.session.id);
+      if (!switched) {
         try {
           return await primary.generate(request);
         } catch (error) {
@@ -893,6 +905,7 @@ export const createFallbackWrappedProvider = (
             throw error;
           }
           fallbackSessions.add(request.session.id);
+          (request.session.metadata ??= {})[FALLBACK_ACTIVE_METADATA_KEY] = true;
           onFallback(error);
         }
       }

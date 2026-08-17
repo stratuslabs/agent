@@ -616,3 +616,68 @@ test('approval policies receive the turn signal in their context', async () => {
 
   assert.equal(sawSignal, controller.signal);
 });
+
+test('resumed input is durable before any provider work begins', async () => {
+  const store = new InMemorySessionStore();
+  let storedAtGenerate: string[] = [];
+
+  const provider: ModelProvider = {
+    name: 'inspector',
+    async generate({ session }) {
+      const stored = await store.get(session.id);
+      storedAtGenerate = (stored?.messages ?? []).filter((m) => m.role === 'user').map((m) => m.content);
+      if (storedAtGenerate.length > 1) {
+        throw new Error('provider crashed mid-turn');
+      }
+      return { parts: [{ type: 'text', text: 'first reply' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, store });
+  await runner.initialize();
+  await runner.run({ sessionId: 'durable-1', agent: { id: 'a', name: 'A' }, userMessage: 'first' });
+
+  await assert.rejects(() => runner.resume({ sessionId: 'durable-1', userMessage: 'second' }));
+  // The resumed message was already saved when the provider started —
+  // a crash after this point cannot lose accepted input.
+  assert.deepEqual(storedAtGenerate, ['first', 'second']);
+  const after = await store.get('durable-1');
+  assert.deepEqual(after?.messages.filter((m) => m.role === 'user').map((m) => m.content), ['first', 'second']);
+});
+
+test('hosted tool calls persist their paired messages to the stored session', async () => {
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'demo.echo',
+    async execute(input) {
+      return { echoed: input };
+    },
+  });
+
+  const provider: ModelProvider = {
+    name: 'unused',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'unused' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools, store });
+  await runner.initialize();
+
+  const session = await store.create({
+    id: 'hosted-1',
+    agent: { id: 'a', name: 'A' },
+    status: 'running',
+    messages: [],
+  });
+
+  await runner.executeHostedToolCall(session, { id: 'hc-1', toolName: 'demo.echo', input: { text: 'hi' } });
+
+  const stored = await store.get('hosted-1');
+  const callMessage = stored?.messages.find((m) => m.toolCalls?.[0]?.id === 'hc-1');
+  const resultMessage = stored?.messages.find((m) => m.toolResult?.callId === 'hc-1');
+  assert.ok(callMessage, 'the tool call must be recorded in durable history');
+  assert.ok(resultMessage, 'the tool result must be recorded in durable history');
+  assert.equal(resultMessage.toolResult?.ok, true);
+});

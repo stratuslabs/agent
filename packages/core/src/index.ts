@@ -546,9 +546,16 @@ export class AgentRunner {
       createdAt: new Date().toISOString(),
     });
 
-    await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
+    // The accepted input is durable BEFORE any provider work: a crash
+    // mid-turn must not silently lose a message the caller believes was
+    // received — restarting with the same session id recovers it.
+    await this.store.save(session);
+    const stored = await this.store.get(session.id);
+    const working = stored ?? session;
 
-    return this.executeTurns(session, input.signal);
+    await this.bus.emit({ type: 'session.updated', sessionId: working.id, status: working.status });
+
+    return this.executeTurns(working, input.signal);
   }
 
   /** Tool names this session's agent may use, or undefined for no limit. */
@@ -673,7 +680,32 @@ export class AgentRunner {
    * if the kernel loop had called them.
    */
   async executeHostedToolCall(session: Session, call: ToolCall, context?: ExecutionContext): Promise<ToolResult> {
-    return this.executeToolCall(session, call, context?.signal);
+    const result = await this.executeToolCall(session, call, context?.signal);
+
+    // Persistence is part of this seam's contract, not a courtesy: a
+    // provider-driven loop consumes tool results internally and returns
+    // only final text, so without recording here the durable session would
+    // omit every hosted tool action — including its side effects. The
+    // paired messages match what the kernel loop writes, and the save
+    // makes the record survive even if the provider turn later fails.
+    session.messages.push({
+      id: `${session.id}:assistant:${session.messages.length + 1}`,
+      role: 'assistant',
+      content: '',
+      createdAt: new Date().toISOString(),
+      toolCalls: [call],
+    });
+    session.messages.push({
+      id: `${session.id}:tool:${result.callId}`,
+      role: 'tool',
+      name: result.toolName,
+      content: JSON.stringify(result),
+      createdAt: new Date().toISOString(),
+      toolResult: result,
+    });
+    await this.store.save(session);
+
+    return result;
   }
 
   private async executeToolCall(session: Session, call: ToolCall, signal?: AbortSignal): Promise<ToolResult> {
