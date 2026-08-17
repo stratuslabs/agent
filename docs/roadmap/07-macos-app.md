@@ -16,15 +16,15 @@ By this point the runtime story is complete (gateway, Slack, permissions, tools,
 - **Roster management**: list agents with avatars/status, edit souls (form view + raw markdown view of the same file), duplicate, archive/delete.
 - **Settings management**: default/fallback provider and model, credential entry (validated against the live API the same way `stratus setup` verifies keys), per-agent permission mode and approver (03), channel bindings (which Slack app/token pair an agent uses, 02).
 - **Daemon control**: start/stop/restart `stratusd`, install/uninstall the launchd plist, health and uptime from `GET /api/health`, a live activity feed from the WS event stream (read-only monitoring, not chat).
-- Distribution: signed + notarized DMG (StratusOS's `build-dmg.sh` and Sparkle update wiring are prior art to reuse).
+- Distribution: signed + notarized DMG with auto-updates (Sparkle).
 
-**Out:** chat UI (explicitly — the dashboard covers it, and the API makes it easy to add here later if ever wanted); iOS (dropped from the roadmap entirely); editing memory contents; any agent-loop or provider code in Swift. The app must contain **zero runtime** — that is the StratusOS lesson written into scope.
+**Out:** chat UI (explicitly — the dashboard covers it, and the API makes it easy to add here later if ever wanted); iOS (dropped from the roadmap entirely); editing memory contents; any agent-loop or provider code in Swift. The app must contain **zero runtime**.
 
 ## Design sketch
 
 - **Two access paths, one source of truth.** When the daemon runs, the app uses the control API (05) with the token from `~/.stratus/gateway-token`. For state that must be editable while the daemon is down (souls, config, credentials), the app reads/writes the same `~/.stratus` files the CLI uses — the file formats (`config.json`, `credentials.json` 0600, `agents/*.md` soul frontmatter) are the compatibility contract, so this step includes documenting them as such in the repo (`docs/architecture/state-files.md`, referenced from both CLI and app).
 - Soul frontmatter parsing exists once in TypeScript (`parseSoul` in `packages/agents`); the Swift side needs a parser for the same minimal dialect — keep the dialect frozen or expose a validation endpoint on the API so the app can round-trip safely. (Bias: validate via API when daemon is up; conservative writer in Swift regardless.)
-- Menu bar presence with the roster at a glance; main window for creation/editing. No Metal launch animations before the app does its job (StratusOS, again).
+- Menu bar presence with the roster at a glance; main window for creation/editing.
 - Credentials go into `~/.stratus/credentials.json` to stay CLI-compatible (not Keychain-only), preserving its 0600 posture; Keychain migration is a possible later hardening once both consumers can read it.
 
 ## Acceptance criteria

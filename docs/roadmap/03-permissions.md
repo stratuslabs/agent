@@ -6,13 +6,13 @@ Agents can be trusted with real tools (shell, files, browser) while running unat
 
 ## Why now
 
-Phase 1 gives agents an always-on body; before they get real capabilities (step 06) they need judgment. The current options — `always`/`ask`/`never` with a TTY prompt (`createApprovalPolicy` in `packages/cli/src/index.ts`) — don't work in a daemon: `ask` has no terminal to ask on. StratusOS already paid the tuition for this design; we port its engine rather than rediscover it.
+Phase 1 gives agents an always-on body; before they get real capabilities (step 06) they need judgment. The current options — `always`/`ask`/`never` with a TTY prompt (`createApprovalPolicy` in `packages/cli/src/index.ts`) — don't work in a daemon: `ask` has no terminal to ask on.
 
 ## Scope
 
 **In:**
 
-- New package `@stratusagent/permissions`, implementing the kernel's `ApprovalPolicy` seam. Ported semantics from StratusOS's `PermissionManager.swift`:
+- New package `@stratusagent/permissions`, implementing the kernel's `ApprovalPolicy` seam:
   - **Safe-command allowlist** for shell tools (a curated base-command set: `git`, `ls`, `grep`, …), merged with a **per-agent persistent whitelist** at `~/.stratus/agents/<id>.whitelist.json`.
   - **Metacharacter defeat**: any `|`, `;`, `` ` ``, `&&`, `||`, `$(`, or redirection disqualifies a command from auto-approval regardless of its base command — the non-obvious rule that makes an allowlist real.
   - **Three-tier resolution**: session cache → persistent whitelist → interactive approval. "Always allow" whitelists the command *base*, never the full string.

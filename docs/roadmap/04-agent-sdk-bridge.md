@@ -6,7 +6,7 @@ Agents billed through a Claude subscription (the `@stratusagent/provider-claude-
 
 ## Why now
 
-The fleet may run on either billing path, and today they aren't equivalent: the claude-code provider passes `tools: []` with `maxTurns: 1` and flattens the session into a `Conversation so far:` prompt string, so a subscription agent can't even use `memory.remember`. This is also where we permanently resolve the fork that sank StratusOS: **the kernel owns the loop**; the Agent SDK must never become a side door around permissions and memory.
+Agents may run on either billing path, and today they aren't equivalent: the claude-code provider passes `tools: []` with `maxTurns: 1` and flattens the session into a `Conversation so far:` prompt string, so a subscription agent can't even use `memory.remember`. This is also where the "kernel owns the loop" decision becomes enforceable: the Agent SDK must never become a side door around permissions and memory.
 
 ## Scope
 

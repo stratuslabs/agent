@@ -15,15 +15,15 @@ Steps are ordered by dependency, not by calendar. Numbers are stable identifiers
 | 05 | [Control API + web dashboard](./05-control-api.md) | Not started | One API for every surface; a real chat/monitoring UI |
 | 06 | [Tool packs: fs, shell, browser](./06-tool-packs.md) | Not started | Reusable capability packages agents opt into by allowlist |
 | 07 | [macOS app: visual agent creation and management](./07-macos-app.md) | Not started | Create and manage agents without the CLI |
-| 08 | [Productization: hosted service config, VM recipe, credential leases](./08-productization.md) | Not started | The SaaS and client-VM tracks as configurations of the framework |
+| 08 | [Deployment profiles: single-tenant VM, hosted multi-tenant, credential leases](./08-deployment-profiles.md) | Not started | Non-local deployments as configurations of the framework |
 
 ## Phases
 
-- **Phase 1 — the fleet is live (steps 01–02).** After the gateway and the Slack channel, the Stratus Labs agents run on the Mac Minis and answer in Slack. This is the milestone everything else builds on.
+- **Phase 1 — the fleet is live (steps 01–02).** After the gateway and the Slack channel, agents run always-on on your own hardware and answer in Slack. This is the milestone everything else builds on.
 - **Phase 2 — trusted and on subscription (steps 03–04).** The permission engine makes unattended tool use safe; the SDK bridge makes the Claude-subscription billing path a full citizen.
 - **Phase 3 — surfaces and capabilities (steps 05–06).** The control API turns the gateway into a platform; the dashboard replaces the smoke-test page; tool packs give agents real capabilities to opt into.
 - **Phase 4 — the management app (step 07).** The macOS app makes agent creation and settings a visual experience instead of a CLI one.
-- **Phase 5 — products (step 08).** The hosted growth-research service and the client-VM offering, both as configurations.
+- **Phase 5 — deployment profiles (step 08).** The single-tenant VM and hosted multi-tenant deployments, both as configurations.
 
 ## Ground rules
 

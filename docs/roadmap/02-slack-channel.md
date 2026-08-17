@@ -6,7 +6,7 @@ Talk to Stratus agents in Slack, where each agent has its own name, avatar, and 
 
 ## Why now
 
-This is the front door for the Stratus Labs fleet on the Mac Minis. It is also the forcing function for the channel contract that every later adapter (Discord, Telegram, email) reuses.
+This is the first real front door for a running fleet, and the forcing function for the channel contract that every later adapter (Discord, Telegram, email) reuses.
 
 ## Scope
 
@@ -17,7 +17,7 @@ This is the front door for the Stratus Labs fleet on the Mac Minis. It is also t
   - `OutboundConnection` (post, edit, typing indicator),
   - `ChannelAdapter` lifecycle (`start(gateway)`, `stop()`) plus the inbound → router → session-key mapping helpers.
 - New package `@stratusagent/channel-slack`:
-  - **Socket Mode** (no public ingress — required for Mac Minis behind NAT).
+  - **Socket Mode** (no public ingress — required for machines behind NAT).
   - **One Slack app per agent.** Slack cannot give one bot multiple identities with real avatar/presence/DMs, so the adapter holds a map of bot token → agent id and runs one socket per agent. A Slack **app manifest template** ships in the package so creating an agent's app is a 2-minute copy-paste; setup docs cover it.
   - Session key convention: `slack:<team>:<channel>:<thread_ts>` (DMs: the DM channel id) passed to `gateway.dispatch` — thread = conversation, resumable across daemon restarts (from step 01).
   - Streaming replies: post a placeholder, then edit on `provider.delta` batches (throttled to respect `chat.update` rate limits), finalize on completion. Typing indicator held for the whole turn.

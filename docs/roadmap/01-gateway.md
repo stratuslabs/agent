@@ -13,12 +13,12 @@ Everything in the v2 vision presumes a process that outlives a terminal command:
 **In:**
 
 - New package `@stratusagent/gateway`: composes the same `AgentRunner`, tool registry, providers, and file memory store the CLI uses, but as a persistent service with a lifecycle (start, drain, stop).
-- `stratus serve` command in the CLI to run it in the foreground; a documented launchd plist for Mac Mini deployment (template in the package, `HOME`-relative — no hardcoded user paths).
+- `stratus serve` command in the CLI to run it in the foreground; a documented launchd plist for macOS deployment (template in the package, `HOME`-relative — no hardcoded user paths).
 - Durable `SessionStore` implementation backed by SQLite (`~/.stratus/sessions.db`), honoring the existing `create/get/save` seam in `packages/core/src/index.ts`. Sessions must round-trip completely — including `metadata` (the Anthropic provider caches raw turns there under `anthropicRawTurns`; losing it breaks tool-use replay).
 - Kernel additions (the only core changes in this roadmap):
   - **Streaming deltas**: extend the `StratusEvent` union with `provider.delta` (text / tool-call fragments). Providers that don't stream emit none; consumers that don't care ignore them.
   - **Cancellation**: `run`/`resume` accept an `AbortSignal`; aborting fails the turn cleanly (session `failed` with a distinguishable reason, tool subprocesses killed).
-  - An activity watchdog helper in the gateway: abort a turn when no event has arrived for N seconds (StratusOS's lesson — progress-based, not wall-clock).
+  - An activity watchdog helper in the gateway: abort a turn when no event has arrived for N seconds (progress-based, not wall-clock).
 - Session identity convention: callers pass stable session ids (channels will use thread-derived keys) so any inbound message can resume its conversation across daemon restarts.
 - Extract the triplicated persona/memory system-prompt rendering from the three provider packages into one shared helper (natural to do while touching providers for streaming).
 

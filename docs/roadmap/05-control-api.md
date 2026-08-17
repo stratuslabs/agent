@@ -6,7 +6,7 @@ The gateway exposes one HTTP + WebSocket API — the only doorway any surface us
 
 ## Why now
 
-Phase 1–2 made the fleet live and trustworthy, but the only ways in are Slack and a local TTY. The control API is what turns the gateway into a platform: the web dashboard consumes it now, the macOS app (07) consumes it next, and the hosted product (08) is largely *built* on it. Today's dashboard (`startDashboardServer` in `packages/cli/src/index.ts`) is an unconnected smoke-test page — good scaffolding, no runtime access.
+Phase 1–2 made the fleet live and trustworthy, but the only ways in are Slack and a local TTY. The control API is what turns the gateway into a platform: the web dashboard consumes it now, the macOS app (07) consumes it next, and the hosted deployment profile (08) is largely *built* on it. Today's dashboard (`startDashboardServer` in `packages/cli/src/index.ts`) is an unconnected smoke-test page — good scaffolding, no runtime access.
 
 ## Scope
 
@@ -19,7 +19,7 @@ Phase 1–2 made the fleet live and trustworthy, but the only ways in are Slack 
   - `WS /api/events` — the live `StratusEvent` stream (deltas included), filterable by session/agent. One stream serves chat rendering, monitoring, and approval UIs alike.
   - `GET/POST /api/approvals` — list pending approvals (03) and resolve them.
   - `GET /api/health` — daemon status, uptime, provider reachability, per-agent state.
-- **Auth**: bearer token generated into `~/.stratus/gateway-token` (0600). Localhost binding is the default posture; remote access is the operator's tunnel choice (Tailscale documented as the recommended pattern for reaching a home Mac Mini). No user accounts — that's product territory (08).
+- **Auth**: bearer token generated into `~/.stratus/gateway-token` (0600). Localhost binding is the default posture; remote access is the operator's tunnel choice (Tailscale documented as the recommended pattern for reaching a machine at home). No user accounts — that belongs to the hosted profile (08).
 - **Web dashboard**: served by the gateway at `/`, replacing the smoke-test page. Single static bundle, no build-step framework lock-in decision needed in this spec — requirements are: roster view with avatars, session list + live chat view (streaming, tool status lines), pending-approvals panel, health strip. Dark, in the existing dashboard's visual direction.
 - CLI: `stratus dashboard` now opens the gateway's UI (starting the gateway if needed); remote-client flags (`--gateway <url>`) for `stratus agents` as the first remote-consuming command.
 

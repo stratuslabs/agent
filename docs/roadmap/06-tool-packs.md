@@ -6,7 +6,7 @@ Real capabilities as optional packages — filesystem, shell, and browser tools 
 
 ## Why now
 
-The permission engine (03) exists precisely so agents can be trusted with these. The fleet's usefulness — and everything the client-VM track promises — is bounded by its tools. Existing work to fold in: `stratuslabs/tool-browser` and `stratuslabs/tool-screenshot`.
+The permission engine (03) exists precisely so agents can be trusted with these, and an agent's usefulness is bounded by its tools. Existing work to fold in: `stratuslabs/tool-browser` and `stratuslabs/tool-screenshot`.
 
 ## Scope
 
@@ -38,4 +38,4 @@ The permission engine (03) exists precisely so agents can be trusted with these.
 ## Open questions
 
 - Per-agent workspace directories (`~/.stratus/workspaces/<agent-id>/`) as a general convention for tool outputs — introduce here or wait for a dedicated step? (Leaning: introduce here minimally; screenshots need somewhere to live.)
-- Playwright's install weight on Mac Minis vs. reusing an installed Chrome via channel selection — decide in the PR with real numbers.
+- Playwright's install weight on target machines vs. reusing an installed Chrome via channel selection — decide in the PR with real numbers.
