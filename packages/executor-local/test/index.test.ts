@@ -278,3 +278,27 @@ test('a command is not spawned when the signal fired during construction', async
   assert.match(result.error ?? '', /aborted/i);
   assert.equal(spawned, 0);
 });
+
+test('cancellation settles the turn even when parseResult never resolves', async () => {
+  // The subprocess exits cleanly, then the parser blocks: the turn's
+  // signal must settle this phase too, or the drain waits on it forever.
+  const tool = defineLocalCommandTool({
+    name: 'stuck.parser',
+    createCommand: () => ({ command: process.execPath, args: ['-e', ''] }),
+    parseResult: () => new Promise(() => {}),
+  });
+
+  const executor = createLocalCommandExecutor();
+  const controller = new AbortController();
+  const pending = executor.execute(
+    { id: 'c-parse', toolName: 'stuck.parser', input: {} },
+    tool,
+    session,
+    { signal: controller.signal },
+  );
+  setTimeout(() => controller.abort(), 100);
+
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? '', /aborted/i);
+});

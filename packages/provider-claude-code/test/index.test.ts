@@ -288,3 +288,35 @@ test('a missing Claude Code executable produces install guidance', async () => {
     /Install it \(npm install -g @anthropic-ai\/claude-code\)/,
   );
 });
+
+test('a wedged SDK stream is aborted after the idle timeout', async () => {
+  // The query never yields a message; the idle timer must abort the SDK's
+  // controller and surface the stall as a provider failure, not hang the
+  // turn until the daemon is killed.
+  const provider = createClaudeCodeProvider({
+    idleTimeoutMs: 50,
+    queryFn: ({ options }) => ({
+      [Symbol.asyncIterator]() {
+        return {
+          next: () =>
+            new Promise((_resolve, reject) => {
+              const keepAlive = setTimeout(() => {}, 60_000);
+              options?.abortController?.signal.addEventListener(
+                'abort',
+                () => {
+                  clearTimeout(keepAlive);
+                  reject(new DOMException('aborted', 'AbortError'));
+                },
+                { once: true },
+              );
+            }),
+        };
+      },
+    }),
+  });
+
+  await assert.rejects(
+    () => provider.generate({ session: createSession() } as never),
+    /no output for 50ms/,
+  );
+});

@@ -48,6 +48,8 @@ export interface LocalCommandContext {
   call: ToolCall;
   session: Session;
   tool: LocalCommandTool;
+  /** The turn's abort signal, for parsers that do asynchronous work. */
+  signal?: AbortSignal;
 }
 
 export interface LocalCommandTool extends Tool {
@@ -129,7 +131,7 @@ export class LocalCommandExecutor implements Executor {
       if (signal?.aborted) {
         return failureResult(call, `Command aborted before start: ${call.toolName}`);
       }
-      const invocation = await raceWithAbort(tool.createCommand(call.input, session), signal);
+      const invocation = await raceWithAbort(tool.createCommand(call.input, session), signal, 'Command construction');
       if (signal?.aborted) {
         return failureResult(call, `Command aborted before start: ${call.toolName}`);
       }
@@ -165,8 +167,14 @@ export class LocalCommandExecutor implements Executor {
       }
 
       try {
+        // Parsing can be asynchronous too; a parser blocked at cancellation
+        // must not keep the settled subprocess's turn pending.
         const output = tool.parseResult
-          ? await tool.parseResult(execution, { call, session, tool })
+          ? await raceWithAbort(
+              tool.parseResult(execution, { call, session, tool, ...(signal ? { signal } : {}) }),
+              signal,
+              'Result parsing',
+            )
           : serializeExecution(execution);
         return successResult(call, output);
       } catch (error) {
@@ -185,12 +193,12 @@ export const createLocalCommandExecutor = (
 // Settles as soon as the signal fires, whether or not the wrapped work
 // ever does — an unresponsive command factory must not pin a cancelled
 // turn open.
-const raceWithAbort = async <T>(work: Promise<T> | T, signal?: AbortSignal): Promise<T> => {
+const raceWithAbort = async <T>(work: Promise<T> | T, signal: AbortSignal | undefined, what: string): Promise<T> => {
   if (!signal) {
     return work;
   }
   return new Promise<T>((resolve, reject) => {
-    const onAbort = (): void => reject(new Error('Command construction aborted.'));
+    const onAbort = (): void => reject(new Error(`${what} aborted.`));
     if (signal.aborted) {
       onAbort();
       return;

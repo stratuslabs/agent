@@ -209,7 +209,17 @@ export interface ClaudeCodeProviderConfig {
   pathToClaudeCodeExecutable?: string;
   /** Test injection point; defaults to the real Agent SDK query(). */
   queryFn?: ClaudeCodeQueryFn;
+  /**
+   * Abort a query when the SDK stream yields nothing for this long — a
+   * wedged subprocess must not pin a turn (and a draining daemon) open
+   * forever. Inactivity-based, so a healthy long run that keeps producing
+   * messages stays alive. Sized above the local executor's timeout ceiling
+   * so a slow hosted tool never trips it. 0 disables. Default 10 minutes.
+   */
+  idleTimeoutMs?: number;
 }
+
+const DEFAULT_IDLE_TIMEOUT_MS = 600_000;
 
 const createSystemPrompt = (
   request: ProviderRequest,
@@ -295,6 +305,7 @@ export const createClaudeCodeProvider = ({
   maxTurns,
   pathToClaudeCodeExecutable,
   queryFn = sdkQuery as unknown as ClaudeCodeQueryFn,
+  idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
 }: ClaudeCodeProviderConfig = {}): ModelProvider => ({
   name,
   async generate(request: ProviderRequest) {
@@ -317,6 +328,10 @@ export const createClaudeCodeProvider = ({
       ? bridgeKernelTools(request.tools, request.session, countedExecute, request.signal ? { signal: request.signal } : undefined)
       : undefined;
 
+    const controller = request.signal
+      ? linkedAbortController(request.signal)
+      : new AbortController();
+
     const options: Options = {
       model,
       systemPrompt: createSystemPrompt(request, systemPrompt),
@@ -337,8 +352,9 @@ export const createClaudeCodeProvider = ({
           }
         : {}),
       // Aborting the turn must stop the SDK query itself, not just our
-      // iteration over it — the kernel contract is that cancelled work ends.
-      ...(request.signal ? { abortController: linkedAbortController(request.signal) } : {}),
+      // iteration over it — the kernel contract is that cancelled work
+      // ends. The same controller also carries the idle-timeout abort.
+      abortController: controller,
       // The env REPLACES the subprocess environment, so inherit ours and
       // then pin the auth: this provider is subscription-billed in both
       // modes (setup token or existing sign-in), so an ambient API key must
@@ -354,8 +370,28 @@ export const createClaudeCodeProvider = ({
 
     let resultText: string | undefined;
 
+    // A wedged SDK subprocess yields nothing forever; the idle timer cuts
+    // it loose. It resets on every yielded message so healthy long runs
+    // stay alive, and its firing is distinguishable from a caller abort.
+    let timedOutIdle = false;
+    let idleTimer: NodeJS.Timeout | undefined;
+    const resetIdleTimer = (): void => {
+      if (idleTimeoutMs <= 0) {
+        return;
+      }
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+      idleTimer = setTimeout(() => {
+        timedOutIdle = true;
+        controller.abort();
+      }, idleTimeoutMs);
+    };
+
     try {
+      resetIdleTimer();
       for await (const message of queryFn({ prompt: createPrompt(request), options })) {
+        resetIdleTimer();
         if (message.type !== 'result') {
           continue;
         }
@@ -373,7 +409,16 @@ export const createClaudeCodeProvider = ({
           'Claude Code could not be started. Install it (npm install -g @anthropic-ai/claude-code) and sign in with `claude`, or use an Anthropic API key instead.',
         );
       }
+      if (timedOutIdle && !request.signal?.aborted) {
+        throw markIfSideEffects(
+          new Error(`Claude Code produced no output for ${idleTimeoutMs}ms; the run was aborted as stalled.`),
+        );
+      }
       throw markIfSideEffects(error);
+    } finally {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
     }
 
     if (resultText === undefined || resultText.length === 0) {

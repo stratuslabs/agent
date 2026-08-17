@@ -763,3 +763,27 @@ test('the watchdog arms when a streaming fallback takes over a non-streaming pri
   );
   await gateway.stop();
 });
+
+test('a dispatch aborted during preflight never touches durable state', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+
+  // The entry check runs first (microtask FIFO), then preflight awaits
+  // filesystem work, then this abort fires — landing squarely between the
+  // entry check and the runner. The recheck must catch it before any
+  // session is created.
+  const controller = new AbortController();
+  const pending = gateway.dispatch({
+    sessionId: 'preflight-abort-1',
+    userMessage: 'never me',
+    signal: controller.signal,
+  });
+  queueMicrotask(() => controller.abort());
+
+  await assert.rejects(() => pending, (error: Error) => error instanceof RunAbortedError);
+  const stored = await gateway.store.get('preflight-abort-1');
+  await gateway.stop();
+  assert.equal(stored, undefined);
+});

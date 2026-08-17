@@ -588,6 +588,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       : streamsDeltas(config);
 
     return withWatchdog(input.sessionId, input.signal, effectiveStreams, fallbackStreams, async (signal) => {
+      // The preflight above (agent refresh, config resolution, session
+      // load) awaited filesystem work; the entry check has long passed.
+      // Recheck before the runner touches durable state, or a dispatch
+      // cancelled mid-preflight would still persist its user message.
+      if (signal.aborted) {
+        throw new RunAbortedError();
+      }
+
       if (existing) {
         // Refresh the stored definition before resuming, so the turn runs
         // with the current instructions, tools, and credentials.
