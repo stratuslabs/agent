@@ -30,6 +30,8 @@ Credentials are stored in `~/.stratus/credentials.json` (owner-read-only) and se
 ## Usage
 
 ```bash
+stratus chat                           # talk — the conversation persists
+stratus chat --soul ./ava.md
 stratus run "say hello"
 stratus run --soul ./ava.md "introduce yourself"
 stratus run --provider anthropic --model claude-opus-5 "hello"
@@ -74,6 +76,6 @@ Agents remember: facts saved with the built-in `memory.remember` tool persist to
 
 Precedence: flags → `STRATUS_*` env vars → soul file hints → config file. Project-local `stratus.config.json` outranks the global `~/.stratus/config.json`; stored sign-ins are endpoint-bound and never sent to endpoints a project config selects.
 
-Today the CLI covers setup, one-shot runs, agent creation, and the local dashboard; channels and the always-on agent service are the next milestones.
+Today the CLI covers setup, chat, one-shot runs, agent creation, and the local dashboard; channels and the always-on agent service are the next milestones.
 
 Part of [Stratus Agent](https://github.com/stratuslabs/agent) — a tiny TypeScript agent runtime.

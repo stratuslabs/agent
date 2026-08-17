@@ -20,6 +20,7 @@ Right now, the best way to try it is a local loop in the terminal or a minimal l
 This repo is early, but the core loop is complete.
 
 Today it is useful for:
+- talking with your agent in a persistent conversation (`stratus chat`) — the session carries across turns and remembered facts accumulate
 - running a multi-turn agent loop locally: provider → tools → provider until the model finishes
 - running real tool-calling sessions against Claude (via the official Anthropic SDK) or any OpenAI-compatible provider (tools are advertised with JSON schemas, tool calls execute locally, and results are fed back to the model)
 - defining agents as soul files — markdown personas you run with `stratus run --soul ./ava.md "hi"`
@@ -248,6 +249,8 @@ Opened your default browser.
 ## CLI usage
 
 ```bash
+stratus chat
+stratus chat --soul ./examples/souls/ava.md
 stratus run --prompt "Use the demo tool"
 stratus run "Say hello"
 stratus run --provider anthropic "Say hello"

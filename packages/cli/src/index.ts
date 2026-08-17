@@ -106,6 +106,19 @@ export interface ParsedAgentNewCommand {
   format: 'text' | 'json' | 'soul';
 }
 
+export interface ParsedChatCommand {
+  command: 'chat';
+  provider?: CliProviderName;
+  model?: string;
+  baseUrl?: string;
+  configPath?: string;
+  /** Path to a soul file defining the agent to chat with. */
+  soul?: string;
+  events: boolean;
+  approvals: CliApprovalMode;
+  maxTurns?: number;
+}
+
 export interface ParsedAgentsCommand {
   command: 'agents';
   format: 'text' | 'json';
@@ -117,6 +130,7 @@ export interface ParsedHelpCommand {
 
 export type ParsedCommand =
   | ParsedRunCommand
+  | ParsedChatCommand
   | ParsedDashboardCommand
   | ParsedSetupCommand
   | ParsedAgentNewCommand
@@ -237,6 +251,8 @@ const HELP_TEXT = `Stratus Agent CLI
 
 Usage:
   stratus setup
+  stratus chat
+  stratus chat --soul ./examples/souls/ava.md
   stratus run --prompt "Use the demo tool"
   stratus run "Say hello"
   ANTHROPIC_API_KEY=... stratus run --provider anthropic "Say hello"
@@ -253,6 +269,8 @@ Commands:
                    subscription or API key), create your agent, and test it —
                    settings go to ~/.stratus/config.json, sign-ins to
                    ~/.stratus/credentials.json (0600)
+  chat             Talk with your agent — the conversation persists across turns
+                   and remembered facts accumulate; /exit or Ctrl+C to leave
   run              Execute one local Stratus Agent session
   agent new        Create an agent identity (generates a human-ish name + avatar theme)
   agents           List your agents: who they are, where their souls live, what
@@ -648,6 +666,68 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     }
 
     return { command: 'dashboard', ...(port !== undefined ? { port } : {}), host, openBrowser };
+  }
+
+  if (command === 'chat') {
+    const parsed: ParsedChatCommand = { command: 'chat', events: false, approvals: 'always' };
+    for (let index = 0; index < rest.length; index += 1) {
+      const token = rest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--provider') {
+        parsed.provider = parseProviderName(readOptionValue(rest, index, '--provider'), '--provider');
+        index += 1;
+        continue;
+      }
+      if (token === '--model') {
+        parsed.model = readOptionValue(rest, index, '--model');
+        index += 1;
+        continue;
+      }
+      if (token === '--base-url') {
+        parsed.baseUrl = readOptionValue(rest, index, '--base-url');
+        index += 1;
+        continue;
+      }
+      if (token === '--soul') {
+        parsed.soul = readOptionValue(rest, index, '--soul');
+        index += 1;
+        continue;
+      }
+      if (token === '--config') {
+        parsed.configPath = readOptionValue(rest, index, '--config');
+        index += 1;
+        continue;
+      }
+      if (token === '--approvals') {
+        const value = readOptionValue(rest, index, '--approvals');
+        if (value !== 'always' && value !== 'ask' && value !== 'never') {
+          throw new Error(`Invalid value for --approvals: ${value}`);
+        }
+        parsed.approvals = value;
+        index += 1;
+        continue;
+      }
+      if (token === '--max-turns') {
+        const value = Number(readOptionValue(rest, index, '--max-turns'));
+        if (!Number.isInteger(value) || value < 1) {
+          throw new Error(`Invalid value for --max-turns: ${rest[index + 1] ?? '(missing)'}`);
+        }
+        parsed.maxTurns = value;
+        index += 1;
+        continue;
+      }
+      if (token === '--events') {
+        parsed.events = true;
+        continue;
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+    return parsed;
   }
 
   if (command === 'agents' || (command === 'agent' && rest[0] === 'list')) {
@@ -1350,6 +1430,7 @@ const createApprovalPolicy = (
   mode: CliApprovalMode,
   streams: CliStreams,
   env: CliEnvironment,
+  ask?: (prompt: string) => Promise<string>,
 ): ApprovalPolicy => {
   if (mode === 'always') {
     return new AllowAllApprovalPolicy();
@@ -1359,6 +1440,17 @@ const createApprovalPolicy = (
     return {
       async approve() {
         return false;
+      },
+    };
+  }
+
+  // A caller that already owns stdin (chat's readline) supplies its own
+  // asker — two readers on one stream would race for the same bytes.
+  if (ask) {
+    return {
+      async approve({ call }) {
+        const answer = await ask(`Approve tool call ${call.toolName} with input ${JSON.stringify(call.input)}? [y/N] `);
+        return /^y(es)?$/i.test(answer.trim());
       },
     };
   }
@@ -1385,17 +1477,24 @@ const createApprovalPolicy = (
   };
 };
 
-export const runSingleLoop = async (
-  prompt: string,
+// The shared wiring behind every conversational command: memory (with
+// legacy migration), tools, events, provider (with fallback), and the
+// agent the runtime resolved. run uses it for one shot; chat keeps the
+// runner alive and resumes the same session turn after turn.
+const createAgentRuntime = async (
   streams: CliStreams,
   options: {
     events?: boolean;
+    /** Replaces the default event printer when provided. */
+    onEvent?: (event: StratusEvent) => void;
+    /** Answers --approvals ask questions when the caller owns stdin. */
+    askApproval?: (prompt: string) => Promise<string>;
     runtime: RuntimeConfig;
     approvals?: CliApprovalMode;
     maxTurns?: number;
     env?: CliEnvironment;
   },
-): Promise<Session> => {
+) => {
   const runEnv = options.env ?? {};
   await migrateLegacyMemory(runEnv);
   const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(runEnv)));
@@ -1409,7 +1508,12 @@ export const runSingleLoop = async (
       writeLine(streams.stderr, `Warning: event handler failed: ${error instanceof Error ? error.message : String(error)}`);
     },
   });
-  if (options.events ?? true) {
+  if (options.onEvent) {
+    const onEvent = options.onEvent;
+    bus.subscribe(async (event) => {
+      onEvent(event);
+    });
+  } else if (options.events ?? true) {
     bus.subscribe(async (event) => {
       const line = formatEvent(event);
       if (line) {
@@ -1430,7 +1534,7 @@ export const runSingleLoop = async (
     provider: runtimeProvider,
     tools,
     executor: createLocalCommandExecutor(),
-    approvals: createApprovalPolicy(options.approvals ?? 'always', streams, options.env ?? {}),
+    approvals: createApprovalPolicy(options.approvals ?? 'always', streams, options.env ?? {}, options.askApproval),
     bus,
     memory,
     ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
@@ -1443,23 +1547,33 @@ export const runSingleLoop = async (
   const agent = options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT;
 
   const metadata = options.runtime.provider === 'demo'
-    ? { provider: 'demo' as const }
+    ? { provider: 'demo' as const, executor: 'local-command' }
     : {
         provider: options.runtime.provider,
         model: options.runtime.model,
         ...(options.runtime.provider === 'openai' ? { baseUrl: options.runtime.baseUrl } : {}),
       };
 
+  return { runner, agent, metadata };
+};
+
+export const runSingleLoop = async (
+  prompt: string,
+  streams: CliStreams,
+  options: {
+    events?: boolean;
+    runtime: RuntimeConfig;
+    approvals?: CliApprovalMode;
+    maxTurns?: number;
+    env?: CliEnvironment;
+  },
+): Promise<Session> => {
+  const { runner, agent, metadata } = await createAgentRuntime(streams, options);
   return runner.run({
     sessionId: randomUUID(),
     agent,
     userMessage: prompt,
-    metadata: options.runtime.provider === 'demo'
-      ? {
-          ...metadata,
-          executor: 'local-command',
-        }
-      : metadata,
+    metadata,
   });
 };
 
@@ -1481,6 +1595,234 @@ export const printSessionSummary = (session: Session, streams: CliStreams): void
     const content = message.role === 'tool' ? stringifyValue(JSON.parse(message.content) as JsonValue) : message.content;
     writeLine(streams.stdout, `[${message.role}${nameSuffix}] ${content}`);
   }
+};
+
+const lastAssistantReply = (session: Session): string => {
+  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+    const message = session.messages[index];
+    if (message && message.role === 'assistant' && message.content.trim().length > 0) {
+      return message.content;
+    }
+  }
+  return '(no reply)';
+};
+
+const CHAT_HELP = [
+  '  /help   show this',
+  '  /exit   leave the chat (Ctrl+C and Ctrl+D work too)',
+  'Everything else is a message to your agent. The conversation persists',
+  'across turns, and facts they remember stick forever.',
+].join('\n');
+
+export const runChat = async (
+  command: ParsedChatCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const runtime = await resolveRuntimeConfig({
+    command: 'run',
+    prompt: '',
+    format: 'text',
+    events: false,
+    approvals: command.approvals,
+    ...(command.provider ? { provider: command.provider } : {}),
+    ...(command.model ? { model: command.model } : {}),
+    ...(command.baseUrl ? { baseUrl: command.baseUrl } : {}),
+    ...(command.soul ? { soul: command.soul } : {}),
+    ...(command.configPath ? { configPath: command.configPath } : {}),
+  }, env);
+
+  // Interactive means the real terminal: an injected stdinStream is by
+  // definition not a TTY conversation, so it never gets prompts, ANSI
+  // styling, or a terminal readline wired to a stream that can't take it.
+  const interactive = env.setupInput === undefined
+    && env.stdinStream === undefined
+    && process.stdin.isTTY === true;
+  // Styling is for eyes: piped transcripts stay plain text.
+  const bold = (text: string): string => (interactive ? `\u001b[1m${text}\u001b[0m` : text);
+  const dim = (text: string): string => (interactive ? `\u001b[2m${text}\u001b[0m` : text);
+
+  const input = env.stdinStream ?? process.stdin;
+  const rl = interactive
+    ? createInterface({
+        input,
+        output: streams.stdout as unknown as NodeJS.WritableStream,
+        prompt: '\u001b[36myou ›\u001b[0m ',
+        terminal: true,
+      })
+    : createInterface({ input, terminal: false });
+  // One reader owns stdin. Every line lands in this queue, and whoever is
+  // waiting — the chat loop, or an approval question mid-turn — takes the
+  // next one. A second readline would race for the same bytes, and
+  // rl.question cannot be used while the interface is being iterated.
+  const lineQueue: string[] = [];
+  let inputClosed = false;
+  let pendingApproval: ((answer: string) => void) | undefined;
+  let notifyLine: (() => void) | undefined;
+  rl.on('line', (rawLine) => {
+    if (pendingApproval) {
+      const resolve = pendingApproval;
+      pendingApproval = undefined;
+      resolve(rawLine);
+      return;
+    }
+    lineQueue.push(rawLine);
+    notifyLine?.();
+  });
+  rl.on('close', () => {
+    inputClosed = true;
+    if (pendingApproval) {
+      const resolve = pendingApproval;
+      pendingApproval = undefined;
+      resolve('');
+    }
+    notifyLine?.();
+  });
+
+  const nextLine = (): Promise<string | undefined> => {
+    if (lineQueue.length > 0) {
+      return Promise.resolve(lineQueue.shift());
+    }
+    if (inputClosed) {
+      return Promise.resolve(undefined);
+    }
+    return new Promise((resolve) => {
+      notifyLine = () => {
+        notifyLine = undefined;
+        resolve(lineQueue.shift());
+      };
+    });
+  };
+
+  // An approval consumes the next unconsumed line (typed live, or already
+  // queued from piped input). A closed stream denies instead of hanging.
+  const askApproval = (prompt: string): Promise<string> => {
+    streams.stderr.write(prompt);
+    const queued = lineQueue.shift();
+    if (queued !== undefined) {
+      return Promise.resolve(queued);
+    }
+    if (inputClosed) {
+      return Promise.resolve('');
+    }
+    return new Promise((resolve) => {
+      pendingApproval = resolve;
+    });
+  };
+
+  const { runner, agent, metadata } = await createAgentRuntime(streams, {
+    runtime,
+    approvals: command.approvals,
+    askApproval,
+    ...(command.maxTurns !== undefined ? { maxTurns: command.maxTurns } : {}),
+    env,
+    onEvent: (event) => {
+      if (command.events) {
+        const line = formatEvent(event);
+        if (line) {
+          writeLine(streams.stdout, dim(line));
+        }
+        return;
+      }
+      // Quiet by default — just a whisper when the agent reaches for a tool.
+      if (event.type === 'tool.called') {
+        writeLine(streams.stdout, dim(`  · using ${event.call.toolName}`));
+      } else if (event.type === 'tool.denied') {
+        writeLine(streams.stdout, dim(`  · ${event.call.toolName} denied`));
+      }
+    },
+  });
+
+  const modelLine = runtime.provider === 'demo'
+    ? 'demo (offline)'
+    : `${runtime.provider} · ${runtime.model}`;
+
+  if (interactive) {
+    streams.stdout.write('\u001b[2J\u001b[H');
+    for (const line of stratusHeaderLines()) {
+      writeLine(streams.stdout, line);
+    }
+    writeLine(streams.stdout);
+    writeLine(streams.stdout, `Chatting with ${bold(agent.name)} — ${modelLine}.`);
+    writeLine(streams.stdout, dim('The conversation persists across turns. /exit to leave, /help for more.'));
+    writeLine(streams.stdout);
+  }
+
+  // Ctrl+C between turns closes the chat gracefully; mid-turn there is
+  // nothing to cancel in the kernel yet, so leave immediately instead of
+  // silently waiting out a slow provider call.
+  let turnInFlight = false;
+  rl.on('SIGINT', () => {
+    if (turnInFlight) {
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, dim('Interrupted.'));
+      process.exit(130);
+    }
+    rl.close();
+  });
+
+  // One session for the whole sitting: the first message starts it, every
+  // later message resumes it — the same plumbing a channel will use to
+  // keep a thread alive.
+  let sessionId: string | undefined;
+
+  if (interactive) {
+    rl.prompt();
+  }
+  for (;;) {
+    const rawLine = await nextLine();
+    if (rawLine === undefined) {
+      break;
+    }
+    const line = rawLine.trim();
+    if (line.length === 0) {
+      if (interactive) {
+        rl.prompt();
+      }
+      continue;
+    }
+    if (line === '/exit' || line === '/quit' || line === 'exit' || line === 'quit') {
+      break;
+    }
+    if (line === '/help') {
+      writeLine(streams.stdout, CHAT_HELP);
+      if (interactive) {
+        rl.prompt();
+      }
+      continue;
+    }
+
+    if (!interactive) {
+      writeLine(streams.stdout, `you › ${line}`);
+    }
+    try {
+      turnInFlight = true;
+      let session: Session;
+      if (sessionId === undefined) {
+        const id = randomUUID();
+        sessionId = id;
+        session = await runner.run({ sessionId: id, agent, userMessage: line, metadata });
+      } else {
+        session = await runner.resume({ sessionId, userMessage: line });
+      }
+      writeLine(streams.stdout, `${bold(`${agent.name} ›`)} ${lastAssistantReply(session)}`);
+    } catch (error) {
+      writeLine(streams.stderr, `Error: ${error instanceof Error ? error.message : String(error)}`);
+      writeLine(streams.stdout, dim('(that turn failed — the conversation is still here, try again)'));
+    } finally {
+      turnInFlight = false;
+    }
+    writeLine(streams.stdout);
+    if (interactive) {
+      rl.prompt();
+    }
+  }
+  rl.close();
+
+  if (interactive) {
+    writeLine(streams.stdout, dim(`Bye — ${agent.name} keeps what they remembered.`));
+  }
+  return 0;
 };
 
 const formatRuntimeBanner = (runtime: RuntimeConfig): string => {
@@ -3494,6 +3836,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'agents') {
       return runAgents(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'chat') {
+      return runChat(command, streams, resolvedEnv);
     }
 
     if (command.command === 'setup') {
