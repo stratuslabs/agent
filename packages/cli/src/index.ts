@@ -777,7 +777,7 @@ export const warnOnCredentialOverride = async (
   streams: CliStreams,
   env: CliEnvironment = {},
 ): Promise<void> => {
-  if (runtime.provider !== 'anthropic' || !runtime.apiKey) {
+  if (runtime.provider === 'demo') {
     return;
   }
   const stored = (await loadCredentials(env)).anthropic;
@@ -788,15 +788,25 @@ export const warnOnCredentialOverride = async (
   // would name the wrong one whenever a custom apiKeyEnv or the legacy
   // STRATUSCLAW_ prefix supplied the key, sending the reader to unset
   // something that was never the cause.
-  const culprit = runtime.apiKeyEnvVar;
+  const primary = runtime.provider === 'anthropic' && runtime.apiKey ? runtime.apiKeyEnvVar : undefined;
+  // A fallback demoted the same way costs exactly as much, and only bites
+  // once the primary is already failing — the worst moment to discover it.
+  // The fallback path consults the provider's own conventional variable.
+  const processEnv = readProcessEnv(env);
+  const fallbackVar = runtime.fallback?.provider === 'anthropic'
+    && runtime.fallback.apiKey !== undefined
+    && readNonEmptyString(processEnv.ANTHROPIC_API_KEY) === runtime.fallback.apiKey
+    ? 'ANTHROPIC_API_KEY'
+    : undefined;
+  const culprit = primary ?? fallbackVar;
   if (!culprit) {
     return;
   }
   writeLine(
     streams.stderr,
     `Warning: ${culprit} in your environment outranks the Claude subscription sign-in saved by \`stratus setup\`, `
-    + 'so this run is billed per token instead of through your plan. Unset it to use the subscription, '
-    + 'or run `stratus doctor` to see everything that is being overridden.',
+    + `so ${primary ? 'this run is' : 'a fallback retry would be'} billed per token instead of through your plan. `
+    + 'Unset it to use the subscription, or run `stratus doctor` to see everything that is being overridden.',
   );
 };
 
@@ -3427,11 +3437,16 @@ export const collectDoctorReport = async (
   }
 
   let fileConfig: StratusConfigFile = {};
+  let configFatal = false;
   if (winner) {
     try {
       fileConfig = await loadConfigFile(winner.path);
     } catch (error) {
-      problems.push(`${winner.path} could not be parsed (${(error as Error).message}); running as if it were empty.`);
+      // resolveRuntimeConfig propagates this — no run reaches provider or
+      // credential resolution, so presenting defaults as resolved settings
+      // would describe a run that cannot happen.
+      configFatal = true;
+      problems.push(`${winner.path} could not be parsed (${(error as Error).message}). Every run fails until it is fixed or removed.`);
       warn(`ignoring unreadable config ${winner.path}`);
     }
   }
@@ -3450,39 +3465,57 @@ export const collectDoctorReport = async (
     return undefined;
   };
 
-  // Soul first: its frontmatter outranks the config file for provider and
-  // model, so it has to be loaded before either can be attributed.
+  /**
+   * The verdict comes from the resolver, not from a second copy of its
+   * rules. Everything below only *attributes* values to the file or
+   * variable that supplied them — which the resolver does not report —
+   * while whether a run works at all, and what it bills, is whatever
+   * resolveRuntimeConfig actually returns or throws.
+   */
   const envSoul = envPick('STRATUS_SOUL', 'STRATUSCLAW_SOUL');
   const soulValue = envSoul?.value ?? fileConfig.soul;
   const soulSource = envSoul ? envSoul.name : (winner ? winner.path : '');
-  let soul: ParsedSoul | undefined;
-  let soulPath: string | undefined;
-  if (typeof soulValue === 'string') {
-    soulPath = path.resolve(cwd, soulValue);
+  const soulPath = typeof soulValue === 'string' ? path.resolve(cwd, soulValue) : undefined;
+  // Loaded here for ATTRIBUTION only — the soul's frontmatter is what
+  // explains a provider nobody wrote in a config file. Whether a run works
+  // is still the resolver's verdict below.
+  const soul = soulPath ? await loadSoulFile(soulPath).catch(() => undefined) : undefined;
+
+  let resolved: RuntimeConfig | undefined;
+  if (!configFatal) {
     try {
-      soul = await loadSoulFile(soulPath);
-    } catch (error) {
-      // resolveRuntimeConfig propagates loadSoulFile's failure — it never
-      // substitutes the built-in agent, because another identity's soul
-      // (or none) would resolve different provider pins.
-      problems.push(
-        `The configured soul ${soulPath} could not be read (${(error as Error).message}). `
-        + 'Every run fails until it is fixed or the soul setting is removed; the built-in agent is not substituted.',
+      resolved = await resolveStateRuntimeConfig(
+        command.configPath ? { configPath: command.configPath } : {},
+        env,
       );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      problems.push(`No run can start: ${message}`);
+      if (soulPath && /soul/i.test(message)) {
+        // Worth saying explicitly: a soul that fails to load is fatal, not
+        // a quiet downgrade to the built-in agent.
+        problems.push(
+          `Every run fails until ${soulPath} is fixed or the soul setting is removed — the built-in agent is not substituted.`,
+        );
+      }
     }
   }
 
   const envProviderPick = envPick('STRATUS_PROVIDER', 'STRATUSCLAW_PROVIDER');
-  const envProvider = envProviderPick
-    ? parseProviderName(envProviderPick.value, envProviderPick.name)
-    : undefined;
-  const provider: DoctorSetting = envProvider
-    ? { value: String(envProvider), source: String(envProviderPick?.name) }
+  const providerSource = envProviderPick
+    ? envProviderPick.name
     : soul?.provider
-      ? { value: soul.provider, source: `${soulPath} (soul frontmatter)` }
+      ? `${soulPath} (soul frontmatter)`
       : fileConfig.provider
-        ? { value: fileConfig.provider, source: winner?.path ?? 'config' }
-        : { value: 'demo', source: 'built-in default — nothing set a provider' };
+        ? (winner?.path ?? 'config')
+        : 'built-in default — nothing set a provider';
+  // When resolution fails the intended provider is still worth reporting:
+  // "why is it anthropic" is exactly the question, and the problems below
+  // already say no run can start.
+  const intendedProvider = envProviderPick?.value ?? soul?.provider ?? fileConfig.provider ?? 'demo';
+  const provider: DoctorSetting = resolved
+    ? { value: resolved.provider, source: providerSource }
+    : { value: `${intendedProvider} (unreachable)`, source: providerSource };
 
   if (provider.value === 'demo') {
     problems.push(
@@ -3494,114 +3527,81 @@ export const collectDoctorReport = async (
   }
 
   let model: DoctorSetting | undefined;
-  if (provider.value !== 'demo') {
+  if (resolved && resolved.provider !== 'demo') {
     const envModel = envPick('STRATUS_MODEL', 'STRATUSCLAW_MODEL');
     // A soul's model belongs to the soul's provider, and the config's model
     // to the config's provider — either can be stranded by an override.
-    const soulModelApplies = soul?.provider === undefined || soul.provider === provider.value;
-    const configModelApplies = (fileConfig.provider ?? 'openai') === provider.value;
-    model = envModel
-      ? { value: envModel.value, source: envModel.name }
-      : soulModelApplies && soul?.model
-        ? { value: soul.model, source: `${soulPath} (soul frontmatter)` }
-        : configModelApplies && fileConfig.model
-          ? { value: fileConfig.model, source: winner?.path ?? 'config' }
-          : {
-              value: provider.value === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL,
-              source: 'built-in default for this provider',
-            };
+    const soulModelApplies = soul?.provider === undefined || soul.provider === resolved.provider;
+    const configModelApplies = (fileConfig.provider ?? 'openai') === resolved.provider;
+    model = {
+      value: resolved.model,
+      source: envModel
+        ? envModel.name
+        : soulModelApplies && soul?.model === resolved.model
+          ? `${soulPath} (soul frontmatter)`
+          : configModelApplies && fileConfig.model === resolved.model
+            ? (winner?.path ?? 'config')
+            : 'built-in default for this provider',
+    };
   }
 
   const credentials = await loadCredentials(env);
-  // Which config keys the resolver would honor: a file's apiKeyEnv (and
-  // model, and baseUrl) was written for the provider that file names, so
-  // an override that selects a different provider strands them.
-  const fileConfigApplies = (fileConfig.provider ?? 'openai') === provider.value;
-  // A configured fallback is the only reason a run ever reaches a second
-  // provider's credential. Same gate as the resolver: a fallback with no
-  // explicit provider was written for the config's own provider, so an
-  // override that changes the provider strands it.
-  const fallbackConfigured = fileConfig.fallbackModel !== undefined
-    && (fileConfig.fallbackProvider !== undefined || fileConfigApplies);
-  const fallbackProvider = fallbackConfigured
-    ? (fileConfig.fallbackProvider ?? (provider.value as StratusProviderName))
-    : undefined;
-
-  // An auto-discovered project config could point anywhere, so the
-  // resolver refuses to send an unbound stored sign-in to a custom
-  // endpoint it names — and the run fails rather than leaking the key. A
-  // credential bound to its own endpoint ignores config URLs entirely.
-  const untrustedCustomBaseUrl = winner?.label.startsWith('project') === true
-    && envPick('STRATUS_BASE_URL', 'STRATUSCLAW_BASE_URL') === undefined
-    && fileConfigApplies
-    && fileConfig.baseUrl !== undefined
-    && fileConfig.baseUrl.replace(/\/+$/, '')
-      !== (provider.value === 'anthropic' ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_OPENAI_BASE_URL);
-
   const signIns: DoctorReport['signIns'] = [];
+  const usedKeyEnvVar = resolved && resolved.provider !== 'demo' ? resolved.apiKeyEnvVar : undefined;
+  const usesAuthToken = resolved?.provider === 'anthropic' && resolved.authToken !== undefined;
+  const fallback = resolved && resolved.provider !== 'demo' ? resolved.fallback : undefined;
+
   for (const target of ['anthropic', 'openai'] as const) {
     const stored = credentials[target];
-    const isDefault = target === provider.value;
-    const isFallbackTarget = !isDefault && fallbackProvider === target;
     const label = stored?.type === 'oauth_token' ? 'Claude subscription (Pro/Max)' : 'API key';
+    const isDefault = resolved?.provider === target;
+    const isFallback = fallback?.provider === target;
 
-    // A provider no run consults is reported, never diagnosed: flagging an
-    // override on a credential nothing reads is a false alarm.
-    if (!isDefault && !isFallbackTarget) {
+    // A provider no resolved run consults is reported, never diagnosed:
+    // flagging an override on a credential nothing reads is a false alarm.
+    if (!isDefault && !isFallback) {
       signIns.push({
         provider: target,
-        status: stored ? `${label} (unused — ${provider.value} serves your runs)` : 'not signed in',
+        status: stored
+          ? `${label} (unused — ${resolved ? resolved.provider : 'nothing'} serves your runs)`
+          : 'not signed in',
       });
       continue;
     }
 
-    // Resolved by the state package, not re-derived: the generic and
-    // custom variable rules live in one place so a warning can never blame
-    // a variable the run did not actually use. The fallback path consults
-    // only the provider's own conventional variable.
-    const envKey = isDefault
-      ? resolveEnvApiKey(apiKeyEnvNameFor(target, fileConfig, fileConfigApplies, env), env)
-      : (() => {
-          const name = target === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
-          const value = readNonEmptyString(processEnv[name]);
-          return typeof value === 'string' ? { name, value } : undefined;
-        })();
+    const envVar = isDefault ? usedKeyEnvVar : (target === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY');
+    const viaEnv = isDefault
+      ? usedKeyEnvVar !== undefined
+      : fallback?.apiKey !== undefined && fallback.apiKey === readNonEmptyString(processEnv[String(envVar)]);
     const where = isDefault ? 'runs are' : 'fallback runs are';
 
-    if (stored && envKey) {
-      signIns.push({ provider: target, status: `${label}, overridden by ${envKey.name} in your environment` });
+    if (stored && viaEnv) {
+      signIns.push({ provider: target, status: `${label}, overridden by ${envVar} in your environment` });
       // The costly case: an env key silently demotes a subscription to
       // per-token billing, and nothing in a normal run says so.
       problems.push(stored.type === 'oauth_token'
-        ? `${envKey.name} in your environment outranks your saved ${target} subscription sign-in, so ${where} billed per token instead of through your plan. Unset it (check your shell profile) to use the subscription.`
-        : `${envKey.name} in your environment outranks your saved ${target} sign-in. Unset it to use the one \`stratus setup\` stored.`);
+        ? `${envVar} in your environment outranks your saved ${target} subscription sign-in, so ${where} billed per token instead of through your plan. Unset it (check your shell profile) to use the subscription.`
+        : `${envVar} in your environment outranks your saved ${target} sign-in. Unset it to use the one \`stratus setup\` stored.`);
       continue;
     }
-    if (envKey) {
-      signIns.push({ provider: target, status: `using ${envKey.name} from your environment` });
+    if (viaEnv) {
+      signIns.push({ provider: target, status: `using ${envVar} from your environment` });
       continue;
     }
     if (stored) {
-      // Only an unbound credential can be redirected, so only an unbound
-      // one is refused.
-      const blocked = isDefault && untrustedCustomBaseUrl
-        && !(stored.type === 'api_key' && stored.baseUrl !== undefined);
-      signIns.push({
-        provider: target,
-        status: blocked ? `${label}, not sent to the endpoint this config selects` : label,
-      });
-      if (blocked) {
-        problems.push(
-          `${winner?.path} sets a custom base URL (${fileConfig.baseUrl}), and your saved ${target} sign-in is not sent to an endpoint an auto-discovered project config chose — every run fails. `
-          + `Pass --config to trust the file explicitly, or set ${apiKeyEnvNameFor(target, fileConfig, fileConfigApplies, env)} for that endpoint.`,
-        );
-      }
+      signIns.push({ provider: target, status: isDefault && usesAuthToken ? `${label} — runs go through the Claude Code runtime` : label });
       continue;
     }
     signIns.push({ provider: target, status: 'not signed in' });
-    problems.push(isDefault
-      ? `Provider is ${target} but there is no sign-in for it — runs will fail. Run \`stratus setup\` → Providers.`
-      : `The fallback targets ${target} but there is no sign-in for it, so the fallback is skipped and a failing run just fails.`);
+  }
+
+  // A fallback the resolver dropped is the quiet failure: the config still
+  // names one, but a failing primary has nothing to retry on.
+  if (fileConfig.fallbackModel !== undefined && resolved && resolved.provider !== 'demo' && !fallback) {
+    problems.push(
+      `A fallback model (${fileConfig.fallbackModel}) is configured but could not be resolved — usually no sign-in for its provider, or an endpoint its saved key is not sent to. `
+      + 'A failing primary model has nothing to retry on.',
+    );
   }
 
   const channels = await loadChannelCredentials(env);
@@ -3644,9 +3644,7 @@ export const collectDoctorReport = async (
     ...(model ? { model } : {}),
     ...(soulPath ? { soul: { value: soulPath, source: soulSource } } : {}),
     ...(soul ? { agent: `${soul.agent.name} (${soul.agent.id})` } : {}),
-    ...(fallbackProvider && fileConfig.fallbackModel
-      ? { fallback: { provider: fallbackProvider, model: fileConfig.fallbackModel } }
-      : {}),
+    ...(fallback ? { fallback: { provider: fallback.provider, model: fallback.model } } : {}),
     signIns,
     slackAgents,
     slackPackageInstalled,
@@ -3997,6 +3995,25 @@ export const runServe = async (
       );
     }
   }
+
+  // A daemon is the costliest place for a silently demoted subscription:
+  // every dispatch for as long as it runs, with nobody watching. The
+  // gateway resolves per dispatch, so this checks the default selection
+  // the same way a run would, once, at startup.
+  await resolveRuntimeConfig(
+    {
+      command: 'run',
+      prompt: '',
+      format: 'text',
+      events: false,
+      approvals: 'always',
+      ...(command.configPath ? { configPath: command.configPath } : {}),
+    },
+    env,
+  ).then((runtime) => warnOnCredentialOverride(runtime, streams, env)).catch(() => {
+    // Resolution problems are the gateway's to report as it starts; this
+    // check exists only for the billing surprise.
+  });
 
   const gateway = createGateway({
     env,
