@@ -87,8 +87,13 @@ export class SqliteSessionStore implements SessionStore {
     // inherits owner-only.
     try {
       chmodSync(filePath, 0o600);
-    } catch {
-      // The open above created it; a chmod failure surfaces below anyway.
+    } catch (error) {
+      // A database that cannot be tightened must not be used: conversation
+      // bodies would stay readable by other local users for the daemon's
+      // whole lifetime, silently.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
     }
     // WAL, not the default DELETE journal: DELETE mode recreates a
     // rollback journal on EVERY write, which a one-time chmod could never
@@ -111,8 +116,12 @@ export class SqliteSessionStore implements SessionStore {
     for (const sensitive of [filePath, `${filePath}-wal`, `${filePath}-shm`, `${filePath}-journal`]) {
       try {
         chmodSync(sensitive, 0o600);
-      } catch {
-        // A sidecar that does not exist has nothing to tighten.
+      } catch (error) {
+        // A sidecar that does not exist has nothing to tighten; anything
+        // else means session data stays readable — refuse to run over it.
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
       }
     }
   }
@@ -308,6 +317,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   const loadRoster = async (): Promise<void> => {
+    // The built-in id is reserved BEFORE ordinary roster entries load: a
+    // roster file that happens to declare id "stratus" must not hijack
+    // the documented built-in fallback for agentId-less dispatches — the
+    // duplicate guard below skips it with a warning. Only the explicitly
+    // configured default soul may take the id over (defaultAgentId
+    // replaces a pathless source).
+    registerSource({ definition: { ...DEFAULT_STRATUS_AGENT } });
     const entries: RosterEntry[] = await loadRosterSouls(env, warn);
     for (const entry of entries) {
       if (sources.has(entry.soul.agent.id)) {
@@ -320,9 +336,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // The configured default soul is part of the roster too — it is what
     // an agentId-less dispatch answers as.
     await defaultAgentId();
-    if (!sources.has(DEFAULT_STRATUS_AGENT.id)) {
-      registerSource({ definition: { ...DEFAULT_STRATUS_AGENT } });
-    }
   };
 
   /**

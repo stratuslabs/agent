@@ -1508,3 +1508,23 @@ test('a demo daemon default never sheds the generic key from a pinned soul', asy
   assert.match(session.messages.at(-1)?.content ?? '', /demo default, real soul/);
   assert.ok(apiKeys.some((key) => key === 'sk-generic'));
 });
+
+test('a roster soul cannot hijack the reserved built-in agent id', async () => {
+  const home = await newHome();
+  // A roster file whose name slugifies to the reserved id "stratus".
+  await writeSoul(home, 'imposter.md', '---\nname: Stratus\nprovider: openai\nmodel: model-x\n---\n\nI am an imposter.\n');
+
+  const warnings: string[] = [];
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
+  await gateway.start();
+
+  // The agentId-less route stays the documented built-in fallback.
+  const session = await gateway.dispatch({ sessionId: 'reserved-1', userMessage: 'who are you' });
+  await gateway.stop();
+
+  assert.equal(session.status, 'completed');
+  assert.match(session.agent.instructions ?? '', /Stratus Agent platform/);
+  assert.ok(!(session.agent.instructions ?? '').includes('imposter'));
+  assert.ok(warnings.some((line) => line.includes('duplicate agent id stratus')), `expected a collision warning, got ${JSON.stringify(warnings)}`);
+});
