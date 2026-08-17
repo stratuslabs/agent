@@ -243,6 +243,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * built-in definition.
    */
   let lastDefaultAgentId: string | undefined;
+  // The last successfully loaded config snapshot, serving dispatches while
+  // the file on disk is temporarily broken (an operator mid-edit).
+  let lastGoodConfigSnapshot: NonNullable<RuntimeSelection['presetConfig']> | undefined;
   const defaultAgentId = async (): Promise<string> => {
     // Identity only — never full runtime resolution: credential checks do
     // not belong here, or a daemon default provider without installed keys
@@ -611,6 +614,34 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // different provider than it was chosen for.
     const selection: RuntimeSelection = { ...options.selection };
     let resolveEnv = env;
+
+    // One config read per dispatch, through a last-known-good cache: a
+    // config.json an operator saved mid-edit must neither fail dispatches
+    // (a daemon keeps serving) nor silently change what it configured —
+    // discarding a broken config wholesale would flip a config-provided
+    // provider back to the demo default, durably recording canned replies
+    // in a real conversation. With no known-good snapshot to fall back
+    // on, failing is the honest outcome. Credential and provider errors
+    // are never masked — only the file itself degrades.
+    let configSnapshot: NonNullable<RuntimeSelection['presetConfig']>;
+    try {
+      const location = await resolveConfigLocation(
+        options.selection?.configPath ? { configPath: options.selection.configPath } : {},
+        env,
+      );
+      configSnapshot = location
+        ? { config: await loadConfigFile(location.path), trusted: location.trusted, path: location.path }
+        : { config: {}, trusted: true };
+      lastGoodConfigSnapshot = configSnapshot;
+    } catch (error) {
+      if (!(error instanceof ConfigFileError) || !lastGoodConfigSnapshot) {
+        throw error;
+      }
+      warn(`${error.message}; using the last known-good config`);
+      configSnapshot = lastGoodConfigSnapshot;
+    }
+    selection.presetConfig = configSnapshot;
+
     const pins = source.soul;
     if (pins) {
       // One soul read per dispatch: resolution uses the exact snapshot
@@ -621,26 +652,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       selection.presetSoul = pins;
       if (pins.provider || pins.model) {
         const processEnv = { ...(env.processEnv ?? process.env) };
-        let defaultProvider: string | undefined = options.selection?.provider
+        // The daemon-wide default can come from the selection, the
+        // environment, or the config file. A config with no provider key
+        // predates the anthropic option and is openai-specific (the
+        // resolver treats it that way), so a real file without the key
+        // still names openai as the default.
+        const defaultProvider: string | undefined = options.selection?.provider
           ?? processEnv.STRATUS_PROVIDER
-          ?? processEnv.STRATUSCLAW_PROVIDER;
-        if (pins.provider && defaultProvider === undefined) {
-          // The daemon-wide default can also come from the config file.
-          // Without checking it, a soul pinned to the SAME provider the
-          // config selects would still shed the generic credentials
-          // (STRATUS_API_KEY) that were installed precisely for it. A
-          // broken config leaves the default unknown — scrubbing, the
-          // safe side.
-          try {
-            const location = await resolveConfigLocation(
-              options.selection?.configPath ? { configPath: options.selection.configPath } : {},
-              env,
-            );
-            defaultProvider = location ? (await loadConfigFile(location.path)).provider : undefined;
-          } catch {
-            defaultProvider = undefined;
-          }
-        }
+          ?? processEnv.STRATUSCLAW_PROVIDER
+          ?? configSnapshot.config.provider
+          ?? (configSnapshot.path !== undefined ? 'openai' : undefined);
         if (pins.provider) {
           delete selection.provider;
           delete processEnv.STRATUS_PROVIDER;
@@ -677,20 +698,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       selection.presetSoul = null;
     }
 
-    let config: RuntimeConfig;
-    try {
-      config = await resolveRuntimeConfig(selection, resolveEnv);
-    } catch (error) {
-      // Only a broken config FILE degrades — a daemon must keep serving
-      // while an operator has config.json mid-edit. Credential and
-      // provider errors still surface: masking them behind a config-less
-      // retry could silently reroute an agent (e.g. to the demo provider).
-      if (!(error instanceof ConfigFileError)) {
-        throw error;
-      }
-      warn(`${error.message}; resolving without the config file`);
-      config = await resolveRuntimeConfig({ ...selection, ignoreConfigFile: true }, resolveEnv);
-    }
+    // The preset snapshot means resolution reads no config file — every
+    // failure from here is a credential or provider problem and surfaces.
+    const config = await resolveRuntimeConfig(selection, resolveEnv);
     const runner = runnerFor(config);
 
     const metadata: JsonObject = {

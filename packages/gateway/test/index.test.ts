@@ -1305,3 +1305,61 @@ test('the sticky-fallback switch is durable while the fallback is still in fligh
   assert.equal(session.status, 'completed');
   assert.match(session.messages.at(-1)?.content ?? '', /slow fallback reply/);
 });
+
+test('a provider-less legacy config counts as an OpenAI default for the credential scrub', async () => {
+  const home = await newHome();
+  // Legacy config: no provider key (openai-specific by convention), an
+  // OpenAI-pinned soul, and the generic key. The scrub must see a match.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ model: 'model-legacy' }));
+
+  const authHeaders: string[] = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    authHeaders.push(String((init?.headers as Record<string, string>)?.authorization ?? ''));
+    return openAiText('ava with the generic key');
+  }) as typeof fetch;
+
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_API_KEY: 'sk-generic' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+
+  const session = await gateway.dispatch({ sessionId: 'legacy-cfg-1', agentId: 'ava', userMessage: 'hi' });
+  await gateway.stop();
+
+  assert.equal(session.status, 'completed');
+  assert.ok(authHeaders.some((header) => header === 'Bearer sk-generic'));
+});
+
+test('config degradation serves the last known-good config, never the demo default', async () => {
+  const home = await newHome();
+  // A pinless soul whose provider comes entirely from the config file.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai', model: 'model-cfg' }));
+
+  const requestedModels: string[] = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { model: string };
+    requestedModels.push(body.model);
+    return openAiText('real provider reply');
+  }) as typeof fetch;
+
+  const warnings: string[] = [];
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
+  await gateway.start();
+
+  const healthy = await gateway.dispatch({ sessionId: 'keepcfg-1', agentId: 'ava', userMessage: 'hi' });
+  assert.match(healthy.messages.at(-1)?.content ?? '', /real provider reply/);
+
+  // Mid-edit save: the config is momentarily invalid. The session must
+  // keep its configured provider — a canned demo reply durably recorded
+  // in a real conversation would be worse than failing.
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ "provider": ');
+  const degraded = await gateway.dispatch({ sessionId: 'keepcfg-1', userMessage: 'still openai?' });
+  await gateway.stop();
+
+  assert.equal(degraded.status, 'completed');
+  assert.match(degraded.messages.at(-1)?.content ?? '', /real provider reply/);
+  assert.deepEqual(requestedModels, ['model-cfg', 'model-cfg']);
+  assert.ok(warnings.some((line) => line.includes('config')));
+});

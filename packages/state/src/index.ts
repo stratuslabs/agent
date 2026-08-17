@@ -134,11 +134,13 @@ export interface RuntimeSelection {
    */
   presetSoul?: ParsedSoul | null;
   /**
-   * Resolve as if no config file existed. For long-running callers
-   * degrading after a ConfigFileError — a daemon must not fail every
-   * dispatch while an operator has config.json in a broken state.
+   * An already-loaded config snapshot used instead of reading any file —
+   * for long-running callers serving the last known-good config while
+   * the file on disk is temporarily broken. Carries the trust flag (and
+   * path, for messages) the snapshot was loaded with; an empty config
+   * ({ config: {}, trusted: true }) resolves as if no file existed.
    */
-  ignoreConfigFile?: boolean;
+  presetConfig?: { config: StratusConfigFile; trusted: boolean; path?: string };
 }
 
 // The agent every run uses when no soul is configured. A Stratus agent is
@@ -676,8 +678,12 @@ export const resolveRuntimeConfig = async (
   env: StateEnvironment = {},
 ): Promise<RuntimeConfig> => {
   const processEnv = readProcessEnv(env);
-  const configLocation = selection.ignoreConfigFile ? undefined : await resolveConfigLocation(selection, env);
-  const fileConfig = configLocation ? await loadConfigFile(configLocation.path) : {};
+  const configLocation = selection.presetConfig !== undefined ? undefined : await resolveConfigLocation(selection, env);
+  const fileConfig = selection.presetConfig?.config ?? (configLocation ? await loadConfigFile(configLocation.path) : {});
+  // Trust (and the path shown in messages) follows the snapshot when one
+  // is preset, the discovered location otherwise.
+  const configTrusted = selection.presetConfig !== undefined ? selection.presetConfig.trusted : configLocation?.trusted;
+  const configPathShown = selection.presetConfig !== undefined ? selection.presetConfig.path : configLocation?.path;
   const soulPath = selection.presetSoul !== undefined ? undefined : resolveSoulPath(selection, env, fileConfig);
   const soul = selection.presetSoul ?? (soulPath ? await loadSoulFile(soulPath) : undefined);
 
@@ -728,7 +734,7 @@ export const resolveRuntimeConfig = async (
   // the provider's default endpoint is harmless.
   const defaultEndpointFor = (target: string): string =>
     target === 'anthropic' ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_OPENAI_BASE_URL;
-  const untrustedCustomBaseUrl = configLocation?.trusted === false
+  const untrustedCustomBaseUrl = configTrusted === false
     && selection.baseUrl === undefined
     && readNonEmptyString(processEnv.STRATUS_BASE_URL) === undefined
     && readNonEmptyString(processEnv.STRATUSCLAW_BASE_URL) === undefined
@@ -781,7 +787,7 @@ export const resolveRuntimeConfig = async (
   if (!apiKey && !authToken) {
     if (untrustedCustomBaseUrl && credentials[provider as CredentialProviderName]) {
       throw new Error(
-        `The project config at ${configLocation?.path} sets a custom base URL (${fileConfig.baseUrl}), so your saved sign-in is not sent to it. Set ${apiKeyEnvName} or STRATUS_API_KEY to use this endpoint, or run with --config to trust the file explicitly.`,
+        `The project config at ${configPathShown} sets a custom base URL (${fileConfig.baseUrl}), so your saved sign-in is not sent to it. Set ${apiKeyEnvName} or STRATUS_API_KEY to use this endpoint, or run with --config to trust the file explicitly.`,
       );
     }
     throw new Error(
@@ -839,7 +845,7 @@ export const resolveRuntimeConfig = async (
       // including the primary's stored key when both share a provider.
       // Only env-supplied keys follow such a URL.
       const fallbackUntrustedUrl = fallbackProvider === 'openai'
-        && configLocation?.trusted === false
+        && configTrusted === false
         && fileConfig.fallbackBaseUrl !== undefined
         && fileConfig.fallbackBaseUrl.replace(/\/+$/, '') !== DEFAULT_OPENAI_BASE_URL;
       const fallbackEnvKey = readNonEmptyString(processEnv[fallbackProvider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY']);
