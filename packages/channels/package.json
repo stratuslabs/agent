@@ -1,0 +1,44 @@
+{
+  "name": "@stratusagent/channels",
+  "version": "0.2.5",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types"
+  },
+  "dependencies": {
+    "@stratusagent/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/channels"
+  },
+  "description": "The Stratus channel contract: inbound messages, outbound streaming connections, adapter lifecycle, and stable per-conversation session keys",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "chat"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

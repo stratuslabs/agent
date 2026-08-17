@@ -426,6 +426,60 @@ test('a queued dispatch whose signal aborted while waiting never mutates the ses
   // was not marked failed by work that never ran.
   assert.deepEqual(stored?.messages.filter((m) => m.role === 'user').map((m) => m.content), ['first']);
   assert.equal(stored?.status, 'completed');
+
+test('channel adapters start after the roster and stop before the drain', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+
+  const order: string[] = [];
+  let sawAgentsAtStart = 0;
+  let replied = '';
+
+  const adapter = {
+    name: 'fake',
+    async start(gw: import('../src/index.ts').Gateway) {
+      order.push('start');
+      sawAgentsAtStart = gw.agents().length;
+      // A full end-to-end turn through the real gateway from a channel.
+      const session = await gw.dispatch({ sessionId: 'chan-1', userMessage: 'say hello' });
+      replied = session.messages.at(-1)?.content ?? '';
+    },
+    async stop() {
+      order.push('stop');
+    },
+  };
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, channels: [adapter] });
+  await gateway.start();
+  await gateway.stop();
+
+  assert.deepEqual(order, ['start', 'stop']);
+  assert.ok(sawAgentsAtStart >= 1, 'roster must be loaded before channels start');
+  assert.ok(replied.length > 0, 'the channel turn produced a reply');
+});
+
+test('a channel adapter that fails to start does not take the gateway down', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const warnings: string[] = [];
+
+  const broken = {
+    name: 'broken',
+    async start() {
+      throw new Error('no tokens');
+    },
+    async stop() {
+      throw new Error('never started');
+    },
+  };
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, channels: [broken], warn: (line) => warnings.push(line) });
+  await gateway.start();
+  const session = await gateway.dispatch({ sessionId: 'still-up-1', userMessage: 'say hello' });
+  await gateway.stop();
+
+  assert.equal(session.status, 'completed');
+  assert.ok(warnings.some((line) => line.includes('broken')), 'expected a warning about the broken channel');
 });
 
 test('the idle watchdog honors a session sticky-switched to a non-streaming fallback', async () => {

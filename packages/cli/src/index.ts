@@ -59,6 +59,7 @@ import {
   DEFAULT_STRATUS_AGENT,
   discoverActiveConfig,
   globalConfigPath,
+  loadChannelCredentials,
   loadCredentials,
   memoryFilePath,
   migrateLegacyMemory,
@@ -3107,12 +3108,36 @@ export const runServe = async (
   // command neither needs nor should pay for (Node still prints an
   // experimental warning for it).
   const { createGateway } = await import('@stratusagent/gateway');
+  const log = (line: string): void => writeLine(streams.stdout, line);
+  const warn = (line: string): void => writeLine(streams.stderr, `Warning: ${line}`);
+
+  // Agents with stored Slack tokens go live in Slack automatically — the
+  // tokens are gateway infrastructure secrets in the channels namespace of
+  // ~/.stratus/credentials.json (see @stratusagent/channel-slack's README
+  // for the 2-minute per-agent app setup).
+  const channelCredentials = await loadChannelCredentials(env);
+  const slackAgents = Object.entries(channelCredentials.slack ?? {});
+  const channels = [];
+  if (slackAgents.length > 0) {
+    const { createSlackChannelAdapter } = await import('@stratusagent/channel-slack');
+    channels.push(createSlackChannelAdapter({
+      agents: slackAgents.map(([agentId, tokens]) => ({
+        agentId,
+        appToken: tokens.appToken,
+        botToken: tokens.botToken,
+      })),
+      log,
+      warn,
+    }));
+  }
+
   const gateway = createGateway({
     env,
     ...(command.configPath ? { selection: { configPath: command.configPath } } : {}),
     ...(command.idleTimeoutMs !== undefined ? { idleTimeoutMs: command.idleTimeoutMs } : {}),
-    log: (line) => writeLine(streams.stdout, line),
-    warn: (line) => writeLine(streams.stderr, `Warning: ${line}`),
+    ...(channels.length > 0 ? { channels } : {}),
+    log,
+    warn,
   });
 
   if (command.events) {

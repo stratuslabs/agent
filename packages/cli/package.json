@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@stratusagent/agents": "workspace:*",
+    "@stratusagent/channel-slack": "workspace:*",
     "@stratusagent/core": "workspace:*",
     "@stratusagent/executor-local": "workspace:*",
     "@stratusagent/gateway": "workspace:*",

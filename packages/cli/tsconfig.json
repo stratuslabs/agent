@@ -40,6 +40,12 @@
     },
     {
       "path": "../gateway"
+    },
+    {
+      "path": "../channel-slack"
+    },
+    {
+      "path": "../channels"
     }
   ]
 }
