@@ -1942,6 +1942,12 @@ export const runSetup = async (
   // A path passed via --config is not auto-discovered by `stratus run`, so
   // suggested commands must carry it explicitly.
   const runConfigFlag = command.configPath ? ` --config ${quoteShellArg(command.configPath)}` : '';
+  // Set once save() detects a project config shadowing the global one.
+  // Suggested commands must carry it too, or they read a different config
+  // than the one just written — for `serve` that means a different roster,
+  // and Slack apps stored here would be skipped as having no agent.
+  let shadowConfigFlag = '';
+  const serveCommand = (): string => `stratus serve${runConfigFlag}${shadowConfigFlag}`;
 
   // Seed from what is already configured, so re-running setup edits instead
   // of clobbering.
@@ -2714,7 +2720,7 @@ export const runSetup = async (
       // Unreachable is not a verdict on the tokens: save and let the
       // daemon report on its first connection attempt.
       const detail = bot.status === 'unreachable' ? bot.detail : (app as { detail?: string }).detail;
-      writeLine(streams.stdout, `! Could not reach Slack to verify (${detail}). Saved the tokens anyway — \`stratus serve\` will report on startup.`);
+      writeLine(streams.stdout, `! Could not reach Slack to verify (${detail}). Saved the tokens anyway — \`${serveCommand()}\` will report on startup.`);
     }
   };
 
@@ -2739,11 +2745,16 @@ export const runSetup = async (
     }
     try {
       const soul = await loadSoulFile(resolved);
-      // A soul outside the roster can still collide by id with one inside
-      // it; the roster copy wins, exactly as it does in the gateway.
-      if (!entries.some((entry) => entry.soul.agent.id === soul.agent.id)) {
-        entries.unshift({ soul, path: resolved });
+      // An explicit id can collide with a roster file. The gateway's
+      // defaultAgentId replaces the roster source whenever the configured
+      // soul resolves to a different path, so the configured soul is the
+      // one Slack actually dispatches to — offering the roster namesake
+      // here would connect an app to a different agent than it names.
+      const collision = entries.findIndex((entry) => entry.soul.agent.id === soul.agent.id);
+      if (collision >= 0) {
+        entries.splice(collision, 1);
       }
+      entries.unshift({ soul, path: resolved });
     } catch (error) {
       warnOnce(`could not read the default soul ${resolved} (${error instanceof Error ? error.message : String(error)})`);
     }
@@ -2779,7 +2790,7 @@ export const runSetup = async (
       const choice = await prompter.select(
         'Channels — Slack (one app per agent: its own name, avatar, and presence)',
         options,
-        { footnote: 'Run `stratus serve` afterwards to bring the connected agents online.' },
+        { footnote: `Run \`${serveCommand()}\` afterwards to bring the connected agents online.` },
       );
       if (choice.kind !== 'index' || choice.index === options.length - 1) {
         return;
@@ -2894,7 +2905,6 @@ export const runSetup = async (
   };
 
   const save = async (): Promise<void> => {
-    let shadowConfigFlag = '';
     const config: Record<string, string> = { provider: state.provider };
     if (state.provider !== 'demo') {
       config.model = state.model ?? defaultModelFor(state.provider);
@@ -2958,7 +2968,7 @@ export const runSetup = async (
       await saveChannelCredentials(env, state.channels);
       const connected = Object.keys(state.channels.slack ?? {}).length;
       writeLine(streams.stdout, connected > 0
-        ? `Saved Slack tokens for ${connected} agent${connected === 1 ? '' : 's'} to ${credentialsPath(env)} — run \`stratus serve\` to bring them online.`
+        ? `Saved Slack tokens for ${connected} agent${connected === 1 ? '' : 's'} to ${credentialsPath(env)} — run \`${serveCommand()}\` to bring them online.`
         : `Removed the stored Slack tokens from ${credentialsPath(env)}.`);
     }
     writeLine(streams.stdout);

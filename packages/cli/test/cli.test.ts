@@ -3061,3 +3061,63 @@ test('the Channels menu offers a default soul that lives outside the roster', as
   const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
   assert.deepEqual(credentials.channels, { slack: { nova: { appToken: 'xapp-t', botToken: 'xoxb-t' } } });
 });
+
+test('a configured soul outranks a same-id roster file in the Channels menu', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // Same explicit id, two files. The gateway's defaultAgentId replaces the
+  // roster source with the configured soul, so Slack dispatches to Nova —
+  // offering "Ava" here would name an app after the wrong agent.
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\nid: shared\n---\n\nYou are Ava.\n');
+  const soulPath = path.join(project, 'nova.md');
+  await writeFile(soulPath, '---\nname: Nova\nid: shared\n---\n\nYou are Nova.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', soul: soulPath }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['4\n', '3\n', '6\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Nova \(shared\)/);
+  assert.doesNotMatch(output.stdout, /Ava \(shared\)/);
+});
+
+test('setup suggests serve with the same --config it was run with', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup', '--config', './custom.json'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['4\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '2\n', '6\n']),
+      fetch: (async (url: any) => new Response(JSON.stringify(
+        String(url).endsWith('/auth.test')
+          ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
+          : { ok: true, url: 'wss://x' },
+      ), { status: 200 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // A bare `stratus serve` would read a different config — and therefore a
+  // different roster — so the stored Slack app would be skipped.
+  assert.match(output.stdout, /run `stratus serve --config \.\/custom\.json` to bring them online/);
+});
