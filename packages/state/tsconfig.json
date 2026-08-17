@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "composite": true
+  },
+  "references": [
+    { "path": "../core" },
+    { "path": "../agents" },
+    { "path": "../providers" },
+    { "path": "../provider-anthropic" },
+    { "path": "../provider-claude-code" },
+    { "path": "../executor-local" }
+  ],
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "test"]
+}

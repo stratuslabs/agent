@@ -38,6 +38,9 @@ importers:
       '@stratusagent/providers':
         specifier: workspace:*
         version: link:../providers
+      '@stratusagent/state':
+        specifier: workspace:*
+        version: link:../state
     devDependencies:
       '@types/node':
         specifier: ^24.6.0
@@ -118,6 +121,31 @@ importers:
       '@stratusagent/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/state:
+    dependencies:
+      '@stratusagent/agents':
+        specifier: workspace:*
+        version: link:../agents
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+      '@stratusagent/executor-local':
+        specifier: workspace:*
+        version: link:../executor-local
+      '@stratusagent/provider-anthropic':
+        specifier: workspace:*
+        version: link:../provider-anthropic
+      '@stratusagent/provider-claude-code':
+        specifier: workspace:*
+        version: link:../provider-claude-code
+      '@stratusagent/providers':
+        specifier: workspace:*
+        version: link:../providers
     devDependencies:
       typescript:
         specifier: ^5.9.3

@@ -1,12 +1,9 @@
 {
-  "name": "@stratusagent/cli",
+  "name": "@stratusagent/state",
   "version": "0.2.4",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "bin": {
-    "stratus": "./dist/bin.js"
-  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -18,9 +15,8 @@
   ],
   "scripts": {
     "build": "tsc -b",
-    "cli": "node --experimental-strip-types ./src/bin.ts",
     "typecheck": "tsc --noEmit --project tsconfig.test.json",
-    "test": "node --test --experimental-strip-types ./test/**/*.test.ts"
+    "test": "node --test --experimental-strip-types"
   },
   "dependencies": {
     "@stratusagent/agents": "workspace:*",
@@ -28,20 +24,18 @@
     "@stratusagent/executor-local": "workspace:*",
     "@stratusagent/provider-anthropic": "workspace:*",
     "@stratusagent/provider-claude-code": "workspace:*",
-    "@stratusagent/providers": "workspace:*",
-    "@stratusagent/state": "workspace:*"
+    "@stratusagent/providers": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^24.6.0",
     "typescript": "^5.9.3"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",
-    "directory": "packages/cli"
+    "directory": "packages/state"
   },
-  "description": "Stratus Agent CLI: setup walkthrough, agent creation, local runs, and dashboard",
+  "description": "Shared Stratus state wiring: config resolution, credential storage, the soul roster, file-backed agent memory, and provider construction — used by the CLI and the gateway alike",
   "keywords": [
     "stratus",
     "agent",
