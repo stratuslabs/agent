@@ -19,6 +19,7 @@ import {
 import {
   createDelegateTool,
   createRememberTool,
+  type ParsedSoul,
 } from '@stratusagent/agents';
 import { createLocalCommandExecutor } from '@stratusagent/executor-local';
 import {
@@ -50,18 +51,31 @@ const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
  * state like the Anthropic raw-turn cache — round-trips as one JSON body,
  * so a conversation resumed after a daemon restart replays exactly.
  */
+export interface SqliteSessionStoreOptions {
+  /**
+   * The database's parent directory is dedicated Stratus state (e.g. the
+   * default ~/.stratus): tighten it to owner-only even when it already
+   * exists, since mkdir's mode only applies to directories it creates and
+   * an upgrade over a looser install must not stay world-readable. Leave
+   * false for caller-supplied paths — a shared parent like /tmp or a
+   * project directory must never be chmodded implicitly.
+   */
+  ownedDirectory?: boolean;
+}
+
 export class SqliteSessionStore implements SessionStore {
   private readonly db: DatabaseSync;
 
-  constructor(filePath: string) {
+  constructor(filePath: string, options: SqliteSessionStoreOptions = {}) {
     // Sessions hold complete conversations (prompts, replies, tool output,
     // provider replay state) — owner-only, like the credentials file. The
-    // chmods cover pre-existing files and directories too: mkdir's mode
-    // only applies to directories it creates, so an upgrade over a 0755
-    // ~/.stratus must be tightened explicitly.
+    // file chmods below cover databases created earlier under a looser
+    // umask too; directories the store creates are born 0700.
     const dir = path.dirname(filePath);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    chmodSync(dir, 0o700);
+    if (options.ownedDirectory) {
+      chmodSync(dir, 0o700);
+    }
     this.db = new DatabaseSync(filePath);
     for (const sensitive of [filePath, `${filePath}-wal`, `${filePath}-shm`, `${filePath}-journal`]) {
       try {
@@ -179,6 +193,8 @@ interface AgentSource {
   definition: AgentDefinition;
   /** Soul file backing this agent; undefined for the built-in default. */
   soulPath?: string;
+  /** The parsed soul, carried for its provider/model pins. */
+  soul?: ParsedSoul;
 }
 
 /**
@@ -196,9 +212,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const bus = new EventBus({
     onError: (error) => warn(`event handler failed: ${error instanceof Error ? error.message : String(error)}`),
   });
-  const store = new SqliteSessionStore(
-    options.sessionDbPath ?? path.join(stratusHomePath(env), SESSIONS_DB_FILENAME),
-  );
+  // The default database lives in the gateway-owned ~/.stratus, which is
+  // tightened to owner-only; a caller-supplied path may sit in a shared
+  // directory that must not be chmodded from under other processes.
+  const store = options.sessionDbPath
+    ? new SqliteSessionStore(options.sessionDbPath)
+    : new SqliteSessionStore(path.join(stratusHomePath(env), SESSIONS_DB_FILENAME), { ownedDirectory: true });
   const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
   const registry = new AgentRegistry();
   const sources = new Map<string, AgentSource>();
@@ -218,7 +237,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         warn(`duplicate agent id ${entry.soul.agent.id} (${existing?.soulPath ?? 'built-in'} vs ${entry.path}); keeping the first`);
         continue;
       }
-      registerSource({ definition: entry.soul.agent, soulPath: entry.path });
+      registerSource({ definition: entry.soul.agent, soulPath: entry.path, soul: entry.soul });
     }
     if (!sources.has(DEFAULT_STRATUS_AGENT.id)) {
       registerSource({ definition: { ...DEFAULT_STRATUS_AGENT } });
@@ -239,7 +258,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       try {
         const soul = await loadSoulFile(source.soulPath);
         if (soul.agent.id === agentId) {
-          const refreshed: AgentSource = { definition: soul.agent, soulPath: source.soulPath };
+          const refreshed: AgentSource = { definition: soul.agent, soulPath: source.soulPath, soul };
           registerSource(refreshed);
           return refreshed;
         }
@@ -482,11 +501,27 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     // Config re-resolves per dispatch, so a changed model, credential, or
     // soul pin applies without a restart. The pool dedupes runners by the
-    // resolved configuration.
-    const config = await resolveRuntimeConfig(
-      { ...options.selection, ...(source.soulPath ? { soul: source.soulPath } : {}) },
-      env,
-    );
+    // resolved configuration. The gateway-wide selection is a default, not
+    // an override: resolveRuntimeConfig gives selection.provider/model top
+    // precedence (they are explicit flags on the CLI), so any default the
+    // soul pins over is dropped here — an agent pinned to a provider keeps
+    // it whatever the gateway was started with, and a default model never
+    // rides along to a different provider than it was chosen for.
+    const selection: RuntimeSelection = { ...options.selection };
+    if (source.soulPath) {
+      selection.soul = source.soulPath;
+      const pins = source.soul;
+      if (pins?.provider) {
+        delete selection.provider;
+        if (pins.provider !== options.selection?.provider) {
+          delete selection.model;
+        }
+      }
+      if (pins?.model) {
+        delete selection.model;
+      }
+    }
+    const config = await resolveRuntimeConfig(selection, env);
     const runner = runnerFor(config);
 
     const metadata: JsonObject = {

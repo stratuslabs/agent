@@ -472,7 +472,9 @@ test('executeHostedToolCall runs a tool with approvals, allowlists, and events',
   assert.equal(blocked.ok, false);
   assert.match(blocked.error ?? '', /not permitted/);
 
-  assert.deepEqual(events, ['tool.called', 'tool.completed', 'tool.denied']);
+  // The blocked call settles with tool.completed too (carrying the failed
+  // result): every tool call emits exactly one settling event.
+  assert.deepEqual(events, ['tool.called', 'tool.completed', 'tool.denied', 'tool.completed']);
 });
 
 test('streaming runners drain every provider.delta before the final provider.response', async () => {
@@ -680,4 +682,98 @@ test('hosted tool calls persist their paired messages to the stored session', as
   assert.ok(callMessage, 'the tool call must be recorded in durable history');
   assert.ok(resultMessage, 'the tool result must be recorded in durable history');
   assert.equal(resultMessage.toolResult?.ok, true);
+});
+
+test('kernel tool activity is saved as it happens, not only at turn end', async () => {
+  const inner = new InMemorySessionStore();
+  const snapshots: Session[] = [];
+  const store = {
+    create: (input: Omit<Session, 'createdAt' | 'updatedAt'>) => inner.create(input),
+    get: (id: string) => inner.get(id),
+    save: async (session: Session) => {
+      snapshots.push(JSON.parse(JSON.stringify(session)) as Session);
+      await inner.save(session);
+    },
+  };
+
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'remember',
+    parameters: { type: 'object', properties: {} },
+    async execute() {
+      return { remembered: true };
+    },
+  });
+
+  const provider: ModelProvider = {
+    name: 'p',
+    async generate({ session }) {
+      if (session.messages.at(-1)?.role === 'tool') {
+        return { parts: [{ type: 'text', text: 'noted' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: 'call-9', toolName: 'remember', input: {} } }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools, store });
+  await runner.run({
+    sessionId: 'durable-tools-1',
+    agent: { id: 'a', name: 'A' },
+    userMessage: 'remember this',
+  });
+
+  // A save landed with the call recorded but not yet executed: a daemon
+  // killed mid-tool leaves a session that shows the attempt, so a resume
+  // does not replay the request and repeat the side effect.
+  const callSaved = snapshots.find((snapshot) => {
+    const last = snapshot.messages.at(-1);
+    return last?.role === 'assistant' && (last.toolCalls?.length ?? 0) > 0;
+  });
+  assert.ok(callSaved, 'the tool call must be saved before execution');
+  assert.equal(callSaved.status, 'running');
+
+  // And a save landed with the result, before the final provider turn.
+  const resultSaved = snapshots.find((snapshot) => {
+    const last = snapshot.messages.at(-1);
+    return last?.role === 'tool' && last.toolResult?.ok === true;
+  });
+  assert.ok(resultSaved, 'the tool result must be saved right after execution');
+  assert.equal(resultSaved.status, 'running');
+
+  assert.equal(snapshots.at(-1)?.status, 'completed');
+});
+
+test('rejected tool calls settle with a tool.completed event', async () => {
+  const events: StratusEvent[] = [];
+  const bus = new EventBus();
+  bus.subscribe((event) => {
+    events.push(event);
+  });
+
+  const provider: ModelProvider = {
+    name: 'p',
+    async generate({ session }) {
+      if (session.messages.at(-1)?.role === 'tool') {
+        return { parts: [{ type: 'text', text: 'fine' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: 'call-10', toolName: 'ghost', input: {} } }] };
+    },
+  };
+
+  // Event consumers pairing a response's tool calls with settling events
+  // (the gateway's phase-aware watchdog) rely on rejections settling too.
+  const runner = new AgentRunner({ provider, bus });
+  const session = await runner.run({
+    sessionId: 'rejected-1',
+    agent: { id: 'a', name: 'A' },
+    userMessage: 'call a ghost',
+  });
+
+  assert.equal(session.status, 'completed');
+  const settled = events.find(
+    (event) => event.type === 'tool.completed' && event.result.callId === 'call-10',
+  );
+  assert.ok(settled, 'a rejected call must emit tool.completed');
+  assert.equal(settled.type === 'tool.completed' && settled.result.ok, false);
+  assert.match(settled.type === 'tool.completed' ? settled.result.error ?? '' : '', /Tool not found: ghost/);
 });

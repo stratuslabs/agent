@@ -634,6 +634,12 @@ export class AgentRunner {
             createdAt: new Date().toISOString(),
             toolCalls: [part.call],
           });
+          // Durable recovery cannot rely on reaching the end of the turn:
+          // the call is saved before it runs and its result immediately
+          // after, so a daemon killed mid-turn never holds a session whose
+          // side effects happened but were not recorded — a later resume
+          // would replay the request and repeat them.
+          await this.store.save(session);
 
           const result = await this.executeToolCall(session, part.call, signal);
 
@@ -645,6 +651,7 @@ export class AgentRunner {
             createdAt: new Date().toISOString(),
             toolResult: result,
           });
+          await this.store.save(session);
         }
 
         if (!sawToolCall) {
@@ -714,15 +721,25 @@ export class AgentRunner {
   }
 
   private async executeToolCall(session: Session, call: ToolCall, signal?: AbortSignal): Promise<ToolResult> {
-    const allowedTools = this.allowedToolsFor(session);
-    if (allowedTools !== undefined && !allowedTools.has(call.toolName)) {
-      return {
+    // Every tool call settles with exactly one event — tool.completed
+    // (executed or rejected, the result says which) or tool.denied. Event
+    // consumers tracking a response's outstanding calls (the gateway's
+    // phase-aware watchdog) count on rejected calls settling too.
+    const rejected = async (error: string): Promise<ToolResult> => {
+      const result: ToolResult = {
         callId: call.id,
         toolName: call.toolName,
         ok: false,
         output: null,
-        error: `Tool not permitted for agent ${session.agent.id}: ${call.toolName}`,
+        error,
       };
+      await this.bus.emit({ type: 'tool.completed', sessionId: session.id, result });
+      return result;
+    };
+
+    const allowedTools = this.allowedToolsFor(session);
+    if (allowedTools !== undefined && !allowedTools.has(call.toolName)) {
+      return rejected(`Tool not permitted for agent ${session.agent.id}: ${call.toolName}`);
     }
 
     const approved = await this.approvals.approve({ session, call, ...(signal ? { signal } : {}) });
@@ -739,13 +756,7 @@ export class AgentRunner {
 
     const tool = this.tools.get(call.toolName);
     if (!tool) {
-      return {
-        callId: call.id,
-        toolName: call.toolName,
-        ok: false,
-        output: null,
-        error: `Tool not found: ${call.toolName}`,
-      };
+      return rejected(`Tool not found: ${call.toolName}`);
     }
 
     throwIfAborted(signal);

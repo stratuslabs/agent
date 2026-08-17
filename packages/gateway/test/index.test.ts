@@ -369,14 +369,32 @@ test('a pre-existing loose session directory is tightened to owner-only', async 
   const home = await newHome();
   // The upgrade path: ~/.stratus already exists with the default 0755 from
   // an earlier install. mkdir's mode only applies to directories it
-  // creates, so the constructor must chmod explicitly.
+  // creates, so the constructor must chmod explicitly — but only for a
+  // directory declared as dedicated Stratus state.
   const dir = path.join(home, 'state');
+  await mkdir(dir, { recursive: true, mode: 0o755 });
+  const dbPath = path.join(dir, 'sessions.db');
+  const store = new SqliteSessionStore(dbPath, { ownedDirectory: true });
+  store.close();
+
+  assert.equal(((await stat(dir)).mode & 0o777), 0o700);
+});
+
+test('a caller-supplied parent directory is never chmodded', async () => {
+  const { stat } = await import('node:fs/promises');
+  const home = await newHome();
+  // An embedder pointing sessionDbPath at a shared directory (think /tmp
+  // or a project root): the store must not change that directory's
+  // permissions from under other processes. The database file itself is
+  // still tightened — it is always ours.
+  const dir = path.join(home, 'shared');
   await mkdir(dir, { recursive: true, mode: 0o755 });
   const dbPath = path.join(dir, 'sessions.db');
   const store = new SqliteSessionStore(dbPath);
   store.close();
 
-  assert.equal(((await stat(dir)).mode & 0o777), 0o700);
+  assert.equal(((await stat(dir)).mode & 0o777), 0o755);
+  assert.equal(((await stat(dbPath)).mode & 0o777), 0o600);
 });
 
 test('a queued dispatch whose signal aborted while waiting never mutates the session', async () => {
@@ -539,4 +557,82 @@ test('a mid-turn switch to a non-streaming fallback suspends the watchdog for th
 
   assert.equal(session.status, 'completed');
   assert.match(session.messages.at(-1)?.content ?? '', /fallback rode out the silence/);
+});
+
+test('a soul provider pin beats the gateway-wide selection', async () => {
+  const home = await newHome();
+  // The gateway's selection is a default for unpinned agents, never an
+  // override: Ava pins Anthropic, so she must not be routed through the
+  // gateway's OpenAI default — nor inherit its model.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  const urls: string[] = [];
+  const fetchImpl = (async (url: unknown) => {
+    urls.push(String(url));
+    if (String(url).includes('anthropic')) {
+      return anthropicSseText('from anthropic');
+    }
+    return openAiText('from openai');
+  }) as typeof fetch;
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { ANTHROPIC_API_KEY: 'sk-a', OPENAI_API_KEY: 'sk-o' },
+    fetch: fetchImpl,
+  };
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    selection: { provider: 'openai', model: 'model-o' },
+  });
+  await gateway.start();
+
+  const pinned = await gateway.dispatch({ sessionId: 'pin-1', agentId: 'ava', userMessage: 'hi' });
+  // The default agent has no pins, so the gateway-wide selection applies.
+  const unpinned = await gateway.dispatch({ sessionId: 'pin-2', userMessage: 'hi' });
+  await gateway.stop();
+
+  assert.match(pinned.messages.at(-1)?.content ?? '', /from anthropic/);
+  assert.match(unpinned.messages.at(-1)?.content ?? '', /from openai/);
+  assert.ok(urls.some((url) => url.includes('anthropic')));
+});
+
+test('the watchdog re-arms after a rejected tool call and still catches a stalled provider', async () => {
+  const home = await newHome();
+  // The streaming provider calls a tool that does not exist; the kernel
+  // rejects it without executing anything. The rejection must still settle
+  // the watchdog's pending-tool count — otherwise the timer stays
+  // suspended, and the stalled second provider request below would hang
+  // the turn (and gateway shutdown) forever.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  let anthropicCalls = 0;
+  const fetchImpl = ((url: unknown, init?: RequestInit) => {
+    if (String(url).includes('anthropic')) {
+      anthropicCalls += 1;
+      if (anthropicCalls === 1) {
+        return Promise.resolve(anthropicSseToolCall('no_such_tool', {}));
+      }
+      return new Promise((_resolve, reject) => {
+        if (init?.signal?.aborted) {
+          reject(new DOMException('aborted', 'AbortError'));
+          return;
+        }
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      });
+    }
+    return Promise.resolve(openAiText('unused'));
+  }) as typeof fetch;
+
+  const env = { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-a' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 200, warn: () => {} });
+  await gateway.start();
+
+  await assert.rejects(
+    () => gateway.dispatch({ sessionId: 'rejected-tool-1', agentId: 'ava', userMessage: 'call something odd' }),
+    (error: Error) => error instanceof RunAbortedError && /no activity/.test(error.message),
+  );
+  await gateway.stop();
+  assert.equal(anthropicCalls, 2);
 });
