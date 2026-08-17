@@ -316,3 +316,14 @@ test('a stopping gateway refuses new work but drains in-flight turns', async () 
   assert.equal(session.status, 'completed');
   await stopped;
 });
+
+test('the session database and its directory are owner-only', async () => {
+  const { stat } = await import('node:fs/promises');
+  const home = await newHome();
+  const dbPath = path.join(home, 'state', 'sessions.db');
+  const store = new SqliteSessionStore(dbPath);
+  store.close();
+
+  assert.equal(((await stat(path.dirname(dbPath))).mode & 0o777), 0o700);
+  assert.equal(((await stat(dbPath)).mode & 0o777), 0o600);
+});

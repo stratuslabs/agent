@@ -356,23 +356,21 @@ export const createAnthropicProvider = ({
 
       let response;
       if (request.onDelta) {
-        // Streaming path: text fragments feed the kernel's delta sink as
-        // they arrive, serialized so the sink's backpressure is honored,
-        // and fully drained before generate() resolves.
+        // Streaming path: iterate the stream and AWAIT the sink per
+        // fragment — the kernel contract's backpressure. A slow consumer
+        // (a throttled Slack edit) pauses this consumer loop instead of
+        // piling every remaining delta into an unbounded queue.
         const stream = client.messages.stream(params, requestOptions);
         const onDelta = request.onDelta;
-        let sinkChain: Promise<void> = Promise.resolve();
-        stream.on('text', (textDelta) => {
-          sinkChain = sinkChain.then(() => onDelta({ type: 'text', text: textDelta }));
-        });
-        stream.on('contentBlock', (block) => {
-          if (block.type === 'tool_use') {
-            const toolName = mapping.fromWire.get(block.name) ?? block.name;
-            sinkChain = sinkChain.then(() => onDelta({ type: 'tool-call', toolName }));
+        for await (const event of stream) {
+          if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+            await onDelta({ type: 'text', text: event.delta.text });
+          } else if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
+            const toolName = mapping.fromWire.get(event.content_block.name) ?? event.content_block.name;
+            await onDelta({ type: 'tool-call', toolName });
           }
-        });
+        }
         response = await stream.finalMessage();
-        await sinkChain;
       } else {
         response = await client.messages.create(params, requestOptions);
       }

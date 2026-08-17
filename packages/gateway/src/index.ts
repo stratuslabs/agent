@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { chmodSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -52,8 +52,18 @@ export class SqliteSessionStore implements SessionStore {
   private readonly db: DatabaseSync;
 
   constructor(filePath: string) {
-    mkdirSync(path.dirname(filePath), { recursive: true });
+    // Sessions hold complete conversations (prompts, replies, tool output,
+    // provider replay state) — owner-only, like the credentials file. The
+    // chmods cover databases created earlier under a looser umask too.
+    mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(filePath);
+    for (const sensitive of [filePath, `${filePath}-wal`, `${filePath}-shm`, `${filePath}-journal`]) {
+      try {
+        chmodSync(sensitive, 0o600);
+      } catch {
+        // Journal side-files only exist while active; nothing to tighten.
+      }
+    }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
