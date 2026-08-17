@@ -236,6 +236,18 @@ const createSystemPrompt = (
   return sections.join('\n\n');
 };
 
+// Forwards the kernel's abort signal into an AbortController the Agent SDK
+// understands, so aborting a turn terminates the underlying query.
+const linkedAbortController = (signal: AbortSignal): AbortController => {
+  const controller = new AbortController();
+  if (signal.aborted) {
+    controller.abort();
+  } else {
+    signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+  return controller;
+};
+
 // The Agent SDK takes a single prompt string per query, so multi-turn
 // sessions are rendered as a transcript with the latest user message last.
 const createPrompt = (request: ProviderRequest): string => {
@@ -319,6 +331,9 @@ export const createClaudeCodeProvider = ({
             allowedTools: bridgedTools.map((tool) => `mcp__${MCP_SERVER_NAME}__${tool.name}`),
           }
         : {}),
+      // Aborting the turn must stop the SDK query itself, not just our
+      // iteration over it — the kernel contract is that cancelled work ends.
+      ...(request.signal ? { abortController: linkedAbortController(request.signal) } : {}),
       // The env REPLACES the subprocess environment, so inherit ours and
       // then pin the auth: this provider is subscription-billed in both
       // modes (setup token or existing sign-in), so an ambient API key must

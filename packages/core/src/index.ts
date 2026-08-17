@@ -110,6 +110,15 @@ export type ProviderPart =
   | { type: 'text'; text: string }
   | { type: 'tool-call'; call: ToolCall };
 
+/**
+ * A streamed fragment of an in-progress provider response. Text deltas carry
+ * output as it is generated; tool-call deltas announce that the model has
+ * started emitting a call (input may still be incomplete).
+ */
+export type ProviderDelta =
+  | { type: 'text'; text: string }
+  | { type: 'tool-call'; toolName: string; inputFragment?: string };
+
 export interface ToolDescriptor {
   name: string;
   description?: string;
@@ -203,6 +212,22 @@ export interface ProviderRequest {
   tools?: ToolDescriptor[];
   /** Agent-scoped long-term memory, newest last. */
   memory?: MemoryEntry[];
+  /**
+   * Streaming sink. Adapters that stream call this per fragment and MUST
+   * await the returned promise before the next call (backpressure); the
+   * runner drains every pending delta before emitting the final
+   * provider.response, so a delta can never arrive after the response.
+   * A single-promise generate() cannot stream on its own — this is the
+   * provider-to-runner streaming contract. Optional on both sides:
+   * non-streaming adapters ignore it.
+   */
+  onDelta?: (delta: ProviderDelta) => void | Promise<void>;
+  /**
+   * Abort signal for the turn. Adapters MUST cancel their underlying
+   * operation (HTTP request, SDK query) when it fires — racing the promise
+   * is not cancellation; the underlying work has to stop.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ProviderResponse {
@@ -214,21 +239,37 @@ export interface ModelProvider {
   generate(request: ProviderRequest): Promise<ProviderResponse>;
 }
 
+/**
+ * Ambient context for one tool execution. The abort signal is the turn's:
+ * executors kill in-flight subprocesses on abort, and long-running tools
+ * should observe it too.
+ */
+export interface ExecutionContext {
+  signal?: AbortSignal;
+}
+
 export interface Tool {
   name: string;
   description?: string;
   /** JSON Schema describing the tool's input, advertised to model providers. */
   parameters?: JsonObject;
-  execute(input: JsonObject, session: Session): Promise<JsonValue>;
+  execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue>;
 }
 
 export interface Executor {
-  execute(call: ToolCall, tool: Tool, session: Session): Promise<ToolResult>;
+  execute(call: ToolCall, tool: Tool, session: Session, context?: ExecutionContext): Promise<ToolResult>;
 }
 
 export interface ApprovalContext {
   session: Session;
   call: ToolCall;
+  /**
+   * The turn's abort signal. A policy that waits on a human MUST observe it:
+   * an aborted turn rejects the in-flight wait and invalidates its pending
+   * request, so a later approval can never execute a tool for a cancelled
+   * turn.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ApprovalPolicy {
@@ -238,6 +279,7 @@ export interface ApprovalPolicy {
 export type StratusEvent =
   | { type: 'session.created'; sessionId: string; agentId: string }
   | { type: 'session.updated'; sessionId: string; status: SessionStatus }
+  | { type: 'provider.delta'; sessionId: string; delta: ProviderDelta }
   | { type: 'provider.response'; sessionId: string; parts: ProviderPart[] }
   | { type: 'tool.called'; sessionId: string; call: ToolCall }
   | { type: 'tool.completed'; sessionId: string; result: ToolResult }
@@ -350,9 +392,9 @@ export class ToolRegistry {
 }
 
 export class DefaultExecutor implements Executor {
-  async execute(call: ToolCall, tool: Tool, session: Session): Promise<ToolResult> {
+  async execute(call: ToolCall, tool: Tool, session: Session, context?: ExecutionContext): Promise<ToolResult> {
     try {
-      const output = await tool.execute(call.input, session);
+      const output = await tool.execute(call.input, session, context);
       return { callId: call.id, toolName: call.toolName, ok: true, output };
     } catch (error) {
       return {
@@ -377,12 +419,34 @@ export interface RunInput {
   agent: AgentDescriptor;
   userMessage: string;
   metadata?: JsonObject;
+  /** Aborting fails the turn cleanly; see RunAbortedError. */
+  signal?: AbortSignal;
 }
 
 export interface ResumeInput {
   sessionId: string;
   userMessage: string;
+  /** Aborting fails the turn cleanly; see RunAbortedError. */
+  signal?: AbortSignal;
 }
+
+/**
+ * Thrown when a run is stopped by its abort signal. The session ends up
+ * `failed` with this error's message as `lastError`, so an aborted turn is
+ * distinguishable from a genuine failure.
+ */
+export class RunAbortedError extends Error {
+  constructor(message = 'Run aborted') {
+    super(message);
+    this.name = 'RunAbortedError';
+  }
+}
+
+const throwIfAborted = (signal: AbortSignal | undefined): void => {
+  if (signal?.aborted) {
+    throw new RunAbortedError();
+  }
+};
 
 export interface AgentRunnerOptions {
   provider: ModelProvider;
@@ -398,6 +462,13 @@ export interface AgentRunnerOptions {
   memory?: AgentMemoryStore;
   /** Maximum provider turns per run before the session fails. */
   maxTurns?: number;
+  /**
+   * When true, the runner hands providers a delta sink and re-emits their
+   * fragments as provider.delta events. Off by default: streaming is
+   * additive, and consumers that render only final responses (one-shot CLI
+   * runs, tests) keep the simpler non-streaming provider path.
+   */
+  streaming?: boolean;
 }
 
 const DEFAULT_MAX_TURNS = 8;
@@ -412,6 +483,7 @@ export class AgentRunner {
   readonly agents: AgentRegistry;
   readonly memory: AgentMemoryStore | undefined;
   readonly maxTurns: number;
+  readonly streaming: boolean;
   private readonly options: AgentRunnerOptions;
 
   constructor(options: AgentRunnerOptions) {
@@ -425,6 +497,7 @@ export class AgentRunner {
     this.agents = options.agents ?? new AgentRegistry();
     this.memory = options.memory;
     this.maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
+    this.streaming = options.streaming ?? false;
   }
 
   async initialize(): Promise<void> {
@@ -455,7 +528,7 @@ export class AgentRunner {
     await this.bus.emit({ type: 'session.created', sessionId: session.id, agentId: session.agent.id });
     await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
 
-    return this.executeTurns(session);
+    return this.executeTurns(session, input.signal);
   }
 
   async resume(input: ResumeInput): Promise<Session> {
@@ -475,7 +548,7 @@ export class AgentRunner {
 
     await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
 
-    return this.executeTurns(session);
+    return this.executeTurns(session, input.signal);
   }
 
   /** Tool names this session's agent may use, or undefined for no limit. */
@@ -487,7 +560,7 @@ export class AgentRunner {
     return tools ? new Set(tools) : undefined;
   }
 
-  private async executeTurns(initialSession: Session): Promise<Session> {
+  private async executeTurns(initialSession: Session, signal?: AbortSignal): Promise<Session> {
     let session = initialSession;
 
     try {
@@ -497,17 +570,34 @@ export class AgentRunner {
         .filter((tool) => allowedTools === undefined || allowedTools.has(tool.name));
 
       for (let turn = 1; ; turn += 1) {
+        throwIfAborted(signal);
         if (turn > this.maxTurns) {
           throw new Error(`Session exceeded the maximum of ${this.maxTurns} provider turns.`);
         }
 
         const memory = this.memory ? await this.memory.list(session.agent.id) : [];
 
+        // Deltas re-emit on the bus through a serial chain that is drained
+        // before the final provider.response goes out — a delta arriving
+        // after the response would let a late edit overwrite final output.
+        let deltaChain: Promise<void> = Promise.resolve();
+        const onDelta = (delta: ProviderDelta): Promise<void> => {
+          const emission = deltaChain.then(() =>
+            this.bus.emit({ type: 'provider.delta', sessionId: session.id, delta }),
+          );
+          deltaChain = emission;
+          return emission;
+        };
+
         const response = await this.options.provider.generate({
           session,
           ...(tools.length > 0 ? { tools } : {}),
           ...(memory.length > 0 ? { memory } : {}),
+          ...(this.streaming ? { onDelta } : {}),
+          ...(signal ? { signal } : {}),
         });
+        throwIfAborted(signal);
+        await deltaChain;
         await this.bus.emit({ type: 'provider.response', sessionId: session.id, parts: response.parts });
 
         let sawToolCall = false;
@@ -524,6 +614,7 @@ export class AgentRunner {
           }
 
           sawToolCall = true;
+          throwIfAborted(signal);
           session.messages.push({
             id: `${session.id}:assistant:${session.messages.length + 1}`,
             role: 'assistant',
@@ -532,7 +623,7 @@ export class AgentRunner {
             toolCalls: [part.call],
           });
 
-          const result = await this.executeToolCall(session, part.call);
+          const result = await this.executeToolCall(session, part.call, signal);
 
           session.messages.push({
             id: `${session.id}:tool:${result.callId}`,
@@ -575,11 +666,11 @@ export class AgentRunner {
    * (e.g. the Claude Code runtime) but must run Stratus tools exactly as
    * if the kernel loop had called them.
    */
-  async executeHostedToolCall(session: Session, call: ToolCall): Promise<ToolResult> {
-    return this.executeToolCall(session, call);
+  async executeHostedToolCall(session: Session, call: ToolCall, context?: ExecutionContext): Promise<ToolResult> {
+    return this.executeToolCall(session, call, context?.signal);
   }
 
-  private async executeToolCall(session: Session, call: ToolCall): Promise<ToolResult> {
+  private async executeToolCall(session: Session, call: ToolCall, signal?: AbortSignal): Promise<ToolResult> {
     const allowedTools = this.allowedToolsFor(session);
     if (allowedTools !== undefined && !allowedTools.has(call.toolName)) {
       return {
@@ -591,7 +682,7 @@ export class AgentRunner {
       };
     }
 
-    const approved = await this.approvals.approve({ session, call });
+    const approved = await this.approvals.approve({ session, call, ...(signal ? { signal } : {}) });
     if (!approved) {
       await this.bus.emit({ type: 'tool.denied', sessionId: session.id, call });
       return {
@@ -614,8 +705,9 @@ export class AgentRunner {
       };
     }
 
+    throwIfAborted(signal);
     await this.bus.emit({ type: 'tool.called', sessionId: session.id, call });
-    const result = await this.executor.execute(call, tool, session);
+    const result = await this.executor.execute(call, tool, session, signal ? { signal } : undefined);
     await this.bus.emit({ type: 'tool.completed', sessionId: session.id, result });
     return result;
   }

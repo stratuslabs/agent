@@ -474,3 +474,145 @@ test('executeHostedToolCall runs a tool with approvals, allowlists, and events',
 
   assert.deepEqual(events, ['tool.called', 'tool.completed', 'tool.denied']);
 });
+
+test('streaming runners drain every provider.delta before the final provider.response', async () => {
+  const order: string[] = [];
+  const bus = new EventBus();
+  bus.subscribe(async (event: StratusEvent) => {
+    if (event.type === 'provider.delta') {
+      // A deliberately slow subscriber: draining must still finish before
+      // the final response is delivered.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      order.push(`delta:${event.delta.type === 'text' ? event.delta.text : event.delta.toolName}`);
+      return;
+    }
+    if (event.type === 'provider.response') {
+      order.push('response');
+    }
+  });
+
+  const provider: ModelProvider = {
+    name: 'streaming-scripted',
+    async generate({ onDelta }) {
+      assert.ok(onDelta, 'streaming runner must hand providers a delta sink');
+      await onDelta({ type: 'text', text: 'Hel' });
+      await onDelta({ type: 'text', text: 'lo' });
+      await onDelta({ type: 'tool-call', toolName: 'demo.echo' });
+      return { parts: [{ type: 'text', text: 'Hello' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, bus, streaming: true });
+  await runner.initialize();
+  await runner.run({
+    sessionId: 'stream-1',
+    agent: { id: 'streamer', name: 'Streamer' },
+    userMessage: 'hi',
+  });
+
+  assert.deepEqual(order, ['delta:Hel', 'delta:lo', 'delta:demo.echo', 'response']);
+});
+
+test('non-streaming runners never hand providers a delta sink', async () => {
+  const provider: ModelProvider = {
+    name: 'plain',
+    async generate({ onDelta }) {
+      assert.equal(onDelta, undefined);
+      return { parts: [{ type: 'text', text: 'ok' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider });
+  await runner.initialize();
+  const session = await runner.run({
+    sessionId: 'plain-1',
+    agent: { id: 'plain', name: 'Plain' },
+    userMessage: 'hi',
+  });
+  assert.equal(session.status, 'completed');
+});
+
+test('aborting a run fails the session with a distinguishable reason', async () => {
+  const controller = new AbortController();
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'slow',
+    async execute(_input, _session, context) {
+      // The tool observes the turn's signal arriving through the executor.
+      assert.equal(context?.signal, controller.signal);
+      controller.abort();
+      return { done: true };
+    },
+  });
+
+  const provider: ModelProvider = {
+    name: 'tool-then-text',
+    async generate({ session, signal }) {
+      assert.equal(signal, controller.signal, 'provider must receive the turn signal');
+      if (session.messages.at(-1)?.role === 'tool') {
+        return { parts: [{ type: 'text', text: 'never reached' }] };
+      }
+      return {
+        parts: [
+          { type: 'tool-call', call: { id: 'call-abort', toolName: 'slow', input: {} } },
+        ],
+      };
+    },
+  };
+
+  const store = new InMemorySessionStore();
+  const runner = new AgentRunner({ provider, tools, store });
+  await runner.initialize();
+
+  await assert.rejects(
+    () =>
+      runner.run({
+        sessionId: 'abort-1',
+        agent: { id: 'aborter', name: 'Aborter' },
+        userMessage: 'go',
+        signal: controller.signal,
+      }),
+    (error: Error) => error.name === 'RunAbortedError',
+  );
+
+  const session = await store.get('abort-1');
+  assert.equal(session?.status, 'failed');
+  assert.equal(session?.lastError, 'Run aborted');
+});
+
+test('approval policies receive the turn signal in their context', async () => {
+  const controller = new AbortController();
+  const tools = new ToolRegistry();
+  tools.register({ name: 'gated', async execute() { return null; } });
+
+  let sawSignal: AbortSignal | undefined;
+  const provider: ModelProvider = {
+    name: 'one-call',
+    async generate({ session }) {
+      if (session.messages.at(-1)?.role === 'tool') {
+        return { parts: [{ type: 'text', text: 'done' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: 'c1', toolName: 'gated', input: {} } }] };
+    },
+  };
+
+  const runner = new AgentRunner({
+    provider,
+    tools,
+    approvals: {
+      async approve({ signal }) {
+        sawSignal = signal;
+        return true;
+      },
+    },
+  });
+  await runner.initialize();
+  await runner.run({
+    sessionId: 'approval-signal-1',
+    agent: { id: 'gatee', name: 'Gatee' },
+    userMessage: 'go',
+    signal: controller.signal,
+  });
+
+  assert.equal(sawSignal, controller.signal);
+});

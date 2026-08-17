@@ -335,6 +335,8 @@ export const createOpenAICompatibleProvider = ({
           messages: createOpenAICompatibleMessages(request, systemPrompt, toolNames),
           ...(tools.length > 0 ? { tools } : {}),
         }),
+        // Aborting the turn cancels the in-flight HTTP request.
+        ...(request.signal ? { signal: request.signal } : {}),
       });
 
       const payload = await parseOpenAICompatibleResponse(response);

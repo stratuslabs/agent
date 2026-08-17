@@ -160,3 +160,35 @@ test('local command executor preserves utf-8 characters split across stdout chun
   const output = result.output as Record<string, unknown>;
   assert.equal(output.stdout, '😀');
 });
+
+test('local command executor kills the child when the turn aborts', async () => {
+  const tool = defineLocalCommandTool({
+    name: 'sleepy',
+    createCommand() {
+      return {
+        command: process.execPath,
+        args: ['-e', 'setTimeout(() => console.log("survived"), 5000);'],
+      };
+    },
+  });
+
+  const controller = new AbortController();
+  const executor = createLocalCommandExecutor();
+  const startedAt = Date.now();
+  setTimeout(() => controller.abort(), 50);
+
+  const result = await executor.execute(
+    { id: 'call-abort', toolName: 'sleepy', input: {} },
+    tool,
+    session,
+    { signal: controller.signal },
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, `Command aborted: ${process.execPath}`);
+  const output = result.output as Record<string, unknown>;
+  assert.equal(output.aborted, true);
+  assert.equal(output.stdout, '');
+  // The child died with the abort, not with its own 5s timer.
+  assert.ok(Date.now() - startedAt < 4000);
+});

@@ -6,6 +6,7 @@ import {
 import { StringDecoder } from 'node:string_decoder';
 
 import type {
+  ExecutionContext,
   Executor,
   JsonObject,
   JsonValue,
@@ -38,6 +39,8 @@ export interface LocalCommandExecution {
   stderr: string;
   exitCode: number;
   timedOut: boolean;
+  /** True when the turn's abort signal killed the child before completion. */
+  aborted: boolean;
   durationMs: number;
 }
 
@@ -112,9 +115,9 @@ export class LocalCommandExecutor implements Executor {
     this.maxTimeoutMs = options.maxTimeoutMs ?? DEFAULT_MAX_TIMEOUT_MS;
   }
 
-  async execute(call: ToolCall, tool: Tool, session: Session): Promise<ToolResult> {
+  async execute(call: ToolCall, tool: Tool, session: Session, context?: ExecutionContext): Promise<ToolResult> {
     if (!isLocalCommandTool(tool)) {
-      return this.fallback.execute(call, tool, session);
+      return this.fallback.execute(call, tool, session, context);
     }
 
     try {
@@ -123,7 +126,16 @@ export class LocalCommandExecutor implements Executor {
       const execution = await runLocalCommand(invocation, {
         spawn: this.spawn,
         timeoutMs,
+        ...(context?.signal ? { signal: context.signal } : {}),
       });
+
+      if (execution.aborted) {
+        return failureResult(
+          call,
+          `Command aborted: ${execution.command}`,
+          serializeExecution(execution),
+        );
+      }
 
       if (execution.timedOut) {
         return failureResult(
@@ -174,13 +186,14 @@ const resolveTimeoutMs = (
 
 const runLocalCommand = async (
   invocation: LocalCommandInvocation,
-  options: { spawn: LocalSpawn; timeoutMs: number },
+  options: { spawn: LocalSpawn; timeoutMs: number; signal?: AbortSignal },
 ): Promise<LocalCommandExecution> => {
   const startedAt = Date.now();
   const args = invocation.args ?? [];
   let stdout = '';
   let stderr = '';
   let timedOut = false;
+  let aborted = false;
   const stdoutDecoder = new StringDecoder('utf8');
   const stderrDecoder = new StringDecoder('utf8');
 
@@ -210,6 +223,18 @@ const runLocalCommand = async (
   }, options.timeoutMs);
   timer.unref();
 
+  // The turn's abort signal kills the child directly — an aborted turn must
+  // leave no orphaned subprocess behind.
+  const onAbort = (): void => {
+    aborted = true;
+    child.kill('SIGKILL');
+  };
+  if (options.signal?.aborted) {
+    onAbort();
+  } else {
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+  }
+
   try {
     const exitCode = await waitForChild(child);
     stdout += stdoutDecoder.end();
@@ -223,10 +248,12 @@ const runLocalCommand = async (
       stderr,
       exitCode,
       timedOut,
+      aborted,
       durationMs: Date.now() - startedAt,
     };
   } finally {
     clearTimeout(timer);
+    options.signal?.removeEventListener('abort', onAbort);
   }
 };
 
@@ -247,5 +274,6 @@ const serializeExecution = (execution: LocalCommandExecution): JsonValue => ({
   stderr: execution.stderr,
   exitCode: execution.exitCode,
   timedOut: execution.timedOut,
+  aborted: execution.aborted,
   durationMs: execution.durationMs,
 });
