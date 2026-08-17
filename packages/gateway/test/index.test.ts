@@ -358,3 +358,52 @@ test('a queued dispatch whose signal aborted while waiting never mutates the ses
   assert.deepEqual(stored?.messages.filter((m) => m.role === 'user').map((m) => m.content), ['first']);
   assert.equal(stored?.status, 'completed');
 });
+
+test('the idle watchdog honors a session sticky-switched to a non-streaming fallback', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Anthropic primary (streams → watchdog eligible) with an OpenAI
+  // fallback (no deltas): once a session has durably switched, the
+  // watchdog must stay off for it or slow-but-healthy fallback turns die.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'model-p',
+    fallbackModel: 'model-f',
+    fallbackProvider: 'openai',
+  }));
+
+  const fetchImpl = (async (url: unknown, init?: RequestInit) => {
+    if (String(url).includes('anthropic')) {
+      throw new Error('primary should not be called for a switched session');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    return openAiText('slow but healthy fallback');
+  }) as typeof fetch;
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { ANTHROPIC_API_KEY: 'sk-a', OPENAI_API_KEY: 'sk-o' },
+    fetch: fetchImpl,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 100, warn: () => {} });
+  await gateway.start();
+
+  // A durable session that already switched to the fallback.
+  await gateway.store.create({
+    id: 'switched-1',
+    agent: { id: 'stratus', name: 'Stratus' },
+    status: 'completed',
+    messages: [
+      { id: 'u1', role: 'user', content: 'earlier', createdAt: new Date().toISOString() },
+      { id: 'a1', role: 'assistant', content: 'earlier reply', createdAt: new Date().toISOString() },
+    ],
+    metadata: { fallbackActive: true },
+  });
+
+  const session = await gateway.dispatch({ sessionId: 'switched-1', userMessage: 'take your time' });
+  await gateway.stop();
+
+  assert.equal(session.status, 'completed');
+  assert.match(session.messages.at(-1)?.content ?? '', /slow but healthy fallback/);
+});

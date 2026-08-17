@@ -27,12 +27,14 @@ import {
   createRuntimeProvider,
   DEFAULT_STRATUS_AGENT,
   loadRosterSouls,
+  FALLBACK_ACTIVE_METADATA_KEY,
   loadSoulFile,
   memoryFilePath,
   migrateLegacyMemory,
   resolveRuntimeConfig,
   stratusHomePath,
   withLegacyDefaultMemories,
+  type FallbackRuntime,
   type RosterEntry,
   type RuntimeConfig,
   type RuntimeSelection,
@@ -332,6 +334,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * that kills slow-but-healthy turns, so it stays off for them (their
    * tool phases are covered by executor timeouts regardless).
    */
+  const fallbackStreamsDeltas = (fallback: FallbackRuntime): boolean =>
+    fallback.provider === 'anthropic' && Boolean(fallback.apiKey);
+
   const streamsDeltas = (config: RuntimeConfig): boolean =>
     config.provider === 'anthropic' && Boolean(config.apiKey);
 
@@ -439,14 +444,24 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       ...input.metadata,
     };
 
-    return withWatchdog(input.sessionId, input.signal, streamsDeltas(config), async (signal) => {
-      const existing = await store.get(input.sessionId);
+    // Load before starting the watchdog: whether this turn actually streams
+    // depends on the session's durable state, not just the primary config —
+    // a session sticky-switched to a non-streaming fallback emits no deltas,
+    // and an idle timer there would be a wall-clock kill of healthy work.
+    const existing = await store.get(input.sessionId);
+    if (existing && existing.agent.id !== agent.id) {
+      throw new Error(
+        `Session ${input.sessionId} belongs to agent ${existing.agent.id}, not ${agent.id} — sessions never cross agent identities.`,
+      );
+    }
+
+    const switchedToFallback = existing?.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true;
+    const effectiveStreams = switchedToFallback && config.provider !== 'demo' && config.fallback
+      ? fallbackStreamsDeltas(config.fallback)
+      : streamsDeltas(config);
+
+    return withWatchdog(input.sessionId, input.signal, effectiveStreams, async (signal) => {
       if (existing) {
-        if (existing.agent.id !== agent.id) {
-          throw new Error(
-            `Session ${input.sessionId} belongs to agent ${existing.agent.id}, not ${agent.id} — sessions never cross agent identities.`,
-          );
-        }
         // Refresh the stored definition before resuming, so the turn runs
         // with the current instructions, tools, and credentials.
         existing.agent = agent;

@@ -162,3 +162,42 @@ test('a fallback switch records itself in session metadata', async () => {
   await wrapped.generate({ session } as never);
   assert.equal(session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY], true);
 });
+
+test('a mid-stream primary failure emits a reset delta before the fallback streams', async () => {
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const session = {
+    id: 'garbled',
+    agent: { id: 'a', name: 'A' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  };
+
+  const primary = {
+    name: 'p',
+    async generate({ onDelta }: { onDelta?: (d: { type: string; text?: string }) => Promise<void> | void }) {
+      await onDelta?.({ type: 'text', text: 'partial pri' });
+      throw new Error('primary died mid-stream');
+    },
+  };
+  const fallback = {
+    name: 'f',
+    async generate({ onDelta }: { onDelta?: (d: { type: string; text?: string }) => Promise<void> | void }) {
+      await onDelta?.({ type: 'text', text: 'fallback says hi' });
+      return { parts: [{ type: 'text' as const, text: 'fallback says hi' }] };
+    },
+  };
+
+  const seen: string[] = [];
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, () => {});
+  await wrapped.generate({
+    session,
+    onDelta: async (delta: { type: string; text?: string }) => {
+      seen.push(delta.type === 'text' ? `text:${delta.text}` : delta.type);
+    },
+  } as never);
+
+  // Consumers see: partial primary → reset (discard it) → clean fallback.
+  assert.deepEqual(seen, ['text:partial pri', 'reset', 'text:fallback says hi']);
+});

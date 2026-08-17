@@ -113,11 +113,16 @@ export type ProviderPart =
 /**
  * A streamed fragment of an in-progress provider response. Text deltas carry
  * output as it is generated; tool-call deltas announce that the model has
- * started emitting a call (input may still be incomplete).
+ * started emitting a call (input may still be incomplete). A reset delta
+ * tells consumers to DISCARD every fragment streamed so far for this
+ * response — emitted when a provider abandons a partial attempt (e.g. a
+ * fallback wrapper retrying after the primary failed mid-stream), so
+ * renderers never fuse two attempts into one message.
  */
 export type ProviderDelta =
   | { type: 'text'; text: string }
-  | { type: 'tool-call'; toolName: string; inputFragment?: string };
+  | { type: 'tool-call'; toolName: string; inputFragment?: string }
+  | { type: 'reset' };
 
 export interface ToolDescriptor {
   name: string;
