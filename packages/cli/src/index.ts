@@ -62,6 +62,7 @@ import {
   loadChannelCredentials,
   loadCredentials,
   loadRosterSouls,
+  loadSoulFile,
   memoryFilePath,
   migrateLegacyMemory,
   parseProviderName,
@@ -79,6 +80,7 @@ import {
   type ChannelCredentials,
   type CredentialProviderName,
   type CredentialsFile,
+  type RosterEntry,
   type FallbackRuntime,
   type RuntimeConfig,
   type StoredCredential,
@@ -2716,9 +2718,41 @@ export const runSetup = async (
     }
   };
 
+  /**
+   * Every agent the gateway would dispatch to: the ~/.stratus/agents
+   * roster plus the configured default soul, which `stratus setup` can
+   * point at a file anywhere. The gateway registers that soul too, so a
+   * Channels list built from the agents directory alone would hide an
+   * agent Slack can perfectly well talk to. Reads state.soulPath rather
+   * than the saved config so a soul chosen earlier in this same setup
+   * session is already connectable.
+   */
+  const channelRoster = async (): Promise<RosterEntry[]> => {
+    const warnOnce = (message: string): void => writeLine(streams.stderr, `Warning: ${message}.`);
+    const entries = [...await loadRosterSouls(env, warnOnce)];
+    if (!state.soulPath) {
+      return entries;
+    }
+    const resolved = path.resolve(readWorkingDirectory(env), state.soulPath);
+    if (entries.some((entry) => entry.path === resolved)) {
+      return entries;
+    }
+    try {
+      const soul = await loadSoulFile(resolved);
+      // A soul outside the roster can still collide by id with one inside
+      // it; the roster copy wins, exactly as it does in the gateway.
+      if (!entries.some((entry) => entry.soul.agent.id === soul.agent.id)) {
+        entries.unshift({ soul, path: resolved });
+      }
+    } catch (error) {
+      warnOnce(`could not read the default soul ${resolved} (${error instanceof Error ? error.message : String(error)})`);
+    }
+    return entries;
+  };
+
   const chooseChannels = async (): Promise<void> => {
     while (true) {
-      const roster = await loadRosterSouls(env, (message) => writeLine(streams.stderr, `Warning: ${message}.`));
+      const roster = await channelRoster();
       const slack = state.channels.slack ?? {};
 
       if (roster.length === 0) {

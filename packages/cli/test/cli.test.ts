@@ -3026,3 +3026,38 @@ test('the setup manifest matches the one shipped by the Slack package', async ()
   const generated = JSON.parse(slackAppManifest('NAME'));
   assert.deepEqual(generated, shipped);
 });
+
+test('the Channels menu offers a default soul that lives outside the roster', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  // `stratus setup` can point the default soul at a file anywhere; the
+  // gateway registers it, so Channels must offer it too.
+  const soulPath = path.join(project, 'nova.md');
+  await writeFile(soulPath, '---\nname: Nova\n---\n\nYou are Nova.\n');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', soul: soulPath }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      // Channels → Nova → tokens → Back → Save & finish
+      setupInput: Readable.from(['4\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '2\n', '6\n']),
+      fetch: (async (url: any) => new Response(JSON.stringify(
+        String(url).endsWith('/auth.test')
+          ? { ok: true, user_id: 'B9', team: 'Acme', team_id: 'T9' }
+          : { ok: true, url: 'wss://x' },
+      ), { status: 200 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Nova \(nova\)/);
+  assert.match(output.stdout, /✓ Verified — Nova is connected to Slack in Acme/);
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials.channels, { slack: { nova: { appToken: 'xapp-t', botToken: 'xoxb-t' } } });
+});
