@@ -370,7 +370,11 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
         ...(metadata ? { metadata } : {}),
       };
       await mkdir(path.dirname(filePath), { recursive: true });
-      await appendFile(filePath, `${JSON.stringify(entry)}\n`);
+      // Long-term memory is conversation content — owner-only, like the
+      // credentials and session files. The mode applies on creation; the
+      // chmod tightens files created earlier under a looser umask.
+      await appendFile(filePath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+      await chmod(filePath, 0o600);
       return entry;
     },
     async list(agentId: string) {

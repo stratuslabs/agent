@@ -280,6 +280,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return lastDefaultAgentId ?? DEFAULT_STRATUS_AGENT.id;
     }
     if (!resolved) {
+      // The operator removed the default soul on purpose: the built-in is
+      // now the cached answer too, so a later transient read failure
+      // cannot resurrect the retired soul's identity.
+      lastDefaultAgentId = DEFAULT_STRATUS_AGENT.id;
       return DEFAULT_STRATUS_AGENT.id;
     }
     const id = resolved.soul.agent.id;

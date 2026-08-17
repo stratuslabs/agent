@@ -302,3 +302,18 @@ test('the fallback switch persists before the fallback attempt begins', async ()
 
   assert.deepEqual(order, ['persist', 'fallback']);
 });
+
+test('the memory file is owner-only, pre-existing files included', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-mem-'));
+  const filePath = memoryFilePath({ homeDir: home });
+
+  // Simulate a file created earlier under a loose umask.
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, '', { mode: 0o644 });
+
+  const store = createFileMemoryStore(filePath);
+  await store.append('ava', 'remembers privately');
+
+  const mode = (await stat(filePath)).mode & 0o777;
+  assert.equal(mode, 0o600);
+});

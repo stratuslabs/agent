@@ -1427,3 +1427,31 @@ test('WAL sidecars are owner-only for their whole lifetime, reopens included', a
   await assertSidecarsTight();
   reopened.close();
 });
+
+test('removing the default soul updates the cached default to the built-in', async () => {
+  const { unlink } = await import('node:fs/promises');
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\n---\n\nYou are Nova.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
+
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+
+  const asNova = await gateway.dispatch({ sessionId: 'retire-1', userMessage: 'hello' });
+  assert.equal(asNova.agent.name, 'Nova');
+
+  // The operator retires the default soul on purpose.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({}));
+  const asBuiltin = await gateway.dispatch({ sessionId: 'retire-2', userMessage: 'hello' });
+  assert.equal(asBuiltin.agent.id, 'stratus');
+
+  // A later transient config failure must not resurrect Nova — the cached
+  // default is now the built-in.
+  await unlink(path.join(home, '.stratus', 'config.json'));
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ broken');
+  const degraded = await gateway.dispatch({ sessionId: 'retire-3', userMessage: 'hello' });
+  await gateway.stop();
+  assert.equal(degraded.agent.id, 'stratus');
+});
