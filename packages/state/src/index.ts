@@ -123,6 +123,13 @@ export interface RuntimeSelection {
   configPath?: string;
   /** Path to a soul file defining the agent to run as. */
   soul?: string;
+  /**
+   * An already-parsed soul used verbatim instead of loading any file —
+   * for callers serving from a cache while the backing file is
+   * unreadable. Outranks soul paths and the config file's default soul,
+   * so no other agent's soul can substitute its pins.
+   */
+  presetSoul?: ParsedSoul;
 }
 
 // The agent every run uses when no soul is configured. A Stratus agent is
@@ -607,8 +614,8 @@ export const resolveRuntimeConfig = async (
   const processEnv = readProcessEnv(env);
   const configLocation = await resolveConfigLocation(selection, env);
   const fileConfig = configLocation ? await loadConfigFile(configLocation.path) : {};
-  const soulPath = resolveSoulPath(selection, env, fileConfig);
-  const soul = soulPath ? await loadSoulFile(soulPath) : undefined;
+  const soulPath = selection.presetSoul ? undefined : resolveSoulPath(selection, env, fileConfig);
+  const soul = selection.presetSoul ?? (soulPath ? await loadSoulFile(soulPath) : undefined);
 
   // Explicit flags and env vars outrank the soul's own provider/model hints,
   // which outrank the config file's defaults.

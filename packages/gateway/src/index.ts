@@ -254,9 +254,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // too: keep the roster registration — its soulPath drives per-dispatch
     // refresh. A config-only soul registers with the path it resolved
     // from, so it refreshes (and keeps its pins current) exactly like a
-    // roster soul, resumed sessions included.
+    // roster soul, resumed sessions included. A repointed config (same
+    // agent id, different file) replaces the source, or moves and
+    // replacements would silently keep refreshing the old file.
     const existing = sources.get(id);
-    if (!existing?.soulPath) {
+    const pathChanged = Boolean(config.soulPath && existing?.soulPath && existing.soulPath !== config.soulPath);
+    if (!existing?.soulPath || pathChanged) {
       registerSource({
         definition: config.soul.agent,
         soul: config.soul,
@@ -457,24 +460,23 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Whether the provider currently serving this turn streams deltas —
     // the primary until a reset delta announces the sticky fallback switch.
     let streamingActive = idleEnabled;
-    let armed = idleEnabled;
     let pendingTools = 0;
+    // Set at a text-only provider.response: the turn is wrapping up
+    // (saves, completion events); nothing left for the timer to guard.
+    let turnSettling = false;
 
     const suspendTimer = (): void => {
-      armed = false;
       if (timer) {
         clearTimeout(timer);
         timer = undefined;
       }
     };
 
-    const resetTimer = (): void => {
-      if (!armed || effectiveIdleMs <= 0) {
+    const armTimer = (): void => {
+      if (effectiveIdleMs <= 0) {
         return;
       }
-      if (timer) {
-        clearTimeout(timer);
-      }
+      suspendTimer();
       // Deliberately not unref'd: while a provider await is in flight, this
       // timer is what guarantees the process can always make progress on it.
       timer = setTimeout(() => {
@@ -484,54 +486,59 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }, effectiveIdleMs);
     };
 
-    // Prepended: emission awaits subscribers in order, so a slow external
-    // consumer (a throttled channel edit) ahead of this handler would
-    // delay the very activity signals the timer is measuring — and a
-    // blocked provider.response would keep the timer armed into the tool
-    // phase it is supposed to suspend for.
-    const unsubscribe = bus.subscribe((event: StratusEvent) => {
+    // Two subscriptions bracket every event's fan-out. The PREPENDED
+    // observer runs before any external consumer: it updates phase state
+    // and stops the clock — while the remaining (possibly slow, throttled)
+    // subscribers process this event, the provider is not being awaited,
+    // so elapsed time is consumer time, not provider silence. The APPENDED
+    // marker runs last: control is about to return to the runner and its
+    // provider await, so the timer arms only when a streaming provider is
+    // actually the thing being waited on (never during tool phases,
+    // post-switch silent fallbacks, or turn wrap-up).
+    const unsubscribeObserver = bus.subscribe((event: StratusEvent) => {
       if (!('sessionId' in event) || event.sessionId !== sessionId) {
         return;
       }
       switch (event.type) {
         case 'provider.delta':
-          // A reset marks the mid-turn, session-sticky fallback switch: the
-          // timer follows whether the now-active provider streams. A silent
-          // fallback makes silence healthy for the rest of the turn; a
-          // streaming one takes over the primary's watchdog protection.
+          // A reset marks the mid-turn, session-sticky fallback switch:
+          // the timer follows whether the now-active provider streams.
           if (event.delta.type === 'reset') {
             streamingActive = fallbackStreams;
-            if (fallbackStreams) {
-              armed = true;
-              resetTimer();
-            } else {
-              suspendTimer();
-            }
-          } else {
-            resetTimer();
           }
           break;
         case 'provider.response':
           // The provider finished; the loop enters its tool phase
-          // (approval waits included). The response says exactly how many
-          // tool calls must settle before the loop returns to the provider.
+          // (approval waits included) — or, with no tool calls, the turn
+          // is over. The response says exactly how many tool calls must
+          // settle before the loop returns to the provider.
           pendingTools = event.parts.filter((part) => part.type !== 'text').length;
-          suspendTimer();
+          if (pendingTools === 0) {
+            turnSettling = true;
+          }
           break;
         case 'tool.completed':
         case 'tool.denied':
           pendingTools = Math.max(0, pendingTools - 1);
-          if (pendingTools === 0 && streamingActive) {
-            armed = true;
-            resetTimer();
-          }
           break;
         default:
-          resetTimer();
           break;
       }
+      suspendTimer();
     }, { prepend: true });
-    resetTimer();
+
+    const unsubscribeDrain = bus.subscribe((event: StratusEvent) => {
+      if (!('sessionId' in event) || event.sessionId !== sessionId) {
+        return;
+      }
+      if (streamingActive && pendingTools === 0 && !turnSettling) {
+        armTimer();
+      }
+    });
+
+    if (streamingActive) {
+      armTimer();
+    }
 
     try {
       return await run(controller.signal);
@@ -541,10 +548,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       throw error;
     } finally {
-      if (timer) {
-        clearTimeout(timer);
-      }
-      unsubscribe();
+      suspendTimer();
+      unsubscribeObserver();
+      unsubscribeDrain();
       external?.removeEventListener('abort', onExternalAbort);
     }
   };
@@ -630,18 +636,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         resolveEnv = { ...env, processEnv };
       }
       if (source.refreshFailed && pins) {
-        // The soul file is currently unreadable, so resolveRuntimeConfig
-        // has nothing to load for this agent — and without a selection it
-        // would fall back to the config file's DEFAULT soul, another
-        // agent's pins. Assert the cached pins with selection precedence
-        // instead: the demotion above already scrubbed conflicting
-        // defaults.
-        if (pins.provider === 'openai' || pins.provider === 'anthropic' || pins.provider === 'demo') {
-          selection.provider = pins.provider;
-        }
-        if (pins.model) {
-          selection.model = pins.model;
-        }
+        // The soul file is currently unreadable, so resolution runs from
+        // the cached soul itself — pinned, partially pinned, or pinless
+        // alike. Without this, resolveRuntimeConfig would load the config
+        // file's DEFAULT soul and fill the gaps with another agent's
+        // pins and billing path.
+        selection.presetSoul = pins;
       }
     }
     const config = await resolveRuntimeConfig(selection, resolveEnv);

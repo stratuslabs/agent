@@ -1048,3 +1048,91 @@ test('the watchdog observes activity ahead of slow external event consumers', as
   assert.equal(session.status, 'completed');
   assert.match(session.messages.at(-1)?.content ?? '', /all done/);
 });
+
+test('a pinless cached soul never inherits the default soul\'s pins while unreadable', async () => {
+  const { unlink } = await import('node:fs/promises');
+  const home = await newHome();
+  // Ava has NO provider/model pins; the configured default soul does.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\nprovider: openai\nmodel: model-nova\n---\n\nYou are Nova.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
+
+  const requestedModels: string[] = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { model: string };
+    requestedModels.push(body.model);
+    return openAiText('should not be called for ava');
+  }) as typeof fetch;
+
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+
+  const first = await gateway.dispatch({ sessionId: 'pinless-1', agentId: 'ava', userMessage: 'hello' });
+  assert.equal(first.status, 'completed');
+
+  await unlink(path.join(home, '.stratus', 'agents', 'ava.md'));
+  const degraded = await gateway.dispatch({ sessionId: 'pinless-1', agentId: 'ava', userMessage: 'still?' });
+  await gateway.stop();
+
+  assert.equal(degraded.status, 'completed');
+  assert.equal(degraded.agent.name, 'Ava');
+  // A pinless soul resolves the same way readable or not — and NEVER
+  // through the default soul's provider/model.
+  assert.ok(!requestedModels.includes('model-nova'), `default soul pins leaked: ${JSON.stringify(requestedModels)}`);
+});
+
+test('repointing the default soul to a new file with the same id takes effect', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\n---\n\nYou are Nova, mark one.\n');
+  await writeFile(path.join(home, 'nova-v2.md'), '---\nname: Nova\n---\n\nYou are Nova, mark two.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
+
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+
+  const opened = await gateway.dispatch({ sessionId: 'repoint-1', userMessage: 'hello' });
+  assert.match(opened.agent.instructions ?? '', /mark one/);
+
+  // A replacement file, same identity: the source must follow the new
+  // path instead of silently refreshing the old one forever.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova-v2.md' }));
+  const fresh = await gateway.dispatch({ sessionId: 'repoint-2', userMessage: 'hello again' });
+  await gateway.stop();
+
+  assert.match(fresh.agent.instructions ?? '', /mark two/);
+});
+
+test('the watchdog does not tick while slow delta consumers process a healthy stream', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  const fetchImpl = (async (url: unknown) => {
+    if (String(url).includes('anthropic')) {
+      return anthropicSseText('healthy but slowly consumed');
+    }
+    return openAiText('unused');
+  }) as typeof fetch;
+
+  const env = { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-a' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 300, warn: () => {} });
+  await gateway.start();
+
+  // A throttled consumer that takes longer than the idle timeout per
+  // delta. The provider awaits the sink (backpressure), so no further
+  // delta can arrive until this finishes — that elapsed time is consumer
+  // time, not provider silence, and must not be counted against the turn.
+  gateway.bus.subscribe(async (event) => {
+    if (event.type === 'provider.delta') {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  });
+
+  const session = await gateway.dispatch({ sessionId: 'slow-delta-1', agentId: 'ava', userMessage: 'stream it' });
+  await gateway.stop();
+
+  assert.equal(session.status, 'completed');
+  assert.match(session.messages.at(-1)?.content ?? '', /healthy but slowly consumed/);
+});
