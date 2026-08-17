@@ -301,6 +301,7 @@ examples/
   souls/
 docs/
   architecture/
+  roadmap/
 ```
 
 ## Development commands
@@ -313,8 +314,8 @@ pnpm test
 
 ## Where this is headed
 
-Near term, Stratus Agent is aiming to stay small and understandable while the runtime pieces settle.
+The kernel stays small and understandable; capability grows as optional packages around it. The destination is one always-on runtime (`stratus serve`) that hosts a roster of agents with durable sessions, speaks through channel packages (Slack first, with each agent as its own bot identity), and exposes one control API that every surface — CLI, web dashboard, macOS management app — consumes as a thin client.
 
-Expect the CLI to keep improving first. Broader provider, executor, and runtime capabilities can grow from there.
-
-If you want the deeper design notes, see `docs/architecture/stratus-v1.md`.
+- **Vision:** [`docs/architecture/stratus-v2.md`](docs/architecture/stratus-v2.md) — the layered architecture, key decisions, and how the deployment targets (local machines, VMs, hosted) collapse into one runtime.
+- **Roadmap:** [`docs/roadmap/`](docs/roadmap/README.md) — ordered steps with a one-page spec each, from the gateway daemon to productization.
+- **v1 design notes:** [`docs/architecture/stratus-v1.md`](docs/architecture/stratus-v1.md) — the kernel boundary this all builds on.

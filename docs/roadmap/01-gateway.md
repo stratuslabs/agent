@@ -1,0 +1,49 @@
+# 01 — The Gateway: `stratus serve`, durable sessions, streaming + cancellation
+
+## Goal
+
+A long-running daemon (`stratusd`, started with `stratus serve`) that hosts the agent roster with durable, resumable sessions — the process every channel, API, and surface plugs into.
+
+## Why now
+
+Everything in the v2 vision presumes a process that outlives a terminal command: Slack presence, remote approvals, a control API, checking on agents from elsewhere. None of it can exist first. Today the only session store is `InMemorySessionStore`, and while `stratus chat` resumes sessions in-process, every session still dies with the process.
+
+## Scope
+
+**In:**
+
+- New package `@stratusagent/gateway`: composes the same `AgentRunner`, tool registry, providers, and file memory store the CLI uses, but as a persistent service with a lifecycle (start, drain, stop).
+- `stratus serve` command in the CLI to run it in the foreground; a documented launchd plist for macOS deployment (template in the package, `HOME`-relative — no hardcoded user paths).
+- Durable `SessionStore` implementation backed by SQLite (`~/.stratus/sessions.db`), honoring the existing `create/get/save` seam in `packages/core/src/index.ts`. Sessions must round-trip completely — including `metadata` (the Anthropic provider caches raw turns there under `anthropicRawTurns`; losing it breaks tool-use replay).
+- Kernel additions (the only core changes in this roadmap):
+  - **Streaming deltas**: extend the `StratusEvent` union with `provider.delta` (text / tool-call fragments), fed by an explicit provider-to-runner streaming contract — `ModelProvider.generate` returning one promise cannot produce live deltas on its own. `ProviderRequest` gains an optional `onDelta(part)` sink that streaming adapters call as fragments arrive (`generate` still resolves with the final `ProviderResponse`), and the runner re-emits sink calls as `provider.delta` events. Ordering is part of the contract: the sink returns a promise the adapter awaits, and the runner drains every pending delta emission before emitting the final `provider.response` — a delta delivered after the final response is a contract violation (covered by the delta-ordering test below), since a late Slack edit would overwrite finalized output. Providers that don't stream never call it; consumers that don't care ignore the events.
+  - **Cancellation**: `run`/`resume` accept an `AbortSignal` that **propagates through both the provider and execution contracts**. `ProviderRequest` carries the signal and every adapter must cancel its underlying operation on abort (abort the HTTP request, terminate the SDK query) — racing the promise is not cancellation; the underlying work must stop. `Executor.execute` and `Tool.execute` gain an execution context carrying the signal, and `LocalCommandExecutor` kills its child process on abort (today it only kills on its own timeout). The signal also reaches **approval waits**: `ApprovalContext` carries it, and an abort rejects any in-flight `approve()` wait and invalidates its pending request (03's remote prompt expires) — a turn blocked on approval is otherwise cancellable nowhere, and a later Allow click must never execute a tool for a cancelled turn. Aborting fails the turn cleanly (session `failed` with a distinguishable reason, no orphaned requests, subprocesses, or approval prompts).
+  - An activity watchdog helper in the gateway: abort a turn when no event has arrived for N seconds (progress-based, not wall-clock). The watchdog is **phase-aware**, so healthy-but-quiet work isn't killed as a stall: streaming phases abort on no-delta-for-N-seconds, non-streaming provider calls and tool executions fall back to phase-specific timeouts (the provider request timeout, the executor's own timeout), and approval waits suspend it entirely — a pending approval is progress (see also 04). Phase transitions are observable because they already emit events (`provider.delta`, `tool.called`, approval-requested).
+- Session identity convention: callers pass stable session ids (channels will use thread-derived keys) so any inbound message can resume its conversation across daemon restarts.
+- Extract the triplicated persona/memory system-prompt rendering from the three provider packages into one shared helper (natural to do while touching providers for streaming).
+- Wire delegation into the runtime: register `agent.delegate` in the gateway's tool registry against the loaded roster, so orchestrator agents can delegate from real entrypoints — and later steps (08's sub-leases) hook a live seam. Delegation must be **dispatcher-backed, not runner-capturing**: today's `createDelegateTool` (from `@stratusagent/agents`, exercised only by tests) closes over a single `AgentRunner`, which with a per-provider runner pool would run every delegated target on the delegator's provider and credentials. The gateway registers a variant that calls the gateway dispatcher, so a delegated run selects the target agent's resolved (provider, model) exactly like a direct dispatch, and flows through the same approval, event, and persistence machinery as any turn.
+
+**Out:** channels (02), HTTP API (05), any scheduler/cron, multi-tenancy, queueing. The gateway at this step is only reachable in-process and via signals — that's fine; step 02 gives it its first real front door.
+
+## Design sketch
+
+- `createGateway(config)` → `{ start(), stop(), dispatch(input): AsyncIterable<StratusEvent> }` where `dispatch` is the one entrypoint channels/API will call: it resolves the agent (router or explicit id), loads-or-creates the session by id, **refreshes the session's stored agent definition from the roster** (a session pins its agent *id*; instructions, tools, and credentials re-resolve each turn so a soul edit reaches existing conversations instead of replaying a stale snapshot), and runs a turn.
+- **Per-agent provider routing**: `AgentRunner` is constructed with one fixed provider, but roster agents pin their own provider/model in soul frontmatter — refreshing the agent definition alone cannot honor that. The gateway keeps a runner per resolved (provider, model) — a pool sharing one session store, event bus, tool registry, and approval policy — and `dispatch` selects by the agent's resolved configuration (soul frontmatter → global defaults). Two agents must never share a billing path or provider credentials by accident.
+- SQLite via `node:sqlite` to keep the zero-heavy-deps ethos; one `sessions` table (id, agent_id, status, JSON body, timestamps) is enough — no ORM. `node:sqlite` is unflagged only on **Node 22.13+** (22.6–22.12 require `--experimental-sqlite`), so this step raises the documented repo floor from 22.6 to 22.13 — still the Node 22 line, and cheaper than a native dependency or flag juggling in launchd plists.
+- Config: the CLI's state wiring — `resolveRuntimeConfig` precedence (flags → env → config file → defaults), credential store access, soul roster loading, and the file memory store — is **extracted into a shared lower-level package** (working name `@stratusagent/state`) that both the CLI and the gateway depend on. The CLI must depend on the gateway to implement `stratus serve`, so the gateway importing from the CLI would be a package cycle; extraction, not duplication. Gateway-specific keys live under a `gateway` section of `~/.stratus/config.json`.
+- Single-flight per session (a second dispatch to a busy session queues or rejects — pick one and document it), concurrent across sessions.
+
+## Acceptance criteria
+
+- `stratus serve` starts, loads the roster from `~/.stratus/agents/`, and logs a ready line; SIGTERM drains in-flight turns then exits.
+- Kill and restart the daemon mid-conversation: a follow-up message with the same session id continues the conversation with full history, including after a tool-use turn on the Anthropic provider.
+- A turn aborted via the watchdog or signal leaves the session in a consistent `failed` state and the daemon healthy.
+- Streaming: with the Anthropic provider, `provider.delta` events arrive before the final `provider.response`; `pnpm test` covers delta ordering with a scripted provider.
+- Two roster agents pinned to different providers/models each run through their own (verified with scripted providers in one gateway).
+- An agent on provider A delegating via `agent.delegate` to a target pinned to provider B runs the target on B — never on the delegator's provider or credentials (scripted-provider test).
+- Existing CLI behavior (`run`, `chat`) unchanged; all packages still build/typecheck/test green.
+
+## Open questions
+
+- Does `stratus chat` switch to gateway-backed sessions immediately (persistent conversations for free) or stay in-process until 05? Leaning: switch it, behind a flag at first.
+- Retention: sessions.db grows forever without a policy — prune on age, cap, or leave to the operator for now?
