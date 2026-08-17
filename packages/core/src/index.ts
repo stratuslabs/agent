@@ -697,16 +697,16 @@ export class AgentRunner {
         });
         throwIfAborted(signal);
         await deltaChain;
-        await this.bus.emit({ type: 'provider.response', sessionId: session.id, parts: response.parts });
 
-        // Record the ENTIRE response — text and every tool call — before
-        // executing anything. Durable recovery cannot rely on reaching the
-        // end of the turn: provider replay state (the Anthropic raw-turn
-        // cache) carries the complete response, so a partially persisted
-        // call set would replay tool_use blocks that resume-time
-        // reconciliation cannot answer. With all calls durable up front, a
-        // daemon killed during any execution leaves a session where every
-        // call is either answered or explicitly reconcilable.
+        // Record and SAVE the entire response — text and every tool call —
+        // before anything else happens with it. Two consumers depend on
+        // that order: provider replay state (the Anthropic raw-turn cache)
+        // carries the complete response, so a partially persisted call set
+        // would replay tool_use blocks that resume-time reconciliation
+        // cannot answer; and provider.response subscribers may publish the
+        // answer externally (a channel edit) the moment the event fires —
+        // an answer a user has seen must already be durable, or a crash
+        // resumes with history that contradicts what was delivered.
         const calls: ToolCall[] = [];
         for (const part of response.parts) {
           if (part.type === 'text') {
@@ -728,9 +728,8 @@ export class AgentRunner {
           });
         }
         const sawToolCall = calls.length > 0;
-        if (sawToolCall) {
-          await this.store.save(session);
-        }
+        await this.store.save(session);
+        await this.bus.emit({ type: 'provider.response', sessionId: session.id, parts: response.parts });
 
         for (const call of calls) {
           throwIfAborted(signal);

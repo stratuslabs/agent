@@ -947,3 +947,46 @@ test('reconciliation matches repeated tool-call ids by occurrence', async () => 
   assert.equal(results[1]?.toolResult?.ok, false);
   assert.match(results[1]?.toolResult?.error ?? '', /interrupted/i);
 });
+
+test('the response is durable before provider.response reaches subscribers', async () => {
+  const inner = new InMemorySessionStore();
+  const order: string[] = [];
+  const store = {
+    create: (input: Omit<Session, 'createdAt' | 'updatedAt'>) => inner.create(input),
+    get: (id: string) => inner.get(id),
+    save: async (session: Session) => {
+      const last = session.messages.at(-1);
+      order.push(`save:${last?.role}:${last?.content ?? ''}`);
+      await inner.save(session);
+    },
+  };
+
+  const bus = new EventBus();
+  bus.subscribe((event) => {
+    if (event.type === 'provider.response') {
+      // A channel could publish the answer the instant this fires — the
+      // store must already hold it.
+      order.push('response-event');
+    }
+  });
+
+  const provider: ModelProvider = {
+    name: 'p',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'the answer' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, store, bus });
+  await runner.run({
+    sessionId: 'durable-response-1',
+    agent: { id: 'a', name: 'A' },
+    userMessage: 'ask',
+  });
+
+  const saveIndex = order.indexOf('save:assistant:the answer');
+  const eventIndex = order.indexOf('response-event');
+  assert.ok(saveIndex >= 0, 'the text-only response must be saved');
+  assert.ok(eventIndex >= 0, 'provider.response must fire');
+  assert.ok(saveIndex < eventIndex, `the save must precede the event: ${JSON.stringify(order)}`);
+});
