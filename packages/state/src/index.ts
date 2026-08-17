@@ -132,6 +132,12 @@ export interface RuntimeSelection {
    * config file's default soul either).
    */
   presetSoul?: ParsedSoul | null;
+  /**
+   * Resolve as if no config file existed. For long-running callers
+   * degrading after a ConfigFileError — a daemon must not fail every
+   * dispatch while an operator has config.json in a broken state.
+   */
+  ignoreConfigFile?: boolean;
 }
 
 // The agent every run uses when no soul is configured. A Stratus agent is
@@ -403,7 +409,31 @@ export const readNonEmptyString = <T = string>(
   return map ? map(trimmed) : trimmed;
 };
 
+/**
+ * A config file that exists but cannot be read, parsed, or validated —
+ * distinguishable from credential and provider errors so long-running
+ * callers can degrade (resolve without the file) instead of failing every
+ * dispatch while an operator mid-edit has the file in a broken state.
+ */
+export class ConfigFileError extends Error {
+  readonly configPath: string;
+
+  constructor(configPath: string, cause: unknown) {
+    super(`Could not use config ${configPath}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = 'ConfigFileError';
+    this.configPath = configPath;
+  }
+}
+
 export const loadConfigFile = async (configPath: string): Promise<StratusConfigFile> => {
+  try {
+    return await loadConfigFileInner(configPath);
+  } catch (error) {
+    throw error instanceof ConfigFileError ? error : new ConfigFileError(configPath, error);
+  }
+};
+
+const loadConfigFileInner = async (configPath: string): Promise<StratusConfigFile> => {
   const raw = await readFile(configPath, 'utf8');
   const parsed = JSON.parse(raw) as unknown;
 
@@ -634,7 +664,7 @@ export const resolveRuntimeConfig = async (
   env: StateEnvironment = {},
 ): Promise<RuntimeConfig> => {
   const processEnv = readProcessEnv(env);
-  const configLocation = await resolveConfigLocation(selection, env);
+  const configLocation = selection.ignoreConfigFile ? undefined : await resolveConfigLocation(selection, env);
   const fileConfig = configLocation ? await loadConfigFile(configLocation.path) : {};
   const soulPath = selection.presetSoul !== undefined ? undefined : resolveSoulPath(selection, env, fileConfig);
   const soul = selection.presetSoul ?? (soulPath ? await loadSoulFile(soulPath) : undefined);

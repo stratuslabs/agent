@@ -1195,3 +1195,35 @@ test('an unreadable default soul path degrades startup instead of failing it', a
   assert.equal(session.agent.id, 'stratus');
   assert.ok(warnings.some((line) => line.includes('default soul')), `expected a default-soul warning, got ${JSON.stringify(warnings)}`);
 });
+
+test('a malformed config.json degrades dispatches instead of failing them', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
+  await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\n---\n\nYou are Nova.\n');
+
+  const fetchImpl = (async () => openAiText('ava fine')) as typeof fetch;
+  const warnings: string[] = [];
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
+  await gateway.start();
+
+  const healthy = await gateway.dispatch({ sessionId: 'cfg-degrade-0', userMessage: 'hi' });
+  assert.equal(healthy.agent.name, 'Nova');
+
+  // The operator saves config.json mid-edit: invalid JSON. The daemon
+  // keeps serving — roster agents from their own pins, the default route
+  // from its cached source — with a warning, not a dead gateway.
+  await writeFile(path.join(home, '.stratus', 'config.json'), '{ "soul": ');
+
+  const roster = await gateway.dispatch({ sessionId: 'cfg-degrade-1', agentId: 'ava', userMessage: 'hi' });
+  assert.equal(roster.status, 'completed');
+  assert.match(roster.messages.at(-1)?.content ?? '', /ava fine/);
+
+  const viaDefault = await gateway.dispatch({ sessionId: 'cfg-degrade-2', userMessage: 'hi' });
+  await gateway.stop();
+  assert.equal(viaDefault.status, 'completed');
+  assert.equal(viaDefault.agent.name, 'Nova');
+  assert.ok(warnings.some((line) => line.includes('config')), `expected a config warning, got ${JSON.stringify(warnings)}`);
+});

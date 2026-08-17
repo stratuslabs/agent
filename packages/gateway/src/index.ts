@@ -32,6 +32,7 @@ import {
   loadSoulFile,
   memoryFilePath,
   migrateLegacyMemory,
+  ConfigFileError,
   resolveConfiguredSoul,
   resolveRuntimeConfig,
   stratusHomePath,
@@ -652,7 +653,21 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // because that file is currently unusable.
       selection.presetSoul = null;
     }
-    const config = await resolveRuntimeConfig(selection, resolveEnv);
+
+    let config: RuntimeConfig;
+    try {
+      config = await resolveRuntimeConfig(selection, resolveEnv);
+    } catch (error) {
+      // Only a broken config FILE degrades — a daemon must keep serving
+      // while an operator has config.json mid-edit. Credential and
+      // provider errors still surface: masking them behind a config-less
+      // retry could silently reroute an agent (e.g. to the demo provider).
+      if (!(error instanceof ConfigFileError)) {
+        throw error;
+      }
+      warn(`${error.message}; resolving without the config file`);
+      config = await resolveRuntimeConfig({ ...selection, ignoreConfigFile: true }, resolveEnv);
+    }
     const runner = runnerFor(config);
 
     const metadata: JsonObject = {
