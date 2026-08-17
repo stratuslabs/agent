@@ -161,6 +161,7 @@ test('a fallback switch records itself in session metadata', async () => {
   const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, () => {});
   await wrapped.generate({ session } as never);
   assert.equal(session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY], true);
+});
 
 test('channel credentials live in their own namespace and survive setup re-saves', async () => {
   const { loadChannelCredentials, saveChannelCredentials, loadCredentials } = await import('../src/index.ts');

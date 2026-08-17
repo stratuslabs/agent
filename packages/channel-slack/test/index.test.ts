@@ -363,3 +363,96 @@ test('unknown roster agents are skipped with a warning and the rest connect', as
   assert.match(warnings[0] ?? '', /ghost/);
   assert.equal(socket.started, true);
 });
+
+test('queued turns in one thread keep their own renderers', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const bus = new EventBus();
+
+  let turn = 0;
+  const gateway: GatewayLike = {
+    bus,
+    agents: () => [{ id: 'ava', name: 'Ava' }],
+    async dispatch(input) {
+      turn += 1;
+      const thisTurn = turn;
+      // Deltas emitted mid-turn must land on THIS turn's renderer even
+      // though a second message already queued its own.
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: `turn-${thisTurn}-delta` } });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return sessionWithReply(input.sessionId, `turn-${thisTurn}-final`);
+    },
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  // Two messages into the SAME thread before the first turn finishes.
+  const one = socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-q1' },
+    event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-AVA> first', ts: '700.1', thread_ts: '700.0', channel: 'C1' },
+  });
+  const two = socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-q2' },
+    event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-AVA> second', ts: '700.2', thread_ts: '700.0', channel: 'C1' },
+  });
+  await Promise.all([one, two]);
+  await adapter.stop();
+
+  // Placeholder 1 got turn 1's delta and final; placeholder 2 got turn 2's.
+  const byTs = new Map<string, string[]>();
+  for (const update of web.updates) {
+    byTs.set(update.ts, [...(byTs.get(update.ts) ?? []), update.text]);
+  }
+  const [firstTs, secondTs] = web.posts.map((_post, index) => `bot-ts-${index + 1}`);
+  assert.ok((byTs.get(firstTs!) ?? []).some((text) => text.includes('turn-1-delta')), 'turn 1 deltas must edit the first placeholder');
+  assert.equal((byTs.get(firstTs!) ?? []).at(-1), 'turn-1-final');
+  assert.ok(!(byTs.get(secondTs!) ?? []).some((text) => text.includes('turn-1')), 'turn 1 output must never touch the second placeholder');
+  assert.equal((byTs.get(secondTs!) ?? []).at(-1), 'turn-2-final');
+});
+
+test('file-bearing tool results upload into the conversation', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const bus = new EventBus();
+
+  const gateway: GatewayLike = {
+    bus,
+    agents: () => [{ id: 'ava', name: 'Ava' }],
+    async dispatch(input) {
+      await bus.emit({
+        type: 'tool.completed',
+        sessionId: input.sessionId,
+        result: {
+          callId: 'c1',
+          toolName: 'browser.screenshot',
+          ok: true,
+          output: { file: '/tmp/shot.png', files: ['/tmp/extra.pdf'] },
+        },
+      });
+      return sessionWithReply(input.sessionId, 'here you go');
+    },
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> screenshot please'));
+  await adapter.stop();
+
+  assert.deepEqual(web.uploads, [
+    { channel_id: 'C1', file: '/tmp/shot.png' },
+    { channel_id: 'C1', file: '/tmp/extra.pdf' },
+  ]);
+  assert.equal(web.updates.at(-1)?.text, 'here you go');
+});

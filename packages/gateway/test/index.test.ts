@@ -426,6 +426,7 @@ test('a queued dispatch whose signal aborted while waiting never mutates the ses
   // was not marked failed by work that never ran.
   assert.deepEqual(stored?.messages.filter((m) => m.role === 'user').map((m) => m.content), ['first']);
   assert.equal(stored?.status, 'completed');
+});
 
 test('channel adapters start after the roster and stop before the drain', async () => {
   const home = await newHome();

@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
+import path from 'node:path';
 
-import type { Session, StratusEvent } from '@stratusagent/core';
+import type { Session, StratusEvent, ToolResult } from '@stratusagent/core';
 import {
   channelSessionKey,
   type ChannelAdapter,
@@ -102,6 +103,7 @@ class ReplyRenderer {
   private lastEditAt = 0;
   private pendingEdit: NodeJS.Timeout | undefined;
   private editChain: Promise<void> = Promise.resolve();
+  private uploadChain: Promise<void> = Promise.resolve();
   private finalized = false;
   private readonly web: SlackWebLike;
   private readonly channel: string;
@@ -151,7 +153,28 @@ class ReplyRenderer {
     if (event.type === 'tool.completed') {
       this.toolLine = undefined;
       // The next delta or the finalize will refresh the message.
+      if (event.result.ok) {
+        for (const filePath of collectFilePaths(event.result)) {
+          this.queueUpload(filePath);
+        }
+      }
     }
+  }
+
+  // Tool results that reference local output files (a screenshot, a
+  // generated report) become real attachments in the conversation — the
+  // channel contract's upload operation. Uploads chain so they land in
+  // order and finalize() waits for them.
+  private queueUpload(filePath: string): void {
+    this.uploadChain = this.uploadChain
+      .then(() => this.web.files.uploadV2({
+        channel_id: this.channel,
+        file: filePath,
+        filename: path.basename(filePath),
+        ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
+      }))
+      .then(() => undefined)
+      .catch((error) => this.warn(`files.uploadV2 failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`));
   }
 
   private currentText(): string {
@@ -198,6 +221,7 @@ class ReplyRenderer {
     const chunks = splitForSlack(text);
     this.queueEdit(chunks[0] ?? '(no reply)');
     await this.editChain;
+    await this.uploadChain;
     for (const chunk of chunks.slice(1)) {
       try {
         await this.web.chat.postMessage({
@@ -215,6 +239,30 @@ class ReplyRenderer {
     await this.finalize(`Something went wrong: ${message}`);
   }
 }
+
+// The adapter-level convention for file-bearing tool results: an ok result
+// whose object output carries `file: string` or `files: string[]` refers to
+// local paths the channel should deliver as attachments.
+const collectFilePaths = (result: ToolResult): string[] => {
+  const output = result.output;
+  if (typeof output !== 'object' || output === null || Array.isArray(output)) {
+    return [];
+  }
+  const paths: string[] = [];
+  const single = (output as { file?: unknown }).file;
+  if (typeof single === 'string' && single.length > 0) {
+    paths.push(single);
+  }
+  const many = (output as { files?: unknown }).files;
+  if (Array.isArray(many)) {
+    for (const entry of many) {
+      if (typeof entry === 'string' && entry.length > 0) {
+        paths.push(entry);
+      }
+    }
+  }
+  return paths;
+};
 
 const truncateForSlack = (text: string): string =>
   text.length <= SLACK_MAX_MESSAGE_CHARS ? text : `${text.slice(0, SLACK_MAX_MESSAGE_CHARS - 1)}…`;
@@ -275,7 +323,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const createWeb = options.createWebClient ?? defaultWebClient;
 
   const connections: AgentConnection[] = [];
-  const renderers = new Map<string, ReplyRenderer>();
+  // Renderers queue per session: two messages in one thread share a
+  // session id, and the gateway serializes their turns — so events route
+  // to the FIRST registered renderer (the running turn), never a later
+  // message's placeholder. Each handler removes exactly its own renderer.
+  const renderers = new Map<string, ReplyRenderer[]>();
   // In-flight turns, so stop() can drain: a reply mid-render should reach
   // Slack before the sockets go away.
   const inflight = new Set<Promise<void>>();
@@ -381,20 +433,36 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       warn(`could not post to ${event.channel}: ${error instanceof Error ? error.message : String(error)}`);
       return;
     }
-    renderers.set(sessionId, renderer);
+
+    // The push and the dispatch happen in the same microtask, so queue
+    // order matches the gateway's single-flight turn order for this
+    // session: index 0 is always the turn currently running.
+    const queue = renderers.get(sessionId) ?? [];
+    queue.push(renderer);
+    renderers.set(sessionId, queue);
+    const turn = gateway.dispatch({
+      sessionId,
+      agentId: connection.config.agentId,
+      userMessage,
+      metadata: { channel: 'slack', team, slackChannel: event.channel, slackUser: event.user },
+    });
 
     try {
-      const session = await gateway.dispatch({
-        sessionId,
-        agentId: connection.config.agentId,
-        userMessage,
-        metadata: { channel: 'slack', team, slackChannel: event.channel, slackUser: event.user },
-      });
+      const session = await turn;
       await renderer.finalize(lastAssistantReply(session));
     } catch (error) {
       await renderer.fail(error instanceof Error ? error.message : String(error));
     } finally {
-      renderers.delete(sessionId);
+      const current = renderers.get(sessionId);
+      if (current) {
+        const index = current.indexOf(renderer);
+        if (index >= 0) {
+          current.splice(index, 1);
+        }
+        if (current.length === 0) {
+          renderers.delete(sessionId);
+        }
+      }
     }
   };
 
@@ -405,7 +473,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       gatewayRef = gateway;
       unsubscribe = gateway.bus.subscribe((event) => {
         if ('sessionId' in event) {
-          renderers.get(event.sessionId)?.onEvent(event);
+          renderers.get(event.sessionId)?.[0]?.onEvent(event);
         }
       });
 
