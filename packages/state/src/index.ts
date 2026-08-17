@@ -417,11 +417,19 @@ export const readNonEmptyString = <T = string>(
  */
 export class ConfigFileError extends Error {
   readonly configPath: string;
+  /** The underlying fs error code (e.g. ENOENT, EACCES), when there is one. */
+  readonly code: string | undefined;
 
   constructor(configPath: string, cause: unknown) {
     super(`Could not use config ${configPath}: ${cause instanceof Error ? cause.message : String(cause)}`);
     this.name = 'ConfigFileError';
     this.configPath = configPath;
+    this.cause = cause;
+    // Callers distinguishing a missing config from a broken one keep
+    // working on `error.code` exactly as with the raw fs error.
+    this.code = typeof (cause as NodeJS.ErrnoException)?.code === 'string'
+      ? (cause as NodeJS.ErrnoException).code
+      : undefined;
   }
 }
 
@@ -513,7 +521,10 @@ export const resolveConfigLocation = async (
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT') {
-        throw error;
+        // A config that exists but cannot be read is the same class of
+        // failure as one that cannot be parsed — typed, so long-running
+        // callers can degrade instead of failing every dispatch.
+        throw new ConfigFileError(candidate.path, error);
       }
     }
   }

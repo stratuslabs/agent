@@ -240,3 +240,32 @@ test('a primary that dies before its first delta still emits the reset', async (
   // partial output to discard.
   assert.deepEqual(seen, ['reset']);
 });
+
+test('config file errors are typed and preserve the underlying fs code', async () => {
+  const { loadConfigFile, resolveConfigLocation, ConfigFileError } = await import('../src/index.ts');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cfg-'));
+
+  // Missing file: callers that branch on ENOENT (first-run setup, agent
+  // creation) keep working on error.code.
+  await assert.rejects(
+    () => loadConfigFile(path.join(home, 'nope.json')),
+    (error: Error & { code?: string }) => error instanceof ConfigFileError && error.code === 'ENOENT',
+  );
+
+  // Malformed JSON: typed, so a daemon can degrade on exactly this class.
+  await writeFile(path.join(home, 'bad.json'), '{ "soul": ');
+  await assert.rejects(
+    () => loadConfigFile(path.join(home, 'bad.json')),
+    (error: unknown) => error instanceof ConfigFileError,
+  );
+
+  // Auto-discovery over a candidate that exists but cannot be read (here:
+  // a directory wearing the config filename) fails typed as well — the
+  // same degradation path as a parse failure.
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cfg-proj-'));
+  await mkdir(path.join(project, 'stratus.config.json'));
+  await assert.rejects(
+    () => resolveConfigLocation({}, { homeDir: home, cwd: project }),
+    (error: unknown) => error instanceof ConfigFileError,
+  );
+});
