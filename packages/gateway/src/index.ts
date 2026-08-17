@@ -289,16 +289,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       throw new Error(`Agent not found: ${agentId}`);
     }
     if (source.soulPath) {
+      let soul: ParsedSoul | undefined;
       try {
-        const soul = await loadSoulFile(source.soulPath);
-        if (soul.agent.id === agentId) {
-          const refreshed: AgentSource = { definition: soul.agent, soulPath: source.soulPath, soul };
-          registerSource(refreshed);
-          return refreshed;
-        }
-        warn(`soul ${source.soulPath} now declares id ${soul.agent.id}; keeping the loaded definition for ${agentId}`);
+        soul = await loadSoulFile(source.soulPath);
       } catch (error) {
         warn(`could not refresh ${source.soulPath}: ${error instanceof Error ? error.message : String(error)}; keeping the loaded definition`);
+      }
+      if (soul) {
+        if (soul.agent.id !== agentId) {
+          // The file now belongs to a different agent. Serving this agent
+          // anyway would resolve provider/model pins from that other
+          // agent's soul — another identity's billing path — so the
+          // dispatch is refused rather than run on ambiguous config.
+          throw new Error(
+            `Soul ${source.soulPath} now declares agent ${soul.agent.id}, not ${agentId} — refusing the dispatch so ${agentId}'s sessions cannot run on another agent's provider pins. Restore the soul's identity, or address the agent by its new id.`,
+          );
+        }
+        const refreshed: AgentSource = { definition: soul.agent, soulPath: source.soulPath, soul };
+        registerSource(refreshed);
+        return refreshed;
       }
     }
     return source;

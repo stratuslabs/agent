@@ -940,3 +940,31 @@ test('an edited config-only default soul reaches resumed sessions on their next 
   assert.equal(resumed.agent.name, 'Nova');
   assert.match(resumed.agent.instructions ?? '', /mark two/);
 });
+
+test('a soul file reassigned to a different agent id refuses dispatches for the old id', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  const fetchImpl = (async () => openAiText('hi from ava')) as typeof fetch;
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+
+  const opened = await gateway.dispatch({ sessionId: 'reassigned-1', agentId: 'ava', userMessage: 'hello' });
+  assert.equal(opened.status, 'completed');
+
+  // The operator rewrites the file as a different agent. Ava's sessions
+  // must not silently run on Zed's provider pins — the dispatch refuses
+  // with a clear error instead.
+  await writeSoul(home, 'ava.md', '---\nname: Zed\nprovider: anthropic\nmodel: model-z\n---\n\nYou are Zed.\n');
+  await assert.rejects(
+    () => gateway.dispatch({ sessionId: 'reassigned-1', agentId: 'ava', userMessage: 'still ava?' }),
+    /now declares agent .*not ava/,
+  );
+
+  // Restoring the identity restores service.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava again.\n');
+  const recovered = await gateway.dispatch({ sessionId: 'reassigned-1', agentId: 'ava', userMessage: 'back?' });
+  await gateway.stop();
+  assert.equal(recovered.status, 'completed');
+});
