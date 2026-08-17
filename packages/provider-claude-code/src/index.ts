@@ -1,7 +1,139 @@
-import { query as sdkQuery, type Options } from '@anthropic-ai/claude-agent-sdk';
-import type { ModelProvider, ProviderRequest } from '@stratusagent/core';
+import { randomUUID } from 'node:crypto';
+
+import {
+  createSdkMcpServer,
+  query as sdkQuery,
+  tool as sdkTool,
+  type Options,
+  type SdkMcpToolDefinition,
+} from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
+import type {
+  JsonObject,
+  ModelProvider,
+  ProviderRequest,
+  Session,
+  ToolCall,
+  ToolDescriptor,
+  ToolResult,
+} from '@stratusagent/core';
 
 export const DEFAULT_CLAUDE_CODE_MODEL = 'claude-opus-5';
+
+/** Provider turns per generate call once kernel tools are bridged in. */
+const DEFAULT_TOOL_MAX_TURNS = 8;
+
+const MCP_SERVER_NAME = 'stratus';
+
+/**
+ * Executes one kernel tool call on behalf of the Claude Code loop. The
+ * host owns approvals, events, allowlists, and the executor —
+ * AgentRunner.executeHostedToolCall is the canonical implementation.
+ */
+export type ClaudeCodeToolExecutor = (session: Session, call: ToolCall) => Promise<ToolResult>;
+
+// MCP tool names must match ^[a-zA-Z0-9_-]{1,64}$, so kernel names like
+// "demo.echo" are flattened; the original name travels in the closure.
+const sanitizeToolName = (name: string): string => {
+  const cleaned = name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+  return cleaned.length > 0 ? cleaned : 'tool';
+};
+
+const zodTypeFor = (schema: unknown): z.ZodType => {
+  if (typeof schema !== 'object' || schema === null) {
+    return z.unknown();
+  }
+  const spec = schema as Record<string, unknown>;
+  let type: z.ZodType;
+  if (Array.isArray(spec.enum) && spec.enum.length > 0 && spec.enum.every((value) => typeof value === 'string')) {
+    type = z.enum(spec.enum as [string, ...string[]]);
+  } else {
+    switch (spec.type) {
+      case 'string':
+        type = z.string();
+        break;
+      case 'number':
+      case 'integer':
+        type = z.number();
+        break;
+      case 'boolean':
+        type = z.boolean();
+        break;
+      case 'array':
+        type = z.array(zodTypeFor(spec.items));
+        break;
+      case 'object':
+        type = z.record(z.string(), z.unknown());
+        break;
+      default:
+        type = z.unknown();
+    }
+  }
+  return typeof spec.description === 'string' ? type.describe(spec.description) : type;
+};
+
+// Kernel tools describe inputs as JSON Schema; the Agent SDK wants a Zod
+// shape. Unknown constructs degrade to z.unknown() rather than failing.
+const zodShapeFor = (parameters: JsonObject | undefined): Record<string, z.ZodType> => {
+  const shape: Record<string, z.ZodType> = {};
+  if (!parameters || typeof parameters.properties !== 'object' || parameters.properties === null) {
+    return shape;
+  }
+  const required = new Set(
+    Array.isArray(parameters.required)
+      ? parameters.required.filter((value): value is string => typeof value === 'string')
+      : [],
+  );
+  for (const [key, propSchema] of Object.entries(parameters.properties as Record<string, unknown>)) {
+    const type = zodTypeFor(propSchema);
+    shape[key] = required.has(key) ? type : type.optional();
+  }
+  return shape;
+};
+
+/**
+ * Renders kernel tools as in-process MCP tool definitions: Claude Code
+ * calls them mid-loop, the host executes them (approvals and events
+ * included), and the result feeds straight back into the same turn.
+ * createClaudeCodeProvider wires this automatically; exported for hosts
+ * with their own loops and for tests.
+ */
+export const bridgeKernelTools = (
+  descriptors: readonly ToolDescriptor[],
+  session: Session,
+  executeTool: ClaudeCodeToolExecutor,
+): Array<SdkMcpToolDefinition<Record<string, z.ZodType>>> => {
+  const used = new Set<string>();
+  return descriptors.map((descriptor) => {
+    const base = sanitizeToolName(descriptor.name);
+    let name = base;
+    for (let suffix = 2; used.has(name); suffix += 1) {
+      name = `${base.slice(0, 60)}_${suffix}`;
+    }
+    used.add(name);
+    return sdkTool(
+      name,
+      descriptor.description ?? `Stratus tool ${descriptor.name}`,
+      zodShapeFor(descriptor.parameters),
+      async (args) => {
+        const result = await executeTool(session, {
+          id: `claude-code:${randomUUID()}`,
+          toolName: descriptor.name,
+          input: (args ?? {}) as JsonObject,
+        });
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(result.ok ? result.output : { error: result.error ?? 'Tool failed.' }),
+            },
+          ],
+          ...(result.ok ? {} : { isError: true }),
+        };
+      },
+    );
+  });
+};
 
 /**
  * The slice of the Agent SDK's message stream this provider consumes.
@@ -30,7 +162,13 @@ export interface ClaudeCodeProviderConfig {
   name?: string;
   /** Extra system prompt, rendered before the agent's own persona. */
   systemPrompt?: string;
-  /** Claude Code turns per generate call. Default 1 (no tools yet). */
+  /**
+   * Executes kernel tool calls for the Claude Code loop. When set, the
+   * request's tools are bridged in as an in-process MCP server; without
+   * it runs stay text-only.
+   */
+  executeTool?: ClaudeCodeToolExecutor;
+  /** Claude Code turns per generate call. Defaults to 1 without tools, 8 with. */
   maxTurns?: number;
   /** Path to a specific Claude Code executable (auto-detected otherwise). */
   pathToClaudeCodeExecutable?: string;
@@ -92,9 +230,10 @@ const createPrompt = (request: ProviderRequest): string => {
  * Runs turns through the Claude Agent SDK (Claude Code as a library), so a
  * Claude Pro/Max subscription covers usage instead of per-token API billing.
  *
- * Current scope: text conversations with the agent's persona and memory.
- * Kernel tools are not yet bridged into the Claude Code loop, so runs
- * through this provider do not execute Stratus tools.
+ * The agent's persona and memory render as the system prompt, and kernel
+ * tools bridge into the loop as an in-process MCP server when the host
+ * supplies `executeTool` — approvals, allowlists, and events all run on
+ * the host side, so this runtime is the same agent as the API provider.
  *
  * Requires Claude Code available on the machine (bundled with the Agent
  * SDK) and either a setup token (`authToken`) or an existing `claude`
@@ -105,19 +244,39 @@ export const createClaudeCodeProvider = ({
   model = DEFAULT_CLAUDE_CODE_MODEL,
   name = 'claude-code',
   systemPrompt,
-  maxTurns = 1,
+  executeTool,
+  maxTurns,
   pathToClaudeCodeExecutable,
   queryFn = sdkQuery as unknown as ClaudeCodeQueryFn,
 }: ClaudeCodeProviderConfig = {}): ModelProvider => ({
   name,
   async generate(request: ProviderRequest) {
+    // Kernel tools ride into the loop as an in-process MCP server; the
+    // host executes each call (approvals and events included) and Claude
+    // Code continues the turn with the result.
+    const bridgedTools = executeTool && request.tools && request.tools.length > 0
+      ? bridgeKernelTools(request.tools, request.session, executeTool)
+      : undefined;
+
     const options: Options = {
       model,
       systemPrompt: createSystemPrompt(request, systemPrompt),
-      // No built-in Claude Code tools: Stratus owns the tool surface, and
-      // kernel tools are not bridged into this runtime yet.
+      // No built-in Claude Code tools: Stratus owns the tool surface.
       tools: [],
-      maxTurns,
+      maxTurns: maxTurns ?? (bridgedTools ? DEFAULT_TOOL_MAX_TURNS : 1),
+      ...(bridgedTools
+        ? {
+            mcpServers: {
+              [MCP_SERVER_NAME]: createSdkMcpServer({
+                name: MCP_SERVER_NAME,
+                version: '1.0.0',
+                instructions: 'Tools provided by the Stratus Agent runtime. Use them when they help; results return as JSON.',
+                tools: bridgedTools,
+              }),
+            },
+            allowedTools: bridgedTools.map((tool) => `mcp__${MCP_SERVER_NAME}__${tool.name}`),
+          }
+        : {}),
       // The env REPLACES the subprocess environment, so inherit ours and
       // then pin the auth: this provider is subscription-billed in both
       // modes (setup token or existing sign-in), so an ambient API key must

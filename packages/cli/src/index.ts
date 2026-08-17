@@ -34,7 +34,7 @@ import {
   DEFAULT_ANTHROPIC_MODEL,
   redactAnthropicRawTurns,
 } from '@stratusagent/provider-anthropic';
-import { createClaudeCodeProvider } from '@stratusagent/provider-claude-code';
+import { createClaudeCodeProvider, type ClaudeCodeToolExecutor } from '@stratusagent/provider-claude-code';
 import {
   createRememberTool,
   defineAgent,
@@ -1379,6 +1379,7 @@ const createFallbackWrappedProvider = (
 const createRuntimeProvider = (
   config: RuntimeConfig,
   onFallback?: (error: unknown) => void,
+  executeTool?: ClaudeCodeToolExecutor,
 ): ModelProvider => {
   if (config.provider === 'demo') {
     return createDemoProvider();
@@ -1386,12 +1387,12 @@ const createRuntimeProvider = (
 
   if (config.fallback) {
     const { fallback, ...primaryConfig } = config;
-    const primary = createRuntimeProvider(primaryConfig);
+    const primary = createRuntimeProvider(primaryConfig, undefined, executeTool);
     const fallbackProvider = createRuntimeProvider({
       ...fallback,
       ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
       ...(config.fetch ? { fetch: config.fetch } : {}),
-    } as RuntimeConfig);
+    } as RuntimeConfig, undefined, executeTool);
     return createFallbackWrappedProvider(primary, fallbackProvider, onFallback ?? (() => {}));
   }
 
@@ -1404,6 +1405,10 @@ const createRuntimeProvider = (
         authToken: config.authToken,
         model: config.model,
         ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
+        // Kernel tools run through the host loop (approvals, events,
+        // allowlists intact), so the subscription runtime is the same
+        // agent as the API-key provider — memory.remember included.
+        ...(executeTool ? { executeTool } : {}),
       });
     }
     return createAnthropicProvider({
@@ -1522,13 +1527,26 @@ const createAgentRuntime = async (
     });
   }
 
-  const runtimeProvider = createRuntimeProvider(options.runtime, (error) => {
-    const fallback = options.runtime.provider === 'demo' ? undefined : options.runtime.fallback;
-    writeLine(
-      streams.stderr,
-      `Warning: the default model failed (${error instanceof Error ? error.message : String(error)}); falling back to ${fallback?.model ?? 'the fallback model'}.`,
-    );
-  });
+  // The Claude Code runtime executes kernel tools by calling back into the
+  // runner built just below — late-bound because the runner needs the
+  // provider first.
+  let hostedRunner: AgentRunner | undefined;
+  const runtimeProvider = createRuntimeProvider(
+    options.runtime,
+    (error) => {
+      const fallback = options.runtime.provider === 'demo' ? undefined : options.runtime.fallback;
+      writeLine(
+        streams.stderr,
+        `Warning: the default model failed (${error instanceof Error ? error.message : String(error)}); falling back to ${fallback?.model ?? 'the fallback model'}.`,
+      );
+    },
+    async (session, call) => {
+      if (!hostedRunner) {
+        throw new Error('The Stratus runtime is not ready to execute tools yet.');
+      }
+      return hostedRunner.executeHostedToolCall(session, call);
+    },
+  );
 
   const runner = new AgentRunner({
     provider: runtimeProvider,
@@ -1540,6 +1558,7 @@ const createAgentRuntime = async (
     ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
   });
 
+  hostedRunner = runner;
   await runner.initialize();
 
   // A soul is a full identity — without one, every provider serves the

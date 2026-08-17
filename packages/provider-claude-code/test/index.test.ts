@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { MemoryEntry, ProviderRequest, Session } from '@stratusagent/core';
+import type { MemoryEntry, ProviderRequest, Session, ToolCall, ToolResult } from '@stratusagent/core';
 import {
+  bridgeKernelTools,
   createClaudeCodeProvider,
   DEFAULT_CLAUDE_CODE_MODEL,
   type ClaudeCodeQueryFn,
@@ -129,6 +130,92 @@ test('error results and empty responses surface as errors', async () => {
     () => empty.generate({ session: createSession() }),
     /empty response/,
   );
+});
+
+test('kernel tools bridge into the loop as an in-process MCP server', async () => {
+  const { queryFn, calls } = createFakeQuery([
+    { type: 'result', subtype: 'success', is_error: false, result: 'Saved!' },
+  ]);
+
+  const executed: ToolCall[] = [];
+  const provider = createClaudeCodeProvider({
+    queryFn,
+    executeTool: async (_session, call) => {
+      executed.push(call);
+      return { callId: call.id, toolName: call.toolName, ok: true, output: { saved: true } };
+    },
+  });
+
+  await provider.generate({
+    session: createSession(),
+    tools: [
+      { name: 'memory.remember', description: 'Save a fact.', parameters: { type: 'object', properties: { fact: { type: 'string' } }, required: ['fact'] } },
+      { name: 'demo.echo', parameters: { type: 'object', properties: { text: { type: 'string' } } } },
+    ],
+  });
+
+  const options = calls[0]!.options as {
+    tools?: string[];
+    maxTurns?: number;
+    allowedTools?: string[];
+    mcpServers?: Record<string, unknown>;
+  };
+  // Built-ins stay off; the Stratus server carries the kernel tools, with
+  // names flattened to the MCP charset and pre-approved for the loop.
+  assert.deepEqual(options.tools, []);
+  assert.ok(options.mcpServers?.stratus);
+  assert.deepEqual(options.allowedTools, ['mcp__stratus__memory_remember', 'mcp__stratus__demo_echo']);
+  // Tool runs need a real loop, not a single turn.
+  assert.equal(options.maxTurns, 8);
+});
+
+test('bridged tool handlers execute through the host and report failures', async () => {
+  const session = createSession();
+  const seen: ToolCall[] = [];
+  const executeTool = async (forSession: Session, call: ToolCall): Promise<ToolResult> => {
+    assert.equal(forSession.id, session.id);
+    seen.push(call);
+    if (call.toolName === 'demo.echo') {
+      return { callId: call.id, toolName: call.toolName, ok: true, output: { uppercase: 'HI' } };
+    }
+    return { callId: call.id, toolName: call.toolName, ok: false, output: null, error: 'denied by approval policy' };
+  };
+
+  const bridged = bridgeKernelTools(
+    [
+      { name: 'demo.echo', parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } },
+      { name: 'memory.remember' },
+    ],
+    session,
+    executeTool,
+  );
+
+  assert.deepEqual(bridged.map((tool) => tool.name), ['demo_echo', 'memory_remember']);
+
+  const ok = await bridged[0]!.handler({ text: 'hi' }, {});
+  assert.deepEqual(ok.content, [{ type: 'text', text: JSON.stringify({ uppercase: 'HI' }) }]);
+  assert.notEqual(ok.isError, true);
+  // The kernel sees the original dotted name, not the MCP-flattened one.
+  assert.equal(seen[0]?.toolName, 'demo.echo');
+  assert.deepEqual(seen[0]?.input, { text: 'hi' });
+
+  const failed = await bridged[1]!.handler({}, {});
+  assert.equal(failed.isError, true);
+  assert.match(JSON.stringify(failed.content), /denied by approval policy/);
+});
+
+test('without an executor the runtime stays text-only', async () => {
+  const { queryFn, calls } = createFakeQuery([
+    { type: 'result', subtype: 'success', is_error: false, result: 'Hi.' },
+  ]);
+  const provider = createClaudeCodeProvider({ queryFn });
+  await provider.generate({
+    session: createSession(),
+    tools: [{ name: 'demo.echo' }],
+  });
+  const options = calls[0]!.options as { mcpServers?: unknown; maxTurns?: number };
+  assert.equal(options.mcpServers, undefined);
+  assert.equal(options.maxTurns, 1);
 });
 
 test('a missing Claude Code executable produces install guidance', async () => {

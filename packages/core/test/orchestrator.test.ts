@@ -409,3 +409,68 @@ test('event handler errors are isolated and never fail the run', async () => {
   assert.ok(captured.length > 0);
   assert.match(String(captured[0]), /subscriber exploded/);
 });
+
+test('executeHostedToolCall runs a tool with approvals, allowlists, and events', async () => {
+  const events: string[] = [];
+  const bus = new EventBus();
+  bus.subscribe((event) => {
+    events.push(event.type);
+  });
+
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'echo',
+    async execute(input) {
+      return { echoed: String(input.text).toUpperCase() };
+    },
+  });
+
+  const provider: ModelProvider = {
+    name: 'unused',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'unused' }] };
+    },
+  };
+
+  let deny = false;
+  const runner = new AgentRunner({
+    provider,
+    tools,
+    bus,
+    approvals: {
+      async approve() {
+        return !deny;
+      },
+    },
+  });
+  await runner.initialize();
+
+  const session: Session = {
+    id: 'hosted-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  // Approved call: executes and emits tool.called/tool.completed.
+  const ok = await runner.executeHostedToolCall(session, { id: 'c1', toolName: 'echo', input: { text: 'hi' } });
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.output, { echoed: 'HI' });
+
+  // Denied call: the approval policy still gates hosted execution.
+  deny = true;
+  const denied = await runner.executeHostedToolCall(session, { id: 'c2', toolName: 'echo', input: { text: 'no' } });
+  assert.equal(denied.ok, false);
+  assert.match(denied.error ?? '', /denied by approval policy/);
+
+  // Allowlisted agents stay scoped even when the provider drives the loop.
+  const scoped: Session = { ...session, agent: { id: 'rex', name: 'Rex', tools: ['other.tool'] } };
+  deny = false;
+  const blocked = await runner.executeHostedToolCall(scoped, { id: 'c3', toolName: 'echo', input: { text: 'x' } });
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.error ?? '', /not permitted/);
+
+  assert.deepEqual(events, ['tool.called', 'tool.completed', 'tool.denied']);
+});
