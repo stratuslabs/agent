@@ -33,6 +33,8 @@ import {
   memoryFilePath,
   migrateLegacyMemory,
   ConfigFileError,
+  loadConfigFile,
+  resolveConfigLocation,
   resolveConfiguredSoul,
   resolveRuntimeConfig,
   stratusHomePath,
@@ -615,9 +617,26 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       selection.presetSoul = pins;
       if (pins.provider || pins.model) {
         const processEnv = { ...(env.processEnv ?? process.env) };
-        const defaultProvider = options.selection?.provider
+        let defaultProvider: string | undefined = options.selection?.provider
           ?? processEnv.STRATUS_PROVIDER
           ?? processEnv.STRATUSCLAW_PROVIDER;
+        if (pins.provider && defaultProvider === undefined) {
+          // The daemon-wide default can also come from the config file.
+          // Without checking it, a soul pinned to the SAME provider the
+          // config selects would still shed the generic credentials
+          // (STRATUS_API_KEY) that were installed precisely for it. A
+          // broken config leaves the default unknown — scrubbing, the
+          // safe side.
+          try {
+            const location = await resolveConfigLocation(
+              options.selection?.configPath ? { configPath: options.selection.configPath } : {},
+              env,
+            );
+            defaultProvider = location ? (await loadConfigFile(location.path)).provider : undefined;
+          } catch {
+            defaultProvider = undefined;
+          }
+        }
         if (pins.provider) {
           delete selection.provider;
           delete processEnv.STRATUS_PROVIDER;

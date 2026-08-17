@@ -604,23 +604,32 @@ export class AgentRunner {
    * resume can decide to retry rather than assume the side effect landed.
    */
   private reconcileInterruptedToolCalls(session: Session): void {
-    const answered = new Set<string>();
+    // Matched by OCCURRENCE, not by id alone: providers can reuse ids
+    // (the OpenAI-compatible adapter synthesizes tool-call-1 whenever an
+    // endpoint omits them), and an earlier answered occurrence must not
+    // make a later dangling one look answered. The nth call with an id
+    // needs the nth result with that id, in transcript order.
+    const resultsAvailable = new Map<string, number>();
     for (const message of session.messages) {
       if (message.role === 'tool' && message.toolResult) {
-        answered.add(message.toolResult.callId);
+        const id = message.toolResult.callId;
+        resultsAvailable.set(id, (resultsAvailable.get(id) ?? 0) + 1);
       }
     }
 
+    const callsSeen = new Map<string, number>();
     for (let index = 0; index < session.messages.length; index += 1) {
       const message = session.messages[index];
       if (message?.role !== 'assistant' || !message.toolCalls) {
         continue;
       }
       for (const call of message.toolCalls) {
-        if (answered.has(call.id)) {
+        const occurrence = (callsSeen.get(call.id) ?? 0) + 1;
+        callsSeen.set(call.id, occurrence);
+        if (occurrence <= (resultsAvailable.get(call.id) ?? 0)) {
           continue;
         }
-        answered.add(call.id);
+        resultsAvailable.set(call.id, occurrence);
         const result: ToolResult = {
           callId: call.id,
           toolName: call.toolName,

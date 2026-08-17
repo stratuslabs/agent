@@ -1227,3 +1227,39 @@ test('a malformed config.json degrades dispatches instead of failing them', asyn
   assert.equal(viaDefault.agent.name, 'Nova');
   assert.ok(warnings.some((line) => line.includes('config')), `expected a config warning, got ${JSON.stringify(warnings)}`);
 });
+
+test('generic credentials survive when the soul pins the config-file provider', async () => {
+  const home = await newHome();
+  // The daemon default comes ONLY from the config file, and the soul pins
+  // that same provider. The generic key installed for it must survive.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+
+  const authHeaders: string[] = [];
+  const fetchImpl = (async (url: unknown, init?: RequestInit) => {
+    const headers = new Headers(init?.headers ?? {});
+    authHeaders.push(headers.get('x-api-key') ?? '');
+    if (String(url).includes('anthropic')) {
+      return anthropicSseText('ava with the generic key');
+    }
+    return openAiText('unexpected');
+  }) as typeof fetch;
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { STRATUS_API_KEY: 'sk-generic' },
+    fetch: fetchImpl,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+
+  // Previously this failed with "Missing API key": no selection/env
+  // provider default meant the scrub always fired.
+  const session = await gateway.dispatch({ sessionId: 'cfg-provider-1', agentId: 'ava', userMessage: 'hi' });
+  await gateway.stop();
+
+  assert.equal(session.status, 'completed');
+  assert.match(session.messages.at(-1)?.content ?? '', /ava with the generic key/);
+  assert.ok(authHeaders.some((header) => header === 'sk-generic'));
+});

@@ -893,3 +893,57 @@ test('every tool call in a response is durable before the first executes', async
   const resultIds = session.messages.filter((m) => m.role === 'tool').map((m) => m.toolResult?.callId);
   assert.deepEqual(resultIds, ['mc-1', 'mc-2']);
 });
+
+test('reconciliation matches repeated tool-call ids by occurrence', async () => {
+  const store = new InMemorySessionStore();
+  const now = new Date().toISOString();
+  // Endpoints that omit ids get a synthesized one per response — the same
+  // id twice. The first occurrence was answered; the second is dangling.
+  await store.create({
+    id: 'dup-id-1',
+    agent: { id: 'a', name: 'A' },
+    status: 'running',
+    messages: [
+      { id: 'u1', role: 'user', content: 'step one', createdAt: now },
+      {
+        id: 'a1', role: 'assistant', content: '', createdAt: now,
+        toolCalls: [{ id: 'tool-call-1', toolName: 'step', input: { n: 1 } }],
+      },
+      {
+        id: 't1', role: 'tool', name: 'step', content: '{"ok":true}', createdAt: now,
+        toolResult: { callId: 'tool-call-1', toolName: 'step', ok: true, output: { n: 1 } },
+      },
+      {
+        id: 'a2', role: 'assistant', content: '', createdAt: now,
+        toolCalls: [{ id: 'tool-call-1', toolName: 'step', input: { n: 2 } }],
+      },
+    ],
+  });
+
+  let historyWellFormed = false;
+  const provider: ModelProvider = {
+    name: 'p',
+    async generate({ session }) {
+      // Every call occurrence must be directly followed by a result.
+      const dangling = session.messages.some((message, index) => {
+        if (message.role !== 'assistant' || !message.toolCalls?.length) {
+          return false;
+        }
+        return session.messages[index + 1]?.role !== 'tool';
+      });
+      historyWellFormed = !dangling;
+      return { parts: [{ type: 'text', text: 'resumed' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, store });
+  const session = await runner.resume({ sessionId: 'dup-id-1', userMessage: 'continue' });
+
+  assert.equal(session.status, 'completed');
+  assert.ok(historyWellFormed, 'every call occurrence must be answered before provider work');
+  const results = session.messages.filter((m) => m.role === 'tool' && m.toolResult?.callId === 'tool-call-1');
+  assert.equal(results.length, 2, 'the second occurrence needs its own result');
+  assert.equal(results[0]?.toolResult?.ok, true);
+  assert.equal(results[1]?.toolResult?.ok, false);
+  assert.match(results[1]?.toolResult?.error ?? '', /interrupted/i);
+});
