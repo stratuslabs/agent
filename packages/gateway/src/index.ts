@@ -195,6 +195,12 @@ interface AgentSource {
   soulPath?: string;
   /** The parsed soul, carried for its provider/model pins. */
   soul?: ParsedSoul;
+  /**
+   * This dispatch's refresh could not re-read the soul file: serve from
+   * the cached soul and keep the failing path out of config resolution.
+   * Only ever set on the ephemeral copy handed to one dispatch.
+   */
+  refreshFailed?: boolean;
 }
 
 /**
@@ -294,21 +300,27 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         soul = await loadSoulFile(source.soulPath);
       } catch (error) {
         warn(`could not refresh ${source.soulPath}: ${error instanceof Error ? error.message : String(error)}; keeping the loaded definition`);
+        // Serve from cache WITHOUT the failing path — config resolution
+        // must not re-read a file this refresh just failed to load, or
+        // every dispatch for this agent fails instead of degrading.
+        return {
+          definition: source.definition,
+          ...(source.soul ? { soul: source.soul } : {}),
+          refreshFailed: true,
+        };
       }
-      if (soul) {
-        if (soul.agent.id !== agentId) {
-          // The file now belongs to a different agent. Serving this agent
-          // anyway would resolve provider/model pins from that other
-          // agent's soul — another identity's billing path — so the
-          // dispatch is refused rather than run on ambiguous config.
-          throw new Error(
-            `Soul ${source.soulPath} now declares agent ${soul.agent.id}, not ${agentId} — refusing the dispatch so ${agentId}'s sessions cannot run on another agent's provider pins. Restore the soul's identity, or address the agent by its new id.`,
-          );
-        }
-        const refreshed: AgentSource = { definition: soul.agent, soulPath: source.soulPath, soul };
-        registerSource(refreshed);
-        return refreshed;
+      if (soul.agent.id !== agentId) {
+        // The file now belongs to a different agent. Serving this agent
+        // anyway would resolve provider/model pins from that other
+        // agent's soul — another identity's billing path — so the
+        // dispatch is refused rather than run on ambiguous config.
+        throw new Error(
+          `Soul ${source.soulPath} now declares agent ${soul.agent.id}, not ${agentId} — refusing the dispatch so ${agentId}'s sessions cannot run on another agent's provider pins. Restore the soul's identity, or address the agent by its new id.`,
+        );
       }
+      const refreshed: AgentSource = { definition: soul.agent, soulPath: source.soulPath, soul };
+      registerSource(refreshed);
+      return refreshed;
     }
     return source;
   };
@@ -472,6 +484,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }, effectiveIdleMs);
     };
 
+    // Prepended: emission awaits subscribers in order, so a slow external
+    // consumer (a throttled channel edit) ahead of this handler would
+    // delay the very activity signals the timer is measuring — and a
+    // blocked provider.response would keep the timer armed into the tool
+    // phase it is supposed to suspend for.
     const unsubscribe = bus.subscribe((event: StratusEvent) => {
       if (!('sessionId' in event) || event.sessionId !== sessionId) {
         return;
@@ -513,7 +530,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           resetTimer();
           break;
       }
-    });
+    }, { prepend: true });
     resetTimer();
 
     try {
@@ -611,6 +628,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           delete processEnv.STRATUSCLAW_MODEL;
         }
         resolveEnv = { ...env, processEnv };
+      }
+      if (source.refreshFailed && pins) {
+        // The soul file is currently unreadable, so resolveRuntimeConfig
+        // has nothing to load for this agent — and without a selection it
+        // would fall back to the config file's DEFAULT soul, another
+        // agent's pins. Assert the cached pins with selection precedence
+        // instead: the demotion above already scrubbed conflicting
+        // defaults.
+        if (pins.provider === 'openai' || pins.provider === 'anthropic' || pins.provider === 'demo') {
+          selection.provider = pins.provider;
+        }
+        if (pins.model) {
+          selection.model = pins.model;
+        }
       }
     }
     const config = await resolveRuntimeConfig(selection, resolveEnv);

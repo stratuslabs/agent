@@ -968,3 +968,83 @@ test('a soul file reassigned to a different agent id refuses dispatches for the 
   await gateway.stop();
   assert.equal(recovered.status, 'completed');
 });
+
+test('a temporarily unreadable soul degrades to the cached definition and pins', async () => {
+  const { unlink } = await import('node:fs/promises');
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  // A configured default soul with its own model: Ava's degraded
+  // resolution must not fall back to it.
+  await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\nprovider: openai\nmodel: model-nova\n---\n\nYou are Nova.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
+
+  const requestedModels: string[] = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { model: string };
+    requestedModels.push(body.model);
+    return openAiText(`reply from ${body.model}`);
+  }) as typeof fetch;
+
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+
+  const first = await gateway.dispatch({ sessionId: 'degraded-1', agentId: 'ava', userMessage: 'hello' });
+  assert.equal(first.status, 'completed');
+
+  // The soul file vanishes mid-flight (partial edit, sync glitch): the
+  // agent keeps serving from cache instead of failing every dispatch.
+  await unlink(path.join(home, '.stratus', 'agents', 'ava.md'));
+  const degraded = await gateway.dispatch({ sessionId: 'degraded-1', agentId: 'ava', userMessage: 'still here?' });
+  await gateway.stop();
+
+  assert.equal(degraded.status, 'completed');
+  assert.equal(degraded.agent.name, 'Ava');
+  // Both turns ran on Ava's own cached model — never the default soul's.
+  assert.deepEqual(requestedModels, ['model-a', 'model-a']);
+});
+
+test('the watchdog observes activity ahead of slow external event consumers', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', [
+    '---', 'name: Ava', 'provider: anthropic', 'model: model-a',
+    'tools:', '  - agent.delegate', '---', '', 'You are Ava.', '',
+  ].join('\n'));
+  await writeSoul(home, 'bea.md', '---\nname: Bea\nprovider: openai\nmodel: model-b\n---\n\nYou are Bea.\n');
+
+  let anthropicCalls = 0;
+  const fetchImpl = (async (url: unknown) => {
+    if (String(url).includes('anthropic')) {
+      anthropicCalls += 1;
+      return anthropicCalls === 1
+        ? anthropicSseToolCall('agent_delegate', { agent: 'bea', prompt: 'quick task' })
+        : anthropicSseText('all done');
+    }
+    return openAiText('bea done');
+  }) as typeof fetch;
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { ANTHROPIC_API_KEY: 'sk-a', OPENAI_API_KEY: 'sk-o' },
+    fetch: fetchImpl,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 300, warn: () => {} });
+  await gateway.start();
+
+  // An external consumer (think: a throttled channel edit) that takes
+  // longer than the idle timeout to process provider.response. Emission
+  // awaits subscribers in order — the watchdog must observe (and suspend)
+  // BEFORE this consumer blocks the chain, or a healthy turn dies.
+  gateway.bus.subscribe(async (event) => {
+    if (event.type === 'provider.response') {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  });
+
+  const session = await gateway.dispatch({ sessionId: 'slow-consumer-1', agentId: 'ava', userMessage: 'delegate it' });
+  await gateway.stop();
+
+  assert.equal(session.status, 'completed');
+  assert.match(session.messages.at(-1)?.content ?? '', /all done/);
+});

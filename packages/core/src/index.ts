@@ -305,21 +305,41 @@ export interface EventBusOptions {
   onError?: (error: unknown, event: StratusEvent) => void;
 }
 
+export interface SubscribeOptions {
+  /**
+   * Run this handler before previously registered ones. Emission awaits
+   * handlers in order, so a slow consumer delays everyone after it — a
+   * liveness observer (an activity watchdog) must sit in front, or the
+   * activity it exists to notice reaches it only after the delay it is
+   * timing against.
+   */
+  prepend?: boolean;
+}
+
 export class EventBus {
-  private handlers = new Set<EventHandler>();
+  private handlers: EventHandler[] = [];
   private readonly onError: EventBusOptions['onError'];
 
   constructor(options: EventBusOptions = {}) {
     this.onError = options.onError;
   }
 
-  subscribe(handler: EventHandler): () => void {
-    this.handlers.add(handler);
-    return () => this.handlers.delete(handler);
+  subscribe(handler: EventHandler, options: SubscribeOptions = {}): () => void {
+    if (options.prepend) {
+      this.handlers.unshift(handler);
+    } else {
+      this.handlers.push(handler);
+    }
+    return () => {
+      const index = this.handlers.indexOf(handler);
+      if (index >= 0) {
+        this.handlers.splice(index, 1);
+      }
+    };
   }
 
   async emit(event: StratusEvent): Promise<void> {
-    for (const handler of this.handlers) {
+    for (const handler of [...this.handlers]) {
       try {
         await handler(event);
       } catch (error) {
