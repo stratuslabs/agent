@@ -47,10 +47,10 @@ Landing with the gateway (step 01), because every layer above needs them:
 
 Contract extensions owned by later steps:
 
-4. Approval-request/resolve event variants and a risk level on `ToolDescriptor` (step 03).
+4. Approval-request/resolve event variants, a risk level on registered `Tool`s (derived into their descriptors), and the resolved tool + risk in `ApprovalContext` (step 03).
 5. A callable tool-dispatch seam on `ProviderRequest`, so providers that host an inner loop execute tools through the kernel chain instead of around it (step 04).
 6. Glob support in per-agent tool allowlists (step 06).
-7. Provider usage/cost data on `session.completed` events (step 08).
+7. A `usage` field on `ProviderResponse`, accumulated by the runner and emitted with `session.completed` (step 08).
 
 Anything beyond this list gets decided in this document first, not in an implementation PR. One cleanup rides along: persona + memory system-prompt rendering is currently duplicated in all three provider packages and becomes a single shared contract.
 
@@ -72,7 +72,7 @@ Everything optional is a package, installed only where needed:
 - holds a SQLite session store keyed so a chat thread maps to a resumable session,
 - runs channel adapters and the agent router,
 - enforces approvals, including surfacing them remotely — an agent that hits a gated tool while nobody is at the machine asks in Slack instead of dying on a TTY prompt,
-- exposes one control API (HTTP + WebSocket): list agents, list/read sessions, send messages, stream events, resolve pending approvals.
+- exposes one control API (HTTP + WebSocket): list agents, list/read sessions, send messages, stream events, resolve pending approvals, and manage configuration (agent create/edit, credentials, settings, model/tool catalogs).
 
 The gateway is a package + CLI command, not a fork of the runtime. It composes the same `AgentRunner` the CLI uses today.
 

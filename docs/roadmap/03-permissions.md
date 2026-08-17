@@ -19,7 +19,7 @@ Phase 1 gives agents an always-on body; before they get real capabilities (step 
   - **Modes**: `interactive` (TTY prompt, current CLI behavior), `headless` (no human reachable: auto-approve safe, deny the rest, log every denial), `remote` (see below).
 - **Remote approval flow** through the gateway: a gated tool call parks the turn in a `pending_approval` state and emits an approval-request event; the Slack adapter renders it as a message with **Allow once / Always allow / Deny** buttons to a configured approver channel or DM; the decision resumes or fails the tool call. Timeout falls back to deny-with-note.
 - Per-agent policy config in soul frontmatter and/or `~/.stratus/config.json`: mode, approver, extra allow/deny patterns. The kernel's per-agent tool allowlist stays the first gate; this engine governs *invocations* of allowed tools.
-- Non-shell tools declare a coarse risk level in their `ToolDescriptor` (safe / gated / dangerous) so the same policy covers file writes and browser actions, not just shell.
+- Non-shell tools declare a coarse risk level (safe / gated / dangerous) so the same policy covers file writes and browser actions, not just shell. Risk lives on the registered `Tool` itself (with `ToolDescriptor` deriving it so providers see it too), and `ApprovalContext` grows the resolved tool and its risk — `approve({ session, call })` alone cannot classify an invocation, so the policy must never have to guess from a call name.
 
 **Out:** container/VM isolation (explicitly later — see the v2 doc's "policy before isolation"), credential leases (step 08), org-level policy or audit UI.
 
@@ -42,4 +42,4 @@ Phase 1 gives agents an always-on body; before they get real capabilities (step 
 ## Open questions
 
 - Should "Always allow" be scoped per agent (current thinking) or offer a fleet-wide option for the operator's own agents?
-- Risk levels on `ToolDescriptor`: enum on the descriptor vs. a registry-side classification table — descriptor is simpler, table avoids trusting tool authors. (Start: descriptor, revisit for marketplace-era third-party tools.)
+- Who assigns risk: the enum on the tool itself vs. a registry-side classification table — tool-declared is simpler, a table avoids trusting tool authors. (Start: tool-declared, revisit for marketplace-era third-party tools.)

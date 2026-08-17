@@ -28,7 +28,7 @@ Everything in the v2 vision presumes a process that outlives a terminal command:
 
 - `createGateway(config)` → `{ start(), stop(), dispatch(input): AsyncIterable<StratusEvent> }` where `dispatch` is the one entrypoint channels/API will call: it resolves the agent (router or explicit id), loads-or-creates the session by id, and runs a turn.
 - SQLite via `node:sqlite` to keep the zero-heavy-deps ethos; one `sessions` table (id, agent_id, status, JSON body, timestamps) is enough — no ORM. `node:sqlite` is unflagged only on **Node 22.13+** (22.6–22.12 require `--experimental-sqlite`), so this step raises the documented repo floor from 22.6 to 22.13 — still the Node 22 line, and cheaper than a native dependency or flag juggling in launchd plists.
-- Config: reuse the CLI's `resolveRuntimeConfig` precedence (flags → env → config file → defaults); gateway-specific keys live under a `gateway` section of `~/.stratus/config.json`.
+- Config: the CLI's state wiring — `resolveRuntimeConfig` precedence (flags → env → config file → defaults), credential store access, soul roster loading, and the file memory store — is **extracted into a shared lower-level package** (working name `@stratusagent/state`) that both the CLI and the gateway depend on. The CLI must depend on the gateway to implement `stratus serve`, so the gateway importing from the CLI would be a package cycle; extraction, not duplication. Gateway-specific keys live under a `gateway` section of `~/.stratus/config.json`.
 - Single-flight per session (a second dispatch to a busy session queues or rejects — pick one and document it), concurrent across sessions.
 
 ## Acceptance criteria
