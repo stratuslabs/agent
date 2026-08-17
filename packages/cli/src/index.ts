@@ -3104,17 +3104,21 @@ type SlackAdapterFactory = typeof import('@stratusagent/channel-slack').createSl
  * whose stored tokens say it should be running.
  */
 const loadSlackAdapter = async (): Promise<SlackAdapterFactory | undefined> => {
+  // Resolution and loading are separate questions, and only the first one
+  // means "not installed". Inspecting the import's error message cannot
+  // tell them apart: a package that IS installed but is missing one of
+  // its own dependencies throws ERR_MODULE_NOT_FOUND naming that
+  // dependency and this package as the importer — a broken install would
+  // read as an absent one, silently disabling a channel whose tokens say
+  // it should be running.
   try {
-    return (await import('@stratusagent/channel-slack')).createSlackChannelAdapter;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    const missingPackage = (code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND')
-      && String((error as Error).message).includes('@stratusagent/channel-slack');
-    if (missingPackage) {
-      return undefined;
-    }
-    throw error;
+    import.meta.resolve('@stratusagent/channel-slack');
+  } catch {
+    return undefined;
   }
+  // Resolvable: any failure from here is a real problem with the
+  // installed package, and surfaces.
+  return (await import('@stratusagent/channel-slack')).createSlackChannelAdapter;
 };
 
 /**
