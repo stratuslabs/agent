@@ -14,6 +14,7 @@ import {
   parseCommand,
   resolveRuntimeConfig,
   runCli,
+  slackAppManifest,
   startDashboardServer,
 } from '../src/index.ts';
 
@@ -1412,7 +1413,7 @@ test('setup signs into Claude with a pasted API key, verifies it, and saves cred
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-test-key\n', '5\n']),
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-test-key\n', '6\n']),
       fetch: (async (url: any, init?: any) => {
         const headers: Record<string, string> = {};
         new Headers(init?.headers ?? {}).forEach((value, key) => {
@@ -1454,7 +1455,7 @@ test('setup stores a Claude subscription setup token', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '1\n', '1\n', 'sk-ant-oat-123\n', '5\n']),
+      setupInput: Readable.from(['1\n', '1\n', '1\n', 'sk-ant-oat-123\n', '6\n']),
     },
   });
 
@@ -1478,7 +1479,7 @@ test('setup refuses a rejected API key and saves nothing', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '1\n', '2\n', 'bad-key\n', '5\n']),
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'bad-key\n', '6\n']),
       fetch: (async () => new Response('{}', { status: 401 })) as typeof fetch,
     },
   });
@@ -1500,7 +1501,7 @@ test('setup creates an agent whose soul lives in ~/.stratus/agents', async () =>
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '5\n']),
+      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '6\n']),
     },
   });
 
@@ -1542,7 +1543,7 @@ test('setup demo path can test run inline before saving', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '3\n', '4\n', '5\n']),
+      setupInput: Readable.from(['1\n', '3\n', '5\n', '6\n']),
     },
   });
 
@@ -1566,7 +1567,7 @@ test('setup warns when exported env vars override the saved config', async () =>
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: { STRATUS_PROVIDER: 'openai' },
-      setupInput: Readable.from(['1\n', '3\n', '5\n']),
+      setupInput: Readable.from(['1\n', '3\n', '6\n']),
     },
   });
 
@@ -1588,7 +1589,7 @@ test('setup honors STRATUS_CONFIG and --config for the write target', async () =
       cwd: tempDir,
       homeDir: home,
       processEnv: { STRATUS_CONFIG: envConfigPath },
-      setupInput: Readable.from(['5\n']),
+      setupInput: Readable.from(['6\n']),
     },
   });
   assert.match(viaEnv.output.stdout, /STRATUS_CONFIG is set, so the config will be written to/);
@@ -1603,7 +1604,7 @@ test('setup honors STRATUS_CONFIG and --config for the write target', async () =
       cwd: tempDir,
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '3\n', '5\n']),
+      setupInput: Readable.from(['1\n', '3\n', '6\n']),
     },
   });
   assert.match(viaFlag.output.stdout, /stratus run --config \.\/custom\.json "say hello"/);
@@ -1676,7 +1677,7 @@ test('setup Models menu picks default and fallback from live available models', 
         '1\n', '2\n', 'https://local.test/v1\n', 'sk-openai-key\n', // Providers → OpenAI → custom base URL → key
         '2\n', '1\n', '2\n',                      // Models → default → claude-sonnet-5
         '2\n', '2\n', '3\n',                      // Models → fallback → gpt-4.1-mini
-        '5\n',
+        '6\n',
       ]),
     },
   });
@@ -1804,7 +1805,7 @@ test('switching the default provider clears settings chosen for the old one', as
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-key\n', '5\n']),
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-key\n', '6\n']),
       fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
     },
   });
@@ -1844,7 +1845,7 @@ Be warm.
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '3\n', '5\n']),
+      setupInput: Readable.from(['1\n', '3\n', '6\n']),
     },
   });
 
@@ -1862,7 +1863,7 @@ test('setup saves a key when the endpoint has no /models to verify against', asy
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '2\n', 'https://local.test/v1\n', 'sk-local\n', '5\n']),
+      setupInput: Readable.from(['1\n', '2\n', 'https://local.test/v1\n', 'sk-local\n', '6\n']),
       fetch: (async () => new Response('not found', { status: 404 })) as typeof fetch,
     },
   });
@@ -1895,7 +1896,7 @@ test('the inline test run uses the same env-over-stored key precedence as real r
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: { ANTHROPIC_API_KEY: 'env-key' },
-      setupInput: Readable.from(['4\n', '5\n']),
+      setupInput: Readable.from(['5\n', '6\n']),
       fetch: (async (_url: any, init?: any) => {
         const headers: Record<string, string> = {};
         new Headers(init?.headers ?? {}).forEach((value, key) => {
@@ -1940,7 +1941,7 @@ test('a typed model id resolves to the provider that lists it', async () => {
         '1\n', '1\n', '2\n', 'sk-ant-key\n',
         '1\n', '2\n', '\n', 'sk-openai-key\n',
         '2\n', '2\n', 'gpt-4.1-mini\n',   // fallback typed by id — listed under openai
-        '5\n',
+        '6\n',
       ]),
     },
   });
@@ -2039,7 +2040,7 @@ Be warm.
       fetch: (async () => new Response(JSON.stringify({
         data: [{ id: 'claude-opus-5' }, { id: 'claude-sonnet-5' }],
       }), { status: 200 })) as typeof fetch,
-      setupInput: Readable.from(['2\n', '1\n', '2\n', '5\n']),
+      setupInput: Readable.from(['2\n', '1\n', '2\n', '6\n']),
     },
   });
 
@@ -2077,7 +2078,7 @@ test('model discovery uses the same credential a real run would use', async () =
         }
         return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
       }) as typeof fetch,
-      setupInput: Readable.from(['2\n', '1\n', '1\n', '5\n']),
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '6\n']),
     },
   });
 
@@ -2145,7 +2146,7 @@ test('a secondary openai sign-in keeps its endpoint with the credential', async 
       setupInput: Readable.from([
         '1\n', '1\n', '2\n', 'sk-ant-key\n',
         '1\n', '2\n', 'https://local.test/v1\n', 'sk-local\n',
-        '5\n',
+        '6\n',
       ]),
     },
   });
@@ -2241,7 +2242,7 @@ test('signing into a second provider keeps a STRATUS_API_KEY-powered default', a
       // into openai must not steal the default.
       processEnv: { STRATUS_API_KEY: 'generic-key' },
       fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
-      setupInput: Readable.from(['1\n', '2\n', '\n', 'sk-openai\n', '5\n']),
+      setupInput: Readable.from(['1\n', '2\n', '\n', 'sk-openai\n', '6\n']),
     },
   });
 
@@ -2279,7 +2280,7 @@ test('the inline test run fails over on the configured fallback', async () => {
           choices: [{ message: { content: 'Fallback says hello.' } }],
         }), { status: 200, headers: { 'content-type': 'application/json' } });
       }) as typeof fetch,
-      setupInput: Readable.from(['4\n', '5\n']),
+      setupInput: Readable.from(['5\n', '6\n']),
     },
   });
 
@@ -2303,7 +2304,7 @@ test('setup warns when a project config shadows the global file it wrote', async
       cwd: project,
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '3\n', '5\n']),
+      setupInput: Readable.from(['1\n', '3\n', '6\n']),
     },
   });
 
@@ -2344,7 +2345,7 @@ test('model discovery keeps a bound stored key on its own endpoint', async () =>
         listRequests.push({ url: String(url), bearer: headers.authorization });
         return new Response(JSON.stringify({ data: [{ id: 'local-llama' }] }), { status: 200 });
       }) as typeof fetch,
-      setupInput: Readable.from(['2\n', '1\n', '1\n', '5\n']),
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '6\n']),
     },
   });
 
@@ -2383,7 +2384,7 @@ test('discovery never sends the generic STRATUS_API_KEY to a secondary provider'
         byHost.openai = headers.authorization;
         return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
       }) as typeof fetch,
-      setupInput: Readable.from(['2\n', '1\n', '1\n', '5\n']),
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '6\n']),
     },
   });
 
@@ -2467,7 +2468,7 @@ test('anthropic discovery, fallback, and save all honor a configured endpoint', 
         listUrls.push(String(url));
         return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
       }) as typeof fetch,
-      setupInput: Readable.from(['2\n', '1\n', '1\n', '5\n']),
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '6\n']),
     },
   });
   assert.equal(listUrls[0], 'https://ant-proxy.test/v1/models?limit=100');
@@ -2513,7 +2514,7 @@ test('the model picker hides non-chat models and leads with chat ones', async ()
         ],
       }), { status: 200 })) as typeof fetch,
       // Accept the advertised default (empty answer picks entry #1).
-      setupInput: Readable.from(['2\n', '1\n', '\n', '5\n']),
+      setupInput: Readable.from(['2\n', '1\n', '\n', '6\n']),
     },
   });
 
@@ -2557,7 +2558,7 @@ test('the inline test run keeps a bound stored key on its own endpoint', async (
         }
         return new Response(JSON.stringify({ data: [] }), { status: 200 });
       }) as typeof fetch,
-      setupInput: Readable.from(['4\n', '5\n']),
+      setupInput: Readable.from(['5\n', '6\n']),
     },
   });
 
@@ -2587,7 +2588,7 @@ test('anthropic keys bind to the endpoint they were verified against', async () 
         verifyUrls.push(String(url));
         return new Response('{}', { status: 200 });
       }) as typeof fetch,
-      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-proxy\n', '5\n']),
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-proxy\n', '6\n']),
     },
   });
 
@@ -2636,7 +2637,7 @@ test('the inline test run honors the STRATUS_API_KEY_ENV selector', async () => 
       // The selector redirects the effective key to MY_KEY, exactly as a
       // real run would resolve it.
       processEnv: { STRATUS_API_KEY_ENV: 'MY_KEY', MY_KEY: 'selector-key' },
-      setupInput: Readable.from(['4\n', '5\n']),
+      setupInput: Readable.from(['5\n', '6\n']),
       fetch: (async (_url: any, init?: any) => {
         const headers: Record<string, string> = {};
         new Headers(init?.headers ?? {}).forEach((value, key) => {
@@ -2683,7 +2684,7 @@ test('a rejected replacement sign-in leaves the previous endpoint untouched', as
       processEnv: {},
       // The replacement key for the new endpoint is rejected.
       fetch: (async () => new Response('{}', { status: 401 })) as typeof fetch,
-      setupInput: Readable.from(['1\n', '2\n', 'https://new.test/v1\n', 'bad-key\n', '5\n']),
+      setupInput: Readable.from(['1\n', '2\n', 'https://new.test/v1\n', 'bad-key\n', '6\n']),
     },
   });
 
@@ -2723,7 +2724,7 @@ test('discovery honors a secondary anthropic credential bound endpoint', async (
         }
         return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
       }) as typeof fetch,
-      setupInput: Readable.from(['2\n', '1\n', '1\n', '5\n']),
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '6\n']),
     },
   });
 
@@ -2882,4 +2883,146 @@ test('optional channel packages are never hard dependencies of the CLI', async (
     assert.equal(manifest.peerDependenciesMeta?.[name]?.optional, true, `${name} must be an OPTIONAL peer`);
     assert.ok(manifest.devDependencies?.[name], `${name} must stay a devDependency so the workspace builds`);
   }
+});
+
+test('setup connects an agent to Slack without touching any file by hand', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+
+  const { streams, output } = createStreams();
+  const slackCalls: Array<{ url: string; auth: string }> = [];
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      // Channels → Ava → paste both tokens → Back → Save & finish
+      setupInput: Readable.from(['4\n', '1\n', 'xapp-tok\n', 'xoxb-tok\n', '2\n', '6\n']),
+      fetch: (async (url: any, init?: any) => {
+        slackCalls.push({
+          url: String(url),
+          auth: new Headers(init?.headers ?? {}).get('authorization') ?? '',
+        });
+        if (String(url).endsWith('/auth.test')) {
+          return new Response(JSON.stringify({ ok: true, user_id: 'B123', team: 'Acme', team_id: 'T1' }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ ok: true, url: 'wss://slack' }), { status: 200 });
+      }) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // Both tokens are verified against Slack before anything is stored.
+  assert.deepEqual(slackCalls.map((c) => c.url.replace('https://slack.com/api/', '')), ['auth.test', 'apps.connections.open']);
+  assert.equal(slackCalls[0]?.auth, 'Bearer xoxb-tok');
+  assert.equal(slackCalls[1]?.auth, 'Bearer xapp-tok');
+  assert.match(output.stdout, /✓ Verified — Ava is connected to Slack in Acme \(bot B123\)\./);
+  // The manifest is printed for pasting, so app creation needs no file hunt.
+  assert.match(output.stdout, /"always_online": true/);
+  assert.match(output.stdout, /app_mentions:read/);
+
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials.channels, { slack: { ava: { appToken: 'xapp-tok', botToken: 'xoxb-tok' } } });
+});
+
+test('setup refuses to store Slack tokens the API rejects', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['4\n', '1\n', 'xapp-tok\n', 'xoxb-bad\n', '2\n', '6\n']),
+      // Slack answers 200 with ok:false for a bad token.
+      fetch: (async () => new Response(JSON.stringify({ ok: false, error: 'invalid_auth' }), { status: 200 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /✗ Slack rejected the bot token \(invalid_auth\)\. Nothing was saved/);
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8').catch(() => '{}'));
+  assert.equal(credentials.channels, undefined);
+});
+
+test('setup rejects malformed Slack tokens before calling the API', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+
+  const { streams, output } = createStreams();
+  let called = 0;
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['4\n', '1\n', 'xoxb-wrong-kind\n', '2\n', '6\n']),
+      fetch: (async () => { called += 1; return new Response('{}', { status: 200 }); }) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /does not look like an app-level token/);
+  assert.equal(called, 0, 'a malformed token must not reach Slack');
+});
+
+test('setup disconnects an agent from Slack', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({
+      anthropic: { type: 'api_key', value: 'sk-keep-me' },
+      channels: { slack: { ava: { appToken: 'xapp-old', botToken: 'xoxb-old' } } },
+    }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      // Channels → Ava (connected) → Disconnect → Back → Save & finish
+      setupInput: Readable.from(['4\n', '1\n', '2\n', '2\n', '6\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Ava is no longer connected to Slack/);
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials.channels, { slack: {} });
+  // Disconnecting a channel must never disturb the provider sign-in.
+  assert.deepEqual(credentials.anthropic, { type: 'api_key', value: 'sk-keep-me' });
+});
+
+test('the setup manifest matches the one shipped by the Slack package', async () => {
+  // Setup generates the manifest itself so it works before the optional
+  // channel package is installed; this pins the two copies together.
+  const here = path.dirname(new URL(import.meta.url).pathname);
+  const shipped = JSON.parse(await readFile(
+    path.join(here, '..', '..', 'channel-slack', 'manifest', 'stratus-agent.manifest.json'),
+    'utf8',
+  ));
+  const generated = JSON.parse(slackAppManifest('NAME'));
+  assert.deepEqual(generated, shipped);
 });
