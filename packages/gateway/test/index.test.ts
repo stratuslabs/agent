@@ -1363,3 +1363,35 @@ test('config degradation serves the last known-good config, never the demo defau
   assert.deepEqual(requestedModels, ['model-cfg', 'model-cfg']);
   assert.ok(warnings.some((line) => line.includes('config')));
 });
+
+test('an empty STRATUS_PROVIDER is no default at all for the credential scrub', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+
+  const apiKeys: string[] = [];
+  const fetchImpl = (async (url: unknown, init?: RequestInit) => {
+    apiKeys.push(new Headers(init?.headers ?? {}).get('x-api-key') ?? '');
+    if (String(url).includes('anthropic')) {
+      return anthropicSseText('still anthropic');
+    }
+    return openAiText('unexpected');
+  }) as typeof fetch;
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    // The resolver ignores empty env values; the scrub must too — this
+    // previously read '' as a mismatching default and deleted the key.
+    processEnv: { STRATUS_PROVIDER: '', STRATUS_API_KEY: 'sk-generic' },
+    fetch: fetchImpl,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+  const session = await gateway.dispatch({ sessionId: 'empty-env-1', agentId: 'ava', userMessage: 'hi' });
+  await gateway.stop();
+
+  assert.equal(session.status, 'completed');
+  assert.match(session.messages.at(-1)?.content ?? '', /still anthropic/);
+  assert.ok(apiKeys.some((key) => key === 'sk-generic'));
+});

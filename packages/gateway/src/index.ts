@@ -34,6 +34,7 @@ import {
   migrateLegacyMemory,
   ConfigFileError,
   loadConfigFile,
+  readNonEmptyString,
   resolveConfigLocation,
   resolveConfiguredSoul,
   resolveRuntimeConfig,
@@ -657,9 +658,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         // predates the anthropic option and is openai-specific (the
         // resolver treats it that way), so a real file without the key
         // still names openai as the default.
+        // Env values normalize exactly as the resolver normalizes them:
+        // an empty or whitespace-padded STRATUS_PROVIDER is no default at
+        // all, not a mismatching one.
         const defaultProvider: string | undefined = options.selection?.provider
-          ?? processEnv.STRATUS_PROVIDER
-          ?? processEnv.STRATUSCLAW_PROVIDER
+          ?? readNonEmptyString(processEnv.STRATUS_PROVIDER)
+          ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER)
           ?? configSnapshot.config.provider
           ?? (configSnapshot.path !== undefined ? 'openai' : undefined);
         if (pins.provider) {
