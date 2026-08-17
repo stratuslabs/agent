@@ -121,7 +121,18 @@ export class LocalCommandExecutor implements Executor {
     }
 
     try {
-      const invocation = await tool.createCommand(call.input, session);
+      // The factory runs before any process exists, so the signal must be
+      // observed here too: a cancelled turn settles even if createCommand
+      // never does, and a command is never spawned after cancellation just
+      // to be killed — its startup side effects would already be real.
+      const signal = context?.signal;
+      if (signal?.aborted) {
+        return failureResult(call, `Command aborted before start: ${call.toolName}`);
+      }
+      const invocation = await raceWithAbort(tool.createCommand(call.input, session), signal);
+      if (signal?.aborted) {
+        return failureResult(call, `Command aborted before start: ${call.toolName}`);
+      }
       const timeoutMs = resolveTimeoutMs(invocation.timeoutMs, this.defaultTimeoutMs, this.maxTimeoutMs);
       const execution = await runLocalCommand(invocation, {
         spawn: this.spawn,
@@ -170,6 +181,33 @@ export class LocalCommandExecutor implements Executor {
 export const createLocalCommandExecutor = (
   options: LocalCommandExecutorOptions = {},
 ): Executor => new LocalCommandExecutor(options);
+
+// Settles as soon as the signal fires, whether or not the wrapped work
+// ever does — an unresponsive command factory must not pin a cancelled
+// turn open.
+const raceWithAbort = async <T>(work: Promise<T> | T, signal?: AbortSignal): Promise<T> => {
+  if (!signal) {
+    return work;
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(new Error('Command construction aborted.'));
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(work).then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+};
 
 const resolveTimeoutMs = (
   requested: number | undefined,

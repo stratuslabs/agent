@@ -224,3 +224,57 @@ test('cancellation kills the whole process tree, not just the direct child', asy
   // before its own 5s timer.
   assert.ok(Date.now() - startedAt < 4000);
 });
+
+test('cancellation settles the turn even when createCommand never resolves', async () => {
+  // The factory runs before any process exists; the abort signal must be
+  // honored there too, or a cancelled turn (and a draining daemon) waits
+  // on it forever.
+  const tool = defineLocalCommandTool({
+    name: 'stuck.factory',
+    createCommand: () => new Promise(() => {}),
+  });
+
+  const executor = createLocalCommandExecutor();
+  const controller = new AbortController();
+  const pending = executor.execute(
+    { id: 'c-stuck', toolName: 'stuck.factory', input: {} },
+    tool,
+    session,
+    { signal: controller.signal },
+  );
+  setTimeout(() => controller.abort(), 20);
+
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? '', /aborted/i);
+});
+
+test('a command is not spawned when the signal fired during construction', async () => {
+  let spawned = 0;
+  const executor = createLocalCommandExecutor({
+    spawn: ((..._args: unknown[]) => {
+      spawned += 1;
+      throw new Error('must not spawn');
+    }) as never,
+  });
+
+  const controller = new AbortController();
+  const tool = defineLocalCommandTool({
+    name: 'late.factory',
+    createCommand: async () => {
+      controller.abort();
+      return { command: 'echo', args: ['hi'] };
+    },
+  });
+
+  const result = await executor.execute(
+    { id: 'c-late', toolName: 'late.factory', input: {} },
+    tool,
+    session,
+    { signal: controller.signal },
+  );
+
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? '', /aborted/i);
+  assert.equal(spawned, 0);
+});

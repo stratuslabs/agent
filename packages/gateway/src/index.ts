@@ -369,9 +369,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * executions and approval waits emit no deltas (executor timeouts cover
    * them), so the timer suspends at each provider.response and re-arms once
    * every tool call from that response has settled and the loop heads back
-   * to the provider. A mid-turn switch to a non-streaming fallback
-   * (signalled by a reset delta) suspends it for the rest of the turn: the
-   * switch is session-sticky, so every later call this turn is silent too.
+   * to the provider. A reset delta marks the mid-turn, session-sticky
+   * switch to the fallback provider, and the timer follows the active
+   * provider through it: switching to a non-streaming fallback suspends it
+   * for the rest of the turn (silence is healthy there), while a streaming
+   * fallback taking over from a non-streaming primary arms it for the
+   * first time.
    */
   const withWatchdog = async <T>(
     sessionId: string,
@@ -380,7 +383,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     fallbackStreams: boolean,
     run: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> => {
-    const effectiveIdleMs = idleEnabled ? idleTimeoutMs : 0;
+    const effectiveIdleMs = idleEnabled || fallbackStreams ? idleTimeoutMs : 0;
     if (effectiveIdleMs <= 0 && !external) {
       return run(new AbortController().signal);
     }
@@ -395,9 +398,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
 
     let timer: NodeJS.Timeout | undefined;
-    let armed = true;
+    // Whether the provider currently serving this turn streams deltas —
+    // the primary until a reset delta announces the sticky fallback switch.
+    let streamingActive = idleEnabled;
+    let armed = idleEnabled;
     let pendingTools = 0;
-    let suspendedForTurn = false;
 
     const suspendTimer = (): void => {
       armed = false;
@@ -429,12 +434,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       switch (event.type) {
         case 'provider.delta':
-          // A reset marks a mid-turn, session-sticky switch to the fallback
-          // provider. When that fallback emits no deltas, silence is
-          // healthy for the remainder of the turn.
-          if (event.delta.type === 'reset' && !fallbackStreams) {
-            suspendedForTurn = true;
-            suspendTimer();
+          // A reset marks the mid-turn, session-sticky fallback switch: the
+          // timer follows whether the now-active provider streams. A silent
+          // fallback makes silence healthy for the rest of the turn; a
+          // streaming one takes over the primary's watchdog protection.
+          if (event.delta.type === 'reset') {
+            streamingActive = fallbackStreams;
+            if (fallbackStreams) {
+              armed = true;
+              resetTimer();
+            } else {
+              suspendTimer();
+            }
           } else {
             resetTimer();
           }
@@ -449,7 +460,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         case 'tool.completed':
         case 'tool.denied':
           pendingTools = Math.max(0, pendingTools - 1);
-          if (pendingTools === 0 && !suspendedForTurn) {
+          if (pendingTools === 0 && streamingActive) {
             armed = true;
             resetTimer();
           }

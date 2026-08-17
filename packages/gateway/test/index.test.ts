@@ -717,3 +717,49 @@ test('endpoint and generic credential defaults never ride along to a soul-pinned
   assert.match(pinned.messages.at(-1)?.content ?? '', /anthropic answered/);
   assert.ok(urls.every((url) => !url.includes('localhost')));
 });
+
+test('the watchdog arms when a streaming fallback takes over a non-streaming primary', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The primary emits no deltas, so the turn starts with the watchdog
+  // unarmed. When the primary fails and the Anthropic fallback takes over
+  // mid-turn, the reset delta must arm it: a fallback stream that then
+  // stalls has to be cut loose, not held open until an SDK timeout.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'model-p',
+    fallbackModel: 'model-f',
+    fallbackProvider: 'anthropic',
+  }));
+
+  const fetchImpl = ((url: unknown, init?: RequestInit) => {
+    if (String(url).includes('anthropic')) {
+      return new Promise((_resolve, reject) => {
+        if (init?.signal?.aborted) {
+          reject(new DOMException('aborted', 'AbortError'));
+          return;
+        }
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      });
+    }
+    return Promise.resolve(new Response(
+      JSON.stringify({ error: { message: 'primary down' } }),
+      { status: 500, headers: { 'content-type': 'application/json' } },
+    ));
+  }) as typeof fetch;
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o', ANTHROPIC_API_KEY: 'sk-a' },
+    fetch: fetchImpl,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 300, warn: () => {} });
+  await gateway.start();
+
+  await assert.rejects(
+    () => gateway.dispatch({ sessionId: 'arming-1', userMessage: 'hang after switching' }),
+    (error: Error) => error instanceof RunAbortedError && /no activity/.test(error.message),
+  );
+  await gateway.stop();
+});
