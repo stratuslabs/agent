@@ -1136,3 +1136,62 @@ test('the watchdog does not tick while slow delta consumers process a healthy st
   assert.equal(session.status, 'completed');
   assert.match(session.messages.at(-1)?.content ?? '', /healthy but slowly consumed/);
 });
+
+test('the gateway starts when daemon defaults lack credentials the default soul does not need', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeSoul(home, 'roster-bea.md', '---\nname: Bea\nprovider: anthropic\nmodel: model-b\n---\n\nYou are Bea.\n');
+  // The default soul pins Anthropic; the daemon-wide default says OpenAI —
+  // and only Anthropic credentials are installed. Startup must not fail
+  // on the OpenAI key the soul never needed.
+  await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\nprovider: anthropic\nmodel: model-n\n---\n\nYou are Nova.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
+
+  const fetchImpl = (async (url: unknown) => {
+    if (String(url).includes('anthropic')) {
+      return anthropicSseText('nova on anthropic');
+    }
+    return openAiText('unexpected provider');
+  }) as typeof fetch;
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { ANTHROPIC_API_KEY: 'sk-a' },
+    fetch: fetchImpl,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, selection: { provider: 'openai' } });
+
+  // Previously this threw "Missing API key" out of loadRoster.
+  await gateway.start();
+  assert.ok(gateway.agents().some((agent) => agent.name === 'Nova'));
+
+  // The default route runs on the soul's own provider...
+  const viaDefault = await gateway.dispatch({ sessionId: 'start-degrade-1', userMessage: 'hi' });
+  assert.equal(viaDefault.agent.name, 'Nova');
+  assert.match(viaDefault.messages.at(-1)?.content ?? '', /nova on anthropic/);
+
+  // ...and explicit roster agents were never held hostage by the default.
+  const viaRoster = await gateway.dispatch({ sessionId: 'start-degrade-2', agentId: 'bea', userMessage: 'hi' });
+  await gateway.stop();
+  assert.equal(viaRoster.status, 'completed');
+});
+
+test('an unreadable default soul path degrades startup instead of failing it', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'missing.md' }));
+
+  const warnings: string[] = [];
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
+  await gateway.start();
+
+  // The default route falls back to the built-in agent, with a warning.
+  const session = await gateway.dispatch({ sessionId: 'missing-default-1', userMessage: 'hello' });
+  await gateway.stop();
+
+  assert.equal(session.status, 'completed');
+  assert.equal(session.agent.id, 'stratus');
+  assert.ok(warnings.some((line) => line.includes('default soul')), `expected a default-soul warning, got ${JSON.stringify(warnings)}`);
+});

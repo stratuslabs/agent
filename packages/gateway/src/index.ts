@@ -32,6 +32,7 @@ import {
   loadSoulFile,
   memoryFilePath,
   migrateLegacyMemory,
+  resolveConfiguredSoul,
   resolveRuntimeConfig,
   stratusHomePath,
   withLegacyDefaultMemories,
@@ -238,12 +239,27 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * allowlist, memory id) must follow along, not stay pinned to the
    * built-in definition.
    */
+  let lastDefaultAgentId: string | undefined;
   const defaultAgentId = async (): Promise<string> => {
-    const config = await resolveRuntimeConfig({ ...options.selection }, env);
-    if (!config.soul) {
+    // Identity only — never full runtime resolution: credential checks do
+    // not belong here, or a daemon default provider without installed keys
+    // would throw while the soul pins a provider that has them, taking
+    // loadRoster (and the whole gateway) down with it. Provider resolution
+    // happens at dispatch, where pin demotion applies.
+    let resolved: { soul: ParsedSoul; path: string } | undefined;
+    try {
+      resolved = await resolveConfiguredSoul({ ...options.selection }, env);
+    } catch (error) {
+      warn(`could not load the configured default soul: ${error instanceof Error ? error.message : String(error)}`);
+      // A transiently unreadable default keeps routing to the last known
+      // default agent (whose source serves from cache) rather than
+      // silently switching identities to the built-in.
+      return lastDefaultAgentId ?? DEFAULT_STRATUS_AGENT.id;
+    }
+    if (!resolved) {
       return DEFAULT_STRATUS_AGENT.id;
     }
-    const id = config.soul.agent.id;
+    const id = resolved.soul.agent.id;
     // The normal setup layout has the default soul in ~/.stratus/agents
     // too: keep the roster registration — its soulPath drives per-dispatch
     // refresh. A config-only soul registers with the path it resolved
@@ -252,14 +268,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // agent id, different file) replaces the source, or moves and
     // replacements would silently keep refreshing the old file.
     const existing = sources.get(id);
-    const pathChanged = Boolean(config.soulPath && existing?.soulPath && existing.soulPath !== config.soulPath);
+    const pathChanged = Boolean(existing?.soulPath && existing.soulPath !== resolved.path);
     if (!existing?.soulPath || pathChanged) {
       registerSource({
-        definition: config.soul.agent,
-        soul: config.soul,
-        ...(config.soulPath ? { soulPath: config.soulPath } : {}),
+        definition: resolved.soul.agent,
+        soul: resolved.soul,
+        soulPath: resolved.path,
       });
     }
+    lastDefaultAgentId = id;
     return id;
   };
 
@@ -628,6 +645,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         }
         resolveEnv = { ...env, processEnv };
       }
+    } else {
+      // A soul-less agent (the built-in default) resolves with no soul at
+      // all: the config file's default soul belongs to another identity —
+      // and when the default route degrades to the built-in, it is exactly
+      // because that file is currently unusable.
+      selection.presetSoul = null;
     }
     const config = await resolveRuntimeConfig(selection, resolveEnv);
     const runner = runnerFor(config);
