@@ -229,6 +229,24 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     sources.set(source.definition.id, source);
   };
 
+  /**
+   * The agent an agentId-less dispatch routes to: the configured default
+   * soul when one is set (what `stratus setup` writes to config.json),
+   * the built-in Stratus definition otherwise. Re-resolved per call so an
+   * edited default soul reaches conversations without a restart — the
+   * runtime config already re-reads it, and the identity (persona, tool
+   * allowlist, memory id) must follow along, not stay pinned to the
+   * built-in definition.
+   */
+  const defaultAgentId = async (): Promise<string> => {
+    const config = await resolveRuntimeConfig({ ...options.selection }, env);
+    if (!config.soul) {
+      return DEFAULT_STRATUS_AGENT.id;
+    }
+    registerSource({ definition: config.soul.agent, soul: config.soul });
+    return config.soul.agent.id;
+  };
+
   const loadRoster = async (): Promise<void> => {
     const entries: RosterEntry[] = await loadRosterSouls(env, warn);
     for (const entry of entries) {
@@ -239,6 +257,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       registerSource({ definition: entry.soul.agent, soulPath: entry.path, soul: entry.soul });
     }
+    // The configured default soul is part of the roster too — it is what
+    // an agentId-less dispatch answers as.
+    await defaultAgentId();
     if (!sources.has(DEFAULT_STRATUS_AGENT.id)) {
       registerSource({ definition: { ...DEFAULT_STRATUS_AGENT } });
     }
@@ -506,7 +527,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       throw new RunAbortedError();
     }
 
-    const agentId = input.agentId ?? DEFAULT_STRATUS_AGENT.id;
+    const agentId = input.agentId ?? await defaultAgentId();
     const source = await refreshAgent(agentId);
     const agent = source.definition;
 

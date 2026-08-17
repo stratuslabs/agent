@@ -787,3 +787,26 @@ test('a dispatch aborted during preflight never touches durable state', async ()
   await gateway.stop();
   assert.equal(stored, undefined);
 });
+
+test('an agentId-less dispatch answers as the configured default soul', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // What `stratus setup` writes: a default soul outside the roster dir.
+  await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\n---\n\nYou are Nova, precise and quick.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
+
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+
+  // The default soul is part of the visible roster.
+  assert.ok(gateway.agents().some((agent) => agent.name === 'Nova'), 'the default soul must appear in agents()');
+
+  // No agentId: the turn runs AS Nova — identity, not just provider config.
+  const session = await gateway.dispatch({ sessionId: 'default-soul-1', userMessage: 'hello' });
+  await gateway.stop();
+
+  assert.equal(session.agent.name, 'Nova');
+  assert.notEqual(session.agent.id, 'stratus');
+  assert.equal(session.status, 'completed');
+});
