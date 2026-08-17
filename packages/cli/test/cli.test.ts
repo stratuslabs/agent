@@ -3121,3 +3121,60 @@ test('setup suggests serve with the same --config it was run with', async () => 
   // different roster — so the stored Slack app would be skipped.
   assert.match(output.stdout, /run `stratus serve --config \.\/custom\.json` to bring them online/);
 });
+
+test('the Channels menu drops duplicate roster ids the way the gateway does', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // Two files, one id. The gateway keeps the first sorted file; offering
+  // the other would name a Slack app for an agent that can never be
+  // dispatched to, since credentials are keyed by the shared id.
+  await writeFile(path.join(agentsDir, 'a-first.md'), '---\nname: First\nid: twin\n---\n\nYou are First.\n');
+  await writeFile(path.join(agentsDir, 'b-second.md'), '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['4\n', '2\n', '6\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /First \(twin\)/);
+  assert.doesNotMatch(output.stdout, /Second \(twin\)/);
+  assert.match(output.stderr, /duplicate agent id twin/);
+});
+
+test('the Channels menu follows STRATUS_SOUL over the configured soul', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const configured = path.join(project, 'configured.md');
+  const overridden = path.join(project, 'override.md');
+  await writeFile(configured, '---\nname: Configured\n---\n\nYou are Configured.\n');
+  await writeFile(overridden, '---\nname: Overridden\n---\n\nYou are Overridden.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo', soul: configured }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      // `stratus serve` would resolve this soul, not the configured one.
+      processEnv: { STRATUS_SOUL: overridden },
+      setupInput: Readable.from(['4\n', '2\n', '6\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Overridden \(overridden\)/);
+  assert.doesNotMatch(output.stdout, /Configured \(configured\)/);
+  assert.match(output.stderr, /STRATUS_SOUL points at .*override\.md/);
+});

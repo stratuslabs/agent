@@ -2735,11 +2735,36 @@ export const runSetup = async (
    */
   const channelRoster = async (): Promise<RosterEntry[]> => {
     const warnOnce = (message: string): void => writeLine(streams.stderr, `Warning: ${message}.`);
-    const entries = [...await loadRosterSouls(env, warnOnce)];
-    if (!state.soulPath) {
+    // Mirror the gateway's loadRoster: two soul files declaring the same
+    // id are not two agents. Offering both would let someone create and
+    // name an app for the loser, which can never receive a message —
+    // Slack credentials are keyed by the shared id, and dispatch reaches
+    // the first sorted file.
+    const entries: RosterEntry[] = [];
+    for (const entry of await loadRosterSouls(env, warnOnce)) {
+      const clash = entries.find((seen) => seen.soul.agent.id === entry.soul.agent.id);
+      if (clash) {
+        warnOnce(`duplicate agent id ${entry.soul.agent.id} (${clash.path} vs ${entry.path}); keeping the first`);
+        continue;
+      }
+      entries.push(entry);
+    }
+
+    // The soul a run resolves to, in resolveSoulPath's own order: an env
+    // override outranks the config value this setup session is editing.
+    // Listing the config soul while `stratus serve` registers the env one
+    // would store tokens against an id the adapter then skips.
+    const processEnv = readProcessEnv(env);
+    const envSoul = readNonEmptyString(processEnv.STRATUS_SOUL)
+      ?? readNonEmptyString(processEnv.STRATUSCLAW_SOUL);
+    if (typeof envSoul === 'string' && state.soulPath && envSoul !== state.soulPath) {
+      warnOnce(`STRATUS_SOUL points at ${envSoul}, which outranks the configured ${state.soulPath} — Channels lists what a run would actually use`);
+    }
+    const effectiveSoul = typeof envSoul === 'string' ? envSoul : state.soulPath;
+    if (!effectiveSoul) {
       return entries;
     }
-    const resolved = path.resolve(readWorkingDirectory(env), state.soulPath);
+    const resolved = path.resolve(readWorkingDirectory(env), effectiveSoul);
     if (entries.some((entry) => entry.path === resolved)) {
       return entries;
     }
