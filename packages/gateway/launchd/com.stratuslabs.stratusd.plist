@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd template for stratusd. Install per user (no hardcoded paths):
+
+    1. Replace __NODE__ with `which node` (must be Node 22.13+)
+       and __STRATUS__ with `which stratus` (or the absolute path to
+       packages/cli/dist/bin.js in a checkout).
+    2. Copy to ~/Library/LaunchAgents/com.stratuslabs.stratusd.plist
+    3. launchctl load ~/Library/LaunchAgents/com.stratuslabs.stratusd.plist
+
+  Logs land in ~/Library/Logs/stratusd. State stays in ~/.stratus as usual.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.stratuslabs.stratusd</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__STRATUS__</string>
+    <string>serve</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>~/Library/Logs/stratusd/stratusd.log</string>
+  <key>StandardErrorPath</key>
+  <string>~/Library/Logs/stratusd/stratusd.err.log</string>
+</dict>
+</plist>

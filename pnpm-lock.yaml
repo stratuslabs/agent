@@ -29,6 +29,9 @@ importers:
       '@stratusagent/executor-local':
         specifier: workspace:*
         version: link:../executor-local
+      '@stratusagent/gateway':
+        specifier: workspace:*
+        version: link:../gateway
       '@stratusagent/provider-anthropic':
         specifier: workspace:*
         version: link:../provider-anthropic
@@ -76,6 +79,25 @@ importers:
       '@stratusagent/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/gateway:
+    dependencies:
+      '@stratusagent/agents':
+        specifier: workspace:*
+        version: link:../agents
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+      '@stratusagent/executor-local':
+        specifier: workspace:*
+        version: link:../executor-local
+      '@stratusagent/state':
+        specifier: workspace:*
+        version: link:../state
     devDependencies:
       typescript:
         specifier: ^5.9.3

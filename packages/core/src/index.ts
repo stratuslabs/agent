@@ -647,7 +647,13 @@ export class AgentRunner {
       await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
       await this.bus.emit({ type: 'session.completed', sessionId: session.id });
       return session;
-    } catch (error) {
+    } catch (caught) {
+      // An abort can surface first from any layer (the provider's cancelled
+      // request, an executor, this loop's own checks) — normalize so an
+      // aborted turn is always distinguishable from a genuine failure.
+      const error = signal?.aborted && !(caught instanceof RunAbortedError)
+        ? new RunAbortedError()
+        : caught;
       const lastError = error instanceof Error ? error.message : String(error);
       session.status = 'failed';
       session.lastError = lastError;

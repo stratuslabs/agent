@@ -37,6 +37,9 @@
     },
     {
       "path": "../state"
+    },
+    {
+      "path": "../gateway"
     }
   ]
 }

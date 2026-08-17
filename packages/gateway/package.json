@@ -1,12 +1,9 @@
 {
-  "name": "@stratusagent/cli",
+  "name": "@stratusagent/gateway",
   "version": "0.2.4",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "bin": {
-    "stratus": "./dist/bin.js"
-  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -14,40 +11,39 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "launchd"
   ],
   "scripts": {
     "build": "tsc -b",
-    "cli": "node --experimental-strip-types ./src/bin.ts",
     "typecheck": "tsc --noEmit --project tsconfig.test.json",
-    "test": "node --test --experimental-strip-types ./test/**/*.test.ts"
+    "test": "node --test --experimental-strip-types"
+  },
+  "engines": {
+    "node": ">=22.13"
   },
   "dependencies": {
     "@stratusagent/agents": "workspace:*",
     "@stratusagent/core": "workspace:*",
     "@stratusagent/executor-local": "workspace:*",
-    "@stratusagent/gateway": "workspace:*",
-    "@stratusagent/provider-anthropic": "workspace:*",
-    "@stratusagent/provider-claude-code": "workspace:*",
-    "@stratusagent/providers": "workspace:*",
     "@stratusagent/state": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^24.6.0",
     "typescript": "^5.9.3"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",
-    "directory": "packages/cli"
+    "directory": "packages/gateway"
   },
-  "description": "Stratus Agent CLI: setup walkthrough, agent creation, local runs, and dashboard",
+  "description": "stratusd — the always-on Stratus Agent gateway: durable SQLite sessions, a per-provider runner pool, dispatcher-backed delegation, and an activity watchdog",
   "keywords": [
     "stratus",
     "agent",
     "ai",
-    "llm"
+    "llm",
+    "daemon"
   ],
   "publishConfig": {
     "access": "public"

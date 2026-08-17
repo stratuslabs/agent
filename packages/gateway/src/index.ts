@@ -1,0 +1,476 @@
+import { mkdirSync } from 'node:fs';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+
+import {
+  AgentRegistry,
+  AgentRunner,
+  EventBus,
+  RunAbortedError,
+  ToolRegistry,
+  type AgentDefinition,
+  type ApprovalPolicy,
+  type JsonObject,
+  type Session,
+  type SessionStore,
+  type StratusEvent,
+} from '@stratusagent/core';
+import {
+  createDelegateTool,
+  createRememberTool,
+} from '@stratusagent/agents';
+import { createLocalCommandExecutor } from '@stratusagent/executor-local';
+import {
+  createDemoTool,
+  createFileMemoryStore,
+  createRuntimeProvider,
+  DEFAULT_STRATUS_AGENT,
+  loadRosterSouls,
+  loadSoulFile,
+  memoryFilePath,
+  migrateLegacyMemory,
+  resolveRuntimeConfig,
+  stratusHomePath,
+  withLegacyDefaultMemories,
+  type RosterEntry,
+  type RuntimeConfig,
+  type RuntimeSelection,
+  type StateEnvironment,
+} from '@stratusagent/state';
+
+const SESSIONS_DB_FILENAME = 'sessions.db';
+const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
+
+/**
+ * Durable session storage on node:sqlite (unflagged on Node 22.13+). The
+ * whole session — messages, status, and metadata, including provider replay
+ * state like the Anthropic raw-turn cache — round-trips as one JSON body,
+ * so a conversation resumed after a daemon restart replays exactly.
+ */
+export class SqliteSessionStore implements SessionStore {
+  private readonly db: DatabaseSync;
+
+  constructor(filePath: string) {
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    this.db = new DatabaseSync(filePath);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+  }
+
+  async create(input: Omit<Session, 'createdAt' | 'updatedAt'>): Promise<Session> {
+    const now = new Date().toISOString();
+    const session: Session = { ...input, createdAt: now, updatedAt: now };
+    this.db
+      .prepare('INSERT OR REPLACE INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(session.id, session.agent.id, session.status, JSON.stringify(session), session.createdAt, session.updatedAt);
+    return session;
+  }
+
+  async get(id: string): Promise<Session | undefined> {
+    const row = this.db.prepare('SELECT body FROM sessions WHERE id = ?').get(id) as
+      | { body: string }
+      | undefined;
+    return row ? (JSON.parse(row.body) as Session) : undefined;
+  }
+
+  async save(session: Session): Promise<void> {
+    const updated: Session = { ...session, updatedAt: new Date().toISOString() };
+    this.db
+      .prepare('INSERT OR REPLACE INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(updated.id, updated.agent.id, updated.status, JSON.stringify(updated), updated.createdAt, updated.updatedAt);
+  }
+
+  /** Newest-first session listing for one agent (or all agents). */
+  list(agentId?: string): Array<Pick<Session, 'id' | 'status' | 'createdAt' | 'updatedAt'> & { agentId: string }> {
+    const rows = (agentId
+      ? this.db.prepare('SELECT id, agent_id, status, created_at, updated_at FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC').all(agentId)
+      : this.db.prepare('SELECT id, agent_id, status, created_at, updated_at FROM sessions ORDER BY updated_at DESC').all()) as Array<{
+      id: string;
+      agent_id: string;
+      status: Session['status'];
+      created_at: string;
+      updated_at: string;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      agentId: row.agent_id,
+      status: row.status,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  close(): void {
+    this.db.close();
+  }
+}
+
+export interface GatewayOptions {
+  env?: StateEnvironment;
+  /** Gateway-wide provider/model overrides applied beneath per-soul pins. */
+  selection?: RuntimeSelection;
+  approvals?: ApprovalPolicy;
+  maxTurns?: number;
+  /**
+   * The activity watchdog: abort a turn when no event for its session has
+   * arrived for this long. Progress-based, not wall-clock — any delta, tool
+   * event, or response resets it. 0 disables. Default 120s.
+   */
+  idleTimeoutMs?: number;
+  /** Session database path. Default ~/.stratus/sessions.db. */
+  sessionDbPath?: string;
+  log?: (line: string) => void;
+  warn?: (line: string) => void;
+}
+
+export interface DispatchInput {
+  /**
+   * Stable session id chosen by the caller — channels derive it from the
+   * conversation (e.g. a Slack thread), so any later message with the same
+   * id resumes the conversation, across daemon restarts included.
+   */
+  sessionId: string;
+  /** Roster agent id. Defaults to the gateway's default agent. */
+  agentId?: string;
+  userMessage: string;
+  metadata?: JsonObject;
+  signal?: AbortSignal;
+}
+
+export interface Gateway {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  /** The one entrypoint: resolve the agent, load-or-create the session, run a turn. */
+  dispatch(input: DispatchInput): Promise<Session>;
+  /** Live events from every runner, one stream for all consumers. */
+  readonly bus: EventBus;
+  /** The store shared by every runner (durable across restarts). */
+  readonly store: SqliteSessionStore;
+  /** The current roster, default agent included. */
+  agents(): AgentDefinition[];
+}
+
+interface AgentSource {
+  definition: AgentDefinition;
+  /** Soul file backing this agent; undefined for the built-in default. */
+  soulPath?: string;
+}
+
+/**
+ * The always-on Stratus process. One gateway holds the roster, the durable
+ * session store, the shared event bus, and a pool of runners keyed by
+ * resolved provider configuration — each agent runs on its own provider,
+ * model, and credentials, delegation included.
+ */
+export const createGateway = (options: GatewayOptions = {}): Gateway => {
+  const env = options.env ?? {};
+  const log = options.log ?? (() => {});
+  const warn = options.warn ?? (() => {});
+  const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+
+  const bus = new EventBus({
+    onError: (error) => warn(`event handler failed: ${error instanceof Error ? error.message : String(error)}`),
+  });
+  const store = new SqliteSessionStore(
+    options.sessionDbPath ?? path.join(stratusHomePath(env), SESSIONS_DB_FILENAME),
+  );
+  const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
+  const registry = new AgentRegistry();
+  const sources = new Map<string, AgentSource>();
+
+  // ---- roster -------------------------------------------------------------
+
+  const registerSource = (source: AgentSource): void => {
+    registry.register(source.definition);
+    sources.set(source.definition.id, source);
+  };
+
+  const loadRoster = async (): Promise<void> => {
+    const entries: RosterEntry[] = await loadRosterSouls(env, warn);
+    for (const entry of entries) {
+      if (sources.has(entry.soul.agent.id)) {
+        const existing = sources.get(entry.soul.agent.id);
+        warn(`duplicate agent id ${entry.soul.agent.id} (${existing?.soulPath ?? 'built-in'} vs ${entry.path}); keeping the first`);
+        continue;
+      }
+      registerSource({ definition: entry.soul.agent, soulPath: entry.path });
+    }
+    if (!sources.has(DEFAULT_STRATUS_AGENT.id)) {
+      registerSource({ definition: { ...DEFAULT_STRATUS_AGENT } });
+    }
+  };
+
+  /**
+   * A session pins its agent id, never a snapshot of the agent: the soul
+   * file is re-read on every dispatch, so an edited persona (or tool
+   * allowlist) reaches existing conversations on their next turn.
+   */
+  const refreshAgent = async (agentId: string): Promise<AgentSource> => {
+    const source = sources.get(agentId);
+    if (!source) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+    if (source.soulPath) {
+      try {
+        const soul = await loadSoulFile(source.soulPath);
+        if (soul.agent.id === agentId) {
+          const refreshed: AgentSource = { definition: soul.agent, soulPath: source.soulPath };
+          registerSource(refreshed);
+          return refreshed;
+        }
+        warn(`soul ${source.soulPath} now declares id ${soul.agent.id}; keeping the loaded definition for ${agentId}`);
+      } catch (error) {
+        warn(`could not refresh ${source.soulPath}: ${error instanceof Error ? error.message : String(error)}; keeping the loaded definition`);
+      }
+    }
+    return source;
+  };
+
+  // ---- runner pool --------------------------------------------------------
+
+  const tools = new ToolRegistry();
+  tools.register(createDemoTool());
+  tools.register(createRememberTool(memory));
+  // Delegation is dispatcher-backed, not runner-capturing: the target agent
+  // runs through the same per-provider routing as a direct dispatch, so a
+  // delegated specialist uses their own provider and credentials.
+  tools.register(createDelegateTool({
+    registry,
+    dispatch: (input) => dispatchInternal({
+      sessionId: input.sessionId,
+      agentId: input.agent.id,
+      userMessage: input.userMessage,
+      metadata: input.metadata,
+    }),
+  }));
+
+  const runners = new Map<string, AgentRunner>();
+
+  const runnerKeyFor = (config: RuntimeConfig): string =>
+    JSON.stringify([
+      config.provider,
+      'model' in config ? config.model : '',
+      'baseUrl' in config ? config.baseUrl ?? '' : '',
+      config.provider === 'anthropic' && config.authToken && !config.apiKey ? 'subscription' : 'key',
+    ]);
+
+  const runnerFor = (config: RuntimeConfig): AgentRunner => {
+    const key = runnerKeyFor(config);
+    const existing = runners.get(key);
+    if (existing) {
+      return existing;
+    }
+
+    // The Claude Code runtime executes kernel tools by calling back into
+    // the runner built just below — late-bound because the runner needs
+    // the provider first.
+    let hostedRunner: AgentRunner | undefined;
+    const provider = createRuntimeProvider(
+      config,
+      (error) => warn(`default model failed (${error instanceof Error ? error.message : String(error)}); using the fallback model`),
+      async (session, call) => {
+        if (!hostedRunner) {
+          throw new Error('The Stratus runtime is not ready to execute tools yet.');
+        }
+        return hostedRunner.executeHostedToolCall(session, call);
+      },
+      options.maxTurns,
+    );
+
+    const runner = new AgentRunner({
+      provider,
+      tools,
+      executor: createLocalCommandExecutor(),
+      ...(options.approvals ? { approvals: options.approvals } : {}),
+      store,
+      bus,
+      agents: registry,
+      memory,
+      streaming: true,
+      ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
+    });
+    hostedRunner = runner;
+    runners.set(key, runner);
+    return runner;
+  };
+
+  // ---- watchdog -----------------------------------------------------------
+
+  /**
+   * Progress-based abort: the timer resets on every event the session
+   * emits (deltas included — gateway runners always stream), so a healthy
+   * long turn keeps itself alive while a stalled one is cut loose. Tool
+   * executions carry their own executor timeouts underneath this.
+   */
+  const withWatchdog = async <T>(
+    sessionId: string,
+    external: AbortSignal | undefined,
+    run: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> => {
+    if (idleTimeoutMs <= 0 && !external) {
+      return run(new AbortController().signal);
+    }
+
+    const controller = new AbortController();
+    let timedOut = false;
+    const onExternalAbort = (): void => controller.abort();
+    if (external?.aborted) {
+      controller.abort();
+    } else {
+      external?.addEventListener('abort', onExternalAbort, { once: true });
+    }
+
+    let timer: NodeJS.Timeout | undefined;
+    const resetTimer = (): void => {
+      if (idleTimeoutMs <= 0) {
+        return;
+      }
+      if (timer) {
+        clearTimeout(timer);
+      }
+      // Deliberately not unref'd: while a turn is in flight, this timer is
+      // what guarantees the process can always make progress on it.
+      timer = setTimeout(() => {
+        timedOut = true;
+        warn(`watchdog: no activity on session ${sessionId} for ${idleTimeoutMs}ms; aborting the turn`);
+        controller.abort();
+      }, idleTimeoutMs);
+    };
+
+    const unsubscribe = bus.subscribe((event: StratusEvent) => {
+      if ('sessionId' in event && event.sessionId === sessionId) {
+        resetTimer();
+      }
+    });
+    resetTimer();
+
+    try {
+      return await run(controller.signal);
+    } catch (error) {
+      if (timedOut && error instanceof RunAbortedError) {
+        throw new RunAbortedError(`Run aborted: no activity for ${idleTimeoutMs}ms`);
+      }
+      throw error;
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
+      unsubscribe();
+      external?.removeEventListener('abort', onExternalAbort);
+    }
+  };
+
+  // ---- dispatch -----------------------------------------------------------
+
+  // Single-flight per session: a second message to a busy session queues
+  // behind the in-flight turn instead of interleaving with it. Sessions
+  // are independent — different conversations run concurrently.
+  const sessionChains = new Map<string, Promise<unknown>>();
+  const inflight = new Set<Promise<unknown>>();
+  let stopping = false;
+
+  const dispatchInternal = async (input: DispatchInput): Promise<Session> => {
+    const agentId = input.agentId ?? DEFAULT_STRATUS_AGENT.id;
+    const source = await refreshAgent(agentId);
+    const agent = source.definition;
+
+    // Config re-resolves per dispatch, so a changed model, credential, or
+    // soul pin applies without a restart. The pool dedupes runners by the
+    // resolved configuration.
+    const config = await resolveRuntimeConfig(
+      { ...options.selection, ...(source.soulPath ? { soul: source.soulPath } : {}) },
+      env,
+    );
+    const runner = runnerFor(config);
+
+    const metadata: JsonObject = {
+      ...(config.provider === 'demo'
+        ? { provider: 'demo' }
+        : { provider: config.provider, model: config.model }),
+      ...input.metadata,
+    };
+
+    return withWatchdog(input.sessionId, input.signal, async (signal) => {
+      const existing = await store.get(input.sessionId);
+      if (existing) {
+        if (existing.agent.id !== agent.id) {
+          throw new Error(
+            `Session ${input.sessionId} belongs to agent ${existing.agent.id}, not ${agent.id} — sessions never cross agent identities.`,
+          );
+        }
+        // Refresh the stored definition before resuming, so the turn runs
+        // with the current instructions, tools, and credentials.
+        existing.agent = agent;
+        await store.save(existing);
+        return runner.resume({ sessionId: input.sessionId, userMessage: input.userMessage, signal });
+      }
+
+      return runner.run({
+        sessionId: input.sessionId,
+        agent,
+        userMessage: input.userMessage,
+        metadata,
+        signal,
+      });
+    });
+  };
+
+  const dispatch = async (input: DispatchInput): Promise<Session> => {
+    if (stopping) {
+      throw new Error('The gateway is stopping and no longer accepts new work.');
+    }
+
+    const previous = sessionChains.get(input.sessionId) ?? Promise.resolve();
+    const turn = previous.then(
+      () => dispatchInternal(input),
+      () => dispatchInternal(input),
+    );
+
+    const settled = turn.catch(() => {});
+    sessionChains.set(input.sessionId, settled);
+    inflight.add(settled);
+    void settled.finally(() => {
+      inflight.delete(settled);
+      if (sessionChains.get(input.sessionId) === settled) {
+        sessionChains.delete(input.sessionId);
+      }
+    });
+
+    return turn;
+  };
+
+  return {
+    bus,
+    store,
+
+    async start() {
+      await migrateLegacyMemory(env);
+      await loadRoster();
+      const named = registry.list().map((agent) => agent.name).join(', ');
+      log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
+    },
+
+    // Drain: in-flight turns finish, new dispatches are refused, then the
+    // database closes. SIGTERM handling in `stratus serve` calls this.
+    async stop() {
+      stopping = true;
+      await Promise.allSettled([...inflight]);
+      store.close();
+      log('stratusd stopped');
+    },
+
+    dispatch,
+
+    agents() {
+      return registry.list();
+    },
+  };
+};

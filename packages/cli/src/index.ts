@@ -105,6 +105,8 @@ export interface CliEnvironment {
   fetch?: typeof fetch;
   openExternal?: (url: string) => Promise<void> | void;
   dashboardAutoShutdownMs?: number;
+  /** Shuts down `stratus serve` the way SIGTERM would (tests). */
+  shutdownSignal?: AbortSignal;
 }
 
 export interface CliRunOptions {
@@ -168,6 +170,14 @@ export interface ParsedAgentsCommand {
   format: 'text' | 'json';
 }
 
+export interface ParsedServeCommand {
+  command: 'serve';
+  configPath?: string;
+  /** Watchdog idle timeout in milliseconds. 0 disables. */
+  idleTimeoutMs?: number;
+  events: boolean;
+}
+
 export interface ParsedHelpCommand {
   command: 'help';
 }
@@ -179,6 +189,7 @@ export type ParsedCommand =
   | ParsedSetupCommand
   | ParsedAgentNewCommand
   | ParsedAgentsCommand
+  | ParsedServeCommand
   | ParsedHelpCommand;
 
 type CliConfigFile = StratusConfigFile;
@@ -218,6 +229,10 @@ Commands:
   chat             Talk with your agent — the conversation persists across turns
                    and remembered facts accumulate; /exit or Ctrl+C to leave
   run              Execute one local Stratus Agent session
+  serve            Run stratusd, the always-on gateway: durable sessions, the
+                   whole roster live at once (each agent on its own provider),
+                   delegation, and a watchdog — Ctrl+C / SIGTERM drains cleanly
+                   (--idle-timeout <seconds>, --no-events, --config <path>)
   agent new        Create an agent identity (generates a human-ish name + avatar theme)
   agents           List your agents: who they are, where their souls live, what
                    they run on, what they remember (also: stratus agent list)
@@ -333,6 +348,39 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     }
 
     return { command: 'dashboard', ...(port !== undefined ? { port } : {}), host, openBrowser };
+  }
+
+  if (command === 'serve') {
+    const parsed: ParsedServeCommand = { command: 'serve', events: true };
+    for (let index = 0; index < rest.length; index += 1) {
+      const token = rest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--config') {
+        parsed.configPath = readOptionValue(rest, index, '--config');
+        index += 1;
+        continue;
+      }
+      if (token === '--idle-timeout') {
+        const seconds = Number(readOptionValue(rest, index, '--idle-timeout'));
+        if (!Number.isFinite(seconds) || seconds < 0) {
+          throw new Error(`Invalid value for --idle-timeout: ${rest[index + 1] ?? '(missing)'}`);
+        }
+        parsed.idleTimeoutMs = Math.round(seconds * 1000);
+        index += 1;
+        continue;
+      }
+      if (token === '--no-events') {
+        parsed.events = false;
+        continue;
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+    return parsed;
   }
 
   if (command === 'chat') {
@@ -3045,6 +3093,69 @@ export const runDashboard = async (
   return 0;
 };
 
+/**
+ * `stratus serve` — run the gateway (stratusd) in the foreground: load the
+ * roster, accept dispatches, print events, and drain cleanly on SIGTERM,
+ * SIGINT, or the injected shutdown signal.
+ */
+export const runServe = async (
+  command: ParsedServeCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  // Loaded lazily: the gateway pulls in node:sqlite, which every other CLI
+  // command neither needs nor should pay for (Node still prints an
+  // experimental warning for it).
+  const { createGateway } = await import('@stratusagent/gateway');
+  const gateway = createGateway({
+    env,
+    ...(command.configPath ? { selection: { configPath: command.configPath } } : {}),
+    ...(command.idleTimeoutMs !== undefined ? { idleTimeoutMs: command.idleTimeoutMs } : {}),
+    log: (line) => writeLine(streams.stdout, line),
+    warn: (line) => writeLine(streams.stderr, `Warning: ${line}`),
+  });
+
+  if (command.events) {
+    gateway.bus.subscribe((event) => {
+      const line = formatEvent(event);
+      if (line) {
+        writeLine(streams.stdout, line);
+      }
+    });
+  }
+
+  await gateway.start();
+  writeLine(streams.stdout, 'Press Ctrl+C to stop.');
+
+  // Hold the event loop open until a shutdown request, then drain: new
+  // dispatches are refused while in-flight turns finish.
+  await new Promise<void>((resolve) => {
+    const keepAlive = setInterval(() => {}, 2_147_000_000);
+    let settled = false;
+    const shutdown = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearInterval(keepAlive);
+      process.off('SIGTERM', shutdown);
+      process.off('SIGINT', shutdown);
+      resolve();
+    };
+    process.once('SIGTERM', shutdown);
+    process.once('SIGINT', shutdown);
+    if (env.shutdownSignal?.aborted) {
+      shutdown();
+    } else {
+      env.shutdownSignal?.addEventListener('abort', shutdown, { once: true });
+    }
+  });
+
+  writeLine(streams.stdout, 'Stopping — draining in-flight turns.');
+  await gateway.stop();
+  return 0;
+};
+
 export const runCli = async ({ argv, streams = process, env = {} }: CliRunOptions): Promise<number> => {
   try {
     const resolvedEnv = argv.includes('--stdin') && env.stdin === undefined
@@ -3079,6 +3190,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'dashboard') {
       return runDashboard(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'serve') {
+      return runServe(command, streams, resolvedEnv);
     }
 
     const runtime = await resolveRuntimeConfig(command, resolvedEnv);
