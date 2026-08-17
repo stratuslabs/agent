@@ -17,6 +17,20 @@ Slack adapter for Stratus agents. **One Slack app per agent** — Slack has no w
 }
 ```
 
+## Installing
+
+This package is an **optional peer** of the CLI — `stratus` ships without any
+transport, so installs that never use Slack do not carry the Slack SDKs
+(~9 MB). Add it alongside the CLI to enable the channel:
+
+```sh
+npm install -g @stratusagent/channel-slack
+```
+
+`stratus serve` picks it up automatically for every roster agent with stored
+Slack tokens. Without it, tokens are reported at startup with an install
+hint and the daemon serves every other channel as usual.
+
 ## Setting up an agent's Slack app (~2 minutes)
 
 1. https://api.slack.com/apps → **Create New App → From a manifest** → paste `manifest/stratus-agent.manifest.json` with `NAME` replaced by the agent's name.

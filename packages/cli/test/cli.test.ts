@@ -2857,3 +2857,29 @@ test('parseCommand parses serve options', () => {
   });
   assert.throws(() => parseCommand(['serve', '--idle-timeout', '-2']), /Invalid value for --idle-timeout/);
 });
+
+test('optional channel packages are never hard dependencies of the CLI', async () => {
+  // Installing the CLI must not drag in a transport nobody asked for: the
+  // Slack SDKs alone are ~9 MB. Channel packages are optional peers —
+  // present as devDependencies so the workspace builds and tests, absent
+  // from what consumers install.
+  const { readFile } = await import('node:fs/promises');
+  const here = path.dirname(new URL(import.meta.url).pathname);
+  const manifest = JSON.parse(await readFile(path.join(here, '..', 'package.json'), 'utf8')) as {
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+    peerDependencies?: Record<string, string>;
+    peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+  };
+
+  const optionalChannels = Object.keys({ ...manifest.dependencies, ...manifest.peerDependencies })
+    .filter((name) => name.startsWith('@stratusagent/channel-'));
+  assert.ok(optionalChannels.length > 0, 'expected at least one channel package to be declared');
+
+  for (const name of optionalChannels) {
+    assert.ok(!manifest.dependencies?.[name], `${name} must not be a hard dependency of the CLI`);
+    assert.ok(manifest.peerDependencies?.[name], `${name} must be declared as a peer dependency`);
+    assert.equal(manifest.peerDependenciesMeta?.[name]?.optional, true, `${name} must be an OPTIONAL peer`);
+    assert.ok(manifest.devDependencies?.[name], `${name} must stay a devDependency so the workspace builds`);
+  }
+});

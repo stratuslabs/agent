@@ -3094,6 +3094,29 @@ export const runDashboard = async (
   return 0;
 };
 
+type SlackAdapterFactory = typeof import('@stratusagent/channel-slack').createSlackChannelAdapter;
+
+/**
+ * Loads the optional Slack channel package, or undefined when it is not
+ * installed. Only that package being absent is tolerated: an adapter that
+ * fails to load for any other reason (a broken install, a bad transitive
+ * dependency) surfaces rather than silently disabling Slack for a daemon
+ * whose stored tokens say it should be running.
+ */
+const loadSlackAdapter = async (): Promise<SlackAdapterFactory | undefined> => {
+  try {
+    return (await import('@stratusagent/channel-slack')).createSlackChannelAdapter;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    const missingPackage = (code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND')
+      && String((error as Error).message).includes('@stratusagent/channel-slack');
+    if (missingPackage) {
+      return undefined;
+    }
+    throw error;
+  }
+};
+
 /**
  * `stratus serve` — run the gateway (stratusd) in the foreground: load the
  * roster, accept dispatches, print events, and drain cleanly on SIGTERM,
@@ -3119,16 +3142,28 @@ export const runServe = async (
   const slackAgents = Object.entries(channelCredentials.slack ?? {});
   const channels = [];
   if (slackAgents.length > 0) {
-    const { createSlackChannelAdapter } = await import('@stratusagent/channel-slack');
-    channels.push(createSlackChannelAdapter({
-      agents: slackAgents.map(([agentId, tokens]) => ({
-        agentId,
-        appToken: tokens.appToken,
-        botToken: tokens.botToken,
-      })),
-      log,
-      warn,
-    }));
+    // Channel packages are optional peers: the CLI never bundles a
+    // transport nobody asked for (the Slack SDKs alone are ~9 MB). A
+    // missing one degrades like a broken app does — the daemon serves
+    // every other channel — with an actionable line instead of a
+    // module-not-found stack.
+    const adapter = await loadSlackAdapter();
+    if (adapter) {
+      channels.push(adapter({
+        agents: slackAgents.map(([agentId, tokens]) => ({
+          agentId,
+          appToken: tokens.appToken,
+          botToken: tokens.botToken,
+        })),
+        log,
+        warn,
+      }));
+    } else {
+      warn(
+        `Slack tokens are stored for ${slackAgents.length} agent(s), but @stratusagent/channel-slack is not installed. `
+        + 'Run `npm install -g @stratusagent/channel-slack` to bring them online; starting without the Slack channel.',
+      );
+    }
   }
 
   const gateway = createGateway({
