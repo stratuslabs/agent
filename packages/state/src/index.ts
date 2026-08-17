@@ -185,6 +185,7 @@ const GLOBAL_CONFIG_FILENAME = 'config.json';
 const CREDENTIALS_FILENAME = 'credentials.json';
 const AGENTS_DIRNAME = 'agents';
 const MEMORY_FILENAME = 'memory.jsonl';
+const LOGS_DIRNAME = 'logs';
 export const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 export const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 export const DEFAULT_OPENAI_MODEL = 'gpt-4.1-mini';
@@ -197,6 +198,9 @@ export const stratusHomePath = (env: StateEnvironment): string =>
   path.join(readHomeDirectory(env), STRATUS_HOME_DIRNAME);
 export const globalConfigPath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), GLOBAL_CONFIG_FILENAME);
+/** Where `stratus serve` keeps its structured log, and `stratus logs` reads it. */
+export const logsDirPath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), LOGS_DIRNAME);
 export const credentialsPath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), CREDENTIALS_FILENAME);
 export const agentsDirPath = (env: StateEnvironment): string =>

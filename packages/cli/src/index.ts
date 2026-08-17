@@ -69,6 +69,7 @@ import {
   parseProviderName,
   readNonEmptyString,
   readProcessEnv,
+  logsDirPath,
   readWorkingDirectory,
   resolveEnvApiKey,
   DEFAULT_CONFIG_FILENAME,
@@ -89,6 +90,24 @@ import {
   type StratusConfigFile,
   type StratusProviderName,
 } from '@stratusagent/state';
+
+import {
+  createLogWriter,
+  formatLogRecord,
+  readRecentRecords,
+  tailLog,
+  type LogRecord,
+  type LogWriter,
+} from './logs.ts';
+
+export {
+  createLogWriter,
+  formatLogRecord,
+  parseLogLines,
+  readRecentRecords,
+  tailLog,
+  type LogRecord,
+} from './logs.ts';
 
 // The shared state package owns config resolution, credentials, memory, and
 // provider wiring now (the gateway uses the same code); the CLI re-exports
@@ -184,12 +203,25 @@ export interface ParsedDoctorCommand {
   configPath?: string;
 }
 
+export interface ParsedLogsCommand {
+  command: 'logs';
+  /** Keep streaming new records instead of exiting after the backlog. */
+  follow: boolean;
+  /** How many recent records to show before following. */
+  limit: number;
+  agentId?: string;
+  sessionId?: string;
+  format: 'text' | 'json';
+}
+
 export interface ParsedServeCommand {
   command: 'serve';
   configPath?: string;
   /** Watchdog idle timeout in milliseconds. 0 disables. */
   idleTimeoutMs?: number;
   events: boolean;
+  /** Write the structured log to ~/.stratus/logs. Defaults to true. */
+  logToFile?: boolean;
 }
 
 export interface ParsedHelpCommand {
@@ -204,6 +236,7 @@ export type ParsedCommand =
   | ParsedAgentNewCommand
   | ParsedAgentsCommand
   | ParsedDoctorCommand
+  | ParsedLogsCommand
   | ParsedServeCommand
   | ParsedHelpCommand;
 
@@ -234,6 +267,8 @@ Usage:
   stratus run --config ./stratus.config.json --provider openai "Say hello"
   stratus agents
   stratus doctor
+  stratus logs -f
+  stratus logs --agent ava -n 200
   stratus dashboard
   stratus dashboard --port 4123 --host 0.0.0.0 --no-open
 
@@ -249,7 +284,12 @@ Commands:
   serve            Run stratusd, the always-on gateway: durable sessions, the
                    whole roster live at once (each agent on its own provider),
                    delegation, and a watchdog — Ctrl+C / SIGTERM drains cleanly
-                   (--idle-timeout <seconds>, --no-events, --config <path>)
+                   (--idle-timeout <seconds>, --no-events, --no-log-file,
+                   --config <path>); everything it says is also written to
+                   ~/.stratus/logs, which "stratus logs" reads
+  logs             Read the daemon's log from any terminal: -f to follow,
+                   -n <count> for backlog, --agent / --session to filter,
+                   --format json for the raw records
   agent new        Create an agent identity (generates a human-ish name + avatar theme)
   agents           List your agents: who they are, where their souls live, what
                    they run on, what they remember (also: stratus agent list)
@@ -398,6 +438,10 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         parsed.events = false;
         continue;
       }
+      if (token === '--no-log-file') {
+        parsed.logToFile = false;
+        continue;
+      }
       throw new Error(`Unknown option: ${token}`);
     }
     return parsed;
@@ -518,6 +562,64 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       throw new Error(`Unknown option: ${token}`);
     }
     return { command: 'doctor', format, ...(configPath ? { configPath } : {}) };
+  }
+
+  if (command === 'logs') {
+    let follow = false;
+    let limit = 50;
+    let agentId: string | undefined;
+    let sessionId: string | undefined;
+    let format: 'text' | 'json' = 'text';
+    for (let index = 0; index < rest.length; index += 1) {
+      const token = rest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--follow' || token === '-f') {
+        follow = true;
+        continue;
+      }
+      if (token === '--lines' || token === '-n') {
+        const value = Number(readOptionValue(rest, index, token));
+        if (!Number.isFinite(value) || value < 0) {
+          throw new Error(`Invalid value for ${token}: ${rest[index + 1] ?? '(missing)'}`);
+        }
+        limit = Math.floor(value);
+        index += 1;
+        continue;
+      }
+      if (token === '--agent') {
+        agentId = readOptionValue(rest, index, '--agent');
+        index += 1;
+        continue;
+      }
+      if (token === '--session') {
+        sessionId = readOptionValue(rest, index, '--session');
+        index += 1;
+        continue;
+      }
+      if (token === '--format') {
+        const value = readOptionValue(rest, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported format: ${value}`);
+        }
+        format = value;
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+    return {
+      command: 'logs',
+      follow,
+      limit,
+      format,
+      ...(agentId ? { agentId } : {}),
+      ...(sessionId ? { sessionId } : {}),
+    };
   }
 
   if (command === 'agent') {
@@ -755,6 +857,29 @@ export const formatEvent = (event: StratusEvent): string | null => {
       return `• session.failed ${event.error}`;
     default:
       return null;
+  }
+};
+
+/**
+ * The fields worth keeping per event type. Tool inputs and message text
+ * are deliberately excluded: the log is a trace of what happened, not a
+ * second copy of the transcript.
+ */
+const eventDetail = (event: StratusEvent): Record<string, unknown> | undefined => {
+  switch (event.type) {
+    case 'session.updated':
+      return { status: event.status };
+    case 'provider.response':
+      return { parts: event.parts.length };
+    case 'tool.called':
+    case 'tool.denied':
+      return { tool: event.call.toolName };
+    case 'tool.completed':
+      return { tool: event.result.toolName, ok: event.result.ok };
+    case 'session.failed':
+      return { error: event.error };
+    default:
+      return undefined;
   }
 };
 
@@ -3730,6 +3855,54 @@ export const runDoctor = async (
   return 1;
 };
 
+/**
+ * `stratus logs` — the daemon's structured log, filtered. `serve` streams
+ * to its own stdout, which is gone the moment it runs under a service
+ * manager; this reads the file it also writes, from any terminal.
+ */
+export const runLogs = async (
+  command: ParsedLogsCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const dir = logsDirPath(env);
+  const filter = {
+    ...(command.agentId ? { agentId: command.agentId } : {}),
+    ...(command.sessionId ? { sessionId: command.sessionId } : {}),
+  };
+  const emit = (record: LogRecord): void => {
+    writeLine(streams.stdout, command.format === 'json' ? JSON.stringify(record) : formatLogRecord(record));
+  };
+
+  const recent = await readRecentRecords(dir, command.limit, filter);
+  for (const record of recent) {
+    emit(record);
+  }
+
+  if (!command.follow) {
+    if (recent.length === 0 && command.format === 'text') {
+      writeLine(streams.stdout, `No log records yet in ${dir}. Start the daemon with \`stratus serve\`.`);
+    }
+    return 0;
+  }
+
+  const controller = new AbortController();
+  const stop = (): void => controller.abort();
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+  env.shutdownSignal?.addEventListener('abort', stop, { once: true });
+  if (env.shutdownSignal?.aborted) {
+    stop();
+  }
+  try {
+    await tailLog({ dir, filter, signal: controller.signal, onRecord: emit });
+  } finally {
+    process.off('SIGINT', stop);
+    process.off('SIGTERM', stop);
+  }
+  return 0;
+};
+
 export const runAgentNew = async (
   command: ParsedAgentNewCommand,
   streams: CliStreams,
@@ -3963,8 +4136,26 @@ export const runServe = async (
   // command neither needs nor should pay for (Node still prints an
   // experimental warning for it).
   const { createGateway } = await import('@stratusagent/gateway');
-  const log = (line: string): void => writeLine(streams.stdout, line);
-  const warn = (line: string): void => writeLine(streams.stderr, `Warning: ${line}`);
+  // Under a service manager the daemon's stdout is gone, so everything it
+  // says is also written to ~/.stratus/logs — that file is what `stratus
+  // logs` reads, and the only record of an overnight run.
+  const logWriter: LogWriter | undefined = command.logToFile === false
+    ? undefined
+    : createLogWriter({
+        dir: logsDirPath(env),
+        onError: (error) => writeLine(
+          streams.stderr,
+          `Warning: could not write the log file (${error instanceof Error ? error.message : String(error)}); continuing.`,
+        ),
+      });
+  const log = (line: string): void => {
+    writeLine(streams.stdout, line);
+    void logWriter?.write({ ts: new Date().toISOString(), level: 'info', msg: line });
+  };
+  const warn = (line: string): void => {
+    writeLine(streams.stderr, `Warning: ${line}`);
+    void logWriter?.write({ ts: new Date().toISOString(), level: 'warn', msg: line });
+  };
 
   // Agents with stored Slack tokens go live in Slack automatically — the
   // tokens are gateway infrastructure secrets in the channels namespace of
@@ -4012,6 +4203,39 @@ export const runServe = async (
       const line = formatEvent(event);
       if (line) {
         writeLine(streams.stdout, line);
+      }
+    });
+  }
+
+  if (logWriter) {
+    // Only session.created carries the agent id, so it seeds a map the
+    // later events in that session read from. A session resumed after a
+    // restart never re-creates, so an unmapped id falls back to the
+    // durable store — which is exactly the case where attribution matters.
+    const agentBySession = new Map<string, string>();
+    gateway.bus.subscribe(async (event) => {
+      if (event.type === 'session.created') {
+        agentBySession.set(event.sessionId, event.agentId);
+      }
+      let agentId = agentBySession.get(event.sessionId);
+      if (!agentId) {
+        const session = await gateway.store.get(event.sessionId).catch(() => undefined);
+        agentId = session?.agent.id;
+        if (agentId) {
+          agentBySession.set(event.sessionId, agentId);
+        }
+      }
+      const detail = eventDetail(event);
+      await logWriter.write({
+        ts: new Date().toISOString(),
+        level: 'event',
+        event: event.type,
+        sessionId: event.sessionId,
+        ...(agentId ? { agentId } : {}),
+        ...(detail ? { detail } : {}),
+      });
+      if (event.type === 'session.completed' || event.type === 'session.failed') {
+        agentBySession.delete(event.sessionId);
       }
     });
   }
@@ -4074,6 +4298,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'doctor') {
       return runDoctor(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'logs') {
+      return runLogs(command, streams, resolvedEnv);
     }
 
     if (command.command === 'chat') {

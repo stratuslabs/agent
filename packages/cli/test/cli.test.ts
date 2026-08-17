@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { Readable } from 'node:stream';
@@ -10,12 +10,15 @@ import { fileURLToPath } from 'node:url';
 
 import {
   createFileMemoryStore,
+  createLogWriter,
   HELP_TEXT,
   parseCommand,
   resolveRuntimeConfig,
   runCli,
+  readRecentRecords,
   slackAppManifest,
   startDashboardServer,
+  tailLog,
 } from '../src/index.ts';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
@@ -3577,4 +3580,136 @@ test('doctor reports the fallback and flags one with no sign-in', async () => {
   // Where a failing run goes next is part of "why is my usage where it is".
   assert.match(output.stdout, /fallback {2}openai · gpt-4\.1-mini/);
   assert.match(output.stdout, /The fallback targets openai but there is no sign-in for it/);
+});
+
+test('the log writer appends owner-only JSONL and rotates by size', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  const writer = createLogWriter({ dir, maxBytes: 200, keep: 2 });
+
+  for (let index = 0; index < 12; index += 1) {
+    await writer.write({ ts: new Date(index * 1000).toISOString(), level: 'info', msg: `line ${index}` });
+  }
+
+  // Sessions carry prompts and tool output, so the trace is as sensitive
+  // as the transcript it describes.
+  const info = await stat(writer.path);
+  assert.equal(info.mode & 0o777, 0o600);
+  const names = (await readdir(dir)).sort();
+  assert.ok(names.includes('stratusd.jsonl'), 'the live file stays at a stable name');
+  assert.ok(names.some((name) => name.startsWith('stratusd.jsonl.')), 'rotation happened');
+  assert.ok(names.length <= 3, `keep=2 plus the live file, got ${names.join(', ')}`);
+});
+
+test('recent records reach back through a rotated generation', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  const writer = createLogWriter({ dir, maxBytes: 220, keep: 3 });
+  for (let index = 0; index < 10; index += 1) {
+    await writer.write({ ts: new Date(index * 1000).toISOString(), level: 'info', msg: `line ${index}` });
+  }
+
+  // A rotation must not make the daemon look like it just started.
+  const records = await readRecentRecords(dir, 10);
+  assert.equal(records.length, 10);
+  assert.deepEqual(records.map((record) => record.msg), Array.from({ length: 10 }, (_, i) => `line ${i}`));
+});
+
+test('logs filters by agent and can emit the raw records', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const dir = path.join(home, '.stratus', 'logs');
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'stratusd.jsonl'), [
+    JSON.stringify({ ts: '2026-08-17T14:32:07.000Z', level: 'event', event: 'tool.called', agentId: 'ava', sessionId: 'sess-1', detail: { tool: 'memory.remember' } }),
+    JSON.stringify({ ts: '2026-08-17T14:32:08.000Z', level: 'event', event: 'tool.called', agentId: 'nova', sessionId: 'sess-2', detail: { tool: 'demo.echo' } }),
+    '',
+  ].join('\n'));
+
+  const text = createStreams();
+  assert.equal(await runCli({
+    argv: ['logs', '--agent', 'ava'],
+    streams: text.streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  }), 0);
+  assert.match(text.output.stdout, /14:32:07 {2}ava {9}tool\.called tool=memory\.remember \[sess-1\]/);
+  assert.doesNotMatch(text.output.stdout, /nova/);
+
+  const json = createStreams();
+  await runCli({
+    argv: ['logs', '--session', 'sess-2', '--format', 'json'],
+    streams: json.streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+  const parsed = JSON.parse(json.output.stdout.trim());
+  assert.equal(parsed.agentId, 'nova');
+  assert.equal(parsed.detail.tool, 'demo.echo');
+});
+
+test('following the log picks up new lines and survives a rotation', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  const writer = createLogWriter({ dir, maxBytes: 160, keep: 2 });
+  await writer.write({ ts: new Date(0).toISOString(), level: 'info', msg: 'before the tail' });
+
+  const seen: string[] = [];
+  const controller = new AbortController();
+  const tail = tailLog({
+    dir,
+    intervalMs: 10,
+    signal: controller.signal,
+    onRecord: (record) => {
+      seen.push(String(record.msg));
+      // Enough to have crossed the rotation threshold above.
+      if (seen.length >= 6) {
+        controller.abort();
+      }
+    },
+  });
+
+  for (let index = 0; index < 6; index += 1) {
+    await writer.write({ ts: new Date(index * 1000).toISOString(), level: 'info', msg: `after ${index}` });
+    await new Promise((resolve) => setTimeout(resolve, 15));
+  }
+  await tail;
+
+  // The backlog is not replayed, and rotation mid-tail loses nothing.
+  assert.ok(!seen.includes('before the tail'), 'following starts at the current end');
+  assert.deepEqual(seen, Array.from({ length: 6 }, (_, i) => `after ${i}`));
+});
+
+test('serve writes what it says to the log file, and --no-log-file opts out', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-'));
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+  await runCli({
+    argv: ['serve', '--no-events'],
+    streams: createStreams().streams,
+    env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  const records = await readRecentRecords(path.join(serveHome, '.stratus', 'logs'), 50);
+  assert.ok(
+    records.some((record) => /stratusd ready/.test(String(record.msg))),
+    'the daemon line survives its terminal',
+  );
+
+  const quietHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-'));
+  const quiet = new AbortController();
+  setTimeout(() => quiet.abort(), 150);
+  await runCli({
+    argv: ['serve', '--no-events', '--no-log-file'],
+    streams: createStreams().streams,
+    env: { homeDir: quietHome, cwd: quietHome, processEnv: {}, shutdownSignal: quiet.signal },
+  });
+  assert.deepEqual(await readRecentRecords(path.join(quietHome, '.stratus', 'logs'), 50), []);
+});
+
+test('parseCommand parses logs options', () => {
+  assert.deepEqual(parseCommand(['logs']), { command: 'logs', follow: false, limit: 50, format: 'text' });
+  assert.deepEqual(parseCommand(['logs', '-f', '-n', '10', '--agent', 'ava', '--session', 's1', '--format', 'json']), {
+    command: 'logs',
+    follow: true,
+    limit: 10,
+    format: 'json',
+    agentId: 'ava',
+    sessionId: 's1',
+  });
+  assert.deepEqual(parseCommand(['serve', '--no-log-file']), { command: 'serve', events: true, logToFile: false });
 });
