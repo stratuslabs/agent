@@ -81,6 +81,13 @@ export type RuntimeConfig =
       soul?: ParsedSoul;
       /** Absolute path the soul was loaded from, for callers that re-read it. */
       soulPath?: string;
+      /**
+       * The environment variable the API key came from, when it came from
+       * the environment rather than the credential store. Callers report
+       * it verbatim — guessing the name gets it wrong whenever a custom
+       * variable or the legacy prefix supplied the key.
+       */
+      apiKeyEnvVar?: string;
       fallback?: FallbackRuntime;
     }
   | {
@@ -95,6 +102,8 @@ export type RuntimeConfig =
       soul?: ParsedSoul;
       /** Absolute path the soul was loaded from, for callers that re-read it. */
       soulPath?: string;
+      /** See the openai variant — the variable that supplied the key. */
+      apiKeyEnvVar?: string;
       fallback?: FallbackRuntime;
     };
 
@@ -773,6 +782,50 @@ export const loadRosterSouls = async (
   return entries;
 };
 
+/**
+ * The environment variable that supplies this provider's API key, before
+ * the two generic ones are considered. A config file's `apiKeyEnv` was
+ * written for the provider named in that file, so it only counts when the
+ * file still describes the provider being resolved.
+ *
+ * Exported because diagnostics have to name the variable that actually
+ * won: re-deriving this rule elsewhere drifts, and a warning that blames
+ * the wrong variable leaves the real override — and its billing — in place.
+ */
+export const apiKeyEnvNameFor = (
+  provider: CredentialProviderName,
+  fileConfig: StratusConfigFile,
+  fileConfigApplies: boolean,
+  env: StateEnvironment = {},
+): string => {
+  const processEnv = readProcessEnv(env);
+  return String(
+    readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
+      ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV)
+      ?? (fileConfigApplies ? fileConfig.apiKeyEnv : undefined)
+      ?? (provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'),
+  );
+};
+
+/**
+ * The environment key a run would use, and the variable it came from.
+ * Order matches the resolver: the generic variables outrank the
+ * provider-specific one.
+ */
+export const resolveEnvApiKey = (
+  apiKeyEnvName: string,
+  env: StateEnvironment = {},
+): { name: string; value: string } | undefined => {
+  const processEnv = readProcessEnv(env);
+  for (const name of ['STRATUS_API_KEY', 'STRATUSCLAW_API_KEY', apiKeyEnvName]) {
+    const value = readNonEmptyString(processEnv[name]);
+    if (typeof value === 'string') {
+      return { name, value };
+    }
+  }
+  return undefined;
+};
+
 export const resolveRuntimeConfig = async (
   selection: RuntimeSelection,
   env: StateEnvironment = {},
@@ -821,10 +874,7 @@ export const resolveRuntimeConfig = async (
     ?? (fileConfigApplies ? fileConfig.model : undefined)
     ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_MODEL : DEFAULT_OPENAI_MODEL);
 
-  const apiKeyEnvName = readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV)
-    ?? (fileConfigApplies ? fileConfig.apiKeyEnv : undefined)
-    ?? (provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY');
+  const apiKeyEnvName = apiKeyEnvNameFor(provider as CredentialProviderName, fileConfig, fileConfigApplies, env);
 
   const credentials = await loadCredentials(env);
 
@@ -843,9 +893,8 @@ export const resolveRuntimeConfig = async (
     && fileConfig.baseUrl.replace(/\/+$/, '') !== defaultEndpointFor(String(provider));
 
   // Env vars outrank the stored sign-in from `stratus setup`.
-  const envApiKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY)
-    ?? readNonEmptyString(processEnv[String(apiKeyEnvName)]);
+  const envApiKeyEntry = resolveEnvApiKey(apiKeyEnvName, env);
+  const envApiKey = envApiKeyEntry?.value;
   const candidateCredential = credentials[provider as CredentialProviderName];
   // A bound credential ignores config URLs entirely, so an untrusted
   // project URL cannot redirect it — only unbound stored keys are blocked.
@@ -902,12 +951,14 @@ export const resolveRuntimeConfig = async (
         ...(baseUrl ? { baseUrl: String(baseUrl) } : {}),
         ...(apiKey ? { apiKey: String(apiKey) } : {}),
         ...(authToken ? { authToken } : {}),
+        ...(envApiKeyEntry ? { apiKeyEnvVar: envApiKeyEntry.name } : {}),
       }
     : {
         provider: 'openai',
         model: String(model),
         baseUrl: String(baseUrl),
         apiKey: String(apiKey),
+        ...(envApiKeyEntry ? { apiKeyEnvVar: envApiKeyEntry.name } : {}),
       };
 
   const systemPrompt = readNonEmptyString(processEnv.STRATUS_SYSTEM_PROMPT)

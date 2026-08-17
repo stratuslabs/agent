@@ -393,6 +393,7 @@ test('resolveRuntimeConfig loads openai settings from renamed env vars', async (
   assert.deepEqual(runtime, {
     provider: 'openai',
     apiKey: 'env-key',
+    apiKeyEnvVar: 'OPENAI_API_KEY',
     model: 'gpt-4.1-mini',
     baseUrl: 'https://example.test/v1',
   });
@@ -418,6 +419,7 @@ test('resolveRuntimeConfig still supports legacy env vars', async () => {
   assert.deepEqual(runtime, {
     provider: 'openai',
     apiKey: 'legacy-key',
+    apiKeyEnvVar: 'CUSTOM_OPENAI_KEY',
     model: 'gpt-4.1-mini',
     baseUrl: 'https://example.test/v1',
   });
@@ -449,6 +451,7 @@ test('resolveRuntimeConfig loads openai settings from config file', async () => 
   assert.deepEqual(runtime, {
     provider: 'openai',
     apiKey: 'config-key',
+    apiKeyEnvVar: 'CUSTOM_OPENAI_KEY',
     model: 'gpt-4.1-mini',
     baseUrl: 'https://example.test/v1',
   });
@@ -480,6 +483,7 @@ test('resolveRuntimeConfig falls back to legacy config filename', async () => {
   assert.deepEqual(runtime, {
     provider: 'openai',
     apiKey: 'config-key',
+    apiKeyEnvVar: 'CUSTOM_OPENAI_KEY',
     model: 'gpt-4.1-mini',
     baseUrl: 'https://api.openai.com/v1',
   });
@@ -740,6 +744,7 @@ test('resolveRuntimeConfig defaults anthropic to claude-opus-5 and its own key e
   assert.deepEqual(runtime, {
     provider: 'anthropic',
     apiKey: 'env-key',
+    apiKeyEnvVar: 'ANTHROPIC_API_KEY',
     model: 'claude-opus-5',
   });
 
@@ -946,6 +951,7 @@ test("resolveRuntimeConfig ignores another provider's config file settings", asy
   assert.deepEqual(runtime, {
     provider: 'anthropic',
     apiKey: 'anthropic-key',
+    apiKeyEnvVar: 'ANTHROPIC_API_KEY',
     model: 'claude-opus-5',
   });
 });
@@ -1284,6 +1290,7 @@ test('resolveRuntimeConfig treats provider-less config settings as openai-specif
   assert.deepEqual(anthropicRuntime, {
     provider: 'anthropic',
     apiKey: 'anthropic-key',
+    apiKeyEnvVar: 'ANTHROPIC_API_KEY',
     model: 'claude-opus-5',
   });
 
@@ -1303,6 +1310,7 @@ test('resolveRuntimeConfig treats provider-less config settings as openai-specif
   assert.deepEqual(openaiRuntime, {
     provider: 'openai',
     apiKey: 'openai-key',
+    apiKeyEnvVar: 'CUSTOM_OPENAI_KEY',
     model: 'gpt-4.1-mini',
     baseUrl: 'https://example.test/v1',
   });
@@ -1649,7 +1657,13 @@ test('run uses the stored sign-in from the global config and credentials', async
     homeDir: home,
     processEnv: { ANTHROPIC_API_KEY: 'env-key' },
   });
-  assert.deepEqual(envWins, { provider: 'anthropic', apiKey: 'env-key', model: 'claude-opus-5' });
+  assert.deepEqual(envWins, {
+    provider: 'anthropic',
+    apiKey: 'env-key',
+    // The resolver records which variable won, so diagnostics never guess.
+    apiKeyEnvVar: 'ANTHROPIC_API_KEY',
+    model: 'claude-opus-5',
+  });
 });
 
 test('setup Models menu picks default and fallback from live available models', async () => {
@@ -3254,8 +3268,8 @@ test('doctor flags an environment key that demotes a subscription sign-in', asyn
   });
 
   assert.equal(exitCode, 1);
+  assert.match(output.stdout, /ANTHROPIC_API_KEY in your environment outranks/);
   assert.match(output.stdout, /billed per token instead of through your plan/);
-  assert.match(output.stdout, /Unset ANTHROPIC_API_KEY/);
 });
 
 test('doctor names the project config that outranks the global one', async () => {
@@ -3324,4 +3338,110 @@ test('a run warns when an environment key overrides the subscription sign-in', a
   });
 
   assert.match(output.stderr, /ANTHROPIC_API_KEY in your environment outranks the Claude subscription sign-in/);
+});
+
+test('doctor names the custom variable that actually supplied the key', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // apiKeyEnv points at a custom variable, and the config names anthropic
+  // so the resolver honors it. Blaming ANTHROPIC_API_KEY here would send
+  // the reader to unset something that was never the cause.
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'anthropic', apiKeyEnv: 'WORK_CLAUDE_KEY' }),
+  );
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-x' } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: { WORK_CLAUDE_KEY: 'sk-ant-custom' },
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.match(output.stdout, /WORK_CLAUDE_KEY in your environment outranks/);
+  assert.doesNotMatch(output.stdout, /Unset ANTHROPIC_API_KEY/);
+});
+
+test('doctor ignores an apiKeyEnv belonging to a different provider', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The config describes openai, so its apiKeyEnv is an openai variable.
+  // STRATUS_PROVIDER selects anthropic, which strands it — the run uses
+  // the stored subscription, so reporting per-token billing would be a lie.
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'openai', apiKeyEnv: 'MY_OPENAI_KEY' }),
+  );
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-x' } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: { STRATUS_PROVIDER: 'anthropic', MY_OPENAI_KEY: 'sk-openai' },
+    },
+  });
+
+  assert.equal(exitCode, 0, 'the subscription is intact, so nothing is wrong');
+  assert.match(output.stdout, /anthropic Claude subscription \(Pro\/Max\)$/m);
+  assert.doesNotMatch(output.stdout, /billed per token/);
+});
+
+test('doctor reports an explicit config path that does not exist', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor', '--config', './missing.json'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 1);
+  // A real run with this flag fails outright, so reporting built-in
+  // defaults would describe a run that cannot happen.
+  assert.match(output.stdout, /missing\.json does not exist/);
+  assert.match(output.stdout, /every run with this setting fails/);
+});
+
+test('a run names the legacy variable when it supplied the key', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-x' } }),
+  );
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['run', 'hello'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: { STRATUSCLAW_API_KEY: 'sk-ant-legacy' },
+      fetch: (async () => new Response('{}', { status: 401 })) as typeof fetch,
+    },
+  });
+
+  assert.match(output.stderr, /STRATUSCLAW_API_KEY in your environment outranks/);
+  assert.doesNotMatch(output.stderr, /ANTHROPIC_API_KEY in your environment/);
 });

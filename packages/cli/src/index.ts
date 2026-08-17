@@ -49,6 +49,7 @@ import {
 } from '@stratusagent/agents';
 import {
   agentsDirPath,
+  apiKeyEnvNameFor,
   createDemoTool,
   createFileMemoryStore,
   createRuntimeProvider,
@@ -69,6 +70,7 @@ import {
   readNonEmptyString,
   readProcessEnv,
   readWorkingDirectory,
+  resolveEnvApiKey,
   DEFAULT_CONFIG_FILENAME,
   LEGACY_CONFIG_FILENAME,
   loadConfigFile,
@@ -782,8 +784,14 @@ export const warnOnCredentialOverride = async (
   if (stored?.type !== 'oauth_token') {
     return;
   }
-  const processEnv = readProcessEnv(env);
-  const culprit = readNonEmptyString(processEnv.STRATUS_API_KEY) ? 'STRATUS_API_KEY' : 'ANTHROPIC_API_KEY';
+  // The resolver records the variable that actually won — guessing it here
+  // would name the wrong one whenever a custom apiKeyEnv or the legacy
+  // STRATUSCLAW_ prefix supplied the key, sending the reader to unset
+  // something that was never the cause.
+  const culprit = runtime.apiKeyEnvVar;
+  if (!culprit) {
+    return;
+  }
   writeLine(
     streams.stderr,
     `Warning: ${culprit} in your environment outranks the Claude subscription sign-in saved by \`stratus setup\`, `
@@ -3392,8 +3400,18 @@ export const collectDoctorReport = async (
       await readFile(candidate.path, 'utf8');
       present.push(candidate);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
         problems.push(`${candidate.path} exists but cannot be read (${(error as Error).message}).`);
+      } else if (explicit) {
+        // Discovery treats a missing candidate as "try the next one", but
+        // an explicitly named config has no next one: a real run calls
+        // loadConfigFile on it and fails. Reporting built-in defaults here
+        // would describe a run that cannot happen, and hide the typo.
+        problems.push(
+          `${candidate.path} does not exist, but ${candidate.label} names it — every run with this setting fails. `
+          + 'Fix the path, or drop the setting to fall back to config discovery.',
+        );
       }
     }
   }
@@ -3473,30 +3491,37 @@ export const collectDoctorReport = async (
   }
 
   const credentials = await loadCredentials(env);
-  const keyEnvFor = (target: CredentialProviderName): string =>
-    (target === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY');
+  // Which config keys the resolver would honor: a file's apiKeyEnv (and
+  // model, and baseUrl) was written for the provider that file names, so
+  // an override that selects a different provider strands them.
+  const fileConfigApplies = (fileConfig.provider ?? 'openai') === provider.value;
   const signIns: DoctorReport['signIns'] = [];
   for (const target of ['anthropic', 'openai'] as const) {
     const stored = credentials[target];
-    // The exact chain resolveRuntimeConfig uses: a generic STRATUS_API_KEY
-    // or a configured apiKeyEnv authenticate the DEFAULT provider only.
     const isDefault = target === provider.value;
-    const envKey = (isDefault
-      ? readNonEmptyString(processEnv.STRATUS_API_KEY)
-        ?? (fileConfig.apiKeyEnv ? readNonEmptyString(processEnv[fileConfig.apiKeyEnv]) : undefined)
-      : undefined)
-      ?? readNonEmptyString(processEnv[keyEnvFor(target)]);
+    // Resolved by the state package, not re-derived: the generic and
+    // custom variable rules live in one place so a warning can never blame
+    // a variable the run did not actually use. Only the default provider
+    // consults them — a secondary provider is reached through the fallback
+    // path, which uses its own conventional variable alone.
+    const envKey = isDefault
+      ? resolveEnvApiKey(apiKeyEnvNameFor(target, fileConfig, fileConfigApplies, env), env)
+      : (() => {
+          const name = target === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+          const value = readNonEmptyString(processEnv[name]);
+          return typeof value === 'string' ? { name, value } : undefined;
+        })();
     const label = stored?.type === 'oauth_token' ? 'Claude subscription (Pro/Max)' : 'API key';
 
     if (stored && envKey) {
-      signIns.push({ provider: target, status: `${label}, overridden by an API key in your environment` });
+      signIns.push({ provider: target, status: `${label}, overridden by ${envKey.name} in your environment` });
       // The costly case: an env key silently demotes a subscription to
       // per-token billing, and nothing in a normal run says so.
       problems.push(stored.type === 'oauth_token'
-        ? `An API key in your environment outranks your saved ${target} subscription sign-in, so runs are billed per token instead of through your plan. Unset ${keyEnvFor(target)} (check your shell profile) to use the subscription.`
-        : `An API key in your environment outranks your saved ${target} sign-in. Unset ${keyEnvFor(target)} to use the one \`stratus setup\` stored.`);
+        ? `${envKey.name} in your environment outranks your saved ${target} subscription sign-in, so ${isDefault ? 'runs are' : 'fallback runs are'} billed per token instead of through your plan. Unset it (check your shell profile) to use the subscription.`
+        : `${envKey.name} in your environment outranks your saved ${target} sign-in. Unset it to use the one \`stratus setup\` stored.`);
     } else if (envKey) {
-      signIns.push({ provider: target, status: `using an API key from your environment` });
+      signIns.push({ provider: target, status: `using ${envKey.name} from your environment` });
     } else if (stored) {
       signIns.push({ provider: target, status: label });
     } else {
