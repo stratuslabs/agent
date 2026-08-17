@@ -16,6 +16,7 @@ import type {
   ToolCall,
   ToolDescriptor,
   ToolResult,
+  ExecutionContext,
 } from '@stratusagent/core';
 
 export const DEFAULT_CLAUDE_CODE_MODEL = 'claude-opus-5';
@@ -30,7 +31,7 @@ const MCP_SERVER_NAME = 'stratus';
  * host owns approvals, events, allowlists, and the executor —
  * AgentRunner.executeHostedToolCall is the canonical implementation.
  */
-export type ClaudeCodeToolExecutor = (session: Session, call: ToolCall) => Promise<ToolResult>;
+export type ClaudeCodeToolExecutor = (session: Session, call: ToolCall, context?: ExecutionContext) => Promise<ToolResult>;
 
 const HOSTED_SIDE_EFFECTS = Symbol.for('stratus.hostedToolSideEffects');
 
@@ -122,6 +123,7 @@ export const bridgeKernelTools = (
   descriptors: readonly ToolDescriptor[],
   session: Session,
   executeTool: ClaudeCodeToolExecutor,
+  context?: ExecutionContext,
 ): Array<SdkMcpToolDefinition<Record<string, z.ZodType>>> => {
   // The kernel loop executes tools one at a time; hosted execution keeps
   // that contract. Concurrent MCP calls would race a single interactive
@@ -153,7 +155,7 @@ export const bridgeKernelTools = (
           id: `claude-code:${randomUUID()}`,
           toolName: descriptor.name,
           input: (args ?? {}) as JsonObject,
-        }));
+        }, context));
         return {
           content: [
             {
@@ -302,14 +304,17 @@ export const createClaudeCodeProvider = ({
     // a failure after side effects can refuse fallback replay.
     let hostedToolRuns = 0;
     const countedExecute: ClaudeCodeToolExecutor | undefined = executeTool
-      ? async (session, call) => {
+      ? async (session, call, context) => {
           hostedToolRuns += 1;
-          return executeTool(session, call);
+          return executeTool(session, call, context);
         }
       : undefined;
     const markIfSideEffects = <T>(error: T): T => (hostedToolRuns > 0 ? markHostedToolSideEffects(error) : error);
+    // The request's abort signal rides into every hosted tool call, so a
+    // cancelled turn stops local commands and delegated runs too — not
+    // just the SDK query around them.
     const bridgedTools = countedExecute && request.tools && request.tools.length > 0
-      ? bridgeKernelTools(request.tools, request.session, countedExecute)
+      ? bridgeKernelTools(request.tools, request.session, countedExecute, request.signal ? { signal: request.signal } : undefined)
       : undefined;
 
     const options: Options = {

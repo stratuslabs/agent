@@ -285,11 +285,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const provider = createRuntimeProvider(
       config,
       (error) => warn(`default model failed (${error instanceof Error ? error.message : String(error)}); using the fallback model`),
-      async (session, call) => {
+      async (session, call, context) => {
         if (!hostedRunner) {
           throw new Error('The Stratus runtime is not ready to execute tools yet.');
         }
-        return hostedRunner.executeHostedToolCall(session, call);
+        return hostedRunner.executeHostedToolCall(session, call, context);
       },
       options.maxTurns,
     );

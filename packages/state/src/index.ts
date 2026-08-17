@@ -886,6 +886,12 @@ export const createFallbackWrappedProvider = (
           if (hasHostedToolSideEffects(error)) {
             throw error;
           }
+          // A cancelled turn is not a provider failure: the abort error
+          // must surface as-is, and the session must not be routed to the
+          // fallback model for every later conversation turn.
+          if (request.signal?.aborted) {
+            throw error;
+          }
           fallbackSessions.add(request.session.id);
           onFallback(error);
         }
