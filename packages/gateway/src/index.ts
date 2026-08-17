@@ -195,12 +195,6 @@ interface AgentSource {
   soulPath?: string;
   /** The parsed soul, carried for its provider/model pins. */
   soul?: ParsedSoul;
-  /**
-   * This dispatch's refresh could not re-read the soul file: serve from
-   * the cached soul and keep the failing path out of config resolution.
-   * Only ever set on the ephemeral copy handed to one dispatch.
-   */
-  refreshFailed?: boolean;
 }
 
 /**
@@ -303,13 +297,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         soul = await loadSoulFile(source.soulPath);
       } catch (error) {
         warn(`could not refresh ${source.soulPath}: ${error instanceof Error ? error.message : String(error)}; keeping the loaded definition`);
-        // Serve from cache WITHOUT the failing path — config resolution
-        // must not re-read a file this refresh just failed to load, or
-        // every dispatch for this agent fails instead of degrading.
+        // Serve from cache WITHOUT the failing path: the dispatch resolves
+        // from the cached soul snapshot, and the registered source keeps
+        // its path for the next refresh attempt.
         return {
           definition: source.definition,
           ...(source.soul ? { soul: source.soul } : {}),
-          refreshFailed: true,
         };
       }
       if (soul.agent.id !== agentId) {
@@ -594,15 +587,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // different provider than it was chosen for.
     const selection: RuntimeSelection = { ...options.selection };
     let resolveEnv = env;
-    // Pin demotion applies to every souled agent — roster souls (loaded
-    // via their path) and a config-only default soul alike; the latter is
-    // re-read by resolveRuntimeConfig from the config file itself.
-    if (source.soulPath || source.soul) {
-      if (source.soulPath) {
-        selection.soul = source.soulPath;
-      }
-      const pins = source.soul;
-      if (pins?.provider || pins?.model) {
+    const pins = source.soul;
+    if (pins) {
+      // One soul read per dispatch: resolution uses the exact snapshot
+      // refreshAgent just loaded and identity-checked. Handing the path
+      // to resolveRuntimeConfig instead would read the file a second
+      // time, racing a concurrent replacement — this turn could keep one
+      // agent's definition while adopting another's provider pins.
+      selection.presetSoul = pins;
+      if (pins.provider || pins.model) {
         const processEnv = { ...(env.processEnv ?? process.env) };
         const defaultProvider = options.selection?.provider
           ?? processEnv.STRATUS_PROVIDER
@@ -634,14 +627,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           delete processEnv.STRATUSCLAW_MODEL;
         }
         resolveEnv = { ...env, processEnv };
-      }
-      if (source.refreshFailed && pins) {
-        // The soul file is currently unreadable, so resolution runs from
-        // the cached soul itself — pinned, partially pinned, or pinless
-        // alike. Without this, resolveRuntimeConfig would load the config
-        // file's DEFAULT soul and fill the gaps with another agent's
-        // pins and billing path.
-        selection.presetSoul = pins;
       }
     }
     const config = await resolveRuntimeConfig(selection, resolveEnv);
