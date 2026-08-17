@@ -527,17 +527,28 @@ const createOpenAICompatibleMessages = (
 
   for (const message of request.session.messages) {
     if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
+      const wireCalls = message.toolCalls.map((call) => ({
+        id: call.id,
+        type: 'function' as const,
+        function: {
+          name: toWireToolName(call.toolName, toolNames),
+          arguments: JSON.stringify(call.input),
+        },
+      }));
+      // The runner records one message per call (and the response's text
+      // separately), but on the wire they are ONE assistant turn: OpenAI
+      // rejects a tool_calls message that is not fully answered before the
+      // next assistant message. Directly consecutive assistant messages
+      // can only come from a single response, so merging is safe.
+      const previous = messages.at(-1);
+      if (previous && previous.role === 'assistant') {
+        previous.tool_calls = [...(previous.tool_calls ?? []), ...wireCalls];
+        continue;
+      }
       messages.push({
         role: 'assistant',
         content: message.content.length > 0 ? message.content : null,
-        tool_calls: message.toolCalls.map((call) => ({
-          id: call.id,
-          type: 'function',
-          function: {
-            name: toWireToolName(call.toolName, toolNames),
-            arguments: JSON.stringify(call.input),
-          },
-        })),
+        tool_calls: wireCalls,
       });
       continue;
     }

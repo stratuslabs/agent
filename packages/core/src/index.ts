@@ -122,6 +122,12 @@ export type ProviderPart =
 export type ProviderDelta =
   | { type: 'text'; text: string }
   | { type: 'tool-call'; toolName: string; inputFragment?: string }
+  /**
+   * The model is reasoning: a content-free progress signal so activity
+   * watchdogs see a healthy turn during long thinking stretches. The
+   * reasoning itself is deliberately never carried here.
+   */
+  | { type: 'thinking' }
   | { type: 'reset' };
 
 export interface ToolDescriptor {
@@ -664,8 +670,15 @@ export class AgentRunner {
         await deltaChain;
         await this.bus.emit({ type: 'provider.response', sessionId: session.id, parts: response.parts });
 
-        let sawToolCall = false;
-
+        // Record the ENTIRE response — text and every tool call — before
+        // executing anything. Durable recovery cannot rely on reaching the
+        // end of the turn: provider replay state (the Anthropic raw-turn
+        // cache) carries the complete response, so a partially persisted
+        // call set would replay tool_use blocks that resume-time
+        // reconciliation cannot answer. With all calls durable up front, a
+        // daemon killed during any execution leaves a session where every
+        // call is either answered or explicitly reconcilable.
+        const calls: ToolCall[] = [];
         for (const part of response.parts) {
           if (part.type === 'text') {
             session.messages.push({
@@ -676,9 +689,7 @@ export class AgentRunner {
             });
             continue;
           }
-
-          sawToolCall = true;
-          throwIfAborted(signal);
+          calls.push(part.call);
           session.messages.push({
             id: `${session.id}:assistant:${session.messages.length + 1}`,
             role: 'assistant',
@@ -686,15 +697,18 @@ export class AgentRunner {
             createdAt: new Date().toISOString(),
             toolCalls: [part.call],
           });
-          // Durable recovery cannot rely on reaching the end of the turn:
-          // the call is saved before it runs and its result immediately
-          // after, so a daemon killed mid-turn never holds a session whose
-          // side effects happened but were not recorded — a later resume
-          // would replay the request and repeat them.
+        }
+        const sawToolCall = calls.length > 0;
+        if (sawToolCall) {
           await this.store.save(session);
+        }
 
-          const result = await this.executeToolCall(session, part.call, signal);
+        for (const call of calls) {
+          throwIfAborted(signal);
+          const result = await this.executeToolCall(session, call, signal);
 
+          // The result lands immediately after execution, so side effects
+          // are never durable without their record.
           session.messages.push({
             id: `${session.id}:tool:${result.callId}`,
             role: 'tool',

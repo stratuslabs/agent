@@ -535,3 +535,59 @@ test('streaming forwards tool-input fragments as tool-call deltas', async () => 
   assert.ok(call && call.type === 'tool-call');
   assert.deepEqual(call.call.input, { text: 'hi' });
 });
+
+test('streaming forwards thinking progress without exposing the reasoning', async () => {
+  const sse = (events: Array<{ type: string }>): Response =>
+    new Response(
+      events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
+
+  const fetchImpl = (async () =>
+    sse([
+      {
+        type: 'message_start',
+        message: {
+          id: 'msg_1', type: 'message', role: 'assistant', model: DEFAULT_ANTHROPIC_MODEL,
+          content: [], stop_reason: null, stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      },
+      { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'private reasoning' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'the answer' } },
+      { type: 'content_block_stop', index: 1 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 2 } },
+      { type: 'message_stop' },
+    ])) as typeof fetch;
+
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const session: Session = {
+    id: 's-think',
+    agent: { id: 'a', name: 'A' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'go', createdAt: new Date().toISOString() }],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const deltas: Array<Record<string, unknown>> = [];
+  await provider.generate({
+    session,
+    onDelta: async (delta) => {
+      deltas.push(delta as Record<string, unknown>);
+    },
+  } as ProviderRequest);
+
+  // Thinking stretches surface as content-free progress signals, so an
+  // activity watchdog sees a healthy turn — and the reasoning never rides
+  // along.
+  assert.deepEqual(deltas, [
+    { type: 'thinking' },
+    { type: 'thinking' },
+    { type: 'text', text: 'the answer' },
+  ]);
+});

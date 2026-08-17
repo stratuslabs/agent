@@ -831,3 +831,65 @@ test('resume reconciles a tool call whose result was never recorded', async () =
   assert.match(synthetic?.toolResult?.error ?? '', /interrupted/i);
   assert.equal(session.messages.at(-1)?.content, 'recovered');
 });
+
+test('every tool call in a response is durable before the first executes', async () => {
+  const inner = new InMemorySessionStore();
+  const snapshots: Session[] = [];
+  const store = {
+    create: (input: Omit<Session, 'createdAt' | 'updatedAt'>) => inner.create(input),
+    get: (id: string) => inner.get(id),
+    save: async (session: Session) => {
+      snapshots.push(JSON.parse(JSON.stringify(session)) as Session);
+      await inner.save(session);
+    },
+  };
+
+  const tools = new ToolRegistry();
+  let callSetDurableAtFirstExecution = false;
+  tools.register({
+    name: 'step',
+    parameters: { type: 'object', properties: {} },
+    async execute() {
+      // At the FIRST execution, both calls must already be saved —
+      // provider replay state carries the whole response, so a partially
+      // persisted call set replays tool uses that reconciliation could
+      // never answer.
+      if (!callSetDurableAtFirstExecution) {
+        const stored = await inner.get('multi-call-1');
+        const persistedCallIds = (stored?.messages ?? [])
+          .flatMap((m) => m.toolCalls ?? [])
+          .map((c) => c.id);
+        callSetDurableAtFirstExecution =
+          persistedCallIds.includes('mc-1') && persistedCallIds.includes('mc-2');
+      }
+      return { done: true };
+    },
+  });
+
+  const provider: ModelProvider = {
+    name: 'p',
+    async generate({ session }) {
+      if (session.messages.at(-1)?.role === 'tool') {
+        return { parts: [{ type: 'text', text: 'both ran' }] };
+      }
+      return {
+        parts: [
+          { type: 'tool-call', call: { id: 'mc-1', toolName: 'step', input: {} } },
+          { type: 'tool-call', call: { id: 'mc-2', toolName: 'step', input: {} } },
+        ],
+      };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools, store });
+  const session = await runner.run({
+    sessionId: 'multi-call-1',
+    agent: { id: 'a', name: 'A' },
+    userMessage: 'do two things',
+  });
+
+  assert.equal(session.status, 'completed');
+  assert.ok(callSetDurableAtFirstExecution, 'both calls must be saved before the first runs');
+  const resultIds = session.messages.filter((m) => m.role === 'tool').map((m) => m.toolResult?.callId);
+  assert.deepEqual(resultIds, ['mc-1', 'mc-2']);
+});

@@ -369,6 +369,13 @@ export const createAnthropicProvider = ({
         for await (const event of stream) {
           if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
             await onDelta({ type: 'text', text: event.delta.text });
+          } else if (
+            event.type === 'content_block_delta'
+            && (event.delta.type === 'thinking_delta' || event.delta.type === 'signature_delta')
+          ) {
+            // Adaptive thinking can run longer than an idle timeout before
+            // the first visible text; forward progress without content.
+            await onDelta({ type: 'thinking' });
           } else if (event.type === 'content_block_delta' && event.delta.type === 'input_json_delta') {
             const toolName = toolNamesByIndex.get(event.index);
             if (toolName !== undefined) {
