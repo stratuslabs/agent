@@ -1455,3 +1455,30 @@ test('removing the default soul updates the cached default to the built-in', asy
   await gateway.stop();
   assert.equal(degraded.agent.id, 'stratus');
 });
+
+test('the generic key serves a pinned soul when nothing else selects a provider', async () => {
+  const home = await newHome();
+  // No config.json, no env/selection provider: the soul is the only
+  // provider selector, so STRATUS_API_KEY is its credential — the
+  // resolver's own reading of a generic key.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  const apiKeys: string[] = [];
+  const fetchImpl = (async (url: unknown, init?: RequestInit) => {
+    apiKeys.push(new Headers(init?.headers ?? {}).get('x-api-key') ?? '');
+    if (String(url).includes('anthropic')) {
+      return anthropicSseText('soul-only selection works');
+    }
+    return openAiText('unexpected');
+  }) as typeof fetch;
+
+  const env = { homeDir: home, cwd: home, processEnv: { STRATUS_API_KEY: 'sk-generic' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+  const session = await gateway.dispatch({ sessionId: 'soul-only-1', agentId: 'ava', userMessage: 'hi' });
+  await gateway.stop();
+
+  assert.equal(session.status, 'completed');
+  assert.match(session.messages.at(-1)?.content ?? '', /soul-only selection works/);
+  assert.ok(apiKeys.some((key) => key === 'sk-generic'));
+});
