@@ -61,6 +61,8 @@ import {
   globalConfigPath,
   loadChannelCredentials,
   loadCredentials,
+  loadRosterSouls,
+  loadSoulFile,
   memoryFilePath,
   migrateLegacyMemory,
   parseProviderName,
@@ -71,11 +73,14 @@ import {
   LEGACY_CONFIG_FILENAME,
   loadConfigFile,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
+  saveChannelCredentials,
   saveCredentials,
   stratusHomePath,
   withLegacyDefaultMemories,
+  type ChannelCredentials,
   type CredentialProviderName,
   type CredentialsFile,
+  type RosterEntry,
   type FallbackRuntime,
   type RuntimeConfig,
   type StoredCredential,
@@ -224,9 +229,10 @@ Usage:
 
 Commands:
   setup            Menu-driven onboarding: pick a provider, sign in (Claude
-                   subscription or API key), create your agent, and test it —
-                   settings go to ~/.stratus/config.json, sign-ins to
-                   ~/.stratus/credentials.json (0600)
+                   subscription or API key), create your agent, connect it to
+                   Slack, and test it — settings go to ~/.stratus/config.json,
+                   sign-ins and channel tokens to ~/.stratus/credentials.json
+                   (0600)
   chat             Talk with your agent — the conversation persists across turns
                    and remembered facts accumulate; /exit or Ctrl+C to leave
   run              Execute one local Stratus Agent session
@@ -1766,6 +1772,114 @@ const verifyProviderKey = async (
   }
 };
 
+// Slack verification talks to the Web API over plain fetch rather than
+// through @stratusagent/channel-slack. Setup must stay usable before that
+// optional package is installed, and the CLI deliberately does not depend
+// on it (or on the ~9 MB of Slack SDKs underneath).
+const SLACK_API_ROOT = 'https://slack.com/api';
+
+interface SlackIdentity {
+  botUserId?: string;
+  teamName?: string;
+  teamId?: string;
+}
+
+type SlackVerdict =
+  | { status: 'ok'; identity: SlackIdentity }
+  | { status: 'rejected'; detail: string }
+  | { status: 'unreachable'; detail: string };
+
+const callSlack = async (
+  method: string,
+  token: string,
+  fetchImpl: typeof fetch | undefined,
+): Promise<{ ok: true; body: Record<string, unknown> } | { ok: false; verdict: SlackVerdict }> => {
+  if (typeof fetchImpl !== 'function') {
+    return { ok: false, verdict: { status: 'unreachable', detail: 'fetch is unavailable' } };
+  }
+  try {
+    const response = await fetchImpl(`${SLACK_API_ROOT}/${method}`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+    });
+    if (!response.ok) {
+      return { ok: false, verdict: { status: 'unreachable', detail: `HTTP ${response.status}` } };
+    }
+    const body = await response.json() as Record<string, unknown>;
+    if (body.ok === true) {
+      return { ok: true, body };
+    }
+    // Slack answers 200 with { ok: false, error } for bad credentials, so
+    // the error string — not the status — is what condemns a token.
+    return { ok: false, verdict: { status: 'rejected', detail: String(body.error ?? 'unknown error') } };
+  } catch (error) {
+    return { ok: false, verdict: { status: 'unreachable', detail: error instanceof Error ? error.message : String(error) } };
+  }
+};
+
+/** Verifies a bot token and reports the identity it belongs to. */
+const verifySlackBotToken = async (token: string, fetchImpl: typeof fetch | undefined): Promise<SlackVerdict> => {
+  const result = await callSlack('auth.test', token, fetchImpl);
+  if (!result.ok) {
+    return result.verdict;
+  }
+  return {
+    status: 'ok',
+    identity: {
+      ...(typeof result.body.user_id === 'string' ? { botUserId: result.body.user_id } : {}),
+      ...(typeof result.body.team === 'string' ? { teamName: result.body.team } : {}),
+      ...(typeof result.body.team_id === 'string' ? { teamId: result.body.team_id } : {}),
+    },
+  };
+};
+
+/**
+ * Verifies an app-level token by opening a Socket Mode URL. The URL is
+ * discarded — this only proves the token carries connections:write, which
+ * is the failure the daemon would otherwise hit at start time.
+ */
+const verifySlackAppToken = async (token: string, fetchImpl: typeof fetch | undefined): Promise<SlackVerdict> => {
+  const result = await callSlack('apps.connections.open', token, fetchImpl);
+  return result.ok ? { status: 'ok', identity: {} } : result.verdict;
+};
+
+// Scopes and events the adapter needs. Kept in step with the manifest
+// shipped by @stratusagent/channel-slack (a test pins them together) so
+// setup can hand over a ready-to-paste manifest without depending on that
+// package being installed.
+const SLACK_BOT_SCOPES = [
+  'app_mentions:read',
+  'chat:write',
+  'files:write',
+  'im:history',
+  'im:read',
+  'im:write',
+  'users:read',
+];
+const SLACK_BOT_EVENTS = ['app_mention', 'message.im'];
+
+export const slackAppManifest = (agentName: string): string => JSON.stringify({
+  display_information: {
+    name: agentName,
+    description: 'A Stratus agent',
+    background_color: '#1a1d21',
+  },
+  features: {
+    bot_user: { display_name: agentName, always_online: true },
+  },
+  oauth_config: { scopes: { bot: SLACK_BOT_SCOPES } },
+  settings: {
+    event_subscriptions: { bot_events: SLACK_BOT_EVENTS },
+    interactivity: { is_enabled: false },
+    org_deploy_enabled: false,
+    socket_mode_enabled: true,
+    token_rotation_enabled: false,
+  },
+}, null, 2);
+
 const DEFAULT_SOUL_STARTER = [
   'You are a helpful, warm generalist. Answer first, explain second, and',
   'keep replies short unless the question genuinely needs depth. Use',
@@ -1784,6 +1898,9 @@ interface SetupState {
   soulPath?: string;
   credentials: CredentialsFile;
   credentialsDirty: boolean;
+  /** Channel tokens (Slack apps, keyed by agent id) and whether they changed. */
+  channels: ChannelCredentials;
+  channelsDirty: boolean;
 }
 
 // Shown when live model listing is unavailable (e.g. subscription tokens
@@ -1825,6 +1942,12 @@ export const runSetup = async (
   // A path passed via --config is not auto-discovered by `stratus run`, so
   // suggested commands must carry it explicitly.
   const runConfigFlag = command.configPath ? ` --config ${quoteShellArg(command.configPath)}` : '';
+  // Set once save() detects a project config shadowing the global one.
+  // Suggested commands must carry it too, or they read a different config
+  // than the one just written — for `serve` that means a different roster,
+  // and Slack apps stored here would be skipped as having no agent.
+  let shadowConfigFlag = '';
+  const serveCommand = (): string => `stratus serve${runConfigFlag}${shadowConfigFlag}`;
 
   // Seed from what is already configured, so re-running setup edits instead
   // of clobbering.
@@ -1879,6 +2002,8 @@ export const runSetup = async (
     ...(existing.fallbackBaseUrl ? { fallbackBaseUrl: existing.fallbackBaseUrl } : {}),
     credentials: await loadCredentials(env),
     credentialsDirty: false,
+    channels: await loadChannelCredentials(env),
+    channelsDirty: false,
   };
 
   const prompter = createSetupPrompter(baseStreams, env, {
@@ -1954,6 +2079,14 @@ export const runSetup = async (
       return 'none — every run uses the built-in default agent';
     }
     return state.soulPath;
+  };
+
+  const channelsSummary = (): string => {
+    const connected = Object.keys(state.channels.slack ?? {}).length;
+    if (connected === 0) {
+      return 'Slack: not connected';
+    }
+    return `Slack: ${connected} agent${connected === 1 ? '' : 's'} connected`;
   };
 
   const storeCredential = (provider: CredentialProviderName, credential: StoredCredential): void => {
@@ -2518,6 +2651,228 @@ export const runSetup = async (
     };
   };
 
+  /**
+   * Walks an agent through connecting their own Slack app: show the
+   * manifest to paste, take both tokens, verify each against Slack, and
+   * store them under the agent's id. Tokens are keyed by a roster agent
+   * picked from a list rather than typed, so the id can never drift from
+   * the roster — the mismatch that otherwise surfaces only as a startup
+   * warning about an agent the gateway cannot find.
+   */
+  const connectSlackAgent = async (agentId: string, agentName: string): Promise<void> => {
+    writeLine(streams.stdout);
+    writeLine(streams.stdout, `Create a Slack app for ${agentName}:`);
+    writeLine(streams.stdout, '  1. Open https://api.slack.com/apps → Create New App → From a manifest');
+    writeLine(streams.stdout, '  2. Pick your workspace, then paste this manifest:');
+    writeLine(streams.stdout);
+    for (const line of slackAppManifest(agentName).split('\n')) {
+      writeLine(streams.stdout, `    ${line}`);
+    }
+    writeLine(streams.stdout);
+    writeLine(streams.stdout, '  3. Create the app, then Basic Information → App-Level Tokens →');
+    writeLine(streams.stdout, '     Generate a token with the connections:write scope (xapp-…)');
+    writeLine(streams.stdout, '  4. Install App → copy the Bot User OAuth Token (xoxb-…)');
+    writeLine(streams.stdout, `  5. Basic Information → Display Information → upload ${agentName}'s avatar`);
+    writeLine(streams.stdout);
+
+    const appToken = await prompter.askSecret('Paste the app-level token (xapp-…, Enter to cancel; input is hidden): ');
+    if (!appToken) {
+      writeLine(streams.stdout, 'Cancelled — nothing was saved.');
+      return;
+    }
+    if (!appToken.startsWith('xapp-')) {
+      writeLine(streams.stdout, '✗ That does not look like an app-level token (they start with xapp-). Nothing was saved.');
+      return;
+    }
+    const botToken = await prompter.askSecret('Paste the bot user OAuth token (xoxb-…, Enter to cancel; input is hidden): ');
+    if (!botToken) {
+      writeLine(streams.stdout, 'Cancelled — nothing was saved.');
+      return;
+    }
+    if (!botToken.startsWith('xoxb-')) {
+      writeLine(streams.stdout, '✗ That does not look like a bot token (they start with xoxb-). Nothing was saved.');
+      return;
+    }
+
+    writeLine(streams.stdout, 'Checking the tokens with Slack…');
+    const fetchImpl = env.fetch ?? globalThis.fetch;
+    const bot = await verifySlackBotToken(botToken, fetchImpl);
+    if (bot.status === 'rejected') {
+      writeLine(streams.stdout, `✗ Slack rejected the bot token (${bot.detail}). Nothing was saved — reinstall the app and copy the token again.`);
+      return;
+    }
+    const app = await verifySlackAppToken(appToken, fetchImpl);
+    if (app.status === 'rejected') {
+      writeLine(streams.stdout, `✗ Slack rejected the app-level token (${app.detail}). Nothing was saved — check it has the connections:write scope.`);
+      return;
+    }
+
+    const slack = { ...(state.channels.slack ?? {}) };
+    slack[agentId] = { appToken, botToken };
+    state.channels = { ...state.channels, slack };
+    state.channelsDirty = true;
+
+    if (bot.status === 'ok' && app.status === 'ok') {
+      const where = bot.identity.teamName ? ` in ${bot.identity.teamName}` : '';
+      const who = bot.identity.botUserId ? ` (bot ${bot.identity.botUserId})` : '';
+      writeLine(streams.stdout, `✓ Verified — ${agentName} is connected to Slack${where}${who}.`);
+    } else {
+      // Unreachable is not a verdict on the tokens: save and let the
+      // daemon report on its first connection attempt.
+      const detail = bot.status === 'unreachable' ? bot.detail : (app as { detail?: string }).detail;
+      writeLine(streams.stdout, `! Could not reach Slack to verify (${detail}). Saved the tokens anyway — \`${serveCommand()}\` will report on startup.`);
+    }
+  };
+
+  /**
+   * Every agent the gateway would dispatch to: the ~/.stratus/agents
+   * roster plus the configured default soul, which `stratus setup` can
+   * point at a file anywhere. The gateway registers that soul too, so a
+   * Channels list built from the agents directory alone would hide an
+   * agent Slack can perfectly well talk to. Reads state.soulPath rather
+   * than the saved config so a soul chosen earlier in this same setup
+   * session is already connectable.
+   */
+  const channelRoster = async (): Promise<RosterEntry[]> => {
+    const warnOnce = (message: string): void => writeLine(streams.stderr, `Warning: ${message}.`);
+    // Mirror the gateway's loadRoster: two soul files declaring the same
+    // id are not two agents. Offering both would let someone create and
+    // name an app for the loser, which can never receive a message —
+    // Slack credentials are keyed by the shared id, and dispatch reaches
+    // the first sorted file.
+    const entries: RosterEntry[] = [];
+    for (const entry of await loadRosterSouls(env, warnOnce)) {
+      const clash = entries.find((seen) => seen.soul.agent.id === entry.soul.agent.id);
+      if (clash) {
+        warnOnce(`duplicate agent id ${entry.soul.agent.id} (${clash.path} vs ${entry.path}); keeping the first`);
+        continue;
+      }
+      entries.push(entry);
+    }
+
+    // The soul a run resolves to, in resolveSoulPath's own order: an env
+    // override outranks the config value this setup session is editing.
+    // Listing the config soul while `stratus serve` registers the env one
+    // would store tokens against an id the adapter then skips.
+    const processEnv = readProcessEnv(env);
+    const envSoul = readNonEmptyString(processEnv.STRATUS_SOUL)
+      ?? readNonEmptyString(processEnv.STRATUSCLAW_SOUL);
+    if (typeof envSoul === 'string' && state.soulPath && envSoul !== state.soulPath) {
+      warnOnce(`STRATUS_SOUL points at ${envSoul}, which outranks the configured ${state.soulPath} — Channels lists what a run would actually use`);
+    }
+    const effectiveSoul = typeof envSoul === 'string' ? envSoul : state.soulPath;
+    if (!effectiveSoul) {
+      return entries;
+    }
+    const resolved = path.resolve(readWorkingDirectory(env), effectiveSoul);
+    if (entries.some((entry) => entry.path === resolved)) {
+      return entries;
+    }
+    try {
+      const soul = await loadSoulFile(resolved);
+      // An explicit id can collide with a roster file. The gateway's
+      // defaultAgentId replaces the roster source whenever the configured
+      // soul resolves to a different path, so the configured soul is the
+      // one Slack actually dispatches to — offering the roster namesake
+      // here would connect an app to a different agent than it names.
+      const collision = entries.findIndex((entry) => entry.soul.agent.id === soul.agent.id);
+      if (collision >= 0) {
+        entries.splice(collision, 1);
+      }
+      entries.unshift({ soul, path: resolved });
+    } catch (error) {
+      warnOnce(`could not read the default soul ${resolved} (${error instanceof Error ? error.message : String(error)})`);
+    }
+    return entries;
+  };
+
+  const chooseChannels = async (): Promise<void> => {
+    while (true) {
+      const roster = await channelRoster();
+      const slack = state.channels.slack ?? {};
+
+      if (roster.length === 0) {
+        writeLine(streams.stdout);
+        writeLine(streams.stdout, 'No agents yet — create one from the Agent menu first, then give it a Slack app.');
+        writeLine(streams.stdout, 'Slack apps are per agent: each gets its own name, avatar, and presence.');
+        await prompter.ask('Press Enter to return to the menu… ');
+        return;
+      }
+
+      const options = roster.map((entry) => {
+        const id = entry.soul.agent.id;
+        const status = slack[id] ? '✓ connected' : '— not connected';
+        return `${entry.soul.agent.name} (${id})`.padEnd(34) + status;
+      });
+      // Orphans: tokens whose agent left the roster would otherwise be
+      // invisible here while still being loaded by `stratus serve`.
+      const orphans = Object.keys(slack).filter((id) => !roster.some((entry) => entry.soul.agent.id === id));
+      for (const id of orphans) {
+        options.push(`${id}`.padEnd(34) + '! tokens without a matching agent');
+      }
+      options.push('Back');
+
+      const choice = await prompter.select(
+        'Channels — Slack (one app per agent: its own name, avatar, and presence)',
+        options,
+        { footnote: `Run \`${serveCommand()}\` afterwards to bring the connected agents online.` },
+      );
+      if (choice.kind !== 'index' || choice.index === options.length - 1) {
+        return;
+      }
+
+      if (choice.index >= roster.length) {
+        // An orphaned entry — offer to clear it.
+        const orphanId = orphans[choice.index - roster.length];
+        if (!orphanId) {
+          return;
+        }
+        const confirm = await prompter.select(`No agent with id ${orphanId} is in the roster.`, [
+          'Remove these Slack tokens',
+          'Keep them',
+        ]);
+        if (confirm.kind === 'index' && confirm.index === 0) {
+          const next = { ...slack };
+          delete next[orphanId];
+          state.channels = { ...state.channels, slack: next };
+          state.channelsDirty = true;
+          writeLine(streams.stdout, `Removed the Slack tokens for ${orphanId}.`);
+        }
+        continue;
+      }
+
+      const entry = roster[choice.index];
+      if (!entry) {
+        return;
+      }
+      const agentId = entry.soul.agent.id;
+      const agentName = entry.soul.agent.name;
+
+      if (!slack[agentId]) {
+        await connectSlackAgent(agentId, agentName);
+        continue;
+      }
+
+      const action = await prompter.select(`${agentName} is connected to Slack.`, [
+        'Replace the tokens (re-run the app setup)',
+        'Disconnect from Slack (forget the tokens)',
+        'Back',
+      ]);
+      if (action.kind !== 'index' || action.index === 2) {
+        continue;
+      }
+      if (action.index === 0) {
+        await connectSlackAgent(agentId, agentName);
+        continue;
+      }
+      const next = { ...slack };
+      delete next[agentId];
+      state.channels = { ...state.channels, slack: next };
+      state.channelsDirty = true;
+      writeLine(streams.stdout, `${agentName} is no longer connected to Slack. The Slack app itself still exists — delete it at api.slack.com/apps if you are done with it.`);
+    }
+  };
+
   const testRun = async (): Promise<void> => {
     const runtime = await buildTestRuntime();
     if (!runtime) {
@@ -2575,7 +2930,6 @@ export const runSetup = async (
   };
 
   const save = async (): Promise<void> => {
-    let shadowConfigFlag = '';
     const config: Record<string, string> = { provider: state.provider };
     if (state.provider !== 'demo') {
       config.model = state.model ?? defaultModelFor(state.provider);
@@ -2632,6 +2986,15 @@ export const runSetup = async (
     if (state.credentialsDirty) {
       await saveCredentials(env, state.credentials);
       writeLine(streams.stdout, `Saved your sign-in to ${credentialsPath(env)} (readable only by you).`);
+    }
+    if (state.channelsDirty) {
+      // Channel tokens live in their own namespace of the same file; the
+      // writers merge, so this never clobbers the provider sign-in above.
+      await saveChannelCredentials(env, state.channels);
+      const connected = Object.keys(state.channels.slack ?? {}).length;
+      writeLine(streams.stdout, connected > 0
+        ? `Saved Slack tokens for ${connected} agent${connected === 1 ? '' : 's'} to ${credentialsPath(env)} — run \`${serveCommand()}\` to bring them online.`
+        : `Removed the stored Slack tokens from ${credentialsPath(env)}.`);
     }
     writeLine(streams.stdout);
 
@@ -2698,12 +3061,13 @@ export const runSetup = async (
         `Providers            ${providersSummary()}`,
         `Models               ${modelsSummary()}`,
         `Agent                ${agentSummary()}`,
+        `Channels             ${channelsSummary()}`,
         'Test run             say hello with the current settings',
         'Save & finish',
       ]);
 
       // Backing out of the top level (Esc, or the input ending) saves.
-      if (choice.kind !== 'index' || choice.index === 4) {
+      if (choice.kind !== 'index' || choice.index === 5) {
         break;
       }
 
@@ -2714,6 +3078,8 @@ export const runSetup = async (
       } else if (choice.index === 2) {
         await chooseAgent();
       } else if (choice.index === 3) {
+        await chooseChannels();
+      } else if (choice.index === 4) {
         await testRun();
       }
     }

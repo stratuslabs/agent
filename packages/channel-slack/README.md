@@ -33,6 +33,13 @@ hint and the daemon serves every other channel as usual.
 
 ## Setting up an agent's Slack app (~2 minutes)
 
+**The easy way:** run `stratus setup` → **Channels**. It prints the manifest with
+the agent's name already filled in, takes both tokens without echoing them,
+verifies each against Slack, and stores them under the right agent id — no
+editing `credentials.json` by hand.
+
+The manual equivalent, if you prefer:
+
 1. https://api.slack.com/apps → **Create New App → From a manifest** → paste `manifest/stratus-agent.manifest.json` with `NAME` replaced by the agent's name.
 2. **Basic Information → App-Level Tokens** → generate a token with `connections:write` (that's the `appToken`, `xapp-…`).
 3. **Install App** to the workspace → copy the **Bot User OAuth Token** (that's the `botToken`, `xoxb-…`).
