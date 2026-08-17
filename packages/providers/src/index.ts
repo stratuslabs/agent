@@ -67,6 +67,12 @@ export interface OpenAICompatibleProviderConfig {
   systemPrompt?: string;
   headers?: Record<string, string>;
   fetch?: typeof fetch;
+  /**
+   * Upper bound on one HTTP request, caller signal or not — an endpoint
+   * that accepts a request and never completes it must not wedge the turn
+   * (and its caller's shutdown) forever. 0 disables. Default 5 minutes.
+   */
+  requestTimeoutMs?: number;
 }
 
 interface OpenAICompatibleToolCall {
@@ -113,6 +119,7 @@ interface OpenAICompatibleResponse {
 }
 
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
+const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
 
 export const textPart = (text: string): ProviderPart => ({ type: 'text', text });
 
@@ -310,6 +317,7 @@ export const createOpenAICompatibleProvider = ({
   systemPrompt,
   headers = {},
   fetch: fetchImpl = globalThis.fetch,
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
 }: OpenAICompatibleProviderConfig): ModelProvider => {
   if (typeof fetchImpl !== 'function') {
     throw new Error('Global fetch is unavailable for the OpenAI-compatible provider.');
@@ -323,23 +331,40 @@ export const createOpenAICompatibleProvider = ({
       const toolNames = createOpenAICompatibleToolNameMapping(request.tools);
       const tools = createOpenAICompatibleTools(request.tools, toolNames);
 
-      const response = await fetchImpl(`${normalizedBaseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${apiKey}`,
-          ...headers,
-        },
-        body: JSON.stringify({
-          model,
-          messages: createOpenAICompatibleMessages(request, systemPrompt, toolNames),
-          ...(tools.length > 0 ? { tools } : {}),
-        }),
-        // Aborting the turn cancels the in-flight HTTP request.
-        ...(request.signal ? { signal: request.signal } : {}),
-      });
+      // The turn's signal cancels the request; the timeout bounds it even
+      // when no signal exists, so a hung endpoint cannot pin the turn (and
+      // a draining daemon) open forever.
+      const timeout = requestTimeoutMs > 0 ? AbortSignal.timeout(requestTimeoutMs) : undefined;
+      const signal = timeout && request.signal
+        ? AbortSignal.any([request.signal, timeout])
+        : timeout ?? request.signal;
 
-      const payload = await parseOpenAICompatibleResponse(response);
+      let payload;
+      let response: Response;
+      try {
+        response = await fetchImpl(`${normalizedBaseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${apiKey}`,
+            ...headers,
+          },
+          body: JSON.stringify({
+            model,
+            messages: createOpenAICompatibleMessages(request, systemPrompt, toolNames),
+            ...(tools.length > 0 ? { tools } : {}),
+          }),
+          ...(signal ? { signal } : {}),
+        });
+        payload = await parseOpenAICompatibleResponse(response);
+      } catch (error) {
+        // A timed-out request is a provider failure (fallback-eligible),
+        // never mistaken for the caller's own cancellation.
+        if (timeout?.aborted && !request.signal?.aborted) {
+          throw new Error(`Provider request timed out after ${requestTimeoutMs}ms: ${name}`);
+        }
+        throw error;
+      }
 
       if (!response.ok) {
         throw new Error(payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`);

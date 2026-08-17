@@ -676,3 +676,44 @@ test('a soul provider pin beats the daemon environment defaults', async () => {
   assert.match(unpinned.messages.at(-1)?.content ?? '', /from openai/);
   assert.ok(urls.some((url) => url.includes('anthropic')));
 });
+
+test('endpoint and generic credential defaults never ride along to a soul-pinned provider', async () => {
+  const home = await newHome();
+  // The daemon's defaults point at a custom OpenAI-compatible endpoint
+  // with a generic key. Ava pins Anthropic: her requests must go to the
+  // real Anthropic endpoint with her provider's credential — the default
+  // base URL and generic key were chosen for a different service.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  const urls: string[] = [];
+  const fetchImpl = (async (url: unknown) => {
+    urls.push(String(url));
+    if (String(url).includes('api.anthropic.com')) {
+      return anthropicSseText('anthropic answered');
+    }
+    return openAiText('local endpoint answered');
+  }) as typeof fetch;
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: {
+      STRATUS_API_KEY: 'sk-generic',
+      ANTHROPIC_API_KEY: 'sk-a',
+      OPENAI_API_KEY: 'sk-o',
+    },
+    fetch: fetchImpl,
+  };
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    selection: { provider: 'openai', baseUrl: 'http://localhost:9/v1' },
+  });
+  await gateway.start();
+
+  const pinned = await gateway.dispatch({ sessionId: 'endpoint-pin-1', agentId: 'ava', userMessage: 'hi' });
+  await gateway.stop();
+
+  assert.match(pinned.messages.at(-1)?.content ?? '', /anthropic answered/);
+  assert.ok(urls.every((url) => !url.includes('localhost')));
+});

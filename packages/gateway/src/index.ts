@@ -523,9 +523,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           delete processEnv.STRATUS_PROVIDER;
           delete processEnv.STRATUSCLAW_PROVIDER;
           if (pins.provider !== defaultProvider) {
+            // The default model, endpoint, and generic credentials were all
+            // chosen for the default provider — none may ride along to the
+            // soul's: a base URL would point the pinned provider at the
+            // wrong service, and a generic API key would be sent to it.
             delete selection.model;
             delete processEnv.STRATUS_MODEL;
             delete processEnv.STRATUSCLAW_MODEL;
+            delete selection.baseUrl;
+            delete processEnv.STRATUS_BASE_URL;
+            delete processEnv.STRATUSCLAW_BASE_URL;
+            delete processEnv.STRATUS_API_KEY;
+            delete processEnv.STRATUSCLAW_API_KEY;
+            delete processEnv.STRATUS_API_KEY_ENV;
+            delete processEnv.STRATUSCLAW_API_KEY_ENV;
           }
         }
         if (pins.model) {
