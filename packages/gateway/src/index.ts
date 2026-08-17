@@ -174,10 +174,24 @@ export class SqliteSessionStore implements SessionStore {
   }
 }
 
+/**
+ * A channel adapter as the gateway sees it: started after the roster
+ * loads, stopped before the store drains. Structurally identical to
+ * @stratusagent/channels' ChannelAdapter — kept structural here so the
+ * gateway does not depend on the channels package.
+ */
+export interface GatewayChannelAdapter {
+  name: string;
+  start(gateway: Gateway): Promise<void>;
+  stop(): Promise<void>;
+}
+
 export interface GatewayOptions {
   env?: StateEnvironment;
   /** Gateway-wide provider/model overrides applied beneath per-soul pins. */
   selection?: RuntimeSelection;
+  /** Channel adapters to run (Slack, …). Started on start(), stopped on stop(). */
+  channels?: GatewayChannelAdapter[];
   approvals?: ApprovalPolicy;
   maxTurns?: number;
   /**
@@ -817,7 +831,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return turn;
   };
 
-  return {
+  const startedChannels: GatewayChannelAdapter[] = [];
+
+  const gateway: Gateway = {
     bus,
     store,
 
@@ -826,12 +842,37 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       await loadRoster();
       const named = registry.list().map((agent) => agent.name).join(', ');
       log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
+      // Channels come up after the roster so their first inbound message
+      // already has agents to dispatch to. One failing adapter must not
+      // keep the rest (or the gateway) down.
+      for (const adapter of options.channels ?? []) {
+        try {
+          await adapter.start(gateway);
+          startedChannels.push(adapter);
+        } catch (error) {
+          warn(`channel ${adapter.name} failed to start: ${error instanceof Error ? error.message : String(error)}`);
+          // A start() that rejected may still hold sockets or listeners it
+          // acquired before failing; it never reaches startedChannels, so
+          // this is its only cleanup.
+          try {
+            await adapter.stop();
+          } catch (stopError) {
+            warn(`channel ${adapter.name} cleanup after failed start also failed: ${stopError instanceof Error ? stopError.message : String(stopError)}`);
+          }
+        }
+      }
     },
 
-    // Drain: in-flight turns finish, new dispatches are refused, then the
-    // database closes. SIGTERM handling in `stratus serve` calls this.
+    // Drain: channels stop taking messages, in-flight turns finish, new
+    // dispatches are refused, then the database closes. SIGTERM handling
+    // in `stratus serve` calls this.
     async stop() {
+      // Refuse new work first; then let channels finish rendering their
+      // in-flight turns (already-started dispatches keep running), drain,
+      // and close.
       stopping = true;
+      await Promise.allSettled(startedChannels.map((adapter) => adapter.stop()));
+      startedChannels.length = 0;
       await Promise.allSettled([...inflight]);
       store.close();
       log('stratusd stopped');
@@ -843,4 +884,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return registry.list();
     },
   };
+
+  return gateway;
 };

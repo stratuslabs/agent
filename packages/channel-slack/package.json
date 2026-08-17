@@ -1,0 +1,48 @@
+{
+  "name": "@stratusagent/channel-slack",
+  "version": "0.2.5",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "manifest"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types"
+  },
+  "dependencies": {
+    "@slack/socket-mode": "^2.0.4",
+    "@slack/web-api": "^7.11.0",
+    "@stratusagent/channels": "workspace:*",
+    "@stratusagent/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/channel-slack"
+  },
+  "description": "Slack adapter for Stratus agents: one Slack app per agent (real avatar and presence), Socket Mode, thread-keyed resumable sessions, and streaming replies via message edits",
+  "keywords": [
+    "stratus",
+    "agent",
+    "slack",
+    "ai",
+    "llm"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -163,6 +163,29 @@ test('a fallback switch records itself in session metadata', async () => {
   assert.equal(session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY], true);
 });
 
+test('channel credentials live in their own namespace and survive setup re-saves', async () => {
+  const { loadChannelCredentials, saveChannelCredentials, loadCredentials } = await import('../src/index.ts');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-chan-'));
+  const env = { homeDir: home };
+
+  await saveCredentials(env, { anthropic: { type: 'oauth_token', value: 'tok-1' } });
+  await saveChannelCredentials(env, {
+    slack: { ava: { appToken: 'xapp-1', botToken: 'xoxb-1' } },
+  });
+  // A later provider re-save (what `stratus setup` does) must not clobber
+  // the channel tokens — and vice versa.
+  await saveCredentials(env, { anthropic: { type: 'oauth_token', value: 'tok-2' } });
+
+  const channels = await loadChannelCredentials(env);
+  assert.deepEqual(channels, { slack: { ava: { appToken: 'xapp-1', botToken: 'xoxb-1' } } });
+  const providers = await loadCredentials(env);
+  assert.equal(providers.anthropic?.value, 'tok-2');
+
+  const filePath = path.join(home, '.stratus', 'credentials.json');
+  const mode = (await stat(filePath)).mode & 0o777;
+  assert.equal(mode, 0o600);
+});
+
 test('a mid-stream primary failure emits a reset delta before the fallback streams', async () => {
   const { createFallbackWrappedProvider } = await import('../src/index.ts');
   const session = {

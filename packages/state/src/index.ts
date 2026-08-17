@@ -225,14 +225,99 @@ export const loadCredentials = async (env: StateEnvironment): Promise<Credential
   return credentials;
 };
 
-// Credentials never live in a project directory or a shell profile — they
-// are written once by `stratus setup` and read on every run, 0600 so only
-// the owner can read them.
-export const saveCredentials = async (env: StateEnvironment, credentials: CredentialsFile): Promise<void> => {
+// The raw credentials file, whatever it holds. Writers merge into this so
+// one namespace (provider sign-ins, channel tokens) never clobbers another.
+const loadRawCredentialsFile = async (env: StateEnvironment): Promise<Record<string, unknown>> => {
+  let raw: string;
+  try {
+    raw = await readFile(credentialsPath(env), 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return {};
+    }
+    throw error;
+  }
+  const parsed = JSON.parse(raw) as unknown;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`Credentials file must contain a JSON object: ${credentialsPath(env)}`);
+  }
+  return parsed as Record<string, unknown>;
+};
+
+const writeRawCredentialsFile = async (env: StateEnvironment, contents: Record<string, unknown>): Promise<void> => {
   const filePath = credentialsPath(env);
   await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(credentials, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(filePath, `${JSON.stringify(contents, null, 2)}\n`, { mode: 0o600 });
   await chmod(filePath, 0o600);
+};
+
+// Credentials never live in a project directory or a shell profile — they
+// are written once by `stratus setup` and read on every run, 0600 so only
+// the owner can read them. Provider entries merge over the existing file,
+// so channel tokens (and anything else stored alongside) survive a
+// re-run of setup.
+export const saveCredentials = async (env: StateEnvironment, credentials: CredentialsFile): Promise<void> => {
+  const existing = await loadRawCredentialsFile(env);
+  for (const provider of ['anthropic', 'openai'] as const) {
+    if (credentials[provider]) {
+      existing[provider] = credentials[provider];
+    } else {
+      delete existing[provider];
+    }
+  }
+  await writeRawCredentialsFile(env, existing);
+};
+
+/**
+ * A Slack app/bot token pair for one agent. Channel tokens are gateway
+ * infrastructure secrets, not agent capabilities: they live in their own
+ * `channels` namespace of the credentials file and are NEVER resolved
+ * through the agent-scoped CredentialResolver — an agent's credential
+ * allowlist neither needs nor grants access to its own transport tokens.
+ */
+export interface SlackChannelCredential {
+  appToken: string;
+  botToken: string;
+}
+
+export interface ChannelCredentials {
+  /** Keyed by agent id — one Slack app (one bot identity) per agent. */
+  slack?: Record<string, SlackChannelCredential>;
+}
+
+export const loadChannelCredentials = async (env: StateEnvironment): Promise<ChannelCredentials> => {
+  const raw = await loadRawCredentialsFile(env);
+  const channels = raw.channels;
+  if (typeof channels !== 'object' || channels === null || Array.isArray(channels)) {
+    return {};
+  }
+  const slackRaw = (channels as Record<string, unknown>).slack;
+  if (typeof slackRaw !== 'object' || slackRaw === null || Array.isArray(slackRaw)) {
+    return {};
+  }
+  const slack: Record<string, SlackChannelCredential> = {};
+  for (const [agentId, entry] of Object.entries(slackRaw as Record<string, unknown>)) {
+    if (
+      typeof entry === 'object' && entry !== null && !Array.isArray(entry) &&
+      typeof (entry as SlackChannelCredential).appToken === 'string' &&
+      typeof (entry as SlackChannelCredential).botToken === 'string'
+    ) {
+      slack[agentId] = {
+        appToken: (entry as SlackChannelCredential).appToken,
+        botToken: (entry as SlackChannelCredential).botToken,
+      };
+    }
+  }
+  return Object.keys(slack).length > 0 ? { slack } : {};
+};
+
+export const saveChannelCredentials = async (
+  env: StateEnvironment,
+  channels: ChannelCredentials,
+): Promise<void> => {
+  const existing = await loadRawCredentialsFile(env);
+  existing.channels = channels;
+  await writeRawCredentialsFile(env, existing);
 };
 
 // Memory used to live under the working directory. Fold any such file into

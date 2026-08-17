@@ -15,6 +15,8 @@ Right now, the best way to try it is a local loop in the terminal or a minimal l
 - `@stratusagent/executor-local`, a concrete local child-process executor adapter
 - `@stratusagent/state`, shared state wiring: config resolution, credentials, the soul roster, file memory, provider construction
 - `@stratusagent/gateway`, stratusd — the always-on gateway with durable SQLite sessions and a per-provider runner pool
+- `@stratusagent/channels`, the channel contract: inbound messages, streaming outbound connections, session keys
+- `@stratusagent/channel-slack`, the Slack adapter — one Slack app per agent, Socket Mode, streaming replies via edits
 - `@stratusagent/cli`, the local CLI entrypoint
 
 ## Current status
@@ -24,6 +26,7 @@ This repo is early, but the core loop is complete.
 Today it is useful for:
 - talking with your agent in a persistent conversation (`stratus chat`) — the session carries across turns and remembered facts accumulate
 - running the whole roster as an always-on daemon (`stratus serve`) — durable sessions that survive restarts, each agent on its own provider and model, delegation between them, and a progress-based watchdog
+- talking to your agents in Slack — each agent is its own Slack app with its own avatar and presence, threads are resumable conversations, and replies stream via message edits (store tokens under `channels.slack.<agentId>` in `~/.stratus/credentials.json` and `stratus serve` brings them online; see `packages/channel-slack/README.md` for the 2-minute per-agent app setup)
 - running a multi-turn agent loop locally: provider → tools → provider until the model finishes
 - running real tool-calling sessions against Claude (via the official Anthropic SDK) or any OpenAI-compatible provider (tools are advertised with JSON schemas, tool calls execute locally, and results are fed back to the model)
 - defining agents as soul files — markdown personas you run with `stratus run --soul ./ava.md "hi"`
@@ -296,6 +299,8 @@ node packages/cli/dist/bin.js dashboard
 ```text
 packages/
   agents/
+  channel-slack/
+  channels/
   cli/
   core/
   executor-local/

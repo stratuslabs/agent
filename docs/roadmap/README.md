@@ -9,7 +9,7 @@ Steps are ordered by dependency, not by calendar. Numbers are stable identifiers
 | Step | Spec | Status | Delivers |
 | --- | --- | --- | --- |
 | 01 | [The gateway: `stratus serve`, durable sessions, streaming + cancellation](./01-gateway.md) | In review | An always-on process with sessions that survive restarts |
-| 02 | [Slack channel: contract package + per-agent bot identity](./02-slack-channel.md) | Not started | Talk to your agents in Slack, each with its own avatar and presence |
+| 02 | [Slack channel: contract package + per-agent bot identity](./02-slack-channel.md) | In review | Talk to your agents in Slack, each with its own avatar and presence |
 | 03 | [Permission engine: allowlists, whitelists, headless + remote approval](./03-permissions.md) | Not started | Agents can be trusted with real tools while unattended |
 | 04 | [Agent SDK tool bridge: tools + real history on the subscription path](./04-agent-sdk-bridge.md) | Not started | Claude-subscription agents get full tool calling under kernel policy |
 | 05 | [Control API + web dashboard](./05-control-api.md) | Not started | One API for every surface; a real chat/monitoring UI |
