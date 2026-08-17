@@ -34,7 +34,11 @@ import {
   DEFAULT_ANTHROPIC_MODEL,
   redactAnthropicRawTurns,
 } from '@stratusagent/provider-anthropic';
-import { createClaudeCodeProvider, type ClaudeCodeToolExecutor } from '@stratusagent/provider-claude-code';
+import {
+  createClaudeCodeProvider,
+  hasHostedToolSideEffects,
+  type ClaudeCodeToolExecutor,
+} from '@stratusagent/provider-claude-code';
 import {
   createRememberTool,
   defineAgent,
@@ -1367,6 +1371,12 @@ const createFallbackWrappedProvider = (
         try {
           return await primary.generate(request);
         } catch (error) {
+          // A turn that already executed tools must not be replayed on
+          // another provider — the side effects (a remembered fact, a
+          // command) would happen twice.
+          if (hasHostedToolSideEffects(error)) {
+            throw error;
+          }
           usingFallback = true;
           onFallback(error);
         }
@@ -1380,6 +1390,7 @@ const createRuntimeProvider = (
   config: RuntimeConfig,
   onFallback?: (error: unknown) => void,
   executeTool?: ClaudeCodeToolExecutor,
+  maxTurns?: number,
 ): ModelProvider => {
   if (config.provider === 'demo') {
     return createDemoProvider();
@@ -1387,12 +1398,12 @@ const createRuntimeProvider = (
 
   if (config.fallback) {
     const { fallback, ...primaryConfig } = config;
-    const primary = createRuntimeProvider(primaryConfig, undefined, executeTool);
+    const primary = createRuntimeProvider(primaryConfig, undefined, executeTool, maxTurns);
     const fallbackProvider = createRuntimeProvider({
       ...fallback,
       ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
       ...(config.fetch ? { fetch: config.fetch } : {}),
-    } as RuntimeConfig, undefined, executeTool);
+    } as RuntimeConfig, undefined, executeTool, maxTurns);
     return createFallbackWrappedProvider(primary, fallbackProvider, onFallback ?? (() => {}));
   }
 
@@ -1409,6 +1420,10 @@ const createRuntimeProvider = (
         // allowlists intact), so the subscription runtime is the same
         // agent as the API-key provider — memory.remember included.
         ...(executeTool ? { executeTool } : {}),
+        // An explicit --max-turns governs the Claude Code inner loop too;
+        // this provider consumes all tool calls inside one generate, so
+        // the outer runner never sees them.
+        ...(maxTurns !== undefined ? { maxTurns } : {}),
       });
     }
     return createAnthropicProvider({
@@ -1546,6 +1561,7 @@ const createAgentRuntime = async (
       }
       return hostedRunner.executeHostedToolCall(session, call);
     },
+    options.maxTurns,
   );
 
   const runner = new AgentRunner({

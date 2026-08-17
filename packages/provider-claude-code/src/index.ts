@@ -32,6 +32,26 @@ const MCP_SERVER_NAME = 'stratus';
  */
 export type ClaudeCodeToolExecutor = (session: Session, call: ToolCall) => Promise<ToolResult>;
 
+const HOSTED_SIDE_EFFECTS = Symbol.for('stratus.hostedToolSideEffects');
+
+/** Marks an error as coming from a turn that had already executed kernel tools. */
+export const markHostedToolSideEffects = <T>(error: T): T => {
+  if (typeof error === 'object' && error !== null) {
+    (error as Record<PropertyKey, unknown>)[HOSTED_SIDE_EFFECTS] = true;
+  }
+  return error;
+};
+
+/**
+ * True when this error aborted a turn that had already executed kernel
+ * tools. Retrying such a request on another provider would repeat those
+ * side effects (a fact remembered twice, a command run twice), so
+ * fallback wrappers must rethrow instead of failing over.
+ */
+export const hasHostedToolSideEffects = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null
+  && (error as Record<PropertyKey, unknown>)[HOSTED_SIDE_EFFECTS] === true;
+
 // MCP tool names must match ^[a-zA-Z0-9_-]{1,64}$, so kernel names like
 // "demo.echo" are flattened; the original name travels in the closure.
 const sanitizeToolName = (name: string): string => {
@@ -103,6 +123,19 @@ export const bridgeKernelTools = (
   session: Session,
   executeTool: ClaudeCodeToolExecutor,
 ): Array<SdkMcpToolDefinition<Record<string, z.ZodType>>> => {
+  // The kernel loop executes tools one at a time; hosted execution keeps
+  // that contract. Concurrent MCP calls would race a single interactive
+  // approval prompt — and each other's side effects.
+  let queue: Promise<unknown> = Promise.resolve();
+  const serialize = <T>(task: () => Promise<T>): Promise<T> => {
+    const run = queue.then(task, task);
+    queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+
   const used = new Set<string>();
   return descriptors.map((descriptor) => {
     const base = sanitizeToolName(descriptor.name);
@@ -116,11 +149,11 @@ export const bridgeKernelTools = (
       descriptor.description ?? `Stratus tool ${descriptor.name}`,
       zodShapeFor(descriptor.parameters),
       async (args) => {
-        const result = await executeTool(session, {
+        const result = await serialize(() => executeTool(session, {
           id: `claude-code:${randomUUID()}`,
           toolName: descriptor.name,
           input: (args ?? {}) as JsonObject,
-        });
+        }));
         return {
           content: [
             {
@@ -253,9 +286,18 @@ export const createClaudeCodeProvider = ({
   async generate(request: ProviderRequest) {
     // Kernel tools ride into the loop as an in-process MCP server; the
     // host executes each call (approvals and events included) and Claude
-    // Code continues the turn with the result.
-    const bridgedTools = executeTool && request.tools && request.tools.length > 0
-      ? bridgeKernelTools(request.tools, request.session, executeTool)
+    // Code continues the turn with the result. Executions are counted so
+    // a failure after side effects can refuse fallback replay.
+    let hostedToolRuns = 0;
+    const countedExecute: ClaudeCodeToolExecutor | undefined = executeTool
+      ? async (session, call) => {
+          hostedToolRuns += 1;
+          return executeTool(session, call);
+        }
+      : undefined;
+    const markIfSideEffects = <T>(error: T): T => (hostedToolRuns > 0 ? markHostedToolSideEffects(error) : error);
+    const bridgedTools = countedExecute && request.tools && request.tools.length > 0
+      ? bridgeKernelTools(request.tools, request.session, countedExecute)
       : undefined;
 
     const options: Options = {
@@ -311,11 +353,11 @@ export const createClaudeCodeProvider = ({
           'Claude Code could not be started. Install it (npm install -g @anthropic-ai/claude-code) and sign in with `claude`, or use an Anthropic API key instead.',
         );
       }
-      throw error;
+      throw markIfSideEffects(error);
     }
 
     if (resultText === undefined || resultText.length === 0) {
-      throw new Error('Claude Code returned an empty response.');
+      throw markIfSideEffects(new Error('Claude Code returned an empty response.'));
     }
 
     return { parts: [{ type: 'text' as const, text: resultText }] };
