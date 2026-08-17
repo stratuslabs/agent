@@ -110,6 +110,26 @@ export type ProviderPart =
   | { type: 'text'; text: string }
   | { type: 'tool-call'; call: ToolCall };
 
+/**
+ * A streamed fragment of an in-progress provider response. Text deltas carry
+ * output as it is generated; tool-call deltas announce that the model has
+ * started emitting a call (input may still be incomplete). A reset delta
+ * tells consumers to DISCARD every fragment streamed so far for this
+ * response — emitted when a provider abandons a partial attempt (e.g. a
+ * fallback wrapper retrying after the primary failed mid-stream), so
+ * renderers never fuse two attempts into one message.
+ */
+export type ProviderDelta =
+  | { type: 'text'; text: string }
+  | { type: 'tool-call'; toolName: string; inputFragment?: string }
+  /**
+   * The model is reasoning: a content-free progress signal so activity
+   * watchdogs see a healthy turn during long thinking stretches. The
+   * reasoning itself is deliberately never carried here.
+   */
+  | { type: 'thinking' }
+  | { type: 'reset' };
+
 export interface ToolDescriptor {
   name: string;
   description?: string;
@@ -203,6 +223,22 @@ export interface ProviderRequest {
   tools?: ToolDescriptor[];
   /** Agent-scoped long-term memory, newest last. */
   memory?: MemoryEntry[];
+  /**
+   * Streaming sink. Adapters that stream call this per fragment and MUST
+   * await the returned promise before the next call (backpressure); the
+   * runner drains every pending delta before emitting the final
+   * provider.response, so a delta can never arrive after the response.
+   * A single-promise generate() cannot stream on its own — this is the
+   * provider-to-runner streaming contract. Optional on both sides:
+   * non-streaming adapters ignore it.
+   */
+  onDelta?: (delta: ProviderDelta) => void | Promise<void>;
+  /**
+   * Abort signal for the turn. Adapters MUST cancel their underlying
+   * operation (HTTP request, SDK query) when it fires — racing the promise
+   * is not cancellation; the underlying work has to stop.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ProviderResponse {
@@ -214,21 +250,37 @@ export interface ModelProvider {
   generate(request: ProviderRequest): Promise<ProviderResponse>;
 }
 
+/**
+ * Ambient context for one tool execution. The abort signal is the turn's:
+ * executors kill in-flight subprocesses on abort, and long-running tools
+ * should observe it too.
+ */
+export interface ExecutionContext {
+  signal?: AbortSignal;
+}
+
 export interface Tool {
   name: string;
   description?: string;
   /** JSON Schema describing the tool's input, advertised to model providers. */
   parameters?: JsonObject;
-  execute(input: JsonObject, session: Session): Promise<JsonValue>;
+  execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue>;
 }
 
 export interface Executor {
-  execute(call: ToolCall, tool: Tool, session: Session): Promise<ToolResult>;
+  execute(call: ToolCall, tool: Tool, session: Session, context?: ExecutionContext): Promise<ToolResult>;
 }
 
 export interface ApprovalContext {
   session: Session;
   call: ToolCall;
+  /**
+   * The turn's abort signal. A policy that waits on a human MUST observe it:
+   * an aborted turn rejects the in-flight wait and invalidates its pending
+   * request, so a later approval can never execute a tool for a cancelled
+   * turn.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ApprovalPolicy {
@@ -238,6 +290,7 @@ export interface ApprovalPolicy {
 export type StratusEvent =
   | { type: 'session.created'; sessionId: string; agentId: string }
   | { type: 'session.updated'; sessionId: string; status: SessionStatus }
+  | { type: 'provider.delta'; sessionId: string; delta: ProviderDelta }
   | { type: 'provider.response'; sessionId: string; parts: ProviderPart[] }
   | { type: 'tool.called'; sessionId: string; call: ToolCall }
   | { type: 'tool.completed'; sessionId: string; result: ToolResult }
@@ -252,21 +305,41 @@ export interface EventBusOptions {
   onError?: (error: unknown, event: StratusEvent) => void;
 }
 
+export interface SubscribeOptions {
+  /**
+   * Run this handler before previously registered ones. Emission awaits
+   * handlers in order, so a slow consumer delays everyone after it — a
+   * liveness observer (an activity watchdog) must sit in front, or the
+   * activity it exists to notice reaches it only after the delay it is
+   * timing against.
+   */
+  prepend?: boolean;
+}
+
 export class EventBus {
-  private handlers = new Set<EventHandler>();
+  private handlers: EventHandler[] = [];
   private readonly onError: EventBusOptions['onError'];
 
   constructor(options: EventBusOptions = {}) {
     this.onError = options.onError;
   }
 
-  subscribe(handler: EventHandler): () => void {
-    this.handlers.add(handler);
-    return () => this.handlers.delete(handler);
+  subscribe(handler: EventHandler, options: SubscribeOptions = {}): () => void {
+    if (options.prepend) {
+      this.handlers.unshift(handler);
+    } else {
+      this.handlers.push(handler);
+    }
+    return () => {
+      const index = this.handlers.indexOf(handler);
+      if (index >= 0) {
+        this.handlers.splice(index, 1);
+      }
+    };
   }
 
   async emit(event: StratusEvent): Promise<void> {
-    for (const handler of this.handlers) {
+    for (const handler of [...this.handlers]) {
       try {
         await handler(event);
       } catch (error) {
@@ -350,9 +423,9 @@ export class ToolRegistry {
 }
 
 export class DefaultExecutor implements Executor {
-  async execute(call: ToolCall, tool: Tool, session: Session): Promise<ToolResult> {
+  async execute(call: ToolCall, tool: Tool, session: Session, context?: ExecutionContext): Promise<ToolResult> {
     try {
-      const output = await tool.execute(call.input, session);
+      const output = await tool.execute(call.input, session, context);
       return { callId: call.id, toolName: call.toolName, ok: true, output };
     } catch (error) {
       return {
@@ -377,12 +450,34 @@ export interface RunInput {
   agent: AgentDescriptor;
   userMessage: string;
   metadata?: JsonObject;
+  /** Aborting fails the turn cleanly; see RunAbortedError. */
+  signal?: AbortSignal;
 }
 
 export interface ResumeInput {
   sessionId: string;
   userMessage: string;
+  /** Aborting fails the turn cleanly; see RunAbortedError. */
+  signal?: AbortSignal;
 }
+
+/**
+ * Thrown when a run is stopped by its abort signal. The session ends up
+ * `failed` with this error's message as `lastError`, so an aborted turn is
+ * distinguishable from a genuine failure.
+ */
+export class RunAbortedError extends Error {
+  constructor(message = 'Run aborted') {
+    super(message);
+    this.name = 'RunAbortedError';
+  }
+}
+
+const throwIfAborted = (signal: AbortSignal | undefined): void => {
+  if (signal?.aborted) {
+    throw new RunAbortedError();
+  }
+};
 
 export interface AgentRunnerOptions {
   provider: ModelProvider;
@@ -398,6 +493,13 @@ export interface AgentRunnerOptions {
   memory?: AgentMemoryStore;
   /** Maximum provider turns per run before the session fails. */
   maxTurns?: number;
+  /**
+   * When true, the runner hands providers a delta sink and re-emits their
+   * fragments as provider.delta events. Off by default: streaming is
+   * additive, and consumers that render only final responses (one-shot CLI
+   * runs, tests) keep the simpler non-streaming provider path.
+   */
+  streaming?: boolean;
 }
 
 const DEFAULT_MAX_TURNS = 8;
@@ -412,6 +514,7 @@ export class AgentRunner {
   readonly agents: AgentRegistry;
   readonly memory: AgentMemoryStore | undefined;
   readonly maxTurns: number;
+  readonly streaming: boolean;
   private readonly options: AgentRunnerOptions;
 
   constructor(options: AgentRunnerOptions) {
@@ -425,6 +528,7 @@ export class AgentRunner {
     this.agents = options.agents ?? new AgentRegistry();
     this.memory = options.memory;
     this.maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
+    this.streaming = options.streaming ?? false;
   }
 
   async initialize(): Promise<void> {
@@ -455,7 +559,7 @@ export class AgentRunner {
     await this.bus.emit({ type: 'session.created', sessionId: session.id, agentId: session.agent.id });
     await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
 
-    return this.executeTurns(session);
+    return this.executeTurns(session, input.signal);
   }
 
   async resume(input: ResumeInput): Promise<Session> {
@@ -463,6 +567,13 @@ export class AgentRunner {
     if (!session) {
       throw new Error(`Session not found: ${input.sessionId}`);
     }
+
+    // Mid-turn saves make tool calls durable before their results; a
+    // daemon killed in between leaves a call with no result, and provider
+    // wire formats reject a tool call that is never answered. Close each
+    // dangling call with an explicit interrupted result so the durable
+    // conversation stays resumable.
+    this.reconcileInterruptedToolCalls(session);
 
     session.status = 'running';
     delete session.lastError;
@@ -473,9 +584,70 @@ export class AgentRunner {
       createdAt: new Date().toISOString(),
     });
 
-    await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
+    // The accepted input is durable BEFORE any provider work: a crash
+    // mid-turn must not silently lose a message the caller believes was
+    // received — restarting with the same session id recovers it.
+    await this.store.save(session);
+    const stored = await this.store.get(session.id);
+    const working = stored ?? session;
 
-    return this.executeTurns(session);
+    await this.bus.emit({ type: 'session.updated', sessionId: working.id, status: working.status });
+
+    return this.executeTurns(working, input.signal);
+  }
+
+  /**
+   * Appends a synthetic failed result directly after every tool call that
+   * has none — the durable trace of a turn interrupted between the call's
+   * save and its result's. The model sees an honest record ("interrupted,
+   * never ran to completion") instead of a wire-format violation, and a
+   * resume can decide to retry rather than assume the side effect landed.
+   */
+  private reconcileInterruptedToolCalls(session: Session): void {
+    // Matched by OCCURRENCE, not by id alone: providers can reuse ids
+    // (the OpenAI-compatible adapter synthesizes tool-call-1 whenever an
+    // endpoint omits them), and an earlier answered occurrence must not
+    // make a later dangling one look answered. The nth call with an id
+    // needs the nth result with that id, in transcript order.
+    const resultsAvailable = new Map<string, number>();
+    for (const message of session.messages) {
+      if (message.role === 'tool' && message.toolResult) {
+        const id = message.toolResult.callId;
+        resultsAvailable.set(id, (resultsAvailable.get(id) ?? 0) + 1);
+      }
+    }
+
+    const callsSeen = new Map<string, number>();
+    for (let index = 0; index < session.messages.length; index += 1) {
+      const message = session.messages[index];
+      if (message?.role !== 'assistant' || !message.toolCalls) {
+        continue;
+      }
+      for (const call of message.toolCalls) {
+        const occurrence = (callsSeen.get(call.id) ?? 0) + 1;
+        callsSeen.set(call.id, occurrence);
+        if (occurrence <= (resultsAvailable.get(call.id) ?? 0)) {
+          continue;
+        }
+        resultsAvailable.set(call.id, occurrence);
+        const result: ToolResult = {
+          callId: call.id,
+          toolName: call.toolName,
+          ok: false,
+          output: null,
+          error: 'Tool execution was interrupted before a result was recorded; it may not have run to completion.',
+        };
+        index += 1;
+        session.messages.splice(index, 0, {
+          id: `${session.id}:tool:${call.id}`,
+          role: 'tool',
+          name: call.toolName,
+          content: JSON.stringify(result),
+          createdAt: new Date().toISOString(),
+          toolResult: result,
+        });
+      }
+    }
   }
 
   /** Tool names this session's agent may use, or undefined for no limit. */
@@ -487,7 +659,7 @@ export class AgentRunner {
     return tools ? new Set(tools) : undefined;
   }
 
-  private async executeTurns(initialSession: Session): Promise<Session> {
+  private async executeTurns(initialSession: Session, signal?: AbortSignal): Promise<Session> {
     let session = initialSession;
 
     try {
@@ -497,21 +669,45 @@ export class AgentRunner {
         .filter((tool) => allowedTools === undefined || allowedTools.has(tool.name));
 
       for (let turn = 1; ; turn += 1) {
+        throwIfAborted(signal);
         if (turn > this.maxTurns) {
           throw new Error(`Session exceeded the maximum of ${this.maxTurns} provider turns.`);
         }
 
         const memory = this.memory ? await this.memory.list(session.agent.id) : [];
 
+        // Deltas re-emit on the bus through a serial chain that is drained
+        // before the final provider.response goes out — a delta arriving
+        // after the response would let a late edit overwrite final output.
+        let deltaChain: Promise<void> = Promise.resolve();
+        const onDelta = (delta: ProviderDelta): Promise<void> => {
+          const emission = deltaChain.then(() =>
+            this.bus.emit({ type: 'provider.delta', sessionId: session.id, delta }),
+          );
+          deltaChain = emission;
+          return emission;
+        };
+
         const response = await this.options.provider.generate({
           session,
           ...(tools.length > 0 ? { tools } : {}),
           ...(memory.length > 0 ? { memory } : {}),
+          ...(this.streaming ? { onDelta } : {}),
+          ...(signal ? { signal } : {}),
         });
-        await this.bus.emit({ type: 'provider.response', sessionId: session.id, parts: response.parts });
+        throwIfAborted(signal);
+        await deltaChain;
 
-        let sawToolCall = false;
-
+        // Record and SAVE the entire response — text and every tool call —
+        // before anything else happens with it. Two consumers depend on
+        // that order: provider replay state (the Anthropic raw-turn cache)
+        // carries the complete response, so a partially persisted call set
+        // would replay tool_use blocks that resume-time reconciliation
+        // cannot answer; and provider.response subscribers may publish the
+        // answer externally (a channel edit) the moment the event fires —
+        // an answer a user has seen must already be durable, or a crash
+        // resumes with history that contradicts what was delivered.
+        const calls: ToolCall[] = [];
         for (const part of response.parts) {
           if (part.type === 'text') {
             session.messages.push({
@@ -522,8 +718,7 @@ export class AgentRunner {
             });
             continue;
           }
-
-          sawToolCall = true;
+          calls.push(part.call);
           session.messages.push({
             id: `${session.id}:assistant:${session.messages.length + 1}`,
             role: 'assistant',
@@ -531,9 +726,17 @@ export class AgentRunner {
             createdAt: new Date().toISOString(),
             toolCalls: [part.call],
           });
+        }
+        const sawToolCall = calls.length > 0;
+        await this.store.save(session);
+        await this.bus.emit({ type: 'provider.response', sessionId: session.id, parts: response.parts });
 
-          const result = await this.executeToolCall(session, part.call);
+        for (const call of calls) {
+          throwIfAborted(signal);
+          const result = await this.executeToolCall(session, call, signal);
 
+          // The result lands immediately after execution, so side effects
+          // are never durable without their record.
           session.messages.push({
             id: `${session.id}:tool:${result.callId}`,
             role: 'tool',
@@ -542,6 +745,7 @@ export class AgentRunner {
             createdAt: new Date().toISOString(),
             toolResult: result,
           });
+          await this.store.save(session);
         }
 
         if (!sawToolCall) {
@@ -556,7 +760,13 @@ export class AgentRunner {
       await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
       await this.bus.emit({ type: 'session.completed', sessionId: session.id });
       return session;
-    } catch (error) {
+    } catch (caught) {
+      // An abort can surface first from any layer (the provider's cancelled
+      // request, an executor, this loop's own checks) — normalize so an
+      // aborted turn is always distinguishable from a genuine failure.
+      const error = signal?.aborted && !(caught instanceof RunAbortedError)
+        ? new RunAbortedError()
+        : caught;
       const lastError = error instanceof Error ? error.message : String(error);
       session.status = 'failed';
       session.lastError = lastError;
@@ -575,23 +785,62 @@ export class AgentRunner {
    * (e.g. the Claude Code runtime) but must run Stratus tools exactly as
    * if the kernel loop had called them.
    */
-  async executeHostedToolCall(session: Session, call: ToolCall): Promise<ToolResult> {
-    return this.executeToolCall(session, call);
+  async executeHostedToolCall(session: Session, call: ToolCall, context?: ExecutionContext): Promise<ToolResult> {
+    // Persistence is part of this seam's contract, not a courtesy: a
+    // provider-driven loop consumes tool results internally and returns
+    // only final text, so without recording here the durable session would
+    // omit every hosted tool action — including its side effects. The
+    // paired messages match what the kernel loop writes, in the same
+    // order: the call is saved before it runs and the result immediately
+    // after, so a daemon killed mid-tool never holds a session whose side
+    // effects happened without a recorded attempt.
+    session.messages.push({
+      id: `${session.id}:assistant:${session.messages.length + 1}`,
+      role: 'assistant',
+      content: '',
+      createdAt: new Date().toISOString(),
+      toolCalls: [call],
+    });
+    await this.store.save(session);
+
+    const result = await this.executeToolCall(session, call, context?.signal);
+
+    session.messages.push({
+      id: `${session.id}:tool:${result.callId}`,
+      role: 'tool',
+      name: result.toolName,
+      content: JSON.stringify(result),
+      createdAt: new Date().toISOString(),
+      toolResult: result,
+    });
+    await this.store.save(session);
+
+    return result;
   }
 
-  private async executeToolCall(session: Session, call: ToolCall): Promise<ToolResult> {
-    const allowedTools = this.allowedToolsFor(session);
-    if (allowedTools !== undefined && !allowedTools.has(call.toolName)) {
-      return {
+  private async executeToolCall(session: Session, call: ToolCall, signal?: AbortSignal): Promise<ToolResult> {
+    // Every tool call settles with exactly one event — tool.completed
+    // (executed or rejected, the result says which) or tool.denied. Event
+    // consumers tracking a response's outstanding calls (the gateway's
+    // phase-aware watchdog) count on rejected calls settling too.
+    const rejected = async (error: string): Promise<ToolResult> => {
+      const result: ToolResult = {
         callId: call.id,
         toolName: call.toolName,
         ok: false,
         output: null,
-        error: `Tool not permitted for agent ${session.agent.id}: ${call.toolName}`,
+        error,
       };
+      await this.bus.emit({ type: 'tool.completed', sessionId: session.id, result });
+      return result;
+    };
+
+    const allowedTools = this.allowedToolsFor(session);
+    if (allowedTools !== undefined && !allowedTools.has(call.toolName)) {
+      return rejected(`Tool not permitted for agent ${session.agent.id}: ${call.toolName}`);
     }
 
-    const approved = await this.approvals.approve({ session, call });
+    const approved = await this.approvals.approve({ session, call, ...(signal ? { signal } : {}) });
     if (!approved) {
       await this.bus.emit({ type: 'tool.denied', sessionId: session.id, call });
       return {
@@ -605,17 +854,12 @@ export class AgentRunner {
 
     const tool = this.tools.get(call.toolName);
     if (!tool) {
-      return {
-        callId: call.id,
-        toolName: call.toolName,
-        ok: false,
-        output: null,
-        error: `Tool not found: ${call.toolName}`,
-      };
+      return rejected(`Tool not found: ${call.toolName}`);
     }
 
+    throwIfAborted(signal);
     await this.bus.emit({ type: 'tool.called', sessionId: session.id, call });
-    const result = await this.executor.execute(call, tool, session);
+    const result = await this.executor.execute(call, tool, session, signal ? { signal } : undefined);
     await this.bus.emit({ type: 'tool.completed', sessionId: session.id, result });
     return result;
   }

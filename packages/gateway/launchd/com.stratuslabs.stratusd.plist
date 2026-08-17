@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd template for stratusd. launchd does NOT expand ~, so every path
+  below must be absolute. Install per user:
+
+    1. Replace __NODE__ with `which node` (must be Node 22.13+),
+       __STRATUS__ with `which stratus` (or the absolute path to
+       packages/cli/dist/bin.js in a checkout), and __HOME__ with your
+       home directory (`echo $HOME`).
+    2. mkdir -p "$HOME/Library/Logs/stratusd"
+    3. Copy to ~/Library/LaunchAgents/com.stratuslabs.stratusd.plist
+    4. launchctl load ~/Library/LaunchAgents/com.stratuslabs.stratusd.plist
+
+  One-liner for steps 1–3 from the repo root:
+
+    mkdir -p "$HOME/Library/Logs/stratusd" && \
+    sed -e "s|__NODE__|$(which node)|" -e "s|__STRATUS__|$(which stratus)|" \
+        -e "s|__HOME__|$HOME|" \
+        packages/gateway/launchd/com.stratuslabs.stratusd.plist \
+        > "$HOME/Library/LaunchAgents/com.stratuslabs.stratusd.plist"
+
+  State stays in ~/.stratus as usual.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.stratuslabs.stratusd</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__STRATUS__</string>
+    <string>serve</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/stratusd/stratusd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/stratusd/stratusd.err.log</string>
+</dict>
+</plist>

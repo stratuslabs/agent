@@ -1,5 +1,5 @@
 {
-  "name": "@stratusagent/agents",
+  "name": "@stratusagent/gateway",
   "version": "0.2.5",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,15 +11,22 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "launchd"
   ],
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc --noEmit --project tsconfig.test.json",
     "test": "node --test --experimental-strip-types"
   },
+  "engines": {
+    "node": ">=22.13"
+  },
   "dependencies": {
-    "@stratusagent/core": "workspace:*"
+    "@stratusagent/agents": "workspace:*",
+    "@stratusagent/core": "workspace:*",
+    "@stratusagent/executor-local": "workspace:*",
+    "@stratusagent/state": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.9.3"
@@ -28,14 +35,15 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",
-    "directory": "packages/agents"
+    "directory": "packages/gateway"
   },
-  "description": "Stratus agent identities: one-call creation with generated names and avatar themes, per-agent memory, delegation, and routing",
+  "description": "stratusd \u2014 the always-on Stratus Agent gateway: durable SQLite sessions, a per-provider runner pool, dispatcher-backed delegation, and an activity watchdog",
   "keywords": [
     "stratus",
     "agent",
     "ai",
-    "llm"
+    "llm",
+    "daemon"
   ],
   "publishConfig": {
     "access": "public"

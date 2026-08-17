@@ -341,7 +341,7 @@ export const createAnthropicProvider = ({
       const tools = createAnthropicTools(request.tools, mapping);
       const system = createSystemPrompt(request, systemPrompt);
 
-      const response = await client.messages.create({
+      const params = {
         model,
         max_tokens: maxTokens,
         ...(system ? { system } : {}),
@@ -349,7 +349,48 @@ export const createAnthropicProvider = ({
         // Claude Opus 5 thinks adaptively when `thinking` is omitted.
         ...(thinking === 'disabled' ? { thinking: { type: 'disabled' as const } } : {}),
         messages: createAnthropicMessages(request, mapping, rawTurns),
-      });
+      };
+      // The turn's abort signal cancels the underlying HTTP request — the
+      // kernel contract is that aborting stops the work, not just the wait.
+      const requestOptions = request.signal ? { signal: request.signal } : undefined;
+
+      let response;
+      if (request.onDelta) {
+        // Streaming path: iterate the stream and AWAIT the sink per
+        // fragment — the kernel contract's backpressure. A slow consumer
+        // (a throttled Slack edit) pauses this consumer loop instead of
+        // piling every remaining delta into an unbounded queue.
+        const stream = client.messages.stream(params, requestOptions);
+        const onDelta = request.onDelta;
+        // Tool input streams as JSON fragments after the block's start
+        // event. Forwarding them keeps consumers (and activity watchdogs)
+        // fed while Claude spends time generating a large tool argument.
+        const toolNamesByIndex = new Map<number, string>();
+        for await (const event of stream) {
+          if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+            await onDelta({ type: 'text', text: event.delta.text });
+          } else if (
+            event.type === 'content_block_delta'
+            && (event.delta.type === 'thinking_delta' || event.delta.type === 'signature_delta')
+          ) {
+            // Adaptive thinking can run longer than an idle timeout before
+            // the first visible text; forward progress without content.
+            await onDelta({ type: 'thinking' });
+          } else if (event.type === 'content_block_delta' && event.delta.type === 'input_json_delta') {
+            const toolName = toolNamesByIndex.get(event.index);
+            if (toolName !== undefined) {
+              await onDelta({ type: 'tool-call', toolName, inputFragment: event.delta.partial_json });
+            }
+          } else if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
+            const toolName = mapping.fromWire.get(event.content_block.name) ?? event.content_block.name;
+            toolNamesByIndex.set(event.index, toolName);
+            await onDelta({ type: 'tool-call', toolName });
+          }
+        }
+        response = await stream.finalMessage();
+      } else {
+        response = await client.messages.create(params, requestOptions);
+      }
 
       const { text, calls } = extractParts(response.content, mapping);
 

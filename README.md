@@ -13,6 +13,8 @@ Right now, the best way to try it is a local loop in the terminal or a minimal l
 - `@stratusagent/provider-claude-code`, the Claude subscription runtime on the Claude Agent SDK
 - `@stratusagent/executors`, helpers for execution behavior
 - `@stratusagent/executor-local`, a concrete local child-process executor adapter
+- `@stratusagent/state`, shared state wiring: config resolution, credentials, the soul roster, file memory, provider construction
+- `@stratusagent/gateway`, stratusd — the always-on gateway with durable SQLite sessions and a per-provider runner pool
 - `@stratusagent/cli`, the local CLI entrypoint
 
 ## Current status
@@ -21,6 +23,7 @@ This repo is early, but the core loop is complete.
 
 Today it is useful for:
 - talking with your agent in a persistent conversation (`stratus chat`) — the session carries across turns and remembered facts accumulate
+- running the whole roster as an always-on daemon (`stratus serve`) — durable sessions that survive restarts, each agent on its own provider and model, delegation between them, and a progress-based watchdog
 - running a multi-turn agent loop locally: provider → tools → provider until the model finishes
 - running real tool-calling sessions against Claude (via the official Anthropic SDK) or any OpenAI-compatible provider (tools are advertised with JSON schemas, tool calls execute locally, and results are fed back to the model)
 - defining agents as soul files — markdown personas you run with `stratus run --soul ./ava.md "hi"`
@@ -84,12 +87,12 @@ Two well-written example souls live in `examples/souls/` — they double as the 
 
 ## Local setup (fresh machine)
 
-Stratus Agent needs **Node.js 22.6+** (the test runner uses `--experimental-strip-types`) and **pnpm 10**.
+Stratus Agent needs **Node.js 22.13+** (the gateway's session store uses `node:sqlite`, which runs unflagged from 22.13; the test runner uses `--experimental-strip-types`) and **pnpm 10**.
 
 On macOS:
 
 ```bash
-brew install node             # installs the latest Node, which satisfies >= 22.6
+brew install node             # installs the latest Node, which satisfies >= 22.13
 # or, to pin the Node 22 line: nvm install 22
 # (avoid `brew install node@22` — it is keg-only, so node/corepack won't be on PATH without extra steps)
 corepack enable && corepack prepare pnpm@10.18.3 --activate
@@ -259,6 +262,8 @@ stratus run --provider openai --model gpt-4.1-mini "Say hello"
 stratus agents
 stratus dashboard
 stratus dashboard --port 4123 --host 127.0.0.1 --no-open
+stratus serve
+stratus serve --idle-timeout 120 --no-events
 ```
 
 Current options:
@@ -295,8 +300,10 @@ packages/
   core/
   executor-local/
   executors/
+  gateway/
   provider-anthropic/
   providers/
+  state/
 examples/
   souls/
 docs/

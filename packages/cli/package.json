@@ -1,6 +1,6 @@
 {
   "name": "@stratusagent/cli",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -23,12 +23,14 @@
     "test": "node --test --experimental-strip-types ./test/**/*.test.ts"
   },
   "dependencies": {
+    "@stratusagent/agents": "workspace:*",
     "@stratusagent/core": "workspace:*",
     "@stratusagent/executor-local": "workspace:*",
-    "@stratusagent/providers": "workspace:*",
+    "@stratusagent/gateway": "workspace:*",
     "@stratusagent/provider-anthropic": "workspace:*",
-    "@stratusagent/agents": "workspace:*",
-    "@stratusagent/provider-claude-code": "workspace:*"
+    "@stratusagent/provider-claude-code": "workspace:*",
+    "@stratusagent/providers": "workspace:*",
+    "@stratusagent/state": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.6.0",

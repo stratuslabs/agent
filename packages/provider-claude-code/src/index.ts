@@ -16,6 +16,7 @@ import type {
   ToolCall,
   ToolDescriptor,
   ToolResult,
+  ExecutionContext,
 } from '@stratusagent/core';
 
 export const DEFAULT_CLAUDE_CODE_MODEL = 'claude-opus-5';
@@ -30,7 +31,7 @@ const MCP_SERVER_NAME = 'stratus';
  * host owns approvals, events, allowlists, and the executor —
  * AgentRunner.executeHostedToolCall is the canonical implementation.
  */
-export type ClaudeCodeToolExecutor = (session: Session, call: ToolCall) => Promise<ToolResult>;
+export type ClaudeCodeToolExecutor = (session: Session, call: ToolCall, context?: ExecutionContext) => Promise<ToolResult>;
 
 const HOSTED_SIDE_EFFECTS = Symbol.for('stratus.hostedToolSideEffects');
 
@@ -122,6 +123,7 @@ export const bridgeKernelTools = (
   descriptors: readonly ToolDescriptor[],
   session: Session,
   executeTool: ClaudeCodeToolExecutor,
+  context?: ExecutionContext,
 ): Array<SdkMcpToolDefinition<Record<string, z.ZodType>>> => {
   // The kernel loop executes tools one at a time; hosted execution keeps
   // that contract. Concurrent MCP calls would race a single interactive
@@ -153,7 +155,7 @@ export const bridgeKernelTools = (
           id: `claude-code:${randomUUID()}`,
           toolName: descriptor.name,
           input: (args ?? {}) as JsonObject,
-        }));
+        }, context));
         return {
           content: [
             {
@@ -207,7 +209,17 @@ export interface ClaudeCodeProviderConfig {
   pathToClaudeCodeExecutable?: string;
   /** Test injection point; defaults to the real Agent SDK query(). */
   queryFn?: ClaudeCodeQueryFn;
+  /**
+   * Abort a query when the SDK stream yields nothing for this long — a
+   * wedged subprocess must not pin a turn (and a draining daemon) open
+   * forever. Inactivity-based, so a healthy long run that keeps producing
+   * messages stays alive. Sized above the local executor's timeout ceiling
+   * so a slow hosted tool never trips it. 0 disables. Default 10 minutes.
+   */
+  idleTimeoutMs?: number;
 }
+
+const DEFAULT_IDLE_TIMEOUT_MS = 600_000;
 
 const createSystemPrompt = (
   request: ProviderRequest,
@@ -236,6 +248,18 @@ const createSystemPrompt = (
   return sections.join('\n\n');
 };
 
+// Forwards the kernel's abort signal into an AbortController the Agent SDK
+// understands, so aborting a turn terminates the underlying query.
+const linkedAbortController = (signal: AbortSignal): AbortController => {
+  const controller = new AbortController();
+  if (signal.aborted) {
+    controller.abort();
+  } else {
+    signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+  return controller;
+};
+
 // The Agent SDK takes a single prompt string per query, so multi-turn
 // sessions are rendered as a transcript with the latest user message last.
 const createPrompt = (request: ProviderRequest): string => {
@@ -252,6 +276,18 @@ const createPrompt = (request: ProviderRequest): string => {
     if (message.role === 'tool') {
       lines.push(`[tool ${message.name ?? 'result'}] ${message.content}`);
       continue;
+    }
+    // A tool call is part of the assistant's turn: without it, the next
+    // query would see a result with no record of what was asked (e.g. a
+    // memory id but not the remembered fact) and reason over half the
+    // history. Its runner message carries empty content, so skip that.
+    if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
+      for (const call of message.toolCalls) {
+        lines.push(`[assistant called tool ${call.toolName}] ${JSON.stringify(call.input)}`);
+      }
+      if (message.content.length === 0) {
+        continue;
+      }
     }
     lines.push(`[${message.role}] ${message.content}`);
   }
@@ -281,6 +317,7 @@ export const createClaudeCodeProvider = ({
   maxTurns,
   pathToClaudeCodeExecutable,
   queryFn = sdkQuery as unknown as ClaudeCodeQueryFn,
+  idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
 }: ClaudeCodeProviderConfig = {}): ModelProvider => ({
   name,
   async generate(request: ProviderRequest) {
@@ -288,16 +325,59 @@ export const createClaudeCodeProvider = ({
     // host executes each call (approvals and events included) and Claude
     // Code continues the turn with the result. Executions are counted so
     // a failure after side effects can refuse fallback replay.
+    const controller = request.signal
+      ? linkedAbortController(request.signal)
+      : new AbortController();
+
+    // A wedged SDK subprocess yields nothing forever; the idle timer cuts
+    // it loose. It resets on every yielded message so healthy long runs
+    // stay alive, and it suspends entirely while a hosted tool (approval
+    // waits included) is executing — those phases legitimately produce no
+    // SDK output for as long as they need.
+    let timedOutIdle = false;
+    let idleTimer: NodeJS.Timeout | undefined;
+    let activeHostedTools = 0;
+    const suspendIdleTimer = (): void => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = undefined;
+      }
+    };
+    const resetIdleTimer = (): void => {
+      if (idleTimeoutMs <= 0 || activeHostedTools > 0) {
+        return;
+      }
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+      idleTimer = setTimeout(() => {
+        timedOutIdle = true;
+        controller.abort();
+      }, idleTimeoutMs);
+    };
+
     let hostedToolRuns = 0;
     const countedExecute: ClaudeCodeToolExecutor | undefined = executeTool
-      ? async (session, call) => {
+      ? async (session, call, context) => {
           hostedToolRuns += 1;
-          return executeTool(session, call);
+          activeHostedTools += 1;
+          suspendIdleTimer();
+          try {
+            return await executeTool(session, call, context);
+          } finally {
+            activeHostedTools -= 1;
+            resetIdleTimer();
+          }
         }
       : undefined;
     const markIfSideEffects = <T>(error: T): T => (hostedToolRuns > 0 ? markHostedToolSideEffects(error) : error);
+    // The abort signal riding into every hosted tool call is the provider's
+    // own controller — the union of the caller's cancellation and the idle
+    // timeout — so hosted work never outlives the query around it: a
+    // cancelled or stalled turn stops local commands and delegated runs
+    // too, and an approval granted after the abort can no longer execute.
     const bridgedTools = countedExecute && request.tools && request.tools.length > 0
-      ? bridgeKernelTools(request.tools, request.session, countedExecute)
+      ? bridgeKernelTools(request.tools, request.session, countedExecute, { signal: controller.signal })
       : undefined;
 
     const options: Options = {
@@ -319,6 +399,10 @@ export const createClaudeCodeProvider = ({
             allowedTools: bridgedTools.map((tool) => `mcp__${MCP_SERVER_NAME}__${tool.name}`),
           }
         : {}),
+      // Aborting the turn must stop the SDK query itself, not just our
+      // iteration over it — the kernel contract is that cancelled work
+      // ends. The same controller also carries the idle-timeout abort.
+      abortController: controller,
       // The env REPLACES the subprocess environment, so inherit ours and
       // then pin the auth: this provider is subscription-billed in both
       // modes (setup token or existing sign-in), so an ambient API key must
@@ -335,7 +419,9 @@ export const createClaudeCodeProvider = ({
     let resultText: string | undefined;
 
     try {
+      resetIdleTimer();
       for await (const message of queryFn({ prompt: createPrompt(request), options })) {
+        resetIdleTimer();
         if (message.type !== 'result') {
           continue;
         }
@@ -353,7 +439,16 @@ export const createClaudeCodeProvider = ({
           'Claude Code could not be started. Install it (npm install -g @anthropic-ai/claude-code) and sign in with `claude`, or use an Anthropic API key instead.',
         );
       }
+      if (timedOutIdle && !request.signal?.aborted) {
+        throw markIfSideEffects(
+          new Error(`Claude Code produced no output for ${idleTimeoutMs}ms; the run was aborted as stalled.`),
+        );
+      }
       throw markIfSideEffects(error);
+    } finally {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
     }
 
     if (resultText === undefined || resultText.length === 0) {

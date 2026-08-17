@@ -472,5 +472,521 @@ test('executeHostedToolCall runs a tool with approvals, allowlists, and events',
   assert.equal(blocked.ok, false);
   assert.match(blocked.error ?? '', /not permitted/);
 
-  assert.deepEqual(events, ['tool.called', 'tool.completed', 'tool.denied']);
+  // The blocked call settles with tool.completed too (carrying the failed
+  // result): every tool call emits exactly one settling event.
+  assert.deepEqual(events, ['tool.called', 'tool.completed', 'tool.denied', 'tool.completed']);
+});
+
+test('streaming runners drain every provider.delta before the final provider.response', async () => {
+  const order: string[] = [];
+  const bus = new EventBus();
+  bus.subscribe(async (event: StratusEvent) => {
+    if (event.type === 'provider.delta') {
+      // A deliberately slow subscriber: draining must still finish before
+      // the final response is delivered.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      order.push(`delta:${event.delta.type === 'text' ? event.delta.text : event.delta.toolName}`);
+      return;
+    }
+    if (event.type === 'provider.response') {
+      order.push('response');
+    }
+  });
+
+  const provider: ModelProvider = {
+    name: 'streaming-scripted',
+    async generate({ onDelta }) {
+      assert.ok(onDelta, 'streaming runner must hand providers a delta sink');
+      await onDelta({ type: 'text', text: 'Hel' });
+      await onDelta({ type: 'text', text: 'lo' });
+      await onDelta({ type: 'tool-call', toolName: 'demo.echo' });
+      return { parts: [{ type: 'text', text: 'Hello' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, bus, streaming: true });
+  await runner.initialize();
+  await runner.run({
+    sessionId: 'stream-1',
+    agent: { id: 'streamer', name: 'Streamer' },
+    userMessage: 'hi',
+  });
+
+  assert.deepEqual(order, ['delta:Hel', 'delta:lo', 'delta:demo.echo', 'response']);
+});
+
+test('non-streaming runners never hand providers a delta sink', async () => {
+  const provider: ModelProvider = {
+    name: 'plain',
+    async generate({ onDelta }) {
+      assert.equal(onDelta, undefined);
+      return { parts: [{ type: 'text', text: 'ok' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider });
+  await runner.initialize();
+  const session = await runner.run({
+    sessionId: 'plain-1',
+    agent: { id: 'plain', name: 'Plain' },
+    userMessage: 'hi',
+  });
+  assert.equal(session.status, 'completed');
+});
+
+test('aborting a run fails the session with a distinguishable reason', async () => {
+  const controller = new AbortController();
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'slow',
+    async execute(_input, _session, context) {
+      // The tool observes the turn's signal arriving through the executor.
+      assert.equal(context?.signal, controller.signal);
+      controller.abort();
+      return { done: true };
+    },
+  });
+
+  const provider: ModelProvider = {
+    name: 'tool-then-text',
+    async generate({ session, signal }) {
+      assert.equal(signal, controller.signal, 'provider must receive the turn signal');
+      if (session.messages.at(-1)?.role === 'tool') {
+        return { parts: [{ type: 'text', text: 'never reached' }] };
+      }
+      return {
+        parts: [
+          { type: 'tool-call', call: { id: 'call-abort', toolName: 'slow', input: {} } },
+        ],
+      };
+    },
+  };
+
+  const store = new InMemorySessionStore();
+  const runner = new AgentRunner({ provider, tools, store });
+  await runner.initialize();
+
+  await assert.rejects(
+    () =>
+      runner.run({
+        sessionId: 'abort-1',
+        agent: { id: 'aborter', name: 'Aborter' },
+        userMessage: 'go',
+        signal: controller.signal,
+      }),
+    (error: Error) => error.name === 'RunAbortedError',
+  );
+
+  const session = await store.get('abort-1');
+  assert.equal(session?.status, 'failed');
+  assert.equal(session?.lastError, 'Run aborted');
+});
+
+test('approval policies receive the turn signal in their context', async () => {
+  const controller = new AbortController();
+  const tools = new ToolRegistry();
+  tools.register({ name: 'gated', async execute() { return null; } });
+
+  let sawSignal: AbortSignal | undefined;
+  const provider: ModelProvider = {
+    name: 'one-call',
+    async generate({ session }) {
+      if (session.messages.at(-1)?.role === 'tool') {
+        return { parts: [{ type: 'text', text: 'done' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: 'c1', toolName: 'gated', input: {} } }] };
+    },
+  };
+
+  const runner = new AgentRunner({
+    provider,
+    tools,
+    approvals: {
+      async approve({ signal }) {
+        sawSignal = signal;
+        return true;
+      },
+    },
+  });
+  await runner.initialize();
+  await runner.run({
+    sessionId: 'approval-signal-1',
+    agent: { id: 'gatee', name: 'Gatee' },
+    userMessage: 'go',
+    signal: controller.signal,
+  });
+
+  assert.equal(sawSignal, controller.signal);
+});
+
+test('resumed input is durable before any provider work begins', async () => {
+  const store = new InMemorySessionStore();
+  let storedAtGenerate: string[] = [];
+
+  const provider: ModelProvider = {
+    name: 'inspector',
+    async generate({ session }) {
+      const stored = await store.get(session.id);
+      storedAtGenerate = (stored?.messages ?? []).filter((m) => m.role === 'user').map((m) => m.content);
+      if (storedAtGenerate.length > 1) {
+        throw new Error('provider crashed mid-turn');
+      }
+      return { parts: [{ type: 'text', text: 'first reply' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, store });
+  await runner.initialize();
+  await runner.run({ sessionId: 'durable-1', agent: { id: 'a', name: 'A' }, userMessage: 'first' });
+
+  await assert.rejects(() => runner.resume({ sessionId: 'durable-1', userMessage: 'second' }));
+  // The resumed message was already saved when the provider started —
+  // a crash after this point cannot lose accepted input.
+  assert.deepEqual(storedAtGenerate, ['first', 'second']);
+  const after = await store.get('durable-1');
+  assert.deepEqual(after?.messages.filter((m) => m.role === 'user').map((m) => m.content), ['first', 'second']);
+});
+
+test('hosted tool calls persist their paired messages to the stored session', async () => {
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  // The call must be durable before the tool runs — a daemon killed
+  // mid-tool must never hold a session whose side effects have no
+  // recorded attempt (a recovery would replay them).
+  let callDurableAtExecution = false;
+  tools.register({
+    name: 'demo.echo',
+    async execute(input) {
+      const mid = await store.get('hosted-1');
+      callDurableAtExecution = Boolean(mid?.messages.some((m) => m.toolCalls?.[0]?.id === 'hc-1'));
+      return { echoed: input };
+    },
+  });
+
+  const provider: ModelProvider = {
+    name: 'unused',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'unused' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools, store });
+  await runner.initialize();
+
+  const session = await store.create({
+    id: 'hosted-1',
+    agent: { id: 'a', name: 'A' },
+    status: 'running',
+    messages: [],
+  });
+
+  await runner.executeHostedToolCall(session, { id: 'hc-1', toolName: 'demo.echo', input: { text: 'hi' } });
+
+  const stored = await store.get('hosted-1');
+  const callMessage = stored?.messages.find((m) => m.toolCalls?.[0]?.id === 'hc-1');
+  const resultMessage = stored?.messages.find((m) => m.toolResult?.callId === 'hc-1');
+  assert.ok(callMessage, 'the tool call must be recorded in durable history');
+  assert.ok(resultMessage, 'the tool result must be recorded in durable history');
+  assert.equal(resultMessage.toolResult?.ok, true);
+  assert.ok(callDurableAtExecution, 'the tool call must be saved before the tool executes');
+});
+
+test('kernel tool activity is saved as it happens, not only at turn end', async () => {
+  const inner = new InMemorySessionStore();
+  const snapshots: Session[] = [];
+  const store = {
+    create: (input: Omit<Session, 'createdAt' | 'updatedAt'>) => inner.create(input),
+    get: (id: string) => inner.get(id),
+    save: async (session: Session) => {
+      snapshots.push(JSON.parse(JSON.stringify(session)) as Session);
+      await inner.save(session);
+    },
+  };
+
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'remember',
+    parameters: { type: 'object', properties: {} },
+    async execute() {
+      return { remembered: true };
+    },
+  });
+
+  const provider: ModelProvider = {
+    name: 'p',
+    async generate({ session }) {
+      if (session.messages.at(-1)?.role === 'tool') {
+        return { parts: [{ type: 'text', text: 'noted' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: 'call-9', toolName: 'remember', input: {} } }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools, store });
+  await runner.run({
+    sessionId: 'durable-tools-1',
+    agent: { id: 'a', name: 'A' },
+    userMessage: 'remember this',
+  });
+
+  // A save landed with the call recorded but not yet executed: a daemon
+  // killed mid-tool leaves a session that shows the attempt, so a resume
+  // does not replay the request and repeat the side effect.
+  const callSaved = snapshots.find((snapshot) => {
+    const last = snapshot.messages.at(-1);
+    return last?.role === 'assistant' && (last.toolCalls?.length ?? 0) > 0;
+  });
+  assert.ok(callSaved, 'the tool call must be saved before execution');
+  assert.equal(callSaved.status, 'running');
+
+  // And a save landed with the result, before the final provider turn.
+  const resultSaved = snapshots.find((snapshot) => {
+    const last = snapshot.messages.at(-1);
+    return last?.role === 'tool' && last.toolResult?.ok === true;
+  });
+  assert.ok(resultSaved, 'the tool result must be saved right after execution');
+  assert.equal(resultSaved.status, 'running');
+
+  assert.equal(snapshots.at(-1)?.status, 'completed');
+});
+
+test('rejected tool calls settle with a tool.completed event', async () => {
+  const events: StratusEvent[] = [];
+  const bus = new EventBus();
+  bus.subscribe((event) => {
+    events.push(event);
+  });
+
+  const provider: ModelProvider = {
+    name: 'p',
+    async generate({ session }) {
+      if (session.messages.at(-1)?.role === 'tool') {
+        return { parts: [{ type: 'text', text: 'fine' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: { id: 'call-10', toolName: 'ghost', input: {} } }] };
+    },
+  };
+
+  // Event consumers pairing a response's tool calls with settling events
+  // (the gateway's phase-aware watchdog) rely on rejections settling too.
+  const runner = new AgentRunner({ provider, bus });
+  const session = await runner.run({
+    sessionId: 'rejected-1',
+    agent: { id: 'a', name: 'A' },
+    userMessage: 'call a ghost',
+  });
+
+  assert.equal(session.status, 'completed');
+  const settled = events.find(
+    (event) => event.type === 'tool.completed' && event.result.callId === 'call-10',
+  );
+  assert.ok(settled, 'a rejected call must emit tool.completed');
+  assert.equal(settled.type === 'tool.completed' && settled.result.ok, false);
+  assert.match(settled.type === 'tool.completed' ? settled.result.error ?? '' : '', /Tool not found: ghost/);
+});
+
+test('resume reconciles a tool call whose result was never recorded', async () => {
+  const store = new InMemorySessionStore();
+  const now = new Date().toISOString();
+  // The durable shape a daemon crash leaves behind: the call was saved
+  // before execution, the result never landed.
+  await store.create({
+    id: 'dangling-1',
+    agent: { id: 'a', name: 'A' },
+    status: 'running',
+    messages: [
+      { id: 'u1', role: 'user', content: 'remember it', createdAt: now },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '',
+        createdAt: now,
+        toolCalls: [{ id: 'c-lost', toolName: 'remember', input: { fact: 'x' } }],
+      },
+    ],
+  });
+
+  let sawInterruptedResult = false;
+  const provider: ModelProvider = {
+    name: 'p',
+    async generate({ session }) {
+      // The provider must see a well-formed history: every call answered.
+      sawInterruptedResult = session.messages.some(
+        (m) => m.role === 'tool' && m.toolResult?.callId === 'c-lost' && m.toolResult.ok === false,
+      );
+      return { parts: [{ type: 'text', text: 'recovered' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, store });
+  const session = await runner.resume({ sessionId: 'dangling-1', userMessage: 'continue' });
+
+  assert.equal(session.status, 'completed');
+  assert.ok(sawInterruptedResult, 'the dangling call must be answered before provider work');
+  const callIndex = session.messages.findIndex((m) => m.toolCalls?.[0]?.id === 'c-lost');
+  const synthetic = session.messages[callIndex + 1];
+  assert.equal(synthetic?.role, 'tool');
+  assert.equal(synthetic?.toolResult?.callId, 'c-lost');
+  assert.equal(synthetic?.toolResult?.ok, false);
+  assert.match(synthetic?.toolResult?.error ?? '', /interrupted/i);
+  assert.equal(session.messages.at(-1)?.content, 'recovered');
+});
+
+test('every tool call in a response is durable before the first executes', async () => {
+  const inner = new InMemorySessionStore();
+  const snapshots: Session[] = [];
+  const store = {
+    create: (input: Omit<Session, 'createdAt' | 'updatedAt'>) => inner.create(input),
+    get: (id: string) => inner.get(id),
+    save: async (session: Session) => {
+      snapshots.push(JSON.parse(JSON.stringify(session)) as Session);
+      await inner.save(session);
+    },
+  };
+
+  const tools = new ToolRegistry();
+  let callSetDurableAtFirstExecution = false;
+  tools.register({
+    name: 'step',
+    parameters: { type: 'object', properties: {} },
+    async execute() {
+      // At the FIRST execution, both calls must already be saved —
+      // provider replay state carries the whole response, so a partially
+      // persisted call set replays tool uses that reconciliation could
+      // never answer.
+      if (!callSetDurableAtFirstExecution) {
+        const stored = await inner.get('multi-call-1');
+        const persistedCallIds = (stored?.messages ?? [])
+          .flatMap((m) => m.toolCalls ?? [])
+          .map((c) => c.id);
+        callSetDurableAtFirstExecution =
+          persistedCallIds.includes('mc-1') && persistedCallIds.includes('mc-2');
+      }
+      return { done: true };
+    },
+  });
+
+  const provider: ModelProvider = {
+    name: 'p',
+    async generate({ session }) {
+      if (session.messages.at(-1)?.role === 'tool') {
+        return { parts: [{ type: 'text', text: 'both ran' }] };
+      }
+      return {
+        parts: [
+          { type: 'tool-call', call: { id: 'mc-1', toolName: 'step', input: {} } },
+          { type: 'tool-call', call: { id: 'mc-2', toolName: 'step', input: {} } },
+        ],
+      };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools, store });
+  const session = await runner.run({
+    sessionId: 'multi-call-1',
+    agent: { id: 'a', name: 'A' },
+    userMessage: 'do two things',
+  });
+
+  assert.equal(session.status, 'completed');
+  assert.ok(callSetDurableAtFirstExecution, 'both calls must be saved before the first runs');
+  const resultIds = session.messages.filter((m) => m.role === 'tool').map((m) => m.toolResult?.callId);
+  assert.deepEqual(resultIds, ['mc-1', 'mc-2']);
+});
+
+test('reconciliation matches repeated tool-call ids by occurrence', async () => {
+  const store = new InMemorySessionStore();
+  const now = new Date().toISOString();
+  // Endpoints that omit ids get a synthesized one per response — the same
+  // id twice. The first occurrence was answered; the second is dangling.
+  await store.create({
+    id: 'dup-id-1',
+    agent: { id: 'a', name: 'A' },
+    status: 'running',
+    messages: [
+      { id: 'u1', role: 'user', content: 'step one', createdAt: now },
+      {
+        id: 'a1', role: 'assistant', content: '', createdAt: now,
+        toolCalls: [{ id: 'tool-call-1', toolName: 'step', input: { n: 1 } }],
+      },
+      {
+        id: 't1', role: 'tool', name: 'step', content: '{"ok":true}', createdAt: now,
+        toolResult: { callId: 'tool-call-1', toolName: 'step', ok: true, output: { n: 1 } },
+      },
+      {
+        id: 'a2', role: 'assistant', content: '', createdAt: now,
+        toolCalls: [{ id: 'tool-call-1', toolName: 'step', input: { n: 2 } }],
+      },
+    ],
+  });
+
+  let historyWellFormed = false;
+  const provider: ModelProvider = {
+    name: 'p',
+    async generate({ session }) {
+      // Every call occurrence must be directly followed by a result.
+      const dangling = session.messages.some((message, index) => {
+        if (message.role !== 'assistant' || !message.toolCalls?.length) {
+          return false;
+        }
+        return session.messages[index + 1]?.role !== 'tool';
+      });
+      historyWellFormed = !dangling;
+      return { parts: [{ type: 'text', text: 'resumed' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, store });
+  const session = await runner.resume({ sessionId: 'dup-id-1', userMessage: 'continue' });
+
+  assert.equal(session.status, 'completed');
+  assert.ok(historyWellFormed, 'every call occurrence must be answered before provider work');
+  const results = session.messages.filter((m) => m.role === 'tool' && m.toolResult?.callId === 'tool-call-1');
+  assert.equal(results.length, 2, 'the second occurrence needs its own result');
+  assert.equal(results[0]?.toolResult?.ok, true);
+  assert.equal(results[1]?.toolResult?.ok, false);
+  assert.match(results[1]?.toolResult?.error ?? '', /interrupted/i);
+});
+
+test('the response is durable before provider.response reaches subscribers', async () => {
+  const inner = new InMemorySessionStore();
+  const order: string[] = [];
+  const store = {
+    create: (input: Omit<Session, 'createdAt' | 'updatedAt'>) => inner.create(input),
+    get: (id: string) => inner.get(id),
+    save: async (session: Session) => {
+      const last = session.messages.at(-1);
+      order.push(`save:${last?.role}:${last?.content ?? ''}`);
+      await inner.save(session);
+    },
+  };
+
+  const bus = new EventBus();
+  bus.subscribe((event) => {
+    if (event.type === 'provider.response') {
+      // A channel could publish the answer the instant this fires — the
+      // store must already hold it.
+      order.push('response-event');
+    }
+  });
+
+  const provider: ModelProvider = {
+    name: 'p',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'the answer' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, store, bus });
+  await runner.run({
+    sessionId: 'durable-response-1',
+    agent: { id: 'a', name: 'A' },
+    userMessage: 'ask',
+  });
+
+  const saveIndex = order.indexOf('save:assistant:the answer');
+  const eventIndex = order.indexOf('response-event');
+  assert.ok(saveIndex >= 0, 'the text-only response must be saved');
+  assert.ok(eventIndex >= 0, 'provider.response must fire');
+  assert.ok(saveIndex < eventIndex, `the save must precede the event: ${JSON.stringify(order)}`);
 });

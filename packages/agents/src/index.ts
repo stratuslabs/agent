@@ -347,12 +347,26 @@ export const createRememberTool = (store: AgentMemoryStore): Tool => ({
 
 export const DELEGATE_TOOL_NAME = 'agent.delegate';
 
-export interface DelegateToolOptions {
+/**
+ * Runs a delegated sub-session. A plain runner works when every agent
+ * shares one provider; a host with per-agent provider routing (the
+ * gateway) supplies its own dispatcher so the target runs on the
+ * target's resolved provider and credentials — never the delegator's.
+ */
+export type DelegateDispatch = (input: {
+  sessionId: string;
+  agent: AgentDefinition;
+  userMessage: string;
+  metadata: JsonObject;
+  /** The parent turn's abort signal — a cancelled parent cancels the delegated run too. */
+  signal?: AbortSignal;
+}) => Promise<Session>;
+
+export type DelegateToolOptions = {
   registry: AgentRegistry;
-  runner: AgentRunner;
   /** Maximum delegation depth to stop orchestrator loops. Default 3. */
   maxDepth?: number;
-}
+} & ({ runner: AgentRunner; dispatch?: never } | { dispatch: DelegateDispatch; runner?: never });
 
 const DEFAULT_MAX_DELEGATION_DEPTH = 3;
 
@@ -364,8 +378,10 @@ const DEFAULT_MAX_DELEGATION_DEPTH = 3;
 export const createDelegateTool = ({
   registry,
   runner,
+  dispatch,
   maxDepth = DEFAULT_MAX_DELEGATION_DEPTH,
 }: DelegateToolOptions): Tool => {
+  const runDelegated: DelegateDispatch = dispatch ?? ((input) => runner.run(input));
   // Sub-session ids must be unique even when one orchestrator delegates to
   // the same target repeatedly, and must stay unique across tool rebuilds
   // sharing one SessionStore — so a counter alone is not enough.
@@ -384,7 +400,7 @@ export const createDelegateTool = ({
     },
     required: ['agent', 'prompt'],
   },
-  async execute(input: JsonObject, session: Session) {
+  async execute(input: JsonObject, session: Session, context) {
     const targetRef = typeof input.agent === 'string' ? input.agent : '';
     const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
     if (!targetRef || !prompt) {
@@ -407,7 +423,7 @@ export const createDelegateTool = ({
     }
 
     delegationCount += 1;
-    const result = await runner.run({
+    const result = await runDelegated({
       sessionId: `${session.id}:delegate:${target.id}:${depth + 1}:${uniqueSuffix()}`,
       agent: target,
       userMessage: prompt,
@@ -418,6 +434,9 @@ export const createDelegateTool = ({
           ? session.metadata.rootSessionId
           : session.id,
       },
+      // A cancelled parent turn cancels the delegated run with it —
+      // otherwise the parent cannot settle until the target gives up.
+      ...(context?.signal ? { signal: context.signal } : {}),
     });
 
     const reply = [...result.messages]

@@ -1,5 +1,5 @@
 {
-  "name": "@stratusagent/agents",
+  "name": "@stratusagent/state",
   "version": "0.2.5",
   "type": "module",
   "main": "./dist/index.js",
@@ -19,7 +19,12 @@
     "test": "node --test --experimental-strip-types"
   },
   "dependencies": {
-    "@stratusagent/core": "workspace:*"
+    "@stratusagent/agents": "workspace:*",
+    "@stratusagent/core": "workspace:*",
+    "@stratusagent/executor-local": "workspace:*",
+    "@stratusagent/provider-anthropic": "workspace:*",
+    "@stratusagent/provider-claude-code": "workspace:*",
+    "@stratusagent/providers": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.9.3"
@@ -28,9 +33,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",
-    "directory": "packages/agents"
+    "directory": "packages/state"
   },
-  "description": "Stratus agent identities: one-call creation with generated names and avatar themes, per-agent memory, delegation, and routing",
+  "description": "Shared Stratus state wiring: config resolution, credential storage, the soul roster, file-backed agent memory, and provider construction \u2014 used by the CLI and the gateway alike",
   "keywords": [
     "stratus",
     "agent",

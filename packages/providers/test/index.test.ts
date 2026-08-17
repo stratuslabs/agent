@@ -581,3 +581,53 @@ test('createOpenAICompatibleProvider preserves non-json HTTP error bodies', asyn
 
   await assert.rejects(() => provider.generate(createRequest()), /upstream proxy failure/);
 });
+
+test('a hung endpoint is bounded by the request timeout', async () => {
+  // An endpoint that accepts the request and never completes it must not
+  // wedge the turn (or a draining daemon) forever — the provider bounds
+  // every request even when the caller supplies no signal.
+  const provider = createOpenAICompatibleProvider({
+    model: 'm',
+    apiKey: 'k',
+    requestTimeoutMs: 50,
+    fetch: ((_url: unknown, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        // AbortSignal.timeout's own timer is unref'd; this one keeps the
+        // event loop alive while the "hung" request waits to be aborted.
+        const keepAlive = setTimeout(() => {}, 60_000);
+        init?.signal?.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(keepAlive);
+            reject(new DOMException('aborted', 'AbortError'));
+          },
+          { once: true },
+        );
+      })) as typeof fetch,
+  });
+
+  await assert.rejects(() => provider.generate(createRequest()), /timed out after 50ms/);
+});
+
+test('a caller abort is never reported as a provider timeout', async () => {
+  const controller = new AbortController();
+  const provider = createOpenAICompatibleProvider({
+    model: 'm',
+    apiKey: 'k',
+    requestTimeoutMs: 60_000,
+    fetch: ((_url: unknown, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('aborted', 'AbortError')),
+          { once: true },
+        );
+        controller.abort();
+      })) as typeof fetch,
+  });
+
+  await assert.rejects(
+    () => provider.generate({ ...createRequest(), signal: controller.signal }),
+    (error: Error) => error.name === 'AbortError',
+  );
+});

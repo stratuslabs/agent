@@ -160,3 +160,145 @@ test('local command executor preserves utf-8 characters split across stdout chun
   const output = result.output as Record<string, unknown>;
   assert.equal(output.stdout, '😀');
 });
+
+test('local command executor kills the child when the turn aborts', async () => {
+  const tool = defineLocalCommandTool({
+    name: 'sleepy',
+    createCommand() {
+      return {
+        command: process.execPath,
+        args: ['-e', 'setTimeout(() => console.log("survived"), 5000);'],
+      };
+    },
+  });
+
+  const controller = new AbortController();
+  const executor = createLocalCommandExecutor();
+  const startedAt = Date.now();
+  setTimeout(() => controller.abort(), 50);
+
+  const result = await executor.execute(
+    { id: 'call-abort', toolName: 'sleepy', input: {} },
+    tool,
+    session,
+    { signal: controller.signal },
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, `Command aborted: ${process.execPath}`);
+  const output = result.output as Record<string, unknown>;
+  assert.equal(output.aborted, true);
+  assert.equal(output.stdout, '');
+  // The child died with the abort, not with its own 5s timer.
+  assert.ok(Date.now() - startedAt < 4000);
+});
+
+test('cancellation kills the whole process tree, not just the direct child', async () => {
+  const tool = defineLocalCommandTool({
+    name: 'tree',
+    createCommand() {
+      // A shell whose grandchild would outlive a direct-child-only kill.
+      return {
+        command: 'sh',
+        args: ['-c', `${JSON.stringify(process.execPath)} -e "setTimeout(() => {}, 5000)" & wait`],
+      };
+    },
+  });
+
+  const controller = new AbortController();
+  const executor = createLocalCommandExecutor();
+  const startedAt = Date.now();
+  setTimeout(() => controller.abort(), 100);
+
+  const result = await executor.execute(
+    { id: 'call-tree', toolName: 'tree', input: {} },
+    tool,
+    session,
+    { signal: controller.signal },
+  );
+
+  assert.equal(result.ok, false);
+  const output = result.output as Record<string, unknown>;
+  assert.equal(output.aborted, true);
+  // The wait ended because the grandchild died with the group — well
+  // before its own 5s timer.
+  assert.ok(Date.now() - startedAt < 4000);
+});
+
+test('cancellation settles the turn even when createCommand never resolves', async () => {
+  // The factory runs before any process exists; the abort signal must be
+  // honored there too, or a cancelled turn (and a draining daemon) waits
+  // on it forever.
+  const tool = defineLocalCommandTool({
+    name: 'stuck.factory',
+    createCommand: () => new Promise(() => {}),
+  });
+
+  const executor = createLocalCommandExecutor();
+  const controller = new AbortController();
+  const pending = executor.execute(
+    { id: 'c-stuck', toolName: 'stuck.factory', input: {} },
+    tool,
+    session,
+    { signal: controller.signal },
+  );
+  setTimeout(() => controller.abort(), 20);
+
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? '', /aborted/i);
+});
+
+test('a command is not spawned when the signal fired during construction', async () => {
+  let spawned = 0;
+  const executor = createLocalCommandExecutor({
+    spawn: ((..._args: unknown[]) => {
+      spawned += 1;
+      throw new Error('must not spawn');
+    }) as never,
+  });
+
+  const controller = new AbortController();
+  const tool = defineLocalCommandTool({
+    name: 'late.factory',
+    createCommand: async () => {
+      controller.abort();
+      return { command: 'echo', args: ['hi'] };
+    },
+  });
+
+  const result = await executor.execute(
+    { id: 'c-late', toolName: 'late.factory', input: {} },
+    tool,
+    session,
+    { signal: controller.signal },
+  );
+
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? '', /aborted/i);
+  assert.equal(spawned, 0);
+});
+
+test('cancellation settles the turn even when parseResult never resolves', async () => {
+  // The subprocess exits cleanly, then the parser blocks: the turn's
+  // signal must settle this phase too, or the drain waits on it forever.
+  const tool = defineLocalCommandTool({
+    name: 'stuck.parser',
+    createCommand: () => ({ command: process.execPath, args: ['-e', ''] }),
+    parseResult: () => new Promise(() => {}),
+  });
+
+  const executor = createLocalCommandExecutor();
+  const controller = new AbortController();
+  const pending = executor.execute(
+    { id: 'c-parse', toolName: 'stuck.parser', input: {} },
+    tool,
+    session,
+    { signal: controller.signal },
+  );
+  setTimeout(() => controller.abort(), 100);
+
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? '', /aborted/i);
+});

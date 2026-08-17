@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "composite": true
+  },
+  "references": [
+    { "path": "../core" },
+    { "path": "../agents" },
+    { "path": "../executor-local" },
+    { "path": "../state" }
+  ],
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "test"]
+}

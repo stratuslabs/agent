@@ -6,6 +6,7 @@ import {
 import { StringDecoder } from 'node:string_decoder';
 
 import type {
+  ExecutionContext,
   Executor,
   JsonObject,
   JsonValue,
@@ -38,6 +39,8 @@ export interface LocalCommandExecution {
   stderr: string;
   exitCode: number;
   timedOut: boolean;
+  /** True when the turn's abort signal killed the child before completion. */
+  aborted: boolean;
   durationMs: number;
 }
 
@@ -45,6 +48,8 @@ export interface LocalCommandContext {
   call: ToolCall;
   session: Session;
   tool: LocalCommandTool;
+  /** The turn's abort signal, for parsers that do asynchronous work. */
+  signal?: AbortSignal;
 }
 
 export interface LocalCommandTool extends Tool {
@@ -112,18 +117,38 @@ export class LocalCommandExecutor implements Executor {
     this.maxTimeoutMs = options.maxTimeoutMs ?? DEFAULT_MAX_TIMEOUT_MS;
   }
 
-  async execute(call: ToolCall, tool: Tool, session: Session): Promise<ToolResult> {
+  async execute(call: ToolCall, tool: Tool, session: Session, context?: ExecutionContext): Promise<ToolResult> {
     if (!isLocalCommandTool(tool)) {
-      return this.fallback.execute(call, tool, session);
+      return this.fallback.execute(call, tool, session, context);
     }
 
     try {
-      const invocation = await tool.createCommand(call.input, session);
+      // The factory runs before any process exists, so the signal must be
+      // observed here too: a cancelled turn settles even if createCommand
+      // never does, and a command is never spawned after cancellation just
+      // to be killed — its startup side effects would already be real.
+      const signal = context?.signal;
+      if (signal?.aborted) {
+        return failureResult(call, `Command aborted before start: ${call.toolName}`);
+      }
+      const invocation = await raceWithAbort(tool.createCommand(call.input, session), signal, 'Command construction');
+      if (signal?.aborted) {
+        return failureResult(call, `Command aborted before start: ${call.toolName}`);
+      }
       const timeoutMs = resolveTimeoutMs(invocation.timeoutMs, this.defaultTimeoutMs, this.maxTimeoutMs);
       const execution = await runLocalCommand(invocation, {
         spawn: this.spawn,
         timeoutMs,
+        ...(context?.signal ? { signal: context.signal } : {}),
       });
+
+      if (execution.aborted) {
+        return failureResult(
+          call,
+          `Command aborted: ${execution.command}`,
+          serializeExecution(execution),
+        );
+      }
 
       if (execution.timedOut) {
         return failureResult(
@@ -142,8 +167,14 @@ export class LocalCommandExecutor implements Executor {
       }
 
       try {
+        // Parsing can be asynchronous too; a parser blocked at cancellation
+        // must not keep the settled subprocess's turn pending.
         const output = tool.parseResult
-          ? await tool.parseResult(execution, { call, session, tool })
+          ? await raceWithAbort(
+              tool.parseResult(execution, { call, session, tool, ...(signal ? { signal } : {}) }),
+              signal,
+              'Result parsing',
+            )
           : serializeExecution(execution);
         return successResult(call, output);
       } catch (error) {
@@ -158,6 +189,33 @@ export class LocalCommandExecutor implements Executor {
 export const createLocalCommandExecutor = (
   options: LocalCommandExecutorOptions = {},
 ): Executor => new LocalCommandExecutor(options);
+
+// Settles as soon as the signal fires, whether or not the wrapped work
+// ever does — an unresponsive command factory must not pin a cancelled
+// turn open.
+const raceWithAbort = async <T>(work: Promise<T> | T, signal: AbortSignal | undefined, what: string): Promise<T> => {
+  if (!signal) {
+    return work;
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(new Error(`${what} aborted.`));
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(work).then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+};
 
 const resolveTimeoutMs = (
   requested: number | undefined,
@@ -174,13 +232,14 @@ const resolveTimeoutMs = (
 
 const runLocalCommand = async (
   invocation: LocalCommandInvocation,
-  options: { spawn: LocalSpawn; timeoutMs: number },
+  options: { spawn: LocalSpawn; timeoutMs: number; signal?: AbortSignal },
 ): Promise<LocalCommandExecution> => {
   const startedAt = Date.now();
   const args = invocation.args ?? [];
   let stdout = '';
   let stderr = '';
   let timedOut = false;
+  let aborted = false;
   const stdoutDecoder = new StringDecoder('utf8');
   const stderrDecoder = new StringDecoder('utf8');
 
@@ -188,7 +247,23 @@ const runLocalCommand = async (
     cwd: invocation.cwd,
     env: invocation.env ? { ...process.env, ...invocation.env } : process.env,
     shell: invocation.shell ?? false,
+    // Own process group (POSIX), so cancellation and timeouts can kill the
+    // whole tree — a shell's or tool's own children included — rather than
+    // only the direct child.
+    ...(process.platform !== 'win32' ? { detached: true } : {}),
   });
+
+  const killTree = (): void => {
+    if (process.platform !== 'win32' && typeof child.pid === 'number') {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+        return;
+      } catch {
+        // Group already gone or not a leader; fall through to direct kill.
+      }
+    }
+    child.kill('SIGKILL');
+  };
 
   child.stdout.on('data', (chunk) => {
     stdout += stdoutDecoder.write(chunk);
@@ -206,9 +281,21 @@ const runLocalCommand = async (
 
   const timer = setTimeout(() => {
     timedOut = true;
-    child.kill('SIGKILL');
+    killTree();
   }, options.timeoutMs);
   timer.unref();
+
+  // The turn's abort signal kills the child directly — an aborted turn must
+  // leave no orphaned subprocess behind.
+  const onAbort = (): void => {
+    aborted = true;
+    killTree();
+  };
+  if (options.signal?.aborted) {
+    onAbort();
+  } else {
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+  }
 
   try {
     const exitCode = await waitForChild(child);
@@ -223,10 +310,12 @@ const runLocalCommand = async (
       stderr,
       exitCode,
       timedOut,
+      aborted,
       durationMs: Date.now() - startedAt,
     };
   } finally {
     clearTimeout(timer);
+    options.signal?.removeEventListener('abort', onAbort);
   }
 };
 
@@ -247,5 +336,6 @@ const serializeExecution = (execution: LocalCommandExecution): JsonValue => ({
   stderr: execution.stderr,
   exitCode: execution.exitCode,
   timedOut: execution.timedOut,
+  aborted: execution.aborted,
   durationMs: execution.durationMs,
 });

@@ -2823,3 +2823,37 @@ test('memory reads dedupe by entry id', async () => {
   assert.equal(entries.length, 1);
   assert.equal(entries[0]?.id, entry.id);
 });
+
+test('runCli serve starts the gateway, prints a ready line, and drains on shutdown', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-'));
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events'],
+    streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: {},
+      shutdownSignal: controller.signal,
+    },
+  });
+
+  assert.equal(code, 0);
+  assert.match(output.stdout, /stratusd ready — \d+ agent\(s\)/);
+  assert.match(output.stdout, /draining in-flight turns/);
+  assert.match(output.stdout, /stratusd stopped/);
+});
+
+test('parseCommand parses serve options', () => {
+  assert.deepEqual(parseCommand(['serve']), { command: 'serve', events: true });
+  assert.deepEqual(parseCommand(['serve', '--no-events', '--idle-timeout', '30', '--config', './x.json']), {
+    command: 'serve',
+    events: false,
+    idleTimeoutMs: 30000,
+    configPath: './x.json',
+  });
+  assert.throws(() => parseCommand(['serve', '--idle-timeout', '-2']), /Invalid value for --idle-timeout/);
+});

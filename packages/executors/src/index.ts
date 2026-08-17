@@ -1,4 +1,5 @@
 import type {
+  ExecutionContext,
   Executor,
   JsonValue,
   Session,
@@ -49,7 +50,7 @@ export const failureResult = (
 };
 
 export interface ExecutorDefinition {
-  execute(call: ToolCall, tool: Tool, session: Session): Promise<ToolResult>;
+  execute(call: ToolCall, tool: Tool, session: Session, context?: ExecutionContext): Promise<ToolResult>;
 }
 
 export const defineExecutor = ({ execute }: ExecutorDefinition): Executor => ({
@@ -74,9 +75,9 @@ export class DirectExecutor implements Executor {
     this.onError = options.onError;
   }
 
-  async execute(call: ToolCall, tool: Tool, session: Session): Promise<ToolResult> {
+  async execute(call: ToolCall, tool: Tool, session: Session, context?: ExecutionContext): Promise<ToolResult> {
     try {
-      const output = await tool.execute(call.input, session);
+      const output = await tool.execute(call.input, session, context);
       return successResult(call, output);
     } catch (error) {
       if (this.onError) {

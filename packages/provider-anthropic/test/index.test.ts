@@ -477,3 +477,117 @@ test('redactAnthropicRawTurns strips replay state from exported sessions', async
   const plain = createSession();
   assert.equal(redactAnthropicRawTurns(plain), plain);
 });
+
+test('streaming forwards tool-input fragments as tool-call deltas', async () => {
+  // Claude streams tool input as JSON fragments after the block's start
+  // event; each must reach the sink — consumers and activity watchdogs
+  // would otherwise see silence while a large argument is generated.
+  const sse = (events: Array<{ type: string }>): Response =>
+    new Response(
+      events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
+
+  const fetchImpl = (async () =>
+    sse([
+      {
+        type: 'message_start',
+        message: {
+          id: 'msg_1', type: 'message', role: 'assistant', model: DEFAULT_ANTHROPIC_MODEL,
+          content: [], stop_reason: null, stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      },
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: 'demo_echo', input: {} } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"text":' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '"hi"}' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 2 } },
+      { type: 'message_stop' },
+    ])) as typeof fetch;
+
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const session: Session = {
+    id: 's-frag',
+    agent: { id: 'a', name: 'A' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'go', createdAt: new Date().toISOString() }],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const deltas: Array<{ type: string; toolName?: string; inputFragment?: string }> = [];
+  const response = await provider.generate({
+    session,
+    tools: [{ name: 'demo.echo', parameters: { type: 'object', properties: {} } }],
+    onDelta: async (delta) => {
+      deltas.push(delta as { type: string });
+    },
+  } as ProviderRequest);
+
+  // One announcing delta (wire name mapped back), then one per fragment.
+  assert.deepEqual(deltas, [
+    { type: 'tool-call', toolName: 'demo.echo' },
+    { type: 'tool-call', toolName: 'demo.echo', inputFragment: '{"text":' },
+    { type: 'tool-call', toolName: 'demo.echo', inputFragment: '"hi"}' },
+  ]);
+  const call = response.parts.find((part) => part.type === 'tool-call');
+  assert.ok(call && call.type === 'tool-call');
+  assert.deepEqual(call.call.input, { text: 'hi' });
+});
+
+test('streaming forwards thinking progress without exposing the reasoning', async () => {
+  const sse = (events: Array<{ type: string }>): Response =>
+    new Response(
+      events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
+
+  const fetchImpl = (async () =>
+    sse([
+      {
+        type: 'message_start',
+        message: {
+          id: 'msg_1', type: 'message', role: 'assistant', model: DEFAULT_ANTHROPIC_MODEL,
+          content: [], stop_reason: null, stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      },
+      { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'private reasoning' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'the answer' } },
+      { type: 'content_block_stop', index: 1 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 2 } },
+      { type: 'message_stop' },
+    ])) as typeof fetch;
+
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const session: Session = {
+    id: 's-think',
+    agent: { id: 'a', name: 'A' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'go', createdAt: new Date().toISOString() }],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const deltas: Array<Record<string, unknown>> = [];
+  await provider.generate({
+    session,
+    onDelta: async (delta) => {
+      deltas.push(delta as Record<string, unknown>);
+    },
+  } as ProviderRequest);
+
+  // Thinking stretches surface as content-free progress signals, so an
+  // activity watchdog sees a healthy turn — and the reasoning never rides
+  // along.
+  assert.deepEqual(deltas, [
+    { type: 'thinking' },
+    { type: 'thinking' },
+    { type: 'text', text: 'the answer' },
+  ]);
+});
