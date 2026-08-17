@@ -243,8 +243,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (!config.soul) {
       return DEFAULT_STRATUS_AGENT.id;
     }
-    registerSource({ definition: config.soul.agent, soul: config.soul });
-    return config.soul.agent.id;
+    const id = config.soul.agent.id;
+    // The normal setup layout has the default soul in ~/.stratus/agents
+    // too: keep the roster registration — its soulPath drives per-dispatch
+    // refresh — and only register a pathless source for a config-only soul.
+    const existing = sources.get(id);
+    if (!existing?.soulPath) {
+      registerSource({ definition: config.soul.agent, soul: config.soul });
+    }
+    return id;
   };
 
   const loadRoster = async (): Promise<void> => {
@@ -527,7 +534,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       throw new RunAbortedError();
     }
 
-    const agentId = input.agentId ?? await defaultAgentId();
+    // A session pins its agent: when the caller names none, an existing
+    // conversation keeps the agent it was created with even if the
+    // configured default soul has changed since — only a brand-new session
+    // takes the current default. (Loaded here, before the watchdog, also
+    // because whether this turn streams depends on durable session state.)
+    const existing = await store.get(input.sessionId);
+    const agentId = input.agentId ?? existing?.agent.id ?? await defaultAgentId();
     const source = await refreshAgent(agentId);
     const agent = source.definition;
 
@@ -542,8 +555,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // different provider than it was chosen for.
     const selection: RuntimeSelection = { ...options.selection };
     let resolveEnv = env;
-    if (source.soulPath) {
-      selection.soul = source.soulPath;
+    // Pin demotion applies to every souled agent — roster souls (loaded
+    // via their path) and a config-only default soul alike; the latter is
+    // re-read by resolveRuntimeConfig from the config file itself.
+    if (source.soulPath || source.soul) {
+      if (source.soulPath) {
+        selection.soul = source.soulPath;
+      }
       const pins = source.soul;
       if (pins?.provider || pins?.model) {
         const processEnv = { ...(env.processEnv ?? process.env) };
@@ -589,11 +607,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       ...input.metadata,
     };
 
-    // Load before starting the watchdog: whether this turn actually streams
-    // depends on the session's durable state, not just the primary config —
-    // a session sticky-switched to a non-streaming fallback emits no deltas,
-    // and an idle timer there would be a wall-clock kill of healthy work.
-    const existing = await store.get(input.sessionId);
     if (existing && existing.agent.id !== agent.id) {
       throw new Error(
         `Session ${input.sessionId} belongs to agent ${existing.agent.id}, not ${agent.id} — sessions never cross agent identities.`,

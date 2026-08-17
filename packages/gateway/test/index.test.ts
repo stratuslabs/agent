@@ -810,3 +810,109 @@ test('an agentId-less dispatch answers as the configured default soul', async ()
   assert.notEqual(session.agent.id, 'stratus');
   assert.equal(session.status, 'completed');
 });
+
+test('a config-only default soul keeps its provider pin over the gateway selection', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The default soul lives outside the roster dir and pins Anthropic; the
+  // gateway was started with an OpenAI-wide default. The pin must win.
+  await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Nova.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
+
+  const urls: string[] = [];
+  const fetchImpl = (async (url: unknown) => {
+    urls.push(String(url));
+    if (String(url).includes('anthropic')) {
+      return anthropicSseText('nova on anthropic');
+    }
+    return openAiText('wrong provider');
+  }) as typeof fetch;
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { ANTHROPIC_API_KEY: 'sk-a', OPENAI_API_KEY: 'sk-o' },
+    fetch: fetchImpl,
+  };
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    selection: { provider: 'openai', model: 'model-o' },
+  });
+  await gateway.start();
+  const session = await gateway.dispatch({ sessionId: 'config-soul-pin-1', userMessage: 'hi' });
+  await gateway.stop();
+
+  assert.equal(session.agent.name, 'Nova');
+  assert.match(session.messages.at(-1)?.content ?? '', /nova on anthropic/);
+  assert.ok(urls.every((url) => !url.includes('openai')));
+});
+
+test('a roster-backed default soul keeps its soulPath (and its pins) when registered as default', async () => {
+  const home = await newHome();
+  // The normal setup layout: the default soul IS a roster soul. Its
+  // registration as the default must not shed the soulPath that drives
+  // per-dispatch refresh and pin demotion.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: '.stratus/agents/ava.md' }));
+
+  const urls: string[] = [];
+  const fetchImpl = (async (url: unknown) => {
+    urls.push(String(url));
+    if (String(url).includes('anthropic')) {
+      return anthropicSseText('ava on anthropic');
+    }
+    return openAiText('wrong provider');
+  }) as typeof fetch;
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { ANTHROPIC_API_KEY: 'sk-a', OPENAI_API_KEY: 'sk-o' },
+    fetch: fetchImpl,
+  };
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    selection: { provider: 'openai', model: 'model-o' },
+  });
+  await gateway.start();
+  const session = await gateway.dispatch({ sessionId: 'roster-default-1', userMessage: 'hi' });
+  await gateway.stop();
+
+  assert.equal(session.agent.name, 'Ava');
+  assert.match(session.messages.at(-1)?.content ?? '', /ava on anthropic/);
+  assert.ok(urls.every((url) => !url.includes('openai')));
+});
+
+test('an agentId-less session resumes with its stored agent after the default soul changes', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\n---\n\nYou are Nova.\n');
+  await writeFile(path.join(home, 'mira.md'), '---\nname: Mira\n---\n\nYou are Mira.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
+
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+
+  const opened = await gateway.dispatch({ sessionId: 'sticky-default-1', userMessage: 'hello' });
+  assert.equal(opened.agent.name, 'Nova');
+
+  // The operator repoints the default soul mid-flight. The existing
+  // conversation keeps its pinned agent; a NEW session takes the new one.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'mira.md' }));
+
+  const resumed = await gateway.dispatch({ sessionId: 'sticky-default-1', userMessage: 'still you?' });
+  const fresh = await gateway.dispatch({ sessionId: 'sticky-default-2', userMessage: 'hello' });
+  await gateway.stop();
+
+  assert.equal(resumed.agent.name, 'Nova');
+  assert.equal(resumed.status, 'completed');
+  assert.equal(
+    resumed.messages.filter((m) => m.role === 'user').length,
+    2,
+    'the conversation must continue, not restart',
+  );
+  assert.equal(fresh.agent.name, 'Mira');
+});
