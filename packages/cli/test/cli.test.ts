@@ -3704,3 +3704,82 @@ test('serve warns at startup when an env key demotes the subscription', async ()
   // watching — the costliest place for this to go unsaid.
   assert.match(output.stderr, /ANTHROPIC_API_KEY in your environment outranks the Claude subscription sign-in/);
 });
+
+test('serve warns for a roster agent whose soul pins the demoted provider', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // The daemon's own default is openai, but this agent pins anthropic and
+  // the gateway resolves its soul independently on every dispatch — so it
+  // is the agent being billed, and the default-only check missed it.
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\nprovider: anthropic\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai' }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    openai: { type: 'api_key', value: 'sk-openai' },
+    anthropic: { type: 'oauth_token', value: 'sk-ant-oat-x' },
+  }));
+
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 200);
+  await runCli({
+    argv: ['serve', '--no-events'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: { ANTHROPIC_API_KEY: 'sk-ant-env' },
+      shutdownSignal: controller.signal,
+    },
+  });
+
+  assert.match(output.stderr, /ANTHROPIC_API_KEY in your environment outranks the Claude subscription sign-in/);
+  // One line, however many agents share the cause.
+  assert.equal(output.stderr.match(/outranks the Claude subscription/g)?.length, 1);
+});
+
+test('doctor stops discovery at the first unreadable config', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  // A directory where a file is expected: readable() fails with EISDIR, and
+  // resolveConfigLocation throws rather than trying the global config.
+  await mkdir(path.join(project, 'stratus.config.json'), { recursive: true });
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: project, homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.match(output.stdout, /exists but cannot be read/);
+  assert.match(output.stdout, /discovery never reaches a lower-priority config/);
+  // The global file is never active for runs started here, so naming it as
+  // the config in use would point at the wrong file entirely.
+  assert.doesNotMatch(output.stdout, new RegExp(`config {4}${path.join(home, '.stratus', 'config.json').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+});
+
+test('doctor blames the setting that actually selected demo', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Setup writes the config, which is the lowest precedence of the three —
+  // so "run setup" here would change nothing and leave runs on demo.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: { STRATUS_PROVIDER: 'demo' },
+    },
+  });
+
+  assert.match(output.stdout, /Unset STRATUS_PROVIDER; it outranks both your config and any soul/);
+  assert.doesNotMatch(output.stdout, /Run `stratus setup` → Providers and sign in/);
+});

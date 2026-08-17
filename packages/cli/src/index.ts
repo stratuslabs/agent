@@ -83,6 +83,7 @@ import {
   type CredentialProviderName,
   type CredentialsFile,
   type RosterEntry,
+  type RuntimeSelection,
   type FallbackRuntime,
   type RuntimeConfig,
   type StoredCredential,
@@ -3407,6 +3408,7 @@ export const collectDoctorReport = async (
         { path: globalConfigPath(env), label: 'global' },
       ];
   const present: Array<{ path: string; label: string }> = [];
+  let unreadable: { path: string; label: string } | undefined;
   for (const candidate of candidates) {
     try {
       await readFile(candidate.path, 'utf8');
@@ -3414,8 +3416,14 @@ export const collectDoctorReport = async (
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT') {
-        problems.push(`${candidate.path} exists but cannot be read (${(error as Error).message}).`);
-      } else if (explicit) {
+        // resolveConfigLocation throws here rather than trying the next
+        // candidate, so discovery stops: a lower-priority file that a real
+        // run never reaches must not be reported as the config in use.
+        unreadable = candidate;
+        problems.push(`${candidate.path} exists but cannot be read (${(error as Error).message}). Every run fails here — discovery never reaches a lower-priority config.`);
+        break;
+      }
+      if (explicit) {
         // Discovery treats a missing candidate as "try the next one", but
         // an explicitly named config has no next one: a real run calls
         // loadConfigFile on it and fails. Reporting built-in defaults here
@@ -3427,8 +3435,8 @@ export const collectDoctorReport = async (
       }
     }
   }
-  const winner = present[0];
-  const shadowed = present.slice(1);
+  const winner = unreadable ?? present[0];
+  const shadowed = unreadable ? [] : present.slice(1);
   if (winner && shadowed.length > 0 && winner.label.startsWith('project')) {
     problems.push(
       `${winner.path} outranks ${shadowed.map((entry) => entry.path).join(' and ')} for runs started in this directory. `
@@ -3437,8 +3445,8 @@ export const collectDoctorReport = async (
   }
 
   let fileConfig: StratusConfigFile = {};
-  let configFatal = false;
-  if (winner) {
+  let configFatal = unreadable !== undefined;
+  if (winner && !unreadable) {
     try {
       fileConfig = await loadConfigFile(winner.path);
     } catch (error) {
@@ -3518,12 +3526,17 @@ export const collectDoctorReport = async (
     : { value: `${intendedProvider} (unreachable)`, source: providerSource };
 
   if (provider.value === 'demo') {
-    problems.push(
-      'Provider is the offline demo model, so replies are canned. '
-      + (fileConfig.provider === 'demo'
-        ? `Change "provider" in ${winner?.path} — or run \`stratus setup\` → Providers.`
-        : 'Run `stratus setup` → Providers and sign in, then Save & finish.'),
-    );
+    // Setup writes the config file, which is the LOWEST precedence of the
+    // three — so when an env var or a soul chose demo, "run setup" is
+    // advice that changes nothing and leaves every run on demo.
+    const fix = envProviderPick
+      ? `Unset ${envProviderPick.name}; it outranks both your config and any soul.`
+      : soul?.provider === 'demo'
+        ? `Change or remove the provider pin in ${soulPath}; a soul outranks the config file.`
+        : fileConfig.provider === 'demo'
+          ? `Change "provider" in ${winner?.path}, or run \`stratus setup\` → Providers.`
+          : 'Run `stratus setup` → Providers and sign in, then Save & finish.';
+    problems.push(`Provider is the offline demo model, so replies are canned. ${fix}`);
   }
 
   let model: DoctorSetting | undefined;
@@ -3998,22 +4011,38 @@ export const runServe = async (
 
   // A daemon is the costliest place for a silently demoted subscription:
   // every dispatch for as long as it runs, with nobody watching. The
-  // gateway resolves per dispatch, so this checks the default selection
-  // the same way a run would, once, at startup.
-  await resolveRuntimeConfig(
-    {
-      command: 'run',
-      prompt: '',
-      format: 'text',
-      events: false,
-      approvals: 'always',
-      ...(command.configPath ? { configPath: command.configPath } : {}),
-    },
-    env,
-  ).then((runtime) => warnOnCredentialOverride(runtime, streams, env)).catch(() => {
-    // Resolution problems are the gateway's to report as it starts; this
-    // check exists only for the billing surprise.
-  });
+  // gateway resolves each agent's soul independently on dispatch, so an
+  // agent pinning anthropic can pick up an environment key even when the
+  // daemon's own default is openai — checking only the default selection
+  // would miss exactly the agent that is being billed. Each distinct
+  // selection is resolved once here, and duplicate warnings are collapsed
+  // so a ten-agent roster does not print ten identical lines.
+  {
+    const warned = new Set<string>();
+    const collect = (line: string): void => {
+      if (!warned.has(line)) {
+        warned.add(line);
+        writeLine(streams.stderr, line);
+      }
+    };
+    const captured: CliStreams = {
+      stdout: { write: () => true },
+      stderr: { write: (chunk: string) => { collect(chunk.replace(/\n$/, '')); return true; } },
+    };
+    const selections: RuntimeSelection[] = [{}];
+    for (const entry of await loadRosterSouls(env, () => {})) {
+      selections.push({ presetSoul: entry.soul });
+    }
+    for (const selection of selections) {
+      await resolveStateRuntimeConfig(
+        { ...selection, ...(command.configPath ? { configPath: command.configPath } : {}) },
+        env,
+      ).then((runtime) => warnOnCredentialOverride(runtime, captured, env)).catch(() => {
+        // Resolution problems are the gateway's to report as it starts and
+        // per dispatch; this pass exists only for the billing surprise.
+      });
+    }
+  }
 
   const gateway = createGateway({
     env,
