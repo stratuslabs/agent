@@ -313,24 +313,60 @@ export const createClaudeCodeProvider = ({
     // host executes each call (approvals and events included) and Claude
     // Code continues the turn with the result. Executions are counted so
     // a failure after side effects can refuse fallback replay.
+    const controller = request.signal
+      ? linkedAbortController(request.signal)
+      : new AbortController();
+
+    // A wedged SDK subprocess yields nothing forever; the idle timer cuts
+    // it loose. It resets on every yielded message so healthy long runs
+    // stay alive, and it suspends entirely while a hosted tool (approval
+    // waits included) is executing — those phases legitimately produce no
+    // SDK output for as long as they need.
+    let timedOutIdle = false;
+    let idleTimer: NodeJS.Timeout | undefined;
+    let activeHostedTools = 0;
+    const suspendIdleTimer = (): void => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = undefined;
+      }
+    };
+    const resetIdleTimer = (): void => {
+      if (idleTimeoutMs <= 0 || activeHostedTools > 0) {
+        return;
+      }
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+      idleTimer = setTimeout(() => {
+        timedOutIdle = true;
+        controller.abort();
+      }, idleTimeoutMs);
+    };
+
     let hostedToolRuns = 0;
     const countedExecute: ClaudeCodeToolExecutor | undefined = executeTool
       ? async (session, call, context) => {
           hostedToolRuns += 1;
-          return executeTool(session, call, context);
+          activeHostedTools += 1;
+          suspendIdleTimer();
+          try {
+            return await executeTool(session, call, context);
+          } finally {
+            activeHostedTools -= 1;
+            resetIdleTimer();
+          }
         }
       : undefined;
     const markIfSideEffects = <T>(error: T): T => (hostedToolRuns > 0 ? markHostedToolSideEffects(error) : error);
-    // The request's abort signal rides into every hosted tool call, so a
-    // cancelled turn stops local commands and delegated runs too — not
-    // just the SDK query around them.
+    // The abort signal riding into every hosted tool call is the provider's
+    // own controller — the union of the caller's cancellation and the idle
+    // timeout — so hosted work never outlives the query around it: a
+    // cancelled or stalled turn stops local commands and delegated runs
+    // too, and an approval granted after the abort can no longer execute.
     const bridgedTools = countedExecute && request.tools && request.tools.length > 0
-      ? bridgeKernelTools(request.tools, request.session, countedExecute, request.signal ? { signal: request.signal } : undefined)
+      ? bridgeKernelTools(request.tools, request.session, countedExecute, { signal: controller.signal })
       : undefined;
-
-    const controller = request.signal
-      ? linkedAbortController(request.signal)
-      : new AbortController();
 
     const options: Options = {
       model,
@@ -369,24 +405,6 @@ export const createClaudeCodeProvider = ({
     };
 
     let resultText: string | undefined;
-
-    // A wedged SDK subprocess yields nothing forever; the idle timer cuts
-    // it loose. It resets on every yielded message so healthy long runs
-    // stay alive, and its firing is distinguishable from a caller abort.
-    let timedOutIdle = false;
-    let idleTimer: NodeJS.Timeout | undefined;
-    const resetIdleTimer = (): void => {
-      if (idleTimeoutMs <= 0) {
-        return;
-      }
-      if (idleTimer) {
-        clearTimeout(idleTimer);
-      }
-      idleTimer = setTimeout(() => {
-        timedOutIdle = true;
-        controller.abort();
-      }, idleTimeoutMs);
-    };
 
     try {
       resetIdleTimer();

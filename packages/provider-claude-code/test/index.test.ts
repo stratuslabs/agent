@@ -320,3 +320,43 @@ test('a wedged SDK stream is aborted after the idle timeout', async () => {
     /no output for 50ms/,
   );
 });
+
+
+test('the idle timer suspends across hosted tool waits and its abort reaches hosted work', async () => {
+  // A hosted tool (or approval wait) longer than the idle timeout is
+  // legitimate silence: the timer must suspend around it and resume
+  // guarding the stream afterwards. And the signal handed to hosted work
+  // is the provider's own controller — the union of caller aborts and the
+  // idle timeout — so a stalled query can never leave a hosted operation
+  // running behind it.
+  const toolSignals: Array<AbortSignal | undefined> = [];
+  const provider = createClaudeCodeProvider({
+    idleTimeoutMs: 60,
+    executeTool: async (_session, call, context) => {
+      toolSignals.push(context?.signal);
+      // 3x the idle timeout — survives only if the timer suspended.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return { callId: call.id, toolName: call.toolName, ok: true, output: { echoed: true } };
+    },
+    queryFn: ({ options }) => (async function* () {
+      const servers = options?.mcpServers as
+        | Record<string, { instance?: { _registeredTools?: Record<string, { handler: (a: unknown, b: unknown) => Promise<unknown> }> } }>
+        | undefined;
+      const handler = servers?.stratus?.instance?._registeredTools?.demo_echo?.handler;
+      assert.ok(handler, 'the bridged tool must be registered on the MCP server');
+      // Simulate the SDK executing the hosted tool mid-turn.
+      await handler({}, {});
+      yield { type: 'result', subtype: 'success', result: 'survived the slow tool' } as never;
+    })(),
+  });
+
+  const response = await provider.generate({
+    session: createSession(),
+    tools: [{ name: 'demo.echo', parameters: { type: 'object', properties: {} } }],
+  } as never);
+
+  assert.equal((response.parts[0] as { text: string }).text, 'survived the slow tool');
+  const signal = toolSignals[0];
+  assert.ok(signal, 'hosted tools must receive the abort signal even without a caller signal');
+  assert.equal(signal.aborted, false, 'the idle timer must not fire during a hosted tool wait');
+});
