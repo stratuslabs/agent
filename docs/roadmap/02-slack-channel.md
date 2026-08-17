@@ -22,7 +22,7 @@ This is the first real front door for a running fleet, and the forcing function 
   - Session key convention: `slack:<agent-id>:<team>:<channel>:<thread_ts>` (DMs: the DM channel id) passed to `gateway.dispatch` — thread = conversation, resumable across daemon restarts (from step 01). The agent id is part of the key: two agents mentioned in the same thread hold two independent sessions, and the gateway rejects a dispatch whose stored session belongs to a different agent than the one addressed — a session never crosses agent identities.
   - Streaming replies: post a placeholder, then edit on `provider.delta` batches (throttled to respect `chat.update` rate limits), finalize on completion. Typing indicator held for the whole turn.
   - Routing: mention/DM of an agent's bot goes to that agent directly; `createAgentRouter` (already in `@stratusagent/agents`) covers shared-channel rules and fallback.
-- Gateway config: `channels.slack.agents: [{ agentId, appToken, botToken }]`, tokens resolved through the existing `CredentialResolver` seam so they live in `~/.stratus/credentials.json`, not in config plaintext.
+- Gateway config: `channels.slack.agents: [{ agentId, appToken, botToken }]`. App and bot tokens are **gateway infrastructure secrets, not agent capabilities**: they resolve through a service-credential namespace owned by the gateway (a `channels` section of `~/.stratus/credentials.json`), never through the agent-scoped `CredentialResolver` seam — an agent's credential allowlist neither needs nor grants access to its own transport tokens.
 
 **Out:** any other channel adapter; slash commands; Slack approval buttons (that lands with step 03); multi-workspace per agent.
 
