@@ -269,3 +269,36 @@ test('config file errors are typed and preserve the underlying fs code', async (
     (error: unknown) => error instanceof ConfigFileError,
   );
 });
+
+test('the fallback switch persists before the fallback attempt begins', async () => {
+  const { createFallbackWrappedProvider, FALLBACK_ACTIVE_METADATA_KEY } = await import('../src/index.ts');
+  const session = {
+    id: 'durable-switch',
+    agent: { id: 'a', name: 'A' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  } as { id: string; metadata?: Record<string, unknown> };
+
+  const order: string[] = [];
+  const primary = { name: 'p', async generate() { throw new Error('down'); } };
+  const fallback = {
+    name: 'f',
+    async generate() {
+      order.push('fallback');
+      return { parts: [{ type: 'text' as const, text: 'ok' }] };
+    },
+  };
+
+  // A daemon killed while the fallback is in flight must find the switch
+  // already durable on restart — persistence cannot wait for the turn's
+  // next save.
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, () => {}, async (persisted) => {
+    order.push('persist');
+    assert.equal((persisted as { metadata?: Record<string, unknown> }).metadata?.[FALLBACK_ACTIVE_METADATA_KEY], true);
+  });
+  await wrapped.generate({ session } as never);
+
+  assert.deepEqual(order, ['persist', 'fallback']);
+});

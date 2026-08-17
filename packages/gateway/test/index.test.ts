@@ -1263,3 +1263,45 @@ test('generic credentials survive when the soul pins the config-file provider', 
   assert.match(session.messages.at(-1)?.content ?? '', /ava with the generic key/);
   assert.ok(authHeaders.some((header) => header === 'sk-generic'));
 });
+
+test('the sticky-fallback switch is durable while the fallback is still in flight', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    model: 'model-p',
+    fallbackModel: 'model-f',
+    fallbackProvider: 'openai',
+  }));
+
+  const fetchImpl = (async (url: unknown) => {
+    if (String(url).includes('anthropic')) {
+      return new Response(
+        JSON.stringify({ error: { type: 'invalid_request_error', message: 'primary down' } }),
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    // The fallback is slow: the switch must already be durable meanwhile.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return openAiText('slow fallback reply');
+  }) as typeof fetch;
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { ANTHROPIC_API_KEY: 'sk-a', OPENAI_API_KEY: 'sk-o' },
+    fetch: fetchImpl,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+
+  const pending = gateway.dispatch({ sessionId: 'durable-switch-1', userMessage: 'go' });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const midFlight = await gateway.store.get('durable-switch-1');
+  assert.equal(midFlight?.metadata?.fallbackActive, true, 'the switch must be durable before the fallback returns');
+
+  const session = await pending;
+  await gateway.stop();
+  assert.equal(session.status, 'completed');
+  assert.match(session.messages.at(-1)?.content ?? '', /slow fallback reply/);
+});

@@ -399,6 +399,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         return hostedRunner.executeHostedToolCall(session, call, context);
       },
       options.maxTurns,
+      // The sticky-fallback switch is durable the moment it happens, not
+      // when the turn's next save lands — a daemon killed mid-fallback
+      // must not retry the primary on restart.
+      (session) => store.save(session),
     );
 
     const runner = new AgentRunner({

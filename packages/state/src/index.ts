@@ -9,6 +9,7 @@ import type {
   JsonValue,
   MemoryEntry,
   ModelProvider,
+  Session,
 } from '@stratusagent/core';
 import { parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import { defineLocalCommandTool } from '@stratusagent/executor-local';
@@ -969,6 +970,7 @@ export const createFallbackWrappedProvider = (
   primary: ModelProvider,
   fallback: ModelProvider,
   onFallback: (error: unknown) => void,
+  persistSession?: (session: Session) => Promise<void>,
 ): ModelProvider => {
   const fallbackSessions = new Set<string>();
 
@@ -996,6 +998,18 @@ export const createFallbackWrappedProvider = (
           fallbackSessions.add(request.session.id);
           (request.session.metadata ??= {})[FALLBACK_ACTIVE_METADATA_KEY] = true;
           onFallback(error);
+          // The switch is durable BEFORE the fallback attempt begins: a
+          // daemon killed while the fallback is in flight must not retry
+          // the primary on restart — stickiness is the contract.
+          // Best-effort: if the save itself fails, the in-memory
+          // stickiness still covers this process's lifetime.
+          if (persistSession) {
+            try {
+              await persistSession(request.session);
+            } catch {
+              // Served anyway; the next runner save retries persistence.
+            }
+          }
           // A reset always precedes the fallback attempt when a sink is
           // attached: it discards whatever partial primary output the
           // consumer buffered, and it is the one in-band signal that this
@@ -1017,6 +1031,7 @@ export const createRuntimeProvider = (
   onFallback?: (error: unknown) => void,
   executeTool?: ClaudeCodeToolExecutor,
   maxTurns?: number,
+  persistSession?: (session: Session) => Promise<void>,
 ): ModelProvider => {
   if (config.provider === 'demo') {
     return createDemoProvider();
@@ -1030,7 +1045,7 @@ export const createRuntimeProvider = (
       ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
       ...(config.fetch ? { fetch: config.fetch } : {}),
     } as RuntimeConfig, undefined, executeTool, maxTurns);
-    return createFallbackWrappedProvider(primary, fallbackProvider, onFallback ?? (() => {}));
+    return createFallbackWrappedProvider(primary, fallbackProvider, onFallback ?? (() => {}), persistSession);
   }
 
   if (config.provider === 'anthropic') {
