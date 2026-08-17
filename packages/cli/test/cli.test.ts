@@ -3178,3 +3178,150 @@ test('the Channels menu follows STRATUS_SOUL over the configured soul', async ()
   assert.doesNotMatch(output.stdout, /Configured \(configured\)/);
   assert.match(output.stderr, /STRATUS_SOUL points at .*override\.md/);
 });
+
+test('doctor reports the resolved provider and where it came from', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  const soulPath = path.join(agentsDir, 'ava.md');
+  await writeFile(soulPath, '---\nname: Ava\n---\n\nYou are Ava.\n');
+  const configPath = path.join(home, '.stratus', 'config.json');
+  await writeFile(configPath, JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5', soul: soulPath }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 0, 'a healthy setup exits 0');
+  // Every setting names the file that decided it — the whole point.
+  assert.match(output.stdout, /provider {2}anthropic/);
+  assert.match(output.stdout, new RegExp(`from ${configPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(output.stdout, /model {5}claude-opus-5/);
+  assert.match(output.stdout, /agent {5}Ava \(ava\)/);
+  assert.match(output.stdout, /anthropic API key/);
+  assert.match(output.stdout, /No problems found\./);
+});
+
+test('doctor explains a demo provider instead of leaving it a mystery', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A stored sign-in does not select a provider — the config does. This is
+  // the shape that makes a signed-in user think Claude is broken.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 1, 'problems make doctor exit non-zero');
+  assert.match(output.stdout, /Provider is the offline demo model/);
+  assert.match(output.stdout, /stratus setup/);
+});
+
+test('doctor flags an environment key that demotes a subscription sign-in', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-x' } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      // Outranks the stored token, so the plan is silently not used.
+      processEnv: { ANTHROPIC_API_KEY: 'sk-ant-from-env' },
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.match(output.stdout, /billed per token instead of through your plan/);
+  assert.match(output.stdout, /Unset ANTHROPIC_API_KEY/);
+});
+
+test('doctor names the project config that outranks the global one', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  const shadow = path.join(project, 'stratus.config.json');
+  await writeFile(shadow, JSON.stringify({ model: 'gpt-4.1-mini' }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: project, homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 1);
+  // The project file has no provider key, so the run silently falls to demo
+  // even though the global config names anthropic.
+  assert.match(output.stdout, /provider {2}demo/);
+  assert.match(output.stdout, new RegExp(`${shadow.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} outranks`));
+  assert.match(output.stdout, /exists but is outranked/);
+});
+
+test('doctor --format json returns the same findings as data', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor', '--format', 'json'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 1);
+  const report = JSON.parse(output.stdout);
+  assert.equal(report.provider.value, 'demo');
+  assert.equal(report.slackPackageInstalled, true);
+  assert.ok(report.problems.some((problem: string) => /offline demo model/.test(problem)));
+});
+
+test('a run warns when an environment key overrides the subscription sign-in', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-x' } }),
+  );
+
+  const { streams, output } = createStreams();
+  // The run itself fails on the fake key; the warning has to arrive anyway,
+  // because a working key is exactly when it goes unnoticed.
+  await runCli({
+    argv: ['run', 'hello'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'sk-ant-from-env' },
+      fetch: (async () => new Response(JSON.stringify({ error: 'nope' }), { status: 401 })) as typeof fetch,
+    },
+  });
+
+  assert.match(output.stderr, /ANTHROPIC_API_KEY in your environment outranks the Claude subscription sign-in/);
+});

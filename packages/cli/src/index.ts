@@ -176,6 +176,12 @@ export interface ParsedAgentsCommand {
   format: 'text' | 'json';
 }
 
+export interface ParsedDoctorCommand {
+  command: 'doctor';
+  format: 'text' | 'json';
+  configPath?: string;
+}
+
 export interface ParsedServeCommand {
   command: 'serve';
   configPath?: string;
@@ -195,6 +201,7 @@ export type ParsedCommand =
   | ParsedSetupCommand
   | ParsedAgentNewCommand
   | ParsedAgentsCommand
+  | ParsedDoctorCommand
   | ParsedServeCommand
   | ParsedHelpCommand;
 
@@ -224,6 +231,7 @@ Usage:
   STRATUS_PROVIDER=openai OPENAI_API_KEY=... stratus run "Say hello"
   stratus run --config ./stratus.config.json --provider openai "Say hello"
   stratus agents
+  stratus doctor
   stratus dashboard
   stratus dashboard --port 4123 --host 0.0.0.0 --no-open
 
@@ -243,6 +251,9 @@ Commands:
   agent new        Create an agent identity (generates a human-ish name + avatar theme)
   agents           List your agents: who they are, where their souls live, what
                    they run on, what they remember (also: stratus agent list)
+  doctor           Show what a run would use right now — provider, model, soul —
+                   and which file or environment variable decided each, then
+                   flag anything that would surprise you (--format json)
   dashboard        Start the local Stratus Agent dashboard and open it in your browser
   help             Show this help message
 
@@ -475,6 +486,36 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       throw new Error(`Unknown option: ${token}`);
     }
     return { command: 'agents', format };
+  }
+
+  if (command === 'doctor') {
+    let format: 'text' | 'json' = 'text';
+    let configPath: string | undefined;
+    for (let index = 0; index < rest.length; index += 1) {
+      const token = rest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--format') {
+        const value = readOptionValue(rest, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported format: ${value}`);
+        }
+        format = value;
+        index += 1;
+        continue;
+      }
+      if (token === '--config') {
+        configPath = readOptionValue(rest, index, '--config');
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+    return { command: 'doctor', format, ...(configPath ? { configPath } : {}) };
   }
 
   if (command === 'agent') {
@@ -722,6 +763,35 @@ export const resolveRuntimeConfig = (
   env: CliEnvironment = {},
 ): Promise<RuntimeConfig> => resolveStateRuntimeConfig(command, env);
 
+/**
+ * A saved subscription sign-in silently demoted to per-token billing is the
+ * one config surprise that costs money — an API key in the environment
+ * outranks the stored credential, and the run otherwise looks identical.
+ * Detected from the resolved config: an apiKey where the stored credential
+ * is a subscription token means the environment won.
+ */
+export const warnOnCredentialOverride = async (
+  runtime: RuntimeConfig,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<void> => {
+  if (runtime.provider !== 'anthropic' || !runtime.apiKey) {
+    return;
+  }
+  const stored = (await loadCredentials(env)).anthropic;
+  if (stored?.type !== 'oauth_token') {
+    return;
+  }
+  const processEnv = readProcessEnv(env);
+  const culprit = readNonEmptyString(processEnv.STRATUS_API_KEY) ? 'STRATUS_API_KEY' : 'ANTHROPIC_API_KEY';
+  writeLine(
+    streams.stderr,
+    `Warning: ${culprit} in your environment outranks the Claude subscription sign-in saved by \`stratus setup\`, `
+    + 'so this run is billed per token instead of through your plan. Unset it to use the subscription, '
+    + 'or run `stratus doctor` to see everything that is being overridden.',
+  );
+};
+
 const createApprovalPolicy = (
   mode: CliApprovalMode,
   streams: CliStreams,
@@ -942,6 +1012,7 @@ export const runChat = async (
     ...(command.soul ? { soul: command.soul } : {}),
     ...(command.configPath ? { configPath: command.configPath } : {}),
   }, env);
+  await warnOnCredentialOverride(runtime, streams, env);
 
   // Interactive means the real terminal: an injected stdinStream is by
   // definition not a TTY conversation, so it never gets prompts, ANSI
@@ -3268,6 +3339,288 @@ export const runAgents = async (
   return 0;
 };
 
+/** One resolved setting, with the thing that decided it. */
+interface DoctorSetting {
+  value: string;
+  source: string;
+}
+
+export interface DoctorReport {
+  configInUse?: string;
+  /** Config files that exist but lost to `configInUse`, nearest first. */
+  configShadowed: string[];
+  provider: DoctorSetting;
+  model?: DoctorSetting;
+  soul?: DoctorSetting;
+  agent?: string;
+  signIns: Array<{ provider: CredentialProviderName; status: string }>;
+  slackAgents: string[];
+  slackPackageInstalled: boolean;
+  rosterCount: number;
+  problems: string[];
+}
+
+/**
+ * `stratus doctor` — what a run would resolve to right now, and which file
+ * or variable decided each part. Every "why is it using X" question needs
+ * the precedence chain, and reading it out of the source is not something
+ * anyone should have to do.
+ */
+export const collectDoctorReport = async (
+  command: ParsedDoctorCommand,
+  warn: (message: string) => void,
+  env: CliEnvironment = {},
+): Promise<DoctorReport> => {
+  const processEnv = readProcessEnv(env);
+  const cwd = readWorkingDirectory(env);
+  const problems: string[] = [];
+
+  // Config discovery, spelled out rather than delegated: doctor has to
+  // report the files that LOST as well as the one in use, which is the
+  // whole point when a stray project config is the answer.
+  const explicit = command.configPath ?? processEnv.STRATUS_CONFIG ?? processEnv.STRATUSCLAW_CONFIG;
+  const candidates = explicit
+    ? [{ path: path.resolve(cwd, String(explicit)), label: command.configPath ? '--config' : 'STRATUS_CONFIG' }]
+    : [
+        { path: path.join(cwd, DEFAULT_CONFIG_FILENAME), label: 'project' },
+        { path: path.join(cwd, LEGACY_CONFIG_FILENAME), label: 'project (legacy)' },
+        { path: globalConfigPath(env), label: 'global' },
+      ];
+  const present: Array<{ path: string; label: string }> = [];
+  for (const candidate of candidates) {
+    try {
+      await readFile(candidate.path, 'utf8');
+      present.push(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        problems.push(`${candidate.path} exists but cannot be read (${(error as Error).message}).`);
+      }
+    }
+  }
+  const winner = present[0];
+  const shadowed = present.slice(1);
+  if (winner && shadowed.length > 0 && winner.label.startsWith('project')) {
+    problems.push(
+      `${winner.path} outranks ${shadowed.map((entry) => entry.path).join(' and ')} for runs started in this directory. `
+      + 'Run from elsewhere, or pass --config to pick one explicitly.',
+    );
+  }
+
+  let fileConfig: StratusConfigFile = {};
+  if (winner) {
+    try {
+      fileConfig = await loadConfigFile(winner.path);
+    } catch (error) {
+      problems.push(`${winner.path} could not be parsed (${(error as Error).message}); running as if it were empty.`);
+      warn(`ignoring unreadable config ${winner.path}`);
+    }
+  }
+
+  // Soul first: its frontmatter outranks the config file for provider and
+  // model, so it has to be loaded before either can be attributed.
+  const envSoul = readNonEmptyString(processEnv.STRATUS_SOUL) ?? readNonEmptyString(processEnv.STRATUSCLAW_SOUL);
+  const soulValue = envSoul ?? fileConfig.soul;
+  const soulSource = envSoul
+    ? (readNonEmptyString(processEnv.STRATUS_SOUL) ? 'STRATUS_SOUL' : 'STRATUSCLAW_SOUL')
+    : (winner ? winner.path : '');
+  let soul: ParsedSoul | undefined;
+  let soulPath: string | undefined;
+  if (typeof soulValue === 'string') {
+    soulPath = path.resolve(cwd, soulValue);
+    try {
+      soul = await loadSoulFile(soulPath);
+    } catch (error) {
+      problems.push(`The configured soul ${soulPath} could not be read (${(error as Error).message}), so runs fall back to the built-in agent.`);
+    }
+  }
+
+  const envProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'));
+  const provider: DoctorSetting = envProvider
+    ? { value: String(envProvider), source: 'STRATUS_PROVIDER' }
+    : soul?.provider
+      ? { value: soul.provider, source: `${soulPath} (soul frontmatter)` }
+      : fileConfig.provider
+        ? { value: fileConfig.provider, source: winner?.path ?? 'config' }
+        : { value: 'demo', source: 'built-in default — nothing set a provider' };
+
+  if (provider.value === 'demo') {
+    problems.push(
+      'Provider is the offline demo model, so replies are canned. '
+      + (fileConfig.provider === 'demo'
+        ? `Change "provider" in ${winner?.path} — or run \`stratus setup\` → Providers.`
+        : 'Run `stratus setup` → Providers and sign in, then Save & finish.'),
+    );
+  }
+
+  let model: DoctorSetting | undefined;
+  if (provider.value !== 'demo') {
+    const envModel = readNonEmptyString(processEnv.STRATUS_MODEL) ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL);
+    // A soul's model belongs to the soul's provider, and the config's model
+    // to the config's provider — either can be stranded by an override.
+    const soulModelApplies = soul?.provider === undefined || soul.provider === provider.value;
+    const configModelApplies = (fileConfig.provider ?? 'openai') === provider.value;
+    model = envModel
+      ? { value: String(envModel), source: 'STRATUS_MODEL' }
+      : soulModelApplies && soul?.model
+        ? { value: soul.model, source: `${soulPath} (soul frontmatter)` }
+        : configModelApplies && fileConfig.model
+          ? { value: fileConfig.model, source: winner?.path ?? 'config' }
+          : {
+              value: provider.value === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL,
+              source: 'built-in default for this provider',
+            };
+  }
+
+  const credentials = await loadCredentials(env);
+  const keyEnvFor = (target: CredentialProviderName): string =>
+    (target === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY');
+  const signIns: DoctorReport['signIns'] = [];
+  for (const target of ['anthropic', 'openai'] as const) {
+    const stored = credentials[target];
+    // The exact chain resolveRuntimeConfig uses: a generic STRATUS_API_KEY
+    // or a configured apiKeyEnv authenticate the DEFAULT provider only.
+    const isDefault = target === provider.value;
+    const envKey = (isDefault
+      ? readNonEmptyString(processEnv.STRATUS_API_KEY)
+        ?? (fileConfig.apiKeyEnv ? readNonEmptyString(processEnv[fileConfig.apiKeyEnv]) : undefined)
+      : undefined)
+      ?? readNonEmptyString(processEnv[keyEnvFor(target)]);
+    const label = stored?.type === 'oauth_token' ? 'Claude subscription (Pro/Max)' : 'API key';
+
+    if (stored && envKey) {
+      signIns.push({ provider: target, status: `${label}, overridden by an API key in your environment` });
+      // The costly case: an env key silently demotes a subscription to
+      // per-token billing, and nothing in a normal run says so.
+      problems.push(stored.type === 'oauth_token'
+        ? `An API key in your environment outranks your saved ${target} subscription sign-in, so runs are billed per token instead of through your plan. Unset ${keyEnvFor(target)} (check your shell profile) to use the subscription.`
+        : `An API key in your environment outranks your saved ${target} sign-in. Unset ${keyEnvFor(target)} to use the one \`stratus setup\` stored.`);
+    } else if (envKey) {
+      signIns.push({ provider: target, status: `using an API key from your environment` });
+    } else if (stored) {
+      signIns.push({ provider: target, status: label });
+    } else {
+      signIns.push({ provider: target, status: 'not signed in' });
+      if (isDefault) {
+        problems.push(`Provider is ${target} but there is no sign-in for it — runs will fail. Run \`stratus setup\` → Providers.`);
+      }
+    }
+  }
+
+  const channels = await loadChannelCredentials(env);
+  const slackAgents = Object.keys(channels.slack ?? {}).sort();
+  const slackPackageInstalled = (await loadSlackAdapter()) !== undefined;
+  if (slackAgents.length > 0 && !slackPackageInstalled) {
+    problems.push(
+      `Slack tokens are stored for ${slackAgents.length} agent(s) but @stratusagent/channel-slack is not installed, so \`stratus serve\` skips them. `
+      + 'Install it with: npm install -g @stratusagent/channel-slack',
+    );
+  }
+
+  let rosterCount = 0;
+  try {
+    rosterCount = (await readdir(agentsDirPath(env))).filter((file) => file.endsWith('.md')).length;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  // Tokens keyed to an agent the roster no longer has are loaded and
+  // skipped on every start, silently.
+  const rosterIds = new Set((await loadRosterSouls(env, warn)).map((entry) => entry.soul.agent.id));
+  rosterIds.add(DEFAULT_STRATUS_AGENT.id);
+  if (soul) {
+    rosterIds.add(soul.agent.id);
+  }
+  const orphans = slackAgents.filter((id) => !rosterIds.has(id));
+  if (orphans.length > 0) {
+    problems.push(
+      `Slack tokens are stored for ${orphans.join(', ')}, which no agent matches — \`stratus serve\` skips them. `
+      + 'Clear them from `stratus setup` → Channels.',
+    );
+  }
+
+  return {
+    ...(winner ? { configInUse: winner.path } : {}),
+    configShadowed: shadowed.map((entry) => entry.path),
+    provider,
+    ...(model ? { model } : {}),
+    ...(soulPath ? { soul: { value: soulPath, source: soulSource } } : {}),
+    ...(soul ? { agent: `${soul.agent.name} (${soul.agent.id})` } : {}),
+    signIns,
+    slackAgents,
+    slackPackageInstalled,
+    rosterCount,
+    problems,
+  };
+};
+
+export const runDoctor = async (
+  command: ParsedDoctorCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const report = await collectDoctorReport(command, (message) => {
+    writeLine(streams.stderr, `Warning: ${message}.`);
+  }, env);
+
+  if (command.format === 'json') {
+    writeLine(streams.stdout, JSON.stringify(report, null, 2));
+    return report.problems.length > 0 ? 1 : 0;
+  }
+
+  const field = (label: string, setting?: DoctorSetting): void => {
+    if (!setting) {
+      return;
+    }
+    writeLine(streams.stdout, `  ${label.padEnd(10)}${setting.value}`);
+    writeLine(streams.stdout, `  ${''.padEnd(10)}from ${setting.source}`);
+  };
+
+  writeLine(streams.stdout, 'Stratus Agent — what a run would use right now');
+  writeLine(streams.stdout);
+  field('provider', report.provider);
+  field('model', report.model);
+  field('soul', report.soul);
+  if (report.agent) {
+    writeLine(streams.stdout, `  ${'agent'.padEnd(10)}${report.agent}`);
+  } else {
+    writeLine(streams.stdout, `  ${'agent'.padEnd(10)}${DEFAULT_STRATUS_AGENT.name} (built-in — no soul configured)`);
+  }
+
+  writeLine(streams.stdout);
+  writeLine(streams.stdout, 'Files');
+  writeLine(streams.stdout, `  config    ${report.configInUse ?? 'none found — built-in defaults apply'}`);
+  for (const shadowedPath of report.configShadowed) {
+    writeLine(streams.stdout, `            (${shadowedPath} exists but is outranked)`);
+  }
+  writeLine(streams.stdout, `  agents    ${report.rosterCount} soul file${report.rosterCount === 1 ? '' : 's'}`);
+
+  writeLine(streams.stdout);
+  writeLine(streams.stdout, 'Sign-ins');
+  for (const entry of report.signIns) {
+    writeLine(streams.stdout, `  ${entry.provider.padEnd(10)}${entry.status}`);
+  }
+
+  writeLine(streams.stdout);
+  writeLine(streams.stdout, 'Channels');
+  writeLine(streams.stdout, `  slack     ${report.slackAgents.length === 0
+    ? 'no agents connected'
+    : `${report.slackAgents.length} connected (${report.slackAgents.join(', ')})`}`);
+  writeLine(streams.stdout, `            @stratusagent/channel-slack ${report.slackPackageInstalled ? 'installed' : 'not installed'}`);
+
+  writeLine(streams.stdout);
+  if (report.problems.length === 0) {
+    writeLine(streams.stdout, 'No problems found.');
+    return 0;
+  }
+  writeLine(streams.stdout, `${report.problems.length} problem${report.problems.length === 1 ? '' : 's'} found:`);
+  for (const problem of report.problems) {
+    writeLine(streams.stdout, `  ! ${problem}`);
+  }
+  return 1;
+};
+
 export const runAgentNew = async (
   command: ParsedAgentNewCommand,
   streams: CliStreams,
@@ -3610,6 +3963,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
       return runAgents(command, streams, resolvedEnv);
     }
 
+    if (command.command === 'doctor') {
+      return runDoctor(command, streams, resolvedEnv);
+    }
+
     if (command.command === 'chat') {
       return runChat(command, streams, resolvedEnv);
     }
@@ -3627,6 +3984,7 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     }
 
     const runtime = await resolveRuntimeConfig(command, resolvedEnv);
+    await warnOnCredentialOverride(runtime, streams, resolvedEnv);
 
     if (command.format === 'text') {
       writeLine(streams.stdout, formatRuntimeBanner(runtime));
