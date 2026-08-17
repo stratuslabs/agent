@@ -3445,3 +3445,136 @@ test('a run names the legacy variable when it supplied the key', async () => {
   assert.match(output.stderr, /STRATUSCLAW_API_KEY in your environment outranks/);
   assert.doesNotMatch(output.stderr, /ANTHROPIC_API_KEY in your environment/);
 });
+
+test('doctor reports an unreadable soul as fatal, not as a fallback', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'anthropic', soul: '/nowhere/ghost.md' }),
+  );
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-x' } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 1);
+  // resolveRuntimeConfig propagates loadSoulFile's error — promising a
+  // built-in fallback would send someone looking for a run that never happens.
+  assert.match(output.stdout, /Every run fails until it is fixed/);
+  assert.match(output.stdout, /agent {5}unresolved — the configured soul could not be read/);
+  assert.doesNotMatch(output.stdout, /built-in — no soul configured/);
+});
+
+test('doctor attributes a legacy provider override to the legacy variable', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai' }));
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['doctor'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: { STRATUSCLAW_PROVIDER: 'anthropic', STRATUSCLAW_MODEL: 'claude-opus-5' },
+    },
+  });
+
+  assert.match(output.stdout, /provider {2}anthropic\n {12}from STRATUSCLAW_PROVIDER/);
+  assert.match(output.stdout, /model {5}claude-opus-5\n {12}from STRATUSCLAW_MODEL/);
+});
+
+test('doctor reports a stored sign-in refused by an untrusted project endpoint', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ openai: { type: 'api_key', value: 'sk-unbound' } }),
+  );
+  // An auto-discovered project config could point anywhere, so the resolver
+  // refuses to send an unbound stored key to the endpoint it names.
+  await writeFile(
+    path.join(project, 'stratus.config.json'),
+    JSON.stringify({ provider: 'openai', baseUrl: 'https://evil.test/v1' }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: project, homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 1, 'the run would fail, so this is not a healthy setup');
+  assert.match(output.stdout, /not sent to the endpoint this config selects/);
+  assert.match(output.stdout, /sets a custom base URL \(https:\/\/evil\.test\/v1\)/);
+});
+
+test('doctor stays quiet about a secondary provider no fallback targets', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'openai', baseUrl: 'https://api.openai.com/v1' }),
+  );
+  // A stored Anthropic subscription plus ANTHROPIC_API_KEY, with no
+  // Anthropic fallback configured: no run ever reads that credential.
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({
+      openai: { type: 'api_key', value: 'sk-openai' },
+      anthropic: { type: 'oauth_token', value: 'sk-ant-oat-x' },
+    }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'sk-ant-env' },
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /anthropic Claude subscription \(Pro\/Max\) \(unused — openai serves your runs\)/);
+  assert.doesNotMatch(output.stdout, /billed per token/);
+});
+
+test('doctor reports the fallback and flags one with no sign-in', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    fallbackProvider: 'openai',
+    fallbackModel: 'gpt-4.1-mini',
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-x' } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 1);
+  // Where a failing run goes next is part of "why is my usage where it is".
+  assert.match(output.stdout, /fallback {2}openai · gpt-4\.1-mini/);
+  assert.match(output.stdout, /The fallback targets openai but there is no sign-in for it/);
+});

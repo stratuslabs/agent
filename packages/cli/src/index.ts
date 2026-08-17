@@ -3361,6 +3361,8 @@ export interface DoctorReport {
   model?: DoctorSetting;
   soul?: DoctorSetting;
   agent?: string;
+  /** The model a failing run retries on, when one is configured. */
+  fallback?: { provider: string; model: string };
   signIns: Array<{ provider: CredentialProviderName; status: string }>;
   slackAgents: string[];
   slackPackageInstalled: boolean;
@@ -3434,13 +3436,25 @@ export const collectDoctorReport = async (
     }
   }
 
+  // Which variable supplied a value, not just the value: naming the wrong
+  // one sends the reader to unset something that was never the cause,
+  // leaving the real override in place. The legacy STRATUSCLAW_ prefix is
+  // still honored by the resolver, so it has to be reportable too.
+  const envPick = (...names: string[]): { name: string; value: string } | undefined => {
+    for (const name of names) {
+      const value = readNonEmptyString(processEnv[name]);
+      if (typeof value === 'string') {
+        return { name, value };
+      }
+    }
+    return undefined;
+  };
+
   // Soul first: its frontmatter outranks the config file for provider and
   // model, so it has to be loaded before either can be attributed.
-  const envSoul = readNonEmptyString(processEnv.STRATUS_SOUL) ?? readNonEmptyString(processEnv.STRATUSCLAW_SOUL);
-  const soulValue = envSoul ?? fileConfig.soul;
-  const soulSource = envSoul
-    ? (readNonEmptyString(processEnv.STRATUS_SOUL) ? 'STRATUS_SOUL' : 'STRATUSCLAW_SOUL')
-    : (winner ? winner.path : '');
+  const envSoul = envPick('STRATUS_SOUL', 'STRATUSCLAW_SOUL');
+  const soulValue = envSoul?.value ?? fileConfig.soul;
+  const soulSource = envSoul ? envSoul.name : (winner ? winner.path : '');
   let soul: ParsedSoul | undefined;
   let soulPath: string | undefined;
   if (typeof soulValue === 'string') {
@@ -3448,14 +3462,22 @@ export const collectDoctorReport = async (
     try {
       soul = await loadSoulFile(soulPath);
     } catch (error) {
-      problems.push(`The configured soul ${soulPath} could not be read (${(error as Error).message}), so runs fall back to the built-in agent.`);
+      // resolveRuntimeConfig propagates loadSoulFile's failure — it never
+      // substitutes the built-in agent, because another identity's soul
+      // (or none) would resolve different provider pins.
+      problems.push(
+        `The configured soul ${soulPath} could not be read (${(error as Error).message}). `
+        + 'Every run fails until it is fixed or the soul setting is removed; the built-in agent is not substituted.',
+      );
     }
   }
 
-  const envProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'));
+  const envProviderPick = envPick('STRATUS_PROVIDER', 'STRATUSCLAW_PROVIDER');
+  const envProvider = envProviderPick
+    ? parseProviderName(envProviderPick.value, envProviderPick.name)
+    : undefined;
   const provider: DoctorSetting = envProvider
-    ? { value: String(envProvider), source: 'STRATUS_PROVIDER' }
+    ? { value: String(envProvider), source: String(envProviderPick?.name) }
     : soul?.provider
       ? { value: soul.provider, source: `${soulPath} (soul frontmatter)` }
       : fileConfig.provider
@@ -3473,13 +3495,13 @@ export const collectDoctorReport = async (
 
   let model: DoctorSetting | undefined;
   if (provider.value !== 'demo') {
-    const envModel = readNonEmptyString(processEnv.STRATUS_MODEL) ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL);
+    const envModel = envPick('STRATUS_MODEL', 'STRATUSCLAW_MODEL');
     // A soul's model belongs to the soul's provider, and the config's model
     // to the config's provider — either can be stranded by an override.
     const soulModelApplies = soul?.provider === undefined || soul.provider === provider.value;
     const configModelApplies = (fileConfig.provider ?? 'openai') === provider.value;
     model = envModel
-      ? { value: String(envModel), source: 'STRATUS_MODEL' }
+      ? { value: envModel.value, source: envModel.name }
       : soulModelApplies && soul?.model
         ? { value: soul.model, source: `${soulPath} (soul frontmatter)` }
         : configModelApplies && fileConfig.model
@@ -3495,15 +3517,48 @@ export const collectDoctorReport = async (
   // model, and baseUrl) was written for the provider that file names, so
   // an override that selects a different provider strands them.
   const fileConfigApplies = (fileConfig.provider ?? 'openai') === provider.value;
+  // A configured fallback is the only reason a run ever reaches a second
+  // provider's credential. Same gate as the resolver: a fallback with no
+  // explicit provider was written for the config's own provider, so an
+  // override that changes the provider strands it.
+  const fallbackConfigured = fileConfig.fallbackModel !== undefined
+    && (fileConfig.fallbackProvider !== undefined || fileConfigApplies);
+  const fallbackProvider = fallbackConfigured
+    ? (fileConfig.fallbackProvider ?? (provider.value as StratusProviderName))
+    : undefined;
+
+  // An auto-discovered project config could point anywhere, so the
+  // resolver refuses to send an unbound stored sign-in to a custom
+  // endpoint it names — and the run fails rather than leaking the key. A
+  // credential bound to its own endpoint ignores config URLs entirely.
+  const untrustedCustomBaseUrl = winner?.label.startsWith('project') === true
+    && envPick('STRATUS_BASE_URL', 'STRATUSCLAW_BASE_URL') === undefined
+    && fileConfigApplies
+    && fileConfig.baseUrl !== undefined
+    && fileConfig.baseUrl.replace(/\/+$/, '')
+      !== (provider.value === 'anthropic' ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_OPENAI_BASE_URL);
+
   const signIns: DoctorReport['signIns'] = [];
   for (const target of ['anthropic', 'openai'] as const) {
     const stored = credentials[target];
     const isDefault = target === provider.value;
+    const isFallbackTarget = !isDefault && fallbackProvider === target;
+    const label = stored?.type === 'oauth_token' ? 'Claude subscription (Pro/Max)' : 'API key';
+
+    // A provider no run consults is reported, never diagnosed: flagging an
+    // override on a credential nothing reads is a false alarm.
+    if (!isDefault && !isFallbackTarget) {
+      signIns.push({
+        provider: target,
+        status: stored ? `${label} (unused — ${provider.value} serves your runs)` : 'not signed in',
+      });
+      continue;
+    }
+
     // Resolved by the state package, not re-derived: the generic and
     // custom variable rules live in one place so a warning can never blame
-    // a variable the run did not actually use. Only the default provider
-    // consults them — a secondary provider is reached through the fallback
-    // path, which uses its own conventional variable alone.
+    // a variable the run did not actually use. The fallback path consults
+    // only the provider's own conventional variable.
     const envKey = isDefault
       ? resolveEnvApiKey(apiKeyEnvNameFor(target, fileConfig, fileConfigApplies, env), env)
       : (() => {
@@ -3511,25 +3566,42 @@ export const collectDoctorReport = async (
           const value = readNonEmptyString(processEnv[name]);
           return typeof value === 'string' ? { name, value } : undefined;
         })();
-    const label = stored?.type === 'oauth_token' ? 'Claude subscription (Pro/Max)' : 'API key';
+    const where = isDefault ? 'runs are' : 'fallback runs are';
 
     if (stored && envKey) {
       signIns.push({ provider: target, status: `${label}, overridden by ${envKey.name} in your environment` });
       // The costly case: an env key silently demotes a subscription to
       // per-token billing, and nothing in a normal run says so.
       problems.push(stored.type === 'oauth_token'
-        ? `${envKey.name} in your environment outranks your saved ${target} subscription sign-in, so ${isDefault ? 'runs are' : 'fallback runs are'} billed per token instead of through your plan. Unset it (check your shell profile) to use the subscription.`
+        ? `${envKey.name} in your environment outranks your saved ${target} subscription sign-in, so ${where} billed per token instead of through your plan. Unset it (check your shell profile) to use the subscription.`
         : `${envKey.name} in your environment outranks your saved ${target} sign-in. Unset it to use the one \`stratus setup\` stored.`);
-    } else if (envKey) {
-      signIns.push({ provider: target, status: `using ${envKey.name} from your environment` });
-    } else if (stored) {
-      signIns.push({ provider: target, status: label });
-    } else {
-      signIns.push({ provider: target, status: 'not signed in' });
-      if (isDefault) {
-        problems.push(`Provider is ${target} but there is no sign-in for it — runs will fail. Run \`stratus setup\` → Providers.`);
-      }
+      continue;
     }
+    if (envKey) {
+      signIns.push({ provider: target, status: `using ${envKey.name} from your environment` });
+      continue;
+    }
+    if (stored) {
+      // Only an unbound credential can be redirected, so only an unbound
+      // one is refused.
+      const blocked = isDefault && untrustedCustomBaseUrl
+        && !(stored.type === 'api_key' && stored.baseUrl !== undefined);
+      signIns.push({
+        provider: target,
+        status: blocked ? `${label}, not sent to the endpoint this config selects` : label,
+      });
+      if (blocked) {
+        problems.push(
+          `${winner?.path} sets a custom base URL (${fileConfig.baseUrl}), and your saved ${target} sign-in is not sent to an endpoint an auto-discovered project config chose — every run fails. `
+          + `Pass --config to trust the file explicitly, or set ${apiKeyEnvNameFor(target, fileConfig, fileConfigApplies, env)} for that endpoint.`,
+        );
+      }
+      continue;
+    }
+    signIns.push({ provider: target, status: 'not signed in' });
+    problems.push(isDefault
+      ? `Provider is ${target} but there is no sign-in for it — runs will fail. Run \`stratus setup\` → Providers.`
+      : `The fallback targets ${target} but there is no sign-in for it, so the fallback is skipped and a failing run just fails.`);
   }
 
   const channels = await loadChannelCredentials(env);
@@ -3572,6 +3644,9 @@ export const collectDoctorReport = async (
     ...(model ? { model } : {}),
     ...(soulPath ? { soul: { value: soulPath, source: soulSource } } : {}),
     ...(soul ? { agent: `${soul.agent.name} (${soul.agent.id})` } : {}),
+    ...(fallbackProvider && fileConfig.fallbackModel
+      ? { fallback: { provider: fallbackProvider, model: fileConfig.fallbackModel } }
+      : {}),
     signIns,
     slackAgents,
     slackPackageInstalled,
@@ -3609,6 +3684,10 @@ export const runDoctor = async (
   field('soul', report.soul);
   if (report.agent) {
     writeLine(streams.stdout, `  ${'agent'.padEnd(10)}${report.agent}`);
+  } else if (report.soul) {
+    // A soul is configured but did not load — saying "built-in" here would
+    // describe a run that cannot happen.
+    writeLine(streams.stdout, `  ${'agent'.padEnd(10)}unresolved — the configured soul could not be read`);
   } else {
     writeLine(streams.stdout, `  ${'agent'.padEnd(10)}${DEFAULT_STRATUS_AGENT.name} (built-in — no soul configured)`);
   }
@@ -3620,6 +3699,11 @@ export const runDoctor = async (
     writeLine(streams.stdout, `            (${shadowedPath} exists but is outranked)`);
   }
   writeLine(streams.stdout, `  agents    ${report.rosterCount} soul file${report.rosterCount === 1 ? '' : 's'}`);
+
+  if (report.fallback) {
+    writeLine(streams.stdout, `  ${'fallback'.padEnd(10)}${report.fallback.provider} · ${report.fallback.model}`);
+    writeLine(streams.stdout, `  ${''.padEnd(10)}used when the default model errors mid-run`);
+  }
 
   writeLine(streams.stdout);
   writeLine(streams.stdout, 'Sign-ins');
