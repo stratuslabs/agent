@@ -851,6 +851,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           startedChannels.push(adapter);
         } catch (error) {
           warn(`channel ${adapter.name} failed to start: ${error instanceof Error ? error.message : String(error)}`);
+          // A start() that rejected may still hold sockets or listeners it
+          // acquired before failing; it never reaches startedChannels, so
+          // this is its only cleanup.
+          try {
+            await adapter.stop();
+          } catch (stopError) {
+            warn(`channel ${adapter.name} cleanup after failed start also failed: ${stopError instanceof Error ? stopError.message : String(stopError)}`);
+          }
         }
       }
     },

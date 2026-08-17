@@ -1,5 +1,4 @@
 {
-  "_comment": "Slack app manifest template for one Stratus agent. Create one app per agent at https://api.slack.com/apps → Create New App → From a manifest. Replace NAME with the agent's name, then: (1) Basic Information → App-Level Tokens → generate a token with connections:write scope (xapp-…), (2) Install App → copy the Bot User OAuth Token (xoxb-…), (3) store both under channels.slack.<agentId> in ~/.stratus/credentials.json, (4) upload the agent's avatar under Basic Information → Display Information.",
   "display_information": {
     "name": "NAME",
     "description": "A Stratus agent",

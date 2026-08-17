@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
@@ -57,7 +58,9 @@ export interface SlackWebLike {
     update(args: { channel: string; ts: string; text: string }): Promise<unknown>;
   };
   files: {
-    uploadV2(args: { channel_id: string; file: string; filename?: string; title?: string; thread_ts?: string }): Promise<unknown>;
+    // The real SDK takes file DATA (a buffer or stream), never a path
+    // string — typing it that way here keeps fakes honest too.
+    uploadV2(args: { channel_id: string; file: Buffer; filename?: string; title?: string; thread_ts?: string }): Promise<unknown>;
   };
   users: {
     info(args: { user: string }): Promise<{ user?: { name?: string; profile?: { display_name?: string; real_name?: string } } }>;
@@ -98,6 +101,7 @@ const defaultWebClient = (botToken: string): SlackWebLike => {
  */
 class ReplyRenderer {
   private buffer = '';
+  private turnBreakPending = false;
   private toolLine: string | undefined;
   private ref: OutboundMessageRef | undefined;
   private lastEditAt = 0;
@@ -141,6 +145,13 @@ class ReplyRenderer {
       return;
     }
     if (event.type === 'provider.delta' && event.delta.type === 'text') {
+      // Text from a new provider turn (after tools ran) must not fuse
+      // with the previous turn's — "I'll check.The result is…" reads as
+      // one garbled sentence for the whole duration of the final stream.
+      if (this.turnBreakPending && this.buffer.trim().length > 0) {
+        this.buffer += '\n\n';
+      }
+      this.turnBreakPending = false;
       this.buffer += event.delta.text;
       this.scheduleEdit();
       return;
@@ -150,7 +161,12 @@ class ReplyRenderer {
       // mid-stream failure): discard everything streamed so far so two
       // attempts never fuse into one message.
       this.buffer = '';
+      this.turnBreakPending = false;
       this.scheduleEdit();
+      return;
+    }
+    if (event.type === 'provider.response') {
+      this.turnBreakPending = true;
       return;
     }
     if (event.type === 'tool.called') {
@@ -160,7 +176,10 @@ class ReplyRenderer {
     }
     if (event.type === 'tool.completed') {
       this.toolLine = undefined;
-      // The next delta or the finalize will refresh the message.
+      // Clear the visible status promptly: the next provider turn may be
+      // non-streaming or slow to its first delta, and the message must not
+      // claim a finished tool is still running that whole time.
+      this.scheduleEdit();
       if (event.result.ok) {
         for (const filePath of collectFilePaths(event.result)) {
           this.queueUpload(filePath);
@@ -175,13 +194,18 @@ class ReplyRenderer {
   // order and finalize() waits for them.
   private queueUpload(filePath: string): void {
     this.uploadChain = this.uploadChain
-      .then(() => this.web.files.uploadV2({
-        channel_id: this.channel,
-        file: filePath,
-        filename: path.basename(filePath),
-        ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
-      }))
-      .then(() => undefined)
+      // Read as file DATA inside the chain: the Web API takes contents,
+      // not a path, and a missing file surfaces as this upload's own
+      // failure instead of an unhandled stream error.
+      .then(async () => {
+        const data = await readFile(filePath);
+        await this.web.files.uploadV2({
+          channel_id: this.channel,
+          file: data,
+          filename: path.basename(filePath),
+          ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
+        });
+      })
       .catch((error) => this.warn(`files.uploadV2 failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`));
   }
 
@@ -272,8 +296,18 @@ const collectFilePaths = (result: ToolResult): string[] => {
   return paths;
 };
 
+// A hard cut must never land between the halves of a UTF-16 surrogate
+// pair — an emoji on the boundary would reach Slack as two replacement
+// characters. Backs the index off the pair's high half when it would.
+const safeCutIndex = (text: string, index: number): number => {
+  const code = text.charCodeAt(index - 1);
+  return code >= 0xd800 && code <= 0xdbff ? index - 1 : index;
+};
+
 const truncateForSlack = (text: string): string =>
-  text.length <= SLACK_MAX_MESSAGE_CHARS ? text : `${text.slice(0, SLACK_MAX_MESSAGE_CHARS - 1)}…`;
+  text.length <= SLACK_MAX_MESSAGE_CHARS
+    ? text
+    : `${text.slice(0, safeCutIndex(text, SLACK_MAX_MESSAGE_CHARS - 1))}…`;
 
 const splitForSlack = (text: string): string[] => {
   if (text.length <= SLACK_MAX_MESSAGE_CHARS) {
@@ -284,7 +318,9 @@ const splitForSlack = (text: string): string[] => {
   while (rest.length > SLACK_MAX_MESSAGE_CHARS) {
     // Prefer a newline break inside the window; fall back to a hard cut.
     const window = rest.slice(0, SLACK_MAX_MESSAGE_CHARS);
-    const breakAt = window.lastIndexOf('\n') > SLACK_MAX_MESSAGE_CHARS / 2 ? window.lastIndexOf('\n') : SLACK_MAX_MESSAGE_CHARS;
+    const breakAt = window.lastIndexOf('\n') > SLACK_MAX_MESSAGE_CHARS / 2
+      ? window.lastIndexOf('\n')
+      : safeCutIndex(rest, SLACK_MAX_MESSAGE_CHARS);
     chunks.push(rest.slice(0, breakAt));
     rest = rest.slice(breakAt).replace(/^\n+/, '');
   }
@@ -297,7 +333,15 @@ const splitForSlack = (text: string): string[] => {
 const lastAssistantReply = (session: Session): string => {
   for (let index = session.messages.length - 1; index >= 0; index -= 1) {
     const message = session.messages[index];
-    if (message && message.role === 'assistant' && message.content.trim().length > 0) {
+    if (!message) {
+      continue;
+    }
+    // Stop at the current turn's input: an earlier turn's answer must not
+    // be replayed as this turn's reply when the provider returned no text.
+    if (message.role === 'user') {
+      break;
+    }
+    if (message.role === 'assistant' && message.content.trim().length > 0) {
       return message.content;
     }
   }
@@ -339,6 +383,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // In-flight turns, so stop() can drain: a reply mid-render should reach
   // Slack before the sockets go away.
   const inflight = new Set<Promise<void>>();
+  // Per-session intake chains: the pre-dispatch pipeline (lookups,
+  // placeholder, dispatch call) runs in Slack receipt order.
+  const intakeChains = new Map<string, Promise<void>>();
   const displayNames = new Map<string, string>();
   // Socket Mode redelivers on missed acks; a slow turn must not run twice.
   const seenEvents = new Set<string>();
@@ -361,15 +408,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     return false;
   };
 
-  const displayNameFor = async (web: SlackWebLike, userId: string): Promise<string> => {
-    const cached = displayNames.get(userId);
+  // User ids are only unique within a workspace; two agents' apps can live
+  // in different workspaces, so the cache key carries the team.
+  const displayNameFor = async (connection: AgentConnection, userId: string): Promise<string> => {
+    const cacheKey = `${connection.teamId}:${userId}`;
+    const cached = displayNames.get(cacheKey);
     if (cached) {
       return cached;
     }
     try {
-      const info = await web.users.info({ user: userId });
+      const info = await connection.web.users.info({ user: userId });
       const name = info.user?.profile?.display_name || info.user?.profile?.real_name || info.user?.name || userId;
-      displayNames.set(userId, name);
+      displayNames.set(cacheKey, name);
       return name;
     } catch {
       return userId;
@@ -377,13 +427,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   // Mentions arrive as <@U123> markup; the model should read names.
-  const humanizeMentions = async (web: SlackWebLike, text: string, botUserId: string): Promise<string> => {
-    const withoutBot = text.replaceAll(`<@${botUserId}>`, '').trim();
+  const humanizeMentions = async (connection: AgentConnection, text: string): Promise<string> => {
+    const withoutBot = text.replaceAll(`<@${connection.botUserId}>`, '').trim();
     const mentionPattern = /<@([A-Z0-9]+)>/g;
     const ids = [...withoutBot.matchAll(mentionPattern)].map((match) => match[1]).filter((id): id is string => Boolean(id));
     let result = withoutBot;
     for (const id of new Set(ids)) {
-      result = result.replaceAll(`<@${id}>`, `@${await displayNameFor(web, id)}`);
+      result = result.replaceAll(`<@${id}>`, `@${await displayNameFor(connection, id)}`);
     }
     return result.trim();
   };
@@ -413,6 +463,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
 
     const team = args.body?.team_id ?? connection.teamId;
+    const userId = event.user;
     // A top-level mention has no thread_ts; its own ts roots the reply
     // thread that becomes the conversation. DMs are one conversation per
     // peer, unkeyed by thread.
@@ -425,42 +476,62 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       ...(thread ? { thread } : {}),
     });
 
-    const cleaned = await humanizeMentions(connection.web, event.text ?? '', connection.botUserId);
-    if (cleaned.length === 0) {
-      return;
-    }
-    const author = await displayNameFor(connection.web, event.user);
-    // In shared channels the model should know who is speaking; a DM is
-    // unambiguous.
-    const userMessage = isDm ? cleaned : `${author}: ${cleaned}`;
+    // Everything up to (and including) the dispatch call is serialized per
+    // session in Slack receipt order: the user lookups and placeholder
+    // post below await network I/O, and without this chain a later message
+    // could reach gateway.dispatch first — processing the conversation in
+    // reverse order in durable history.
+    const previousIntake = intakeChains.get(sessionId) ?? Promise.resolve();
+    const intake = previousIntake.then(async () => {
+      const cleaned = await humanizeMentions(connection, event.text ?? '');
+      if (cleaned.length === 0) {
+        return undefined;
+      }
+      const author = await displayNameFor(connection, userId);
+      // In shared channels the model should know who is speaking; a DM is
+      // unambiguous.
+      const userMessage = isDm ? cleaned : `${author}: ${cleaned}`;
 
-    const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn);
-    try {
-      await renderer.open();
-    } catch (error) {
-      warn(`could not post to ${event.channel}: ${error instanceof Error ? error.message : String(error)}`);
-      return;
-    }
+      const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn);
+      try {
+        await renderer.open();
+      } catch (error) {
+        warn(`could not post to ${event.channel}: ${error instanceof Error ? error.message : String(error)}`);
+        return undefined;
+      }
 
-    // The push and the dispatch happen in the same microtask, so queue
-    // order matches the gateway's single-flight turn order for this
-    // session: index 0 is always the turn currently running.
-    const queue = renderers.get(sessionId) ?? [];
-    queue.push(renderer);
-    renderers.set(sessionId, queue);
-    const turn = gateway.dispatch({
-      sessionId,
-      agentId: connection.config.agentId,
-      userMessage,
-      metadata: { channel: 'slack', team, slackChannel: event.channel, slackUser: event.user },
+      // The push and the dispatch happen in the same microtask, so queue
+      // order matches the gateway's single-flight turn order for this
+      // session: index 0 is always the turn currently running.
+      const queue = renderers.get(sessionId) ?? [];
+      queue.push(renderer);
+      renderers.set(sessionId, queue);
+      const turn = gateway.dispatch({
+        sessionId,
+        agentId: connection.config.agentId,
+        userMessage,
+        metadata: { channel: 'slack', team, slackChannel: event.channel, slackUser: userId },
+      });
+      return { renderer, turn };
+    });
+    const settledIntake = intake.then(
+      () => undefined,
+      () => undefined,
+    );
+    intakeChains.set(sessionId, settledIntake);
+    void settledIntake.then(() => {
+      if (intakeChains.get(sessionId) === settledIntake) {
+        intakeChains.delete(sessionId);
+      }
     });
 
-    try {
-      const session = await turn;
-      await renderer.finalize(lastAssistantReply(session));
-    } catch (error) {
-      await renderer.fail(error instanceof Error ? error.message : String(error));
-    } finally {
+    const started = await intake;
+    if (!started) {
+      return;
+    }
+    const { renderer, turn } = started;
+
+    const removeFromQueue = (): void => {
       const current = renderers.get(sessionId);
       if (current) {
         const index = current.indexOf(renderer);
@@ -471,6 +542,24 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           renderers.delete(sessionId);
         }
       }
+    };
+
+    let session: Session | undefined;
+    let failure: unknown;
+    try {
+      session = await turn;
+    } catch (error) {
+      failure = error;
+    }
+    // The next queued turn starts the moment this dispatch settles — its
+    // events must reach ITS renderer, so this one leaves the queue BEFORE
+    // the potentially slow final edit, uploads, and overflow posts.
+    removeFromQueue();
+
+    if (session) {
+      await renderer.finalize(lastAssistantReply(session));
+    } else {
+      await renderer.fail(failure instanceof Error ? failure.message : String(failure));
     }
   };
 
@@ -522,11 +611,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     },
 
     async stop() {
+      // Stop intake first: with the sockets down no new event can slip
+      // into `inflight` after the drain snapshot below, so nothing posts
+      // to Slack after stop() returns.
+      await Promise.allSettled(connections.map((connection) => connection.socket.disconnect()));
       await Promise.allSettled([...inflight]);
       unsubscribe?.();
       unsubscribe = undefined;
       gatewayRef = undefined;
-      await Promise.allSettled(connections.map((connection) => connection.socket.disconnect()));
       connections.length = 0;
     },
   };

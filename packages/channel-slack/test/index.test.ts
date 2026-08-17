@@ -49,11 +49,13 @@ const createFakeSocket = (): FakeSocket => {
 interface FakeWeb extends SlackWebLike {
   posts: Array<{ channel: string; text: string; thread_ts?: string }>;
   updates: Array<{ channel: string; ts: string; text: string }>;
-  uploads: Array<{ channel_id: string; file: string }>;
+  uploads: Array<{ channel_id: string; filename?: string; contents: string; wasBuffer: boolean }>;
+  userInfoDelayMs?: (callIndex: number) => number;
 }
 
 const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
   let counter = 0;
+  let userInfoCalls = 0;
   const web: FakeWeb = {
     posts: [],
     updates: [],
@@ -76,12 +78,23 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
     },
     files: {
       async uploadV2(args) {
-        web.uploads.push({ channel_id: args.channel_id, file: args.file });
+        // The real SDK takes file contents; a path string would fail there.
+        web.uploads.push({
+          channel_id: args.channel_id,
+          ...(args.filename ? { filename: args.filename } : {}),
+          contents: Buffer.isBuffer(args.file) ? args.file.toString('utf8') : String(args.file),
+          wasBuffer: Buffer.isBuffer(args.file),
+        });
         return {};
       },
     },
     users: {
       async info({ user }) {
+        userInfoCalls += 1;
+        const delay = web.userInfoDelayMs?.(userInfoCalls) ?? 0;
+        if (delay > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
         return { user: { profile: { display_name: user === 'U-DYLAN' ? 'Dylan' : `name-${user}` } } };
       },
     },
@@ -417,7 +430,16 @@ test('queued turns in one thread keep their own renderers', async () => {
   assert.equal((byTs.get(secondTs!) ?? []).at(-1), 'turn-2-final');
 });
 
-test('file-bearing tool results upload into the conversation', async () => {
+test('file-bearing tool results upload their contents into the conversation', async () => {
+  const { mkdtemp, writeFile } = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'slack-upload-'));
+  const shotPath = path.join(dir, 'shot.png');
+  const extraPath = path.join(dir, 'extra.pdf');
+  await writeFile(shotPath, 'png-bytes');
+  await writeFile(extraPath, 'pdf-bytes');
+
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   const bus = new EventBus();
@@ -433,7 +455,7 @@ test('file-bearing tool results upload into the conversation', async () => {
           callId: 'c1',
           toolName: 'browser.screenshot',
           ok: true,
-          output: { file: '/tmp/shot.png', files: ['/tmp/extra.pdf'] },
+          output: { file: shotPath, files: [extraPath] },
         },
       });
       return sessionWithReply(input.sessionId, 'here you go');
@@ -450,9 +472,10 @@ test('file-bearing tool results upload into the conversation', async () => {
   await socket.deliver('app_mention', mention('<@B-AVA> screenshot please'));
   await adapter.stop();
 
+  // Uploads carry the file DATA (the real SDK rejects path strings).
   assert.deepEqual(web.uploads, [
-    { channel_id: 'C1', file: '/tmp/shot.png' },
-    { channel_id: 'C1', file: '/tmp/extra.pdf' },
+    { channel_id: 'C1', filename: 'shot.png', contents: 'png-bytes', wasBuffer: true },
+    { channel_id: 'C1', filename: 'extra.pdf', contents: 'pdf-bytes', wasBuffer: true },
   ]);
   assert.equal(web.updates.at(-1)?.text, 'here you go');
 });
@@ -491,4 +514,170 @@ test('a reset delta discards partial streamed text before the retry streams', as
   for (const update of web.updates.slice(Math.max(resetIndex, 0))) {
     assert.ok(!update.text.includes('doomed partial') || web.updates.indexOf(update) < resetIndex + 1, `late edit leaked partial text: ${update.text}`);
   }
+});
+
+test('inbound order per session survives slow user lookups', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  // The first message's user lookup is slow; without per-session intake
+  // ordering, the second message would reach the gateway first and the
+  // durable conversation would run in reverse.
+  web.userInfoDelayMs = (call) => (call === 1 ? 40 : 0);
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  const one = socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-o1' },
+    event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-AVA> first', ts: '800.1', thread_ts: '800.0', channel: 'C1' },
+  });
+  const two = socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-o2' },
+    event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-AVA> second', ts: '800.2', thread_ts: '800.0', channel: 'C1' },
+  });
+  await Promise.all([one, two]);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((d) => d.userMessage), ['Dylan: first', 'Dylan: second']);
+});
+
+test('the tool status line clears as soon as the tool completes', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const bus = new EventBus();
+
+  const gateway: GatewayLike = {
+    bus,
+    agents: () => [{ id: 'ava', name: 'Ava' }],
+    async dispatch(input) {
+      await bus.emit({ type: 'tool.called', sessionId: input.sessionId, call: { id: 'c1', toolName: 'demo.echo', input: {} } });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await bus.emit({ type: 'tool.completed', sessionId: input.sessionId, result: { callId: 'c1', toolName: 'demo.echo', ok: true, output: {} } });
+      // A slow, non-streaming follow-up provider turn: the message must
+      // not claim the tool is still running all this time.
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return sessionWithReply(input.sessionId, 'done');
+    },
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> run the tool'));
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  await adapter.stop();
+
+  const texts = web.updates.map((update) => update.text);
+  const toolIndex = texts.findIndex((text) => text.includes('⚙'));
+  assert.ok(toolIndex >= 0, 'expected a tool status edit');
+  const afterTool = texts.slice(toolIndex + 1, -1);
+  assert.ok(afterTool.length > 0, 'expected an edit between tool completion and finalize');
+  for (const text of afterTool) {
+    assert.ok(!text.includes('⚙'), `status line must clear promptly, saw: ${text}`);
+  }
+  assert.equal(texts.at(-1), 'done');
+});
+
+test('streamed text from consecutive provider turns stays separated', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const bus = new EventBus();
+
+  const gateway: GatewayLike = {
+    bus,
+    agents: () => [{ id: 'ava', name: 'Ava' }],
+    async dispatch(input) {
+      await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: "I'll check." } });
+      await bus.emit({ type: 'provider.response', sessionId: input.sessionId, parts: [] });
+      await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: 'The result is 4.' } });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return sessionWithReply(input.sessionId, "I'll check.\n\nThe result is 4.");
+    },
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> what is 2+2'));
+  await adapter.stop();
+
+  // The streaming edit keeps the turns visually separate — never
+  // "I'll check.The result is 4." fused into one sentence.
+  assert.ok(
+    web.updates.some((update) => update.text.includes("I'll check.\n\nThe result is 4.")),
+    `expected separated turns in streaming edits, got ${JSON.stringify(web.updates.map((u) => u.text))}`,
+  );
+  assert.ok(web.updates.every((update) => !update.text.includes("check.The")));
+});
+
+test('long replies never split an emoji across the message boundary', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  // No newlines, and a surrogate pair straddling the 4000-unit boundary.
+  const reply = `${'a'.repeat(3999)}😀${'b'.repeat(200)}`;
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> emoji wall'));
+  await adapter.stop();
+
+  const chunks = [web.updates.at(-1)?.text ?? '', ...web.posts.slice(1).map((post) => post.text)];
+  assert.equal(chunks.join(''), reply, 'chunks must reassemble exactly');
+  for (const chunk of chunks) {
+    // A lone surrogate half would appear if the cut landed inside 😀.
+    assert.ok(chunk.isWellFormed(), `chunk split a surrogate pair: …${chunk.slice(-5)}`);
+  }
+});
+
+test('a turn that produced no text finalizes as (no reply), never an older answer', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const now = new Date().toISOString();
+  // A resumed conversation: the previous turn answered, this turn's
+  // provider returned nothing visible.
+  const gateway = createStubGateway(({ sessionId }) => ({
+    id: sessionId,
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'completed' as const,
+    messages: [
+      { id: 'u1', role: 'user' as const, content: 'earlier question', createdAt: now },
+      { id: 'a1', role: 'assistant' as const, content: 'the older answer', createdAt: now },
+      { id: 'u2', role: 'user' as const, content: 'new question', createdAt: now },
+    ],
+    createdAt: now,
+    updatedAt: now,
+  }));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> new question'));
+  await adapter.stop();
+
+  assert.equal(web.updates.at(-1)?.text, '(no reply)');
 });

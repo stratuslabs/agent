@@ -483,6 +483,31 @@ test('a channel adapter that fails to start does not take the gateway down', asy
   assert.ok(warnings.some((line) => line.includes('broken')), 'expected a warning about the broken channel');
 });
 
+test('an adapter whose start rejects is still cleaned up', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+
+  // start() acquires a resource (a socket, a listener) and THEN fails: it
+  // never reaches the started list, so the failure path must stop it —
+  // nothing else ever will.
+  let cleanedUp = false;
+  const halfStarted = {
+    name: 'half-started',
+    async start() {
+      throw new Error('failed after acquiring a socket');
+    },
+    async stop() {
+      cleanedUp = true;
+    },
+  };
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, channels: [halfStarted], warn: () => {} });
+  await gateway.start();
+  await gateway.stop();
+
+  assert.equal(cleanedUp, true, 'the failed adapter must be stopped in the failure path');
+});
+
 test('the idle watchdog honors a session sticky-switched to a non-streaming fallback', async () => {
   const home = await newHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });
