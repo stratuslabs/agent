@@ -48,7 +48,7 @@ Landing with the gateway (step 01), because every layer above needs them:
 Contract extensions owned by later steps:
 
 4. Approval-request/resolve event variants, a risk level on registered `Tool`s (derived into their descriptors), and the resolved tool + risk in `ApprovalContext` (step 03).
-5. A callable tool-dispatch seam on `ProviderRequest`, so providers that host an inner loop execute tools through the kernel chain instead of around it (step 04).
+5. A callable tool-dispatch seam on `ProviderRequest`, so providers that host an inner loop execute tools through the kernel chain — and have them recorded in session history — instead of around it (step 04).
 6. Glob support in per-agent tool allowlists (step 06).
 7. A `usage` field on `ProviderResponse`, accumulated by the runner and emitted with `session.completed` (step 08).
 

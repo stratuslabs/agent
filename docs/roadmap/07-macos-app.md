@@ -30,7 +30,7 @@ By this point the runtime story is complete (gateway, Slack, permissions, tools,
 ## Acceptance criteria
 
 - On a clean Mac with the CLI installed: open app → create an agent (name, personality, model, tools) → the agent appears in `stratus agents` output unchanged, and answers in Slack once its token is bound — no terminal use beyond installing the app/CLI.
-- Edit a soul in the app while the daemon runs; the next conversation turn uses the updated instructions (via 05's `POST /api/roster/reload`).
+- Edit a soul in the app while the daemon runs; the next conversation turn uses the updated instructions — including in *existing* sessions, since gateway dispatch re-resolves the agent definition from the roster each turn (01) after 05's `POST /api/roster/reload` picks up the file change.
 - Daemon control works: install launchd plist, stop/start, health reflects reality; killing the daemon out-of-band shows unhealthy within seconds.
 - Every file the app writes is byte-compatible with the CLI: `stratus setup` and the app can be used interchangeably without either corrupting the other's state.
 - App contains no provider/tool/loop code (review-level check, but real: the only network calls are to the control API and Apple/Sparkle endpoints).

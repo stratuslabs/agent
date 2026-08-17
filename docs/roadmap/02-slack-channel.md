@@ -14,7 +14,7 @@ This is the first real front door for a running fleet, and the forcing function 
 
 - New package `@stratusagent/channels` — the transport contract, no vendor code:
   - `InboundMessage` (channel kind, team/workspace, conversation, thread, author, text, mentions),
-  - `OutboundConnection` (post, edit, typing indicator),
+  - `OutboundConnection` (post, edit, typing indicator, **file upload** — the adapter converts tool results that reference workspace file paths, like screenshots, into outbound attachments),
   - `ChannelAdapter` lifecycle (`start(gateway)`, `stop()`) plus the inbound → router → session-key mapping helpers.
 - New package `@stratusagent/channel-slack`:
   - **Socket Mode** (no public ingress — required for machines behind NAT).
