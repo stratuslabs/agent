@@ -199,7 +199,7 @@ export interface DashboardServerHandle {
   close: () => Promise<void>;
 }
 
-export const CLI_VERSION = '0.2.4';
+export const CLI_VERSION = '0.2.5';
 
 const DEFAULT_DASHBOARD_HOST = '127.0.0.1';
 const DASHBOARD_TITLE = 'Stratus Agent Dashboard';

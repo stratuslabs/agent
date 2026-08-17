@@ -1,6 +1,6 @@
 {
   "name": "@stratusagent/gateway",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -37,7 +37,7 @@
     "url": "git+https://github.com/stratuslabs/agent.git",
     "directory": "packages/gateway"
   },
-  "description": "stratusd — the always-on Stratus Agent gateway: durable SQLite sessions, a per-provider runner pool, dispatcher-backed delegation, and an activity watchdog",
+  "description": "stratusd \u2014 the always-on Stratus Agent gateway: durable SQLite sessions, a per-provider runner pool, dispatcher-backed delegation, and an activity watchdog",
   "keywords": [
     "stratus",
     "agent",
