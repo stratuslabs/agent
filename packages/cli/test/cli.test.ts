@@ -1906,6 +1906,71 @@ test('switching the default provider clears settings chosen for the old one', as
   assert.match(output.stdout, /default claude-opus-5 \(default\)/);
 });
 
+test('creating an agent never claims an id another soul already declares', async () => {
+  const { loadRosterSouls } = await import('@stratusagent/state');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // A filename is not an id. This soul is `renamed.md` and declares
+  // `id: ava`, so `ava.md` being free proves nothing about `ava`.
+  const existingPath = path.join(agentsDir, 'renamed.md');
+  const existing = '---\nname: Ava\nid: ava\n---\n\nThe original Ava.\n';
+  await writeFile(existingPath, existing);
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Say hello to Ava\./);
+
+  // The soul that was already there is untouched — not overwritten, and
+  // not left sharing an id.
+  assert.equal(await readFile(existingPath, 'utf8'), existing);
+  const written = (await readdir(agentsDir)).filter((file) => file !== 'renamed.md');
+  assert.equal(written.length, 1, `agents dir held ${JSON.stringify(await readdir(agentsDir))}`);
+  assert.match(written[0] ?? '', /^ava-[a-z0-9]+\.md$/);
+
+  // Which is the point: the roster still loads, so the daemon still starts.
+  const roster = await loadRosterSouls({ homeDir: home });
+  assert.deepEqual(roster.map((entry) => entry.soul.agent.id).sort(), ['ava', written[0]?.replace(/\.md$/, '')]);
+});
+
+test('creating an agent never claims the reserved built-in id', async () => {
+  const { loadRosterSouls } = await import('@stratusagent/state');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+
+  const { streams } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['3\n', '1\n', 'Stratus\n', 'Be kind and brief.\n', '7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // A soul claiming `stratus` is skipped at load, so writing one would
+  // create an agent that silently never appears on the roster.
+  const written = await readdir(path.join(home, '.stratus', 'agents'));
+  assert.deepEqual(written.map((file) => file.replace(/\.md$/, '')).filter((id) => id === 'stratus'), []);
+  const roster = await loadRosterSouls({ homeDir: home });
+  assert.equal(roster.length, 1, `roster was ${JSON.stringify(roster.map((entry) => entry.soul.agent.id))}`);
+});
+
 test('switching provider warns when the default soul pins another provider', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const soulPath = path.join(home, '.stratus', 'agents', 'ava.md');

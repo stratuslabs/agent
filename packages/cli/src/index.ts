@@ -11,6 +11,7 @@ import {
   AllowAllApprovalPolicy,
   EventBus,
   ToolRegistry,
+  type AgentDefinition,
   type AgentMemoryStore,
   type ApprovalPolicy,
   type JsonObject,
@@ -2324,6 +2325,81 @@ const KNOWN_CLAUDE_MODELS = [
   'claude-sonnet-4-6',
 ];
 
+/**
+ * The ids a newly created soul must not claim: every id the roster
+ * declares, plus the reserved built-in one.
+ *
+ * A filename is not an id. A soul at `renamed.md` may declare `id: ava`,
+ * so `ava.md` being free proves nothing — and since a duplicate id now
+ * refuses the whole roster, writing one would hand back an agent whose
+ * daemon cannot start. `stratus` is included because a soul claiming the
+ * built-in id is skipped at load, so writing one creates an agent that
+ * silently never appears.
+ *
+ * `undefined` means the roster could not be read, which is not the same
+ * as nothing being taken. Creating an agent is never blocked on it — the
+ * caller says so instead, rather than implying a check that did not run.
+ */
+const declaredAgentIds = async (env: CliEnvironment): Promise<Set<string> | undefined> => {
+  try {
+    const entries = await loadRosterSouls(env, () => {});
+    return new Set([DEFAULT_STRATUS_AGENT.id, ...entries.map((entry) => entry.soul.agent.id)]);
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Write a new soul under an id nothing else holds, and return the agent
+ * that got written.
+ *
+ * The name stays theirs, but the id — the soul filename, the memory key,
+ * the credential scope — must be unique: the suggestion pool is small, so
+ * a repeat name would otherwise share an earlier agent's memory. Two
+ * claims have to fail here, and only one of them is a filename:
+ *
+ * - An id another soul declares, whatever that soul is called on disk.
+ *   Since a duplicate refuses the whole roster, writing one would leave a
+ *   daemon that will not start — created by the command meant to help.
+ * - The path itself, via `wx`, which makes the claim atomic against a
+ *   concurrent writer that the roster read above cannot see.
+ *
+ * On either, the id takes a fresh suffix and we try again — through the
+ * shared bound, since appending a suffix to a maxed-out base would build
+ * an id the validator refuses, turning a collision into a crash.
+ */
+const claimSoulFile = async (
+  env: CliEnvironment,
+  input: { name?: string; instructions: string },
+  render: (agent: AgentDefinition) => string,
+  note: (message: string) => void,
+): Promise<{ agent: AgentDefinition; soulPath: string }> => {
+  const taken = await declaredAgentIds(env);
+  if (taken === undefined) {
+    note('Note: the roster could not be read, so this id was not checked against the ids other souls declare.');
+  }
+  let agent = defineAgent({ ...(input.name ? { name: input.name } : {}), instructions: input.instructions });
+  const baseId = agent.id;
+  for (;;) {
+    const soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
+    if (!taken?.has(agent.id)) {
+      try {
+        await writeFile(soulPath, render(agent), { flag: 'wx' });
+        return { agent, soulPath };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw error;
+        }
+      }
+    }
+    agent = defineAgent({
+      id: agentIdWithSuffix(baseId, randomUUID().slice(0, 4)),
+      ...(input.name ? { name: input.name } : { name: agent.name }),
+      instructions: input.instructions,
+    });
+  }
+};
+
 export const runSetup = async (
   command: ParsedSetupCommand,
   streams: CliStreams,
@@ -2952,17 +3028,18 @@ export const runSetup = async (
 
     const name = await prompter.ask('Name your agent (Enter to have one generated): ');
     const instructions = await prompter.ask('Describe their personality in a sentence or two (Enter for a starter you can edit later): ');
-    const agent = defineAgent({
-      ...(name ? { name } : {}),
-      instructions: instructions || DEFAULT_SOUL_STARTER,
-    });
-    const soul = formatSoul({
-      agent,
-      ...(state.provider !== 'demo' ? { provider: state.provider, model: state.model ?? defaultModelFor(state.provider) } : {}),
-    });
-    const soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
-    await mkdir(path.dirname(soulPath), { recursive: true });
-    await writeFile(soulPath, soul);
+    const persona = instructions || DEFAULT_SOUL_STARTER;
+    const pin = state.provider !== 'demo'
+      ? { provider: state.provider, model: state.model ?? defaultModelFor(state.provider) }
+      : {};
+    await mkdir(agentsDirPath(env), { recursive: true });
+    const claimed = await claimSoulFile(
+      env,
+      { ...(name ? { name } : {}), instructions: persona },
+      (agent) => formatSoul({ agent, ...pin }),
+      (message) => writeLine(streams.stdout, message),
+    );
+    const { agent, soulPath } = claimed;
     state.soulPath = soulPath;
     writeLine(streams.stdout, `Say hello to ${agent.name}.`);
     writeLine(streams.stdout, `Their soul lives at ${soulPath} — edit it any time to change how they talk.`);
@@ -4556,7 +4633,6 @@ export const runAgentNew = async (
       );
 
       const persona = instructions || DEFAULT_SOUL_STARTER;
-      let agent = defineAgent({ name, instructions: persona });
 
       // Frontmatter pins what a run from this directory would actually use:
       // env vars outrank the active config file (project-local or explicit
@@ -4583,33 +4659,14 @@ export const runAgentNew = async (
         ?? (soulProvider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
       const soulPin = soulProvider !== 'demo' ? { provider: soulProvider, model: soulModel } : {};
 
-      // The name stays theirs, but the id — the soul filename and the
-      // memory key — must be unique: the suggestion pool is small, so a
-      // repeat name would otherwise silently overwrite an earlier agent's
-      // soul and share their memory. 'wx' makes each claim atomic; on a
-      // collision the id gets a fresh suffix and we try again.
       await mkdir(agentsDirPath(env), { recursive: true });
-      const baseId = agent.id;
-      let soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
-      for (;;) {
-        try {
-          await writeFile(soulPath, formatSoul({ agent, ...soulPin }), { flag: 'wx' });
-          break;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-            throw error;
-          }
-          // Through the shared bound: a long name derives a long base, and
-          // appending a suffix to a maxed-out one would build an id the
-          // validator refuses — turning a filename collision into a crash.
-          agent = defineAgent({
-            id: agentIdWithSuffix(baseId, randomUUID().slice(0, 4)),
-            name,
-            instructions: persona,
-          });
-          soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
-        }
-      }
+      const claimed = await claimSoulFile(
+        env,
+        { name, instructions: persona },
+        (candidate) => formatSoul({ agent: candidate, ...soulPin }),
+        (message) => writeLine(streams.stdout, message),
+      );
+      const { agent, soulPath } = claimed;
 
       const makeDefault = await prompter.select(`Make ${agent.name} your default agent?`, [
         'Yes — every stratus run talks to them',

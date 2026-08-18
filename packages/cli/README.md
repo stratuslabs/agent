@@ -384,6 +384,12 @@ name; a generated agent's id is also capped at 64 characters, but a slug
 derived from a name you chose is used whole, because shortening an id moves
 the agent it belongs to.
 
+Creating an agent checks the id against the ids other souls *declare*, not
+just against the filenames on disk — a soul at `renamed.md` can declare
+`id: ava`, and `stratus` is reserved — so a new agent gets a suffixed id
+(`ava-3f9c`) rather than one that would collide. Its name stays the one you
+chose.
+
 **Two souls cannot share an id.** That is not two agents; it is one agent
 whose memory and sign-ins belong to whichever file sorted first. The roster
 refuses to load and names both files, `stratus serve` will not start,
