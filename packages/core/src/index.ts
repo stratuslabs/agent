@@ -389,6 +389,16 @@ export interface PendingApprovalRecord {
    */
   remaining: ToolCall[];
   /**
+   * Which provider turn this call belongs to, 1-based.
+   *
+   * Recovery resumes the loop counter here rather than restarting it, or a
+   * call parked on the last permitted turn would come back with the whole
+   * budget again — and every crash-and-recover cycle would extend it
+   * further. `maxTurns` is a runaway and cost guard; a turn that survives a
+   * restart must not be worth more than one that did not.
+   */
+  turn: number;
+  /**
    * When the wait began, ISO-8601.
    *
    * The deadline itself is deliberately NOT stored: it is chosen by
@@ -419,6 +429,9 @@ export const readPendingApproval = (session: Session): PendingApprovalRecord | u
   return {
     call: record.call,
     remaining: Array.isArray(record.remaining) ? record.remaining.filter(isCall) : [],
+    // A record written before this field existed resumes at 1, which is
+    // the old behaviour and never *more* permissive than a fresh turn.
+    turn: typeof record.turn === 'number' && Number.isFinite(record.turn) ? record.turn : 1,
     parkedAt: typeof record.parkedAt === 'string' ? record.parkedAt : '',
   };
 };
@@ -880,7 +893,7 @@ export class AgentRunner {
      * the session — replaying it would duplicate the assistant messages and
      * re-ask the model — so recovery picks up exactly where the wait was.
      */
-    resumeFrom?: { pending: ToolCall | undefined; remaining: ToolCall[]; parkedAt?: string },
+    resumeFrom?: { pending: ToolCall | undefined; remaining: ToolCall[]; parkedAt?: string; turn?: number },
   ): Promise<Session> {
     let session = initialSession;
     let pendingEntry = resumeFrom;
@@ -891,7 +904,10 @@ export class AgentRunner {
         .describe()
         .filter((tool) => allowedTools === undefined || allowedTools.has(tool.name));
 
-      for (let turn = 1; ; turn += 1) {
+      // Resumed, not restarted: a recovered turn spends the budget it was
+      // already on. Starting at 1 would let a call parked on the last
+      // permitted turn buy the whole allowance again.
+      for (let turn = resumeFrom?.turn ?? 1; ; turn += 1) {
         throwIfAborted(signal);
         if (turn > this.maxTurns) {
           throw new Error(`Session exceeded the maximum of ${this.maxTurns} provider turns.`);
@@ -911,7 +927,7 @@ export class AgentRunner {
           // a denied one is already answered.
           const carriedParkedAt = pendingEntry.pending ? pendingEntry.parkedAt : undefined;
           pendingEntry = undefined;
-          await this.runToolCalls(session, recovered, signal, carriedParkedAt);
+          await this.runToolCalls(session, recovered, signal, carriedParkedAt, turn);
           continue;
         }
 
@@ -972,7 +988,7 @@ export class AgentRunner {
         await this.store.save(session);
         await this.bus.emit({ type: 'provider.response', sessionId: session.id, parts: response.parts });
 
-        await this.runToolCalls(session, calls, signal);
+        await this.runToolCalls(session, calls, signal, undefined, turn);
 
         if (!sawToolCall) {
           break;
@@ -1042,12 +1058,12 @@ export class AgentRunner {
     const pending = record.call;
     const remaining = record.remaining;
 
-    // The checkpoint comes off before anything runs. It describes a wait
-    // that is over either way, and leaving it would let a second sweep
-    // recover the same call again.
-    await this.checkpointPendingApproval(session, undefined);
-    await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: 'running' });
-
+    // The checkpoint deliberately stays put here. Clearing it before the
+    // recovered wait is durably re-established leaves a window in which the
+    // session reads as `running` with the approval still unanswered — a
+    // daemon that dies inside it is skipped by the next sweep, and the call
+    // is later closed as interrupted rather than recovered. Re-parking
+    // overwrites it; answering retires it, in the same save as the result.
     if (options.denyPending) {
       // Written exactly as executeToolCall would have written a refusal,
       // so a turn denied by an expired deadline is indistinguishable
@@ -1061,19 +1077,47 @@ export class AgentRunner {
         error: `Tool call denied by approval policy: ${pending.toolName}`,
       };
       await this.bus.emit({ type: 'tool.denied', sessionId: session.id, call: pending });
-      session.messages.push({
-        id: `${session.id}:tool:${result.callId}`,
-        role: 'tool',
-        name: result.toolName,
-        content: JSON.stringify(result),
-        createdAt: new Date().toISOString(),
-        toolResult: result,
-      });
-      await this.store.save(session);
-      return this.executeTurns(session, options.signal, { pending: undefined, remaining });
+      // Result and retirement in one write: a crash between them would
+      // either re-deny an answered call or lose the denial.
+      await this.recordToolResult(session, result);
+        return this.executeTurns(session, options.signal, { pending: undefined, remaining, turn: record.turn });
     }
 
-    return this.executeTurns(session, options.signal, { pending, remaining, parkedAt: record.parkedAt });
+    return this.executeTurns(session, options.signal, {
+      pending,
+      remaining,
+      parkedAt: record.parkedAt,
+      turn: record.turn,
+    });
+  }
+
+  /**
+   * Records one tool result — and, in the *same* save, retires the
+   * checkpoint if it was for this call.
+   *
+   * Two writes would leave a window where the result is durable and the
+   * record is not (a later sweep re-executes an answered call) or the other
+   * way round. Since a call with a recorded result is by definition no
+   * longer re-enterable, the two facts belong in one write.
+   */
+  private async recordToolResult(session: Session, result: ToolResult): Promise<void> {
+    session.messages.push({
+      id: `${session.id}:tool:${result.callId}`,
+      role: 'tool',
+      name: result.toolName,
+      content: JSON.stringify(result),
+      createdAt: new Date().toISOString(),
+      toolResult: result,
+    });
+
+    if (readPendingApproval(session)?.call.id === result.callId) {
+      const metadata = { ...(session.metadata ?? {}) };
+      delete metadata[PENDING_APPROVAL_METADATA_KEY];
+      session.metadata = metadata;
+      session.status = 'running';
+    }
+
+    await this.store.save(session);
   }
 
   /**
@@ -1091,6 +1135,7 @@ export class AgentRunner {
      * waiting; anything behind it has not been asked about yet.
      */
     parkedAt?: string,
+    turn = 1,
   ): Promise<void> {
     for (let index = 0; index < calls.length; index += 1) {
       const call = calls[index]!;
@@ -1098,20 +1143,13 @@ export class AgentRunner {
       const result = await this.executeToolCall(session, call, {
         ...(signal ? { signal } : {}),
         remaining: calls.slice(index + 1),
+        turn,
         ...(index === 0 && parkedAt ? { parkedAt } : {}),
       });
 
       // The result lands immediately after execution, so side effects
       // are never durable without their record.
-      session.messages.push({
-        id: `${session.id}:tool:${result.callId}`,
-        role: 'tool',
-        name: result.toolName,
-        content: JSON.stringify(result),
-        createdAt: new Date().toISOString(),
-        toolResult: result,
-      });
-      await this.store.save(session);
+      await this.recordToolResult(session, result);
     }
   }
 
@@ -1219,6 +1257,8 @@ export class AgentRunner {
        * every recovery.
        */
       parkedAt?: string;
+      /** The provider turn these calls came from, for the checkpoint. */
+      turn?: number;
     } = {},
   ): Promise<ToolResult> {
     const { signal, remaining = [] } = options;
@@ -1265,6 +1305,7 @@ export class AgentRunner {
       await this.checkpointPendingApproval(session, {
         call,
         remaining,
+        turn: options.turn ?? 1,
         parkedAt: options.parkedAt ?? new Date().toISOString(),
       });
     }

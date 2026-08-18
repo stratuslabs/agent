@@ -1557,3 +1557,136 @@ test('a recovered call is re-asked with the time it originally parked', async ()
   // of the window rather than a whole new one.
   assert.deepEqual(seen, [parkedAt]);
 });
+
+test('recovery holds the checkpoint until the wait is re-established or answered', async () => {
+  // Clearing it up front leaves a window where the session reads `running`
+  // with the approval still unanswered. A daemon that dies inside that
+  // window is skipped by the next sweep, and the call is later closed as
+  // interrupted — a recoverable turn quietly lost.
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'gated',
+    risk: 'gated',
+    async execute() {
+      return { ok: true };
+    },
+  });
+
+  const now = new Date().toISOString();
+  const call = { id: 'c1', toolName: 'gated', input: {} };
+  const seed = async (id: string): Promise<void> => {
+    await store.create({
+      id,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'pending_approval',
+      messages: [
+        { id: 'm1', role: 'user', content: 'go', createdAt: now },
+        { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [call] },
+      ],
+      metadata: { [PENDING_APPROVAL_METADATA_KEY]: { call, remaining: [], turn: 1, parkedAt: now } },
+    });
+  };
+
+  // Every persisted state is inspected, not just the one after recovery
+  // settles: the defect is a *window*, and sampling either side of it
+  // passes whether the window exists or not. The invariant is that while
+  // the parked call has no result, nothing durable ever says otherwise.
+  await seed('held');
+  const snapshots: Array<{ status: string; parked: boolean }> = [];
+  const watched: InMemorySessionStore = Object.assign(Object.create(store) as InMemorySessionStore, {
+    async save(session: Session) {
+      if (session.id === 'held') {
+        snapshots.push({ status: session.status, parked: Boolean(readPendingApproval(session)) });
+      }
+      return store.save(session);
+    },
+    get: (id: string) => store.get(id),
+    create: (input: Parameters<InMemorySessionStore['create']>[0]) => store.create(input),
+  });
+
+  const stalled = new AgentRunner({
+    provider: { name: 'fake', async generate() { return { parts: [{ type: 'text', text: 'ok' }] }; } },
+    tools,
+    store: watched,
+    approvals: { approve: () => new Promise<boolean>(() => {}) },
+  });
+  void stalled.recoverPendingApproval('held').catch(() => undefined);
+  for (let tick = 0; tick < 20; tick += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.ok(snapshots.length > 0, 'recovery persisted something');
+  const unfindable = snapshots.filter((snapshot) => !snapshot.parked);
+  assert.deepEqual(
+    unfindable,
+    [],
+    `every state saved while the approval was unanswered must stay findable by a sweep, saw ${JSON.stringify(snapshots)}`,
+  );
+
+  // And once a decision lands, the record retires with the result rather
+  // than in a separate write.
+  await seed('answered');
+  const revived = new AgentRunner({
+    provider: { name: 'fake', async generate() { return { parts: [{ type: 'text', text: 'ok' }] }; } },
+    tools,
+    store,
+    approvals: { async approve() { return true; } },
+  });
+  const done = await revived.recoverPendingApproval('answered');
+  assert.equal(readPendingApproval(done!), undefined);
+  assert.ok(done!.messages.some((message) => message.toolResult?.callId === 'c1'));
+});
+
+test('a recovered turn spends the provider budget it was already on', async () => {
+  // maxTurns is a runaway and cost guard. Restarting the counter would let
+  // a call parked on the last permitted turn buy the whole allowance again,
+  // and every crash-and-recover cycle would extend it further.
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'gated',
+    risk: 'gated',
+    async execute() {
+      return { ok: true };
+    },
+  });
+
+  let generates = 0;
+  const now = new Date().toISOString();
+  const call = { id: 'c1', toolName: 'gated', input: {} };
+  await store.create({
+    id: 'budgeted',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [call] },
+    ],
+    // Parked on the third and last permitted turn.
+    metadata: { [PENDING_APPROVAL_METADATA_KEY]: { call, remaining: [], turn: 3, parkedAt: now } },
+  });
+
+  const runner = new AgentRunner({
+    provider: {
+      name: 'fake',
+      async generate() {
+        generates += 1;
+        // Always asks for another tool, so only the budget can stop it.
+        return { parts: [{ type: 'tool-call' as const, call: { id: `c${generates + 1}`, toolName: 'gated', input: {} } }] };
+      },
+    },
+    tools,
+    store,
+    maxTurns: 3,
+    approvals: { async approve() { return true; } },
+  });
+
+  await assert.rejects(
+    runner.recoverPendingApproval('budgeted'),
+    /maximum of 3 provider turns/,
+  );
+  // The recovered calls drain, then the loop is out of budget immediately —
+  // it does not get turns 1 through 3 over again.
+  assert.equal(generates, 0, `expected no further provider turns, saw ${generates}`);
+});
