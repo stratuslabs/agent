@@ -331,6 +331,13 @@ export interface ApprovalContext {
   tool: Tool;
   risk: ToolRisk;
   /**
+   * When this call first parked, if it is being re-asked after a restart.
+   * A transport that imposes a deadline should measure from here, or a
+   * request would win a fresh full window on every restart — and a
+   * crash-looping daemon could keep one alive indefinitely.
+   */
+  parkedAt?: string;
+  /**
    * The turn's abort signal. A policy that waits on a human MUST observe it:
    * an aborted turn rejects the in-flight wait and invalidates its pending
    * request, so a later approval can never execute a tool for a cancelled
@@ -873,7 +880,7 @@ export class AgentRunner {
      * the session — replaying it would duplicate the assistant messages and
      * re-ask the model — so recovery picks up exactly where the wait was.
      */
-    resumeFrom?: { pending: ToolCall | undefined; remaining: ToolCall[] },
+    resumeFrom?: { pending: ToolCall | undefined; remaining: ToolCall[]; parkedAt?: string },
   ): Promise<Session> {
     let session = initialSession;
     let pendingEntry = resumeFrom;
@@ -898,8 +905,13 @@ export class AgentRunner {
             ...(pendingEntry.pending ? [pendingEntry.pending] : []),
             ...pendingEntry.remaining,
           ];
+          // The original park time rides along, so a wait is measured from
+          // when it began rather than restarted by the recovery. Only
+          // meaningful when the parked call itself is being re-asked;
+          // a denied one is already answered.
+          const carriedParkedAt = pendingEntry.pending ? pendingEntry.parkedAt : undefined;
           pendingEntry = undefined;
-          await this.runToolCalls(session, recovered, signal);
+          await this.runToolCalls(session, recovered, signal, carriedParkedAt);
           continue;
         }
 
@@ -1061,7 +1073,7 @@ export class AgentRunner {
       return this.executeTurns(session, options.signal, { pending: undefined, remaining });
     }
 
-    return this.executeTurns(session, options.signal, { pending, remaining });
+    return this.executeTurns(session, options.signal, { pending, remaining, parkedAt: record.parkedAt });
   }
 
   /**
@@ -1069,11 +1081,25 @@ export class AgentRunner {
    * lands. Shared by the normal path and by recovery, so a resumed turn
    * writes exactly what an uninterrupted one would.
    */
-  private async runToolCalls(session: Session, calls: ToolCall[], signal?: AbortSignal): Promise<void> {
+  private async runToolCalls(
+    session: Session,
+    calls: ToolCall[],
+    signal?: AbortSignal,
+    /**
+     * The original park time, when these calls come from a recovered turn.
+     * Applies to the first call only — it is the one that was already
+     * waiting; anything behind it has not been asked about yet.
+     */
+    parkedAt?: string,
+  ): Promise<void> {
     for (let index = 0; index < calls.length; index += 1) {
       const call = calls[index]!;
       throwIfAborted(signal);
-      const result = await this.executeToolCall(session, call, signal, calls.slice(index + 1));
+      const result = await this.executeToolCall(session, call, {
+        ...(signal ? { signal } : {}),
+        remaining: calls.slice(index + 1),
+        ...(index === 0 && parkedAt ? { parkedAt } : {}),
+      });
 
       // The result lands immediately after execution, so side effects
       // are never durable without their record.
@@ -1113,7 +1139,12 @@ export class AgentRunner {
     });
     await this.store.save(session);
 
-    const result = await this.executeToolCall(session, call, context?.signal);
+    // Not recoverable: this result is consumed by the hosting provider's
+    // own loop, which a restart cannot rebuild. See the option's docs.
+    const result = await this.executeToolCall(session, call, {
+      ...(context?.signal ? { signal: context.signal } : {}),
+      recoverable: false,
+    });
 
     session.messages.push({
       id: `${session.id}:tool:${result.callId}`,
@@ -1159,14 +1190,38 @@ export class AgentRunner {
   private async executeToolCall(
     session: Session,
     call: ToolCall,
-    signal?: AbortSignal,
-    /**
-     * The calls queued behind this one in the same response. Recorded on
-     * the checkpoint so a recovering daemon can finish the response rather
-     * than leaving its later `tool_use` blocks unanswered.
-     */
-    remaining: ToolCall[] = [],
+    options: {
+      signal?: AbortSignal;
+      /**
+       * The calls queued behind this one in the same response. Recorded on
+       * the checkpoint so a recovering daemon can finish the response
+       * rather than leaving its later `tool_use` blocks unanswered.
+       */
+      remaining?: ToolCall[];
+      /**
+       * Whether a parked wait here is a checkpoint a restart may re-enter.
+       *
+       * False for a provider that drives its own inner loop. Recovery
+       * re-enters the *kernel* loop, which can only continue a turn whose
+       * next step is a kernel provider call — it cannot reconstruct an SDK
+       * inner loop or the handler that was waiting to consume this result.
+       * Checkpointing such a call would have a restart execute it and then
+       * continue from a state the hosting provider never produced. 04 makes
+       * that explicit: the SDK path is excluded from the resume-the-exact-
+       * call guarantee and must fail cleanly instead, with the pending call
+       * never executed. No checkpoint is exactly that failure — the call is
+       * closed as interrupted like any other dangling one.
+       */
+      recoverable?: boolean;
+      /**
+       * When this wait began, if it began before a restart. Preserved so a
+       * window is measured from the original park rather than restarted on
+       * every recovery.
+       */
+      parkedAt?: string;
+    } = {},
   ): Promise<ToolResult> {
+    const { signal, remaining = [] } = options;
     // Every tool call settles with exactly one event — tool.completed
     // (executed or rejected, the result says which) or tool.denied. Event
     // consumers tracking a response's outstanding calls (the gateway's
@@ -1203,12 +1258,14 @@ export class AgentRunner {
     // add a save to every unattended call to describe a wait that does not
     // happen.
     const risk = resolveToolRisk(tool);
-    const parks = risk !== 'safe';
-    if (parks) {
+    // Asked about either way — only whether the wait leaves a re-enterable
+    // checkpoint differs.
+    const checkpointed = risk !== 'safe' && options.recoverable !== false;
+    if (checkpointed) {
       await this.checkpointPendingApproval(session, {
         call,
         remaining,
-        parkedAt: new Date().toISOString(),
+        parkedAt: options.parkedAt ?? new Date().toISOString(),
       });
     }
 
@@ -1220,12 +1277,13 @@ export class AgentRunner {
         tool,
         risk,
         ...(signal ? { signal } : {}),
+        ...(options.parkedAt ? { parkedAt: options.parkedAt } : {}),
       });
     } finally {
       // Cleared before anything executes and on every exit — an abort that
       // throws out of the policy must not leave the session looking parked
       // on a question nobody is waiting for.
-      if (parks) {
+      if (checkpointed) {
         await this.checkpointPendingApproval(session, undefined);
       }
     }

@@ -5,6 +5,7 @@ import {
   AgentRunner,
   EventBus,
   InMemorySessionStore,
+  PENDING_APPROVAL_METADATA_KEY,
   PluginRegistry,
   readPendingApproval,
   ToolRegistry,
@@ -1459,4 +1460,100 @@ test('a parked call is recovered by identity, not by an id an earlier turn also 
   // The recovered call is turn TWO's, with turn two's input. Resolving the
   // id against the transcript would have re-run `first`.
   assert.deepEqual(ran, [{ target: 'first' }, { target: 'second' }]);
+});
+
+test('a hosted tool call is never checkpointed, so a restart fails it cleanly', async () => {
+  // 04 excludes the SDK path from the resume-the-exact-call guarantee on
+  // purpose: recovery re-enters the KERNEL loop, and it cannot rebuild an
+  // SDK inner loop or the handler waiting to consume this result. A
+  // checkpoint here would have a restart execute the call and then continue
+  // from a state the hosting provider never produced. No checkpoint is the
+  // clean failure that doc asks for.
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'gated',
+    risk: 'gated',
+    async execute() {
+      return { ok: true };
+    },
+  });
+
+  let parked: Session | undefined;
+  const runner = new AgentRunner({
+    provider: { name: 'fake', async generate() { return { parts: [{ type: 'text', text: 'ok' }] }; } },
+    tools,
+    store,
+    approvals: {
+      async approve({ session }) {
+        parked = await store.get(session.id);
+        return true;
+      },
+    },
+  });
+
+  const session = await runner.run({
+    sessionId: 'hosted-1',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'go',
+  });
+  await runner.executeHostedToolCall(session, { id: 'h1', toolName: 'gated', input: {} });
+
+  // Asked about — the gate still applies on the hosted path…
+  assert.ok(parked, 'the policy was consulted');
+  // …but nothing durable claims the call is re-enterable.
+  assert.equal(readPendingApproval(parked!), undefined);
+  assert.notEqual(parked!.status, 'pending_approval');
+
+  const stored = await store.get('hosted-1');
+  assert.equal(readPendingApproval(stored!), undefined);
+  assert.equal(await runner.recoverPendingApproval('hosted-1'), undefined);
+});
+
+test('a recovered call is re-asked with the time it originally parked', async () => {
+  // Otherwise every restart hands the request a fresh full window, and a
+  // crash-looping daemon keeps one alive forever — the opposite of
+  // honouring the deadline it was given.
+  const parkedAt = new Date(Date.now() - 3_600_000).toISOString();
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'gated',
+    risk: 'gated',
+    async execute() {
+      return { ok: true };
+    },
+  });
+
+  const now = new Date().toISOString();
+  const call = { id: 'c1', toolName: 'gated', input: {} };
+  await store.create({
+    id: 'carried-park',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [call] },
+    ],
+    metadata: { [PENDING_APPROVAL_METADATA_KEY]: { call, remaining: [], parkedAt } },
+  });
+
+  const seen: Array<string | undefined> = [];
+  const runner = new AgentRunner({
+    provider: { name: 'fake', async generate() { return { parts: [{ type: 'text', text: 'ok' }] }; } },
+    tools,
+    store,
+    approvals: {
+      async approve(context) {
+        seen.push(context.parkedAt);
+        return true;
+      },
+    },
+  });
+
+  await runner.recoverPendingApproval('carried-park');
+
+  // The transport is told when the wait began, so it can arm what is left
+  // of the window rather than a whole new one.
+  assert.deepEqual(seen, [parkedAt]);
 });

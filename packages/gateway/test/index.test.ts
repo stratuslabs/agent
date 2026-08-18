@@ -2306,3 +2306,46 @@ test('one unanswered recovery does not hold up the other parked turns', async ()
   releaseA?.();
   await settles(gateway.stop(), 'the shutdown drain');
 });
+
+test('a re-asked request keeps the window it started with, not a fresh one', async () => {
+  const { gateway, transport } = await brokerHarness({ approvalTimeoutMs: 60_000 });
+
+  const requested = nextEvent(gateway.bus, 'tool.approval-requested');
+  // Parked 59 seconds ago under a 60-second window: a second left, not
+  // another minute. Without this a restart hands out a full window each
+  // time, and a crash-looping daemon keeps a request alive indefinitely.
+  const answer = transport.request({
+    ...parkedCall('sess-carried'),
+    parkedAt: new Date(Date.now() - 59_000).toISOString(),
+  });
+  const request = await settles(requested, 'the approval request');
+
+  const remainingMs = Date.parse(request.expiresAt ?? '') - Date.now();
+  assert.ok(remainingMs <= 1_500, `expected about a second left, got ${remainingMs}ms`);
+
+  gateway.resolveApproval({ requestId: request.requestId, answer: 'deny' });
+  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  await gateway.stop();
+});
+
+test('a request whose window is already spent is denied without being announced', async () => {
+  const { gateway, transport, events } = await brokerHarness({ approvalTimeoutMs: 60_000 });
+
+  assert.equal(
+    await settles(
+      transport.request({
+        ...parkedCall('sess-spent'),
+        parkedAt: new Date(Date.now() - 3_600_000).toISOString(),
+      }),
+      'the spent request',
+    ),
+    'deny',
+  );
+  // Never asked: announcing a request that is already over would post
+  // buttons nobody can usefully click.
+  assert.equal(events.filter((event) => event.type === 'tool.approval-requested').length, 0);
+  const resolved = events.find((event) => event.type === 'tool.approval-resolved');
+  assert.equal(resolved?.reason, 'timeout');
+
+  await gateway.stop();
+});

@@ -39,6 +39,12 @@ export interface ApprovalRequest {
   tool: Tool;
   risk: ToolRisk;
   /**
+   * When this call first parked, if it is being re-asked after a restart.
+   * A transport that imposes a deadline measures from here rather than
+   * granting a fresh window.
+   */
+  parkedAt?: string;
+  /**
    * The turn's abort signal. A transport MUST invalidate its outstanding
    * request when this fires: the answer would otherwise arrive for a turn
    * that no longer exists, and acting on it would run a tool for cancelled
@@ -197,6 +203,7 @@ const awaitRemote = async (
     call: context.call,
     tool: context.tool,
     risk: context.risk,
+    ...(context.parkedAt ? { parkedAt: context.parkedAt } : {}),
     ...(context.signal ? { signal: context.signal } : {}),
   }).then(
     (answer) => answer,

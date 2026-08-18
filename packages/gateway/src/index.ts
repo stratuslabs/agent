@@ -311,6 +311,14 @@ export interface GatewayApprovalRequest {
   session: Session;
   call: { id: string; toolName: string; input: JsonObject };
   risk: ToolRisk;
+  /**
+   * When this call first parked, if a restart is re-asking it. The wait is
+   * measured from here, so a request keeps the window it started with
+   * instead of winning a fresh one — otherwise a daemon that restarts a
+   * minute before the deadline grants another full timeout, and one that
+   * crash-loops keeps a request alive forever.
+   */
+  parkedAt?: string;
   signal?: AbortSignal;
 }
 
@@ -556,13 +564,28 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     pendingApprovals.set(requestId, settle);
 
-    if (effectiveApprovalTimeoutMs > 0) {
+    // What is left of the window, not a fresh one: a re-asked request
+    // carries when it originally parked, and the elapsed time counts.
+    const alreadyWaitedMs = request.parkedAt ? Date.now() - Date.parse(request.parkedAt) : 0;
+    const remainingTimeoutMs = effectiveApprovalTimeoutMs > 0
+      ? effectiveApprovalTimeoutMs - (Number.isFinite(alreadyWaitedMs) ? Math.max(0, alreadyWaitedMs) : 0)
+      : 0;
+
+    if (effectiveApprovalTimeoutMs > 0 && remainingTimeoutMs <= 0) {
+      // Nothing left to wait with. Settled here rather than armed with a
+      // zero timer, which `setTimeout` would still run a tick later — long
+      // enough to announce a request that is already over.
+      settle('deny', 'timeout');
+      return;
+    }
+
+    if (remainingTimeoutMs > 0) {
       // Deliberately NOT unref'd. A parked turn is real outstanding work,
       // and its timer is the only thing that will ever finish it — letting
       // the process exit out from under one would abandon the turn instead
       // of denying it. Shutdown is handled where it belongs, in stop(),
       // which settles every outstanding request before draining.
-      timer = setTimeout(() => settle('deny', 'timeout'), effectiveApprovalTimeoutMs);
+      timer = setTimeout(() => settle('deny', 'timeout'), remainingTimeoutMs);
     }
 
     // The abort listener is attached before the request is announced, so a
@@ -592,8 +615,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       call: request.call,
       risk: request.risk,
       ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
-      ...(effectiveApprovalTimeoutMs > 0
-        ? { expiresAt: new Date(Date.now() + effectiveApprovalTimeoutMs).toISOString() }
+      ...(remainingTimeoutMs > 0
+        ? { expiresAt: new Date(Date.now() + remainingTimeoutMs).toISOString() }
         : {}),
     });
     // Drained at shutdown alongside the resolutions: a channel that has not
