@@ -3783,3 +3783,56 @@ test('doctor blames the setting that actually selected demo', async () => {
   assert.match(output.stdout, /Unset STRATUS_PROVIDER; it outranks both your config and any soul/);
   assert.doesNotMatch(output.stdout, /Run `stratus setup` → Providers and sign in/);
 });
+
+test('serve applies the gateway soul-pin demotion before checking an agent', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\nprovider: anthropic\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai' }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    openai: { type: 'api_key', value: 'sk-openai' },
+    anthropic: { type: 'oauth_token', value: 'sk-ant-oat-x' },
+  }));
+
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 250);
+  await runCli({
+    argv: ['serve', '--no-events'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      // STRATUS_PROVIDER supplies the daemon default. A dispatch to Ava
+      // drops it because her soul pins a provider, then resolves anthropic
+      // with the environment key — so resolving with the pin bolted onto
+      // an unmodified environment checks openai and never warns.
+      processEnv: { STRATUS_PROVIDER: 'openai', ANTHROPIC_API_KEY: 'sk-ant-env' },
+      shutdownSignal: controller.signal,
+    },
+  });
+
+  assert.match(output.stderr, /ANTHROPIC_API_KEY in your environment outranks the Claude subscription sign-in/);
+});
+
+test('doctor names the legacy config variable that pointed at a missing file', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: { STRATUSCLAW_CONFIG: './gone.json' },
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.match(output.stdout, /gone\.json does not exist, but STRATUSCLAW_CONFIG names it/);
+  assert.doesNotMatch(output.stdout, /but STRATUS_CONFIG names it/);
+});

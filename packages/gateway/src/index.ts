@@ -180,6 +180,81 @@ export class SqliteSessionStore implements SessionStore {
  * @stratusagent/channels' ChannelAdapter — kept structural here so the
  * gateway does not depend on the channels package.
  */
+/** Where the daemon-wide provider default could have come from. */
+export interface SoulPinContext {
+  /** A provider fixed by the caller (the gateway's own selection). */
+  selectionProvider?: string;
+  /** The provider named by the active config file. */
+  configProvider?: string;
+  /** Whether a config file was found at all. */
+  configPresent: boolean;
+}
+
+/**
+ * Apply a soul's provider/model pins to a selection, demoting the
+ * daemon-wide defaults the pins outrank.
+ *
+ * Exported because this is not only dispatch logic: anything that wants to
+ * know what a served agent will actually resolve to — a startup billing
+ * check, a diagnostic — has to normalize the same way, and a second copy
+ * of these rules drifts from this one.
+ */
+export const applySoulPins = (
+  pins: ParsedSoul,
+  selection: RuntimeSelection,
+  env: StateEnvironment,
+  context: SoulPinContext,
+): { selection: RuntimeSelection; env: StateEnvironment } => {
+  selection.presetSoul = pins;
+  if (!pins.provider && !pins.model) {
+    return { selection, env };
+  }
+  const processEnv = { ...(env.processEnv ?? process.env) };
+  // The daemon-wide default can come from the selection, the environment,
+  // or the config file. A config with no provider key predates the
+  // anthropic option and is openai-specific (the resolver treats it that
+  // way), so a real file without the key still names openai as the
+  // default. Env values normalize exactly as the resolver normalizes
+  // them: an empty or whitespace-padded STRATUS_PROVIDER is no default at
+  // all, not a mismatching one.
+  const defaultProvider: string | undefined = context.selectionProvider
+    ?? readNonEmptyString(processEnv.STRATUS_PROVIDER)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER)
+    ?? context.configProvider
+    ?? (context.configPresent ? 'openai' : undefined);
+  if (pins.provider) {
+    delete selection.provider;
+    delete processEnv.STRATUS_PROVIDER;
+    delete processEnv.STRATUSCLAW_PROVIDER;
+    if (defaultProvider !== undefined && defaultProvider !== 'demo' && pins.provider !== defaultProvider) {
+      // The default model, endpoint, and generic credentials were all
+      // chosen for the default provider — none may ride along to the
+      // soul's: a base URL would point the pinned provider at the wrong
+      // service, and a generic API key would be sent to it. With NO
+      // default selected anywhere — or the credential-less demo provider
+      // as the default — there is nothing those values could have been
+      // chosen for except whatever provider the soul selects — exactly
+      // the resolver's own reading of a generic credential — so they stay.
+      delete selection.model;
+      delete processEnv.STRATUS_MODEL;
+      delete processEnv.STRATUSCLAW_MODEL;
+      delete selection.baseUrl;
+      delete processEnv.STRATUS_BASE_URL;
+      delete processEnv.STRATUSCLAW_BASE_URL;
+      delete processEnv.STRATUS_API_KEY;
+      delete processEnv.STRATUSCLAW_API_KEY;
+      delete processEnv.STRATUS_API_KEY_ENV;
+      delete processEnv.STRATUSCLAW_API_KEY_ENV;
+    }
+  }
+  if (pins.model) {
+    delete selection.model;
+    delete processEnv.STRATUS_MODEL;
+    delete processEnv.STRATUSCLAW_MODEL;
+  }
+  return { selection, env: { ...env, processEnv } };
+};
+
 export interface GatewayChannelAdapter {
   name: string;
   start(gateway: Gateway): Promise<void>;
@@ -697,55 +772,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // to resolveRuntimeConfig instead would read the file a second
       // time, racing a concurrent replacement — this turn could keep one
       // agent's definition while adopting another's provider pins.
-      selection.presetSoul = pins;
-      if (pins.provider || pins.model) {
-        const processEnv = { ...(env.processEnv ?? process.env) };
-        // The daemon-wide default can come from the selection, the
-        // environment, or the config file. A config with no provider key
-        // predates the anthropic option and is openai-specific (the
-        // resolver treats it that way), so a real file without the key
-        // still names openai as the default.
-        // Env values normalize exactly as the resolver normalizes them:
-        // an empty or whitespace-padded STRATUS_PROVIDER is no default at
-        // all, not a mismatching one.
-        const defaultProvider: string | undefined = options.selection?.provider
-          ?? readNonEmptyString(processEnv.STRATUS_PROVIDER)
-          ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER)
-          ?? configSnapshot.config.provider
-          ?? (configSnapshot.path !== undefined ? 'openai' : undefined);
-        if (pins.provider) {
-          delete selection.provider;
-          delete processEnv.STRATUS_PROVIDER;
-          delete processEnv.STRATUSCLAW_PROVIDER;
-          if (defaultProvider !== undefined && defaultProvider !== 'demo' && pins.provider !== defaultProvider) {
-            // The default model, endpoint, and generic credentials were all
-            // chosen for the default provider — none may ride along to the
-            // soul's: a base URL would point the pinned provider at the
-            // wrong service, and a generic API key would be sent to it.
-            // With NO default selected anywhere — or the credential-less
-            // demo provider as the default — there is nothing those
-            // values could have been chosen for except whatever provider
-            // the soul selects — exactly the resolver's own reading of a
-            // generic credential — so they stay.
-            delete selection.model;
-            delete processEnv.STRATUS_MODEL;
-            delete processEnv.STRATUSCLAW_MODEL;
-            delete selection.baseUrl;
-            delete processEnv.STRATUS_BASE_URL;
-            delete processEnv.STRATUSCLAW_BASE_URL;
-            delete processEnv.STRATUS_API_KEY;
-            delete processEnv.STRATUSCLAW_API_KEY;
-            delete processEnv.STRATUS_API_KEY_ENV;
-            delete processEnv.STRATUSCLAW_API_KEY_ENV;
-          }
-        }
-        if (pins.model) {
-          delete selection.model;
-          delete processEnv.STRATUS_MODEL;
-          delete processEnv.STRATUSCLAW_MODEL;
-        }
-        resolveEnv = { ...env, processEnv };
-      }
+      const normalized = applySoulPins(pins, selection, env, {
+        ...(options.selection?.provider !== undefined ? { selectionProvider: options.selection.provider } : {}),
+        ...(configSnapshot.config.provider !== undefined ? { configProvider: configSnapshot.config.provider } : {}),
+        configPresent: configSnapshot.path !== undefined,
+      });
+      resolveEnv = normalized.env;
     } else {
       // A soul-less agent (the built-in default) resolves with no soul at
       // all: the config file's default soul belongs to another identity —
