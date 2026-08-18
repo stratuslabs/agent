@@ -4553,14 +4553,6 @@ export const runServe = async (
           `Warning: could not write the log file (${error instanceof Error ? error.message : String(error)}); continuing.`,
         ),
       });
-  // And periodically, for a long-running daemon that warns steadily
-  // without ever writing enough records to rotate. Unref'd, so it never
-  // holds the process open.
-  let redirectTimer: NodeJS.Timeout | undefined;
-  if (logWriter) {
-    redirectTimer = setInterval(() => void truncateRedirectLogs(logsDirPath(env)), 5 * 60_000);
-    redirectTimer.unref?.();
-  }
   const log = (line: string): void => {
     writeLine(streams.stdout, line);
     void logWriter?.write({ ts: new Date().toISOString(), level: 'info', msg: line });
@@ -4707,36 +4699,53 @@ export const runServe = async (
   await gateway.start();
   writeLine(streams.stdout, 'Press Ctrl+C to stop.');
 
-  // Hold the event loop open until a shutdown request, then drain: new
-  // dispatches are refused while in-flight turns finish.
-  await new Promise<void>((resolve) => {
-    const keepAlive = setInterval(() => {}, 2_147_000_000);
-    let settled = false;
-    const shutdown = (): void => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearInterval(keepAlive);
-      if (redirectTimer) {
-        clearInterval(redirectTimer);
-      }
-      process.off('SIGTERM', shutdown);
-      process.off('SIGINT', shutdown);
-      resolve();
-    };
-    process.once('SIGTERM', shutdown);
-    process.once('SIGINT', shutdown);
-    if (env.shutdownSignal?.aborted) {
-      shutdown();
-    } else {
-      env.shutdownSignal?.addEventListener('abort', shutdown, { once: true });
-    }
-  });
+  // And periodically, for a long-running daemon that warns steadily
+  // without ever writing enough records to rotate. Unref'd, so it never
+  // holds the process open. Armed only once the daemon is actually
+  // serving: every step above can throw, and runServe is an exported
+  // function as much as a process entry point — in a host that survives
+  // the failure, a timer armed before the throw would outlive the call
+  // and go on truncating that environment's redirect logs. The finally
+  // below takes it down on every other exit path.
+  let redirectTimer: NodeJS.Timeout | undefined;
+  if (logWriter) {
+    redirectTimer = setInterval(() => void truncateRedirectLogs(logsDirPath(env)), 5 * 60_000);
+    redirectTimer.unref?.();
+  }
 
-  writeLine(streams.stdout, 'Stopping — draining in-flight turns.');
-  await gateway.stop();
-  return 0;
+  try {
+    // Hold the event loop open until a shutdown request, then drain: new
+    // dispatches are refused while in-flight turns finish.
+    await new Promise<void>((resolve) => {
+      const keepAlive = setInterval(() => {}, 2_147_000_000);
+      let settled = false;
+      const shutdown = (): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearInterval(keepAlive);
+        process.off('SIGTERM', shutdown);
+        process.off('SIGINT', shutdown);
+        resolve();
+      };
+      process.once('SIGTERM', shutdown);
+      process.once('SIGINT', shutdown);
+      if (env.shutdownSignal?.aborted) {
+        shutdown();
+      } else {
+        env.shutdownSignal?.addEventListener('abort', shutdown, { once: true });
+      }
+    });
+
+    writeLine(streams.stdout, 'Stopping — draining in-flight turns.');
+    await gateway.stop();
+    return 0;
+  } finally {
+    if (redirectTimer) {
+      clearInterval(redirectTimer);
+    }
+  }
 };
 
 export const runCli = async ({ argv, streams = process, env = {} }: CliRunOptions): Promise<number> => {
@@ -4755,40 +4764,45 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
       return 0;
     }
 
+    // Every handler is awaited, never bare-returned: a bare `return
+    // promise` inside try/catch settles the async function before the
+    // catch can see it, so a command that fails at runtime — a gateway
+    // that cannot open its store, a missing credential — would escape as
+    // a raw rejection instead of the error line and exit code below.
     if (command.command === 'agent-new') {
-      return runAgentNew(command, streams, resolvedEnv);
+      return await runAgentNew(command, streams, resolvedEnv);
     }
 
     if (command.command === 'agents') {
-      return runAgents(command, streams, resolvedEnv);
+      return await runAgents(command, streams, resolvedEnv);
     }
 
     if (command.command === 'doctor') {
-      return runDoctor(command, streams, resolvedEnv);
+      return await runDoctor(command, streams, resolvedEnv);
     }
 
     if (command.command === 'logs') {
-      return runLogs(command, streams, resolvedEnv);
+      return await runLogs(command, streams, resolvedEnv);
     }
 
     if (command.command === 'service') {
-      return runService(command, streams, resolvedEnv);
+      return await runService(command, streams, resolvedEnv);
     }
 
     if (command.command === 'chat') {
-      return runChat(command, streams, resolvedEnv);
+      return await runChat(command, streams, resolvedEnv);
     }
 
     if (command.command === 'setup') {
-      return runSetup(command, streams, resolvedEnv);
+      return await runSetup(command, streams, resolvedEnv);
     }
 
     if (command.command === 'dashboard') {
-      return runDashboard(command, streams, resolvedEnv);
+      return await runDashboard(command, streams, resolvedEnv);
     }
 
     if (command.command === 'serve') {
-      return runServe(command, streams, resolvedEnv);
+      return await runServe(command, streams, resolvedEnv);
     }
 
     const runtime = await resolveRuntimeConfig(command, resolvedEnv);

@@ -5352,3 +5352,25 @@ test('redirect logs are truncated even when serve cannot start', async () => {
 
   assert.equal((await stat(errPath)).size, 0);
 });
+
+test('a serve that cannot start reports the failure instead of escaping', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-'));
+  await mkdir(path.join(home, '.stratus', 'logs'), { recursive: true });
+  // A directory where the session store expects its file: the gateway
+  // throws on startup.
+  await mkdir(path.join(home, '.stratus', 'sessions.db'), { recursive: true });
+
+  const streams = createStreams();
+  const code = await runCli({
+    argv: ['serve', '--no-events'],
+    streams: streams.streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  // Every command handler is awaited inside runCli's try. Bare-returned,
+  // the async function settles before the catch runs and a daemon that
+  // cannot open its store escapes as an unhandled rejection — a raw stack
+  // trace and no error line, in the one place nobody is watching.
+  assert.equal(code, 1);
+  assert.match(streams.output.stderr, /Error: .*database file/);
+});
