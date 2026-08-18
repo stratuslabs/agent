@@ -15,6 +15,8 @@ import {
   installService,
   readServiceStatus,
   serviceUnitPath,
+  startService,
+  stopService,
   uninstallService,
   HELP_TEXT,
   parseCommand,
@@ -4799,4 +4801,80 @@ test('a stored sign-in installs the service as usual', async () => {
   });
 
   assert.ok(calls.some((call) => /enable --now/.test(call)), calls.join(', '));
+});
+
+test('opting out in setup removes a service an earlier run installed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const unitPath = serviceUnitPath({ platform: 'linux', homeDir: home });
+  assert.ok(await readFile(unitPath, 'utf8').catch(() => undefined), 'installed to begin with');
+
+  const calls: string[] = [];
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      // Always on → "Do not run it for me" → Save & finish.
+      setupInput: Readable.from(['5\n', '3\n', '7\n']),
+    },
+  });
+
+  // Skipping the install would leave the daemon running and enabled while
+  // the menu said "off" — still burning usage and still answering in Slack.
+  assert.ok(calls.some((call) => /disable --now/.test(call)), calls.join(', '));
+  assert.equal(await readFile(unitPath, 'utf8').catch(() => undefined), undefined);
+});
+
+test('starting a LaunchAgent works after it has been booted out', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'darwin', homeDir: home, uid: 501, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+
+  const calls: string[] = [];
+  const result = await startService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    run: async (command, args) => {
+      calls.push([command, ...args].join(' '));
+      // kickstart cannot find a job that bootout removed from the domain.
+      return args[0] === 'kickstart' && !calls.some((call) => call.includes('bootstrap'))
+        ? { code: 3, stdout: '', stderr: 'Could not find service' }
+        : { code: 0, stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(calls[0]?.includes('bootstrap'), true, `expected a bootstrap first, got ${calls.join(', ')}`);
+  assert.ok(calls.some((call) => /kickstart/.test(call)));
+});
+
+test('stopping a --no-login service does not promise it comes back at login', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService(
+    { platform: 'darwin', homeDir: home, uid: 501, run: async () => ({ code: 0, stdout: '', stderr: '' }) },
+    { runAtLogin: false },
+  );
+
+  const quiet = await stopService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+  // Believing it will return at login leaves the agents offline indefinitely.
+  assert.ok(quiet.messages.some((message) => /NOT start again on its own/.test(message)), quiet.messages.join(' '));
+
+  await installService({ platform: 'darwin', homeDir: home, uid: 501, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const managed = await stopService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+  assert.ok(managed.messages.some((message) => /start again at your next login/.test(message)));
 });

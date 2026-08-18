@@ -377,11 +377,23 @@ export const startService = async (env: ServiceEnvironment = {}): Promise<Servic
     return { ok: false, messages: [`No service manager for ${env.platform ?? process.platform}.`] };
   }
   const run = runnerFor(env);
-  const result = platform === 'launchd'
-    // kickstart -k restarts a job that is already running, which is what
-    // "start" means after a config change.
-    ? await run('launchctl', ['kickstart', '-k', `gui/${uidOf(env)}/${SERVICE_LABEL}`])
-    : await run('systemctl', ['--user', 'restart', SYSTEMD_UNIT]);
+  if (platform === 'systemd') {
+    const result = await run('systemctl', ['--user', 'restart', SYSTEMD_UNIT]);
+    return result.code === 0
+      ? { ok: true, messages: ['stratusd started.'] }
+      : { ok: false, messages: [`Could not start stratusd: ${result.stderr.trim() || result.stdout.trim()}`, 'Is it installed? Run `stratus service install`.'] };
+  }
+
+  // `stop` boots the job out of the domain entirely, and kickstart only
+  // runs a job that is already there — so start after stop would fail
+  // until something bootstrapped the plist again. Bootstrapping first
+  // makes the documented stop/start pair work; it is expected to fail
+  // when the job is still loaded, which is fine.
+  const domain = `gui/${uidOf(env)}`;
+  await run('launchctl', ['bootstrap', domain, serviceUnitPath(env)]);
+  // -k restarts a job that is already running, which is what "start"
+  // means after a config change.
+  const result = await run('launchctl', ['kickstart', '-k', `${domain}/${SERVICE_LABEL}`]);
   return result.code === 0
     ? { ok: true, messages: ['stratusd started.'] }
     : { ok: false, messages: [`Could not start stratusd: ${result.stderr.trim() || result.stdout.trim()}`, 'Is it installed? Run `stratus service install`.'] };
@@ -393,10 +405,19 @@ export const stopService = async (env: ServiceEnvironment = {}): Promise<Service
     return { ok: false, messages: [`No service manager for ${env.platform ?? process.platform}.`] };
   }
   const run = runnerFor(env);
+  // Asked before stopping, while the job is still there to ask about: a
+  // unit installed with --no-login will NOT come back at the next login,
+  // and telling someone it will leaves their agents offline indefinitely.
+  const status = await readServiceStatus(env);
   const result = platform === 'launchd'
     ? await run('launchctl', ['bootout', `gui/${uidOf(env)}/${SERVICE_LABEL}`])
     : await run('systemctl', ['--user', 'stop', SYSTEMD_UNIT]);
   return result.code === 0
-    ? { ok: true, messages: ['stratusd stopped. It will start again at login unless you uninstall it.'] }
+    ? {
+        ok: true,
+        messages: [status?.runAtLogin
+          ? 'stratusd stopped. It will start again at your next login unless you uninstall it.'
+          : 'stratusd stopped. It will NOT start again on its own — run `stratus service start` when you want it back.'],
+      }
     : { ok: false, messages: [`Could not stop stratusd: ${result.stderr.trim() || result.stdout.trim()}`] };
 };

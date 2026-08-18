@@ -3368,6 +3368,18 @@ export const runSetup = async (
       // a missing key, minutes after setup said it was ready.
       writeLine(streams.stderr, `Not installing the always-on service: your API key comes from ${shellOnly} in this shell, and a background service never sees it.`);
       writeLine(streams.stderr, 'Sign in from Providers so the key is stored, then run `stratus service install`.');
+    } else if (!state.service.install && servicePlatform(serviceEnvFor(env))) {
+      // Opting out has to actually take effect. Skipping the install would
+      // leave a unit from an earlier setup running and enabled at login,
+      // while the menu said "off" — still burning provider usage and still
+      // answering in Slack after an explicit opt-out.
+      const existing = await readServiceStatus(serviceEnvFor(env));
+      if (existing?.installed) {
+        const removed = await uninstallService(serviceEnvFor(env));
+        for (const message of removed.messages) {
+          writeLine(removed.ok ? streams.stdout : streams.stderr, message);
+        }
+      }
     } else if (state.service.install && servicePlatform(serviceEnvFor(env))) {
       // The unit is pinned to the file setup just wrote. Its working
       // directory is the home directory, so discovery from there would
