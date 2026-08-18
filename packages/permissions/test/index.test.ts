@@ -129,6 +129,42 @@ test('an aborted turn is never approved, before or during the prompt', async () 
   );
 });
 
+test('a prompt nobody answers does not outlive the turn', { timeout: 10_000 }, async () => {
+  const controller = new AbortController();
+  let resolvePrompt: ((answer: string) => void) | undefined;
+
+  const policy = createPermissionPolicy({
+    mode: 'interactive',
+    // The terminal is gone: this never settles on its own. Checking
+    // signal.aborted around the await would not help — the await in the
+    // middle is where the cancelled turn would wait forever.
+    ask: async () => new Promise<string>((resolve) => {
+      resolvePrompt = resolve;
+    }),
+  });
+
+  const decision = policy.approve(context('shell.run', 'gated', { signal: controller.signal }));
+  // Gate on the prompt actually being outstanding rather than on a delay,
+  // so a regression fails this assertion instead of hanging the suite.
+  await new Promise<void>((resolve) => {
+    const wait = (): void => {
+      if (resolvePrompt) {
+        resolve();
+        return;
+      }
+      setImmediate(wait);
+    };
+    wait();
+  });
+
+  controller.abort();
+  assert.equal(await decision, false, 'the abort released the wait');
+
+  // And the answer arriving afterwards changes nothing.
+  resolvePrompt?.('y');
+  await new Promise((resolve) => setImmediate(resolve));
+});
+
 test('interactive mode refuses to be constructed with no way to ask', () => {
   assert.throws(
     () => createPermissionPolicy({ mode: 'interactive' }),
