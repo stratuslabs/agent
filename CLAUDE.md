@@ -74,9 +74,11 @@ These are deliberate. Changing one is a decision, not a refactor.
   agent-scoped `CredentialResolver` — an agent must not be able to read
   the tokens of the transport carrying it.
 - **The daemon log is a trace, not a second transcript.** It records that
-  a tool ran and that a session completed. Tool inputs and message text
-  stay out of it, so `~/.stratus/logs` is safe to read over someone's
-  shoulder or paste into an issue.
+  a tool ran and that a session completed. Prompts, replies, and tool
+  inputs stay out of it — keep it that way when adding events. The one
+  gap today is `session.failed`, which persists the provider's error text
+  verbatim, and providers quote the failing request; do not document the
+  log as safe to share without qualifying that.
 - A stored sign-in is endpoint-bound: a credential saved for one endpoint
   is never sent to an endpoint a project-local config selects.
 

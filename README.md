@@ -46,7 +46,7 @@ This repo is early, but the core loop is complete.
 Today it is useful for:
 - talking with your agent in a persistent conversation (`stratus chat`) — the session carries across turns and remembered facts accumulate
 - running the whole roster as an always-on daemon (`stratus serve`) — durable sessions that survive restarts, each agent on its own provider and model, delegation between them, and a progress-based watchdog
-- keeping that daemon running across logouts and reboots (`stratus service install`, on by default after setup) — a LaunchAgent on macOS, a systemd user service on Linux — with `stratus logs` to read what it did while you were away
+- keeping that daemon running once the terminal closes (`stratus service install`, on by default after setup) — a LaunchAgent on macOS, a systemd user service on Linux — with `stratus logs` to read what it did while you were away. Both start at **login**, so a machine that should recover unattended after a reboot needs automatic login on macOS, or `loginctl enable-linger` on Linux
 - talking to your agents in Slack — each agent is its own Slack app with its own avatar and presence, threads are resumable conversations, and replies stream via message edits (install `@stratusagent/channel-slack`, then run `stratus setup` → **Channels** to create and connect each agent's app; see `packages/channel-slack/README.md`)
 - running a multi-turn agent loop locally: provider → tools → provider until the model finishes
 - running real tool-calling sessions against Claude (via the official Anthropic SDK) or any OpenAI-compatible provider (tools are advertised with JSON schemas, tool calls execute locally, and results are fed back to the model)
@@ -298,8 +298,9 @@ and `packages/cli/README.md` covers each in full:
   later (`uninstall`).
 - **`stratus logs`** reads `~/.stratus/logs/stratusd.jsonl` — what the daemon
   has been doing since you closed the terminal. `-f` follows it, `--agent` and
-  `--session` filter it. It is a trace, not a transcript: tool inputs and
-  message text are deliberately not in it.
+  `--session` filter it. It is a trace, not a transcript: prompts, replies, and
+  tool inputs are deliberately not in it, though a failed session does record
+  the provider's error text verbatim.
 - **`stratus doctor`** prints what a run would use right now — provider, model,
   soul — and which file or environment variable decided each, then flags
   anything that would surprise you. It is the fastest answer to "why is this

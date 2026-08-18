@@ -90,7 +90,9 @@ launchd on macOS and to systemd on Linux:
 stratus service install          # write the unit, start now, start at every login
 stratus service install --no-login
 stratus service status
-stratus service start | stop | uninstall
+stratus service start
+stratus service stop
+stratus service uninstall
 ```
 
 `stratus setup` installs it for you at Save & finish unless you opt out, so
@@ -148,9 +150,15 @@ stratus logs --format json       # the raw records, for jq
 ```
 
 The log is a **trace, not a second transcript**: it records that a tool ran and
-that a session completed, never tool inputs or message text. What was said
-lives in the session store, and `~/.stratus/logs` stays safe to read over
-someone's shoulder or paste into an issue.
+that a session completed, with the tool's name, the agent, and the session id.
+Prompts, replies, and tool inputs are not written — what was said lives in the
+session store instead.
+
+One exception worth knowing before you paste a log anywhere. A failed session
+records the **provider's error text verbatim**, and providers routinely quote
+the request that failed — so a malformed prompt can end up inside an error
+message. Skim a log before sharing it, and prefer `--agent` or `--session` to
+narrow it to the run you actually mean.
 
 ## When something looks off
 
