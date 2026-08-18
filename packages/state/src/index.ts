@@ -1415,7 +1415,13 @@ export const createRuntimeProvider = (
     const fallbackProvider = createRuntimeProvider({
       ...fallback,
       ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
+      // Both transports travel, not just the HTTP one. A fallback that
+      // inherits `fetch` but not `queryFn` reaches the real Agent SDK the
+      // moment the primary fails — launching Claude Code out of a test, or
+      // out from under an embedder that supplied its own transport for a
+      // reason. The two are one seam and have to be carried together.
       ...(config.fetch ? { fetch: config.fetch } : {}),
+      ...(config.provider === 'anthropic' && config.queryFn ? { queryFn: config.queryFn } : {}),
     } as RuntimeConfig, undefined, executeTool, maxTurns);
     return createFallbackWrappedProvider(primary, fallbackProvider, onFallback ?? (() => {}), persistSession);
   }

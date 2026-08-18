@@ -54,6 +54,16 @@ const USER_MESSAGE = 'remember that I like short answers';
 const REMEMBERED = 'The user likes short answers.';
 const FINAL_TEXT = 'Noted — short answers from here on.';
 
+/** A minimal session for provider-level assertions. */
+const FALLBACK_SESSION: Session = {
+  id: 'fallback-1',
+  agent: AGENT,
+  status: 'running',
+  messages: [{ id: 'fallback-1:user:1', role: 'user', content: 'hello', createdAt: new Date().toISOString() }],
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+};
+
 /** What both paths must agree on, gathered from one scripted run. */
 interface Observed {
   memory: MemoryEntry[];
@@ -239,4 +249,66 @@ test('a tool call and a memory write land identically on both billing paths', as
   assert.equal(subscription.finalText, apiKey.finalText);
   assert.equal(subscription.status, apiKey.status);
   assert.equal(apiKey.status, 'completed');
+});
+
+test('a subscription fallback inherits the injected query transport', async () => {
+  // The fallback branch returns before the subscription branch is reached,
+  // so it builds its provider from a config of its own. If `queryFn` does
+  // not travel with `fetch`, the fallback reaches the *real* Agent SDK the
+  // moment the primary fails — launching Claude Code out of a test run, or
+  // out from under an embedder that supplied its own transport on purpose.
+  // Nothing about that failure looks like a missing option.
+  const seen: string[] = [];
+  const scripted = (label: string, behaviour: 'fail' | 'answer'): ClaudeCodeQueryFn => () =>
+    (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
+      seen.push(label);
+      if (behaviour === 'fail') {
+        throw new Error('primary is down');
+      }
+      yield { type: 'system', subtype: 'init' } as ClaudeCodeStreamMessage;
+      yield { type: 'result', subtype: 'success', is_error: false, result: FINAL_TEXT } as ClaudeCodeStreamMessage;
+    })();
+
+  // One transport for both, as a caller injecting a seam would supply: the
+  // primary is scripted to fail, so a second call can only be the fallback.
+  let call = 0;
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    call += 1;
+    return call === 1
+      ? scripted('primary', 'fail')(params)
+      : scripted('fallback', 'answer')(params);
+  };
+
+  const provider = createRuntimeProvider({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    authToken: 'sk-ant-oat-primary',
+    queryFn,
+    fallback: { provider: 'anthropic', model: 'claude-opus-5', authToken: 'sk-ant-oat-fallback' },
+  });
+
+  // The gate needs a way to lose. Unforwarded, the fallback builds a real
+  // Agent SDK provider and tries to spawn Claude Code, which hangs instead
+  // of throwing — and a suite with no timeout would hang with it rather
+  // than report the regression. The deadline is not a timing assertion:
+  // the scripted transports settle immediately, so it can only fire when
+  // something reached outside the test.
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), 10_000);
+  let response;
+  try {
+    response = await Promise.race([
+      provider.generate({ session: FALLBACK_SESSION, memory: [], signal: deadline.signal }),
+      new Promise<never>((_, reject) => {
+        deadline.signal.addEventListener('abort', () => {
+          reject(new Error('the fallback never answered through the injected transport — it reached the real Agent SDK'));
+        }, { once: true });
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  assert.deepEqual(seen, ['primary', 'fallback']);
+  assert.deepEqual(response.parts, [{ type: 'text', text: FINAL_TEXT }]);
 });
