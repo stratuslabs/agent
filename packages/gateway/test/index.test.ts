@@ -1344,7 +1344,7 @@ test('generic credentials survive when the soul pins the config-file provider', 
   assert.ok(authHeaders.some((header) => header === 'sk-generic'));
 });
 
-test('the sticky-fallback switch is durable while the fallback is still in flight', async () => {
+test('the sticky-fallback switch is durable while the fallback is still in flight', { timeout: 20_000 }, async () => {
   const home = await newHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
@@ -1392,7 +1392,12 @@ test('the sticky-fallback switch is durable while the fallback is still in fligh
   await gateway.start();
 
   const pending = gateway.dispatch({ sessionId: 'durable-switch-1', userMessage: 'go' });
-  await fallbackInFlight;
+  // The gate also loses to the dispatch settling. A regression that never
+  // reaches the fallback at all — the primary failure surfacing as a failed
+  // session, say — would otherwise leave this waiting on a promise nobody
+  // resolves, and a hung run reports nothing at all where the assertion
+  // below reports exactly what broke.
+  await Promise.race([fallbackInFlight, pending.then(() => {}, () => {})]);
   const midFlight = await gateway.store.get('durable-switch-1');
   assert.equal(midFlight?.metadata?.fallbackActive, true, 'the switch must be durable before the fallback returns');
 
