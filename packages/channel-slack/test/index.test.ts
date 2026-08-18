@@ -1046,3 +1046,60 @@ test('over-long arguments are truncated and say so', async () => {
 
   await adapter.stop();
 });
+
+test('an agent this adapter carries but cannot reach is denied, not abandoned', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const warnings: string[] = [];
+  // The app is configured but its auth fails, so no connection is made.
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => ({
+      ...web,
+      auth: { async test() { throw new Error('invalid_auth'); } },
+    }),
+    warn: (line) => warnings.push(line),
+  });
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+
+  // This adapter was supposed to carry Ava's approvals and cannot, so it
+  // says so rather than letting every gated call wait out the timeout.
+  assert.deepEqual(
+    gateway.resolutions,
+    [{ requestId: 'req-1', answer: 'deny', reason: 'undeliverable' }],
+  );
+  assert.ok(warnings.some((line) => line.includes('no live connection')), JSON.stringify(warnings));
+
+  await adapter.stop();
+});
+
+test('an agent this adapter was never given is left for whoever does carry it', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-bea');
+  await gateway.bus.emit(approvalRequest({ requestId: 'req-bea', agentId: 'bea' }));
+
+  // Approval requests are a broadcast. Denying an agent this adapter was
+  // never configured for would let Slack refuse a question another channel
+  // was about to ask.
+  assert.deepEqual(gateway.resolutions, []);
+  assert.equal(gateway.pendingApprovals.has('req-bea'), true);
+  assert.equal(web.posts.length, 0);
+
+  await adapter.stop();
+});

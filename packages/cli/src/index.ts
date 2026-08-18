@@ -4917,6 +4917,25 @@ export const runServe = async (
   }
 
   await gateway.start();
+
+  // The roster is only known once the gateway has loaded it, and in remote
+  // mode an agent no channel can ask for is the quietest failure this
+  // feature has: its gated calls park with nobody rendering them and wait
+  // out the whole timeout before being denied. No channel can detect this
+  // on its own — a request is a broadcast, and no adapter knows whether
+  // another one is about to answer — so it is reported here, where the
+  // roster and the channel list are both in view.
+  if (approvalMode === 'remote') {
+    const askable = new Set(channels.length > 0 ? slackAgents.map(([agentId]) => agentId) : []);
+    const unreachable = gateway.agents().map((agent) => agent.id).filter((id) => !askable.has(id));
+    if (unreachable.length > 0) {
+      warn(
+        `no channel can ask for ${unreachable.join(', ')}, so their gated calls will wait out the `
+        + 'approval timeout and then be denied. Connect a Slack app for them, or run with --approvals headless.',
+      );
+    }
+  }
+
   writeLine(streams.stdout, 'Press Ctrl+C to stop.');
 
   // And periodically, for a long-running daemon that warns steadily

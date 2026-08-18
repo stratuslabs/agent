@@ -534,6 +534,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const createWeb = options.createWebClient ?? defaultWebClient;
 
   const connections: AgentConnection[] = [];
+  // Every agent this adapter was asked to carry, connected or not — the
+  // difference between "mine and broken" and "not mine".
+  const configuredAgents = new Set(options.agents.map((agent) => agent.agentId));
   // Renderers queue per session: two messages in one thread share a
   // session id, and the gateway serializes their turns — so events route
   // to the FIRST registered renderer (the running turn), never a later
@@ -634,8 +637,29 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     event: Extract<StratusEvent, { type: 'tool.approval-requested' }>,
   ): Promise<void> => {
     const gateway = gatewayRef;
+    if (!gateway) {
+      return;
+    }
+
     const connection = connectionFor(event.agentId);
-    if (!gateway || !connection) {
+    if (!connection) {
+      // Two different situations, and only one of them is this adapter's
+      // to answer.
+      //
+      // An agent it was configured for but could not connect (a failed
+      // auth, a dead app token) is its own: it was supposed to carry that
+      // agent's approvals and cannot, so it says so rather than letting
+      // every gated call wait out the timeout.
+      //
+      // An agent it was never configured for is NOT. Approval requests are
+      // a broadcast, and another channel may be the one that serves that
+      // agent — denying here would let Slack refuse a question somebody
+      // else was going to ask. `stratus serve` reports agents that no
+      // channel can ask for, at startup, where the whole roster is visible.
+      if (configuredAgents.has(event.agentId)) {
+        warn(`slack: ${event.agentId} has no live connection; denying ${event.call.toolName}`);
+        gateway.resolveApproval({ requestId: event.requestId, answer: 'deny', reason: 'undeliverable' });
+      }
       return;
     }
 

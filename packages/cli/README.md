@@ -157,10 +157,10 @@ Three things are worth knowing before you turn it on:
   most for **Always allow**, which widens what the agent may do unattended.
 - **An agent with no approver configured is denied immediately**, not left to
   time out — `remote` with nobody listed behaves exactly like `headless`. If
-  no channel is running at all (no Slack tokens, or `@stratusagent/channel-slack`
-  not installed) there is nothing to render the request, so gated calls wait
-  out the timeout instead. The daemon says which of the two you have, at
-  startup, rather than at 3am:
+  no channel can ask for an agent at all (no Slack tokens for it, or
+  `@stratusagent/channel-slack` not installed) there is nothing to render the
+  request, so its gated calls wait out the timeout instead. The daemon names
+  those agents at startup, rather than leaving you to find out at 3am:
 
   ```text
   approvals: remote — gated calls are parked and asked in Slack (approvers set for ava)

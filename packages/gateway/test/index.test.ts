@@ -1974,3 +1974,43 @@ test('a resolution a channel could not deliver is not filed as a human decision'
 
   await gateway.stop();
 });
+
+test('a resolution never reaches a subscriber before the request it answers', async () => {
+  // Both emissions walk the same subscriber list in order, so an async
+  // subscriber ahead of a channel can hold the announcement while a
+  // timeout fires behind it. A channel told about a resolution for a
+  // request it has never heard of drops it, then renders the announcement
+  // afterwards — buttons for a settled request that nothing retracts.
+  const { gateway, transport } = await brokerHarness({ approvalTimeoutMs: 1 });
+
+  const seen: string[] = [];
+  let releaseAnnouncement: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => {
+    releaseAnnouncement = resolve;
+  });
+
+  // Registered first, and slow on the announcement only — exactly the
+  // shape that lets a resolution overtake it.
+  gateway.bus.subscribe(async (event) => {
+    if (event.type === 'tool.approval-requested') {
+      await held;
+    }
+  });
+  // A stand-in for the channel: order is all it records.
+  gateway.bus.subscribe((event) => {
+    if (event.type === 'tool.approval-requested' || event.type === 'tool.approval-resolved') {
+      seen.push(event.type);
+    }
+  });
+
+  const answer = transport.request(parkedCall('sess-order'));
+  // Let the 1ms expiry fire while the announcement is still held.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(seen, [], 'nothing reached the channel while the announcement was held');
+
+  releaseAnnouncement?.();
+  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  await settles(gateway.stop(), 'the shutdown drain');
+
+  assert.deepEqual(seen, ['tool.approval-requested', 'tool.approval-resolved']);
+});

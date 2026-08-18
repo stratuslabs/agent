@@ -2997,6 +2997,34 @@ test('serve in remote mode says who can actually approve', async () => {
   assert.match(output.stdout, /no channel is running to ask through/);
 });
 
+test('serve names the agents no channel can ask for', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-unreachable-'));
+  await mkdir(path.join(serveHome, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(serveHome, '.stratus', 'config.json'),
+    JSON.stringify({ approvals: { mode: 'remote' } }),
+  );
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events'],
+    streams,
+    env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  assert.equal(code, 0);
+  // The quietest failure this feature has: an agent no channel serves parks
+  // its gated calls with nobody rendering them, and only discovers it after
+  // the full timeout. No adapter can detect this alone — a request is a
+  // broadcast, and none of them knows whether another is about to answer —
+  // so the daemon reports it where the roster and the channels are both in
+  // view.
+  assert.match(output.stderr, /no channel can ask for /);
+  assert.match(output.stderr, /wait out the \napproval timeout|wait out the approval timeout/);
+});
+
 test('serve keeps refusing gated calls when the approvals config cannot be read', async () => {
   const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-badconfig-'));
   await mkdir(path.join(serveHome, '.stratus'), { recursive: true });

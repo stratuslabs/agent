@@ -80,7 +80,11 @@ open for someone who may actually answer — which matters most for **Always
 allow**, since that widens what the agent may do for the rest of the session.
 An agent with no approvers listed denies every request on arrival rather than
 leaving it hanging — set `"slackApprovers": []` on an agent to exclude it
-from a shared default list. Those automatic denials are recorded as
+from a shared default list. The same goes for an agent whose Slack app is
+configured here but failed to connect. An agent this adapter was never given
+is left alone: a request is a broadcast, and refusing one another channel was
+about to answer is not the adapter's call — `stratus serve` reports agents no
+channel can ask for, at startup. Those automatic denials are recorded as
 `undeliverable` rather than `decided`, so the log never shows a refusal
 nobody made as one somebody did.
 

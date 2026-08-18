@@ -496,6 +496,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     let timer: NodeJS.Timeout | undefined;
     const onAbort = (): void => settle('deny', 'cancelled');
 
+    /**
+     * Settles once the request has finished being announced.
+     *
+     * Both emissions go through the same subscriber list, in order, and
+     * `EventBus.emit` awaits each one — so an async subscriber ahead of a
+     * channel can hold the announcement while a timeout or abort fires
+     * behind it, and the channel would hear that a request it has never
+     * heard of was resolved. It drops that, then renders the announcement
+     * when it finally arrives, leaving buttons for a settled request that
+     * nothing will ever retract.
+     *
+     * Chaining is the fix rather than remembering orphaned resolutions in
+     * the channel: a resolution that arrives before its request is not
+     * something a consumer can act on, so it should not be able to happen.
+     * Starts resolved, because a turn already aborted never announces at
+     * all and its denial should not wait on an emission that never runs.
+     */
+    let announced: Promise<void> = Promise.resolve();
+
     const settle: SettleApproval = (answer, reason, actor) => {
       // Identity, not presence: a request that already settled is gone from
       // the registry, and comparing against this exact function is what
@@ -509,14 +528,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       request.signal?.removeEventListener('abort', onAbort);
       resolve(answer);
-      const emitted = bus.emit({
+      const emitted = announced.then(() => bus.emit({
         type: 'tool.approval-resolved',
         sessionId: request.session.id,
         requestId,
         answer,
         reason,
         ...(actor ? { actor } : {}),
-      });
+      }));
       approvalEmissions.add(emitted);
       void emitted.finally(() => approvalEmissions.delete(emitted));
     };
@@ -543,7 +562,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       request.signal.addEventListener('abort', onAbort, { once: true });
     }
 
-    void bus.emit({
+    // `announced` is assigned BEFORE the emission starts, because emit runs
+    // its first subscribers synchronously — one of them settling the
+    // request inline would otherwise chain onto the already-resolved
+    // placeholder and race the very announcement it is answering.
+    let markAnnounced = (): void => {};
+    announced = new Promise<void>((resolveAnnounced) => {
+      markAnnounced = resolveAnnounced;
+    });
+    const announcing = bus.emit({
       type: 'tool.approval-requested',
       sessionId: request.session.id,
       agentId: request.session.agent.id,
@@ -554,6 +581,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       ...(effectiveApprovalTimeoutMs > 0
         ? { expiresAt: new Date(Date.now() + effectiveApprovalTimeoutMs).toISOString() }
         : {}),
+    });
+    // Drained at shutdown alongside the resolutions: a channel that has not
+    // yet been told a request exists cannot be told it was denied either.
+    approvalEmissions.add(announcing);
+    void announcing.finally(() => {
+      approvalEmissions.delete(announcing);
+      markAnnounced();
     });
   });
 
