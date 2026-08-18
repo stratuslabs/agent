@@ -4528,6 +4528,15 @@ export const runServe = async (
   streams: CliStreams,
   env: CliEnvironment = {},
 ): Promise<number> => {
+  // First, before anything that can throw. A broken install makes the
+  // gateway import below fail, the manager restarts, and the CLI's error
+  // and help text append to the redirect file again — the crash loop this
+  // bounding exists for. Running it after the import would skip exactly
+  // that case.
+  if (command.logToFile !== false) {
+    await truncateRedirectLogs(logsDirPath(env)).catch(() => undefined);
+  }
+
   // Loaded lazily: the gateway pulls in node:sqlite, which every other CLI
   // command neither needs nor should pay for (Node still prints an
   // experimental warning for it).
@@ -4544,15 +4553,11 @@ export const runServe = async (
           `Warning: could not write the log file (${error instanceof Error ? error.message : String(error)}); continuing.`,
         ),
       });
-  // The manager's redirect files are bounded on their own clock, not only
-  // when the structured log rotates: a daemon crash-looping at startup
-  // writes launchd diagnostics without ever producing enough records to
-  // trigger a rotation. Once now — which covers each restart of a loop —
-  // and periodically for a long-running daemon that warns without
-  // rotating. Unref'd, so it never holds the process open.
+  // And periodically, for a long-running daemon that warns steadily
+  // without ever writing enough records to rotate. Unref'd, so it never
+  // holds the process open.
   let redirectTimer: NodeJS.Timeout | undefined;
   if (logWriter) {
-    void truncateRedirectLogs(logsDirPath(env));
     redirectTimer = setInterval(() => void truncateRedirectLogs(logsDirPath(env)), 5 * 60_000);
     redirectTimer.unref?.();
   }

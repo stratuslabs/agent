@@ -5330,3 +5330,25 @@ test('redirect logs are bounded without waiting for a rotation', async () => {
 
   assert.equal((await stat(errPath)).size, 0);
 });
+
+test('redirect logs are truncated even when serve cannot start', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-'));
+  const logs = path.join(home, '.stratus', 'logs');
+  await mkdir(logs, { recursive: true });
+  const errPath = path.join(logs, 'stratusd.err.log');
+  await writeFile(errPath, 'x'.repeat(9 * 1024 * 1024));
+
+  // A start that fails before the gateway is ready is the crash-loop case
+  // this bounding exists for: the manager restarts, the CLI appends its
+  // error to the redirect file, and round trips forever. Truncation has to
+  // happen before anything that can throw.
+  const controller = new AbortController();
+  controller.abort();
+  await runCli({
+    argv: ['serve', '--no-events'],
+    streams: createStreams().streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  assert.equal((await stat(errPath)).size, 0);
+});
