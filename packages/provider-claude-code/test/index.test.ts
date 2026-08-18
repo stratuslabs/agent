@@ -7,6 +7,7 @@ import {
   DEFAULT_CLAUDE_CODE_MODEL,
   hasHostedToolSideEffects,
   markHostedToolSideEffects,
+  SDK_SESSION_METADATA_KEY,
   type ClaudeCodeQueryFn,
   type ClaudeCodeStreamMessage,
 } from '../src/index.ts';
@@ -404,4 +405,114 @@ test('transcripts replay hosted tool calls alongside their results', async () =>
   assert.match(prompt, /likes tea/);
   // The empty runner message that carried the call renders nothing extra.
   assert.doesNotMatch(prompt, /\[assistant\] \n/);
+});
+
+test('the first turn records the SDK session id, and the next one resumes it', async () => {
+  const { queryFn, calls } = createFakeQuery([
+    { type: 'system', subtype: 'init', session_id: 'sdk-abc' },
+    { type: 'result', subtype: 'success', is_error: false, result: 'Hi.', session_id: 'sdk-abc' },
+  ]);
+  const provider = createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn });
+
+  const session = createSession();
+  await provider.generate({ session, memory: [] });
+
+  // Captured without a handshake: the id rides on every message.
+  assert.equal(session.metadata?.[SDK_SESSION_METADATA_KEY], 'sdk-abc');
+  assert.equal((calls[0]!.options as { resume?: string }).resume, undefined);
+  assert.equal(calls[0]!.prompt, 'Hello there');
+
+  // The next turn continues that SDK session instead of re-sending the
+  // conversation: the SDK is already holding everything before this
+  // message, so replaying it would both cost more and leave the SDK no
+  // state of its own between turns.
+  session.messages.push(
+    { id: 'session-1:assistant:2', role: 'assistant', content: 'Hi.', createdAt: new Date().toISOString() },
+    { id: 'session-1:user:3', role: 'user', content: 'And now?', createdAt: new Date().toISOString() },
+  );
+  await provider.generate({ session, memory: [] });
+
+  assert.equal((calls[1]!.options as { resume?: string }).resume, 'sdk-abc');
+  assert.equal(calls[1]!.prompt, 'And now?');
+  assert.doesNotMatch(calls[1]!.prompt, /Conversation so far:/);
+});
+
+test('an SDK session that no longer exists replays history into a fresh one', async () => {
+  const attempts: Array<{ resume: string | undefined; prompt: string }> = [];
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    const resume = (params.options as { resume?: string }).resume;
+    attempts.push({ resume, prompt: params.prompt });
+    return (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
+      if (resume) {
+        throw new Error(`No conversation found with session ID: ${resume}`);
+      }
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'Recovered.', session_id: 'sdk-new' };
+    })();
+  };
+
+  const failures: unknown[] = [];
+  const provider = createClaudeCodeProvider({
+    authToken: 'sk-ant-oat-test',
+    queryFn,
+    onResumeFailed: (error) => failures.push(error),
+  });
+
+  const session = createSession({ metadata: { [SDK_SESSION_METADATA_KEY]: 'sdk-gone' } });
+  session.messages.push(
+    { id: 'session-1:assistant:2', role: 'assistant', content: 'Hi.', createdAt: new Date().toISOString() },
+    { id: 'session-1:user:3', role: 'user', content: 'Still there?', createdAt: new Date().toISOString() },
+  );
+
+  const response = await provider.generate({ session, memory: [] });
+
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Recovered.' }]);
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0]?.resume, 'sdk-gone');
+  // The replay carries the whole conversation, not just the latest turn —
+  // the fresh SDK session knows nothing.
+  assert.equal(attempts[1]?.resume, undefined);
+  assert.match(attempts[1]?.prompt ?? '', /Conversation so far:/);
+  assert.equal(failures.length, 1);
+  // And the session now points at the session that answered.
+  assert.equal(session.metadata?.[SDK_SESSION_METADATA_KEY], 'sdk-new');
+});
+
+test('a failed resume is not replayed once a hosted tool has run', async () => {
+  // Replaying would execute the tool a second time. Its side effects are
+  // real and already recorded, so a costlier turn is not the trade — a
+  // duplicated action is.
+  const attempts: Array<string | undefined> = [];
+  const executed: string[] = [];
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    const options = params.options as {
+      resume?: string;
+      mcpServers?: Record<string, { instance?: { _registeredTools?: Record<string, { handler: (a: unknown, b: unknown) => Promise<unknown> }> } }>;
+    };
+    attempts.push(options.resume);
+    return (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
+      const handler = options.mcpServers?.stratus?.instance?._registeredTools?.demo_echo?.handler;
+      assert.ok(handler, 'the tool must be bridged');
+      await handler({}, {});
+      throw new Error('No conversation found with session ID: sdk-gone');
+    })();
+  };
+
+  const provider = createClaudeCodeProvider({
+    authToken: 'sk-ant-oat-test',
+    queryFn,
+    executeTool: async (_session, call) => {
+      executed.push(call.toolName);
+      return { callId: call.id, toolName: call.toolName, ok: true, output: { ok: true } };
+    },
+  });
+
+  const session = createSession({ metadata: { [SDK_SESSION_METADATA_KEY]: 'sdk-gone' } });
+  await assert.rejects(() => provider.generate({
+    session,
+    memory: [],
+    tools: [{ name: 'demo.echo', description: 'echo', parameters: { type: 'object', properties: {} } }],
+  }));
+
+  assert.deepEqual(attempts, ['sdk-gone'], 'the turn must not be replayed after a tool ran');
+  assert.deepEqual(executed, ['demo.echo']);
 });
