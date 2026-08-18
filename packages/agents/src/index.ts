@@ -90,6 +90,94 @@ const slugify = (name: string): string =>
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'agent';
 
+/**
+ * The shape an id is *minted* in: lowercase alphanumerics and internal
+ * hyphens, starting with an alphanumeric. Everything `slugify` produces
+ * matches it, so every id this module derives does.
+ *
+ * Not what validation enforces. A hand-written `id:` predates any shape
+ * rule and `Ava_1` was as valid as `ava` — see `isValidAgentId`.
+ */
+export const AGENT_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+/**
+ * How long an id we *build* is allowed to get. A construction bound, not a
+ * validation rule — `isValidAgentId` deliberately does not check it.
+ *
+ * Every id derived from a long name predates this bound, and enforcing it
+ * retroactively drops working agents off the roster, while trimming them
+ * silently re-keys their sessions, memory, and credentials to an id nobody
+ * has ever used. So the bound applies where an id is minted fresh and
+ * nothing is keyed to it yet, and nowhere else. File systems still have
+ * limits, and an id long enough to hit them fails at the join with a name
+ * that says so.
+ */
+export const MAX_AGENT_ID_LENGTH = 64;
+
+/**
+ * What an id may never be, whatever else it is: anything that stops being
+ * a single, addressable path segment. A separator escapes the directory,
+ * a leading dot hides the file or walks up out of it (`..`), and a control
+ * character is not typeable back.
+ */
+const PATH_UNSAFE_AGENT_ID = /[/\\]|[\u0000-\u001f\u007f]/;
+
+/**
+ * Whether `id` is safe to key an agent's resources and paths by.
+ *
+ * Ids are not labels. They key sessions, memory, credentials, Slack channel
+ * tokens, and every per-agent path on disk — and an explicit frontmatter
+ * `id` is untrusted input: a soul file travels with a repository, and in
+ * the hosted profile it comes from a tenant. `id: ../../escape` reaches
+ * every one of those joins intact, so it is stopped once here rather than
+ * defended at each of them.
+ *
+ * **Unsafe is the rule, not un-sluglike.** Nothing before this checked an
+ * explicit id at all, so `Ava_1`, `team.alpha`, and `AVA` are all out there
+ * keying real sessions and real credentials. Holding them to the shape ids
+ * are minted in would not make anything safer — none of them can leave
+ * their directory — and `loadRosterSouls` degrades a soul that will not
+ * parse to a warning, so the only thing it would accomplish is dropping
+ * those agents off the roster on upgrade, quietly, while their data stays
+ * behind under the old id. Reserving the slug shape for ids nobody has
+ * chosen yet costs nothing; imposing it on ids people are already using
+ * costs them their agent.
+ *
+ * Rejected, never sanitized: rewriting `../../escape` into `escape` hands
+ * back an agent nobody asked for, keyed to resources nobody named.
+ */
+export const isValidAgentId = (id: string): boolean =>
+  id.length > 0
+  // Invisible leading or trailing space cannot be typed back reliably, so
+  // an id that is not its own trimmed self is a mistake, not a legacy.
+  && id === id.trim()
+  && !id.startsWith('.')
+  && !PATH_UNSAFE_AGENT_ID.test(id)
+  // An id keys plain objects too — `credentials.channels.slack[id]` among
+  // them — where an inherited name is not a free slot. `toString` reads as
+  // already connected with nothing stored, and `__proto__` assigns through
+  // to the prototype, so the write lands nowhere and `JSON.stringify` drops
+  // it. `in {}` names exactly that set, and names it by the property it
+  // has rather than by a list to keep in step.
+  && !(id in {});
+
+/**
+ * A freshly minted id, bounded — `base` trimmed so that appending `suffix`
+ * still fits, with any hyphen left dangling by the trim removed.
+ *
+ * Only for ids nothing is keyed to yet: a generated agent's
+ * name-plus-suffix, and `agent new` retrying a filename collision. Both mint
+ * an id in the same breath as the agent, so trimming takes nothing away.
+ * Shared rather than re-derived so the two do not each own half of the bound
+ * and drift. An id derived from a name someone chose does *not* come through
+ * here — that name may already have an agent behind it.
+ */
+export const agentIdWithSuffix = (base: string, suffix?: string): string => {
+  const tail = suffix ? `-${suffix}` : '';
+  const room = Math.max(1, MAX_AGENT_ID_LENGTH - tail.length);
+  return `${base.slice(0, room).replace(/-+$/, '') || 'agent'}${tail}`;
+};
+
 export interface DefineAgentInput {
   name?: string;
   id?: string;
@@ -119,10 +207,33 @@ const generatedIdSuffix = (seed?: string): string => {
 export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
   const nameWasGenerated = input.name === undefined;
   const name = input.name ?? generateAgentName(input.seed);
+  // Only an explicit id is checked: a derived one comes out of slugify,
+  // which cannot produce anything unsafe.
+  if (input.id !== undefined && !isValidAgentId(input.id)) {
+    throw new Error(
+      `Invalid agent id: ${JSON.stringify(input.id)}. An id becomes a path segment, so it may not start with `
+      + 'a dot or contain a slash, a backslash, a control character, or leading or trailing whitespace — '
+      + 'it keys files and credentials, not just labels.',
+    );
+  }
+  // A chosen name's slug is used whole. It is not this function's to
+  // shorten: the same name has resolved to the same id in every release,
+  // and two long names that differ only past the bound are two agents,
+  // not one roster-refusing collision.
+  const derived = nameWasGenerated
+    ? agentIdWithSuffix(slugify(name), generatedIdSuffix(input.seed))
+    : slugify(name);
   return {
-    id: input.id ?? (nameWasGenerated
-      ? `${slugify(name)}-${generatedIdSuffix(input.seed)}`
-      : slugify(name)),
+    // Derived ids are safe by construction with one exception: `constructor`
+    // is a perfectly ordinary slug and an Object.prototype key, so the name
+    // "Constructor" reaches a rule that only ran on explicit ids. Checked
+    // rather than special-cased, so what this returns is *an id that
+    // validates* — not one that passes the cases anyone thought of. The
+    // suffix is seeded by the slug, so the name still answers the same way
+    // every time.
+    id: input.id ?? (isValidAgentId(derived)
+      ? derived
+      : agentIdWithSuffix(derived, generatedIdSuffix(derived))),
     name,
     ...(input.instructions ? { instructions: input.instructions } : {}),
     avatar: input.avatar ?? generateAvatarTheme(name),

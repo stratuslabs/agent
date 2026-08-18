@@ -10,7 +10,7 @@ Steps are ordered by dependency, not by calendar. Numbers are stable identifiers
 | --- | --- | --- | --- |
 | 01 | [The gateway: `stratus serve`, durable sessions, streaming + cancellation](./01-gateway.md) | Shipped | An always-on process with sessions that survive restarts |
 | 02 | [Slack channel: contract package + per-agent bot identity](./02-slack-channel.md) | Shipped | Talk to your agents in Slack, each with its own avatar and presence |
-| 03 | [Permission engine: allowlists, whitelists, headless + remote approval](./03-permissions.md) | In progress — risk model and headless mode (#47), remote approval through Slack (#49), restart recovery (#51); the agent-id invariant next, command scopes moved to 06 | Agents can be trusted with real tools while unattended |
+| 03 | [Permission engine: allowlists, whitelists, headless + remote approval](./03-permissions.md) | Shipped — risk model and headless mode (#47), remote approval through Slack (#49), restart recovery (#51), agent ids as a validated invariant (#52); command scopes moved to 06 | Agents can be trusted with real tools while unattended |
 | 04 | [Agent SDK tool bridge: tools + real history on the subscription path](./04-agent-sdk-bridge.md) | Partly shipped — tool bridge done; SDK-native history still open | Claude-subscription agents get full tool calling under kernel policy |
 | 05 | [Control API + web dashboard](./05-control-api.md) | Not started | One API for every surface; a real chat/monitoring UI |
 | 06 | [Tool packs: fs, shell, browser](./06-tool-packs.md) | Not started | Reusable capability packages agents opt into by allowlist |

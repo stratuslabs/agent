@@ -11,6 +11,7 @@ import {
   AllowAllApprovalPolicy,
   EventBus,
   ToolRegistry,
+  type AgentDefinition,
   type AgentMemoryStore,
   type ApprovalPolicy,
   type JsonObject,
@@ -45,6 +46,7 @@ import {
   type ClaudeCodeToolExecutor,
 } from '@stratusagent/provider-claude-code';
 import {
+  agentIdWithSuffix,
   createRememberTool,
   defineAgent,
   formatSoul,
@@ -74,6 +76,7 @@ import {
   parseProviderName,
   readNonEmptyString,
   readProcessEnv,
+  resolveConfiguredSoul,
   logsDirPath,
   readWorkingDirectory,
   resolveAgentApprovals,
@@ -2323,6 +2326,111 @@ const KNOWN_CLAUDE_MODELS = [
   'claude-sonnet-4-6',
 ];
 
+/**
+ * The ids a newly created soul must not claim: every id the served roster
+ * holds, which is three things and not one directory.
+ *
+ * - **What the roster files declare.** A filename is not an id: a soul at
+ *   `renamed.md` may declare `id: ava`, so `ava.md` being free proves
+ *   nothing — and since a duplicate refuses the whole roster, writing one
+ *   would hand back an agent whose daemon cannot start.
+ * - **The configured default soul**, which the daemon registers whether or
+ *   not its file lives in the agents directory. It wins a same-id contest
+ *   with a roster file — `defaultAgentId` replaces the source when the
+ *   path differs — so a new agent sharing its id is not refused, it is
+ *   shadowed: created, then undispatchable by id or from Slack, with
+ *   nothing saying so.
+ * - **The reserved `stratus`**, since a roster soul claiming it is skipped
+ *   at load, so writing one creates an agent that silently never appears.
+ *
+ * The two readable sources fail **independently**, and what they return is
+ * what they know rather than all-or-nothing. A configured soul that is
+ * missing or mid-edit does not stop the daemon serving the roster, so it
+ * must not discard the roster's claims either: collapsing both to unknown
+ * would let this command write the very duplicate that refuses the roster
+ * it could have read. `unread` names what could not be answered, so the
+ * caller can say which check did not run instead of implying none did.
+ */
+const declaredAgentIds = async (
+  env: CliEnvironment,
+): Promise<{ ids: Set<string>; unread: string[] }> => {
+  const [roster, configured] = await Promise.allSettled([
+    loadRosterSouls(env, () => {}),
+    // Empty selection: the soul a run started here would resolve, by the
+    // same precedence the daemon uses — never a second reading of it.
+    resolveConfiguredSoul({}, env),
+  ]);
+
+  const ids = new Set([DEFAULT_STRATUS_AGENT.id]);
+  const unread: string[] = [];
+  if (roster.status === 'fulfilled') {
+    for (const entry of roster.value) {
+      ids.add(entry.soul.agent.id);
+    }
+  } else {
+    unread.push('the roster');
+  }
+  if (configured.status === 'fulfilled') {
+    if (configured.value) {
+      ids.add(configured.value.soul.agent.id);
+    }
+  } else {
+    unread.push('the configured default soul');
+  }
+  return { ids, unread };
+};
+
+/**
+ * Write a new soul under an id nothing else holds, and return the agent
+ * that got written.
+ *
+ * The name stays theirs, but the id — the soul filename, the memory key,
+ * the credential scope — must be unique: the suggestion pool is small, so
+ * a repeat name would otherwise share an earlier agent's memory. Two
+ * claims have to fail here, and only one of them is a filename:
+ *
+ * - An id another soul declares, whatever that soul is called on disk.
+ *   Since a duplicate refuses the whole roster, writing one would leave a
+ *   daemon that will not start — created by the command meant to help.
+ * - The path itself, via `wx`, which makes the claim atomic against a
+ *   concurrent writer that the roster read above cannot see.
+ *
+ * On either, the id takes a fresh suffix and we try again — through the
+ * shared bound, since appending a suffix to a maxed-out base would build
+ * an id the validator refuses, turning a collision into a crash.
+ */
+const claimSoulFile = async (
+  env: CliEnvironment,
+  input: { name?: string; instructions: string },
+  render: (agent: AgentDefinition) => string,
+  note: (message: string) => void,
+): Promise<{ agent: AgentDefinition; soulPath: string }> => {
+  const { ids: taken, unread } = await declaredAgentIds(env);
+  if (unread.length > 0) {
+    note(`Note: could not read ${unread.join(' or ')}, so this id was not checked against the ids it declares.`);
+  }
+  let agent = defineAgent({ ...(input.name ? { name: input.name } : {}), instructions: input.instructions });
+  const baseId = agent.id;
+  for (;;) {
+    const soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
+    if (!taken.has(agent.id)) {
+      try {
+        await writeFile(soulPath, render(agent), { flag: 'wx' });
+        return { agent, soulPath };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw error;
+        }
+      }
+    }
+    agent = defineAgent({
+      id: agentIdWithSuffix(baseId, randomUUID().slice(0, 4)),
+      ...(input.name ? { name: input.name } : { name: agent.name }),
+      instructions: input.instructions,
+    });
+  }
+};
+
 export const runSetup = async (
   command: ParsedSetupCommand,
   streams: CliStreams,
@@ -2951,17 +3059,18 @@ export const runSetup = async (
 
     const name = await prompter.ask('Name your agent (Enter to have one generated): ');
     const instructions = await prompter.ask('Describe their personality in a sentence or two (Enter for a starter you can edit later): ');
-    const agent = defineAgent({
-      ...(name ? { name } : {}),
-      instructions: instructions || DEFAULT_SOUL_STARTER,
-    });
-    const soul = formatSoul({
-      agent,
-      ...(state.provider !== 'demo' ? { provider: state.provider, model: state.model ?? defaultModelFor(state.provider) } : {}),
-    });
-    const soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
-    await mkdir(path.dirname(soulPath), { recursive: true });
-    await writeFile(soulPath, soul);
+    const persona = instructions || DEFAULT_SOUL_STARTER;
+    const pin = state.provider !== 'demo'
+      ? { provider: state.provider, model: state.model ?? defaultModelFor(state.provider) }
+      : {};
+    await mkdir(agentsDirPath(env), { recursive: true });
+    const claimed = await claimSoulFile(
+      env,
+      { ...(name ? { name } : {}), instructions: persona },
+      (agent) => formatSoul({ agent, ...pin }),
+      (message) => writeLine(streams.stdout, message),
+    );
+    const { agent, soulPath } = claimed;
     state.soulPath = soulPath;
     writeLine(streams.stdout, `Say hello to ${agent.name}.`);
     writeLine(streams.stdout, `Their soul lives at ${soulPath} — edit it any time to change how they talk.`);
@@ -3163,7 +3272,7 @@ export const runSetup = async (
    * Reads state.soulPath rather than the saved config so a soul chosen
    * earlier in this same setup session is already connectable.
    */
-  const channelRoster = async (): Promise<ChannelRosterEntry[]> => {
+  const channelRoster = async (): Promise<{ entries: ChannelRosterEntry[]; loaded: boolean }> => {
     const warnOnce = (message: string): void => writeLine(streams.stderr, `Warning: ${message}.`);
     // Seeded before the roster loads, exactly as loadRoster does it: a
     // fresh install with no soul files still has an agent to put on
@@ -3171,19 +3280,30 @@ export const runSetup = async (
     // built-in's place — the gateway skips it, so offering it here would
     // name an app after an agent that never receives the messages.
     const entries: ChannelRosterEntry[] = [{ soul: { agent: { ...DEFAULT_STRATUS_AGENT } } }];
-    // Mirror the gateway's loadRoster: two soul files declaring the same
-    // id are not two agents. Offering both would let someone create and
-    // name an app for the loser, which can never receive a message —
-    // Slack credentials are keyed by the shared id, and dispatch reaches
-    // the first sorted file.
-    for (const entry of await loadRosterSouls(env, warnOnce)) {
-      const clash = entries.find((seen) => seen.soul.agent.id === entry.soul.agent.id);
-      if (clash) {
-        warnOnce(`duplicate agent id ${entry.soul.agent.id} (${clash.path ?? 'built-in'} vs ${entry.path}); keeping the first`);
-        continue;
-      }
-      entries.push(entry);
+    // loadRosterSouls refuses a roster whose files collide, and drops the
+    // ones claiming the reserved built-in id, so what comes back here is
+    // already unambiguous.
+    let rosterSouls: RosterEntry[] = [];
+    let rosterLoaded = true;
+    try {
+      rosterSouls = await loadRosterSouls(env, warnOnce);
+    } catch (error) {
+      // A roster that cannot say who its agents are cannot have channels
+      // configured for them — but the rest of setup (providers, models,
+      // sign-ins) still works, so this reports and moves on rather than
+      // taking the whole command down.
+      rosterLoaded = false;
+      warnOnce(error instanceof Error ? error.message : String(error));
+      // Nothing is offered, not merely the colliding pair. A roster that
+      // refuses to load fails `createGateway.start()` outright, so no
+      // agent is servable — not the built-in seeded above, and not the
+      // configured soul resolved below (which can itself BE one of the
+      // colliding files). Listing any of them invites connecting a Slack
+      // app to an agent the daemon cannot bring online, and connecting an
+      // app is the expensive half of that mistake.
+      return { entries: [], loaded: false };
     }
+    entries.push(...rosterSouls);
 
     // The soul a run resolves to, in resolveSoulPath's own order: an env
     // override outranks the config value this setup session is editing.
@@ -3197,11 +3317,11 @@ export const runSetup = async (
     }
     const effectiveSoul = typeof envSoul === 'string' ? envSoul : state.soulPath;
     if (!effectiveSoul) {
-      return entries;
+      return { entries, loaded: rosterLoaded };
     }
     const resolved = path.resolve(readWorkingDirectory(env), effectiveSoul);
     if (entries.some((entry) => entry.path === resolved)) {
-      return entries;
+      return { entries, loaded: rosterLoaded };
     }
     try {
       const soul = await loadSoulFile(resolved);
@@ -3219,7 +3339,7 @@ export const runSetup = async (
     } catch (error) {
       warnOnce(`could not read the default soul ${resolved} (${error instanceof Error ? error.message : String(error)})`);
     }
-    return entries;
+    return { entries, loaded: rosterLoaded };
   };
 
   const serviceSummary = (): string => {
@@ -3268,7 +3388,7 @@ export const runSetup = async (
 
   const chooseChannels = async (): Promise<void> => {
     while (true) {
-      const roster = await channelRoster();
+      const { entries: roster, loaded: rosterLoaded } = await channelRoster();
       const slack = state.channels.slack ?? {};
 
       // The roster always holds at least the built-in agent, so there is
@@ -3281,7 +3401,22 @@ export const runSetup = async (
       });
       // Orphans: tokens whose agent left the roster would otherwise be
       // invisible here while still being loaded by `stratus serve`.
-      const orphans = Object.keys(slack).filter((id) => !roster.some((entry) => entry.soul.agent.id === id));
+      //
+      // Only when the roster actually loaded. "No agent has this id" is a
+      // claim about the roster, and a roster that refused to load cannot
+      // support it — every stored token would look orphaned, and this list
+      // offers to DELETE them. Losing a working agent's Slack credentials
+      // because a different pair of files collided is a far worse outcome
+      // than leaving a real orphan on screen for one run.
+      const orphans = rosterLoaded
+        ? Object.keys(slack).filter((id) => !roster.some((entry) => entry.soul.agent.id === id))
+        : [];
+      if (!rosterLoaded) {
+        writeLine(
+          streams.stderr,
+          'Warning: no agents are offered while the roster is unreadable — the daemon cannot start either. Fix the roster first.',
+        );
+      }
       for (const id of orphans) {
         options.push(`${id}`.padEnd(34) + '! tokens without a matching agent');
       }
@@ -4087,12 +4222,27 @@ export const collectDoctorReport = async (
   }
   // Tokens keyed to an agent the roster no longer has are loaded and
   // skipped on every start, silently.
-  const rosterIds = new Set((await loadRosterSouls(env, warn)).map((entry) => entry.soul.agent.id));
+  let rosterEntries: RosterEntry[] = [];
+  let rosterLoaded = true;
+  try {
+    rosterEntries = await loadRosterSouls(env, warn);
+  } catch (error) {
+    // Doctor exists to name problems, so a roster it cannot load is a
+    // finding to report — not an exception that replaces the report.
+    rosterLoaded = false;
+    problems.push(error instanceof Error ? error.message : String(error));
+  }
+  const rosterIds = new Set(rosterEntries.map((entry) => entry.soul.agent.id));
   rosterIds.add(DEFAULT_STRATUS_AGENT.id);
   if (soul) {
     rosterIds.add(soul.agent.id);
   }
-  const orphans = slackAgents.filter((id) => !rosterIds.has(id));
+  // Only against a roster that actually loaded. "No agent has this id" is
+  // a claim about the roster, and a refused one cannot support it — every
+  // stored token would be reported as orphaned, and this advises clearing
+  // them. Advice is not deletion, but an operator who follows it loses the
+  // same credentials by hand.
+  const orphans = rosterLoaded ? slackAgents.filter((id) => !rosterIds.has(id)) : [];
   if (orphans.length > 0) {
     problems.push(
       `Slack tokens are stored for ${orphans.join(', ')}, which no agent matches — \`stratus serve\` skips them. `
@@ -4283,7 +4433,11 @@ const servedRuntimes = async (
     configPresent: location !== undefined,
   };
   const passes: Array<{ selection: RuntimeSelection; env: CliEnvironment }> = [{ selection: {}, env }];
-  for (const entry of await loadRosterSouls(env, () => {})) {
+  // A roster that will not load is the gateway's to refuse, with a better
+  // message than this preflight could give — so it checks what it can and
+  // leaves the failing to start().
+  const rosterForRuntimes = await loadRosterSouls(env, () => {}).catch(() => []);
+  for (const entry of rosterForRuntimes) {
     const normalized = applySoulPins(entry.soul, {}, env, context);
     passes.push({ selection: normalized.selection, env: normalized.env as CliEnvironment });
   }
@@ -4510,7 +4664,6 @@ export const runAgentNew = async (
       );
 
       const persona = instructions || DEFAULT_SOUL_STARTER;
-      let agent = defineAgent({ name, instructions: persona });
 
       // Frontmatter pins what a run from this directory would actually use:
       // env vars outrank the active config file (project-local or explicit
@@ -4537,26 +4690,14 @@ export const runAgentNew = async (
         ?? (soulProvider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
       const soulPin = soulProvider !== 'demo' ? { provider: soulProvider, model: soulModel } : {};
 
-      // The name stays theirs, but the id — the soul filename and the
-      // memory key — must be unique: the suggestion pool is small, so a
-      // repeat name would otherwise silently overwrite an earlier agent's
-      // soul and share their memory. 'wx' makes each claim atomic; on a
-      // collision the id gets a fresh suffix and we try again.
       await mkdir(agentsDirPath(env), { recursive: true });
-      const baseId = agent.id;
-      let soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
-      for (;;) {
-        try {
-          await writeFile(soulPath, formatSoul({ agent, ...soulPin }), { flag: 'wx' });
-          break;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-            throw error;
-          }
-          agent = defineAgent({ id: `${baseId}-${randomUUID().slice(0, 4)}`, name, instructions: persona });
-          soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
-        }
-      }
+      const claimed = await claimSoulFile(
+        env,
+        { name, instructions: persona },
+        (candidate) => formatSoul({ agent: candidate, ...soulPin }),
+        (message) => writeLine(streams.stdout, message),
+      );
+      const { agent, soulPath } = claimed;
 
       const makeDefault = await prompter.select(`Make ${agent.name} your default agent?`, [
         'Yes — every stratus run talks to them',

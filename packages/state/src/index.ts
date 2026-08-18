@@ -904,8 +904,36 @@ export interface RosterEntry {
 }
 
 /**
+ * Two soul files claiming the same agent id.
+ *
+ * Typed so diagnostic callers can report it as a finding rather than
+ * surfacing a stack trace, while the daemon lets it stop a start.
+ */
+export class DuplicateAgentIdError extends Error {
+  readonly agentId: string;
+  readonly paths: [string, string];
+
+  constructor(agentId: string, paths: [string, string]) {
+    super(
+      `Two soul files declare the agent id ${agentId}: ${paths[0]} and ${paths[1]}. `
+      + 'Ids key sessions, memory, and credentials, so one of them has to change.',
+    );
+    this.name = 'DuplicateAgentIdError';
+    this.agentId = agentId;
+    this.paths = paths;
+  }
+}
+
+/**
  * Loads the soul roster from ~/.stratus/agents. Unreadable files degrade
  * to a warning: one broken soul must never take the rest of the team down.
+ *
+ * A duplicate id does NOT degrade, and the difference is the point.
+ * Skipping an unreadable file loses one agent, and which one is obvious.
+ * Picking a winner between two files claiming one id makes an agent
+ * silently inherit another's sessions, memory, and credentials, with the
+ * winner decided by filename sort order — there is no degraded behaviour
+ * that is right, so this refuses instead of guessing.
  */
 export const loadRosterSouls = async (
   env: StateEnvironment,
@@ -924,12 +952,33 @@ export const loadRosterSouls = async (
   }
 
   const entries: RosterEntry[] = [];
+  const byId = new Map<string, string>();
   for (const soulPath of rosterFiles) {
+    let entry: RosterEntry;
     try {
-      entries.push({ soul: await loadSoulFile(soulPath), path: soulPath });
+      entry = { soul: await loadSoulFile(soulPath), path: soulPath };
     } catch (error) {
       warn(`skipping ${soulPath}: ${error instanceof Error ? error.message : String(error)}`);
+      continue;
     }
+    // Reserved ids are dropped BEFORE collision detection, and the order
+    // matters. A soul claiming the built-in id is skipped either way — it
+    // may not take the documented fallback over — so two of them are not
+    // an ambiguity to refuse over: neither was going to get the id. Left
+    // after the check, a repository could take a daemon down simply by
+    // shipping two souls named `stratus`, turning a guard against hijack
+    // into a way to deny service.
+    if (entry.soul.agent.id === DEFAULT_STRATUS_AGENT.id) {
+      warn(`agent id ${entry.soul.agent.id} is reserved for the built-in agent; ignoring ${soulPath}`);
+      continue;
+    }
+
+    const claimed = byId.get(entry.soul.agent.id);
+    if (claimed !== undefined) {
+      throw new DuplicateAgentIdError(entry.soul.agent.id, [claimed, soulPath]);
+    }
+    byId.set(entry.soul.agent.id, soulPath);
+    entries.push(entry);
   }
   return entries;
 };

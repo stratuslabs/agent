@@ -7,6 +7,7 @@ import path from 'node:path';
 import {
   agentsDirPath,
   createFileMemoryStore,
+  DuplicateAgentIdError,
   loadConfigFile,
   loadRosterSouls,
   loadSoulFile,
@@ -440,4 +441,64 @@ test('an explicitly empty approver list excludes an agent instead of inheriting'
   });
   const junk = (await loadConfigFile(junkPath)).approvals;
   assert.deepEqual(resolveAgentApprovals(junk, 'ava'), { slackApprovers: [] });
+});
+
+test('two souls claiming one id refuse the roster, naming both files', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-dup-'));
+  const dir = agentsDirPath({ homeDir: home });
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'a-first.md'), '---\nname: First\nid: twin\n---\n\nYou are First.\n');
+  await writeFile(path.join(dir, 'b-second.md'), '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
+
+  // Not a degraded load. Skipping an unreadable soul loses one agent and
+  // it is obvious which; picking a winner here makes one agent inherit the
+  // other's sessions, memory, and credentials, decided by sort order.
+  const failure = await loadRosterSouls({ homeDir: home }, () => {}).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  assert.ok(failure instanceof DuplicateAgentIdError, `expected a typed refusal, got ${String(failure)}`);
+  assert.equal(failure.agentId, 'twin');
+  // Both files, so the collision can actually be fixed.
+  assert.match(failure.message, /a-first\.md/);
+  assert.match(failure.message, /b-second\.md/);
+});
+
+test('an unreadable soul still degrades to a warning, unlike a duplicate', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-broken-'));
+  const dir = agentsDirPath({ homeDir: home });
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'good.md'), '---\nname: Good\nid: good\n---\n\nYou are Good.\n');
+  // Frontmatter opened and never closed, plus a path-capable id in another
+  // file: both are one-file problems, and one broken soul must never take
+  // the rest of the team down.
+  await writeFile(path.join(dir, 'broken.md'), '---\nname: Broken\n\nno closing fence\n');
+  await writeFile(path.join(dir, 'escaping.md'), '---\nname: Escape\nid: ../../escape\n---\n\nYou escape.\n');
+
+  const warnings: string[] = [];
+  const entries = await loadRosterSouls({ homeDir: home }, (line) => warnings.push(line));
+
+  assert.deepEqual(entries.map((entry) => entry.soul.agent.id), ['good']);
+  assert.equal(warnings.length, 2, `expected both bad files skipped, got ${JSON.stringify(warnings)}`);
+  assert.ok(warnings.some((line) => line.includes('Invalid agent id')), JSON.stringify(warnings));
+});
+
+test('two souls claiming the reserved id are skipped, not treated as a collision', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-reserved-'));
+  const dir = agentsDirPath({ homeDir: home });
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'a.md'), '---\nname: One\nid: stratus\n---\n\nYou are one.\n');
+  await writeFile(path.join(dir, 'b.md'), '---\nname: Two\nid: stratus\n---\n\nYou are two.\n');
+  await writeFile(path.join(dir, 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+
+  // Neither was going to get the id — it is reserved — so their agreeing
+  // on it is not an ambiguity worth refusing over. Left after the
+  // collision check, a repository could take a daemon down just by
+  // shipping two souls named `stratus`, turning a guard against hijacking
+  // the built-in into a way to deny service.
+  const warnings: string[] = [];
+  const entries = await loadRosterSouls({ homeDir: home }, (line) => warnings.push(line));
+
+  assert.deepEqual(entries.map((entry) => entry.soul.agent.id), ['ava']);
+  assert.equal(warnings.filter((line) => line.includes('reserved')).length, 2);
 });

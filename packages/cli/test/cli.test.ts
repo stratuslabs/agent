@@ -1906,6 +1906,146 @@ test('switching the default provider clears settings chosen for the old one', as
   assert.match(output.stdout, /default claude-opus-5 \(default\)/);
 });
 
+test('creating an agent never claims an id another soul already declares', async () => {
+  const { loadRosterSouls } = await import('@stratusagent/state');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // A filename is not an id. This soul is `renamed.md` and declares
+  // `id: ava`, so `ava.md` being free proves nothing about `ava`.
+  const existingPath = path.join(agentsDir, 'renamed.md');
+  const existing = '---\nname: Ava\nid: ava\n---\n\nThe original Ava.\n';
+  await writeFile(existingPath, existing);
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Say hello to Ava\./);
+
+  // The soul that was already there is untouched — not overwritten, and
+  // not left sharing an id.
+  assert.equal(await readFile(existingPath, 'utf8'), existing);
+  const written = (await readdir(agentsDir)).filter((file) => file !== 'renamed.md');
+  assert.equal(written.length, 1, `agents dir held ${JSON.stringify(await readdir(agentsDir))}`);
+  assert.match(written[0] ?? '', /^ava-[a-z0-9]+\.md$/);
+
+  // Which is the point: the roster still loads, so the daemon still starts.
+  const roster = await loadRosterSouls({ homeDir: home });
+  assert.deepEqual(roster.map((entry) => entry.soul.agent.id).sort(), ['ava', written[0]?.replace(/\.md$/, '')]);
+});
+
+test('creating an agent never claims the configured soul\'s id', async () => {
+  const { loadRosterSouls } = await import('@stratusagent/state');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The configured soul is part of the served roster even though its file
+  // is nowhere near the agents directory — and it WINS a same-id contest
+  // with a roster file, so a new agent sharing its id is not refused, it
+  // is shadowed.
+  const configuredPath = path.join(home, 'elsewhere.md');
+  await writeFile(configuredPath, '---\nname: Ava\nid: ava\n---\n\nThe configured Ava.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'demo', soul: configuredPath }),
+  );
+
+  const { streams } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  const written = await readdir(path.join(home, '.stratus', 'agents'));
+  assert.equal(written.length, 1, `agents dir held ${JSON.stringify(written)}`);
+  assert.match(written[0] ?? '', /^ava-[a-z0-9]+\.md$/);
+
+  // Both are dispatchable: the roster one by its own id, the configured
+  // one still answering as `ava`.
+  const roster = await loadRosterSouls({ homeDir: home });
+  assert.deepEqual(roster.map((entry) => entry.soul.agent.id), [written[0]?.replace(/\.md$/, '')]);
+});
+
+test('a broken configured soul does not discard the roster\'s claims', async () => {
+  const { loadRosterSouls } = await import('@stratusagent/state');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'renamed.md'), '---\nname: Ava\nid: ava\n---\n\nThe original Ava.\n');
+  // The configured soul is missing. The daemon tolerates that — it warns
+  // and keeps serving the roster — so this command must not treat the
+  // roster's claims as unknown just because the other source failed, or
+  // it writes the very duplicate that would then refuse the roster.
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'demo', soul: path.join(home, 'gone.md') }),
+  );
+
+  const { streams } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  const written = (await readdir(agentsDir)).filter((file) => file !== 'renamed.md');
+  assert.deepEqual(written.length, 1, `agents dir held ${JSON.stringify(await readdir(agentsDir))}`);
+  assert.match(written[0] ?? '', /^ava-[a-z0-9]+\.md$/);
+  // Still loads: the roster the command could read is the roster it used.
+  await loadRosterSouls({ homeDir: home });
+});
+
+test('creating an agent never claims the reserved built-in id', async () => {
+  const { loadRosterSouls } = await import('@stratusagent/state');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+
+  const { streams } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['3\n', '1\n', 'Stratus\n', 'Be kind and brief.\n', '7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // A soul claiming `stratus` is skipped at load, so writing one would
+  // create an agent that silently never appears on the roster.
+  const written = await readdir(path.join(home, '.stratus', 'agents'));
+  assert.deepEqual(written.map((file) => file.replace(/\.md$/, '')).filter((id) => id === 'stratus'), []);
+  const roster = await loadRosterSouls({ homeDir: home });
+  assert.equal(roster.length, 1, `roster was ${JSON.stringify(roster.map((entry) => entry.soul.agent.id))}`);
+});
+
 test('switching provider warns when the default soul pins another provider', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const soulPath = path.join(home, '.stratus', 'agents', 'ava.md');
@@ -3323,13 +3463,13 @@ test('setup suggests serve with the same --config it was run with', async () => 
   assert.match(output.stdout, /run `stratus serve --config \.\/custom\.json` to bring them online/);
 });
 
-test('the Channels menu drops duplicate roster ids the way the gateway does', async () => {
+test('the Channels menu refuses a roster with a duplicate id instead of picking a winner', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const agentsDir = path.join(home, '.stratus', 'agents');
   await mkdir(agentsDir, { recursive: true });
-  // Two files, one id. The gateway keeps the first sorted file; offering
-  // the other would name a Slack app for an agent that can never be
-  // dispatched to, since credentials are keyed by the shared id.
+  // Two files, one id. Offering either would name a Slack app for an
+  // ambiguous agent — credentials are keyed by the shared id, so whichever
+  // file loses the sort silently answers with the winner's tokens.
   await writeFile(path.join(agentsDir, 'a-first.md'), '---\nname: First\nid: twin\n---\n\nYou are First.\n');
   await writeFile(path.join(agentsDir, 'b-second.md'), '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
 
@@ -3346,10 +3486,15 @@ test('the Channels menu drops duplicate roster ids the way the gateway does', as
     },
   });
 
+  // Setup still runs — providers and sign-ins are configurable regardless
+  // — but neither twin is offered a Slack app, and the reason names both
+  // files so it can actually be fixed.
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /First \(twin\)/);
+  assert.doesNotMatch(output.stdout, /First \(twin\)/);
   assert.doesNotMatch(output.stdout, /Second \(twin\)/);
-  assert.match(output.stderr, /duplicate agent id twin/);
+  assert.match(output.stderr, /Two soul files declare the agent id twin/);
+  assert.match(output.stderr, /a-first\.md/);
+  assert.match(output.stderr, /b-second\.md/);
 });
 
 test('the Channels menu follows STRATUS_SOUL over the configured soul', async () => {
@@ -4494,7 +4639,11 @@ test('a roster file claiming the built-in id is skipped in the Channels menu', a
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /Stratus \(stratus\)/);
   assert.doesNotMatch(output.stdout, /Impostor \(stratus\)/);
-  assert.match(output.stderr, /duplicate agent id stratus \(built-in vs .*impostor\.md\)/);
+  // Reserved, not duplicated: a soul may not take over the documented
+  // fallback, and that is a skip rather than the collision between two
+  // soul files that refuses the whole roster.
+  assert.match(output.stderr, /agent id stratus is reserved for the built-in agent/);
+  assert.match(output.stderr, /impostor\.md/);
 });
 
 test('the Channels menu can clear orphaned tokens with no soul files present', async () => {
@@ -5652,4 +5801,132 @@ test('a config the daemon was pointed at may set approvals', async () => {
   assert.equal(code, 0);
   assert.match(output.stdout, /approvals: remote/);
   assert.doesNotMatch(output.stderr, /cannot decide who may approve/);
+});
+
+test('doctor reports an unloadable roster instead of dying on it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-doctor-dup-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'a-first.md'), '---\nname: First\nid: twin\n---\n\nYou are First.\n');
+  await writeFile(path.join(agentsDir, 'b-second.md'), '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: home, homeDir: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
+  });
+
+  // Doctor exists to name problems, so a roster it cannot load is a
+  // finding — not an exception that replaces the whole report.
+  assert.equal(exitCode, 1, 'a problem was found');
+  assert.match(output.stdout, /Two soul files declare the agent id twin/);
+  assert.match(output.stdout, /a-first\.md/);
+  // Still a real report, not a stack trace.
+  assert.match(output.stdout, /Stratus Agent/);
+});
+
+test('a roster that will not load never offers to delete Slack tokens', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-orphan-guard-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // Two files collide, so the roster refuses — while a third, perfectly
+  // valid agent has working Slack tokens.
+  await writeFile(path.join(agentsDir, 'a-first.md'), '---\nname: First\nid: twin\n---\n\nYou are First.\n');
+  await writeFile(path.join(agentsDir, 'b-second.md'), '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-keep', botToken: 'xoxb-keep' } } } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['4\n', '2\n', '7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // "No agent has this id" is a claim about the roster, and a roster that
+  // refused to load cannot support it. Offering to clear Ava's tokens
+  // because a different pair of files collided would destroy working
+  // credentials over an unrelated mistake.
+  assert.doesNotMatch(output.stdout, /tokens without a matching agent/);
+  // Nothing is offered at all, not just the colliding pair: a roster that
+  // refuses to load fails `stratus serve` outright, so connecting a Slack
+  // app to any of these agents configures something that cannot run.
+  assert.doesNotMatch(output.stdout, /Ava \(ava\)/);
+  assert.match(output.stderr, /no agents are offered while the roster is unreadable/);
+
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials.channels.slack.ava, { appToken: 'xapp-keep', botToken: 'xoxb-keep' });
+});
+
+test('a configured soul from a colliding pair is not offered a Slack app', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-soul-collide-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'a-first.md'), '---\nname: First\nid: twin\n---\n\nYou are First.\n');
+  await writeFile(path.join(agentsDir, 'b-second.md'), '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
+  // The configured default soul IS one of the colliding files, so the
+  // effective-soul path would reload and offer it even though the roster
+  // that contains it just refused.
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'demo', soul: path.join(agentsDir, 'a-first.md') }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['4\n', '1\n', '7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // `createGateway.start()` fails in loadRoster before it ever resolves a
+  // default soul, so offering this one would invite naming a Slack app for
+  // an agent the daemon cannot bring online.
+  assert.doesNotMatch(output.stdout, /First \(twin\)/);
+  assert.match(output.stderr, /no agents are offered while the roster is unreadable/);
+});
+
+test('doctor does not advise clearing tokens it cannot prove are orphaned', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-doctor-orphan-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'a-first.md'), '---\nname: First\nid: twin\n---\n\nYou are First.\n');
+  await writeFile(path.join(agentsDir, 'b-second.md'), '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-a', botToken: 'xoxb-a' } } } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: home, homeDir: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
+  });
+
+  assert.equal(exitCode, 1);
+  // The collision is the finding. Ava's tokens are not — doctor advises,
+  // and an operator who follows advice to clear them loses good
+  // credentials just as surely as a delete would.
+  assert.match(output.stdout, /Two soul files declare the agent id twin/);
+  assert.doesNotMatch(output.stdout, /Slack tokens are stored for ava/);
 });
