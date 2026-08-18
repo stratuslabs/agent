@@ -2,22 +2,42 @@
 
 Stratus Agent is a tiny JavaScript agent runtime and CLI.
 
-Right now, the best way to try it is a local loop in the terminal or a minimal local dashboard. You can run prompts through the CLI, watch session and tool events, and open a lightweight browser surface for local testing.
+You can talk to an agent in the terminal, run your whole roster as an always-on daemon, or reach them from Slack — each agent as its own bot. Sessions are durable, memory is keyed to the agent, and there is a small local dashboard for smoke testing.
 
 ## What it includes
 
+Installing the CLI (`npm install -g @stratusagent/cli`) brings the whole
+runtime with it — these ten packages are what you get, and you never install
+them individually:
+
+- `@stratusagent/cli`, the `stratus` command: setup, chat, one-shot runs, the gateway, the dashboard
 - `@stratusagent/core`, the runtime primitives and agent loop
 - `@stratusagent/agents`, agent identities, souls, memory, delegation, and routing
+- `@stratusagent/state`, shared state wiring: config resolution, credentials, the soul roster, file memory, provider construction
+- `@stratusagent/gateway`, stratusd — the always-on gateway with durable SQLite sessions and a per-provider runner pool
 - `@stratusagent/providers`, helpers for building model providers
 - `@stratusagent/provider-anthropic`, the Claude provider on the official Anthropic SDK
 - `@stratusagent/provider-claude-code`, the Claude subscription runtime on the Claude Agent SDK
 - `@stratusagent/executors`, helpers for execution behavior
 - `@stratusagent/executor-local`, a concrete local child-process executor adapter
-- `@stratusagent/state`, shared state wiring: config resolution, credentials, the soul roster, file memory, provider construction
-- `@stratusagent/gateway`, stratusd — the always-on gateway with durable SQLite sessions and a per-provider runner pool
-- `@stratusagent/channels`, the channel contract: inbound messages, streaming outbound connections, session keys
-- `@stratusagent/channel-slack`, the Slack adapter — one Slack app per agent, Socket Mode, streaming replies via edits
-- `@stratusagent/cli`, the local CLI entrypoint
+
+### Optional packages
+
+Channels are **not** part of that install. A transport you don't use is weight
+you shouldn't carry, so each one is a separate package you add only if you want
+it. Install it next to the CLI and `stratus serve` picks it up on its own:
+
+- `@stratusagent/channel-slack` — talk to your agents in Slack: one Slack app per agent (its own avatar, presence, and DMs), Socket Mode so no public ingress is needed, resumable threads, and replies that stream via message edits. Adds roughly 9 MB of Slack SDKs.
+
+  ```bash
+  npm install -g @stratusagent/channel-slack
+  ```
+
+- `@stratusagent/channels` — the channel contract itself: inbound messages, streaming outbound connections, session keys. It arrives as a dependency of any channel package, and it is what you build a new transport against.
+
+Without a channel installed, everything else works exactly as before: the
+daemon logs an install hint for any agent that has channel credentials stored
+and serves the rest of the roster normally.
 
 ## Current status
 
@@ -26,7 +46,7 @@ This repo is early, but the core loop is complete.
 Today it is useful for:
 - talking with your agent in a persistent conversation (`stratus chat`) — the session carries across turns and remembered facts accumulate
 - running the whole roster as an always-on daemon (`stratus serve`) — durable sessions that survive restarts, each agent on its own provider and model, delegation between them, and a progress-based watchdog
-- talking to your agents in Slack — each agent is its own Slack app with its own avatar and presence, threads are resumable conversations, and replies stream via message edits (store tokens under `channels.slack.<agentId>` in `~/.stratus/credentials.json` and `stratus serve` brings them online; see `packages/channel-slack/README.md` for the 2-minute per-agent app setup)
+- talking to your agents in Slack — each agent is its own Slack app with its own avatar and presence, threads are resumable conversations, and replies stream via message edits (install `@stratusagent/channel-slack`, then run `stratus setup` → **Channels** to create and connect each agent's app; see `packages/channel-slack/README.md`)
 - running a multi-turn agent loop locally: provider → tools → provider until the model finishes
 - running real tool-calling sessions against Claude (via the official Anthropic SDK) or any OpenAI-compatible provider (tools are advertised with JSON schemas, tool calls execute locally, and results are fed back to the model)
 - defining agents as soul files — markdown personas you run with `stratus run --soul ./ava.md "hi"`
@@ -35,7 +55,7 @@ Today it is useful for:
 - opening a tiny local dashboard for browser-based smoke testing
 - seeing how provider output becomes session events
 
-It is not yet a full production agent platform: durable storage, remote executors, vendor SDK adapters, and retries/queues remain out of scope for v1 (see `docs/architecture/stratus-v1.md`).
+It is not yet a full production agent platform. The v1 kernel deliberately left durable storage, remote executors, and retries/queues out of scope (see `docs/architecture/stratus-v1.md`); the gateway has since brought durable sessions in, and remote executors and retries/queues are still open.
 
 ## Agents are people
 
@@ -88,95 +108,87 @@ stratus agent new --format soul > my-agent.md   # generated identity, ready to e
 
 Two well-written example souls live in `examples/souls/` — they double as the format docs. A soul's provider/model are hints: `--provider`/`--model` flags and `STRATUS_*` env vars still win.
 
-## Local setup (fresh machine)
+## Install
 
-Stratus Agent needs **Node.js 22.13+** (the gateway's session store uses `node:sqlite`, which runs unflagged from 22.13; the test runner uses `--experimental-strip-types`) and **pnpm 10**.
+Stratus Agent needs **Node.js 22.13+** — the gateway's session store uses `node:sqlite`, which runs unflagged from 22.13. On macOS, `brew install node` gets you a new enough one; on Linux, use your package manager or nvm.
 
-On macOS:
-
-```bash
-brew install node             # installs the latest Node, which satisfies >= 22.13
-# or, to pin the Node 22 line: nvm install 22
-# (avoid `brew install node@22` — it is keg-only, so node/corepack won't be on PATH without extra steps)
-corepack enable && corepack prepare pnpm@10.18.3 --activate
-```
-
-On Linux, install Node 22 from your package manager or nvm, then enable corepack the same way.
-
-Then clone and verify the toolchain end to end:
-
-```bash
-git clone https://github.com/stratuslabs/agent.git && cd agent
-pnpm install --frozen-lockfile
-pnpm build && pnpm typecheck && pnpm test
-```
-
-If the test suite is green you're ready for the Quickstart below. To configure a provider, run the setup menu:
-
-```bash
-node packages/cli/dist/bin.js setup
-```
-
-Setup is the whole onboarding: a small menu where you pick a provider, sign in, create your first agent, and test it — no config files to edit and no env vars to export:
-
-- **Sign in from the menu.** For Claude, choose how you pay: **Claude subscription (Pro/Max)** — sign in through Claude Code (`claude setup-token`) so usage is covered by your plan — or **Anthropic API key**, pasted straight into the prompt and verified against the live API before it's accepted. OpenAI-compatible keys work the same way.
-- **Credentials are stored for you** in `~/.stratus/credentials.json` (owner-read-only), and settings in `~/.stratus/config.json`, so `stratus run` works from any directory afterwards. A project-local `stratus.config.json` still wins when present, and env vars outrank both.
-- **Create your agent inside setup** — name them (or let Stratus name them), describe their personality, and their soul file lands in `~/.stratus/agents/` ready to edit.
-- **Default and fallback models.** The Models menu lists every model your sign-ins can actually reach (fetched live from the provider APIs) and lets you pick a **default** and a **fallback** — when the default model errors mid-run, the run automatically retries on the fallback, even across providers.
-- **Test without leaving the menu** — option 4 runs a real "say hello" with your current settings.
-
-Prefer doing it by hand? Copy `stratus.config.json.example` into your project instead.
-
-Once the packages are published to npm, this whole section becomes two commands:
+Then:
 
 ```bash
 npm install -g @stratusagent/cli
 stratus setup
 ```
 
+That is the whole install for the runtime. If you want Slack, add the channel package too — see [Optional packages](#optional-packages):
+
+```bash
+npm install -g @stratusagent/channel-slack
+```
+
+### Setup
+
+Setup is the whole onboarding: a small menu where you pick a provider, sign in, create your first agent, connect channels, and test it — no config files to edit and no env vars to export:
+
+- **Sign in from the menu.** For Claude, choose how you pay: **Claude subscription (Pro/Max)** — sign in through Claude Code (`claude setup-token`) so usage is covered by your plan — or **Anthropic API key**, pasted straight into the prompt and verified against the live API before it's accepted. OpenAI-compatible keys work the same way.
+- **Credentials are stored for you** in `~/.stratus/credentials.json` (owner-read-only), and settings in `~/.stratus/config.json`, so `stratus run` works from any directory afterwards. A project-local `stratus.config.json` still wins when present, and env vars outrank both.
+- **Create your agent inside setup** — name them (or let Stratus name them), describe their personality, and their soul file lands in `~/.stratus/agents/` ready to edit.
+- **Default and fallback models.** The Models menu lists every model your sign-ins can actually reach (fetched live from the provider APIs) and lets you pick a **default** and a **fallback** — when the default model errors mid-run, the run automatically retries on the fallback, even across providers.
+- **Connect channels.** The Channels menu walks each agent onto Slack: it prints the app manifest with the agent's name already filled in, takes both tokens without echoing them, verifies each against Slack, and stores them for the daemon. Nothing to hand-edit.
+- **Test without leaving the menu.** The Test run entry does a real "say hello" with your current settings.
+
+Prefer doing it by hand? Copy `stratus.config.json.example` into your project instead.
+
+## From source
+
+To work on Stratus Agent itself you also need **pnpm 10**:
+
+```bash
+corepack enable && corepack prepare pnpm@10.18.3 --activate
+git clone https://github.com/stratuslabs/agent.git && cd agent
+pnpm install --frozen-lockfile
+pnpm build && pnpm typecheck && pnpm test
+```
+
+If the suite is green the toolchain is good. In a source checkout the CLI runs from its build output rather than the global `stratus` binary:
+
+```bash
+node packages/cli/dist/bin.js setup
+node packages/cli/dist/bin.js run "Say hello"
+```
+
+Every `stratus …` command below works that way too.
+
 ## Quickstart
 
-### 1) Install dependencies
+### 1) Run the demo path
+
+The `demo` provider needs no account at all:
 
 ```bash
-pnpm install
-```
-
-### 2) Build the workspace
-
-```bash
-pnpm build
-```
-
-### 3) Run the demo path
-
-Use the built CLI directly:
-
-```bash
-node packages/cli/dist/bin.js run "say hello"
+stratus run "say hello"
 ```
 
 Or trigger the demo tool:
 
 ```bash
-node packages/cli/dist/bin.js run --prompt "please use the echo tool"
+stratus run --prompt "please use the echo tool"
 ```
 
-### 4) Open the local dashboard
+### 2) Open the local dashboard
 
 ```bash
-node packages/cli/dist/bin.js dashboard
+stratus dashboard
 ```
 
 The command prints the local URL, opens your default browser, and exposes a tiny `/api/echo` endpoint that the page can exercise.
 
-### 5) Run a real provider path
+### 3) Run a real provider path
 
-The flagship path is Claude via the official Anthropic SDK:
+`stratus setup` is the easy way in, but every setting has an env var and a flag behind it. The flagship path is Claude via the official Anthropic SDK:
 
 ```bash
 export ANTHROPIC_API_KEY=your-key
-pnpm cli run --provider anthropic "say hello"
+stratus run --provider anthropic "say hello"
 ```
 
 The Claude provider defaults to `claude-opus-5` and handles multi-turn tool calling, the agent's persona and memory, and adaptive thinking out of the box.
@@ -187,7 +199,7 @@ Any OpenAI-compatible API works too:
 export STRATUS_PROVIDER=openai
 export OPENAI_API_KEY=your-key
 export STRATUS_MODEL=gpt-4.1-mini
-pnpm cli run "say hello"
+stratus run "say hello"
 ```
 
 Or with a config file `stratus.config.json` (start from `stratus.config.json.example`):
@@ -205,7 +217,7 @@ Then:
 
 ```bash
 export ANTHROPIC_API_KEY=your-key
-pnpm cli run "say hello"
+stratus run "say hello"
 ```
 
 Legacy `STRATUSCLAW_*` env vars and `stratusclaw.config.json` still work for compatibility.
@@ -255,6 +267,7 @@ Opened your default browser.
 ## CLI usage
 
 ```bash
+stratus setup
 stratus chat
 stratus chat --soul ./examples/souls/ava.md
 stratus run --prompt "Use the demo tool"
@@ -285,14 +298,8 @@ Current options:
 - `--port`, set the dashboard port
 - `--host`, set the dashboard host
 - `--no-open`, skip automatic browser opening
+- `--idle-timeout`, seconds of silence from a streaming provider before `stratus serve`'s watchdog aborts the turn (default: 120)
 - `--help`, `-h`, show help
-
-If you are running from the repo without installing the CLI globally, use:
-
-```bash
-node packages/cli/dist/bin.js run "Say hello"
-node packages/cli/dist/bin.js dashboard
-```
 
 ## Repo shape
 
@@ -307,6 +314,7 @@ packages/
   executors/
   gateway/
   provider-anthropic/
+  provider-claude-code/
   providers/
   state/
 examples/
@@ -326,7 +334,7 @@ pnpm test
 
 ## Where this is headed
 
-The kernel stays small and understandable; capability grows as optional packages around it. The destination is one always-on runtime (`stratus serve`) that hosts a roster of agents with durable sessions, speaks through channel packages (Slack first, with each agent as its own bot identity), and exposes one control API that every surface — CLI, web dashboard, macOS management app — consumes as a thin client.
+The kernel stays small and understandable; capability grows as optional packages around it. The always-on runtime (`stratus serve`) is here — it hosts a roster of agents with durable sessions and speaks through channel packages, Slack first, each agent as its own bot identity. What is still ahead is one control API that every surface — CLI, web dashboard, macOS management app — consumes as a thin client, plus more channels behind the same contract.
 
 - **Vision:** [`docs/architecture/stratus-v2.md`](docs/architecture/stratus-v2.md) — the layered architecture, key decisions, and how the deployment targets (local machines, VMs, hosted) collapse into one runtime.
 - **Roadmap:** [`docs/roadmap/`](docs/roadmap/README.md) — ordered steps with a one-page spec each, from the gateway daemon to productization.
