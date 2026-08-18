@@ -90,10 +90,14 @@ These are deliberate. Changing one is a decision, not a refactor.
   independent of enablement. Do not write an unqualified crash-restart
   guarantee.
 - **A daemon that fails before it starts serving writes nothing to the
-  structured log.** Those errors reach stderr, which the service manager
-  captures in `~/.stratus/logs/stratusd.err.log`. `stratus logs` cannot
-  show them, so anything describing the JSONL as the whole record of a run
-  is wrong for exactly the case someone is debugging.
+  structured log.** Those errors reach stderr, and `stratus logs` cannot
+  show them — so anything describing the JSONL as the whole record of a
+  run is wrong for exactly the case someone is debugging. Where they land
+  is the service manager's business and differs by platform: the
+  LaunchAgent redirects both streams to `~/.stratus/logs/stratusd.{out,err}.log`
+  (which is why `truncateRedirectLogs` exists, and why it is macOS-only in
+  practice), while the systemd unit sets no `StandardOutput` and its
+  output goes to the journal — `journalctl --user-unit=stratusd.service`.
 
 ## Commands
 

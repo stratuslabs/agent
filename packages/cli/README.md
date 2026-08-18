@@ -175,16 +175,20 @@ narrow it to the run you actually mean.
 A daemon that fails *before* it starts serving — a broken install, an
 unreadable credentials file — never gets as far as opening the structured log,
 so `stratus logs` shows nothing or shows yesterday. Those errors go to stderr,
-which the service manager captures beside it:
+and where stderr lands is the service manager's business, so it differs by
+platform:
 
 ```bash
-tail ~/.stratus/logs/stratusd.err.log
+tail ~/.stratus/logs/stratusd.err.log      # macOS
+journalctl --user-unit=stratusd.service    # Linux
 ```
 
-That file is the one that explains a restart loop. Both redirect logs
-(`stratusd.out.log`, `stratusd.err.log`) are truncated when `serve` starts and
-every five minutes while it runs, so a crash loop cannot fill the disk with the
-same error a million times.
+That is where a restart loop explains itself. On macOS the LaunchAgent redirects
+both streams to files, so Stratus truncates them when `serve` starts and every
+five minutes while it runs — a crash loop cannot fill the disk with the same
+error a million times. On Linux systemd keeps the same output in the journal
+instead, which does its own rotation, so there is nothing beside the JSONL to
+bound and nothing to clean up.
 
 ## When something looks off
 
