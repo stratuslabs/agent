@@ -144,16 +144,20 @@ stratus logs                     # the last 50 records
 stratus logs -f                  # follow, across rotations
 stratus logs -n 200
 stratus logs --agent ava
-stratus logs --session slack-C07AB12CD-1731900000.123456
+stratus logs --session slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456
 stratus logs --format json       # the raw records, for jq
 ```
 
 ```text
 09:14:02  —           stratusd ready — 3 agents, slack connected
-09:14:31  ava         session.created [slack-C07AB12CD-1731900000.123456]
-09:14:36  ava         tool.completed tool=memory.remember ok=true [slack-C07AB12CD-1731900000.123456]
+09:14:31  ava         session.created [slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456]
+09:14:36  ava         tool.completed tool=memory.remember ok=true [slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456]
 09:21:07  —           warning: anthropic returned 529; retrying on the fallback model
 ```
+
+Session ids are the channel's own key — `channel:agent:team:conversation[:thread]`
+— so the id in the last column is exactly what `--session` wants, and the same
+conversation keeps it across daemon restarts.
 
 The log is a **trace, not a second transcript**: it records that a tool ran and
 that a session completed, with the tool's name, the agent, and the session id.

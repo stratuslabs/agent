@@ -426,10 +426,11 @@ export const formatLogRecord = (record: LogRecord): string => {
     // string where this version writes an object, and spreading that
     // into entries renders a word one character per pair.
     const detail = formatDetail(record.detail);
-    // The whole session id, never a prefix of it. Ids are structured
-    // (`slack-<channel>-<ts>`), so a fixed-width slice renders different
-    // conversations identically — and this is the column you copy into
-    // `stratus logs --session`, where a prefix matches nothing.
+    // The whole session id, never a prefix of it. A channel id is
+    // `channel:agent:team:conversation[:thread]`, so eight characters of
+    // one is `slack:av` — the same string for every Slack conversation on
+    // the machine. This is also the column you copy into `stratus logs
+    // --session`, which matches on equality, so a prefix finds nothing.
     const session = record.sessionId ? ` [${record.sessionId}]` : '';
     return `${time}  ${who}${record.event ?? 'event'}${detail ? ` ${detail}` : ''}${session}`;
   }
