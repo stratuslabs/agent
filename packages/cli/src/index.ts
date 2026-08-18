@@ -24,7 +24,11 @@ import {
   createLocalCommandExecutor,
   defineLocalCommandTool,
 } from '@stratusagent/executor-local';
-import { createPermissionPolicy } from '@stratusagent/permissions';
+// Type-only: the gateway itself is imported lazily (it pulls in node:sqlite
+// and the whole runner stack), and a serve-only policy seam must not make
+// `stratus run` pay for it.
+import type { ApprovalTransport } from '@stratusagent/gateway';
+import { createPermissionPolicy, type PermissionDecision } from '@stratusagent/permissions';
 import {
   createOpenAICompatibleProvider,
   createProviderResponseBuilder,
@@ -72,6 +76,7 @@ import {
   readProcessEnv,
   logsDirPath,
   readWorkingDirectory,
+  resolveAgentApprovals,
   resolveEnvApiKey,
   DEFAULT_CONFIG_FILENAME,
   LEGACY_CONFIG_FILENAME,
@@ -82,6 +87,7 @@ import {
   saveCredentials,
   stratusHomePath,
   withLegacyDefaultMemories,
+  type ApprovalsConfig,
   type ChannelCredentials,
   type CredentialProviderName,
   type CredentialsFile,
@@ -259,9 +265,13 @@ export interface ParsedLogsCommand {
   format: 'text' | 'json';
 }
 
+export type ServeApprovalMode = 'headless' | 'remote';
+
 export interface ParsedServeCommand {
   command: 'serve';
   configPath?: string;
+  /** Overrides `approvals.mode` in the config file. */
+  approvals?: ServeApprovalMode;
   /** Watchdog idle timeout in milliseconds. 0 disables. */
   idleTimeoutMs?: number;
   events: boolean;
@@ -375,9 +385,10 @@ Commands:
   serve            Run stratusd, the always-on gateway: durable sessions, the
                    whole roster live at once (each agent on its own provider),
                    delegation, and a watchdog — Ctrl+C / SIGTERM drains cleanly
-                   (--idle-timeout <seconds>, --no-events, --no-log-file,
-                   --config <path>); everything it says is also written to
-                   ~/.stratus/logs, which "stratus logs" reads
+                   (--idle-timeout <seconds>, --approvals <headless|remote>,
+                   --no-events, --no-log-file, --config <path>); everything it
+                   says is also written to ~/.stratus/logs, which
+                   "stratus logs" reads
   service          Keep stratusd running under launchd (macOS) or systemd
                    (Linux): install, uninstall, status, start, stop.
                    Installing starts it now and at every login
@@ -410,7 +421,10 @@ Options:
   --config         Config file path (run: load settings from it, setup: write it)
   --format         Output format: text or json (default: text)
   --no-events      Hide event-by-event progress lines in text mode
-  --approvals      Tool approval mode: always, ask, or never (default: always)
+  --approvals      run/chat: tool approval mode — always, ask, or never (default: always)
+                   serve: how the daemon reaches a human — headless (refuse every
+                   gated call) or remote (ask in Slack). Default headless, or
+                   the config file's "approvals.mode"
   --max-turns      Maximum provider turns per run (default: 8)
   --port           Dashboard port, defaults to an open local port
   --host           Dashboard host (default: 127.0.0.1)
@@ -527,6 +541,15 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
           throw new Error(`Invalid value for --idle-timeout: ${rest[index + 1] ?? '(missing)'}`);
         }
         parsed.idleTimeoutMs = Math.round(seconds * 1000);
+        index += 1;
+        continue;
+      }
+      if (token === '--approvals') {
+        const value = readOptionValue(rest, index, '--approvals');
+        if (value !== 'headless' && value !== 'remote') {
+          throw new Error(`Unsupported approvals mode: ${value}. Use headless or remote.`);
+        }
+        parsed.approvals = value;
         index += 1;
         continue;
       }
@@ -985,6 +1008,10 @@ export const formatEvent = (event: StratusEvent): string | null => {
       return `• tool.completed ${event.result.toolName} ok=${String(event.result.ok)}`;
     case 'tool.denied':
       return `• tool.denied ${event.call.toolName}`;
+    case 'tool.approval-requested':
+      return `• tool.approval-requested ${event.call.toolName} (${event.risk}) for ${event.agentId}`;
+    case 'tool.approval-resolved':
+      return `• tool.approval-resolved ${event.answer} (${event.reason})${event.actor ? ` by ${event.actor}` : ''}`;
     case 'session.completed':
       return `• session.completed ${event.sessionId}`;
     case 'session.failed':
@@ -998,6 +1025,14 @@ export const formatEvent = (event: StratusEvent): string | null => {
  * The fields worth keeping per event type. Tool inputs and message text
  * are deliberately excluded: the log is a trace of what happened, not a
  * second copy of the transcript.
+ *
+ * The approval pair is the one place the trace carries a person's id, and
+ * it earns it: `always` widens what an agent may do unattended for the rest
+ * of the session, and "who decided that" is unanswerable afterwards from
+ * anything else. The refusal path is warned about by `onDecision`, but an
+ * *approval* produces no warning at all — without these two records a
+ * granted permission leaves no trace whatsoever. Still no tool input: what
+ * was asked is here, what it was asked with is not.
  */
 const eventDetail = (event: StratusEvent): Record<string, unknown> | undefined => {
   switch (event.type) {
@@ -1010,6 +1045,15 @@ const eventDetail = (event: StratusEvent): Record<string, unknown> | undefined =
       return { tool: event.call.toolName };
     case 'tool.completed':
       return { tool: event.result.toolName, ok: event.result.ok };
+    case 'tool.approval-requested':
+      return { tool: event.call.toolName, risk: event.risk, requestId: event.requestId };
+    case 'tool.approval-resolved':
+      return {
+        requestId: event.requestId,
+        answer: event.answer,
+        reason: event.reason,
+        ...(event.actor ? { actor: event.actor } : {}),
+      };
     case 'session.failed':
       return { error: event.error };
     default:
@@ -2221,7 +2265,12 @@ export const slackAppManifest = (agentName: string): string => JSON.stringify({
   oauth_config: { scopes: { bot: SLACK_BOT_SCOPES } },
   settings: {
     event_subscriptions: { bot_events: SLACK_BOT_EVENTS },
-    interactivity: { is_enabled: false },
+    // Required for remote approval: Allow / Always allow / Deny arrive as
+    // block_actions, and Slack delivers none of them to an app that has
+    // interactivity switched off. Enabled unconditionally rather than per
+    // mode — an app is created once, and discovering months later that the
+    // buttons do nothing means editing the manifest and reinstalling.
+    interactivity: { is_enabled: true },
     org_deploy_enabled: false,
     socket_mode_enabled: true,
     token_rotation_enabled: false,
@@ -4248,6 +4297,84 @@ const servedRuntimes = async (
 };
 
 /**
+ * The daemon's `approvals` block, from the config file the daemon itself
+ * would load. Discovery goes through the shared resolver rather than
+ * reading ~/.stratus/config.json directly: `--config` and STRATUS_CONFIG
+ * both move it, and a second copy of that precedence would resolve the
+ * approver set from a file the gateway is not running on.
+ *
+ * **Only from a trusted location.** An auto-discovered project-local
+ * `stratus.config.json` outranks the global one and can be checked into any
+ * repository — which is why stored credentials are already never combined
+ * with an endpoint it selects. This block is the same kind of boundary and
+ * a sharper one: it names the people who may authorize an agent's gated
+ * tool calls, and it would do so through Slack tokens the user configured
+ * globally. A cloned repo must not be able to appoint its own approver, so
+ * an untrusted config's approvals are ignored — loudly, since silently
+ * dropping the block someone is looking at is its own kind of wrong.
+ *
+ * An unreadable config degrades to headless with a warning, matching how
+ * every other consumer treats one: refusing to start would take the whole
+ * fleet down over a policy block that may not even be present.
+ */
+const loadServeApprovals = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<ApprovalsConfig> => {
+  try {
+    const location = await resolveConfigLocation(configPath ? { configPath } : {}, env);
+    if (!location) {
+      return {};
+    }
+    const approvals = (await loadConfigFile(location.path)).approvals;
+    if (!approvals) {
+      return {};
+    }
+    if (!location.trusted) {
+      warn(
+        `ignoring the approvals config in ${location.path}: a project-local config cannot decide who may approve `
+        + 'this daemon\'s tool calls. Move it to ~/.stratus/config.json, or pass it with --config.',
+      );
+      return {};
+    }
+    return approvals;
+  } catch (error) {
+    warn(`ignoring the approvals config (${error instanceof Error ? error.message : String(error)}); refusing gated calls`);
+    return {};
+  }
+};
+
+/**
+ * One line naming who can actually answer, so a remote daemon does not look
+ * configured when it is not. Two ways it can be hollow, and they fail
+ * differently, so they read differently:
+ *
+ * - No channel running at all (no Slack tokens, or the optional package is
+ *   not installed) — nothing renders the request, so the turn waits out the
+ *   whole timeout before being denied. That is the bad one, and the only
+ *   place it is visible is here, at startup.
+ * - A channel is running but an agent has no approvers — the adapter denies
+ *   that agent's requests on arrival, which is at least prompt.
+ *
+ * `agentIds` is therefore the agents that can actually be *asked*, not
+ * every agent with tokens on disk.
+ */
+const describeApprovers = (approvals: ApprovalsConfig, agentIds: string[]): string => {
+  if (agentIds.length === 0) {
+    return 'but no channel is running to ask through, so gated calls will wait out the approval timeout and then be denied';
+  }
+  const covered = agentIds.filter((agentId) => (resolveAgentApprovals(approvals, agentId).slackApprovers ?? []).length > 0);
+  if (covered.length === 0) {
+    return 'but no approvers are configured, so every gated call is denied on arrival';
+  }
+  const uncovered = agentIds.filter((agentId) => !covered.includes(agentId));
+  return uncovered.length === 0
+    ? `approvers set for ${covered.join(', ')}`
+    : `approvers set for ${covered.join(', ')}; none for ${uncovered.join(', ')}, whose calls are denied on arrival`;
+};
+
+/**
  * `stratus service` — run the daemon under launchd or systemd, so it
  * survives logout, crashes, and reboots. `serve` itself stays a plain
  * foreground process; this only tells the platform how to keep it up.
@@ -4610,6 +4737,12 @@ export const runServe = async (
   // tokens are gateway infrastructure secrets in the channels namespace of
   // ~/.stratus/credentials.json (see @stratusagent/channel-slack's README
   // for the 2-minute per-agent app setup).
+  // The approval policy and the Slack approver sets come from the same
+  // config block, resolved once here: the daemon must not answer "who can
+  // approve this" differently from "is anyone being asked at all".
+  const approvalsConfig = await loadServeApprovals(env, command.configPath, warn);
+  const approvalMode = command.approvals ?? approvalsConfig.mode ?? 'headless';
+
   const channelCredentials = await loadChannelCredentials(env);
   const slackAgents = Object.entries(channelCredentials.slack ?? {});
   const channels = [];
@@ -4622,11 +4755,16 @@ export const runServe = async (
     const adapter = await loadSlackAdapter();
     if (adapter) {
       channels.push(adapter({
-        agents: slackAgents.map(([agentId, tokens]) => ({
-          agentId,
-          appToken: tokens.appToken,
-          botToken: tokens.botToken,
-        })),
+        agents: slackAgents.map(([agentId, tokens]) => {
+          const route = resolveAgentApprovals(approvalsConfig, agentId);
+          return {
+            agentId,
+            appToken: tokens.appToken,
+            botToken: tokens.botToken,
+            ...(route.slackApprovers ? { approvers: route.slackApprovers } : {}),
+            ...(route.slackChannel ? { approvalChannel: route.slackChannel } : {}),
+          };
+        }),
         log,
         warn,
       }));
@@ -4677,24 +4815,40 @@ export const runServe = async (
   // while `serve` was something you ran in a terminal you were sitting at;
   // it is not, now that setup installs it under launchd by default.
   //
-  // Headless is the only honest mode here until a turn can park and ask
-  // through a channel: there is no terminal behind a service manager, so
-  // `safe` runs and anything riskier is refused rather than waved through.
-  // Every refusal is logged — an unattended denial that appears nowhere
-  // reads like an agent that decided not to bother.
-  const approvals = createPermissionPolicy({
-    mode: 'headless',
-    onDecision: (decision) => {
-      if (decision.allowed) {
-        return;
-      }
-      warn(`${decision.agentId}: ${decision.reason} (session ${decision.sessionId})`);
-    },
-  });
+  // There is no terminal behind a service manager, so the choice is
+  // between refusing every gated call (`headless`) and parking the turn to
+  // ask through a channel (`remote`). Headless stays the default: a daemon
+  // that starts waiting on people who were never told they are on the hook
+  // hangs turns instead of refusing them. Every refusal is logged — an
+  // unattended denial that appears nowhere reads like an agent that decided
+  // not to bother.
+  const onDecision = (decision: PermissionDecision): void => {
+    if (decision.allowed) {
+      return;
+    }
+    warn(`${decision.agentId}: ${decision.reason} (session ${decision.sessionId})`);
+  };
+  // A factory, not a policy: remote mode parks turns on a transport the
+  // gateway owns, so the policy cannot exist until the gateway is building
+  // it. Headless takes the same path so there is one construction site.
+  const approvals = (transport: ApprovalTransport): ApprovalPolicy => createPermissionPolicy(
+    approvalMode === 'remote'
+      ? { mode: 'remote', request: transport.request, onDecision }
+      : { mode: 'headless', onDecision },
+  );
+
+  if (approvalMode === 'remote') {
+    // Only agents whose channel actually came up can be asked: tokens on
+    // disk with the Slack package missing means nothing renders the
+    // request, and the turn discovers that by hanging.
+    const askable = channels.length > 0 ? slackAgents.map(([agentId]) => agentId) : [];
+    log(`approvals: remote — gated calls are parked and asked in Slack (${describeApprovers(approvalsConfig, askable)})`);
+  }
 
   const gateway = createGateway({
     env,
     approvals,
+    ...(approvalsConfig.timeoutMs !== undefined ? { approvalTimeoutMs: approvalsConfig.timeoutMs } : {}),
     ...(command.configPath ? { selection: { configPath: command.configPath } } : {}),
     ...(command.idleTimeoutMs !== undefined ? { idleTimeoutMs: command.idleTimeoutMs } : {}),
     ...(channels.length > 0 ? { channels } : {}),
@@ -4763,6 +4917,25 @@ export const runServe = async (
   }
 
   await gateway.start();
+
+  // The roster is only known once the gateway has loaded it, and in remote
+  // mode an agent no channel can ask for is the quietest failure this
+  // feature has: its gated calls park with nobody rendering them and wait
+  // out the whole timeout before being denied. No channel can detect this
+  // on its own — a request is a broadcast, and no adapter knows whether
+  // another one is about to answer — so it is reported here, where the
+  // roster and the channel list are both in view.
+  if (approvalMode === 'remote') {
+    const askable = new Set(channels.length > 0 ? slackAgents.map(([agentId]) => agentId) : []);
+    const unreachable = gateway.agents().map((agent) => agent.id).filter((id) => !askable.has(id));
+    if (unreachable.length > 0) {
+      warn(
+        `no channel can ask for ${unreachable.join(', ')}, so their gated calls will wait out the `
+        + 'approval timeout and then be denied. Connect a Slack app for them, or run with --approvals headless.',
+      );
+    }
+  }
+
   writeLine(streams.stdout, 'Press Ctrl+C to stop.');
 
   // And periodically, for a long-running daemon that warns steadily

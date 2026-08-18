@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
-import type { Session, StratusEvent, ToolResult } from '@stratusagent/core';
+import type { ApprovalAnswer, JsonObject, Session, StratusEvent, ToolResult } from '@stratusagent/core';
 import {
   channelSessionKey,
   type ChannelAdapter,
@@ -20,6 +20,22 @@ export interface SlackAgentConfig {
   agentId: string;
   appToken: string;
   botToken: string;
+  /**
+   * Slack user ids allowed to answer this agent's approval requests.
+   * Authorization is by ACTOR, never by delivery: a request posted into a
+   * shared thread is visible to everyone there, and one of them clicking
+   * **Always allow** would otherwise widen what the agent may do unattended
+   * for the rest of the session. Empty (or absent) means nobody can
+   * approve, so requests are declined on arrival rather than left hanging.
+   */
+  approvers?: string[];
+  /**
+   * Where to ask when the turn is not itself happening in Slack — a
+   * schedule-driven turn, a delegate, an HTTP dispatch. Defaults to the
+   * conversation the turn came from, which is where the person waiting on
+   * the answer already is.
+   */
+  approvalChannel?: string;
 }
 
 // The thin surfaces of the Slack SDKs the adapter touches — injectable so
@@ -28,10 +44,27 @@ export interface SlackAgentConfig {
 export interface SlackSocketEventArgs {
   ack: (response?: unknown) => Promise<void>;
   envelope_id?: string;
-  body?: { team_id?: string; event_id?: string };
+  body?: {
+    team_id?: string;
+    event_id?: string;
+    /** block_actions only: who clicked. The one field authorization reads. */
+    user?: { id?: string };
+    actions?: SlackBlockAction[];
+    channel?: { id?: string };
+    message?: { ts?: string; thread_ts?: string };
+  };
   event?: SlackInboundEvent;
   retry_num?: number;
 }
+
+export interface SlackBlockAction {
+  action_id?: string;
+  /** The request id the button carries. */
+  value?: string;
+}
+
+/** Block Kit is structural, not typed here beyond what the adapter emits. */
+export type SlackBlock = Record<string, unknown>;
 
 export interface SlackInboundEvent {
   type: string;
@@ -54,8 +87,13 @@ export interface SlackSocketLike {
 export interface SlackWebLike {
   auth: { test(): Promise<{ user_id?: string; team_id?: string }> };
   chat: {
-    postMessage(args: { channel: string; text: string; thread_ts?: string }): Promise<{ ts?: string; channel?: string }>;
-    update(args: { channel: string; ts: string; text: string }): Promise<unknown>;
+    postMessage(args: { channel: string; text: string; thread_ts?: string; blocks?: SlackBlock[] }): Promise<{ ts?: string; channel?: string }>;
+    update(args: { channel: string; ts: string; text: string; blocks?: SlackBlock[] }): Promise<unknown>;
+    /**
+     * Visible only to `user`. Refusing a click needs to reach the person
+     * who clicked without announcing to the channel that they tried.
+     */
+    postEphemeral(args: { channel: string; user: string; text: string; thread_ts?: string }): Promise<unknown>;
   };
   files: {
     // The real SDK takes file DATA (a buffer or stream), never a path
@@ -348,6 +386,127 @@ const lastAssistantReply = (session: Session): string => {
   return '(no reply)';
 };
 
+const APPROVAL_ACTIONS: Record<string, ApprovalAnswer> = {
+  stratus_approve_once: 'once',
+  stratus_approve_always: 'always',
+  stratus_deny: 'deny',
+};
+
+/**
+ * How an approval request reads once it is settled. `always` deliberately
+ * says "this session" out loud: the button is the shortest path to widening
+ * what an agent does unattended, and an approver should see the scope they
+ * granted in the record of granting it.
+ */
+const OUTCOME_TEXT: Record<string, string> = {
+  'decided:once': 'Allowed once',
+  'decided:always': 'Allowed for the rest of this session',
+  'decided:deny': 'Denied',
+  'timeout:deny': 'Expired without an answer — denied',
+  // Covers both endings that reach here: the turn was aborted, and the
+  // daemon shut down with the request still outstanding.
+  'cancelled:deny': 'Cancelled before anyone answered — denied',
+  'undeliverable:deny': 'Could not be put to an approver — denied',
+};
+
+/** Comfortably inside Slack's 3000-character section limit. */
+const APPROVAL_INPUT_LIMIT = 1400;
+/** One line in a notification; the blocks carry the readable version. */
+const APPROVAL_SUMMARY_LIMIT = 160;
+
+/**
+ * Slack's three markup characters. Tool input is written by a model, so it
+ * reaches this message as untrusted text: unescaped, `<@U123>` becomes a
+ * real mention and `<!channel>` a real broadcast, letting an agent ping a
+ * workspace through the very prompt asking whether to trust it. Escaping is
+ * applied even inside a code block, where clients disagree about whether
+ * that markup still resolves.
+ */
+const escapeSlackText = (text: string): string =>
+  text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+
+/**
+ * What the approver is actually being asked to allow.
+ *
+ * Without this the prompt names only the tool, and for anything whose
+ * danger lives in its arguments — the shell tool this engine exists for —
+ * `ls` and a destructive command produce an identical message. Approving
+ * something you cannot see is not approval.
+ *
+ * Truncation is announced rather than silent for the same reason: a
+ * decision made on a partial view should at least know it is partial.
+ */
+const renderInvocation = (input: JsonObject): { detail?: string; summary: string; truncated: boolean } => {
+  if (Object.keys(input).length === 0) {
+    return { summary: '', truncated: false };
+  }
+  const rendered = JSON.stringify(input, null, 2);
+  const truncated = rendered.length > APPROVAL_INPUT_LIMIT;
+  const oneLine = JSON.stringify(input);
+  return {
+    detail: truncated ? rendered.slice(0, APPROVAL_INPUT_LIMIT) : rendered,
+    summary: oneLine.length > APPROVAL_SUMMARY_LIMIT
+      ? `${oneLine.slice(0, APPROVAL_SUMMARY_LIMIT)}…`
+      : oneLine,
+    truncated,
+  };
+};
+
+const approvalBlocks = (
+  agentName: string,
+  toolName: string,
+  risk: string,
+  requestId: string,
+  input: JsonObject,
+): SlackBlock[] => {
+  const invocation = renderInvocation(input);
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*${escapeSlackText(agentName)}* wants to run \`${escapeSlackText(toolName)}\` (${risk}).`,
+      },
+    },
+    ...(invocation.detail
+      ? [{
+          type: 'section',
+          text: { type: 'mrkdwn', text: `\`\`\`\n${escapeSlackText(invocation.detail)}\n\`\`\`` },
+        }]
+      : []),
+    ...(invocation.truncated
+      ? [{
+          type: 'context',
+          elements: [{ type: 'mrkdwn', text: ':warning: Arguments shown are truncated — the full call is longer than this.' }],
+        }]
+      : []),
+    {
+      type: 'actions',
+      // The request id rides on every button rather than in the message
+      // reference: Slack gives the value back verbatim, so the gateway is
+      // asked about the request that was actually rendered, never one
+      // re-derived from a channel and timestamp.
+      elements: [
+        { type: 'button', action_id: 'stratus_approve_once', text: { type: 'plain_text', text: 'Allow once' }, value: requestId },
+        { type: 'button', action_id: 'stratus_approve_always', text: { type: 'plain_text', text: 'Always allow' }, value: requestId, style: 'primary' },
+        { type: 'button', action_id: 'stratus_deny', text: { type: 'plain_text', text: 'Deny' }, value: requestId, style: 'danger' },
+      ],
+    },
+  ];
+};
+
+interface PendingApprovalPost {
+  connection: AgentConnection;
+  channel: string;
+  ts: string;
+  thread?: string;
+  agentName: string;
+  toolName: string;
+  risk: string;
+  /** Bound at render time, so a later config change cannot widen a live request. */
+  approvers: Set<string>;
+}
+
 interface AgentConnection {
   config: SlackAgentConfig;
   web: SlackWebLike;
@@ -375,6 +534,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const createWeb = options.createWebClient ?? defaultWebClient;
 
   const connections: AgentConnection[] = [];
+  // Every agent this adapter was asked to carry, connected or not — the
+  // difference between "mine and broken" and "not mine".
+  const configuredAgents = new Set(options.agents.map((agent) => agent.agentId));
   // Renderers queue per session: two messages in one thread share a
   // session id, and the gateway serializes their turns — so events route
   // to the FIRST registered renderer (the running turn), never a later
@@ -390,8 +552,29 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // Socket Mode redelivers on missed acks; a slow turn must not run twice.
   const seenEvents = new Set<string>();
   const seenOrder: string[] = [];
+  // Rendered approval requests, keyed by the gateway's request id — the
+  // same id the buttons carry back.
+  const approvalPosts = new Map<string, PendingApprovalPost>();
+  // Requests whose message is mid-post. A request can settle — expire, or
+  // its turn be cancelled — while the postMessage that announces it is
+  // still in flight, and the retraction would then find nothing to retract
+  // and leave live-looking buttons behind forever. Resolutions arriving in
+  // that window are held here and applied once the post lands. Bounded by
+  // construction: an id is only ever in this set while one HTTP call is
+  // outstanding.
+  const rendering = new Set<string>();
+  const resolvedWhileRendering = new Map<string, Extract<StratusEvent, { type: 'tool.approval-resolved' }>>();
   let unsubscribe: (() => void) | undefined;
   let gatewayRef: GatewayLike | undefined;
+
+  // Everything the adapter owes Slack goes through here, so stop() drains
+  // it: an approval question or its retraction must reach the workspace
+  // before the sockets close, or a message keeps offering buttons that
+  // nothing is listening for.
+  const track = (work: Promise<void>): void => {
+    inflight.add(work);
+    void work.finally(() => inflight.delete(work));
+  };
 
   const alreadySeen = (key: string): boolean => {
     if (seenEvents.has(key)) {
@@ -436,6 +619,241 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       result = result.replaceAll(`<@${id}>`, `@${await displayNameFor(connection, id)}`);
     }
     return result.trim();
+  };
+
+  const connectionFor = (agentId: string): AgentConnection | undefined =>
+    connections.find((candidate) => candidate.config.agentId === agentId);
+
+  /**
+   * Renders one parked call as buttons and remembers where it went.
+   *
+   * A request this adapter cannot route is DENIED here rather than left to
+   * expire: with no approver configured, or no conversation to ask in,
+   * waiting out the timeout tells the agent nothing it will not be told
+   * immediately, and holds the turn (and the thread it is answering) open
+   * for the whole window to get there.
+   */
+  const renderApprovalRequest = async (
+    event: Extract<StratusEvent, { type: 'tool.approval-requested' }>,
+  ): Promise<void> => {
+    const gateway = gatewayRef;
+    if (!gateway) {
+      return;
+    }
+
+    const connection = connectionFor(event.agentId);
+    if (!connection) {
+      // Two different situations, and only one of them is this adapter's
+      // to answer.
+      //
+      // An agent it was configured for but could not connect (a failed
+      // auth, a dead app token) is its own: it was supposed to carry that
+      // agent's approvals and cannot, so it says so rather than letting
+      // every gated call wait out the timeout.
+      //
+      // An agent it was never configured for is NOT. Approval requests are
+      // a broadcast, and another channel may be the one that serves that
+      // agent — denying here would let Slack refuse a question somebody
+      // else was going to ask. `stratus serve` reports agents that no
+      // channel can ask for, at startup, where the whole roster is visible.
+      if (configuredAgents.has(event.agentId)) {
+        warn(`slack: ${event.agentId} has no live connection; denying ${event.call.toolName}`);
+        gateway.resolveApproval({ requestId: event.requestId, answer: 'deny', reason: 'undeliverable' });
+      }
+      return;
+    }
+
+    const approvers = new Set((connection.config.approvers ?? []).filter((id) => id.length > 0));
+    const metadata = event.metadata ?? {};
+    const sameChannel = metadata.channel === 'slack' && typeof metadata.slackChannel === 'string'
+      ? metadata.slackChannel
+      : undefined;
+    const channel = sameChannel ?? connection.config.approvalChannel;
+    const thread = sameChannel && typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
+
+    // Undeliverable, not decided: nobody was asked, so filing this next to
+    // the denials somebody actually made would make the audit record lie
+    // about which is which.
+    const decline = (reason: string): void => {
+      warn(`slack: ${reason}; denying ${event.call.toolName} for ${event.agentId}`);
+      gateway.resolveApproval({ requestId: event.requestId, answer: 'deny', reason: 'undeliverable' });
+    };
+
+    if (approvers.size === 0) {
+      decline(`no approvers configured for ${event.agentId}`);
+      return;
+    }
+    if (!channel) {
+      decline(`no conversation to ask in for ${event.agentId}`);
+      return;
+    }
+
+    const agentName = gateway.agents().find((agent) => agent.id === event.agentId)?.name ?? event.agentId;
+    // The notification preview is all some approvers see before deciding
+    // whether to open the thread, so it carries the arguments too — just
+    // the short form.
+    const invocationSummary = renderInvocation(event.call.input).summary;
+
+    // The post is the only awaited step, and the only window in which the
+    // request can settle behind this function's back — so it is the only
+    // step `rendering` covers, and nothing decides anything until it is
+    // over and the two possible outcomes can be told apart.
+    rendering.add(event.requestId);
+    let post: PendingApprovalPost | undefined;
+    let failure: string | undefined;
+    try {
+      const posted = await connection.web.chat.postMessage({
+        channel,
+        // Fallback text for notifications and clients that do not render
+        // blocks — an approval nobody can read is an approval nobody gives.
+        text: escapeSlackText(
+          `${agentName} wants to run ${event.call.toolName} (${event.risk})`
+          + `${invocationSummary ? `: ${invocationSummary}` : ''}.`,
+        ),
+        ...(thread ? { thread_ts: thread } : {}),
+        blocks: approvalBlocks(agentName, event.call.toolName, event.risk, event.requestId, event.call.input),
+      });
+      post = posted.ts
+        ? {
+            connection,
+            channel: posted.channel ?? channel,
+            ts: posted.ts,
+            ...(thread ? { thread } : {}),
+            agentName,
+            toolName: event.call.toolName,
+            risk: event.risk,
+            approvers,
+          }
+        : undefined;
+      failure = post ? undefined : `Slack accepted the approval request for ${event.agentId} without a timestamp`;
+    } catch (error) {
+      failure = `could not post an approval request to ${channel} (${error instanceof Error ? error.message : String(error)})`;
+    }
+    rendering.delete(event.requestId);
+
+    if (post) {
+      approvalPosts.set(event.requestId, post);
+    }
+
+    const settledMeanwhile = resolvedWhileRendering.get(event.requestId);
+    if (settledMeanwhile) {
+      resolvedWhileRendering.delete(event.requestId);
+      // Already decided — never decline it a second time; just take the
+      // buttons off the message that just appeared.
+      if (post) {
+        await retractApprovalRequest(settledMeanwhile);
+      }
+      return;
+    }
+
+    if (failure) {
+      decline(failure);
+    }
+  };
+
+  /**
+   * Retracts the buttons once a request is settled, however it settled.
+   * Every ending goes through here — a click, the timeout, a cancelled turn
+   * — so a message can never keep offering a decision that no longer has
+   * anywhere to land.
+   */
+  const retractApprovalRequest = async (
+    event: Extract<StratusEvent, { type: 'tool.approval-resolved' }>,
+  ): Promise<void> => {
+    const post = approvalPosts.get(event.requestId);
+    if (!post) {
+      // Still being posted: hold the outcome so the message it is about to
+      // create does not keep offering a decision that is already made.
+      if (rendering.has(event.requestId)) {
+        resolvedWhileRendering.set(event.requestId, event);
+      }
+      return;
+    }
+    approvalPosts.delete(event.requestId);
+
+    const outcome = OUTCOME_TEXT[`${event.reason}:${event.answer}`] ?? 'Resolved';
+    const by = event.actor ? ` by <@${event.actor}>` : '';
+    const text = `*${escapeSlackText(post.agentName)}* — \`${escapeSlackText(post.toolName)}\` (${post.risk}): ${outcome}${by}.`;
+    try {
+      await post.connection.web.chat.update({
+        channel: post.channel,
+        ts: post.ts,
+        text,
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
+      });
+    } catch (error) {
+      warn(`slack: could not update a resolved approval request: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  const handleInteractive = async (connection: AgentConnection, args: SlackSocketEventArgs): Promise<void> => {
+    // Ack first and unconditionally: Slack retries an unacked interaction,
+    // and a redelivered click on a request that is no longer pending would
+    // read as a second, rejected decision.
+    await args.ack();
+
+    const gateway = gatewayRef;
+    const action = args.body?.actions?.[0];
+    const answer = action?.action_id ? APPROVAL_ACTIONS[action.action_id] : undefined;
+    const requestId = action?.value;
+    if (!gateway || !answer || !requestId) {
+      return;
+    }
+
+    const post = approvalPosts.get(requestId);
+    const clicker = args.body?.user?.id;
+    // An unknown request predates this daemon or was already settled; the
+    // click is answered where it was made, not silently dropped.
+    if (!post) {
+      await tellClicker(connection, args, 'That approval request is no longer pending.');
+      return;
+    }
+    // A different agent's app relaying a click would bypass the approver
+    // set bound to the request, since each app carries its own.
+    if (post.connection !== connection) {
+      return;
+    }
+    if (!clicker || !post.approvers.has(clicker)) {
+      // The request stays pending: someone who may not decide clicking is
+      // not a decision, and consuming the request would let any channel
+      // member deny an agent's work.
+      await tellClicker(
+        connection,
+        args,
+        `You are not an approver for ${post.agentName}, so that decision was not recorded.`,
+      );
+      return;
+    }
+
+    // The retraction rides on tool.approval-resolved, which the gateway
+    // emits from resolveApproval — so a decision and the message showing it
+    // cannot disagree, and the timeout path retracts through the same code.
+    if (!gateway.resolveApproval({ requestId, answer, actor: clicker })) {
+      await tellClicker(connection, args, 'That approval request is no longer pending.');
+    }
+  };
+
+  const tellClicker = async (
+    connection: AgentConnection,
+    args: SlackSocketEventArgs,
+    text: string,
+  ): Promise<void> => {
+    const user = args.body?.user?.id;
+    const channel = args.body?.channel?.id;
+    if (!user || !channel) {
+      return;
+    }
+    const thread = args.body?.message?.thread_ts;
+    try {
+      await connection.web.chat.postEphemeral({
+        channel,
+        user,
+        text,
+        ...(thread ? { thread_ts: thread } : {}),
+      });
+    } catch (error) {
+      warn(`slack: could not send an ephemeral notice: ${error instanceof Error ? error.message : String(error)}`);
+    }
   };
 
   const handleInbound = async (connection: AgentConnection, args: SlackSocketEventArgs): Promise<void> => {
@@ -510,7 +928,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         sessionId,
         agentId: connection.config.agentId,
         userMessage,
-        metadata: { channel: 'slack', team, slackChannel: event.channel, slackUser: userId },
+        metadata: {
+          channel: 'slack',
+          team,
+          slackChannel: event.channel,
+          slackUser: userId,
+          // Carried so a mid-turn approval question is asked in the thread
+          // the turn belongs to rather than at the top of a busy channel.
+          ...(thread ? { slackThread: thread } : {}),
+        },
       });
       return { renderer, turn };
     });
@@ -569,6 +995,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     async start(gateway) {
       gatewayRef = gateway;
       unsubscribe = gateway.bus.subscribe((event) => {
+        // Approval traffic is not part of a reply: it gets its own message
+        // with its own lifetime, and routing it through the running turn's
+        // renderer would fold a question into the answer being streamed.
+        if (event.type === 'tool.approval-requested') {
+          track(renderApprovalRequest(event));
+          return;
+        }
+        if (event.type === 'tool.approval-resolved') {
+          track(retractApprovalRequest(event));
+          return;
+        }
         if ('sessionId' in event) {
           renderers.get(event.sessionId)?.[0]?.onEvent(event);
         }
@@ -600,6 +1037,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           };
           socket.on('app_mention', onEvent);
           socket.on('message', onEvent);
+          socket.on('interactive', (args: SlackSocketEventArgs) => {
+            track(handleInteractive(connection, args).catch((error) => {
+              warn(`slack interaction handling failed: ${error instanceof Error ? error.message : String(error)}`);
+            }));
+          });
           await socket.start();
           connections.push(connection);
           log(`slack: ${config.agentId} connected (bot ${connection.botUserId} in team ${connection.teamId})`);
@@ -620,6 +1062,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       unsubscribe = undefined;
       gatewayRef = undefined;
       connections.length = 0;
+      approvalPosts.clear();
+      rendering.clear();
+      resolvedWhileRendering.clear();
     },
   };
 };

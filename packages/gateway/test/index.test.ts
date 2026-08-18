@@ -4,8 +4,13 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { RunAbortedError } from '@stratusagent/core';
-import { createGateway, SqliteSessionStore } from '../src/index.ts';
+import { RunAbortedError, type ApprovalAnswer, type StratusEvent } from '@stratusagent/core';
+import {
+  createGateway,
+  SqliteSessionStore,
+  type ApprovalTransport,
+  type GatewayChannelAdapter,
+} from '../src/index.ts';
 
 const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-gw-'));
 
@@ -1629,4 +1634,383 @@ test('a roster soul cannot hijack the reserved built-in agent id', async () => {
   assert.match(session.agent.instructions ?? '', /Stratus Agent platform/);
   assert.ok(!(session.agent.instructions ?? '').includes('imposter'));
   assert.ok(warnings.some((line) => line.includes('duplicate agent id stratus')), `expected a collision warning, got ${JSON.stringify(warnings)}`);
+});
+
+// ---- approval brokering ---------------------------------------------------
+
+/**
+ * The transport a `remote` policy is handed. Captured through the approvals
+ * factory rather than driven through a real turn: every tool the gateway
+ * registers today is `safe`, so nothing in the fleet can park a call yet.
+ * The seam is what remote approval is made of, and it is testable now —
+ * the policy's own half is covered in @stratusagent/permissions.
+ */
+const brokerHarness = async (
+  options: { approvalTimeoutMs?: number; channels?: GatewayChannelAdapter[] } = {},
+) => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  let transport: ApprovalTransport | undefined;
+  const events: StratusEvent[] = [];
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    ...(options.approvalTimeoutMs !== undefined ? { approvalTimeoutMs: options.approvalTimeoutMs } : {}),
+    ...(options.channels ? { channels: options.channels } : {}),
+    approvals: (given) => {
+      transport = given;
+      return { async approve() { return true; } };
+    },
+  });
+  gateway.bus.subscribe((event) => {
+    events.push(event);
+  });
+  assert.ok(transport, 'the gateway hands the policy factory its approval transport');
+  return { gateway, transport, events };
+};
+
+const parkedCall = (sessionId: string, signal?: AbortSignal) => ({
+  session: {
+    id: sessionId,
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '2026-08-18T00:00:00.000Z',
+    updatedAt: '2026-08-18T00:00:00.000Z',
+    metadata: { channel: 'slack', slackChannel: 'C1' },
+  },
+  call: { id: 'call-1', toolName: 'shell.run', input: { command: 'ls' } },
+  risk: 'gated' as const,
+  ...(signal ? { signal } : {}),
+});
+
+/**
+ * Awaits something that only the feature under test can settle, with a way
+ * to lose. Every assertion below waits on a request being answered, expired,
+ * or cancelled — and a regression in any of those does not produce a wrong
+ * value, it produces no value at all. Without this bound the suite would
+ * hang instead of failing, which reads as broken infrastructure rather than
+ * as the defect it is.
+ *
+ * The bound is not a timing assertion: 5s is orders of magnitude above what
+ * any of these take, so slack on a loaded runner costs nothing and proves
+ * exactly the same thing.
+ */
+const settles = async <T>(work: Promise<T>, what: string): Promise<T> => {
+  const hung = Symbol('hung');
+  const gaveUp = new Promise<typeof hung>((resolve) => {
+    const timer = setTimeout(() => resolve(hung), 5_000);
+    timer.unref?.();
+  });
+  const result = await Promise.race([work, gaveUp]);
+  assert.notEqual(result, hung, `${what} never settled`);
+  return result as T;
+};
+
+/** The first event of a kind, waited for rather than slept toward. */
+const nextEvent = <T extends StratusEvent['type']>(
+  bus: { subscribe(handler: (event: StratusEvent) => void): () => void },
+  type: T,
+): Promise<Extract<StratusEvent, { type: T }>> =>
+  new Promise((resolve) => {
+    const off = bus.subscribe((event) => {
+      if (event.type === type) {
+        off();
+        resolve(event as Extract<StratusEvent, { type: T }>);
+      }
+    });
+  });
+
+test('a parked call is announced, and the answer resumes it', async () => {
+  const { gateway, transport, events } = await brokerHarness();
+
+  const requested = nextEvent(gateway.bus, 'tool.approval-requested');
+  const answer = transport.request(parkedCall('sess-1'));
+  const request = await settles(requested, 'the approval request');
+
+
+  assert.equal(request.agentId, 'ava');
+  assert.equal(request.call.toolName, 'shell.run');
+  assert.equal(request.risk, 'gated');
+  // The session's metadata rides along so a channel can ask where the turn
+  // is actually happening without reaching into the store.
+  assert.equal(request.metadata?.slackChannel, 'C1');
+  assert.ok(Date.parse(request.expiresAt) > 0, 'the request says when it gives up');
+
+  assert.equal(gateway.resolveApproval({ requestId: request.requestId, answer: 'always', actor: 'U9' }), true);
+  assert.equal(await settles(answer, 'the parked call'), 'always');
+
+  const resolved = events.find((event) => event.type === 'tool.approval-resolved');
+  assert.deepEqual(
+    resolved && { answer: resolved.answer, reason: resolved.reason, actor: resolved.actor },
+    { answer: 'always', reason: 'decided', actor: 'U9' },
+  );
+
+  // A second click on the same buttons finds nothing to decide. This is
+  // what stops one request being spent twice — a slow network retrying, or
+  // two approvers clicking at once.
+  assert.equal(gateway.resolveApproval({ requestId: request.requestId, answer: 'deny' }), false);
+  assert.equal(gateway.resolveApproval({ requestId: 'never-existed', answer: 'once' }), false);
+
+  await gateway.stop();
+});
+
+test('a request nobody answers expires into a denial', async () => {
+  // 1ms, and the assertion gates on the settled request rather than a
+  // sleep: the point is that the timeout path denies and says so, not how
+  // fast it gets there.
+  const { gateway, transport } = await brokerHarness({ approvalTimeoutMs: 1 });
+
+  const resolved = nextEvent(gateway.bus, 'tool.approval-resolved');
+  assert.equal(await settles(transport.request(parkedCall('sess-timeout')), 'the expiring request'), 'deny');
+  const event = await settles(resolved, 'the resolution event');
+  assert.equal(event.reason, 'timeout');
+  assert.equal(event.answer, 'deny');
+  assert.equal(event.actor, undefined);
+
+  await gateway.stop();
+});
+
+test('aborting a turn invalidates its pending approval, and a later click is refused', async () => {
+  const { gateway, transport } = await brokerHarness();
+  const controller = new AbortController();
+
+  const requested = nextEvent(gateway.bus, 'tool.approval-requested');
+  const resolved = nextEvent(gateway.bus, 'tool.approval-resolved');
+  const answer = transport.request(parkedCall('sess-abort', controller.signal));
+  const request = await settles(requested, 'the approval request');
+
+  controller.abort();
+  assert.equal(await settles(answer, 'the cancelled request'), 'deny');
+  assert.equal((await settles(resolved, 'the resolution event')).reason, 'cancelled');
+
+  // The acceptance criterion this exists for: an Allow arriving after the
+  // turn was cancelled must not execute a tool for work that is gone.
+  assert.equal(gateway.resolveApproval({ requestId: request.requestId, answer: 'once', actor: 'U9' }), false);
+
+  await gateway.stop();
+});
+
+test('a turn already aborted never parks at all', async () => {
+  const { gateway, transport, events } = await brokerHarness();
+  const controller = new AbortController();
+  controller.abort();
+
+  assert.equal(
+    await settles(transport.request(parkedCall('sess-pre-abort', controller.signal)), 'the request'),
+    'deny',
+  );
+  // It still settles publicly: a denial that appears nowhere is exactly
+  // what the event log exists to prevent.
+  assert.equal(events.filter((event) => event.type === 'tool.approval-resolved').length, 1);
+  assert.equal(events.filter((event) => event.type === 'tool.approval-requested').length, 0);
+
+  await gateway.stop();
+});
+
+test('shutting down denies what is parked instead of waiting it out', async () => {
+  // No timeout at all, so nothing but the shutdown denial can ever settle
+  // this request — which is the bug: a daemon must not be held open by a
+  // question nobody is going to answer.
+  const { gateway, transport } = await brokerHarness({ approvalTimeoutMs: 0 });
+  await gateway.start();
+
+  const requested = nextEvent(gateway.bus, 'tool.approval-requested');
+  const answer = transport.request(parkedCall('sess-shutdown'));
+  const request = await settles(requested, 'the approval request');
+
+  await settles(gateway.stop(), 'the shutdown drain');
+
+  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  assert.equal(gateway.resolveApproval({ requestId: request.requestId, answer: 'once' }), false);
+});
+
+test('a resolution emitted at shutdown reaches channels before they stop', async () => {
+  // EventBus awaits its subscribers in registration order, so one async
+  // handler in front of a channel suspends the emission before the channel
+  // sees it. Nothing in the daemon is async there today — which is the
+  // point: without draining, this guarantee holds by accident, and the
+  // first async subscriber anyone adds leaves live-looking approval
+  // buttons in a workspace the daemon has already left.
+  const seen: string[] = [];
+  let sawResolutionBeforeStop: boolean | undefined;
+
+  const channel: GatewayChannelAdapter = {
+    name: 'fake',
+    async start(gateway) {
+      gateway.bus.subscribe((event) => {
+        if (event.type === 'tool.approval-resolved') {
+          seen.push(event.requestId);
+        }
+      });
+    },
+    async stop() {
+      sawResolutionBeforeStop = seen.length > 0;
+    },
+  };
+
+  const { gateway, transport } = await brokerHarness({ approvalTimeoutMs: 0, channels: [channel] });
+  // Registered before the channel's (channels subscribe during start), and
+  // async, so the emission suspends here first.
+  gateway.bus.subscribe(async (event) => {
+    if (event.type === 'tool.approval-resolved') {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  });
+  await gateway.start();
+
+  const requested = nextEvent(gateway.bus, 'tool.approval-requested');
+  const answer = transport.request(parkedCall('sess-drain'));
+  await settles(requested, 'the approval request');
+
+  await settles(gateway.stop(), 'the shutdown drain');
+  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  assert.equal(sawResolutionBeforeStop, true, 'the channel stopped before its retraction arrived');
+});
+
+test('a call that reaches approval during shutdown is refused, not parked', async () => {
+  // stop() denies what is parked once, at the top. Turns already running
+  // keep going through the drain though, and one can reach a gated tool
+  // AFTER that snapshot — a provider call finishing, or the next call in
+  // the same response. Parking it deadlocks the drain against a question
+  // nobody is left to answer. A channel's stop() runs at exactly that
+  // point in the sequence, which makes it the honest place to fire one.
+  let late: Promise<ApprovalAnswer> | undefined;
+  const channel: GatewayChannelAdapter = {
+    name: 'fake',
+    async start() {},
+    async stop() {
+      late = transport.request(parkedCall('sess-late'));
+    },
+  };
+
+  // No timeout at all, so nothing but the fix can ever settle this.
+  const harness = await brokerHarness({ approvalTimeoutMs: 0, channels: [channel] });
+  const { gateway } = harness;
+  const transport = harness.transport;
+  await gateway.start();
+
+  await settles(gateway.stop(), 'the shutdown drain');
+  assert.ok(late, 'the channel fired a late request');
+  assert.equal(await settles(late, 'the late request'), 'deny');
+});
+
+test('an approval timeout past the timer range is clamped, not silently instant', async () => {
+  // setTimeout turns anything above ~24.8 days into a 1ms delay, so an
+  // over-large value would expire every approval almost immediately — the
+  // exact opposite of what it asked for.
+  const home = await newHome();
+  const warnings: string[] = [];
+  let transport: ApprovalTransport | undefined;
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    approvalTimeoutMs: 2_592_000_000,
+    warn: (line) => warnings.push(line),
+    approvals: (given) => {
+      transport = given;
+      return { async approve() { return true; } };
+    },
+  });
+
+  const requested = nextEvent(gateway.bus, 'tool.approval-requested');
+  const answer = transport!.request(parkedCall('sess-clamp'));
+  const request = await settles(requested, 'the approval request');
+
+  assert.ok(warnings.some((line) => line.includes('maximum timer delay')), `expected a clamp warning, got ${JSON.stringify(warnings)}`);
+
+  // Not a race and not a sleep-then-check: timers fire in expiry order, so
+  // a 1ms one — what an unclamped 30 days silently becomes — has certainly
+  // fired by the time a 20ms one does. Reaching this line with the request
+  // still resolvable is proof the expiry did not happen. Asserting on
+  // `expiresAt` instead would pass either way: the overflow is in
+  // setTimeout, not in the arithmetic.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(
+    gateway.resolveApproval({ requestId: request.requestId, answer: 'deny' }),
+    true,
+    'the request had already expired, so the timeout overflowed to ~1ms',
+  );
+  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  await gateway.stop();
+});
+
+test('an approval timeout that is not a number of milliseconds is refused', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  // Both of these fail the `> 0` test and silently mean "never expire" —
+  // the one behavior documented for an explicit 0, and the last thing a
+  // caller who typed a bad number wants. Config values are rejected with a
+  // better message; this is the programmatic path.
+  for (const approvalTimeoutMs of [-1, Number.NaN]) {
+    assert.throws(
+      () => createGateway({ env, idleTimeoutMs: 0, approvalTimeoutMs }),
+      /non-negative number of milliseconds/,
+      `expected ${String(approvalTimeoutMs)} to be refused`,
+    );
+  }
+  // Zero still means "wait indefinitely", which is a real (test-only) choice.
+  const gateway = createGateway({ env, idleTimeoutMs: 0, approvalTimeoutMs: 0 });
+  await gateway.stop();
+});
+
+test('a resolution a channel could not deliver is not filed as a human decision', async () => {
+  const { gateway, transport, events } = await brokerHarness();
+
+  const requested = nextEvent(gateway.bus, 'tool.approval-requested');
+  const answer = transport.request(parkedCall('sess-undeliverable'));
+  const request = await settles(requested, 'the approval request');
+
+  // What a channel does when it has nobody to ask.
+  assert.equal(
+    gateway.resolveApproval({ requestId: request.requestId, answer: 'deny', reason: 'undeliverable' }),
+    true,
+  );
+  assert.equal(await settles(answer, 'the parked call'), 'deny');
+
+  const resolved = events.find((event) => event.type === 'tool.approval-resolved');
+  assert.equal(resolved?.reason, 'undeliverable');
+  assert.equal(resolved?.actor, undefined);
+
+  await gateway.stop();
+});
+
+test('a resolution never reaches a subscriber before the request it answers', async () => {
+  // Both emissions walk the same subscriber list in order, so an async
+  // subscriber ahead of a channel can hold the announcement while a
+  // timeout fires behind it. A channel told about a resolution for a
+  // request it has never heard of drops it, then renders the announcement
+  // afterwards — buttons for a settled request that nothing retracts.
+  const { gateway, transport } = await brokerHarness({ approvalTimeoutMs: 1 });
+
+  const seen: string[] = [];
+  let releaseAnnouncement: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => {
+    releaseAnnouncement = resolve;
+  });
+
+  // Registered first, and slow on the announcement only — exactly the
+  // shape that lets a resolution overtake it.
+  gateway.bus.subscribe(async (event) => {
+    if (event.type === 'tool.approval-requested') {
+      await held;
+    }
+  });
+  // A stand-in for the channel: order is all it records.
+  gateway.bus.subscribe((event) => {
+    if (event.type === 'tool.approval-requested' || event.type === 'tool.approval-resolved') {
+      seen.push(event.type);
+    }
+  });
+
+  const answer = transport.request(parkedCall('sess-order'));
+  // Let the 1ms expiry fire while the announcement is still held.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(seen, [], 'nothing reached the channel while the announcement was held');
+
+  releaseAnnouncement?.();
+  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  await settles(gateway.stop(), 'the shutdown drain');
+
+  assert.deepEqual(seen, ['tool.approval-requested', 'tool.approval-resolved']);
 });

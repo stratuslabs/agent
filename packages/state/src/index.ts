@@ -44,6 +44,47 @@ export interface StateEnvironment {
 
 export type StratusProviderName = 'demo' | 'openai' | 'anthropic';
 
+/**
+ * Who may approve one agent's gated calls, and where they are asked.
+ * Approver ids are channel-native (Slack user ids) because that is where
+ * the click comes from — mapping them through a Stratus identity would add
+ * a lookup that can only ever be wrong.
+ */
+export interface AgentApprovalConfig {
+  /**
+   * Slack user ids allowed to decide. Nobody listed means nobody may — an
+   * explicit empty array is how an agent is excluded from a global approver
+   * list, and is kept distinct from the key being absent, which inherits.
+   */
+  slackApprovers?: string[];
+  /**
+   * Conversation to ask in when the turn is not itself in Slack. A turn
+   * that arrived through Slack is answered in its own thread regardless.
+   */
+  slackChannel?: string;
+}
+
+/**
+ * The longest an approval may wait: Node's maximum `setTimeout` delay.
+ * Above it a timer does not wait longer, it fires almost immediately.
+ */
+export const MAX_APPROVAL_TIMEOUT_MS = 2_147_483_647;
+
+/** The `approvals` block of ~/.stratus/config.json. */
+export interface ApprovalsConfig extends AgentApprovalConfig {
+  /**
+   * How the daemon reaches a person. `headless` refuses every gated call;
+   * `remote` parks the turn and asks through a channel. Default `headless`
+   * — an unconfigured daemon must not start waiting on humans who were
+   * never told they were on the hook.
+   */
+  mode?: 'headless' | 'remote';
+  /** How long a parked call waits before denying itself, in milliseconds. */
+  timeoutMs?: number;
+  /** Per-agent overrides, keyed by agent id. */
+  agents?: Record<string, AgentApprovalConfig>;
+}
+
 export interface StratusConfigFile {
   provider?: StratusProviderName;
   model?: string;
@@ -58,6 +99,8 @@ export interface StratusConfigFile {
   fallbackProvider?: StratusProviderName;
   /** Base URL for an openai-compatible fallback (e.g. a local model). */
   fallbackBaseUrl?: string;
+  /** Unattended-approval policy for `stratus serve`. */
+  approvals?: ApprovalsConfig;
 }
 
 /** A resolved, ready-to-run fallback model (always a real provider). */
@@ -595,8 +638,113 @@ const loadConfigFileInner = async (configPath: string): Promise<StratusConfigFil
   if (typeof config.fallbackBaseUrl === 'string' && config.fallbackBaseUrl.length > 0) {
     resolved.fallbackBaseUrl = config.fallbackBaseUrl;
   }
+  const approvals = parseApprovalsConfig(config.approvals, configPath);
+  if (approvals) {
+    resolved.approvals = approvals;
+  }
 
   return resolved;
+};
+
+const parseApprovalRoute = (raw: unknown): AgentApprovalConfig | undefined => {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return undefined;
+  }
+  const source = raw as Record<string, unknown>;
+  const route: AgentApprovalConfig = {};
+  if (Array.isArray(source.slackApprovers)) {
+    // Kept even when it filters down to nothing. An agent entry saying
+    // `"slackApprovers": []` is an operator excluding that agent from a
+    // global approver list, and dropping it would fall back to exactly the
+    // list they were excluding — turning a deliberate "nobody may approve
+    // for Ava" into "everyone on the default list may". The empty array
+    // survives; the fallback is for a key that was never written.
+    route.slackApprovers = source.slackApprovers.filter(
+      (entry): entry is string => typeof entry === 'string' && entry.length > 0,
+    );
+  }
+  if (typeof source.slackChannel === 'string' && source.slackChannel.length > 0) {
+    route.slackChannel = source.slackChannel;
+  }
+  return route;
+};
+
+const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig | undefined => {
+  const route = parseApprovalRoute(raw);
+  if (!route) {
+    return undefined;
+  }
+  const source = raw as Record<string, unknown>;
+  const approvals: ApprovalsConfig = { ...route };
+
+  if (source.mode !== undefined) {
+    // A misspelled mode fails loudly rather than falling back to headless:
+    // someone who wrote `remote` and got `headless` would discover it as an
+    // agent that mysteriously refuses everything, with the config in front
+    // of them saying otherwise.
+    if (source.mode !== 'headless' && source.mode !== 'remote') {
+      throw new Error(
+        `Unsupported approvals.mode in config ${configPath}: ${String(source.mode)}. Use headless or remote.`,
+      );
+    }
+    approvals.mode = source.mode;
+  }
+  if (source.timeoutMs !== undefined) {
+    if (typeof source.timeoutMs !== 'number' || !Number.isFinite(source.timeoutMs) || source.timeoutMs < 0) {
+      throw new Error(
+        `Invalid approvals.timeoutMs in config ${configPath}: ${String(source.timeoutMs)}. Use a non-negative number of milliseconds.`,
+      );
+    }
+    // Refused rather than clamped: a value past Node's timer range does not
+    // become a long wait, it becomes a 1ms one — so a config asking for a
+    // 30-day window would expire every approval almost immediately, which
+    // is the exact opposite of what it asked for and impossible to diagnose
+    // from the outside. Someone who wrote a number this large has to be
+    // told, not quietly given a different one.
+    if (source.timeoutMs > MAX_APPROVAL_TIMEOUT_MS) {
+      throw new Error(
+        `Invalid approvals.timeoutMs in config ${configPath}: ${source.timeoutMs} is longer than the maximum `
+        + `${MAX_APPROVAL_TIMEOUT_MS}ms (~24.8 days). A larger value would expire every approval immediately.`,
+      );
+    }
+    approvals.timeoutMs = source.timeoutMs;
+  }
+  if (typeof source.agents === 'object' && source.agents !== null && !Array.isArray(source.agents)) {
+    const agents: Record<string, AgentApprovalConfig> = {};
+    for (const [agentId, entry] of Object.entries(source.agents as Record<string, unknown>)) {
+      const parsed = parseApprovalRoute(entry);
+      if (parsed) {
+        agents[agentId] = parsed;
+      }
+    }
+    if (Object.keys(agents).length > 0) {
+      approvals.agents = agents;
+    }
+  }
+
+  return approvals;
+};
+
+/**
+ * What one agent's approval route resolves to: its own entry where it has
+ * one, the top-level defaults otherwise. Per-key, not per-block — an agent
+ * that only names its own approvers still asks in the default conversation.
+ *
+ * Exported so nothing re-derives it. A second copy of this precedence is
+ * the difference between "these three people can approve" and "everyone
+ * can", and it would drift the first time the shape grows a key.
+ */
+export const resolveAgentApprovals = (
+  approvals: ApprovalsConfig | undefined,
+  agentId: string,
+): AgentApprovalConfig => {
+  const agent = approvals?.agents?.[agentId];
+  const slackApprovers = agent?.slackApprovers ?? approvals?.slackApprovers;
+  const slackChannel = agent?.slackChannel ?? approvals?.slackChannel;
+  return {
+    ...(slackApprovers ? { slackApprovers } : {}),
+    ...(slackChannel ? { slackChannel } : {}),
+  };
 };
 
 export interface ResolvedConfigLocation {

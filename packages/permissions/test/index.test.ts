@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { ApprovalContext, Session, Tool, ToolCall, ToolRisk } from '@stratusagent/core';
+import type { ApprovalAnswer, ApprovalContext, Session, Tool, ToolCall, ToolRisk } from '@stratusagent/core';
 
 import { atLeastAsRisky, createPermissionPolicy, type PermissionDecision } from '../src/index.ts';
 
@@ -202,4 +202,92 @@ test('risk ordering puts dangerous above gated above safe', () => {
   assert.equal(atLeastAsRisky('dangerous', 'gated'), true);
   assert.equal(atLeastAsRisky('gated', 'gated'), true);
   assert.equal(atLeastAsRisky('safe', 'gated'), false);
+});
+
+test('remote mode refuses to be constructed with no way to ask', () => {
+  assert.throws(
+    () => createPermissionPolicy({ mode: 'remote' }),
+    /needs a `request` function/,
+  );
+});
+
+test('a remote answer decides the call, and always covers the rest of the session', async () => {
+  const asked: string[] = [];
+  const answers: ApprovalAnswer[] = ['once', 'always', 'deny'];
+  const decisions: PermissionDecision[] = [];
+  const policy = createPermissionPolicy({
+    mode: 'remote',
+    request: async (request) => {
+      asked.push(request.call.toolName);
+      return answers.shift() ?? 'deny';
+    },
+    onDecision: (decision) => decisions.push(decision),
+  });
+
+  assert.equal(await policy.approve(context('shell.run', 'gated')), true, 'allow once');
+  assert.equal(await policy.approve(context('fs.write', 'gated')), true, 'always allow');
+  // The second fs.write is covered by the "always" above and never reaches
+  // the transport — that is what makes the button worth clicking.
+  assert.equal(await policy.approve(context('fs.write', 'gated')), true);
+  assert.equal(await policy.approve(context('fs.delete', 'dangerous')), false, 'deny');
+
+  assert.deepEqual(asked, ['shell.run', 'fs.write', 'fs.delete']);
+  // A remote "always" is session-scoped exactly like the prompt's, so the
+  // two surfaces cannot mean different things by the same word.
+  assert.match(decisions[2]!.reason, /rest of this session/);
+  assert.match(decisions[3]!.reason, /was not approved/);
+
+  // Session-scoped means session-scoped: another session asks again.
+  const other = context('fs.write', 'gated', { session: session('sess-2') });
+  answers.push('deny');
+  assert.equal(await policy.approve(other), false);
+  assert.deepEqual(asked, ['shell.run', 'fs.write', 'fs.delete', 'fs.write']);
+});
+
+test('a transport that fails denies the call instead of failing the turn', async () => {
+  const policy = createPermissionPolicy({
+    mode: 'remote',
+    request: async () => {
+      throw new Error('slack is down');
+    },
+  });
+
+  // The agent should be told its call was not approved and carry on — a
+  // channel outage must not surface as a crashed turn.
+  assert.equal(await policy.approve(context('shell.run', 'gated')), false);
+});
+
+test('an aborted turn releases a remote request nobody answered', async () => {
+  const controller = new AbortController();
+  let answer: ((value: ApprovalAnswer) => void) | undefined;
+  const policy = createPermissionPolicy({
+    mode: 'remote',
+    request: () => new Promise<ApprovalAnswer>((resolve) => {
+      answer = resolve;
+    }),
+  });
+
+  const decision = policy.approve(context('shell.run', 'gated', { signal: controller.signal }));
+
+  // Gate on the transport actually having been reached, so the abort below
+  // races the wait it is meant to release rather than a not-yet-started one.
+  await new Promise<void>((resolve) => {
+    const wait = (): void => {
+      if (answer) {
+        resolve();
+        return;
+      }
+      setImmediate(wait);
+    };
+    wait();
+  });
+
+  controller.abort();
+  assert.equal(await decision, false, 'the abort released the wait');
+
+  // An approval clicked after the turn is gone changes nothing here — the
+  // gateway refuses it too, but the policy must not be relying on that.
+  answer?.('always');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await policy.approve(context('shell.run', 'gated', { signal: controller.signal })), false);
 });

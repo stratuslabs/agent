@@ -65,6 +65,7 @@ stratus run --provider anthropic --model claude-opus-5 "hello"
 stratus run --prompt "use the echo tool" --format json
 stratus serve                          # stratusd: the whole roster, always on
 stratus serve --idle-timeout 120 --no-events
+stratus serve --approvals remote       # ask a human in Slack instead of refusing
 stratus service install                # keep stratusd running under launchd/systemd
 stratus service status
 stratus logs -f                        # what the daemon has been doing
@@ -91,10 +92,9 @@ riskier is refused, with a line in the log saying which agent wanted what:
 09:14:36  —           warning: ava: shell.run is gated and nobody is available to approve it (session slack:ava:…)
 ```
 
-That is the honest behavior behind a service manager, where there is no
-terminal to prompt on. Asking a human through Slack and resuming the turn on
-their answer is the next piece of this; until then the daemon refuses rather
-than assumes.
+That is the honest default behind a service manager, where there is no
+terminal to prompt on. If somebody *is* reachable, `--approvals remote` asks
+them instead — see [Asking a human](#asking-a-human-remote-approval).
 
 A tool that declares no risk counts as `gated`, never `safe` — forgetting to
 classify something should cost a prompt, not an unattended command. Every
@@ -110,7 +110,87 @@ calls face this policy again under their allowlist, and the chain is depth
 bounded.
 
 `stratus chat` and `stratus run` are unaffected: at a terminal, `--approvals`
-works exactly as before.
+works exactly as before (`always`, `ask`, `never`).
+
+### Asking a human: remote approval
+
+In `remote` mode a gated call does not fail — the turn parks, the request is
+posted to Slack with **Allow once**, **Always allow**, and **Deny**, and the
+turn resumes on the answer. The question goes to the thread the turn is
+happening in, so whoever is talking to the agent sees it where they already
+are.
+
+Turn it on for the daemon with `--approvals remote`, or in
+`~/.stratus/config.json` so the installed service picks it up too:
+
+```jsonc
+{
+  "approvals": {
+    "mode": "remote",              // headless (default) or remote
+    "timeoutMs": 900000,           // unanswered after 15 minutes → denied (max 2147483647)
+    "slackApprovers": ["U01OPS"],  // who may decide, for every agent
+    "slackChannel": "C07OPS",      // where to ask when the turn isn't in Slack
+    "agents": {
+      "ava": { "slackApprovers": ["U01DYLAN"] }
+    }
+  }
+}
+```
+
+An agent inherits the top-level route key by key, so `ava` above asks her own
+approver in the shared `C07OPS` fallback channel. An explicit
+`"slackApprovers": []` on an agent excludes it from the default list — that
+agent's gated calls are then denied outright — while omitting the key
+inherits.
+
+**Only a config you chose is allowed to set this block** — `--config`,
+`STRATUS_CONFIG`, or the global `~/.stratus/config.json`. An auto-discovered
+project-local `stratus.config.json` outranks the global one for provider
+settings, but it can be checked into any repository, and appointing the
+people who may authorize an agent's tool calls is not something a clone gets
+to do. Its `approvals` block is ignored, with a warning naming the file.
+
+Three things are worth knowing before you turn it on:
+
+- **Approvers are people, not places.** Posting into a channel does not make
+  everyone in it an approver: each request is bound to the ids configured for
+  that agent, and anyone else's click is refused with a notice only they see.
+  The request stays open for someone who may actually answer it. This matters
+  most for **Always allow**, which widens what the agent may do unattended.
+- **An agent with no approver configured is denied immediately**, not left to
+  time out — `remote` with nobody listed behaves exactly like `headless`. If
+  no channel can ask for an agent at all (no Slack tokens for it, or
+  `@stratusagent/channel-slack` not installed) there is nothing to render the
+  request, so its gated calls wait out the timeout instead. The daemon names
+  those agents at startup, rather than leaving you to find out at 3am:
+
+  ```text
+  approvals: remote — gated calls are parked and asked in Slack (approvers set for ava)
+  ```
+- **Always allow lasts for the session**, not forever. It stops the same tool
+  asking again in the same conversation, and it is forgotten when the daemon
+  restarts. A durable per-agent whitelist is a narrower promise (a normalized
+  command scope) and ships with the shell tool that needs one.
+
+The request shows the tool's **arguments**, not just its name — for anything
+whose danger lives in what it was called with, approving a bare tool name is
+approving something you cannot see. Arguments are escaped (a model-written
+argument cannot mention or broadcast to the workspace through the prompt)
+and truncated with a visible notice when they are long.
+
+Requests are also denied — visibly, with a reason — when they expire, when
+the turn is cancelled, when the daemon shuts down, and when a turn reaches a
+gated call while the daemon is already stopping. Every one of those retracts
+the buttons in Slack, so a message never keeps offering a decision with
+nowhere to land.
+
+`timeoutMs` is capped at 2147483647 (~24.8 days), the longest timer Node can
+hold. A larger value is rejected at startup rather than accepted: it would
+not wait longer, it would expire every approval almost immediately.
+
+Approval buttons need the Slack app's **Interactivity** switched on. Apps
+created from the manifest that `stratus setup` prints already have it; an app
+created before this shipped needs it enabled once, in its App Manifest.
 
 ## Always on
 
@@ -297,7 +377,7 @@ Agents remember: facts saved with the built-in `memory.remember` tool persist to
 | `--model` | Model for real providers (anthropic default: `claude-opus-5`) |
 | `--base-url` | Override the provider API base URL |
 | `--config <file>` | Load settings from a specific config file |
-| `--approvals` | Tool approval mode: `always`, `ask`, or `never` |
+| `--approvals` | `run`/`chat`: tool approval mode — `always`, `ask`, or `never`. `serve`: how the daemon reaches a human — `headless` (refuse gated calls) or `remote` (ask in Slack); overrides the config's `approvals.mode` |
 | `--max-turns` | Max provider turns per run (default 8) |
 | `--format` | `text` or `json` |
 | `--idle-timeout` | `stratus serve`: seconds of provider silence before the watchdog aborts a turn (default 120) |

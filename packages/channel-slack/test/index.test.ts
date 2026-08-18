@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { EventBus, type Session, type StratusEvent } from '@stratusagent/core';
+import { EventBus, type ApprovalAnswer, type Session, type StratusEvent } from '@stratusagent/core';
 import type { GatewayLike } from '@stratusagent/channels';
 import {
   createSlackChannelAdapter,
+  type SlackBlock,
   type SlackSocketEventArgs,
   type SlackSocketLike,
   type SlackWebLike,
@@ -47,8 +48,9 @@ const createFakeSocket = (): FakeSocket => {
 };
 
 interface FakeWeb extends SlackWebLike {
-  posts: Array<{ channel: string; text: string; thread_ts?: string }>;
-  updates: Array<{ channel: string; ts: string; text: string }>;
+  posts: Array<{ channel: string; text: string; thread_ts?: string; blocks?: SlackBlock[] }>;
+  updates: Array<{ channel: string; ts: string; text: string; blocks?: SlackBlock[] }>;
+  ephemerals: Array<{ channel: string; user: string; text: string }>;
   uploads: Array<{ channel_id: string; filename?: string; contents: string; wasBuffer: boolean }>;
   userInfoDelayMs?: (callIndex: number) => number;
 }
@@ -59,6 +61,7 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
   const web: FakeWeb = {
     posts: [],
     updates: [],
+    ephemerals: [],
     uploads: [],
     auth: {
       async test() {
@@ -73,6 +76,10 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
       },
       async update(args) {
         web.updates.push(args);
+        return {};
+      },
+      async postEphemeral(args) {
+        web.ephemerals.push(args);
         return {};
       },
     },
@@ -116,6 +123,9 @@ const sessionWithReply = (id: string, reply: string): Session => {
 
 interface StubGateway extends GatewayLike {
   dispatches: Array<{ sessionId: string; agentId?: string; userMessage: string }>;
+  resolutions: Array<{ requestId: string; answer: ApprovalAnswer; actor?: string; reason?: string }>;
+  /** Request ids the gateway still considers pending. */
+  pendingApprovals: Set<string>;
 }
 
 const createStubGateway = (
@@ -125,10 +135,27 @@ const createStubGateway = (
   const gateway: StubGateway = {
     bus,
     dispatches: [],
+    resolutions: [],
+    pendingApprovals: new Set<string>(),
     agents: () => [
       { id: 'ava', name: 'Ava' },
       { id: 'bea', name: 'Bea' },
     ],
+    resolveApproval(input) {
+      gateway.resolutions.push(input);
+      if (!gateway.pendingApprovals.delete(input.requestId)) {
+        return false;
+      }
+      void bus.emit({
+        type: 'tool.approval-resolved',
+        sessionId: 'sess-1',
+        requestId: input.requestId,
+        answer: input.answer,
+        reason: input.reason ?? 'decided',
+        ...(input.actor ? { actor: input.actor } : {}),
+      });
+      return true;
+    },
     async dispatch(input) {
       gateway.dispatches.push({
         sessionId: input.sessionId,
@@ -246,6 +273,9 @@ test('streaming deltas edit the placeholder before the final reply lands', async
 
   const gateway: GatewayLike = {
     bus,
+    // Not what these fakes exercise; refusing keeps GatewayLike satisfied
+    // without pretending there is a request to resolve.
+    resolveApproval: () => false,
     agents: () => [{ id: 'ava', name: 'Ava' }],
     async dispatch(input) {
       await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: 'Working' } });
@@ -385,6 +415,9 @@ test('queued turns in one thread keep their own renderers', async () => {
   let turn = 0;
   const gateway: GatewayLike = {
     bus,
+    // Not what these fakes exercise; refusing keeps GatewayLike satisfied
+    // without pretending there is a request to resolve.
+    resolveApproval: () => false,
     agents: () => [{ id: 'ava', name: 'Ava' }],
     async dispatch(input) {
       turn += 1;
@@ -446,6 +479,9 @@ test('file-bearing tool results upload their contents into the conversation', as
 
   const gateway: GatewayLike = {
     bus,
+    // Not what these fakes exercise; refusing keeps GatewayLike satisfied
+    // without pretending there is a request to resolve.
+    resolveApproval: () => false,
     agents: () => [{ id: 'ava', name: 'Ava' }],
     async dispatch(input) {
       await bus.emit({
@@ -487,6 +523,9 @@ test('a reset delta discards partial streamed text before the retry streams', as
 
   const gateway: GatewayLike = {
     bus,
+    // Not what these fakes exercise; refusing keeps GatewayLike satisfied
+    // without pretending there is a request to resolve.
+    resolveApproval: () => false,
     agents: () => [{ id: 'ava', name: 'Ava' }],
     async dispatch(input) {
       await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: 'doomed partial' } });
@@ -555,6 +594,9 @@ test('the tool status line clears as soon as the tool completes', async () => {
 
   const gateway: GatewayLike = {
     bus,
+    // Not what these fakes exercise; refusing keeps GatewayLike satisfied
+    // without pretending there is a request to resolve.
+    resolveApproval: () => false,
     agents: () => [{ id: 'ava', name: 'Ava' }],
     async dispatch(input) {
       await bus.emit({ type: 'tool.called', sessionId: input.sessionId, call: { id: 'c1', toolName: 'demo.echo', input: {} } });
@@ -596,6 +638,9 @@ test('streamed text from consecutive provider turns stays separated', async () =
 
   const gateway: GatewayLike = {
     bus,
+    // Not what these fakes exercise; refusing keeps GatewayLike satisfied
+    // without pretending there is a request to resolve.
+    resolveApproval: () => false,
     agents: () => [{ id: 'ava', name: 'Ava' }],
     async dispatch(input) {
       await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: "I'll check." } });
@@ -680,4 +725,381 @@ test('a turn that produced no text finalizes as (no reply), never an older answe
   await adapter.stop();
 
   assert.equal(web.updates.at(-1)?.text, '(no reply)');
+});
+
+// ---- remote approval ------------------------------------------------------
+
+const approvalRequest = (
+  overrides: Partial<Extract<StratusEvent, { type: 'tool.approval-requested' }>> = {},
+): Extract<StratusEvent, { type: 'tool.approval-requested' }> => ({
+  type: 'tool.approval-requested',
+  sessionId: 'slack:ava:T1:C1:100.1',
+  agentId: 'ava',
+  requestId: 'req-1',
+  call: { id: 'call-1', toolName: 'shell.run', input: { command: 'ls' } },
+  risk: 'gated',
+  metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+  expiresAt: '2026-08-18T00:15:00.000Z',
+  ...overrides,
+});
+
+const click = (actionId: string, requestId: string, user: string) => ({
+  body: {
+    team_id: 'T1',
+    user: { id: user },
+    channel: { id: 'C1' },
+    message: { ts: 'bot-ts-1', thread_ts: '100.1' },
+    actions: [{ action_id: actionId, value: requestId }],
+  },
+});
+
+const approvalAdapter = (agents: Array<Record<string, unknown>>) => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const adapter = createSlackChannelAdapter({
+    agents: agents as never,
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  return { socket, web, gateway, adapter };
+};
+
+const buttonIds = (blocks: SlackBlock[] | undefined): string[] => {
+  const actions = (blocks ?? []).find((block) => block.type === 'actions') as
+    | { elements?: Array<{ action_id?: string }> }
+    | undefined;
+  return (actions?.elements ?? []).map((element) => element.action_id ?? '');
+};
+
+test('a parked call is asked in the thread it came from, with three buttons', async () => {
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+
+  const posted = web.posts.at(-1);
+  assert.equal(posted?.channel, 'C1');
+  // Asked in the conversation the turn belongs to, not at the top of the
+  // channel: the person waiting on the answer is already reading here.
+  assert.equal(posted?.thread_ts, '100.1');
+  // Fallback text matters as much as the blocks — notifications and older
+  // clients show only this, and an approval nobody can read is no approval.
+  assert.match(posted?.text ?? '', /Ava wants to run shell\.run \(gated\)/);
+  assert.deepEqual(buttonIds(posted?.blocks), [
+    'stratus_approve_once',
+    'stratus_approve_always',
+    'stratus_deny',
+  ]);
+
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
+  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'always', actor: 'U-DYLAN' }]);
+  assert.equal(socket.acks, 1, 'Slack retries an unacked interaction');
+
+  // Resolved: the buttons come off, so the message cannot keep offering a
+  // decision with nowhere to land.
+  const update = web.updates.at(-1);
+  assert.equal(buttonIds(update?.blocks).length, 0);
+  assert.match(update?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+
+  await adapter.stop();
+});
+
+test('a click from outside the approver set is refused and the request stays pending', async () => {
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-STRANGER'));
+
+  // Posting into a channel must never make everyone in it an approver —
+  // especially for "Always allow", which widens the session's scope.
+  assert.deepEqual(gateway.resolutions, [], 'a non-approver never reaches the gateway');
+  assert.equal(gateway.pendingApprovals.has('req-1'), true, 'the request is still pending');
+  assert.deepEqual(
+    web.ephemerals.map((entry) => ({ user: entry.user, channel: entry.channel })),
+    [{ user: 'U-STRANGER', channel: 'C1' }],
+  );
+  assert.match(web.ephemerals[0]?.text ?? '', /not an approver for Ava/);
+  // Still offering the decision to the people who may actually make it.
+  assert.equal(web.updates.length, 0);
+
+  // And an approver clicking afterwards still works.
+  await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-DYLAN'));
+  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'deny', actor: 'U-DYLAN' }]);
+
+  await adapter.stop();
+});
+
+test('a request with no approver configured is denied on arrival, not left to expire', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+
+  // Waiting out the timeout would tell the agent nothing it cannot be told
+  // now, while holding the turn — and the thread — open for the whole window.
+  // `undeliverable`, not `decided`: nobody was asked, and filing this
+  // beside the denials somebody actually made would make the audit record
+  // lie about which is which.
+  assert.deepEqual(
+    gateway.resolutions,
+    [{ requestId: 'req-1', answer: 'deny', reason: 'undeliverable' }],
+  );
+  assert.equal(web.posts.length, 0, 'nothing is asked when nobody can answer');
+
+  await adapter.stop();
+});
+
+test('a turn outside Slack asks in the configured approval channel', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'], approvalChannel: 'C-OPS' },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-2');
+  // A scheduled or delegated turn has no Slack conversation of its own.
+  await gateway.bus.emit(approvalRequest({ requestId: 'req-2', sessionId: 'cron:ava:nightly', metadata: {} }));
+
+  assert.equal(web.posts.at(-1)?.channel, 'C-OPS');
+  assert.equal(web.posts.at(-1)?.thread_ts, undefined);
+
+  await adapter.stop();
+});
+
+test('a click on a request this daemon never rendered is answered, not dropped', async () => {
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  // Buttons outlive the daemon that posted them: a restart leaves real
+  // messages in Slack whose requests are gone.
+  await socket.deliver('interactive', click('stratus_approve_once', 'req-from-a-past-life', 'U-DYLAN'));
+
+  assert.deepEqual(gateway.resolutions, []);
+  assert.match(web.ephemerals.at(-1)?.text ?? '', /no longer pending/);
+
+  await adapter.stop();
+});
+
+test('an expired request retracts its own buttons', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+  assert.equal(web.posts.length, 1);
+
+  // The timeout and a cancelled turn settle through the same event a click
+  // does, so there is exactly one path that takes the buttons down.
+  await gateway.bus.emit({
+    type: 'tool.approval-resolved',
+    sessionId: 'slack:ava:T1:C1:100.1',
+    requestId: 'req-1',
+    answer: 'deny',
+    reason: 'timeout',
+  });
+
+  const update = web.updates.at(-1);
+  assert.equal(buttonIds(update?.blocks).length, 0);
+  assert.match(update?.text ?? '', /Expired without an answer/);
+  assert.doesNotMatch(update?.text ?? '', /by <@/);
+
+  await adapter.stop();
+});
+
+test('a request that settles mid-post still has its buttons retracted', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+
+  // Hold the announcing post open, so the request can expire while the
+  // message that offers the buttons is still being created. Without the
+  // hand-off this leaves live-looking buttons in Slack forever: the
+  // retraction runs before there is anything to retract.
+  let releasePost: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => {
+    releasePost = resolve;
+  });
+  const realPost = web.chat.postMessage;
+  web.chat.postMessage = async (args) => {
+    await held;
+    return realPost.call(web.chat, args);
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  const rendering = gateway.bus.emit(approvalRequest());
+  await gateway.bus.emit({
+    type: 'tool.approval-resolved',
+    sessionId: 'slack:ava:T1:C1:100.1',
+    requestId: 'req-1',
+    answer: 'deny',
+    reason: 'timeout',
+  });
+  assert.equal(web.updates.length, 0, 'nothing to retract yet — the post is still in flight');
+
+  releasePost?.();
+  await rendering;
+  // The adapter's work is tracked, so the drain in stop() is the gate: the
+  // retraction has landed by the time stop() returns, with no sleeping.
+  await adapter.stop();
+
+  assert.equal(buttonIds(web.updates.at(-1)?.blocks).length, 0);
+  assert.match(web.updates.at(-1)?.text ?? '', /Expired without an answer/);
+});
+
+const sectionTexts = (blocks: SlackBlock[] | undefined): string[] =>
+  (blocks ?? [])
+    .filter((block) => block.type === 'section')
+    .map((block) => String((block.text as { text?: string } | undefined)?.text ?? ''));
+
+test('the approval prompt shows what is actually being approved', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({
+    call: { id: 'c1', toolName: 'shell.run', input: { command: 'rm -rf /srv/data' } },
+  }));
+
+  // Without the arguments, `ls` and this produce an identical message —
+  // the approver would be authorizing something they cannot see.
+  const posted = web.posts.at(-1);
+  assert.ok(
+    sectionTexts(posted?.blocks).some((text) => text.includes('rm -rf /srv/data')),
+    `expected the command in the blocks, got ${JSON.stringify(sectionTexts(posted?.blocks))}`,
+  );
+  // The notification preview is all some approvers see before deciding
+  // whether to open the thread.
+  assert.match(posted?.text ?? '', /rm -rf \/srv\/data/);
+
+  await adapter.stop();
+});
+
+test('a tool argument cannot ping the workspace through the approval prompt', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({
+    call: { id: 'c1', toolName: 'shell.run', input: { command: 'echo <!channel> <@U-DYLAN>' } },
+  }));
+
+  // Tool input is model-written text. Unescaped it would broadcast to the
+  // channel and mention people — through the very message asking whether
+  // the agent should be trusted.
+  const posted = web.posts.at(-1);
+  const rendered = [...sectionTexts(posted?.blocks), posted?.text ?? ''].join('\n');
+  assert.equal(rendered.includes('<!channel>'), false, 'a broadcast survived into the prompt');
+  assert.equal(rendered.includes('<@U-DYLAN>'), false, 'a mention survived into the prompt');
+  assert.ok(rendered.includes('&lt;!channel&gt;'), 'the text is still readable, just inert');
+
+  await adapter.stop();
+});
+
+test('over-long arguments are truncated and say so', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({
+    call: { id: 'c1', toolName: 'shell.run', input: { command: 'x'.repeat(5000) } },
+  }));
+
+  const posted = web.posts.at(-1);
+  // Slack rejects an over-long section outright, so an untruncated prompt
+  // would not be a long message — it would be no message at all.
+  for (const text of sectionTexts(posted?.blocks)) {
+    assert.ok(text.length < 3000, `a section ran to ${text.length} characters`);
+  }
+  // A decision made on a partial view should at least know it is partial.
+  const contexts = (posted?.blocks ?? []).filter((block) => block.type === 'context');
+  assert.equal(contexts.length, 1, 'the truncation notice is missing');
+
+  await adapter.stop();
+});
+
+test('an agent this adapter carries but cannot reach is denied, not abandoned', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const warnings: string[] = [];
+  // The app is configured but its auth fails, so no connection is made.
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => ({
+      ...web,
+      auth: { async test() { throw new Error('invalid_auth'); } },
+    }),
+    warn: (line) => warnings.push(line),
+  });
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+
+  // This adapter was supposed to carry Ava's approvals and cannot, so it
+  // says so rather than letting every gated call wait out the timeout.
+  assert.deepEqual(
+    gateway.resolutions,
+    [{ requestId: 'req-1', answer: 'deny', reason: 'undeliverable' }],
+  );
+  assert.ok(warnings.some((line) => line.includes('no live connection')), JSON.stringify(warnings));
+
+  await adapter.stop();
+});
+
+test('an agent this adapter was never given is left for whoever does carry it', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-bea');
+  await gateway.bus.emit(approvalRequest({ requestId: 'req-bea', agentId: 'bea' }));
+
+  // Approval requests are a broadcast. Denying an agent this adapter was
+  // never configured for would let Slack refuse a question another channel
+  // was about to ask.
+  assert.deepEqual(gateway.resolutions, []);
+  assert.equal(gateway.pendingApprovals.has('req-bea'), true);
+  assert.equal(web.posts.length, 0);
+
+  await adapter.stop();
 });
