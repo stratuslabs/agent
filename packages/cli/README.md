@@ -138,6 +138,13 @@ Turn it on for the daemon with `--approvals remote`, or in
 An agent inherits the top-level route key by key, so `ava` above asks her own
 approver in the shared `C07OPS` fallback channel.
 
+**Only a config you chose is allowed to set this block** — `--config`,
+`STRATUS_CONFIG`, or the global `~/.stratus/config.json`. An auto-discovered
+project-local `stratus.config.json` outranks the global one for provider
+settings, but it can be checked into any repository, and appointing the
+people who may authorize an agent's tool calls is not something a clone gets
+to do. Its `approvals` block is ignored, with a warning naming the file.
+
 Three things are worth knowing before you turn it on:
 
 - **Approvers are people, not places.** Posting into a channel does not make

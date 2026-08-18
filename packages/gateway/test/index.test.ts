@@ -5,7 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { RunAbortedError, type StratusEvent } from '@stratusagent/core';
-import { createGateway, SqliteSessionStore, type ApprovalTransport } from '../src/index.ts';
+import {
+  createGateway,
+  SqliteSessionStore,
+  type ApprovalTransport,
+  type GatewayChannelAdapter,
+} from '../src/index.ts';
 
 const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-gw-'));
 
@@ -1640,7 +1645,9 @@ test('a roster soul cannot hijack the reserved built-in agent id', async () => {
  * The seam is what remote approval is made of, and it is testable now —
  * the policy's own half is covered in @stratusagent/permissions.
  */
-const brokerHarness = async (options: { approvalTimeoutMs?: number } = {}) => {
+const brokerHarness = async (
+  options: { approvalTimeoutMs?: number; channels?: GatewayChannelAdapter[] } = {},
+) => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
   let transport: ApprovalTransport | undefined;
@@ -1649,6 +1656,7 @@ const brokerHarness = async (options: { approvalTimeoutMs?: number } = {}) => {
     env,
     idleTimeoutMs: 0,
     ...(options.approvalTimeoutMs !== undefined ? { approvalTimeoutMs: options.approvalTimeoutMs } : {}),
+    ...(options.channels ? { channels: options.channels } : {}),
     approvals: (given) => {
       transport = given;
       return { async approve() { return true; } };
@@ -1815,4 +1823,47 @@ test('shutting down denies what is parked instead of waiting it out', async () =
 
   assert.equal(await settles(answer, 'the parked call'), 'deny');
   assert.equal(gateway.resolveApproval({ requestId: request.requestId, answer: 'once' }), false);
+});
+
+test('a resolution emitted at shutdown reaches channels before they stop', async () => {
+  // EventBus awaits its subscribers in registration order, so one async
+  // handler in front of a channel suspends the emission before the channel
+  // sees it. Nothing in the daemon is async there today — which is the
+  // point: without draining, this guarantee holds by accident, and the
+  // first async subscriber anyone adds leaves live-looking approval
+  // buttons in a workspace the daemon has already left.
+  const seen: string[] = [];
+  let sawResolutionBeforeStop: boolean | undefined;
+
+  const channel: GatewayChannelAdapter = {
+    name: 'fake',
+    async start(gateway) {
+      gateway.bus.subscribe((event) => {
+        if (event.type === 'tool.approval-resolved') {
+          seen.push(event.requestId);
+        }
+      });
+    },
+    async stop() {
+      sawResolutionBeforeStop = seen.length > 0;
+    },
+  };
+
+  const { gateway, transport } = await brokerHarness({ approvalTimeoutMs: 0, channels: [channel] });
+  // Registered before the channel's (channels subscribe during start), and
+  // async, so the emission suspends here first.
+  gateway.bus.subscribe(async (event) => {
+    if (event.type === 'tool.approval-resolved') {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  });
+  await gateway.start();
+
+  const requested = nextEvent(gateway.bus, 'tool.approval-requested');
+  const answer = transport.request(parkedCall('sess-drain'));
+  await settles(requested, 'the approval request');
+
+  await settles(gateway.stop(), 'the shutdown drain');
+  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  assert.equal(sawResolutionBeforeStop, true, 'the channel stopped before its retraction arrived');
 });

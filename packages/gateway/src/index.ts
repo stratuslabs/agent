@@ -415,6 +415,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   ) => void;
 
   const pendingApprovals = new Map<string, SettleApproval>();
+  /**
+   * In-flight `tool.approval-resolved` emissions. `EventBus.emit` awaits its
+   * subscribers in order, so one async handler ahead of a channel adapter
+   * suspends the emission before the adapter ever sees it. Nothing today is
+   * async in front of one — which is exactly the problem: the shutdown
+   * guarantee below would rest on that staying true, and the first async
+   * subscriber anyone adds would silently leave live-looking buttons in a
+   * workspace the daemon has left.
+   */
+  const approvalEmissions = new Set<Promise<void>>();
 
   /**
    * Publishes one parked call and settles when somebody answers it, the
@@ -445,7 +455,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       request.signal?.removeEventListener('abort', onAbort);
       resolve(answer);
-      void bus.emit({
+      const emitted = bus.emit({
         type: 'tool.approval-resolved',
         sessionId: request.session.id,
         requestId,
@@ -453,6 +463,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         reason,
         ...(actor ? { actor } : {}),
       });
+      approvalEmissions.add(emitted);
+      void emitted.finally(() => approvalEmissions.delete(emitted));
     };
 
     pendingApprovals.set(requestId, settle);
@@ -1075,6 +1087,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       for (const settle of [...pendingApprovals.values()]) {
         settle('deny', 'cancelled');
       }
+      // Let those resolutions reach their subscribers before the channels
+      // go down, or a channel that renders approvals never learns to
+      // retract the buttons it is still showing.
+      await Promise.allSettled([...approvalEmissions]);
       await Promise.allSettled(startedChannels.map((adapter) => adapter.stop()));
       startedChannels.length = 0;
       await Promise.allSettled([...inflight]);

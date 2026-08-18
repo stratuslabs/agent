@@ -68,6 +68,11 @@ Who may answer is configured per agent, in `~/.stratus/config.json`:
 }
 ```
 
+That block is only read from a config you chose — `--config`,
+`STRATUS_CONFIG`, or the global `~/.stratus/config.json`. A project-local
+`stratus.config.json` cannot appoint approvers, since it can be checked into
+any repository.
+
 **Clicks are authorized by actor, not by delivery.** Everyone in a thread can
 see the request; only the ids listed for that agent can decide it. Anyone
 else's click is refused with a notice only they see, and the request stays

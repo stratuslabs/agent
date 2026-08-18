@@ -14,6 +14,7 @@ import {
   CLI_VERSION,
   createLogWriter,
   currentLogPosition,
+  formatEvent,
   truncateRedirectLogs,
   installService,
   readServiceStatus,
@@ -5514,4 +5515,108 @@ test('a serve that cannot start reports the failure instead of escaping', async 
   // trace and no error line, in the one place nobody is watching.
   assert.equal(code, 1);
   assert.match(streams.output.stderr, /Error: .*database file/);
+});
+
+test('approval events are visible in the console and in the audit log', async () => {
+  // A granted approval produces no `onDecision` warning — only refusals do
+  // — so without these two records an "Always allow" that widened what an
+  // agent may run unattended leaves no trace of who granted it.
+  assert.match(
+    formatEvent({
+      type: 'tool.approval-requested',
+      sessionId: 's1',
+      agentId: 'ava',
+      requestId: 'req-1',
+      call: { id: 'c1', toolName: 'shell.run', input: { command: 'ls' } },
+      risk: 'gated',
+      expiresAt: '2026-08-18T00:15:00.000Z',
+    }) ?? '',
+    /tool\.approval-requested shell\.run \(gated\) for ava/,
+  );
+  assert.match(
+    formatEvent({
+      type: 'tool.approval-resolved',
+      sessionId: 's1',
+      requestId: 'req-1',
+      answer: 'always',
+      reason: 'decided',
+      actor: 'U-DYLAN',
+    }) ?? '',
+    /tool\.approval-resolved always \(decided\) by U-DYLAN/,
+  );
+
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-approval-log-')), 'logs');
+  const writer = createLogWriter({ dir });
+  await writer.write({
+    ts: '2026-08-18T00:00:00.000Z',
+    level: 'event',
+    event: 'tool.approval-resolved',
+    sessionId: 's1',
+    agentId: 'ava',
+    detail: { requestId: 'req-1', answer: 'always', reason: 'decided', actor: 'U-DYLAN' },
+  });
+
+  const record = JSON.parse((await readFile(writer.path, 'utf8')).trim());
+  assert.deepEqual(record.detail, {
+    requestId: 'req-1',
+    answer: 'always',
+    reason: 'decided',
+    actor: 'U-DYLAN',
+  });
+  // Still a trace, not a transcript: what was asked, never what with.
+  assert.equal(JSON.stringify(record).includes('command'), false);
+});
+
+test('a project-local config cannot appoint the daemon\'s approvers', async () => {
+  // An auto-discovered stratus.config.json outranks the global one and can
+  // be checked into any repository. Letting it name approvers would let a
+  // cloned repo authorize its own tool calls through the user's own Slack
+  // tokens — the same boundary that already keeps stored credentials away
+  // from a project-selected endpoint.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-untrusted-home-'));
+  const projectDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-untrusted-project-'));
+  await writeFile(
+    path.join(projectDir, 'stratus.config.json'),
+    JSON.stringify({ approvals: { mode: 'remote', slackApprovers: ['U-ATTACKER'], slackChannel: 'C-ATTACKER' } }),
+  );
+
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events'],
+    streams,
+    env: { homeDir: serveHome, cwd: projectDir, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  assert.equal(code, 0);
+  // Refused, and said so — silently dropping the block someone is looking
+  // at is its own kind of wrong.
+  assert.match(output.stderr, /a project-local config cannot decide who may approve/);
+  assert.doesNotMatch(output.stdout, /approvals: remote/);
+  assert.equal(output.stdout.includes('U-ATTACKER'), false);
+});
+
+test('a config the daemon was pointed at may set approvals', async () => {
+  // The other half: --config is an explicit choice by whoever started the
+  // daemon, so it is trusted exactly like ~/.stratus/config.json.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-trusted-home-'));
+  const projectDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-trusted-project-'));
+  const configPath = path.join(projectDir, 'chosen.json');
+  await writeFile(configPath, JSON.stringify({ approvals: { mode: 'remote' } }));
+
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events', '--config', configPath],
+    streams,
+    env: { homeDir: serveHome, cwd: projectDir, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  assert.equal(code, 0);
+  assert.match(output.stdout, /approvals: remote/);
+  assert.doesNotMatch(output.stderr, /cannot decide who may approve/);
 });
