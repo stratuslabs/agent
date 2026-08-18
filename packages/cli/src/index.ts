@@ -2315,7 +2315,13 @@ export const runSetup = async (
     // undo a deliberate `service install --no-login`.
     service: await (async () => {
       const status = await readServiceStatus(serviceEnvFor(env)).catch(() => undefined);
-      return { install: true, runAtLogin: status?.installed ? status.runAtLogin : true };
+      // An unknown answer (a broken user bus, a timed-out query) must not
+      // read as "they chose --no-login" — that would disable a service on
+      // the next save because of a transient failure.
+      return {
+        install: true,
+        runAtLogin: status?.installed && status.runAtLogin !== undefined ? status.runAtLogin : true,
+      };
     })(),
   };
 
@@ -4166,7 +4172,7 @@ const serviceEnvFor = (env: CliEnvironment): ServiceEnvironment => ({
 const servedRuntimes = async (
   env: CliEnvironment,
   configPath?: string,
-): Promise<Array<{ runtime: RuntimeConfig; env: CliEnvironment }>> => {
+): Promise<Array<{ runtime?: RuntimeConfig; error?: Error; env: CliEnvironment }>> => {
   const { applySoulPins } = await import('@stratusagent/gateway');
   const { config: activeConfig, location } = await discoverActiveConfig(env, () => {});
   const context = {
@@ -4179,19 +4185,50 @@ const servedRuntimes = async (
     passes.push({ selection: normalized.selection, env: normalized.env as CliEnvironment });
   }
 
-  const resolved: Array<{ runtime: RuntimeConfig; env: CliEnvironment }> = [];
+  const resolved: Array<{ runtime?: RuntimeConfig; error?: Error; env: CliEnvironment }> = [];
   for (const pass of passes) {
-    const runtime = await resolveStateRuntimeConfig(
-      { ...pass.selection, ...(configPath ? { configPath } : {}) },
-      pass.env,
-    ).catch(() => undefined);
-    if (runtime) {
+    try {
+      const runtime = await resolveStateRuntimeConfig(
+        { ...pass.selection, ...(configPath ? { configPath } : {}) },
+        pass.env,
+      );
       resolved.push({ runtime, env: pass.env });
+    } catch (error) {
+      resolved.push({ error: error instanceof Error ? error : new Error(String(error)), env: pass.env });
     }
   }
   return resolved;
 };
 
+/**
+ * The environment the managed daemon will actually run in. launchd and
+ * systemd start with their own, so every STRATUS_ and STRATUSCLAW_ override
+ * and every API-key variable in the installing shell is simply absent.
+ * Resolving with the installing shell instead would answer a different
+ * question than "will this daemon work" — an exported STRATUS_PROVIDER=demo
+ * makes the check pass while the daemon resolves the real provider from the
+ * pinned config and cannot authenticate.
+ */
+const daemonEnvironment = (env: CliEnvironment): CliEnvironment => {
+  const processEnv = readProcessEnv(env);
+  const stripped: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(processEnv)) {
+    if (name.startsWith('STRATUS_') || name.startsWith('STRATUSCLAW_')) {
+      continue;
+    }
+    if (name === 'ANTHROPIC_API_KEY' || name === 'OPENAI_API_KEY') {
+      continue;
+    }
+    stripped[name] = value;
+  }
+  return { ...env, processEnv: stripped };
+};
+
+/**
+ * Whether the daemon could authenticate at all, answered by resolving as
+ * the daemon will. Returns the shell variable that is covering for the
+ * missing credential today, so the message can name it.
+ */
 const shellOnlyCredential = async (
   env: CliEnvironment,
   // The config setup just wrote, which is also what the unit will be
@@ -4200,23 +4237,48 @@ const shellOnlyCredential = async (
   // cannot authenticate.
   configPath: string,
 ): Promise<string | undefined> => {
-  const credentials = await loadCredentials(env);
+  const bare = daemonEnvironment(env);
   const processEnv = readProcessEnv(env);
-  for (const { runtime } of await servedRuntimes(env, configPath)) {
-    if (runtime.provider === 'demo') {
+  const covering = (provider: string): string | undefined => {
+    const conventional = provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+    for (const name of ['STRATUS_API_KEY', 'STRATUSCLAW_API_KEY', conventional]) {
+      if (readNonEmptyString(processEnv[name]) !== undefined) {
+        return name;
+      }
+    }
+    // The key is not in this shell either — the daemon is missing a
+    // sign-in outright, which `stratus doctor` reports far better than a
+    // service message can.
+    return undefined;
+  };
+
+  for (const served of await servedRuntimes(bare, configPath)) {
+    if (served.error) {
+      // Resolution failing in the daemon's environment IS the daemon
+      // failing to start a turn — the error names the provider.
+      const provider = /provider=(\w+)/.exec(served.error.message)?.[1] ?? 'anthropic';
+      const name = covering(provider);
+      if (name) {
+        return name;
+      }
       continue;
     }
-    if (runtime.apiKeyEnvVar && !credentials[runtime.provider]) {
-      return runtime.apiKeyEnvVar;
+    const runtime = served.runtime;
+    if (!runtime || runtime.provider === 'demo') {
+      continue;
     }
-    // The fallback exists to rescue a failing primary, so a fallback the
-    // daemon cannot authenticate is a retry path that silently is not
-    // there. It reads only its provider's own conventional variable.
-    const fallback = runtime.fallback;
-    if (fallback && !credentials[fallback.provider] && fallback.apiKey) {
-      const name = fallback.provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
-      if (readNonEmptyString(processEnv[name]) === fallback.apiKey) {
-        return name;
+    // The fallback exists to rescue a failing primary, so one the daemon
+    // cannot authenticate is a retry path that silently is not there.
+    const fallbackOf = (config: RuntimeConfig | undefined): FallbackRuntime | undefined =>
+      (config && config.provider !== 'demo' ? config.fallback : undefined);
+    if (fallbackOf(runtime) === undefined) {
+      const withShell = await servedRuntimes(env, configPath);
+      const shellFallback = withShell.map((entry) => fallbackOf(entry.runtime)).find(Boolean);
+      if (shellFallback) {
+        const name = covering(shellFallback.provider);
+        if (name) {
+          return name;
+        }
       }
     }
   }
@@ -4261,6 +4323,21 @@ export const runService = async (
   const selectedConfig = command.configPath
     ?? readNonEmptyString(processEnv.STRATUS_CONFIG)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_CONFIG);
+  if (command.action === 'install') {
+    // The same question setup asks: launchd and systemd hand the daemon
+    // none of this shell, so a key that lives only here produces a service
+    // that fails every dispatch while reporting a successful install.
+    const shellOnly = await shellOnlyCredential(
+      env,
+      selectedConfig ? path.resolve(readWorkingDirectory(env), String(selectedConfig)) : globalConfigPath(env),
+    );
+    if (shellOnly) {
+      writeLine(streams.stderr, `Not installing: your API key comes from ${shellOnly} in this shell, and a background service never sees it.`);
+      writeLine(streams.stderr, 'Run `stratus setup` → Providers to store the sign-in, then install again.');
+      return 1;
+    }
+  }
+
   const action = command.action === 'install'
     ? installService(serviceEnv, {
         ...(command.runAtLogin === false ? { runAtLogin: false } : {}),
@@ -4595,7 +4672,9 @@ export const runServe = async (
     // the daemon-wide defaults it outranks, including STRATUS_PROVIDER, so
     // each served runtime is resolved the way a dispatch resolves it.
     for (const served of await servedRuntimes(env, command.configPath)) {
-      await warnOnCredentialOverride(served.runtime, captured, served.env);
+      if (served.runtime) {
+        await warnOnCredentialOverride(served.runtime, captured, served.env);
+      }
     }
   }
 

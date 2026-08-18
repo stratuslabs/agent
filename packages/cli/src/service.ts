@@ -198,14 +198,20 @@ const defaultRunner: ServiceRunner = async (command, args) => {
 const runnerFor = (env: ServiceEnvironment): ServiceRunner => env.run ?? defaultRunner;
 const uidOf = (env: ServiceEnvironment): number => env.uid ?? (typeof process.getuid === 'function' ? process.getuid() : 0);
 
+/** What `systemctl is-enabled` prints when it actually knows the answer. */
+const KNOWN_ENABLEMENT_STATES = new Set([
+  'enabled', 'enabled-runtime', 'linked', 'linked-runtime', 'alias',
+  'masked', 'masked-runtime', 'static', 'indirect', 'disabled', 'generated', 'transient',
+]);
+
 export interface ServiceStatus {
   platform: ServicePlatform;
   /** A unit file exists on disk. */
   installed: boolean;
   /** The service manager reports it running. */
   running: boolean;
-  /** Starts automatically at login. */
-  runAtLogin: boolean;
+  /** Starts automatically at login; undefined when the manager could not say. */
+  runAtLogin: boolean | undefined;
   unitPath: string;
   /** Present when the platform's status command failed outright. */
   detail?: string;
@@ -227,9 +233,18 @@ export const readServiceStatus = async (env: ServiceEnvironment = {}): Promise<S
   // launchd's answer is in the plist; systemd's is the enablement symlink,
   // which the unit file itself says nothing about — a unit installed with
   // --no-login would otherwise be reported as starting at login.
-  const runAtLogin = platform === 'launchd'
-    ? /<key>RunAtLoad<\/key>\s*<true\/>/.test(contents)
-    : (await run('systemctl', ['--user', 'is-enabled', SYSTEMD_UNIT])).stdout.trim() === 'enabled';
+  let runAtLogin: boolean | undefined;
+  if (platform === 'launchd') {
+    runAtLogin = /<key>RunAtLoad<\/key>\s*<true\/>/.test(contents);
+  } else {
+    const enabled = await run('systemctl', ['--user', 'is-enabled', SYSTEMD_UNIT]);
+    const state = enabled.stdout.trim();
+    // is-enabled exits non-zero for "disabled", so the exit code alone
+    // cannot separate a real answer from a broken user bus or a timeout.
+    // Reading silence as "disabled" would let a transient failure turn an
+    // enabled service into a --no-login one on the next save.
+    runAtLogin = KNOWN_ENABLEMENT_STATES.has(state) ? state === 'enabled' : undefined;
+  }
   if (platform === 'launchd') {
     const result = await run('launchctl', ['print', `gui/${uidOf(env)}/${SERVICE_LABEL}`]);
     return {

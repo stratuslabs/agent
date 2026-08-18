@@ -5080,3 +5080,112 @@ test('a shell-only credential also removes a service already installed', async (
   assert.ok(calls.some((call) => /disable --now/.test(call)), calls.join(', '));
   assert.equal(await readFile(unitPath, 'utf8').catch(() => undefined), undefined);
 });
+
+test('service install refuses a daemon that cannot see the credential', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai' }));
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'install'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: { OPENAI_API_KEY: 'sk-openai-shell-only' },
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.deepEqual(calls, []);
+  assert.match(output.stderr, /comes from OPENAI_API_KEY in this shell/);
+});
+
+test('the credential check resolves as the daemon will, not as this shell does', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The saved config selects openai with no stored sign-in. A shell-only
+  // STRATUS_PROVIDER=demo makes the *current* shell resolve to demo, which
+  // needs no credential — but the daemon never sees that variable and
+  // resolves openai from the pinned config, where it cannot authenticate.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai' }));
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { STRATUS_PROVIDER: 'demo', OPENAI_API_KEY: 'sk-openai-shell-only' },
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  assert.deepEqual(calls, [], 'the daemon could not authenticate, so nothing should be installed');
+  assert.match(output.stderr, /comes from OPENAI_API_KEY in this shell/);
+});
+
+test('an unanswerable enablement query is not read as --no-login', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+
+  // A broken user bus exits non-zero with nothing on stdout, which looks
+  // exactly like "disabled" unless the known states are checked.
+  const unknown = await readServiceStatus({
+    platform: 'linux',
+    homeDir: home,
+    run: async (_command, args) => (args.includes('is-enabled')
+      ? { code: 1, stdout: '', stderr: 'Failed to connect to bus' }
+      : { code: 0, stdout: 'active\n', stderr: '' }),
+  });
+  assert.equal(unknown?.runAtLogin, undefined);
+
+  const disabled = await readServiceStatus({
+    platform: 'linux',
+    homeDir: home,
+    run: async (_command, args) => (args.includes('is-enabled')
+      ? { code: 1, stdout: 'disabled\n', stderr: '' }
+      : { code: 0, stdout: 'active\n', stderr: '' }),
+  });
+  assert.equal(disabled?.runAtLogin, false);
+});
+
+test('a transient status failure does not disable a service on the next save', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+
+  const calls: string[] = [];
+  await runCli({
+    argv: ['setup'],
+    streams: createStreams().streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => {
+        calls.push([command, ...args].join(' '));
+        return args.includes('is-enabled')
+          ? { code: 1, stdout: '', stderr: 'Failed to connect to bus' }
+          : { code: 0, stdout: '', stderr: '' };
+      },
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  // Reading the failure as "they chose --no-login" would quietly strip an
+  // enabled service's login startup.
+  assert.ok(calls.some((call) => /enable --now/.test(call)), calls.join(', '));
+  assert.ok(!calls.some((call) => /--user disable/.test(call)), calls.join(', '));
+});
