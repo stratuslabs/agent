@@ -125,7 +125,7 @@ Turn it on for the daemon with `--approvals remote`, or in
 {
   "approvals": {
     "mode": "remote",              // headless (default) or remote
-    "timeoutMs": 900000,           // unanswered after 15 minutes → denied
+    "timeoutMs": 900000,           // unanswered after 15 minutes → denied (max 2147483647)
     "slackApprovers": ["U01OPS"],  // who may decide, for every agent
     "slackChannel": "C07OPS",      // where to ask when the turn isn't in Slack
     "agents": {
@@ -167,10 +167,21 @@ Three things are worth knowing before you turn it on:
   restarts. A durable per-agent whitelist is a narrower promise (a normalized
   command scope) and ships with the shell tool that needs one.
 
+The request shows the tool's **arguments**, not just its name — for anything
+whose danger lives in what it was called with, approving a bare tool name is
+approving something you cannot see. Arguments are escaped (a model-written
+argument cannot mention or broadcast to the workspace through the prompt)
+and truncated with a visible notice when they are long.
+
 Requests are also denied — visibly, with a reason — when they expire, when
-the turn is cancelled, and when the daemon shuts down. Every one of those
-retracts the buttons in Slack, so a message never keeps offering a decision
-with nowhere to land.
+the turn is cancelled, when the daemon shuts down, and when a turn reaches a
+gated call while the daemon is already stopping. Every one of those retracts
+the buttons in Slack, so a message never keeps offering a decision with
+nowhere to land.
+
+`timeoutMs` is capped at 2147483647 (~24.8 days), the longest timer Node can
+hold. A larger value is rejected at startup rather than accepted: it would
+not wait longer, it would expire every approval almost immediately.
 
 Approval buttons need the Slack app's **Interactivity** switched on. Apps
 created from the manifest that `stratus setup` prints already have it; an app

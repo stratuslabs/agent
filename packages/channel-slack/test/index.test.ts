@@ -963,3 +963,80 @@ test('a request that settles mid-post still has its buttons retracted', async ()
   assert.equal(buttonIds(web.updates.at(-1)?.blocks).length, 0);
   assert.match(web.updates.at(-1)?.text ?? '', /Expired without an answer/);
 });
+
+const sectionTexts = (blocks: SlackBlock[] | undefined): string[] =>
+  (blocks ?? [])
+    .filter((block) => block.type === 'section')
+    .map((block) => String((block.text as { text?: string } | undefined)?.text ?? ''));
+
+test('the approval prompt shows what is actually being approved', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({
+    call: { id: 'c1', toolName: 'shell.run', input: { command: 'rm -rf /srv/data' } },
+  }));
+
+  // Without the arguments, `ls` and this produce an identical message —
+  // the approver would be authorizing something they cannot see.
+  const posted = web.posts.at(-1);
+  assert.ok(
+    sectionTexts(posted?.blocks).some((text) => text.includes('rm -rf /srv/data')),
+    `expected the command in the blocks, got ${JSON.stringify(sectionTexts(posted?.blocks))}`,
+  );
+  // The notification preview is all some approvers see before deciding
+  // whether to open the thread.
+  assert.match(posted?.text ?? '', /rm -rf \/srv\/data/);
+
+  await adapter.stop();
+});
+
+test('a tool argument cannot ping the workspace through the approval prompt', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({
+    call: { id: 'c1', toolName: 'shell.run', input: { command: 'echo <!channel> <@U-DYLAN>' } },
+  }));
+
+  // Tool input is model-written text. Unescaped it would broadcast to the
+  // channel and mention people — through the very message asking whether
+  // the agent should be trusted.
+  const posted = web.posts.at(-1);
+  const rendered = [...sectionTexts(posted?.blocks), posted?.text ?? ''].join('\n');
+  assert.equal(rendered.includes('<!channel>'), false, 'a broadcast survived into the prompt');
+  assert.equal(rendered.includes('<@U-DYLAN>'), false, 'a mention survived into the prompt');
+  assert.ok(rendered.includes('&lt;!channel&gt;'), 'the text is still readable, just inert');
+
+  await adapter.stop();
+});
+
+test('over-long arguments are truncated and say so', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({
+    call: { id: 'c1', toolName: 'shell.run', input: { command: 'x'.repeat(5000) } },
+  }));
+
+  const posted = web.posts.at(-1);
+  // Slack rejects an over-long section outright, so an untruncated prompt
+  // would not be a long message — it would be no message at all.
+  for (const text of sectionTexts(posted?.blocks)) {
+    assert.ok(text.length < 3000, `a section ran to ${text.length} characters`);
+  }
+  // A decision made on a partial view should at least know it is partial.
+  const contexts = (posted?.blocks ?? []).filter((block) => block.type === 'context');
+  assert.equal(contexts.length, 1, 'the truncation notice is missing');
+
+  await adapter.stop();
+});

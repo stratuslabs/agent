@@ -10,6 +10,7 @@ import {
   loadConfigFile,
   loadRosterSouls,
   loadSoulFile,
+  MAX_APPROVAL_TIMEOUT_MS,
   memoryFilePath,
   resolveAgentApprovals,
   resolveRuntimeConfig,
@@ -374,6 +375,17 @@ test('the approvals block parses, and a misspelled mode fails loudly', async () 
   await assert.rejects(loadConfigFile(badMode), /Unsupported approvals\.mode/);
   const badTimeout = await writeConfig('bad-timeout.json', { approvals: { timeoutMs: -1 } });
   await assert.rejects(loadConfigFile(badTimeout), /Invalid approvals\.timeoutMs/);
+
+  // 30 days looks like a perfectly reasonable approval window and is not:
+  // setTimeout turns anything past ~24.8 days into a 1ms delay, so this
+  // would expire every approval immediately rather than waiting a month.
+  // Refused, not clamped — the number someone wrote has to be the number
+  // they are told about.
+  const hugeTimeout = await writeConfig('huge-timeout.json', { approvals: { timeoutMs: 2_592_000_000 } });
+  await assert.rejects(loadConfigFile(hugeTimeout), /longer than the maximum/);
+  // The boundary itself is fine.
+  const maxTimeout = await writeConfig('max-timeout.json', { approvals: { timeoutMs: MAX_APPROVAL_TIMEOUT_MS } });
+  assert.equal((await loadConfigFile(maxTimeout)).approvals?.timeoutMs, MAX_APPROVAL_TIMEOUT_MS);
 });
 
 test('an agent inherits the default approval route key by key', async () => {

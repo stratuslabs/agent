@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
-import type { ApprovalAnswer, Session, StratusEvent, ToolResult } from '@stratusagent/core';
+import type { ApprovalAnswer, JsonObject, Session, StratusEvent, ToolResult } from '@stratusagent/core';
 import {
   channelSessionKey,
   type ChannelAdapter,
@@ -408,32 +408,91 @@ const OUTCOME_TEXT: Record<string, string> = {
   'cancelled:deny': 'Cancelled before anyone answered — denied',
 };
 
+/** Comfortably inside Slack's 3000-character section limit. */
+const APPROVAL_INPUT_LIMIT = 1400;
+/** One line in a notification; the blocks carry the readable version. */
+const APPROVAL_SUMMARY_LIMIT = 160;
+
+/**
+ * Slack's three markup characters. Tool input is written by a model, so it
+ * reaches this message as untrusted text: unescaped, `<@U123>` becomes a
+ * real mention and `<!channel>` a real broadcast, letting an agent ping a
+ * workspace through the very prompt asking whether to trust it. Escaping is
+ * applied even inside a code block, where clients disagree about whether
+ * that markup still resolves.
+ */
+const escapeSlackText = (text: string): string =>
+  text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+
+/**
+ * What the approver is actually being asked to allow.
+ *
+ * Without this the prompt names only the tool, and for anything whose
+ * danger lives in its arguments — the shell tool this engine exists for —
+ * `ls` and a destructive command produce an identical message. Approving
+ * something you cannot see is not approval.
+ *
+ * Truncation is announced rather than silent for the same reason: a
+ * decision made on a partial view should at least know it is partial.
+ */
+const renderInvocation = (input: JsonObject): { detail?: string; summary: string; truncated: boolean } => {
+  if (Object.keys(input).length === 0) {
+    return { summary: '', truncated: false };
+  }
+  const rendered = JSON.stringify(input, null, 2);
+  const truncated = rendered.length > APPROVAL_INPUT_LIMIT;
+  const oneLine = JSON.stringify(input);
+  return {
+    detail: truncated ? rendered.slice(0, APPROVAL_INPUT_LIMIT) : rendered,
+    summary: oneLine.length > APPROVAL_SUMMARY_LIMIT
+      ? `${oneLine.slice(0, APPROVAL_SUMMARY_LIMIT)}…`
+      : oneLine,
+    truncated,
+  };
+};
+
 const approvalBlocks = (
   agentName: string,
   toolName: string,
   risk: string,
   requestId: string,
-): SlackBlock[] => [
-  {
-    type: 'section',
-    text: {
-      type: 'mrkdwn',
-      text: `*${agentName}* wants to run \`${toolName}\` (${risk}).`,
+  input: JsonObject,
+): SlackBlock[] => {
+  const invocation = renderInvocation(input);
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*${escapeSlackText(agentName)}* wants to run \`${escapeSlackText(toolName)}\` (${risk}).`,
+      },
     },
-  },
-  {
-    type: 'actions',
-    // The request id rides on every button rather than in the message
-    // reference: Slack gives the value back verbatim, so the gateway is
-    // asked about the request that was actually rendered, never one
-    // re-derived from a channel and timestamp.
-    elements: [
-      { type: 'button', action_id: 'stratus_approve_once', text: { type: 'plain_text', text: 'Allow once' }, value: requestId },
-      { type: 'button', action_id: 'stratus_approve_always', text: { type: 'plain_text', text: 'Always allow' }, value: requestId, style: 'primary' },
-      { type: 'button', action_id: 'stratus_deny', text: { type: 'plain_text', text: 'Deny' }, value: requestId, style: 'danger' },
-    ],
-  },
-];
+    ...(invocation.detail
+      ? [{
+          type: 'section',
+          text: { type: 'mrkdwn', text: `\`\`\`\n${escapeSlackText(invocation.detail)}\n\`\`\`` },
+        }]
+      : []),
+    ...(invocation.truncated
+      ? [{
+          type: 'context',
+          elements: [{ type: 'mrkdwn', text: ':warning: Arguments shown are truncated — the full call is longer than this.' }],
+        }]
+      : []),
+    {
+      type: 'actions',
+      // The request id rides on every button rather than in the message
+      // reference: Slack gives the value back verbatim, so the gateway is
+      // asked about the request that was actually rendered, never one
+      // re-derived from a channel and timestamp.
+      elements: [
+        { type: 'button', action_id: 'stratus_approve_once', text: { type: 'plain_text', text: 'Allow once' }, value: requestId },
+        { type: 'button', action_id: 'stratus_approve_always', text: { type: 'plain_text', text: 'Always allow' }, value: requestId, style: 'primary' },
+        { type: 'button', action_id: 'stratus_deny', text: { type: 'plain_text', text: 'Deny' }, value: requestId, style: 'danger' },
+      ],
+    },
+  ];
+};
 
 interface PendingApprovalPost {
   connection: AgentConnection;
@@ -602,6 +661,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
 
     const agentName = gateway.agents().find((agent) => agent.id === event.agentId)?.name ?? event.agentId;
+    // The notification preview is all some approvers see before deciding
+    // whether to open the thread, so it carries the arguments too — just
+    // the short form.
+    const invocationSummary = renderInvocation(event.call.input).summary;
 
     // The post is the only awaited step, and the only window in which the
     // request can settle behind this function's back — so it is the only
@@ -615,9 +678,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         channel,
         // Fallback text for notifications and clients that do not render
         // blocks — an approval nobody can read is an approval nobody gives.
-        text: `${agentName} wants to run ${event.call.toolName} (${event.risk}).`,
+        text: escapeSlackText(
+          `${agentName} wants to run ${event.call.toolName} (${event.risk})`
+          + `${invocationSummary ? `: ${invocationSummary}` : ''}.`,
+        ),
         ...(thread ? { thread_ts: thread } : {}),
-        blocks: approvalBlocks(agentName, event.call.toolName, event.risk, event.requestId),
+        blocks: approvalBlocks(agentName, event.call.toolName, event.risk, event.requestId, event.call.input),
       });
       post = posted.ts
         ? {
@@ -679,7 +745,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
     const outcome = OUTCOME_TEXT[`${event.reason}:${event.answer}`] ?? 'Resolved';
     const by = event.actor ? ` by <@${event.actor}>` : '';
-    const text = `*${post.agentName}* — \`${post.toolName}\` (${post.risk}): ${outcome}${by}.`;
+    const text = `*${escapeSlackText(post.agentName)}* — \`${escapeSlackText(post.toolName)}\` (${post.risk}): ${outcome}${by}.`;
     try {
       await post.connection.web.chat.update({
         channel: post.channel,

@@ -81,6 +81,12 @@ allow**, since that widens what the agent may do for the rest of the session.
 An agent with no approvers listed denies every request on arrival rather than
 leaving it hanging.
 
+The message shows the tool's arguments as well as its name — approving
+`shell.run` without seeing what it would run is not approval. Arguments are
+escaped, so a model-written argument cannot mention or broadcast to the
+workspace through the prompt itself, and long ones are truncated with a
+notice saying so.
+
 Requests are also denied, visibly, when they expire, when the turn is
 cancelled, and when the daemon shuts down. Every ending retracts the buttons,
 so a message never keeps offering a decision that has nowhere to land.

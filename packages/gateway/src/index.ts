@@ -58,6 +58,12 @@ const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
  * the Slack thread it is answering) open indefinitely.
  */
 const DEFAULT_APPROVAL_TIMEOUT_MS = 900_000;
+/**
+ * Node's largest `setTimeout` delay. Anything above it does not become a
+ * long wait — it silently becomes a 1ms one, so a config asking for a
+ * 30-day approval window would expire every request almost immediately.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 /**
  * Durable session storage on node:sqlite (unflagged on Node 22.13+). The
@@ -407,6 +413,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // ---- approval brokering -------------------------------------------------
 
   const approvalTimeoutMs = options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
+  // Clamped, not trusted: a delay past Node's timer range is not a long
+  // wait, it is a 1ms one, so an over-large value would turn every approval
+  // into an instant expiry — the opposite of what it asked for. The CLI
+  // rejects these at config load with a better message; this is the
+  // backstop for a programmatic caller.
+  const effectiveApprovalTimeoutMs = Math.min(approvalTimeoutMs, MAX_TIMER_DELAY_MS);
+  if (approvalTimeoutMs > MAX_TIMER_DELAY_MS) {
+    warn(
+      `approval timeout ${approvalTimeoutMs}ms is above Node's maximum timer delay; using ${MAX_TIMER_DELAY_MS}ms (~24.8 days)`,
+    );
+  }
 
   type SettleApproval = (
     answer: ApprovalAnswer,
@@ -437,6 +454,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * rather than executing a tool for a turn that has already moved on.
    */
   const requestApproval: ApprovalRequester = (request) => new Promise<ApprovalAnswer>((resolve) => {
+    // A shutdown denies what is parked once, at the top of stop(). Turns
+    // already running keep going through the drain, though, and one of them
+    // can reach a gated tool AFTER that snapshot — finishing a provider
+    // call, or moving to the next call in the same response. Parking it
+    // would deadlock the drain against a question nobody is left to answer:
+    // stop() waits for the turn, the turn waits for the approval, and the
+    // approval waits out its timeout — forever when there is none.
+    if (stopping) {
+      resolve('deny');
+      void bus.emit({
+        type: 'tool.approval-resolved',
+        sessionId: request.session.id,
+        requestId: randomUUID(),
+        answer: 'deny',
+        reason: 'cancelled',
+      });
+      return;
+    }
+
     const requestId = randomUUID();
 
     let timer: NodeJS.Timeout | undefined;
@@ -469,13 +505,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     pendingApprovals.set(requestId, settle);
 
-    if (approvalTimeoutMs > 0) {
+    if (effectiveApprovalTimeoutMs > 0) {
       // Deliberately NOT unref'd. A parked turn is real outstanding work,
       // and its timer is the only thing that will ever finish it — letting
       // the process exit out from under one would abandon the turn instead
       // of denying it. Shutdown is handled where it belongs, in stop(),
       // which settles every outstanding request before draining.
-      timer = setTimeout(() => settle('deny', 'timeout'), approvalTimeoutMs);
+      timer = setTimeout(() => settle('deny', 'timeout'), effectiveApprovalTimeoutMs);
     }
 
     // The abort listener is attached before the request is announced, so a
@@ -497,8 +533,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       call: request.call,
       risk: request.risk,
       ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
-      ...(approvalTimeoutMs > 0
-        ? { expiresAt: new Date(Date.now() + approvalTimeoutMs).toISOString() }
+      ...(effectiveApprovalTimeoutMs > 0
+        ? { expiresAt: new Date(Date.now() + effectiveApprovalTimeoutMs).toISOString() }
         : {}),
     });
   });

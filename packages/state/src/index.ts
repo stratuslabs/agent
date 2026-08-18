@@ -60,6 +60,12 @@ export interface AgentApprovalConfig {
   slackChannel?: string;
 }
 
+/**
+ * The longest an approval may wait: Node's maximum `setTimeout` delay.
+ * Above it a timer does not wait longer, it fires almost immediately.
+ */
+export const MAX_APPROVAL_TIMEOUT_MS = 2_147_483_647;
+
 /** The `approvals` block of ~/.stratus/config.json. */
 export interface ApprovalsConfig extends AgentApprovalConfig {
   /**
@@ -680,6 +686,18 @@ const parseApprovalsConfig = (raw: unknown, configPath: string): ApprovalsConfig
     if (typeof source.timeoutMs !== 'number' || !Number.isFinite(source.timeoutMs) || source.timeoutMs < 0) {
       throw new Error(
         `Invalid approvals.timeoutMs in config ${configPath}: ${String(source.timeoutMs)}. Use a non-negative number of milliseconds.`,
+      );
+    }
+    // Refused rather than clamped: a value past Node's timer range does not
+    // become a long wait, it becomes a 1ms one — so a config asking for a
+    // 30-day window would expire every approval almost immediately, which
+    // is the exact opposite of what it asked for and impossible to diagnose
+    // from the outside. Someone who wrote a number this large has to be
+    // told, not quietly given a different one.
+    if (source.timeoutMs > MAX_APPROVAL_TIMEOUT_MS) {
+      throw new Error(
+        `Invalid approvals.timeoutMs in config ${configPath}: ${source.timeoutMs} is longer than the maximum `
+        + `${MAX_APPROVAL_TIMEOUT_MS}ms (~24.8 days). A larger value would expire every approval immediately.`,
       );
     }
     approvals.timeoutMs = source.timeoutMs;

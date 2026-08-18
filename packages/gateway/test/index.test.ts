@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { RunAbortedError, type StratusEvent } from '@stratusagent/core';
+import { RunAbortedError, type ApprovalAnswer, type StratusEvent } from '@stratusagent/core';
 import {
   createGateway,
   SqliteSessionStore,
@@ -1866,4 +1866,71 @@ test('a resolution emitted at shutdown reaches channels before they stop', async
   await settles(gateway.stop(), 'the shutdown drain');
   assert.equal(await settles(answer, 'the parked call'), 'deny');
   assert.equal(sawResolutionBeforeStop, true, 'the channel stopped before its retraction arrived');
+});
+
+test('a call that reaches approval during shutdown is refused, not parked', async () => {
+  // stop() denies what is parked once, at the top. Turns already running
+  // keep going through the drain though, and one can reach a gated tool
+  // AFTER that snapshot — a provider call finishing, or the next call in
+  // the same response. Parking it deadlocks the drain against a question
+  // nobody is left to answer. A channel's stop() runs at exactly that
+  // point in the sequence, which makes it the honest place to fire one.
+  let late: Promise<ApprovalAnswer> | undefined;
+  const channel: GatewayChannelAdapter = {
+    name: 'fake',
+    async start() {},
+    async stop() {
+      late = transport.request(parkedCall('sess-late'));
+    },
+  };
+
+  // No timeout at all, so nothing but the fix can ever settle this.
+  const harness = await brokerHarness({ approvalTimeoutMs: 0, channels: [channel] });
+  const { gateway } = harness;
+  const transport = harness.transport;
+  await gateway.start();
+
+  await settles(gateway.stop(), 'the shutdown drain');
+  assert.ok(late, 'the channel fired a late request');
+  assert.equal(await settles(late, 'the late request'), 'deny');
+});
+
+test('an approval timeout past the timer range is clamped, not silently instant', async () => {
+  // setTimeout turns anything above ~24.8 days into a 1ms delay, so an
+  // over-large value would expire every approval almost immediately — the
+  // exact opposite of what it asked for.
+  const home = await newHome();
+  const warnings: string[] = [];
+  let transport: ApprovalTransport | undefined;
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    approvalTimeoutMs: 2_592_000_000,
+    warn: (line) => warnings.push(line),
+    approvals: (given) => {
+      transport = given;
+      return { async approve() { return true; } };
+    },
+  });
+
+  const requested = nextEvent(gateway.bus, 'tool.approval-requested');
+  const answer = transport!.request(parkedCall('sess-clamp'));
+  const request = await settles(requested, 'the approval request');
+
+  assert.ok(warnings.some((line) => line.includes('maximum timer delay')), `expected a clamp warning, got ${JSON.stringify(warnings)}`);
+
+  // Not a race and not a sleep-then-check: timers fire in expiry order, so
+  // a 1ms one — what an unclamped 30 days silently becomes — has certainly
+  // fired by the time a 20ms one does. Reaching this line with the request
+  // still resolvable is proof the expiry did not happen. Asserting on
+  // `expiresAt` instead would pass either way: the overflow is in
+  // setTimeout, not in the arithmetic.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(
+    gateway.resolveApproval({ requestId: request.requestId, answer: 'deny' }),
+    true,
+    'the request had already expired, so the timeout overflowed to ~1ms',
+  );
+  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  await gateway.stop();
 });
