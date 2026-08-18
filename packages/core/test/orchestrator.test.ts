@@ -560,7 +560,13 @@ test('streaming runners drain every provider.delta before the final provider.res
       // A deliberately slow subscriber: draining must still finish before
       // the final response is delivered.
       await new Promise((resolve) => setTimeout(resolve, 5));
-      order.push(`delta:${event.delta.type === 'text' ? event.delta.text : event.delta.toolName}`);
+      // Narrowed properly: only a tool-call delta carries a name, and
+      // thinking/reset deltas carry nothing at all.
+      const { delta } = event;
+      const label = delta.type === 'text'
+        ? delta.text
+        : delta.type === 'tool-call' ? delta.toolName : delta.type;
+      order.push(`delta:${label}`);
       return;
     }
     if (event.type === 'provider.response') {

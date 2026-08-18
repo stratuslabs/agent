@@ -14,6 +14,9 @@ importers:
         specifier: workspace:*
         version: link:../core
     devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -33,6 +36,9 @@ importers:
         specifier: workspace:*
         version: link:../core
     devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -43,6 +49,9 @@ importers:
         specifier: workspace:*
         version: link:../core
     devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -89,6 +98,9 @@ importers:
 
   packages/core:
     devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -115,6 +127,9 @@ importers:
         specifier: workspace:*
         version: link:../core
     devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -134,6 +149,9 @@ importers:
         specifier: workspace:*
         version: link:../state
     devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -144,6 +162,9 @@ importers:
         specifier: workspace:*
         version: link:../core
     devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -189,6 +210,9 @@ importers:
         specifier: workspace:*
         version: link:../core
     devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -214,6 +238,9 @@ importers:
         specifier: workspace:*
         version: link:../providers
     devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
       typescript:
         specifier: ^5.9.3
         version: 5.9.3

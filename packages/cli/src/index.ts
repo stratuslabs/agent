@@ -1061,10 +1061,17 @@ const eventDetail = (event: StratusEvent): Record<string, unknown> | undefined =
   }
 };
 
-// Kept with its historical CLI signature: a parsed run command is a
-// RuntimeSelection plus CLI-only fields the resolver ignores.
+/**
+ * Kept with its historical CLI signature: a parsed run command is a
+ * RuntimeSelection plus CLI-only fields the resolver ignores.
+ *
+ * Those fields are *permitted*, not required. Demanding a whole
+ * `ParsedRunCommand` made the type claim the resolver cared about
+ * `approvals`, `format`, and `events` — it reads none of them — so every
+ * caller with a selection in hand had to invent values to get past it.
+ */
 export const resolveRuntimeConfig = (
-  command: ParsedRunCommand,
+  command: RuntimeSelection & Partial<Omit<ParsedRunCommand, keyof RuntimeSelection>>,
   env: CliEnvironment = {},
 ): Promise<RuntimeConfig> => resolveStateRuntimeConfig(command, env);
 

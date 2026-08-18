@@ -83,7 +83,14 @@ export class AgentRegistry {
 
 export interface Session {
   id: string;
-  agent: AgentDescriptor;
+  /**
+   * The full definition, not just the descriptor: an agent's tool allowlist
+   * travels with its session, so a runner can enforce it for an agent that
+   * was never registered. Typed as a descriptor, this was read through a
+   * cast — the type said the allowlist could not be here while the runner
+   * depended on it being here.
+   */
+  agent: AgentDefinition;
   status: SessionStatus;
   messages: Message[];
   createdAt: string;
@@ -550,7 +557,8 @@ export class AllowAllApprovalPolicy implements ApprovalPolicy {
 
 export interface RunInput {
   sessionId: string;
-  agent: AgentDescriptor;
+  /** See Session.agent: the allowlist travels with the run. */
+  agent: AgentDefinition;
   userMessage: string;
   metadata?: JsonObject;
   /** Aborting fails the turn cleanly; see RunAbortedError. */
@@ -757,8 +765,7 @@ export class AgentRunner {
   private allowedToolsFor(session: Session): Set<string> | undefined {
     // The definition handed to run()/resume() travels with the session, so an
     // agent's own allowlist applies even when it was never registered.
-    const sessionAgent = session.agent as AgentDefinition;
-    const tools = sessionAgent.tools ?? this.agents.get(session.agent.id)?.tools;
+    const tools = session.agent.tools ?? this.agents.get(session.agent.id)?.tools;
     return tools ? new Set(tools) : undefined;
   }
 

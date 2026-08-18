@@ -15,7 +15,7 @@
   ],
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
     "test": "node --test --experimental-strip-types"
   },
   "engines": {
@@ -25,6 +25,7 @@
     "@stratusagent/core": "workspace:*"
   },
   "devDependencies": {
+    "@types/node": "^24.6.0",
     "typescript": "^5.9.3"
   },
   "license": "MIT",

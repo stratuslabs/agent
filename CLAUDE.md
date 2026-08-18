@@ -52,6 +52,13 @@ If you need a rule that is not exported, export it. Do not copy it.
 - New behavior needs a test that fails without the change. Verify that it
   does; a test that passes both ways is worse than none, because it reads
   as covered.
+- **`pnpm typecheck` covers test files too.** Each package's
+  `tsconfig.test.json` exists for that, and it has to re-declare
+  `"exclude": ["dist"]` — the package tsconfig excludes `test` so a build
+  never emits it, and `exclude` filters whatever `include` matched, so an
+  inherited one silently drops every file the config was written to check.
+  It did exactly that until #50, hiding a stale `GatewayLike` stub and a
+  `Session.agent` type the runner was already casting past.
 - **Never assert timing.** A test that sleeps and then checks state is a
   race against the CI runner. Gate on the event you actually mean, and
   give the gate a way to lose so a regression fails the assertion instead

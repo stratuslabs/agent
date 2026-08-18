@@ -2437,7 +2437,12 @@ test('model discovery keeps a bound stored key on its own endpoint', async () =>
         new Headers(init?.headers ?? {}).forEach((value, key) => {
           headers[key] = value;
         });
-        listRequests.push({ url: String(url), bearer: headers.authorization });
+        // `exactOptionalPropertyTypes` distinguishes "absent" from
+        // "present and undefined"; an unauthenticated probe means absent.
+        listRequests.push({
+          url: String(url),
+          ...(headers.authorization ? { bearer: headers.authorization } : {}),
+        });
         return new Response(JSON.stringify({ data: [{ id: 'local-llama' }] }), { status: 200 });
       }) as typeof fetch,
       serviceRunner: stubServiceRunner,

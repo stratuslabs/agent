@@ -28,7 +28,15 @@ const openAiText = (text: string): Response =>
 
 // A minimal Anthropic SSE stream: the gateway's streaming path (anthropic +
 // apiKey) drives the SDK's stream parser, which wants real event framing.
-const anthropicSse = (events: Array<{ type: string }>): Response =>
+/**
+ * One SSE frame's payload. Typed as "a `type` plus whatever else that event
+ * carries", because the helper only reads `type` and serializes the rest —
+ * describing it as `{ type: string }` made every realistic event literal an
+ * excess-property error.
+ */
+type SseEvent = { type: string } & Record<string, unknown>;
+
+const anthropicSse = (events: SseEvent[]): Response =>
   new Response(
     events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''),
     { status: 200, headers: { 'content-type': 'text/event-stream' } },
@@ -1735,7 +1743,10 @@ test('a parked call is announced, and the answer resumes it', async () => {
   // The session's metadata rides along so a channel can ask where the turn
   // is actually happening without reaching into the store.
   assert.equal(request.metadata?.slackChannel, 'C1');
-  assert.ok(Date.parse(request.expiresAt) > 0, 'the request says when it gives up');
+  // Present because this harness runs with a real timeout; the field is
+  // absent only when there is none, which is a different assertion.
+  assert.ok(request.expiresAt, 'the request says when it gives up');
+  assert.ok(Date.parse(request.expiresAt) > 0);
 
   assert.equal(gateway.resolveApproval({ requestId: request.requestId, answer: 'always', actor: 'U9' }), true);
   assert.equal(await settles(answer, 'the parked call'), 'always');

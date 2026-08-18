@@ -15,6 +15,14 @@ interface RecordedRequest {
   headers: Record<string, string>;
 }
 
+/**
+ * One SSE frame's payload. Typed as "a `type` plus whatever else that event
+ * carries", because the helper only reads `type` and serializes the rest —
+ * describing it as `{ type: string }` made every realistic event literal an
+ * excess-property error.
+ */
+type SseEvent = { type: string } & Record<string, unknown>;
+
 const createMockFetch = (responses: Array<Record<string, unknown>>) => {
   const requests: RecordedRequest[] = [];
   let callIndex = 0;
@@ -482,7 +490,7 @@ test('streaming forwards tool-input fragments as tool-call deltas', async () => 
   // Claude streams tool input as JSON fragments after the block's start
   // event; each must reach the sink — consumers and activity watchdogs
   // would otherwise see silence while a large argument is generated.
-  const sse = (events: Array<{ type: string }>): Response =>
+  const sse = (events: SseEvent[]): Response =>
     new Response(
       events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''),
       { status: 200, headers: { 'content-type': 'text/event-stream' } },
@@ -537,7 +545,7 @@ test('streaming forwards tool-input fragments as tool-call deltas', async () => 
 });
 
 test('streaming forwards thinking progress without exposing the reasoning', async () => {
-  const sse = (events: Array<{ type: string }>): Response =>
+  const sse = (events: SseEvent[]): Response =>
     new Response(
       events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''),
       { status: 200, headers: { 'content-type': 'text/event-stream' } },
