@@ -2815,26 +2815,39 @@ export const runSetup = async (
   };
 
   /**
-   * Every agent the gateway would dispatch to: the ~/.stratus/agents
-   * roster plus the configured default soul, which `stratus setup` can
-   * point at a file anywhere. The gateway registers that soul too, so a
-   * Channels list built from the agents directory alone would hide an
-   * agent Slack can perfectly well talk to. Reads state.soulPath rather
-   * than the saved config so a soul chosen earlier in this same setup
-   * session is already connectable.
+   * A roster entry with an optional path: the built-in Stratus agent
+   * comes from no file at all, exactly as the gateway registers it.
    */
-  const channelRoster = async (): Promise<RosterEntry[]> => {
+  interface ChannelRosterEntry extends Omit<RosterEntry, 'path'> {
+    path?: string;
+  }
+
+  /**
+   * Every agent the gateway would dispatch to: the built-in Stratus
+   * agent, the ~/.stratus/agents roster, and the configured default soul,
+   * which `stratus setup` can point at a file anywhere. The gateway
+   * registers all three, so a Channels list built from the agents
+   * directory alone would hide agents Slack can perfectly well talk to.
+   * Reads state.soulPath rather than the saved config so a soul chosen
+   * earlier in this same setup session is already connectable.
+   */
+  const channelRoster = async (): Promise<ChannelRosterEntry[]> => {
     const warnOnce = (message: string): void => writeLine(streams.stderr, `Warning: ${message}.`);
+    // Seeded before the roster loads, exactly as loadRoster does it: a
+    // fresh install with no soul files still has an agent to put on
+    // Slack, and a roster file that declares id "stratus" cannot take the
+    // built-in's place — the gateway skips it, so offering it here would
+    // name an app after an agent that never receives the messages.
+    const entries: ChannelRosterEntry[] = [{ soul: { agent: { ...DEFAULT_STRATUS_AGENT } } }];
     // Mirror the gateway's loadRoster: two soul files declaring the same
     // id are not two agents. Offering both would let someone create and
     // name an app for the loser, which can never receive a message —
     // Slack credentials are keyed by the shared id, and dispatch reaches
     // the first sorted file.
-    const entries: RosterEntry[] = [];
     for (const entry of await loadRosterSouls(env, warnOnce)) {
       const clash = entries.find((seen) => seen.soul.agent.id === entry.soul.agent.id);
       if (clash) {
-        warnOnce(`duplicate agent id ${entry.soul.agent.id} (${clash.path} vs ${entry.path}); keeping the first`);
+        warnOnce(`duplicate agent id ${entry.soul.agent.id} (${clash.path ?? 'built-in'} vs ${entry.path}); keeping the first`);
         continue;
       }
       entries.push(entry);
@@ -2860,11 +2873,12 @@ export const runSetup = async (
     }
     try {
       const soul = await loadSoulFile(resolved);
-      // An explicit id can collide with a roster file. The gateway's
-      // defaultAgentId replaces the roster source whenever the configured
-      // soul resolves to a different path, so the configured soul is the
-      // one Slack actually dispatches to — offering the roster namesake
-      // here would connect an app to a different agent than it names.
+      // An explicit id can collide with a roster file, or with the
+      // built-in. The gateway's defaultAgentId replaces the registered
+      // source whenever it is pathless (the built-in) or resolves to a
+      // different file, so the configured soul is the one Slack actually
+      // dispatches to — offering the namesake here would connect an app
+      // to a different agent than it names.
       const collision = entries.findIndex((entry) => entry.soul.agent.id === soul.agent.id);
       if (collision >= 0) {
         entries.splice(collision, 1);
@@ -2881,14 +2895,9 @@ export const runSetup = async (
       const roster = await channelRoster();
       const slack = state.channels.slack ?? {};
 
-      if (roster.length === 0) {
-        writeLine(streams.stdout);
-        writeLine(streams.stdout, 'No agents yet — create one from the Agent menu first, then give it a Slack app.');
-        writeLine(streams.stdout, 'Slack apps are per agent: each gets its own name, avatar, and presence.');
-        await prompter.ask('Press Enter to return to the menu… ');
-        return;
-      }
-
+      // The roster always holds at least the built-in agent, so there is
+      // no empty state to short-circuit on — and short-circuiting would
+      // strand orphaned tokens, which are only reachable from this list.
       const options = roster.map((entry) => {
         const id = entry.soul.agent.id;
         const status = slack[id] ? '✓ connected' : '— not connected';

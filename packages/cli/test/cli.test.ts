@@ -2915,8 +2915,9 @@ test('setup connects an agent to Slack without touching any file by hand', async
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      // Channels → Ava → paste both tokens → Back → Save & finish
-      setupInput: Readable.from(['4\n', '1\n', 'xapp-tok\n', 'xoxb-tok\n', '2\n', '6\n']),
+      // Channels → Ava (2; the built-in Stratus agent is 1) → paste both
+      // tokens → Back → Save & finish
+      setupInput: Readable.from(['4\n', '2\n', 'xapp-tok\n', 'xoxb-tok\n', '3\n', '6\n']),
       fetch: (async (url: any, init?: any) => {
         slackCalls.push({
           url: String(url),
@@ -2958,7 +2959,7 @@ test('setup refuses to store Slack tokens the API rejects', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['4\n', '1\n', 'xapp-tok\n', 'xoxb-bad\n', '2\n', '6\n']),
+      setupInput: Readable.from(['4\n', '2\n', 'xapp-tok\n', 'xoxb-bad\n', '3\n', '6\n']),
       // Slack answers 200 with ok:false for a bad token.
       fetch: (async () => new Response(JSON.stringify({ ok: false, error: 'invalid_auth' }), { status: 200 })) as typeof fetch,
     },
@@ -2985,7 +2986,7 @@ test('setup rejects malformed Slack tokens before calling the API', async () => 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['4\n', '1\n', 'xoxb-wrong-kind\n', '2\n', '6\n']),
+      setupInput: Readable.from(['4\n', '2\n', 'xoxb-wrong-kind\n', '3\n', '6\n']),
       fetch: (async () => { called += 1; return new Response('{}', { status: 200 }); }) as typeof fetch,
     },
   });
@@ -3017,7 +3018,7 @@ test('setup disconnects an agent from Slack', async () => {
       homeDir: home,
       processEnv: {},
       // Channels → Ava (connected) → Disconnect → Back → Save & finish
-      setupInput: Readable.from(['4\n', '1\n', '2\n', '2\n', '6\n']),
+      setupInput: Readable.from(['4\n', '2\n', '2\n', '3\n', '6\n']),
     },
   });
 
@@ -3060,7 +3061,7 @@ test('the Channels menu offers a default soul that lives outside the roster', as
       homeDir: home,
       processEnv: {},
       // Channels → Nova → tokens → Back → Save & finish
-      setupInput: Readable.from(['4\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '2\n', '6\n']),
+      setupInput: Readable.from(['4\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '6\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B9', team: 'Acme', team_id: 'T9' }
@@ -3121,7 +3122,7 @@ test('setup suggests serve with the same --config it was run with', async () => 
       cwd: project,
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['4\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '2\n', '6\n']),
+      setupInput: Readable.from(['4\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '6\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
@@ -3154,7 +3155,7 @@ test('the Channels menu drops duplicate roster ids the way the gateway does', as
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['4\n', '2\n', '6\n']),
+      setupInput: Readable.from(['4\n', '3\n', '6\n']),
     },
   });
 
@@ -3183,7 +3184,7 @@ test('the Channels menu follows STRATUS_SOUL over the configured soul', async ()
       homeDir: home,
       // `stratus serve` would resolve this soul, not the configured one.
       processEnv: { STRATUS_SOUL: overridden },
-      setupInput: Readable.from(['4\n', '2\n', '6\n']),
+      setupInput: Readable.from(['4\n', '3\n', '6\n']),
     },
   });
 
@@ -3835,4 +3836,93 @@ test('doctor names the legacy config variable that pointed at a missing file', a
   assert.equal(exitCode, 1);
   assert.match(output.stdout, /gone\.json does not exist, but STRATUSCLAW_CONFIG names it/);
   assert.doesNotMatch(output.stdout, /but STRATUS_CONFIG names it/);
+});
+
+test('the Channels menu connects the built-in agent on a fresh install', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      // No soul files anywhere. The gateway still answers agentId-less
+      // dispatches as the built-in Stratus agent, so it has to be
+      // connectable here — otherwise Slack is unreachable until you
+      // create an agent you may not want.
+      setupInput: Readable.from(['4\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '2\n', '6\n']),
+      fetch: (async (url: any) => new Response(JSON.stringify(
+        String(url).endsWith('/auth.test')
+          ? { ok: true, user_id: 'B7', team: 'Acme', team_id: 'T7' }
+          : { ok: true, url: 'wss://x' },
+      ), { status: 200 })) as typeof fetch,
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Stratus \(stratus\)/);
+  assert.match(output.stdout, /✓ Verified — Stratus is connected to Slack in Acme/);
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials.channels, { slack: { stratus: { appToken: 'xapp-t', botToken: 'xoxb-t' } } });
+});
+
+test('a roster file claiming the built-in id is skipped in the Channels menu', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // The gateway reserves "stratus" before the roster loads and skips this
+  // file with a duplicate warning, so offering "Impostor" here would name
+  // an app for an agent that never receives a message.
+  await writeFile(path.join(agentsDir, 'impostor.md'), '---\nname: Impostor\nid: stratus\n---\n\nYou are not Stratus.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      setupInput: Readable.from(['4\n', '2\n', '6\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Stratus \(stratus\)/);
+  assert.doesNotMatch(output.stdout, /Impostor \(stratus\)/);
+  assert.match(output.stderr, /duplicate agent id stratus \(built-in vs .*impostor\.md\)/);
+});
+
+test('the Channels menu can clear orphaned tokens with no soul files present', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The agent these tokens belonged to was deleted. `stratus serve` still
+  // loads and skips them on every start, and this menu is the only place
+  // they can be removed — so an empty roster must not short-circuit it.
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ghost: { appToken: 'xapp-x', botToken: 'xoxb-x' } } } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      // Channels → the orphan (2, after the built-in) → Remove → Back → Save
+      setupInput: Readable.from(['4\n', '2\n', '1\n', '3\n', '6\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /tokens without a matching agent/);
+  assert.match(output.stdout, /Removed the Slack tokens for ghost\./);
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials.channels, { slack: {} });
 });
