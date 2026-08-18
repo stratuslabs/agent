@@ -378,9 +378,11 @@ Agents remember: facts saved with the built-in `memory.remember` tool persist to
 **Ids are not labels.** Frontmatter may set `id:` explicitly, and it keys the
 agent's sessions, memory, credentials, Slack tokens, and every per-agent path
 on disk. So it must be a slug — lowercase letters, digits, and hyphens,
-starting with a letter or digit, up to 64 characters. Anything else is
-rejected when the soul loads rather than quietly cleaned up. Omit it and one
-is derived from the name.
+starting with a letter or digit. Anything else is rejected when the soul
+loads rather than quietly cleaned up. Omit it and one is derived from the
+name; a generated agent's id is also capped at 64 characters, but a slug
+derived from a name you chose is used whole, because shortening an id moves
+the agent it belongs to.
 
 **Two souls cannot share an id.** That is not two agents; it is one agent
 whose memory and sign-ins belong to whichever file sorted first. The roster

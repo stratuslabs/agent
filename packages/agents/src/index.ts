@@ -104,25 +104,36 @@ const slugify = (name: string): string =>
 export const AGENT_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
 /**
- * Bounded as well as shaped: an id becomes a path segment, and file
- * systems have limits an unbounded one would discover the hard way.
+ * How long an id we *build* is allowed to get. A construction bound, not a
+ * validation rule — `isValidAgentId` deliberately does not check it.
+ *
+ * The difference is that shape has no legacy corpus and length does. No
+ * release ever produced a non-slug id: `slugify` cannot, and a hand-written
+ * `../../escape` was always the attack this module exists to stop. Length is
+ * the opposite — every id derived from a long name before this bound existed
+ * is longer than it, and rejecting those retroactively drops working agents
+ * off the roster while trimming them silently re-keys their sessions, memory,
+ * and credentials to an id nobody has ever used. So the bound applies where
+ * an id is minted fresh and nothing is keyed to it yet, and nowhere else.
+ * File systems still have limits, and an id long enough to hit them fails at
+ * the join with a name that says so.
  */
 export const MAX_AGENT_ID_LENGTH = 64;
 
 /** Whether `id` is safe to key an agent's resources and paths by. */
 export const isValidAgentId = (id: string): boolean =>
-  id.length > 0 && id.length <= MAX_AGENT_ID_LENGTH && AGENT_ID_PATTERN.test(id);
+  id.length > 0 && AGENT_ID_PATTERN.test(id);
 
 /**
- * A derived id, bounded — `base` trimmed so that appending `suffix` still
- * fits, with any hyphen left dangling by the trim removed.
+ * A freshly minted id, bounded — `base` trimmed so that appending `suffix`
+ * still fits, with any hyphen left dangling by the trim removed.
  *
- * Derived ids may be trimmed where explicit ones are rejected, and the
- * difference is consent: nobody chose this string, so shortening it takes
- * nothing away. Shared rather than re-derived, because the two callers that
- * build ids this way — a generated agent's name-plus-suffix, and `agent
- * new` retrying a filename collision — would otherwise each own half of the
- * bound and drift.
+ * Only for ids nothing is keyed to yet: a generated agent's
+ * name-plus-suffix, and `agent new` retrying a filename collision. Both mint
+ * an id in the same breath as the agent, so trimming takes nothing away.
+ * Shared rather than re-derived so the two do not each own half of the bound
+ * and drift. An id derived from a name someone chose does *not* come through
+ * here — that name may already have an agent behind it.
  */
 export const agentIdWithSuffix = (base: string, suffix?: string): string => {
   const tail = suffix ? `-${suffix}` : '';
@@ -160,19 +171,23 @@ export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
   const nameWasGenerated = input.name === undefined;
   const name = input.name ?? generateAgentName(input.seed);
   // Only an explicit id is checked: the derived ones come out of slugify,
-  // which cannot produce anything else. Rejected rather than sanitized —
+  // which cannot produce anything but this shape. Rejected rather than sanitized —
   // silently rewriting `../../escape` into `escape` would hand the caller
   // an agent they did not ask for, keyed to resources they did not name.
   if (input.id !== undefined && !isValidAgentId(input.id)) {
     throw new Error(
-      `Invalid agent id: ${JSON.stringify(input.id)}. Ids may contain lowercase letters, digits, and hyphens, `
-      + 'must start with a letter or digit, and are at most 64 characters — they key files and credentials, not just labels.',
+      `Invalid agent id: ${JSON.stringify(input.id)}. Ids may contain lowercase letters, digits, and hyphens `
+      + 'and must start with a letter or digit — they key files and credentials, not just labels.',
     );
   }
   return {
+    // A chosen name's slug is used whole. It is not this function's to
+    // shorten: the same name has resolved to the same id in every release,
+    // and two long names that differ only past the bound are two agents,
+    // not one roster-refusing collision.
     id: input.id ?? (nameWasGenerated
       ? agentIdWithSuffix(slugify(name), generatedIdSuffix(input.seed))
-      : agentIdWithSuffix(slugify(name))),
+      : slugify(name)),
     name,
     ...(input.instructions ? { instructions: input.instructions } : {}),
     avatar: input.avatar ?? generateAvatarTheme(name),

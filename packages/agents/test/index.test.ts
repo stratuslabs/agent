@@ -20,6 +20,7 @@ import {
   parseSoul,
   agentIdWithSuffix,
   isValidAgentId,
+  MAX_AGENT_ID_LENGTH,
 } from '../src/index.ts';
 
 test('generateAgentName is a human-ish first name, deterministic for a seed', () => {
@@ -483,7 +484,6 @@ test('an explicit agent id must be a slug, because ids become paths', async () =
     'has space',
     'trailing.',
     '',
-    'x'.repeat(65),
   ];
   for (const id of rejected) {
     assert.throws(
@@ -515,26 +515,48 @@ test('a soul declaring a path-capable id is rejected at parse', async () => {
   assert.equal(parseSoul('---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n').agent.id, 'ava');
 });
 
-test('a derived id is bounded, where an explicit one is refused', async () => {
-  // Derived ids may be trimmed and explicit ones may not, and the
-  // difference is consent: nobody chose this string, so shortening it
-  // takes nothing away — whereas silently shortening an id someone wrote
-  // would key their agent to a name they never picked.
-  const long = 'Ada '.repeat(40);
-  const named = defineAgent({ name: long });
-  assert.equal(isValidAgentId(named.id), true, `derived id was ${named.id.length} chars`);
+test('the length bound applies to minted ids, never to keyed ones', async () => {
+  // The bound is a construction rule. Applying it as a validation rule
+  // would re-key agents that already exist: an id is not a label, so
+  // changing one moves the agent's sessions, memory, and credentials.
+  const overLong = 'x'.repeat(MAX_AGENT_ID_LENGTH + 1);
 
+  // A soul written by an older `stratus agent new` carries its derived id
+  // explicitly. Rejecting it now would drop a working agent off the
+  // roster — loadRosterSouls degrades a soul that will not parse to a
+  // warning, so it would vanish rather than fail loudly.
+  assert.equal(defineAgent({ name: 'Ava', id: overLong }).id, overLong);
+  assert.equal(parseSoul(`---\nname: Ava\nid: ${overLong}\n---\nHi`).agent.id, overLong);
+
+  // A hand-written soul that omits the id derives it from the name, and
+  // that derivation has to keep answering the way it always has.
+  const long = `Quarterly Revenue Forecasting And Pipeline Hygiene Assistant For ${'Sales '.repeat(4)}Ops`;
+  const named = defineAgent({ name: long });
+  assert.equal(
+    named.id,
+    'quarterly-revenue-forecasting-and-pipeline-hygiene-assistant-for-sales-sales-sales-sales-ops',
+  );
+  assert.ok(named.id.length > MAX_AGENT_ID_LENGTH, `id was ${named.id.length} chars`);
+
+  // Two long names that differ only past the bound are two agents. Trimmed
+  // to it they would collide, and a duplicate id refuses the whole roster.
+  const other = defineAgent({ name: `${long} And Support` });
+  assert.notEqual(named.id, other.id);
+
+  // What the bound is for: an id minted alongside the agent, where nothing
+  // is keyed to it yet and trimming takes nothing away.
   const generated = defineAgent({ seed: 'x'.repeat(200) });
-  assert.equal(isValidAgentId(generated.id), true);
+  assert.ok(generated.id.length <= MAX_AGENT_ID_LENGTH);
   // The uniqueness suffix survives the trim — it is what keeps two agents
   // drawing the same name from becoming one.
   assert.match(generated.id, /-[a-z0-9]+$/);
 
-  // And the helper both id-builders share keeps a suffix intact rather
-  // than letting the bound eat it.
   const suffixed = agentIdWithSuffix('a'.repeat(200), 'beef');
-  assert.equal(isValidAgentId(suffixed), true);
+  assert.ok(suffixed.length <= MAX_AGENT_ID_LENGTH);
   assert.match(suffixed, /-beef$/);
   // No dangling hyphen where the trim landed.
   assert.equal(agentIdWithSuffix('ava-', 'beef'), 'ava-beef');
+
+  // Shape is still absolute, at any length.
+  assert.throws(() => defineAgent({ name: 'Ava', id: `../../${overLong}` }), /Invalid agent id/);
 });
