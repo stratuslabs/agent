@@ -4767,33 +4767,6 @@ test('a unit that was never enabled is not treated as a failed disable', async (
   assert.equal(result.ok, true);
 });
 
-test('setup will not install a service that cannot see your credential', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
-  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
-
-  const calls: string[] = [];
-  const { streams, output } = createStreams();
-  await runCli({
-    argv: ['setup'],
-    streams,
-    env: {
-      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
-      homeDir: home,
-      // Authenticated only by this shell: launchd and systemd start with
-      // their own environment and never source a profile, so the daemon
-      // would fail every dispatch minutes after setup said it was ready.
-      processEnv: { ANTHROPIC_API_KEY: 'sk-ant-shell-only' },
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
-      setupInput: Readable.from(['7\n']),
-    },
-  });
-
-  assert.deepEqual(calls, [], 'nothing should be handed to the service manager');
-  assert.match(output.stderr, /your API key comes from ANTHROPIC_API_KEY in this shell/);
-  assert.match(output.stderr, /Sign in from Providers/);
-});
-
 test('a stored sign-in installs the service as usual', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
@@ -4917,65 +4890,6 @@ test('systemd unit values escape percent signs', async () => {
   assert.doesNotMatch(unit, /100%b-project/);
 });
 
-test('the shell-only credential check reads the config setup just wrote', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
-  // Nothing discoverable from the working directory, so plain discovery
-  // would resolve the demo provider and report no problem — while the unit
-  // is pinned to this file, whose provider has no stored credential.
-  await writeFile(path.join(project, 'custom.json'), JSON.stringify({ provider: 'openai' }));
-
-  const calls: string[] = [];
-  const { streams, output } = createStreams();
-  await runCli({
-    argv: ['setup', '--config', './custom.json'],
-    streams,
-    env: {
-      cwd: project,
-      homeDir: home,
-      processEnv: { OPENAI_API_KEY: 'sk-openai-shell-only' },
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
-      setupInput: Readable.from(['7\n']),
-    },
-  });
-
-  assert.deepEqual(calls, [], 'a daemon that cannot authenticate must not be installed');
-  assert.match(output.stderr, /your API key comes from OPENAI_API_KEY in this shell/);
-});
-
-test('a shell-only key on any served agent blocks the install', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  const agentsDir = path.join(home, '.stratus', 'agents');
-  await mkdir(agentsDir, { recursive: true });
-  // The default provider is properly signed in, so a config-wide check
-  // passes — but this agent pins openai, whose key exists only in the
-  // shell. The gateway applies each soul's provider independently, so
-  // every message to Nova would fail under the managed daemon.
-  await writeFile(path.join(agentsDir, 'nova.md'), '---\nname: Nova\nprovider: openai\n---\n\nYou are Nova.\n');
-  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
-  await writeFile(
-    path.join(home, '.stratus', 'credentials.json'),
-    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
-  );
-
-  const calls: string[] = [];
-  const { streams, output } = createStreams();
-  await runCli({
-    argv: ['setup'],
-    streams,
-    env: {
-      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
-      homeDir: home,
-      processEnv: { OPENAI_API_KEY: 'sk-openai-shell-only' },
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
-      setupInput: Readable.from(['7\n']),
-    },
-  });
-
-  assert.deepEqual(calls, []);
-  assert.match(output.stderr, /your API key comes from OPENAI_API_KEY in this shell/);
-});
-
 test('rerunning setup keeps an existing --no-login install as it was', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
@@ -5036,118 +4950,6 @@ test('service install pins the config STRATUS_CONFIG selected', async () => {
   assert.match(unit, new RegExp(`"--config" "${path.join(project, 'team.json')}"`));
 });
 
-test('a fallback reachable only from the shell blocks the install', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
-  // The primary is properly stored, so it has no apiKeyEnvVar at all — but
-  // the fallback exists to rescue a failing primary, and under the daemon
-  // it would not be there at all.
-  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
-    provider: 'anthropic',
-    fallbackProvider: 'openai',
-    fallbackModel: 'gpt-4.1-mini',
-  }));
-  await writeFile(
-    path.join(home, '.stratus', 'credentials.json'),
-    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
-  );
-
-  const calls: string[] = [];
-  const { streams, output } = createStreams();
-  await runCli({
-    argv: ['setup'],
-    streams,
-    env: {
-      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
-      homeDir: home,
-      processEnv: { OPENAI_API_KEY: 'sk-openai-shell-only' },
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
-      setupInput: Readable.from(['7\n']),
-    },
-  });
-
-  assert.deepEqual(calls, []);
-  assert.match(output.stderr, /your API key comes from OPENAI_API_KEY in this shell/);
-});
-
-test('a shell-only credential also removes a service already installed', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
-  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
-  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
-  const unitPath = serviceUnitPath({ platform: 'linux', homeDir: home });
-
-  const calls: string[] = [];
-  const { streams, output } = createStreams();
-  await runCli({
-    argv: ['setup'],
-    streams,
-    env: {
-      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
-      homeDir: home,
-      processEnv: { ANTHROPIC_API_KEY: 'sk-ant-shell-only' },
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
-      setupInput: Readable.from(['7\n']),
-    },
-  });
-
-  // Leaving it running would keep failing every Slack dispatch against the
-  // config just overwritten, while the warning says nothing was installed.
-  assert.match(output.stderr, /comes from ANTHROPIC_API_KEY in this shell/);
-  assert.ok(calls.some((call) => /disable --now/.test(call)), calls.join(', '));
-  assert.equal(await readFile(unitPath, 'utf8').catch(() => undefined), undefined);
-});
-
-test('service install refuses a daemon that cannot see the credential', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
-  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai' }));
-
-  const calls: string[] = [];
-  const { streams, output } = createStreams();
-  const exitCode = await runCli({
-    argv: ['service', 'install'],
-    streams,
-    env: {
-      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
-      homeDir: home,
-      processEnv: { OPENAI_API_KEY: 'sk-openai-shell-only' },
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
-    },
-  });
-
-  assert.equal(exitCode, 1);
-  assert.deepEqual(calls, []);
-  assert.match(output.stderr, /comes from OPENAI_API_KEY in this shell/);
-});
-
-test('the credential check resolves as the daemon will, not as this shell does', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
-  // The saved config selects openai with no stored sign-in. A shell-only
-  // STRATUS_PROVIDER=demo makes the *current* shell resolve to demo, which
-  // needs no credential — but the daemon never sees that variable and
-  // resolves openai from the pinned config, where it cannot authenticate.
-  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai' }));
-
-  const calls: string[] = [];
-  const { streams, output } = createStreams();
-  await runCli({
-    argv: ['setup'],
-    streams,
-    env: {
-      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
-      homeDir: home,
-      processEnv: { STRATUS_PROVIDER: 'demo', OPENAI_API_KEY: 'sk-openai-shell-only' },
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
-      setupInput: Readable.from(['7\n']),
-    },
-  });
-
-  assert.deepEqual(calls, [], 'the daemon could not authenticate, so nothing should be installed');
-  assert.match(output.stderr, /comes from OPENAI_API_KEY in this shell/);
-});
-
 test('an unanswerable enablement query is not read as --no-login', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
@@ -5205,66 +5007,6 @@ test('a transient status failure does not disable a service on the next save', a
   // enabled service's login startup.
   assert.ok(calls.some((call) => /enable --now/.test(call)), calls.join(', '));
   assert.ok(!calls.some((call) => /--user disable/.test(call)), calls.join(', '));
-});
-
-test('a custom apiKeyEnv is stripped from the daemon preflight too', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
-  // apiKeyEnv can name anything. Letting one through means the preflight
-  // authenticates with a key the daemon will never have.
-  await writeFile(
-    path.join(home, '.stratus', 'config.json'),
-    JSON.stringify({ provider: 'anthropic', apiKeyEnv: 'WORK_CLAUDE_KEY' }),
-  );
-
-  const calls: string[] = [];
-  const { streams, output } = createStreams();
-  await runCli({
-    argv: ['setup'],
-    streams,
-    env: {
-      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
-      homeDir: home,
-      processEnv: { WORK_CLAUDE_KEY: 'sk-ant-shell-only' },
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
-      setupInput: Readable.from(['7\n']),
-    },
-  });
-
-  assert.deepEqual(calls, [], 'the daemon cannot see WORK_CLAUDE_KEY either');
-  assert.match(output.stderr, /comes from WORK_CLAUDE_KEY in this shell/);
-});
-
-test('a direct install checks the project config the daemon will discover', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
-  // A healthy global config, so forcing the global path would pass the
-  // check — but the unit carries no --config flag and runs from this
-  // directory, where the project config outranks it and has no sign-in.
-  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
-  await writeFile(
-    path.join(home, '.stratus', 'credentials.json'),
-    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
-  );
-  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'openai' }));
-
-  const calls: string[] = [];
-  const { streams, output } = createStreams();
-  const exitCode = await runCli({
-    argv: ['service', 'install'],
-    streams,
-    env: {
-      cwd: project,
-      homeDir: home,
-      processEnv: { OPENAI_API_KEY: 'sk-openai-shell-only' },
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
-    },
-  });
-
-  assert.equal(exitCode, 1);
-  assert.deepEqual(calls, []);
-  assert.match(output.stderr, /comes from OPENAI_API_KEY in this shell/);
 });
 
 test('service install refuses a config the daemon could not parse', async () => {
@@ -5379,62 +5121,10 @@ test('service install refuses a malformed config it would have discovered', asyn
   assert.match(output.stderr, /cannot be used/);
 });
 
-test('an unauthenticated config blocks the install rather than installing a dead daemon', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
-  // No stored credential and nothing in the shell either: every dispatch
-  // would fail with "Missing API key" while the install reported success.
-  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai' }));
-
-  const calls: string[] = [];
-  const { streams, output } = createStreams();
-  const exitCode = await runCli({
-    argv: ['service', 'install'],
-    streams,
-    env: {
-      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
-      homeDir: home,
-      processEnv: {},
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
-    },
-  });
-
-  assert.equal(exitCode, 1);
-  assert.deepEqual(calls, []);
-  assert.match(output.stderr, /there is no sign-in for openai yet/);
-});
-
 test('a demo setup still installs, since it needs no credential at all', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
-
-  const calls: string[] = [];
-  const exitCode = await runCli({
-    argv: ['service', 'install'],
-    streams: createStreams().streams,
-    env: {
-      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
-      homeDir: home,
-      processEnv: {},
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
-    },
-  });
-
-  assert.equal(exitCode, 0);
-  assert.ok(calls.some((call) => /enable --now/.test(call)), calls.join(', '));
-});
-
-test('a missing default soul does not block the install', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
-  // The gateway catches this and serves the built-in agent, so the daemon
-  // runs fine — refusing here would reject a working service, and for a
-  // demo config it would demand a credential that is never needed.
-  await writeFile(
-    path.join(home, '.stratus', 'config.json'),
-    JSON.stringify({ provider: 'demo', soul: '/nowhere/ghost.md' }),
-  );
 
   const calls: string[] = [];
   const exitCode = await runCli({

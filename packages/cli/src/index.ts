@@ -3374,24 +3374,7 @@ export const runSetup = async (
     // were just written rather than the ones it would have found a moment
     // ago. A service failure is reported and never fails setup: the
     // settings are already saved, and `stratus serve` still works by hand.
-    const blocked = state.service.install ? await serviceBlocker(env, configPath) : undefined;
-    if (blocked) {
-      // Installing here would produce a daemon that fails every dispatch on
-      // a missing key, minutes after setup said it was ready.
-      writeLine(streams.stderr, `Not installing the always-on service: ${blocked.detail}.`);
-      writeLine(streams.stderr, 'Sign in from Providers so the key is stored, then run `stratus service install`.');
-      // Skipping is not enough when one is already installed: it keeps
-      // running against the config just overwritten, cannot see the shell
-      // key either, and fails every Slack dispatch while this warning says
-      // the service was not installed.
-      const existing = await readServiceStatus(serviceEnvFor(env)).catch(() => undefined);
-      if (existing?.installed) {
-        const removed = await uninstallService(serviceEnvFor(env));
-        for (const message of removed.messages) {
-          writeLine(removed.ok ? streams.stdout : streams.stderr, message);
-        }
-      }
-    } else if (!state.service.install && servicePlatform(serviceEnvFor(env))) {
+    if (!state.service.install && servicePlatform(serviceEnvFor(env))) {
       // Opting out has to actually take effect. Skipping the install would
       // leave a unit from an earlier setup running and enabled at login,
       // while the menu said "off" — still burning provider usage and still
@@ -4173,7 +4156,7 @@ const serviceEnvFor = (env: CliEnvironment): ServiceEnvironment => ({
 const servedRuntimes = async (
   env: CliEnvironment,
   configPath?: string,
-): Promise<Array<{ runtime?: RuntimeConfig; error?: Error; env: CliEnvironment }>> => {
+): Promise<Array<{ runtime: RuntimeConfig; env: CliEnvironment }>> => {
   const { applySoulPins } = await import('@stratusagent/gateway');
   const { config: activeConfig, location } = await discoverActiveConfig(env, () => {});
   const context = {
@@ -4186,164 +4169,19 @@ const servedRuntimes = async (
     passes.push({ selection: normalized.selection, env: normalized.env as CliEnvironment });
   }
 
-  const resolved: Array<{ runtime?: RuntimeConfig; error?: Error; env: CliEnvironment }> = [];
+  const resolved: Array<{ runtime: RuntimeConfig; env: CliEnvironment }> = [];
   for (const pass of passes) {
-    try {
-      const runtime = await resolveStateRuntimeConfig(
-        { ...pass.selection, ...(configPath ? { configPath } : {}) },
-        pass.env,
-      );
+    // A runtime that cannot resolve is the gateway's to report, per
+    // dispatch and with far better context than a startup pass has.
+    const runtime = await resolveStateRuntimeConfig(
+      { ...pass.selection, ...(configPath ? { configPath } : {}) },
+      pass.env,
+    ).catch(() => undefined);
+    if (runtime) {
       resolved.push({ runtime, env: pass.env });
-    } catch (error) {
-      resolved.push({ error: error instanceof Error ? error : new Error(String(error)), env: pass.env });
     }
   }
   return resolved;
-};
-
-/**
- * The environment the managed daemon will actually run in. launchd and
- * systemd start with their own, so every STRATUS_ and STRATUSCLAW_ override
- * and every API-key variable in the installing shell is simply absent.
- * Resolving with the installing shell instead would answer a different
- * question than "will this daemon work" — an exported STRATUS_PROVIDER=demo
- * makes the check pass while the daemon resolves the real provider from the
- * pinned config and cannot authenticate.
- */
-const daemonEnvironment = (env: CliEnvironment, customKeyVars: Iterable<string> = []): CliEnvironment => {
-  const processEnv = readProcessEnv(env);
-  // A config's apiKeyEnv can name anything — WORK_CLAUDE_KEY, a per-project
-  // variable — and letting one through means the preflight authenticates
-  // with a key the daemon will never have.
-  const custom = new Set(customKeyVars);
-  const stripped: NodeJS.ProcessEnv = {};
-  for (const [name, value] of Object.entries(processEnv)) {
-    if (name.startsWith('STRATUS_') || name.startsWith('STRATUSCLAW_')) {
-      continue;
-    }
-    if (name === 'ANTHROPIC_API_KEY' || name === 'OPENAI_API_KEY' || custom.has(name)) {
-      continue;
-    }
-    stripped[name] = value;
-  }
-  return { ...env, processEnv: stripped };
-};
-
-/**
- * Every variable that could hand a credential to a run: the two selector
- * variables' targets, and the apiKeyEnv of whichever config the daemon
- * will read. Collected from the shell, because that is where the names
- * live before they are stripped.
- */
-const credentialVarNames = async (env: CliEnvironment, configPath?: string): Promise<Set<string>> => {
-  const processEnv = readProcessEnv(env);
-  const names = new Set<string>();
-  for (const selector of ['STRATUS_API_KEY_ENV', 'STRATUSCLAW_API_KEY_ENV'] as const) {
-    const named = readNonEmptyString(processEnv[selector]);
-    if (typeof named === 'string') {
-      names.add(named);
-    }
-  }
-  const config = configPath
-    ? await loadConfigFile(configPath).catch(() => undefined)
-    : (await discoverActiveConfig(env, () => {})).config;
-  if (config?.apiKeyEnv) {
-    names.add(config.apiKeyEnv);
-  }
-  return names;
-};
-
-/**
- * Whether the daemon could authenticate at all, answered by resolving as
- * the daemon will. Returns the shell variable that is covering for the
- * missing credential today, so the message can name it.
- */
-/**
- * Why the managed daemon could not serve a turn: a credential that exists
- * only in the installing shell, or none at all. Both make the service
- * useless; only the wording differs.
- */
-interface ServiceBlocker {
-  /** The shell variable covering for it today, when there is one. */
-  variable?: string;
-  detail: string;
-}
-
-const serviceBlocker = async (
-  env: CliEnvironment,
-  // The config the unit will be pinned to, when it is pinned to one.
-  // Undefined means the unit carries no --config flag, so the daemon
-  // rediscovers from its working directory exactly as this check must —
-  // forcing the global config here would check a file the daemon may
-  // never read, and miss a project config that outranks it.
-  configPath: string | undefined,
-): Promise<ServiceBlocker | undefined> => {
-  const customKeyVars = await credentialVarNames(env, configPath);
-  const bare = daemonEnvironment(env, customKeyVars);
-  const processEnv = readProcessEnv(env);
-  const covering = (provider: string): string | undefined => {
-    const conventional = provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
-    for (const name of ['STRATUS_API_KEY', 'STRATUSCLAW_API_KEY', ...customKeyVars, conventional]) {
-      if (readNonEmptyString(processEnv[name]) !== undefined) {
-        return name;
-      }
-    }
-    // The key is not in this shell either — the daemon is missing a
-    // sign-in outright, which `stratus doctor` reports far better than a
-    // service message can.
-    return undefined;
-  };
-
-  for (const served of await servedRuntimes(bare, configPath)) {
-    if (served.error) {
-      // Not every resolution failure is fatal to the daemon. The gateway
-      // catches a missing or unreadable default soul and serves the
-      // built-in agent instead, so blocking on that would refuse an
-      // install for a service that runs perfectly well — including a demo
-      // config, which needs no credential at all. Only the resolver's
-      // credential failures are terminal for every dispatch.
-      const message = served.error.message;
-      const missingKey = /Missing API key for provider=(\w+)/.exec(message);
-      const boundKey = /saved (\w+) sign-in is bound to/.exec(message);
-      const untrustedUrl = /saved sign-in is not sent to it/.test(message);
-      if (!missingKey && !boundKey && !untrustedUrl) {
-        continue;
-      }
-      if (boundKey || untrustedUrl) {
-        // The key exists but the resolver refuses to send it to this
-        // endpoint; naming a shell variable would be misleading.
-        return { detail: message };
-      }
-      const provider = String(missingKey?.[1]);
-      const name = covering(provider);
-      // Either way the daemon cannot run this agent. A key in the shell
-      // explains where it went; no key at all means there is no sign-in,
-      // and installing a service that fails every dispatch while
-      // reporting success is the worse outcome of the two.
-      return name
-        ? { variable: name, detail: `your API key comes from ${name} in this shell, and a background service never sees it` }
-        : { detail: `there is no sign-in for ${provider} yet, so the daemon could not authenticate` };
-    }
-    const runtime = served.runtime;
-    if (!runtime || runtime.provider === 'demo') {
-      continue;
-    }
-    // The fallback exists to rescue a failing primary, so one the daemon
-    // cannot authenticate is a retry path that silently is not there.
-    const fallbackOf = (config: RuntimeConfig | undefined): FallbackRuntime | undefined =>
-      (config && config.provider !== 'demo' ? config.fallback : undefined);
-    if (fallbackOf(runtime) === undefined) {
-      const withShell = await servedRuntimes(env, configPath);
-      const shellFallback = withShell.map((entry) => fallbackOf(entry.runtime)).find(Boolean);
-      if (shellFallback) {
-        const name = covering(shellFallback.provider);
-        if (name) {
-          return { variable: name, detail: `your API key comes from ${name} in this shell, and a background service never sees it` };
-        }
-      }
-    }
-  }
-  return undefined;
 };
 
 /**
@@ -4417,19 +4255,6 @@ export const runService = async (
         writeLine(streams.stderr, 'The daemon would exit on startup and be restarted in a loop. Fix the file, or move it aside.');
         return 1;
       }
-    }
-
-    // The same question setup asks: launchd and systemd hand the daemon
-    // none of this shell, so a key that lives only here produces a service
-    // that fails every dispatch while reporting a successful install.
-    const blocked = await serviceBlocker(
-      env,
-      selectedConfig ? path.resolve(readWorkingDirectory(env), String(selectedConfig)) : undefined,
-    );
-    if (blocked) {
-      writeLine(streams.stderr, `Not installing: ${blocked.detail}.`);
-      writeLine(streams.stderr, 'Run `stratus setup` → Providers to store the sign-in, then install again.');
-      return 1;
     }
   }
 
@@ -4767,9 +4592,7 @@ export const runServe = async (
     // the daemon-wide defaults it outranks, including STRATUS_PROVIDER, so
     // each served runtime is resolved the way a dispatch resolves it.
     for (const served of await servedRuntimes(env, command.configPath)) {
-      if (served.runtime) {
-        await warnOnCredentialOverride(served.runtime, captured, served.env);
-      }
+      await warnOnCredentialOverride(served.runtime, captured, served.env);
     }
   }
 
