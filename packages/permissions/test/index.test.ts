@@ -102,6 +102,32 @@ test('"always" lasts for the session that said it, and no longer', async () => {
   assert.equal(asks, 3);
 });
 
+test('an "always" grant cannot leak between sessions with adjacent ids', async () => {
+  let asks = 0;
+  const policy = createPermissionPolicy({
+    mode: 'interactive',
+    ask: async () => {
+      asks += 1;
+      return 'always';
+    },
+  });
+
+  // The session cache is keyed by (session, tool) joined on a separator.
+  // Pick one that occurs in real ids — a space, a colon — and these two
+  // pairs collapse onto the same key, so approving the first would silently
+  // approve the second. Channel session ids are colon-delimited and can
+  // carry spaces from a channel name, so the join uses NUL, which cannot
+  // appear in either half.
+  const first = context('run', 'gated', { session: session('a b') });
+  const second = context('b run', 'gated', { session: session('a') });
+
+  assert.equal(await policy.approve(first), true);
+  assert.equal(asks, 1);
+
+  assert.equal(await policy.approve(second), true);
+  assert.equal(asks, 2, 'the second session had to ask for itself');
+});
+
 test('an aborted turn is never approved, before or during the prompt', async () => {
   const controller = new AbortController();
   const preAborted = new AbortController();
