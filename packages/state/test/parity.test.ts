@@ -54,15 +54,21 @@ const USER_MESSAGE = 'remember that I like short answers';
 const REMEMBERED = 'The user likes short answers.';
 const FINAL_TEXT = 'Noted — short answers from here on.';
 
-/** A minimal session for provider-level assertions. */
-const FALLBACK_SESSION: Session = {
-  id: 'fallback-1',
+/**
+ * A fresh session per provider-level assertion. Deliberately not shared:
+ * the fallback wrapper marks a switch on the session so it stays sticky
+ * for the rest of that conversation, so a session reused across tests
+ * arrives at the next one already routed to the fallback — and a test
+ * asserting the primary was tried would silently be asserting nothing.
+ */
+const fallbackSession = (id: string): Session => ({
+  id,
   agent: AGENT,
   status: 'running',
-  messages: [{ id: 'fallback-1:user:1', role: 'user', content: 'hello', createdAt: new Date().toISOString() }],
+  messages: [{ id: `${id}:user:1`, role: 'user', content: 'hello', createdAt: new Date().toISOString() }],
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
-};
+});
 
 /** What both paths must agree on, gathered from one scripted run. */
 interface Observed {
@@ -252,6 +258,7 @@ test('a tool call and a memory write land identically on both billing paths', as
 });
 
 test('a subscription fallback inherits the injected query transport', async () => {
+  const sessionId = 'fallback-inherit';
   // The fallback branch returns before the subscription branch is reached,
   // so it builds its provider from a config of its own. If `queryFn` does
   // not travel with `fetch`, the fallback reaches the *real* Agent SDK the
@@ -298,7 +305,7 @@ test('a subscription fallback inherits the injected query transport', async () =
   let response;
   try {
     response = await Promise.race([
-      provider.generate({ session: FALLBACK_SESSION, memory: [], signal: deadline.signal }),
+      provider.generate({ session: fallbackSession(sessionId), memory: [], signal: deadline.signal }),
       new Promise<never>((_, reject) => {
         deadline.signal.addEventListener('abort', () => {
           reject(new Error('the fallback never answered through the injected transport — it reached the real Agent SDK'));
@@ -311,4 +318,102 @@ test('a subscription fallback inherits the injected query transport', async () =
 
   assert.deepEqual(seen, ['primary', 'fallback']);
   assert.deepEqual(response.parts, [{ type: 'text', text: FINAL_TEXT }]);
+});
+
+test('a subscription fallback behind an OpenAI primary can be given a transport', async () => {
+  const sessionId = 'fallback-cross-provider';
+  // An OpenAI primary has no `queryFn` to lend — the field exists only on
+  // the Anthropic variant — so a subscription fallback here has nothing to
+  // inherit. Without a seam of its own, this pair reaches the real Agent
+  // SDK on the first primary failure, and the type system offers the
+  // caller no way to prevent it.
+  let answered = false;
+  const queryFn: ClaudeCodeQueryFn = () =>
+    (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
+      answered = true;
+      yield { type: 'system', subtype: 'init' } as ClaudeCodeStreamMessage;
+      yield { type: 'result', subtype: 'success', is_error: false, result: FINAL_TEXT } as ClaudeCodeStreamMessage;
+    })();
+
+  const provider = createRuntimeProvider({
+    provider: 'openai',
+    model: 'gpt-4o',
+    baseUrl: 'https://example.invalid/v1',
+    apiKey: 'sk-openai',
+    fetch: (async () => new Response('nope', { status: 500 })) as typeof fetch,
+    fallback: {
+      provider: 'anthropic',
+      model: 'claude-opus-5',
+      authToken: 'sk-ant-oat-fallback',
+      queryFn,
+    },
+  });
+
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), 10_000);
+  let response;
+  try {
+    response = await Promise.race([
+      provider.generate({ session: fallbackSession(sessionId), memory: [], signal: deadline.signal }),
+      new Promise<never>((_, reject) => {
+        deadline.signal.addEventListener('abort', () => {
+          reject(new Error('the fallback never answered through its own transport — it reached the real Agent SDK'));
+        }, { once: true });
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  assert.equal(answered, true);
+  assert.deepEqual(response.parts, [{ type: 'text', text: FINAL_TEXT }]);
+});
+
+test('a fallback naming its own transport is not overridden by the primary\'s', async () => {
+  const sessionId = 'fallback-precedence';
+  // Both can carry one now, so precedence has to be decided rather than
+  // fall out of spread order: a fallback that names a transport is the
+  // only way to give the two halves different ones, and inheriting is the
+  // convenience, not the rule.
+  const used: string[] = [];
+  const transport = (label: string): ClaudeCodeQueryFn => () =>
+    (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
+      used.push(label);
+      if (label === 'primary') {
+        throw new Error('primary is down');
+      }
+      yield { type: 'system', subtype: 'init' } as ClaudeCodeStreamMessage;
+      yield { type: 'result', subtype: 'success', is_error: false, result: FINAL_TEXT } as ClaudeCodeStreamMessage;
+    })();
+
+  const provider = createRuntimeProvider({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    authToken: 'sk-ant-oat-primary',
+    queryFn: transport('primary'),
+    fallback: {
+      provider: 'anthropic',
+      model: 'claude-opus-5',
+      authToken: 'sk-ant-oat-fallback',
+      queryFn: transport('fallback-own'),
+    },
+  });
+
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), 10_000);
+  try {
+    await Promise.race([
+      provider.generate({ session: fallbackSession(sessionId), memory: [], signal: deadline.signal }),
+      new Promise<never>((_, reject) => {
+        deadline.signal.addEventListener('abort', () => {
+          reject(new Error('the fallback never answered — it reached the real Agent SDK'));
+        }, { once: true });
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  // Not ['primary', 'primary']: the fallback used the one it named.
+  assert.deepEqual(used, ['primary', 'fallback-own']);
 });

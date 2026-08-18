@@ -111,6 +111,16 @@ export interface FallbackRuntime {
   baseUrl?: string;
   apiKey?: string;
   authToken?: string;
+  /**
+   * The Agent SDK transport for a *subscription* fallback, which a primary
+   * cannot always supply. A fallback inherits `fetch` from its primary
+   * because both provider variants carry one — but `queryFn` exists only
+   * on the Anthropic variant, so an OpenAI primary with a subscription
+   * fallback has nothing to inherit and no other way to say it. Without
+   * this, that configuration reaches the real Agent SDK the moment the
+   * primary fails.
+   */
+  queryFn?: ClaudeCodeQueryFn;
 }
 
 export type RuntimeConfig =
@@ -1421,7 +1431,10 @@ export const createRuntimeProvider = (
       // out from under an embedder that supplied its own transport for a
       // reason. The two are one seam and have to be carried together.
       ...(config.fetch ? { fetch: config.fetch } : {}),
+      // Inherited from an Anthropic primary, but a fallback naming its own
+      // wins — it is the only way a cross-provider pair can say it.
       ...(config.provider === 'anthropic' && config.queryFn ? { queryFn: config.queryFn } : {}),
+      ...(fallback.queryFn ? { queryFn: fallback.queryFn } : {}),
     } as RuntimeConfig, undefined, executeTool, maxTurns);
     return createFallbackWrappedProvider(primary, fallbackProvider, onFallback ?? (() => {}), persistSession);
   }
