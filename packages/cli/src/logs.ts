@@ -407,12 +407,30 @@ export const tailLog = async (options: TailOptions): Promise<void> => {
 };
 
 /** `14:32:07  ava  tool.called memory.remember` — time, who, what. */
+const formatDetail = (detail: LogRecord['detail']): string => {
+  if (detail === undefined || detail === null) {
+    return '';
+  }
+  if (typeof detail !== 'object') {
+    return String(detail);
+  }
+  return Object.entries(detail).map(([key, value]) => `${key}=${String(value)}`).join(' ');
+};
+
 export const formatLogRecord = (record: LogRecord): string => {
   const time = record.ts.slice(11, 19);
   const who = (record.agentId ?? '—').padEnd(12);
   if (record.level === 'event') {
-    const detail = record.detail ? Object.entries(record.detail).map(([key, value]) => `${key}=${String(value)}`).join(' ') : '';
-    const session = record.sessionId ? ` [${record.sessionId.slice(0, 8)}]` : '';
+    // Records are parsed from a file, not handed over in-process: a
+    // hand-edited line or one written by another version can carry a
+    // string where this version writes an object, and spreading that
+    // into entries renders a word one character per pair.
+    const detail = formatDetail(record.detail);
+    // The whole session id, never a prefix of it. Ids are structured
+    // (`slack-<channel>-<ts>`), so a fixed-width slice renders different
+    // conversations identically — and this is the column you copy into
+    // `stratus logs --session`, where a prefix matches nothing.
+    const session = record.sessionId ? ` [${record.sessionId}]` : '';
     return `${time}  ${who}${record.event ?? 'event'}${detail ? ` ${detail}` : ''}${session}`;
   }
   const prefix = record.level === 'warn' ? 'warning: ' : '';

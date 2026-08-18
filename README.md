@@ -46,6 +46,7 @@ This repo is early, but the core loop is complete.
 Today it is useful for:
 - talking with your agent in a persistent conversation (`stratus chat`) — the session carries across turns and remembered facts accumulate
 - running the whole roster as an always-on daemon (`stratus serve`) — durable sessions that survive restarts, each agent on its own provider and model, delegation between them, and a progress-based watchdog
+- keeping that daemon running across logouts and reboots (`stratus service install`, on by default after setup) — a LaunchAgent on macOS, a systemd user service on Linux — with `stratus logs` to read what it did while you were away
 - talking to your agents in Slack — each agent is its own Slack app with its own avatar and presence, threads are resumable conversations, and replies stream via message edits (install `@stratusagent/channel-slack`, then run `stratus setup` → **Channels** to create and connect each agent's app; see `packages/channel-slack/README.md`)
 - running a multi-turn agent loop locally: provider → tools → provider until the model finishes
 - running real tool-calling sessions against Claude (via the official Anthropic SDK) or any OpenAI-compatible provider (tools are advertised with JSON schemas, tool calls execute locally, and results are fed back to the model)
@@ -134,6 +135,7 @@ Setup is the whole onboarding: a small menu where you pick a provider, sign in, 
 - **Create your agent inside setup** — name them (or let Stratus name them), describe their personality, and their soul file lands in `~/.stratus/agents/` ready to edit.
 - **Default and fallback models.** The Models menu lists every model your sign-ins can actually reach (fetched live from the provider APIs) and lets you pick a **default** and a **fallback** — when the default model errors mid-run, the run automatically retries on the fallback, even across providers.
 - **Connect channels.** The Channels menu walks each agent onto Slack: it prints the app manifest with the agent's name already filled in, takes both tokens without echoing them, verifies each against Slack, and stores them for the daemon. Nothing to hand-edit.
+- **Always on, by default.** The Always on entry installs `stratusd` as a background service — running now, and again at every login — so the roster keeps answering once you close the terminal. Every Slack app you just connected is silent until it runs. Opt out and setup removes the service instead.
 - **Test without leaving the menu.** The Test run entry does a real "say hello" with your current settings.
 
 Prefer doing it by hand? Copy `stratus.config.json.example` into your project instead.
@@ -280,7 +282,29 @@ stratus dashboard
 stratus dashboard --port 4123 --host 127.0.0.1 --no-open
 stratus serve
 stratus serve --idle-timeout 120 --no-events
+stratus service install
+stratus service status
+stratus logs -f
+stratus logs --agent ava -n 200
+stratus doctor
 ```
+
+Three of those are about running the daemon rather than talking to an agent,
+and `packages/cli/README.md` covers each in full:
+
+- **`stratus service`** keeps `stratusd` running under launchd (macOS) or
+  systemd (Linux), starting it now and at every login. `stratus setup` installs
+  it by default, so this is mostly for checking on it (`status`) or opting out
+  later (`uninstall`).
+- **`stratus logs`** reads `~/.stratus/logs/stratusd.jsonl` — what the daemon
+  has been doing since you closed the terminal. `-f` follows it, `--agent` and
+  `--session` filter it. It is a trace, not a transcript: tool inputs and
+  message text are deliberately not in it.
+- **`stratus doctor`** prints what a run would use right now — provider, model,
+  soul — and which file or environment variable decided each, then flags
+  anything that would surprise you. It is the fastest answer to "why is this
+  using the demo provider?" and to an `ANTHROPIC_API_KEY` quietly demoting a
+  Claude subscription sign-in to per-token billing.
 
 Current options:
 
@@ -299,6 +323,9 @@ Current options:
 - `--host`, set the dashboard host
 - `--no-open`, skip automatic browser opening
 - `--idle-timeout`, seconds of silence from a streaming provider before `stratus serve`'s watchdog aborts the turn (default: 120)
+- `--no-log-file`, stop `stratus serve` writing `~/.stratus/logs/stratusd.jsonl`
+- `--no-login`, install the service without the start-at-login trigger
+- `-f`, `-n`, `--agent`, `--session`, `stratus logs`: follow, backlog size, and filters
 - `--help`, `-h`, show help
 
 ## Repo shape
