@@ -3392,10 +3392,18 @@ export const runSetup = async (
       // find a different config whenever setup was run with --config or
       // STRATUS_CONFIG — the daemon would come up on another roster and
       // leave the Slack apps configured above offline.
+      // installService writes files, so it can reject outright — an
+      // inaccessible ~/Library/LaunchAgents, a read-only home. Letting
+      // that escape would fail setup itself, after the config and
+      // credentials were already saved, when the always-on service is the
+      // one optional part of it.
       const result = await installService(serviceEnvFor(env), {
         runAtLogin: state.service.runAtLogin,
         configPath,
-      });
+      }).catch((error: unknown) => ({
+        ok: false,
+        messages: [`Could not install the always-on service: ${error instanceof Error ? error.message : String(error)}`],
+      }));
       for (const message of result.messages) {
         writeLine(result.ok ? streams.stdout : streams.stderr, message);
       }

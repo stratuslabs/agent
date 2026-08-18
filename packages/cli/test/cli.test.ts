@@ -5167,3 +5167,50 @@ test('a config that exists but cannot be read blocks the install', async () => {
   assert.deepEqual(calls, []);
   assert.match(output.stderr, /Not installing:/);
 });
+
+test('the unit keeps the node flags the entrypoint needs', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({
+    platform: 'linux',
+    homeDir: home,
+    execPath: '/usr/bin/node',
+    // From a source checkout the entrypoint is .ts and needs the flag; a
+    // unit without it starts a daemon that cannot load its own bin.
+    execArgv: ['--experimental-strip-types', '--inspect=9229'],
+    scriptPath: '/repo/packages/cli/src/bin.ts',
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  assert.match(unit, /"--experimental-strip-types"/);
+  // An inspector flag would leave the service waiting on a debugger.
+  assert.doesNotMatch(unit, /--inspect/);
+});
+
+test('a service install that throws does not fail setup', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A file where the LaunchAgents/systemd directory belongs: mkdir rejects,
+  // and the rejection used to escape after the config was already written.
+  await mkdir(path.join(home, '.config'), { recursive: true });
+  await writeFile(path.join(home, '.config', 'systemd'), 'not a directory');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0, 'the optional service must not take setup down with it');
+  assert.match(output.stderr, /Could not install the always-on service/);
+  assert.match(output.stderr, /Setup is saved either way/);
+  // And the settings it had already written are still there.
+  assert.ok(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+});

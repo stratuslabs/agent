@@ -35,6 +35,8 @@ export interface ServiceEnvironment {
   execPath?: string;
   /** Absolute path of the CLI entrypoint (bin.js). */
   scriptPath?: string;
+  /** Node flags the entrypoint needs. Defaults to this process's own. */
+  execArgv?: string[];
   /** User id, for launchctl's `gui/<uid>` domain. */
   uid?: number;
   run?: ServiceRunner;
@@ -156,6 +158,12 @@ export const serviceDefinition = (
   // bare `stratus` would depend on a shell profile it never loads.
   argv: [
     env.execPath ?? process.execPath,
+    // The flags this process needed to load its own entrypoint. Running
+    // from a source checkout, that is --experimental-strip-types for a
+    // .ts bin — drop it and the managed daemon cannot start at all while
+    // the foreground command works. Inspector flags are filtered: they
+    // would leave the service waiting on a debugger or holding a port.
+    ...(env.execArgv ?? process.execArgv).filter((flag) => !flag.startsWith('--inspect')),
     env.scriptPath ?? process.argv[1] ?? 'stratus',
     'serve',
     // launchd redirects stdout to a plain file it holds open, and nothing
