@@ -15,15 +15,13 @@ import {
   type StratusEvent,
 } from '@stratusagent/core';
 import { createRememberTool, MEMORY_TOOL_NAME } from '@stratusagent/agents';
-import { createAnthropicProvider } from '@stratusagent/provider-anthropic';
 import {
-  createClaudeCodeProvider,
   type ClaudeCodeQueryFn,
   type ClaudeCodeStreamMessage,
   type ClaudeCodeToolExecutor,
 } from '@stratusagent/provider-claude-code';
 
-import { createFileMemoryStore } from '../src/index.ts';
+import { createFileMemoryStore, createRuntimeProvider } from '../src/index.ts';
 
 /**
  * The same scripted turn, run on both billing paths, asserted through what
@@ -61,6 +59,13 @@ interface Observed {
   memory: MemoryEntry[];
   toolCalls: Array<{ toolName: string; input: unknown }>;
   toolResults: Array<{ toolName: string; ok: boolean }>;
+  /**
+   * Call ids paired with the ids the results answered, in transcript
+   * order. Kept separate from the comparison above because these are
+   * provider-generated and never match across the two — what has to hold
+   * is that each provider answered its *own* calls.
+   */
+  pairing: Array<{ called: string; answered: string | undefined }>;
   events: string[];
   finalText: string;
   status: Session['status'];
@@ -158,12 +163,16 @@ const observe = async (
 
   const toolCalls: Observed['toolCalls'] = [];
   const toolResults: Observed['toolResults'] = [];
+  const calledIds: string[] = [];
+  const answeredIds: string[] = [];
   for (const message of session.messages) {
     for (const call of message.toolCalls ?? []) {
       toolCalls.push({ toolName: call.toolName, input: call.input });
+      calledIds.push(call.id);
     }
     if (message.toolResult) {
       toolResults.push({ toolName: message.toolResult.toolName, ok: message.toolResult.ok });
+      answeredIds.push(message.toolResult.callId);
     }
   }
 
@@ -171,6 +180,7 @@ const observe = async (
     memory: await memoryStore.list(AGENT.id),
     toolCalls,
     toolResults,
+    pairing: calledIds.map((called, index) => ({ called, answered: answeredIds[index] })),
     events: events.filter((type) => type.startsWith('tool.')),
     finalText: session.messages.at(-1)?.content ?? '',
     status: session.status,
@@ -178,17 +188,23 @@ const observe = async (
 };
 
 test('a tool call and a memory write land identically on both billing paths', async () => {
-  const apiKey = await observe(() => createAnthropicProvider({
-    apiKey: 'sk-ant-test',
-    model: 'claude-opus-5',
-    fetch: anthropicFetch(),
-  }));
-
-  const subscription = await observe((executeTool) => createClaudeCodeProvider({
-    authToken: 'sk-ant-oat-test',
-    queryFn: claudeCodeQuery(),
+  // Through the factory the CLI and the gateway actually call, not the
+  // providers directly: selecting the wrong path, or dropping the hosted
+  // executor on the way through, would disable subscription tools in
+  // production while a suite that built its own providers stayed green.
+  // The two configs differ only in which Anthropic credential they carry,
+  // which is exactly how the real choice is made.
+  const apiKey = await observe((executeTool) => createRuntimeProvider(
+    { provider: 'anthropic', model: 'claude-opus-5', apiKey: 'sk-ant-test', fetch: anthropicFetch() },
+    undefined,
     executeTool,
-  }));
+  ));
+
+  const subscription = await observe((executeTool) => createRuntimeProvider(
+    { provider: 'anthropic', model: 'claude-opus-5', authToken: 'sk-ant-oat-test', queryFn: claudeCodeQuery() },
+    undefined,
+    executeTool,
+  ));
 
   // The agent remembered the same thing, under the same id.
   assert.equal(apiKey.memory.length, 1, `api-key path wrote ${apiKey.memory.length} entries`);
@@ -202,11 +218,17 @@ test('a tool call and a memory write land identically on both billing paths', as
   assert.deepEqual(subscription.toolCalls, apiKey.toolCalls);
   assert.deepEqual(apiKey.toolCalls, [{ toolName: MEMORY_TOOL_NAME, input: { fact: REMEMBERED } }]);
 
-  // Every call is answered on both paths — an unpaired tool_use is what
-  // provider wire formats reject, so this is the invariant that keeps a
-  // session usable rather than a matter of tidiness.
+  // Every call is answered *by its own id* on both paths. Equal counts
+  // would not say that: a result carrying the wrong callId leaves one
+  // call and one result in the transcript and still fails on replay,
+  // which is the exact failure this line exists to catch.
   assert.deepEqual(subscription.toolResults, apiKey.toolResults);
-  assert.equal(apiKey.toolResults.length, apiKey.toolCalls.length);
+  for (const [label, observed] of [['api-key', apiKey], ['subscription', subscription]] as const) {
+    assert.ok(observed.pairing.length > 0, `${label} path recorded no tool calls`);
+    for (const { called, answered } of observed.pairing) {
+      assert.equal(answered, called, `${label} path answered ${called} with ${String(answered)}`);
+    }
+  }
 
   // Channels, approvals, and the dashboard all read the event stream, so
   // an agent that behaves the same but reports differently is not the

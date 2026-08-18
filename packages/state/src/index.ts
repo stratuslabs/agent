@@ -24,6 +24,7 @@ import {
 } from '@stratusagent/provider-anthropic';
 import {
   createClaudeCodeProvider,
+  type ClaudeCodeQueryFn,
   hasHostedToolSideEffects,
   type ClaudeCodeToolExecutor,
 } from '@stratusagent/provider-claude-code';
@@ -142,6 +143,15 @@ export type RuntimeConfig =
       authToken?: string;
       systemPrompt?: string;
       fetch?: typeof fetch;
+      /**
+       * The subscription path's transport seam, and the counterpart to
+       * `fetch` above: this variant serves both Anthropic modes, and an
+       * API key reaches the wire through `fetch` while a subscription
+       * token reaches it through the Agent SDK's `query`. Without both,
+       * only half of what this config can select is reachable from a
+       * test.
+       */
+      queryFn?: ClaudeCodeQueryFn;
       soul?: ParsedSoul;
       /** Absolute path the soul was loaded from, for callers that re-read it. */
       soulPath?: string;
@@ -1418,6 +1428,7 @@ export const createRuntimeProvider = (
       return createClaudeCodeProvider({
         authToken: config.authToken,
         model: config.model,
+        ...(config.queryFn ? { queryFn: config.queryFn } : {}),
         ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
         // Kernel tools run through the host loop (approvals, events,
         // allowlists intact), so the subscription runtime is the same
