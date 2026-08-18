@@ -18,6 +18,9 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types"
   },
+  "engines": {
+    "node": ">=22.13 <23 || >=23.4"
+  },
   "dependencies": {
     "@stratusagent/core": "workspace:*"
   },

@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   createFileMemoryStore,
+  unsupportedNodeMessage,
   createLogWriter,
   currentLogPosition,
   truncateRedirectLogs,
@@ -58,6 +59,31 @@ const createStreams = () => {
     },
   };
 };
+
+test('the CLI refuses Node versions below the floor its manifests declare', () => {
+  // The failure this replaces is an ERR_UNKNOWN_BUILTIN_MODULE for
+  // node:sqlite, thrown from a lazy import well after install, naming
+  // neither Node nor the version needed.
+  // 23.0 through 23.3 are the interesting ones: newer than the 22.x floor,
+  // and still shipping node:sqlite behind --experimental-sqlite, because it
+  // was unflagged separately on each line (22.13.0 and 23.4.0).
+  for (const version of ['20.11.0', 'v18.20.4', '22.12.0', '22.9.1', '23.0.0', '23.3.0', 'v23.3.9']) {
+    const message = unsupportedNodeMessage(version);
+    assert.ok(message, `${version} is below the floor`);
+    assert.match(message, /needs Node 22\.13 or newer/);
+    assert.match(message, /23\.4 or newer on the 23\.x line/);
+    assert.match(message, new RegExp(version.replace(/^v/, '').replace(/\./g, '\\.')));
+  }
+
+  for (const version of ['22.13.0', '22.14.2', '23.4.0', '23.11.1', '24.1.0', 'v22.13.1']) {
+    assert.equal(unsupportedNodeMessage(version), undefined, `${version} is supported`);
+  }
+
+  // An unrecognized build string is a bad reason to refuse to run.
+  for (const version of ['', 'nightly', 'v-broken']) {
+    assert.equal(unsupportedNodeMessage(version), undefined);
+  }
+});
 
 test('parseCommand accepts positional prompts', () => {
   assert.deepEqual(parseCommand(['run', 'hello', 'demo']), {

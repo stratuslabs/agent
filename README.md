@@ -111,7 +111,7 @@ Two well-written example souls live in `examples/souls/` — they double as the 
 
 ## Install
 
-Stratus Agent needs **Node.js 22.13+** — the gateway's session store uses `node:sqlite`, which runs unflagged from 22.13. On macOS, `brew install node` gets you a new enough one; on Linux, use your package manager or nvm.
+Stratus Agent needs **Node.js 22.13+** (or **23.4+** if you are on the 23.x line — `node:sqlite` was unflagged separately there, so 23.0–23.3 are too old despite the higher number). On macOS, `brew install node` gets you a new enough one; on Linux, use your package manager or nvm. Every package declares the range in `engines`, and `stratus` checks it before it does anything, so an unsupported Node says so plainly.
 
 Then:
 
