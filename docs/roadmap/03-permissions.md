@@ -4,6 +4,24 @@
 
 Agents can be trusted with real tools (shell, files, browser) while running unattended, because a policy layer decides what auto-runs, what needs a human, and how to reach that human.
 
+## Status
+
+**Shipped (#47).** The risk model and the two modes that need no channel:
+
+- `ToolRisk` (`safe` / `gated` / `dangerous`) on `Tool` and `ToolDescriptor`, with `resolveToolRisk` treating an undeclared tool as `gated` — fail closed, so forgetting to classify costs a prompt rather than an unattended command.
+- The kernel resolves the tool *before* asking the policy, and `ApprovalContext` carries the resolved tool and its risk. A call naming nothing registered no longer reaches a policy at all.
+- `@stratusagent/permissions` with `interactive` and `headless`, wired into `stratus serve`. This closed a live hole: `createGateway` falls back to `AllowAllApprovalPolicy` and `runServe` passed nothing, so the daemon auto-approved every call from every agent — tolerable when `serve` was a foreground process, not once setup began installing it under launchd by default.
+
+**Next: remote approval (`remote` mode).** Park the turn in `pending_approval`, emit the request as a bus event, render Slack buttons, resume or fail on the decision. Restart recovery — the checkpoint-and-drain mechanism in the design sketch below — is the subtle half and deserves its own review; it is fine to land the in-memory flow first and the recovery second.
+
+`remote` is deliberately absent from the shipped enum rather than stubbed: a mode that exists but never resolves looks supported.
+
+**Moved to [06](./06-tool-packs.md): the command-scope allowlist.** Safe `git` scopes, flag and refspec constraints, control-operator defeat, and the persistent per-agent whitelist are still the right design — they were not built because **they have no caller**. Every tool in the repo today (`demo.echo`, `memory.remember`, `agent.delegate`) is fixed-argv; nothing takes a command string. A shell parser and a scope-normalization format written against no consumer would be shaped by guesses and rediscovered as wrong when `shell.run` lands. They belong with that tool, where the requirements are observable and testable against real invocations.
+
+The consequence to keep in mind: until then, a `gated` tool in a daemon is refused rather than narrowed. That is the correct failure while there is nothing gated to run.
+
+**Also settled:** `agent.delegate` is classified `safe`, not `gated`. Delegation spends provider tokens, but so does the turn that decides to delegate — gating on cost would gate the conversation. The criterion is acting on the world *outside* Stratus. Delegation stays in the fleet, the delegate's own calls face the policy again under the delegate's allowlist, and `maxDepth` bounds the chain. Breadth is not bounded, so cost amplification is real; that wants a spend budget, not an approval prompt.
+
 ## Why now
 
 Phase 1 gives agents an always-on body; before they get real capabilities (step 06) they need judgment. The current options — `always`/`ask`/`never` with a TTY prompt (`createApprovalPolicy` in `packages/cli/src/index.ts`) — don't work in a daemon: `ask` has no terminal to ask on.
