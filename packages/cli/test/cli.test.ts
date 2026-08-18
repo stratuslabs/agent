@@ -1984,6 +1984,42 @@ test('creating an agent never claims the configured soul\'s id', async () => {
   assert.deepEqual(roster.map((entry) => entry.soul.agent.id), [written[0]?.replace(/\.md$/, '')]);
 });
 
+test('a broken configured soul does not discard the roster\'s claims', async () => {
+  const { loadRosterSouls } = await import('@stratusagent/state');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'renamed.md'), '---\nname: Ava\nid: ava\n---\n\nThe original Ava.\n');
+  // The configured soul is missing. The daemon tolerates that — it warns
+  // and keeps serving the roster — so this command must not treat the
+  // roster's claims as unknown just because the other source failed, or
+  // it writes the very duplicate that would then refuse the roster.
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'demo', soul: path.join(home, 'gone.md') }),
+  );
+
+  const { streams } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  const written = (await readdir(agentsDir)).filter((file) => file !== 'renamed.md');
+  assert.deepEqual(written.length, 1, `agents dir held ${JSON.stringify(await readdir(agentsDir))}`);
+  assert.match(written[0] ?? '', /^ava-[a-z0-9]+\.md$/);
+  // Still loads: the roster the command could read is the roster it used.
+  await loadRosterSouls({ homeDir: home });
+});
+
 test('creating an agent never claims the reserved built-in id', async () => {
   const { loadRosterSouls } = await import('@stratusagent/state');
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));

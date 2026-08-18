@@ -377,9 +377,10 @@ Agents remember: facts saved with the built-in `memory.remember` tool persist to
 
 **Ids are not labels.** Frontmatter may set `id:` explicitly, and it keys the
 agent's sessions, memory, credentials, Slack tokens, and every per-agent path
-on disk. So it has to stay one path segment: an id may not start with a dot
-or contain a slash, a backslash, a control character, or leading or trailing
-whitespace. Anything that would leave its directory is rejected when the soul
+on disk. So it has to stay one path segment, and one ordinary map key: an id
+may not start with a dot or contain a slash, a backslash, a control
+character, or leading or trailing whitespace, and it may not be a name every
+object already answers to (`__proto__`, `constructor`, `toString`). Anything that would leave its directory is rejected when the soul
 loads rather than quietly cleaned up — `id: ../../escape` is refused, not
 rewritten to `escape`.
 

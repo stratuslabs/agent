@@ -537,6 +537,30 @@ test('a soul declaring a path-capable id is rejected at parse', async () => {
   assert.equal(parseSoul('---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n').agent.id, 'ava');
 });
 
+test('an id that is an Object.prototype key is refused, derived or written', async () => {
+  // Ids key plain objects too — `credentials.channels.slack[id]` among
+  // them. An inherited name is not a free slot there: `toString` reads as
+  // already connected with nothing stored, and `__proto__` assigns through
+  // to the prototype, so the write lands nowhere and JSON.stringify drops
+  // it. Neither fails loudly; the agent just cannot hold credentials.
+  for (const id of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf']) {
+    assert.throws(
+      () => defineAgent({ name: 'Ava', id }),
+      /Invalid agent id/,
+      `expected ${JSON.stringify(id)} to be rejected`,
+    );
+  }
+
+  // And the derived path reaches it too: `constructor` is a perfectly
+  // ordinary slug, so a name nobody would think twice about produces one.
+  const derived = defineAgent({ name: 'Constructor' });
+  assert.notEqual(derived.id, 'constructor');
+  assert.equal(isValidAgentId(derived.id), true);
+  assert.match(derived.id, /^constructor-[a-z0-9]+$/);
+  // Seeded by the slug, so the name still answers the same way every time.
+  assert.equal(defineAgent({ name: 'constructor' }).id, derived.id);
+});
+
 test('the length bound applies to minted ids, never to keyed ones', async () => {
   // The bound is a construction rule. Applying it as a validation rule
   // would re-key agents that already exist: an id is not a label, so

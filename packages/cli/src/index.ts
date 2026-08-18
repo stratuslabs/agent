@@ -2343,26 +2343,41 @@ const KNOWN_CLAUDE_MODELS = [
  * - **The reserved `stratus`**, since a roster soul claiming it is skipped
  *   at load, so writing one creates an agent that silently never appears.
  *
- * `undefined` means the answer could not be read, which is not the same
- * as nothing being taken. Creating an agent is never blocked on it — the
- * caller says so instead, rather than implying a check that did not run.
+ * The two readable sources fail **independently**, and what they return is
+ * what they know rather than all-or-nothing. A configured soul that is
+ * missing or mid-edit does not stop the daemon serving the roster, so it
+ * must not discard the roster's claims either: collapsing both to unknown
+ * would let this command write the very duplicate that refuses the roster
+ * it could have read. `unread` names what could not be answered, so the
+ * caller can say which check did not run instead of implying none did.
  */
-const declaredAgentIds = async (env: CliEnvironment): Promise<Set<string> | undefined> => {
-  try {
-    const [entries, configured] = await Promise.all([
-      loadRosterSouls(env, () => {}),
-      // Empty selection: the soul a run started here would resolve, by the
-      // same precedence the daemon uses — never a second reading of it.
-      resolveConfiguredSoul({}, env),
-    ]);
-    return new Set([
-      DEFAULT_STRATUS_AGENT.id,
-      ...entries.map((entry) => entry.soul.agent.id),
-      ...(configured ? [configured.soul.agent.id] : []),
-    ]);
-  } catch {
-    return undefined;
+const declaredAgentIds = async (
+  env: CliEnvironment,
+): Promise<{ ids: Set<string>; unread: string[] }> => {
+  const [roster, configured] = await Promise.allSettled([
+    loadRosterSouls(env, () => {}),
+    // Empty selection: the soul a run started here would resolve, by the
+    // same precedence the daemon uses — never a second reading of it.
+    resolveConfiguredSoul({}, env),
+  ]);
+
+  const ids = new Set([DEFAULT_STRATUS_AGENT.id]);
+  const unread: string[] = [];
+  if (roster.status === 'fulfilled') {
+    for (const entry of roster.value) {
+      ids.add(entry.soul.agent.id);
+    }
+  } else {
+    unread.push('the roster');
   }
+  if (configured.status === 'fulfilled') {
+    if (configured.value) {
+      ids.add(configured.value.soul.agent.id);
+    }
+  } else {
+    unread.push('the configured default soul');
+  }
+  return { ids, unread };
 };
 
 /**
@@ -2390,15 +2405,15 @@ const claimSoulFile = async (
   render: (agent: AgentDefinition) => string,
   note: (message: string) => void,
 ): Promise<{ agent: AgentDefinition; soulPath: string }> => {
-  const taken = await declaredAgentIds(env);
-  if (taken === undefined) {
-    note('Note: the roster could not be read, so this id was not checked against the ids other souls declare.');
+  const { ids: taken, unread } = await declaredAgentIds(env);
+  if (unread.length > 0) {
+    note(`Note: could not read ${unread.join(' or ')}, so this id was not checked against the ids it declares.`);
   }
   let agent = defineAgent({ ...(input.name ? { name: input.name } : {}), instructions: input.instructions });
   const baseId = agent.id;
   for (;;) {
     const soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
-    if (!taken?.has(agent.id)) {
+    if (!taken.has(agent.id)) {
       try {
         await writeFile(soulPath, render(agent), { flag: 'wx' });
         return { agent, soulPath };

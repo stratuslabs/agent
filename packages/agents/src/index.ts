@@ -152,7 +152,14 @@ export const isValidAgentId = (id: string): boolean =>
   // an id that is not its own trimmed self is a mistake, not a legacy.
   && id === id.trim()
   && !id.startsWith('.')
-  && !PATH_UNSAFE_AGENT_ID.test(id);
+  && !PATH_UNSAFE_AGENT_ID.test(id)
+  // An id keys plain objects too — `credentials.channels.slack[id]` among
+  // them — where an inherited name is not a free slot. `toString` reads as
+  // already connected with nothing stored, and `__proto__` assigns through
+  // to the prototype, so the write lands nowhere and `JSON.stringify` drops
+  // it. `in {}` names exactly that set, and names it by the property it
+  // has rather than by a list to keep in step.
+  && !(id in {});
 
 /**
  * A freshly minted id, bounded — `base` trimmed so that appending `suffix`
@@ -209,14 +216,24 @@ export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
       + 'it keys files and credentials, not just labels.',
     );
   }
+  // A chosen name's slug is used whole. It is not this function's to
+  // shorten: the same name has resolved to the same id in every release,
+  // and two long names that differ only past the bound are two agents,
+  // not one roster-refusing collision.
+  const derived = nameWasGenerated
+    ? agentIdWithSuffix(slugify(name), generatedIdSuffix(input.seed))
+    : slugify(name);
   return {
-    // A chosen name's slug is used whole. It is not this function's to
-    // shorten: the same name has resolved to the same id in every release,
-    // and two long names that differ only past the bound are two agents,
-    // not one roster-refusing collision.
-    id: input.id ?? (nameWasGenerated
-      ? agentIdWithSuffix(slugify(name), generatedIdSuffix(input.seed))
-      : slugify(name)),
+    // Derived ids are safe by construction with one exception: `constructor`
+    // is a perfectly ordinary slug and an Object.prototype key, so the name
+    // "Constructor" reaches a rule that only ran on explicit ids. Checked
+    // rather than special-cased, so what this returns is *an id that
+    // validates* — not one that passes the cases anyone thought of. The
+    // suffix is seeded by the slug, so the name still answers the same way
+    // every time.
+    id: input.id ?? (isValidAgentId(derived)
+      ? derived
+      : agentIdWithSuffix(derived, generatedIdSuffix(derived))),
     name,
     ...(input.instructions ? { instructions: input.instructions } : {}),
     avatar: input.avatar ?? generateAvatarTheme(name),
