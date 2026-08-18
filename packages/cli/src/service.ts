@@ -121,13 +121,21 @@ ${definition.runAtLogin ? `  <key>KeepAlive</key>
  */
 const systemdValue = (value: string): string => value.replace(/%/g, '%%');
 
+/**
+ * ExecStart is a command line, so systemd expands `${VAR}` there on top of
+ * the `%` specifiers — and JSON quoting does not disable it. A path
+ * containing a literal `${HOME}` would reach the daemon as something else
+ * entirely. systemd.service(5) spells a literal dollar `$$`.
+ */
+const systemdArgument = (value: string): string => systemdValue(value).replace(/\$/g, '$$$$');
+
 export const systemdUnit = (definition: ServiceDefinition): string => `[Unit]
 Description=Stratus Agent daemon (stratusd)
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${definition.argv.map((argument) => systemdValue(JSON.stringify(argument))).join(' ')}
+ExecStart=${definition.argv.map((argument) => systemdArgument(JSON.stringify(argument))).join(' ')}
 WorkingDirectory=${systemdValue(definition.workingDirectory)}
 Restart=on-failure
 RestartSec=5
@@ -438,9 +446,13 @@ export const stopService = async (env: ServiceEnvironment = {}): Promise<Service
   return result.code === 0
     ? {
         ok: true,
-        messages: [status?.runAtLogin
-          ? 'stratusd stopped. It will start again at your next login unless you uninstall it.'
-          : 'stratusd stopped. It will NOT start again on its own — run `stratus service start` when you want it back.'],
+        messages: [status?.runAtLogin === undefined
+          // The manager could not say, so neither can we — promising either
+          // outcome is how agents end up offline while someone waits.
+          ? 'stratusd stopped. Whether it starts again at login could not be determined — check `stratus service status`.'
+          : status.runAtLogin
+            ? 'stratusd stopped. It will start again at your next login unless you uninstall it.'
+            : 'stratusd stopped. It will NOT start again on its own — run `stratus service start` when you want it back.'],
       }
     : { ok: false, messages: [`Could not stop stratusd: ${result.stderr.trim() || result.stdout.trim()}`] };
 };

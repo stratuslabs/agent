@@ -4337,7 +4337,9 @@ export const runService = async (
     writeLine(streams.stdout, `  manager   ${status.platform}`);
     writeLine(streams.stdout, `  unit      ${status.unitPath}`);
     if (status.installed) {
-      writeLine(streams.stdout, `  at login  ${status.runAtLogin ? 'yes' : 'no'}`);
+      writeLine(streams.stdout, `  at login  ${status.runAtLogin === undefined
+        ? 'unknown — the service manager did not answer'
+        : status.runAtLogin ? 'yes' : 'no'}`);
     }
     writeLine(streams.stdout, status.installed
       ? '  logs      stratus logs -f'
@@ -4354,6 +4356,20 @@ export const runService = async (
     ?? readNonEmptyString(processEnv.STRATUS_CONFIG)
     ?? readNonEmptyString(processEnv.STRATUSCLAW_CONFIG);
   if (command.action === 'install') {
+    // A config the daemon cannot parse kills it during gateway.start(),
+    // and the manager — having accepted the start — restarts it on a
+    // loop. Better to refuse now, while there is someone reading stderr.
+    if (selectedConfig) {
+      const resolvedConfig = path.resolve(readWorkingDirectory(env), String(selectedConfig));
+      try {
+        await loadConfigFile(resolvedConfig);
+      } catch (error) {
+        writeLine(streams.stderr, `Not installing: ${resolvedConfig} cannot be used (${error instanceof Error ? error.message : String(error)}).`);
+        writeLine(streams.stderr, 'The daemon would exit on startup and be restarted in a loop. Fix the file, or install without --config.');
+        return 1;
+      }
+    }
+
     // The same question setup asks: launchd and systemd hand the daemon
     // none of this shell, so a key that lives only here produces a service
     // that fails every dispatch while reporting a successful install.

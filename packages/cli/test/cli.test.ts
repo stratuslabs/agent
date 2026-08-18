@@ -18,6 +18,7 @@ import {
   startService,
   stopService,
   uninstallService,
+  type ServiceRunner,
   HELP_TEXT,
   parseCommand,
   resolveRuntimeConfig,
@@ -4581,6 +4582,7 @@ test('service install can pin the daemon to a config of its own', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
 
+  await writeFile(path.join(project, 'team.json'), JSON.stringify({ provider: 'demo' }));
   await runCli({
     argv: ['service', 'install', '--config', './team.json'],
     streams: createStreams().streams,
@@ -5001,6 +5003,7 @@ test('service install pins the config STRATUS_CONFIG selected', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
 
+  await writeFile(path.join(project, 'team.json'), JSON.stringify({ provider: 'demo' }));
   await runCli({
     argv: ['service', 'install'],
     streams: createStreams().streams,
@@ -5248,4 +5251,74 @@ test('a direct install checks the project config the daemon will discover', asyn
   assert.equal(exitCode, 1);
   assert.deepEqual(calls, []);
   assert.match(output.stderr, /comes from OPENAI_API_KEY in this shell/);
+});
+
+test('service install refuses a config the daemon could not parse', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  await writeFile(path.join(project, 'broken.json'), '{ not json');
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'install', '--config', './broken.json'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+  });
+
+  // Installing would let the manager accept the start, then restart the
+  // daemon in a loop as it exits on the unreadable config.
+  assert.equal(exitCode, 1);
+  assert.deepEqual(calls, []);
+  assert.match(output.stderr, /cannot be used/);
+  assert.match(output.stderr, /restarted in a loop/);
+});
+
+test('systemd ExecStart escapes dollar signs as well as percents', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const odd = path.join(home, 'proj-${HOME}-100%');
+  await mkdir(odd, { recursive: true });
+
+  await installService({
+    platform: 'linux',
+    homeDir: home,
+    cwd: odd,
+    execPath: '/usr/bin/node',
+    scriptPath: path.join(odd, 'bin.js'),
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  const execStart = unit.split('\n').find((line) => line.startsWith('ExecStart='));
+  // JSON quoting does not disable systemd's expansion; systemd.service(5)
+  // spells a literal dollar `$$`.
+  assert.match(String(execStart), /\$\$\{HOME\}/);
+  assert.match(String(execStart), /100%%/);
+  // WorkingDirectory is not a command line, so it takes % escaping only.
+  assert.match(unit, /WorkingDirectory=.*\$\{HOME\}-100%%/);
+});
+
+test('an unanswerable enablement is reported as unknown, not as no', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const brokenBus: ServiceRunner = async (_command, args) => (args.includes('is-enabled')
+    ? { code: 1, stdout: '', stderr: 'Failed to connect to bus' }
+    : { code: 0, stdout: 'active\n', stderr: '' });
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['service', 'status'],
+    streams,
+    env: { cwd: home, homeDir: home, processEnv: {}, serviceRunner: brokenBus },
+  });
+  assert.match(output.stdout, /at login {2}unknown — the service manager did not answer/);
+
+  // Stopping must not claim it will never come back either.
+  const stopped = await stopService({ platform: 'linux', homeDir: home, run: brokenBus });
+  assert.ok(stopped.messages.some((message) => /could not be determined/.test(message)), stopped.messages.join(' '));
 });
