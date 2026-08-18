@@ -19,6 +19,7 @@ import {
   generateAvatarTheme,
   parseSoul,
   agentIdWithSuffix,
+  AGENT_ID_PATTERN,
   isValidAgentId,
   MAX_AGENT_ID_LENGTH,
 } from '../src/index.ts';
@@ -469,20 +470,23 @@ test('delegation forwards the parent turn abort signal into the dispatcher', asy
   assert.equal(receivedSignal, controller.signal);
 });
 
-test('an explicit agent id must be a slug, because ids become paths', async () => {
+test('an explicit agent id may not leave its directory', async () => {
   // A soul file travels with a repository, and in the hosted profile the
   // id comes from a tenant. It keys sessions, memory, credentials, Slack
-  // tokens, and per-agent paths — so the shape is enforced once, here,
-  // rather than defended at every join.
+  // tokens, and per-agent paths — so this is enforced once, here, rather
+  // than defended at every join.
   const rejected = [
     '../../escape',
+    '..',
+    '.',
     'a/b',
     'a\\b',
     '.hidden',
-    '-leading',
-    'Upper',
-    'has space',
-    'trailing.',
+    'ava\u0000.md',
+    'ava\n2',
+    ' ava',
+    'ava ',
+    '   ',
     '',
   ];
   for (const id of rejected) {
@@ -499,10 +503,28 @@ test('an explicit agent id must be a slug, because ids become paths', async () =
   for (const id of ['ava', 'ava-2', 'a', '0', 'a-b-c', 'x'.repeat(64)]) {
     assert.equal(defineAgent({ name: 'Ava', id }).id, id);
   }
+});
 
-  // Derived ids come out of slugify and cannot be anything else.
+test('an id that is merely un-sluglike is left alone, because someone is using it', async () => {
+  // Nothing before this release checked an explicit id, so these are out
+  // there keying real sessions and real credentials. None can leave its
+  // directory, so refusing them would buy no safety — and since
+  // loadRosterSouls degrades an unparseable soul to a warning, it would
+  // drop those agents off the roster quietly while their data stayed
+  // behind under the old id.
+  for (const id of ['Ava_1', 'team.alpha', 'AVA', 'my agent', '-leading', 'trailing.', 'ava_2']) {
+    assert.equal(
+      defineAgent({ name: 'Ava', id }).id,
+      id,
+      `expected ${JSON.stringify(id)} to survive`,
+    );
+  }
+
+  // The slug shape is what ids are *minted* in — reserved for the ids
+  // nobody has chosen yet, where holding the line costs no one anything.
+  assert.match(defineAgent({ name: 'Ava Löf!' }).id, AGENT_ID_PATTERN);
+  assert.match(defineAgent({ seed: 'x' }).id, AGENT_ID_PATTERN);
   assert.equal(isValidAgentId(defineAgent({ name: 'Ava Löf!' }).id), true);
-  assert.equal(isValidAgentId(defineAgent({ seed: 'x' }).id), true);
 });
 
 test('a soul declaring a path-capable id is rejected at parse', async () => {

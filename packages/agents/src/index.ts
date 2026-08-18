@@ -91,15 +91,12 @@ const slugify = (name: string): string =>
     .replace(/^-+|-+$/g, '') || 'agent';
 
 /**
- * The only shape an agent id may take: lowercase alphanumerics and
- * internal hyphens, starting with an alphanumeric.
+ * The shape an id is *minted* in: lowercase alphanumerics and internal
+ * hyphens, starting with an alphanumeric. Everything `slugify` produces
+ * matches it, so every id this module derives does.
  *
- * Ids are not labels. They key sessions, memory, credentials, Slack
- * channel tokens, and every per-agent path on disk — and an explicit
- * frontmatter `id` is untrusted input: a soul file travels with a
- * repository, and in the hosted profile it comes from a tenant. `../../`
- * or a leading dot in an id reaches every one of those joins intact, so
- * the shape is enforced once here rather than defended at each of them.
+ * Not what validation enforces. A hand-written `id:` predates any shape
+ * rule and `Ava_1` was as valid as `ava` — see `isValidAgentId`.
  */
 export const AGENT_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
@@ -107,22 +104,55 @@ export const AGENT_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
  * How long an id we *build* is allowed to get. A construction bound, not a
  * validation rule — `isValidAgentId` deliberately does not check it.
  *
- * The difference is that shape has no legacy corpus and length does. No
- * release ever produced a non-slug id: `slugify` cannot, and a hand-written
- * `../../escape` was always the attack this module exists to stop. Length is
- * the opposite — every id derived from a long name before this bound existed
- * is longer than it, and rejecting those retroactively drops working agents
- * off the roster while trimming them silently re-keys their sessions, memory,
- * and credentials to an id nobody has ever used. So the bound applies where
- * an id is minted fresh and nothing is keyed to it yet, and nowhere else.
- * File systems still have limits, and an id long enough to hit them fails at
- * the join with a name that says so.
+ * Every id derived from a long name predates this bound, and enforcing it
+ * retroactively drops working agents off the roster, while trimming them
+ * silently re-keys their sessions, memory, and credentials to an id nobody
+ * has ever used. So the bound applies where an id is minted fresh and
+ * nothing is keyed to it yet, and nowhere else. File systems still have
+ * limits, and an id long enough to hit them fails at the join with a name
+ * that says so.
  */
 export const MAX_AGENT_ID_LENGTH = 64;
 
-/** Whether `id` is safe to key an agent's resources and paths by. */
+/**
+ * What an id may never be, whatever else it is: anything that stops being
+ * a single, addressable path segment. A separator escapes the directory,
+ * a leading dot hides the file or walks up out of it (`..`), and a control
+ * character is not typeable back.
+ */
+const PATH_UNSAFE_AGENT_ID = /[/\\]|[\u0000-\u001f\u007f]/;
+
+/**
+ * Whether `id` is safe to key an agent's resources and paths by.
+ *
+ * Ids are not labels. They key sessions, memory, credentials, Slack channel
+ * tokens, and every per-agent path on disk — and an explicit frontmatter
+ * `id` is untrusted input: a soul file travels with a repository, and in
+ * the hosted profile it comes from a tenant. `id: ../../escape` reaches
+ * every one of those joins intact, so it is stopped once here rather than
+ * defended at each of them.
+ *
+ * **Unsafe is the rule, not un-sluglike.** Nothing before this checked an
+ * explicit id at all, so `Ava_1`, `team.alpha`, and `AVA` are all out there
+ * keying real sessions and real credentials. Holding them to the shape ids
+ * are minted in would not make anything safer — none of them can leave
+ * their directory — and `loadRosterSouls` degrades a soul that will not
+ * parse to a warning, so the only thing it would accomplish is dropping
+ * those agents off the roster on upgrade, quietly, while their data stays
+ * behind under the old id. Reserving the slug shape for ids nobody has
+ * chosen yet costs nothing; imposing it on ids people are already using
+ * costs them their agent.
+ *
+ * Rejected, never sanitized: rewriting `../../escape` into `escape` hands
+ * back an agent nobody asked for, keyed to resources nobody named.
+ */
 export const isValidAgentId = (id: string): boolean =>
-  id.length > 0 && AGENT_ID_PATTERN.test(id);
+  id.length > 0
+  // Invisible leading or trailing space cannot be typed back reliably, so
+  // an id that is not its own trimmed self is a mistake, not a legacy.
+  && id === id.trim()
+  && !id.startsWith('.')
+  && !PATH_UNSAFE_AGENT_ID.test(id);
 
 /**
  * A freshly minted id, bounded — `base` trimmed so that appending `suffix`
@@ -170,14 +200,13 @@ const generatedIdSuffix = (seed?: string): string => {
 export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
   const nameWasGenerated = input.name === undefined;
   const name = input.name ?? generateAgentName(input.seed);
-  // Only an explicit id is checked: the derived ones come out of slugify,
-  // which cannot produce anything but this shape. Rejected rather than sanitized —
-  // silently rewriting `../../escape` into `escape` would hand the caller
-  // an agent they did not ask for, keyed to resources they did not name.
+  // Only an explicit id is checked: a derived one comes out of slugify,
+  // which cannot produce anything unsafe.
   if (input.id !== undefined && !isValidAgentId(input.id)) {
     throw new Error(
-      `Invalid agent id: ${JSON.stringify(input.id)}. Ids may contain lowercase letters, digits, and hyphens `
-      + 'and must start with a letter or digit — they key files and credentials, not just labels.',
+      `Invalid agent id: ${JSON.stringify(input.id)}. An id becomes a path segment, so it may not start with `
+      + 'a dot or contain a slash, a backslash, a control character, or leading or trailing whitespace — '
+      + 'it keys files and credentials, not just labels.',
     );
   }
   return {

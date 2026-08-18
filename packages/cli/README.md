@@ -377,12 +377,18 @@ Agents remember: facts saved with the built-in `memory.remember` tool persist to
 
 **Ids are not labels.** Frontmatter may set `id:` explicitly, and it keys the
 agent's sessions, memory, credentials, Slack tokens, and every per-agent path
-on disk. So it must be a slug — lowercase letters, digits, and hyphens,
-starting with a letter or digit. Anything else is rejected when the soul
-loads rather than quietly cleaned up. Omit it and one is derived from the
-name; a generated agent's id is also capped at 64 characters, but a slug
-derived from a name you chose is used whole, because shortening an id moves
-the agent it belongs to.
+on disk. So it has to stay one path segment: an id may not start with a dot
+or contain a slash, a backslash, a control character, or leading or trailing
+whitespace. Anything that would leave its directory is rejected when the soul
+loads rather than quietly cleaned up — `id: ../../escape` is refused, not
+rewritten to `escape`.
+
+Anything else is yours. An id like `Ava_1` or `team.alpha` is unusual but
+harmless, and it is already keying that agent's sessions and sign-ins, so it
+is left exactly as written. Omit `id:` and one is derived from the name as a
+plain slug (`ava`); a generated agent's id is also capped at 64 characters,
+but a slug derived from a name you chose is used whole, because shortening
+an id moves the agent it belongs to.
 
 Creating an agent checks the id against every id the served roster holds,
 not against the filenames on disk: what the roster files *declare* (a soul
