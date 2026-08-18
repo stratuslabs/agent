@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -10,11 +10,14 @@ import {
   RunAbortedError,
   ToolRegistry,
   type AgentDefinition,
+  type ApprovalAnswer,
   type ApprovalPolicy,
+  type ApprovalResolutionReason,
   type JsonObject,
   type Session,
   type SessionStore,
   type StratusEvent,
+  type ToolRisk,
 } from '@stratusagent/core';
 import {
   createDelegateTool,
@@ -49,6 +52,12 @@ import {
 
 const SESSIONS_DB_FILENAME = 'sessions.db';
 const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
+/**
+ * How long a parked call waits for a person. Long enough to survive a
+ * meeting, short enough that a request nobody saw does not hold a turn (and
+ * the Slack thread it is answering) open indefinitely.
+ */
+const DEFAULT_APPROVAL_TIMEOUT_MS = 900_000;
 
 /**
  * Durable session storage on node:sqlite (unflagged on Node 22.13+). The
@@ -261,13 +270,61 @@ export interface GatewayChannelAdapter {
   stop(): Promise<void>;
 }
 
+/**
+ * What the gateway hands a policy that needs a human somewhere else: one
+ * function that publishes a request and settles on the answer. Handed to a
+ * factory rather than exposed on the built gateway because the policy has
+ * to exist before the first dispatch, and a gateway cannot be constructed
+ * with a policy that needs the gateway.
+ */
+export interface ApprovalTransport {
+  request: ApprovalRequester;
+}
+
+/**
+ * A parked call, published for anyone who can reach a person. Mirrors
+ * `@stratusagent/permissions`' `ApprovalRequest` structurally rather than
+ * importing it: the gateway consumes any `ApprovalPolicy`, and depending on
+ * one implementation of the seam to describe the seam would invert that.
+ */
+export interface GatewayApprovalRequest {
+  session: Session;
+  call: { id: string; toolName: string; input: JsonObject };
+  risk: ToolRisk;
+  signal?: AbortSignal;
+}
+
+export type ApprovalRequester = (request: GatewayApprovalRequest) => Promise<ApprovalAnswer>;
+
+export interface ResolveApprovalInput {
+  requestId: string;
+  answer: ApprovalAnswer;
+  /**
+   * The person who decided, in whatever ids their channel uses. Recorded on
+   * the resolved event; who is *allowed* to decide is the channel's
+   * question, since the approver set is written in its ids.
+   */
+  actor?: string;
+}
+
 export interface GatewayOptions {
   env?: StateEnvironment;
   /** Gateway-wide provider/model overrides applied beneath per-soul pins. */
   selection?: RuntimeSelection;
   /** Channel adapters to run (Slack, …). Started on start(), stopped on stop(). */
   channels?: GatewayChannelAdapter[];
-  approvals?: ApprovalPolicy;
+  /**
+   * The policy, or a factory that builds one from the gateway's approval
+   * transport. Pass a factory whenever the policy parks turns on a human
+   * reached through a channel — `remote` mode — since that policy needs the
+   * transport the gateway is still constructing.
+   */
+  approvals?: ApprovalPolicy | ((transport: ApprovalTransport) => ApprovalPolicy);
+  /**
+   * How long a parked call waits before it denies itself. 0 waits forever,
+   * which is only ever right in a test. Default 15 minutes.
+   */
+  approvalTimeoutMs?: number;
   maxTurns?: number;
   /**
    * The activity watchdog: abort a turn when no event for its session has
@@ -306,6 +363,14 @@ export interface Gateway {
   readonly store: SqliteSessionStore;
   /** The current roster, default agent included. */
   agents(): AgentDefinition[];
+  /**
+   * Settles a parked call. Returns false when the request is not pending —
+   * already decided, expired, or belonging to a turn that was cancelled —
+   * which is the normal outcome of a button clicked a minute too late, not
+   * an error. Callers surface it to whoever clicked; they must never treat
+   * it as "try again".
+   */
+  resolveApproval(input: ResolveApprovalInput): boolean;
 }
 
 interface AgentSource {
@@ -338,6 +403,106 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     ? new SqliteSessionStore(options.sessionDbPath)
     : new SqliteSessionStore(path.join(stratusHomePath(env), SESSIONS_DB_FILENAME), { ownedDirectory: true });
   const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
+
+  // ---- approval brokering -------------------------------------------------
+
+  const approvalTimeoutMs = options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
+
+  type SettleApproval = (
+    answer: ApprovalAnswer,
+    reason: ApprovalResolutionReason,
+    actor?: string,
+  ) => void;
+
+  const pendingApprovals = new Map<string, SettleApproval>();
+
+  /**
+   * Publishes one parked call and settles when somebody answers it, the
+   * request expires, or the turn is cancelled.
+   *
+   * All three endings run through the same `settle`, which removes the
+   * request from the registry BEFORE resolving. That ordering is the whole
+   * point: a request that is no longer pending cannot be resolved twice,
+   * so a click racing the timeout — or arriving after an abort — is refused
+   * rather than executing a tool for a turn that has already moved on.
+   */
+  const requestApproval: ApprovalRequester = (request) => new Promise<ApprovalAnswer>((resolve) => {
+    const requestId = randomUUID();
+
+    let timer: NodeJS.Timeout | undefined;
+    const onAbort = (): void => settle('deny', 'cancelled');
+
+    const settle: SettleApproval = (answer, reason, actor) => {
+      // Identity, not presence: a request that already settled is gone from
+      // the registry, and comparing against this exact function is what
+      // makes every ending — click, timeout, abort, shutdown — idempotent.
+      if (pendingApprovals.get(requestId) !== settle) {
+        return;
+      }
+      pendingApprovals.delete(requestId);
+      if (timer) {
+        clearTimeout(timer);
+      }
+      request.signal?.removeEventListener('abort', onAbort);
+      resolve(answer);
+      void bus.emit({
+        type: 'tool.approval-resolved',
+        sessionId: request.session.id,
+        requestId,
+        answer,
+        reason,
+        ...(actor ? { actor } : {}),
+      });
+    };
+
+    pendingApprovals.set(requestId, settle);
+
+    if (approvalTimeoutMs > 0) {
+      // Deliberately NOT unref'd. A parked turn is real outstanding work,
+      // and its timer is the only thing that will ever finish it — letting
+      // the process exit out from under one would abandon the turn instead
+      // of denying it. Shutdown is handled where it belongs, in stop(),
+      // which settles every outstanding request before draining.
+      timer = setTimeout(() => settle('deny', 'timeout'), approvalTimeoutMs);
+    }
+
+    // The abort listener is attached before the request is announced, so a
+    // turn cancelled while the event is still being delivered still ends
+    // the request rather than leaving it pending forever.
+    if (request.signal) {
+      if (request.signal.aborted) {
+        settle('deny', 'cancelled');
+        return;
+      }
+      request.signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    void bus.emit({
+      type: 'tool.approval-requested',
+      sessionId: request.session.id,
+      agentId: request.session.agent.id,
+      requestId,
+      call: request.call,
+      risk: request.risk,
+      ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
+      ...(approvalTimeoutMs > 0
+        ? { expiresAt: new Date(Date.now() + approvalTimeoutMs).toISOString() }
+        : {}),
+    });
+  });
+
+  const resolveApproval = (input: ResolveApprovalInput): boolean => {
+    const settle = pendingApprovals.get(input.requestId);
+    if (!settle) {
+      return false;
+    }
+    settle(input.answer, 'decided', input.actor);
+    return true;
+  };
+
+  const approvals = typeof options.approvals === 'function'
+    ? options.approvals({ request: requestApproval })
+    : options.approvals;
   const registry = new AgentRegistry();
   const sources = new Map<string, AgentSource>();
 
@@ -535,7 +700,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       provider,
       tools,
       executor: createLocalCommandExecutor(),
-      ...(options.approvals ? { approvals: options.approvals } : {}),
+      ...(approvals ? { approvals } : {}),
       store,
       bus,
       agents: registry,
@@ -903,6 +1068,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // in-flight turns (already-started dispatches keep running), drain,
       // and close.
       stopping = true;
+      // Deny what is parked before draining, or the drain waits out every
+      // outstanding approval timeout — a shutdown would hang for as long as
+      // the longest request had left. Each denial is a real decision the
+      // turn continues from, so the drain below still finishes those turns.
+      for (const settle of [...pendingApprovals.values()]) {
+        settle('deny', 'cancelled');
+      }
       await Promise.allSettled(startedChannels.map((adapter) => adapter.stop()));
       startedChannels.length = 0;
       await Promise.allSettled([...inflight]);
@@ -915,6 +1087,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     agents() {
       return registry.list();
     },
+
+    resolveApproval,
   };
 
   return gateway;

@@ -52,7 +52,7 @@ Today it is useful for:
 - running a multi-turn agent loop locally: provider → tools → provider until the model finishes
 - running real tool-calling sessions against Claude (via the official Anthropic SDK) or any OpenAI-compatible provider (tools are advertised with JSON schemas, tool calls execute locally, and results are fed back to the model)
 - defining agents as soul files — markdown personas you run with `stratus run --soul ./ava.md "hi"`
-- gating tool execution with an approval policy (`--approvals always|ask|never`)
+- gating tool execution with an approval policy — at a terminal (`--approvals always|ask|never`), or unattended in `stratus serve`, where a gated call is either refused (`--approvals headless`) or parked and asked in Slack with Allow / Always allow / Deny buttons (`--approvals remote`); see `packages/cli/README.md`
 - continuing an existing session with follow-up user messages via `runner.resume()`
 - opening a tiny local dashboard for browser-based smoke testing
 - seeing how provider output becomes session events
@@ -319,7 +319,7 @@ Current options:
 - `--config`, load provider settings from a JSON config file
 - `--format`, choose `text` or `json`
 - `--no-events`, hide event logs in text mode
-- `--approvals`, tool approval mode: `always`, `ask` (interactive y/N prompt), or `never`
+- `--approvals`, tool approval mode: `always`, `ask` (interactive y/N prompt), or `never` — and for `stratus serve`, `headless` or `remote`
 - `--max-turns`, maximum provider turns per run (default: 8)
 - `--port`, set the dashboard port
 - `--host`, set the dashboard host

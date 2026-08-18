@@ -7,9 +7,11 @@ import path from 'node:path';
 import {
   agentsDirPath,
   createFileMemoryStore,
+  loadConfigFile,
   loadRosterSouls,
   loadSoulFile,
   memoryFilePath,
+  resolveAgentApprovals,
   resolveRuntimeConfig,
   saveCredentials,
 } from '../src/index.ts';
@@ -339,4 +341,63 @@ test('the memory file is owner-only, pre-existing files included', async () => {
 
   const mode = (await stat(filePath)).mode & 0o777;
   assert.equal(mode, 0o600);
+});
+
+const writeConfig = async (name: string, body: unknown): Promise<string> => {
+  const configPath = path.join(tempHome, name);
+  await writeFile(configPath, JSON.stringify(body));
+  return configPath;
+};
+
+test('the approvals block parses, and a misspelled mode fails loudly', async () => {
+  const configPath = await writeConfig('approvals.json', {
+    approvals: {
+      mode: 'remote',
+      timeoutMs: 60000,
+      slackApprovers: ['U-OPS', ''],
+      slackChannel: 'C-OPS',
+      agents: { ava: { slackApprovers: ['U-DYLAN'] }, bea: { slackChannel: 'C-BEA' } },
+    },
+  });
+
+  const config = await loadConfigFile(configPath);
+  assert.equal(config.approvals?.mode, 'remote');
+  assert.equal(config.approvals?.timeoutMs, 60000);
+  // Empty ids are dropped rather than carried into an approver set, where
+  // they would sit next to real ids looking like coverage.
+  assert.deepEqual(config.approvals?.slackApprovers, ['U-OPS']);
+
+  // A mode that silently fell back to headless would be discovered as an
+  // agent that mysteriously refuses everything, with the config in front of
+  // you saying otherwise.
+  const badMode = await writeConfig('bad-mode.json', { approvals: { mode: 'ask' } });
+  await assert.rejects(loadConfigFile(badMode), /Unsupported approvals\.mode/);
+  const badTimeout = await writeConfig('bad-timeout.json', { approvals: { timeoutMs: -1 } });
+  await assert.rejects(loadConfigFile(badTimeout), /Invalid approvals\.timeoutMs/);
+});
+
+test('an agent inherits the default approval route key by key', async () => {
+  const approvals = {
+    slackApprovers: ['U-OPS'],
+    slackChannel: 'C-OPS',
+    agents: { ava: { slackApprovers: ['U-DYLAN'] }, bea: { slackChannel: 'C-BEA' } },
+  };
+
+  // Ava names her own approvers but not her own channel, so she asks the
+  // people she listed in the default conversation. Per-key inheritance, not
+  // per-block: overriding one must not silently clear the other.
+  assert.deepEqual(resolveAgentApprovals(approvals, 'ava'), {
+    slackApprovers: ['U-DYLAN'],
+    slackChannel: 'C-OPS',
+  });
+  assert.deepEqual(resolveAgentApprovals(approvals, 'bea'), {
+    slackApprovers: ['U-OPS'],
+    slackChannel: 'C-BEA',
+  });
+  assert.deepEqual(resolveAgentApprovals(approvals, 'unlisted'), {
+    slackApprovers: ['U-OPS'],
+    slackChannel: 'C-OPS',
+  });
+  // Nothing configured means nobody may approve — never everybody.
+  assert.deepEqual(resolveAgentApprovals(undefined, 'ava'), {});
 });

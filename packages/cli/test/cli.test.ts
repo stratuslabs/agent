@@ -2960,6 +2960,62 @@ test('parseCommand parses serve options', () => {
     configPath: './x.json',
   });
   assert.throws(() => parseCommand(['serve', '--idle-timeout', '-2']), /Invalid value for --idle-timeout/);
+  assert.deepEqual(parseCommand(['serve', '--approvals', 'remote']), {
+    command: 'serve',
+    events: true,
+    approvals: 'remote',
+  });
+  // `ask` is a run/chat mode: there is no terminal behind a service
+  // manager, so accepting it here would promise a prompt nobody can answer.
+  assert.throws(() => parseCommand(['serve', '--approvals', 'ask']), /Use headless or remote/);
+});
+
+test('serve in remote mode says who can actually approve', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-approvals-'));
+  await mkdir(path.join(serveHome, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(serveHome, '.stratus', 'config.json'),
+    JSON.stringify({ approvals: { mode: 'remote', agents: { ava: { slackApprovers: ['U-DYLAN'] } } } }),
+  );
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events'],
+    streams,
+    env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  assert.equal(code, 0);
+  // A daemon configured for remote with no channel running is the failure
+  // mode worth surfacing at startup rather than at 3am: nothing renders the
+  // request, so the turn hangs for the whole timeout before being denied,
+  // and the config looks perfectly fine while it happens.
+  assert.match(output.stdout, /approvals: remote/);
+  assert.match(output.stdout, /no channel is running to ask through/);
+});
+
+test('serve keeps refusing gated calls when the approvals config cannot be read', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-badconfig-'));
+  await mkdir(path.join(serveHome, '.stratus'), { recursive: true });
+  await writeFile(path.join(serveHome, '.stratus', 'config.json'), '{ not json');
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events'],
+    streams,
+    env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  // Degrades to headless with a warning rather than taking the fleet down
+  // over a policy block that may not even be present — and never to
+  // "approve everything", which is the only outcome that would be unsafe.
+  assert.equal(code, 0);
+  assert.match(output.stderr, /ignoring the approvals config/);
+  assert.doesNotMatch(output.stdout, /approvals: remote/);
 });
 
 test('optional channel packages are never hard dependencies of the CLI', async () => {

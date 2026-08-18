@@ -330,6 +330,27 @@ export interface ApprovalPolicy {
   approve(context: ApprovalContext): Promise<boolean>;
 }
 
+/**
+ * What a human decided about one gated call.
+ *
+ * - `once` — run this call, ask again next time.
+ * - `always` — run it and stop asking for this tool in this session.
+ * - `deny` — refuse it.
+ *
+ * `always` is deliberately not "forever": a persistent whitelist is a
+ * different, narrower promise (a normalized command scope) and belongs
+ * with the shell tool that needs one.
+ */
+export type ApprovalAnswer = 'once' | 'always' | 'deny';
+
+/**
+ * Why an approval request stopped being pending. Only `decided` involved a
+ * person — the other two are the request running out of patience or the
+ * turn it belonged to disappearing, and a channel rendering the request
+ * needs to tell those apart when it retracts the buttons.
+ */
+export type ApprovalResolutionReason = 'decided' | 'timeout' | 'cancelled';
+
 export type StratusEvent =
   | { type: 'session.created'; sessionId: string; agentId: string }
   | { type: 'session.updated'; sessionId: string; status: SessionStatus }
@@ -338,6 +359,41 @@ export type StratusEvent =
   | { type: 'tool.called'; sessionId: string; call: ToolCall }
   | { type: 'tool.completed'; sessionId: string; result: ToolResult }
   | { type: 'tool.denied'; sessionId: string; call: ToolCall }
+  /**
+   * A gated call is parked, waiting for a human somewhere else. Channels
+   * render it (Slack buttons) and resolve it through the gateway; nothing
+   * about the request is channel-specific, so the dashboard consumes the
+   * same event.
+   *
+   * `metadata` is the session's, carried because it says where the turn is
+   * happening — a channel that renders the request into the conversation it
+   * came from needs that without reaching into the store.
+   */
+  | {
+      type: 'tool.approval-requested';
+      sessionId: string;
+      agentId: string;
+      /** Opaque id the decision is quoted back with. */
+      requestId: string;
+      call: ToolCall;
+      risk: ToolRisk;
+      metadata?: JsonObject;
+      /**
+       * When the request gives up and denies itself, ISO-8601. Absent when
+       * it never will — a deadline of "now" would be a worse lie than
+       * saying nothing.
+       */
+      expiresAt?: string;
+    }
+  | {
+      type: 'tool.approval-resolved';
+      sessionId: string;
+      requestId: string;
+      answer: ApprovalAnswer;
+      reason: ApprovalResolutionReason;
+      /** Who decided, when a person did. Channel-native id (a Slack user). */
+      actor?: string;
+    }
   | { type: 'session.completed'; sessionId: string }
   | { type: 'session.failed'; sessionId: string; error: string };
 
