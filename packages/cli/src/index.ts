@@ -75,6 +75,7 @@ import {
   DEFAULT_CONFIG_FILENAME,
   LEGACY_CONFIG_FILENAME,
   loadConfigFile,
+  resolveConfigLocation,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
   saveChannelCredentials,
   saveCredentials,
@@ -91,6 +92,33 @@ import {
   type StratusConfigFile,
   type StratusProviderName,
 } from '@stratusagent/state';
+
+import {
+  installService,
+  readServiceStatus,
+  servicePlatform,
+  serviceUnitPath,
+  startService,
+  stopService,
+  uninstallService,
+  type ServiceEnvironment,
+  type ServiceRunner,
+} from './service.ts';
+
+export {
+  installService,
+  launchdPlist,
+  readServiceStatus,
+  servicePlatform,
+  serviceUnitPath,
+  startService,
+  stopService,
+  systemdUnit,
+  uninstallService,
+  SERVICE_LABEL,
+  type ServiceRunner,
+  type ServiceStatus,
+} from './service.ts';
 
 import {
   createLogWriter,
@@ -137,6 +165,8 @@ export interface CliEnvironment {
   dashboardAutoShutdownMs?: number;
   /** Shuts down `stratus serve` the way SIGTERM would (tests). */
   shutdownSignal?: AbortSignal;
+  /** Runs launchctl/systemctl. Injected so tests never touch the real one. */
+  serviceRunner?: ServiceRunner;
 }
 
 export interface CliRunOptions {
@@ -206,6 +236,15 @@ export interface ParsedDoctorCommand {
   configPath?: string;
 }
 
+export interface ParsedServiceCommand {
+  command: 'service';
+  action: 'install' | 'uninstall' | 'status' | 'start' | 'stop';
+  /** install only: start automatically at login. Defaults to true. */
+  runAtLogin?: boolean;
+  /** install only: the config the managed daemon should load. */
+  configPath?: string;
+}
+
 export interface ParsedLogsCommand {
   command: 'logs';
   /** Keep streaming new records instead of exiting after the backlog. */
@@ -240,6 +279,7 @@ export type ParsedCommand =
   | ParsedAgentsCommand
   | ParsedDoctorCommand
   | ParsedLogsCommand
+  | ParsedServiceCommand
   | ParsedServeCommand
   | ParsedHelpCommand;
 
@@ -270,6 +310,8 @@ Usage:
   stratus run --config ./stratus.config.json --provider openai "Say hello"
   stratus agents
   stratus doctor
+  stratus service install
+  stratus service status
   stratus logs -f
   stratus logs --agent ava -n 200
   stratus dashboard
@@ -290,6 +332,11 @@ Commands:
                    (--idle-timeout <seconds>, --no-events, --no-log-file,
                    --config <path>); everything it says is also written to
                    ~/.stratus/logs, which "stratus logs" reads
+  service          Keep stratusd running under launchd (macOS) or systemd
+                   (Linux): install, uninstall, status, start, stop.
+                   Installing starts it now and at every login
+                   (--no-login installs without the login trigger,
+                   --config <path> pins the daemon to one config file)
   logs             Read the daemon's log from any terminal: -f to follow,
                    -n <count> for backlog, --agent / --session to filter,
                    --format json for the raw records
@@ -565,6 +612,44 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       throw new Error(`Unknown option: ${token}`);
     }
     return { command: 'doctor', format, ...(configPath ? { configPath } : {}) };
+  }
+
+  if (command === 'service') {
+    const action = rest[0];
+    if (action === '--help' || action === '-h' || action === undefined) {
+      return { command: 'help' };
+    }
+    if (action !== 'install' && action !== 'uninstall' && action !== 'status' && action !== 'start' && action !== 'stop') {
+      throw new Error(`Unknown service action: ${action} (expected install, uninstall, status, start, or stop)`);
+    }
+    const parsed: ParsedServiceCommand = { command: 'service', action };
+    const serviceRest = rest.slice(1);
+    for (let index = 0; index < serviceRest.length; index += 1) {
+      const token = serviceRest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--no-login') {
+        if (action !== 'install') {
+          throw new Error('--no-login applies to `stratus service install`.');
+        }
+        parsed.runAtLogin = false;
+        continue;
+      }
+      if (token === '--config') {
+        if (action !== 'install') {
+          throw new Error('--config applies to `stratus service install`.');
+        }
+        parsed.configPath = readOptionValue(serviceRest, index, '--config');
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+    return parsed;
   }
 
   if (command === 'logs') {
@@ -2118,6 +2203,8 @@ interface SetupState {
   /** Channel tokens (Slack apps, keyed by agent id) and whether they changed. */
   channels: ChannelCredentials;
   channelsDirty: boolean;
+  /** Run stratusd under the platform's service manager after saving. */
+  service: { install: boolean; runAtLogin: boolean };
 }
 
 // Shown when live model listing is unavailable (e.g. subscription tokens
@@ -2221,6 +2308,22 @@ export const runSetup = async (
     credentialsDirty: false,
     channels: await loadChannelCredentials(env),
     channelsDirty: false,
+    // On by default: setup's whole promise is that you finish it and the
+    // agents are working. An always-on runtime you have to remember to
+    // start is not always-on, and every Slack app configured here stays
+    // silent until stratusd is up. An existing install keeps ITS login
+    // setting, though — rerunning setup and pressing save must not quietly
+    // undo a deliberate `service install --no-login`.
+    service: await (async () => {
+      const status = await readServiceStatus(serviceEnvFor(env)).catch(() => undefined);
+      // An unknown answer (a broken user bus, a timed-out query) must not
+      // read as "they chose --no-login" — that would disable a service on
+      // the next save because of a transient failure.
+      return {
+        install: true,
+        runAtLogin: status?.installed && status.runAtLogin !== undefined ? status.runAtLogin : true,
+      };
+    })(),
   };
 
   const prompter = createSetupPrompter(baseStreams, env, {
@@ -3017,6 +3120,50 @@ export const runSetup = async (
     return entries;
   };
 
+  const serviceSummary = (): string => {
+    if (!servicePlatform(serviceEnvFor(env))) {
+      return `not available on ${env.processEnv?.OSTYPE ?? process.platform} — run \`stratus serve\` yourself`;
+    }
+    if (!state.service.install) {
+      return 'off — start stratusd yourself with `stratus serve`';
+    }
+    return state.service.runAtLogin
+      ? 'stratusd runs after setup, and at every login'
+      : 'stratusd runs after setup, but not at login';
+  };
+
+  /**
+   * Whether the roster keeps answering once this terminal closes. On by
+   * default: an agent you have to remember to start is not always-on, and
+   * every Slack app configured above is silent until stratusd runs.
+   */
+  const chooseService = async (): Promise<void> => {
+    if (!servicePlatform(serviceEnvFor(env))) {
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, `Stratus has no service integration for ${process.platform} yet — run \`stratus serve\` yourself, or supervise it however you prefer.`);
+      await prompter.ask('Press Enter to return to the menu… ');
+      return;
+    }
+    const choice = await prompter.select('Always on — keep stratusd running in the background', [
+      'Run after setup, and start again at every login (recommended)',
+      'Run after setup, but do not start at login',
+      'Do not run it for me — I will start `stratus serve` myself',
+      'Back',
+    ], {
+      footnote: process.platform === 'darwin'
+        // Said here rather than left to be discovered after a reboot.
+        ? 'A LaunchAgent starts at login, not at power-on. For a machine that should recover unattended, turn on automatic login too.'
+        : 'A user service starts at login. `loginctl enable-linger` keeps it up on a machine you do not stay logged in to.',
+    });
+    if (choice.kind !== 'index' || choice.index === 3) {
+      return;
+    }
+    state.service = {
+      install: choice.index !== 2,
+      runAtLogin: choice.index === 0,
+    };
+  };
+
   const chooseChannels = async (): Promise<void> => {
     while (true) {
       const roster = await channelRoster();
@@ -3222,6 +3369,57 @@ export const runSetup = async (
         ? `Saved Slack tokens for ${connected} agent${connected === 1 ? '' : 's'} to ${credentialsPath(env)} — run \`${serveCommand()}\` to bring them online.`
         : `Removed the stored Slack tokens from ${credentialsPath(env)}.`);
     }
+
+    // Last, so the daemon starts against the config and credentials that
+    // were just written rather than the ones it would have found a moment
+    // ago. A service failure is reported and never fails setup: the
+    // settings are already saved, and `stratus serve` still works by hand.
+    if (!state.service.install && servicePlatform(serviceEnvFor(env))) {
+      // Opting out has to actually take effect. Skipping the install would
+      // leave a unit from an earlier setup running and enabled at login,
+      // while the menu said "off" — still burning provider usage and still
+      // answering in Slack after an explicit opt-out.
+      const existing = await readServiceStatus(serviceEnvFor(env)).catch(() => undefined);
+      if (existing?.installed) {
+        // Removal deletes the unit file, so it can reject the same way the
+        // install can. Setup's settings are already written by this point;
+        // the optional service must not take the whole command down.
+        const removed = await uninstallService(serviceEnvFor(env)).catch((error: unknown) => ({
+          ok: false,
+          messages: [
+            `Could not remove the always-on service: ${error instanceof Error ? error.message : String(error)}`,
+            `${serviceUnitPath(serviceEnvFor(env))} is still in place — remove it by hand, or it will start again at login.`,
+          ],
+        }));
+        for (const message of removed.messages) {
+          writeLine(removed.ok ? streams.stdout : streams.stderr, message);
+        }
+      }
+    } else if (state.service.install && servicePlatform(serviceEnvFor(env))) {
+      // The unit is pinned to the file setup just wrote. Its working
+      // directory is the home directory, so discovery from there would
+      // find a different config whenever setup was run with --config or
+      // STRATUS_CONFIG — the daemon would come up on another roster and
+      // leave the Slack apps configured above offline.
+      // installService writes files, so it can reject outright — an
+      // inaccessible ~/Library/LaunchAgents, a read-only home. Letting
+      // that escape would fail setup itself, after the config and
+      // credentials were already saved, when the always-on service is the
+      // one optional part of it.
+      const result = await installService(serviceEnvFor(env), {
+        runAtLogin: state.service.runAtLogin,
+        configPath,
+      }).catch((error: unknown) => ({
+        ok: false,
+        messages: [`Could not install the always-on service: ${error instanceof Error ? error.message : String(error)}`],
+      }));
+      for (const message of result.messages) {
+        writeLine(result.ok ? streams.stdout : streams.stderr, message);
+      }
+      if (!result.ok) {
+        writeLine(streams.stderr, `Setup is saved either way — start the daemon yourself with \`${serveCommand()}\`.`);
+      }
+    }
     writeLine(streams.stdout);
 
     // Exported STRATUS_* variables outrank the config file, so warn when one
@@ -3288,12 +3486,13 @@ export const runSetup = async (
         `Models               ${modelsSummary()}`,
         `Agent                ${agentSummary()}`,
         `Channels             ${channelsSummary()}`,
+        `Always on            ${serviceSummary()}`,
         'Test run             say hello with the current settings',
         'Save & finish',
       ]);
 
       // Backing out of the top level (Esc, or the input ending) saves.
-      if (choice.kind !== 'index' || choice.index === 5) {
+      if (choice.kind !== 'index' || choice.index === 6) {
         break;
       }
 
@@ -3306,6 +3505,8 @@ export const runSetup = async (
       } else if (choice.index === 3) {
         await chooseChannels();
       } else if (choice.index === 4) {
+        await chooseService();
+      } else if (choice.index === 5) {
         await testRun();
       }
     }
@@ -3949,6 +4150,150 @@ export const runLogs = async (
   return 0;
 };
 
+/** Builds the service view of the CLI environment (home, exec paths, runner). */
+const serviceEnvFor = (env: CliEnvironment): ServiceEnvironment => ({
+  ...(env.homeDir !== undefined ? { homeDir: env.homeDir } : {}),
+  cwd: readWorkingDirectory(env),
+  ...(env.serviceRunner !== undefined ? { run: env.serviceRunner } : {}),
+});
+
+/**
+ * A credential that exists only in this shell cannot reach the daemon: a
+ * service manager starts with its own environment and never sources a
+ * profile, so the unit would come up unauthenticated while setup had just
+ * reported everything ready. Returns the variable to name, if so.
+ */
+/**
+ * Every runtime the daemon would resolve: the config-wide default plus one
+ * per roster soul, normalized the way a dispatch normalizes it. A soul that
+ * pins its own provider resolves to different credentials entirely, so any
+ * check that looks only at the default misses exactly the agent that is
+ * misconfigured.
+ */
+const servedRuntimes = async (
+  env: CliEnvironment,
+  configPath?: string,
+): Promise<Array<{ runtime: RuntimeConfig; env: CliEnvironment }>> => {
+  const { applySoulPins } = await import('@stratusagent/gateway');
+  const { config: activeConfig, location } = await discoverActiveConfig(env, () => {});
+  const context = {
+    ...(activeConfig.provider !== undefined ? { configProvider: activeConfig.provider } : {}),
+    configPresent: location !== undefined,
+  };
+  const passes: Array<{ selection: RuntimeSelection; env: CliEnvironment }> = [{ selection: {}, env }];
+  for (const entry of await loadRosterSouls(env, () => {})) {
+    const normalized = applySoulPins(entry.soul, {}, env, context);
+    passes.push({ selection: normalized.selection, env: normalized.env as CliEnvironment });
+  }
+
+  const resolved: Array<{ runtime: RuntimeConfig; env: CliEnvironment }> = [];
+  for (const pass of passes) {
+    // A runtime that cannot resolve is the gateway's to report, per
+    // dispatch and with far better context than a startup pass has.
+    const runtime = await resolveStateRuntimeConfig(
+      { ...pass.selection, ...(configPath ? { configPath } : {}) },
+      pass.env,
+    ).catch(() => undefined);
+    if (runtime) {
+      resolved.push({ runtime, env: pass.env });
+    }
+  }
+  return resolved;
+};
+
+/**
+ * `stratus service` — run the daemon under launchd or systemd, so it
+ * survives logout, crashes, and reboots. `serve` itself stays a plain
+ * foreground process; this only tells the platform how to keep it up.
+ */
+export const runService = async (
+  command: ParsedServiceCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const serviceEnv = serviceEnvFor(env);
+
+  if (command.action === 'status') {
+    const status = await readServiceStatus(serviceEnv);
+    if (!status) {
+      writeLine(streams.stdout, `No service manager for ${process.platform}. Run \`stratus serve\` yourself.`);
+      return 1;
+    }
+    writeLine(streams.stdout, `stratusd  ${status.running ? 'running' : status.installed ? 'installed, not running' : 'not installed'}`);
+    writeLine(streams.stdout, `  manager   ${status.platform}`);
+    writeLine(streams.stdout, `  unit      ${status.unitPath}`);
+    if (status.installed) {
+      writeLine(streams.stdout, `  at login  ${status.runAtLogin === undefined
+        ? 'unknown — the service manager did not answer'
+        : status.runAtLogin ? 'yes' : 'no'}`);
+    }
+    writeLine(streams.stdout, status.installed
+      ? '  logs      stratus logs -f'
+      : '  install   stratus service install');
+    return status.running ? 0 : 1;
+  }
+
+  // A service manager passes none of this shell's environment on, so a
+  // config selected by STRATUS_CONFIG has to be baked into the unit
+  // exactly as --config is. Without it the daemon rediscovers from the
+  // install directory and can come up on a different roster entirely.
+  const processEnv = readProcessEnv(env);
+  const selectedConfig = command.configPath
+    ?? readNonEmptyString(processEnv.STRATUS_CONFIG)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_CONFIG);
+  if (command.action === 'install') {
+    // A config the daemon cannot parse kills it during gateway.start(),
+    // and the manager — having accepted the start — restarts it on a
+    // loop. Better to refuse now, while there is someone reading stderr.
+    // Without an explicit selection the unit carries no --config flag and
+    // discovers from its working directory — the same directory this is
+    // running in — so the discovered file has to be validated too, not
+    // just an explicitly named one.
+    let configToCheck: string | undefined;
+    if (selectedConfig) {
+      configToCheck = path.resolve(readWorkingDirectory(env), String(selectedConfig));
+    } else {
+      try {
+        configToCheck = (await resolveConfigLocation({}, env))?.path;
+      } catch (error) {
+        // Discovery throws when a candidate exists but cannot be read.
+        // Treating that as "no config" would install a daemon that hits
+        // the same error on its first dispatch.
+        writeLine(streams.stderr, `Not installing: ${error instanceof Error ? error.message : String(error)}`);
+        writeLine(streams.stderr, 'The daemon would fail the same way on startup. Fix the file, or move it aside.');
+        return 1;
+      }
+    }
+    if (configToCheck) {
+      try {
+        await loadConfigFile(configToCheck);
+      } catch (error) {
+        writeLine(streams.stderr, `Not installing: ${configToCheck} cannot be used (${error instanceof Error ? error.message : String(error)}).`);
+        writeLine(streams.stderr, 'The daemon would exit on startup and be restarted in a loop. Fix the file, or move it aside.');
+        return 1;
+      }
+    }
+  }
+
+  const action = command.action === 'install'
+    ? installService(serviceEnv, {
+        ...(command.runAtLogin === false ? { runAtLogin: false } : {}),
+        // Absolute: resolved against the directory the install ran in.
+        ...(selectedConfig ? { configPath: path.resolve(readWorkingDirectory(env), String(selectedConfig)) } : {}),
+      })
+    : command.action === 'uninstall'
+      ? uninstallService(serviceEnv)
+      : command.action === 'start'
+        ? startService(serviceEnv)
+        : stopService(serviceEnv);
+
+  const result = await action;
+  for (const message of result.messages) {
+    writeLine(result.ok ? streams.stdout : streams.stderr, message);
+  }
+  return result.ok ? 0 : 1;
+};
+
 export const runAgentNew = async (
   command: ParsedAgentNewCommand,
   streams: CliStreams,
@@ -4260,30 +4605,11 @@ export const runServe = async (
       stdout: { write: () => true },
       stderr: { write: (chunk: string) => { collect(chunk.replace(/\n$/, '')); return true; } },
     };
-    const { applySoulPins } = await import('@stratusagent/gateway');
     // A pinned soul does not merely add a provider — the gateway DEMOTES
-    // the daemon-wide defaults it outranks, including STRATUS_PROVIDER.
-    // Resolving with the pin bolted onto an unmodified environment would
-    // keep the env provider and check the wrong provider entirely, which
-    // is how an agent silently billed per token stays silent.
-    const { config: activeConfig, location } = await discoverActiveConfig(env, () => {});
-    const context = {
-      ...(activeConfig.provider !== undefined ? { configProvider: activeConfig.provider } : {}),
-      configPresent: location !== undefined,
-    };
-    const passes: Array<{ selection: RuntimeSelection; env: CliEnvironment }> = [{ selection: {}, env }];
-    for (const entry of await loadRosterSouls(env, () => {})) {
-      const normalized = applySoulPins(entry.soul, {}, env, context);
-      passes.push({ selection: normalized.selection, env: normalized.env as CliEnvironment });
-    }
-    for (const pass of passes) {
-      await resolveStateRuntimeConfig(
-        { ...pass.selection, ...(command.configPath ? { configPath: command.configPath } : {}) },
-        pass.env,
-      ).then((runtime) => warnOnCredentialOverride(runtime, captured, pass.env)).catch(() => {
-        // Resolution problems are the gateway's to report as it starts and
-        // per dispatch; this pass exists only for the billing surprise.
-      });
+    // the daemon-wide defaults it outranks, including STRATUS_PROVIDER, so
+    // each served runtime is resolved the way a dispatch resolves it.
+    for (const served of await servedRuntimes(env, command.configPath)) {
+      await warnOnCredentialOverride(served.runtime, captured, served.env);
     }
   }
 
@@ -4418,6 +4744,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'logs') {
       return runLogs(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'service') {
+      return runService(command, streams, resolvedEnv);
     }
 
     if (command.command === 'chat') {

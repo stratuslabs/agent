@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { Readable } from 'node:stream';
@@ -12,6 +12,13 @@ import {
   createFileMemoryStore,
   createLogWriter,
   currentLogPosition,
+  installService,
+  readServiceStatus,
+  serviceUnitPath,
+  startService,
+  stopService,
+  uninstallService,
+  type ServiceRunner,
   HELP_TEXT,
   parseCommand,
   resolveRuntimeConfig,
@@ -25,6 +32,11 @@ import {
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 // Isolated HOME so tests never read or write the real ~/.stratus.
 const tempHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+
+// `stratus setup` installs the always-on service when it saves. Tests get a
+// stub: the real launchctl/systemctl would touch the developer's machine,
+// and `systemctl --user` blocks without a session bus.
+const stubServiceRunner = async () => ({ code: 0, stdout: '', stderr: '' });
 
 const createStreams = () => {
   let stdout = '';
@@ -1425,7 +1437,8 @@ test('setup signs into Claude with a pasted API key, verifies it, and saves cred
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-test-key\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-test-key\n', '7\n']),
       fetch: (async (url: any, init?: any) => {
         const headers: Record<string, string> = {};
         new Headers(init?.headers ?? {}).forEach((value, key) => {
@@ -1467,7 +1480,8 @@ test('setup stores a Claude subscription setup token', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '1\n', '1\n', 'sk-ant-oat-123\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '1\n', '1\n', 'sk-ant-oat-123\n', '7\n']),
     },
   });
 
@@ -1491,7 +1505,8 @@ test('setup refuses a rejected API key and saves nothing', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '1\n', '2\n', 'bad-key\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'bad-key\n', '7\n']),
       fetch: (async () => new Response('{}', { status: 401 })) as typeof fetch,
     },
   });
@@ -1513,7 +1528,8 @@ test('setup creates an agent whose soul lives in ~/.stratus/agents', async () =>
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '7\n']),
     },
   });
 
@@ -1555,7 +1571,8 @@ test('setup demo path can test run inline before saving', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '3\n', '5\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '3\n', '6\n', '7\n']),
     },
   });
 
@@ -1579,7 +1596,8 @@ test('setup warns when exported env vars override the saved config', async () =>
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: { STRATUS_PROVIDER: 'openai' },
-      setupInput: Readable.from(['1\n', '3\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '3\n', '7\n']),
     },
   });
 
@@ -1601,7 +1619,8 @@ test('setup honors STRATUS_CONFIG and --config for the write target', async () =
       cwd: tempDir,
       homeDir: home,
       processEnv: { STRATUS_CONFIG: envConfigPath },
-      setupInput: Readable.from(['6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['7\n']),
     },
   });
   assert.match(viaEnv.output.stdout, /STRATUS_CONFIG is set, so the config will be written to/);
@@ -1616,7 +1635,8 @@ test('setup honors STRATUS_CONFIG and --config for the write target', async () =
       cwd: tempDir,
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '3\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '3\n', '7\n']),
     },
   });
   assert.match(viaFlag.output.stdout, /stratus run --config \.\/custom\.json "say hello"/);
@@ -1690,6 +1710,7 @@ test('setup Models menu picks default and fallback from live available models', 
       homeDir: home,
       processEnv: {},
       fetch: routedFetch,
+      serviceRunner: stubServiceRunner,
       setupInput: Readable.from([
         '1\n', '1\n', '2\n', 'sk-ant-key\n',      // Providers → Claude → API key
         '1\n', '2\n', 'https://local.test/v1\n', 'sk-openai-key\n', // Providers → OpenAI → custom base URL → key
@@ -1823,7 +1844,8 @@ test('switching the default provider clears settings chosen for the old one', as
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-key\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-key\n', '7\n']),
       fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
     },
   });
@@ -1863,7 +1885,8 @@ Be warm.
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '3\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '3\n', '7\n']),
     },
   });
 
@@ -1881,7 +1904,8 @@ test('setup saves a key when the endpoint has no /models to verify against', asy
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '2\n', 'https://local.test/v1\n', 'sk-local\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '2\n', 'https://local.test/v1\n', 'sk-local\n', '7\n']),
       fetch: (async () => new Response('not found', { status: 404 })) as typeof fetch,
     },
   });
@@ -1914,7 +1938,8 @@ test('the inline test run uses the same env-over-stored key precedence as real r
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: { ANTHROPIC_API_KEY: 'env-key' },
-      setupInput: Readable.from(['5\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['6\n', '7\n']),
       fetch: (async (_url: any, init?: any) => {
         const headers: Record<string, string> = {};
         new Headers(init?.headers ?? {}).forEach((value, key) => {
@@ -1955,6 +1980,7 @@ test('a typed model id resolves to the provider that lists it', async () => {
         }
         return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
       }) as typeof fetch,
+      serviceRunner: stubServiceRunner,
       setupInput: Readable.from([
         '1\n', '1\n', '2\n', 'sk-ant-key\n',
         '1\n', '2\n', '\n', 'sk-openai-key\n',
@@ -2058,7 +2084,8 @@ Be warm.
       fetch: (async () => new Response(JSON.stringify({
         data: [{ id: 'claude-opus-5' }, { id: 'claude-sonnet-5' }],
       }), { status: 200 })) as typeof fetch,
-      setupInput: Readable.from(['2\n', '1\n', '2\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['2\n', '1\n', '2\n', '7\n']),
     },
   });
 
@@ -2096,7 +2123,8 @@ test('model discovery uses the same credential a real run would use', async () =
         }
         return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
       }) as typeof fetch,
-      setupInput: Readable.from(['2\n', '1\n', '1\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '7\n']),
     },
   });
 
@@ -2161,6 +2189,7 @@ test('a secondary openai sign-in keeps its endpoint with the credential', async 
         }
         return new Response(JSON.stringify({ data: [{ id: 'local-llama' }] }), { status: 200 });
       }) as typeof fetch,
+      serviceRunner: stubServiceRunner,
       setupInput: Readable.from([
         '1\n', '1\n', '2\n', 'sk-ant-key\n',
         '1\n', '2\n', 'https://local.test/v1\n', 'sk-local\n',
@@ -2260,7 +2289,8 @@ test('signing into a second provider keeps a STRATUS_API_KEY-powered default', a
       // into openai must not steal the default.
       processEnv: { STRATUS_API_KEY: 'generic-key' },
       fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
-      setupInput: Readable.from(['1\n', '2\n', '\n', 'sk-openai\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '2\n', '\n', 'sk-openai\n', '7\n']),
     },
   });
 
@@ -2298,7 +2328,8 @@ test('the inline test run fails over on the configured fallback', async () => {
           choices: [{ message: { content: 'Fallback says hello.' } }],
         }), { status: 200, headers: { 'content-type': 'application/json' } });
       }) as typeof fetch,
-      setupInput: Readable.from(['5\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['6\n', '7\n']),
     },
   });
 
@@ -2322,7 +2353,8 @@ test('setup warns when a project config shadows the global file it wrote', async
       cwd: project,
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['1\n', '3\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '3\n', '7\n']),
     },
   });
 
@@ -2363,7 +2395,8 @@ test('model discovery keeps a bound stored key on its own endpoint', async () =>
         listRequests.push({ url: String(url), bearer: headers.authorization });
         return new Response(JSON.stringify({ data: [{ id: 'local-llama' }] }), { status: 200 });
       }) as typeof fetch,
-      setupInput: Readable.from(['2\n', '1\n', '1\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '7\n']),
     },
   });
 
@@ -2402,7 +2435,8 @@ test('discovery never sends the generic STRATUS_API_KEY to a secondary provider'
         byHost.openai = headers.authorization;
         return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
       }) as typeof fetch,
-      setupInput: Readable.from(['2\n', '1\n', '1\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '7\n']),
     },
   });
 
@@ -2486,7 +2520,8 @@ test('anthropic discovery, fallback, and save all honor a configured endpoint', 
         listUrls.push(String(url));
         return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
       }) as typeof fetch,
-      setupInput: Readable.from(['2\n', '1\n', '1\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '7\n']),
     },
   });
   assert.equal(listUrls[0], 'https://ant-proxy.test/v1/models?limit=100');
@@ -2532,7 +2567,8 @@ test('the model picker hides non-chat models and leads with chat ones', async ()
         ],
       }), { status: 200 })) as typeof fetch,
       // Accept the advertised default (empty answer picks entry #1).
-      setupInput: Readable.from(['2\n', '1\n', '\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['2\n', '1\n', '\n', '7\n']),
     },
   });
 
@@ -2576,7 +2612,8 @@ test('the inline test run keeps a bound stored key on its own endpoint', async (
         }
         return new Response(JSON.stringify({ data: [] }), { status: 200 });
       }) as typeof fetch,
-      setupInput: Readable.from(['5\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['6\n', '7\n']),
     },
   });
 
@@ -2606,7 +2643,8 @@ test('anthropic keys bind to the endpoint they were verified against', async () 
         verifyUrls.push(String(url));
         return new Response('{}', { status: 200 });
       }) as typeof fetch,
-      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-proxy\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-proxy\n', '7\n']),
     },
   });
 
@@ -2655,7 +2693,8 @@ test('the inline test run honors the STRATUS_API_KEY_ENV selector', async () => 
       // The selector redirects the effective key to MY_KEY, exactly as a
       // real run would resolve it.
       processEnv: { STRATUS_API_KEY_ENV: 'MY_KEY', MY_KEY: 'selector-key' },
-      setupInput: Readable.from(['5\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['6\n', '7\n']),
       fetch: (async (_url: any, init?: any) => {
         const headers: Record<string, string> = {};
         new Headers(init?.headers ?? {}).forEach((value, key) => {
@@ -2702,7 +2741,8 @@ test('a rejected replacement sign-in leaves the previous endpoint untouched', as
       processEnv: {},
       // The replacement key for the new endpoint is rejected.
       fetch: (async () => new Response('{}', { status: 401 })) as typeof fetch,
-      setupInput: Readable.from(['1\n', '2\n', 'https://new.test/v1\n', 'bad-key\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '2\n', 'https://new.test/v1\n', 'bad-key\n', '7\n']),
     },
   });
 
@@ -2742,7 +2782,8 @@ test('discovery honors a secondary anthropic credential bound endpoint', async (
         }
         return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
       }) as typeof fetch,
-      setupInput: Readable.from(['2\n', '1\n', '1\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '7\n']),
     },
   });
 
@@ -2921,7 +2962,8 @@ test('setup connects an agent to Slack without touching any file by hand', async
       processEnv: {},
       // Channels → Ava (2; the built-in Stratus agent is 1) → paste both
       // tokens → Back → Save & finish
-      setupInput: Readable.from(['4\n', '2\n', 'xapp-tok\n', 'xoxb-tok\n', '3\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['4\n', '2\n', 'xapp-tok\n', 'xoxb-tok\n', '3\n', '7\n']),
       fetch: (async (url: any, init?: any) => {
         slackCalls.push({
           url: String(url),
@@ -2963,7 +3005,8 @@ test('setup refuses to store Slack tokens the API rejects', async () => {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['4\n', '2\n', 'xapp-tok\n', 'xoxb-bad\n', '3\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['4\n', '2\n', 'xapp-tok\n', 'xoxb-bad\n', '3\n', '7\n']),
       // Slack answers 200 with ok:false for a bad token.
       fetch: (async () => new Response(JSON.stringify({ ok: false, error: 'invalid_auth' }), { status: 200 })) as typeof fetch,
     },
@@ -2990,7 +3033,8 @@ test('setup rejects malformed Slack tokens before calling the API', async () => 
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['4\n', '2\n', 'xoxb-wrong-kind\n', '3\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['4\n', '2\n', 'xoxb-wrong-kind\n', '3\n', '7\n']),
       fetch: (async () => { called += 1; return new Response('{}', { status: 200 }); }) as typeof fetch,
     },
   });
@@ -3022,7 +3066,8 @@ test('setup disconnects an agent from Slack', async () => {
       homeDir: home,
       processEnv: {},
       // Channels → Ava (connected) → Disconnect → Back → Save & finish
-      setupInput: Readable.from(['4\n', '2\n', '2\n', '3\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['4\n', '2\n', '2\n', '3\n', '7\n']),
     },
   });
 
@@ -3065,7 +3110,8 @@ test('the Channels menu offers a default soul that lives outside the roster', as
       homeDir: home,
       processEnv: {},
       // Channels → Nova → tokens → Back → Save & finish
-      setupInput: Readable.from(['4\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['4\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '7\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B9', team: 'Acme', team_id: 'T9' }
@@ -3102,7 +3148,8 @@ test('a configured soul outranks a same-id roster file in the Channels menu', as
       cwd: project,
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['4\n', '3\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['4\n', '3\n', '7\n']),
     },
   });
 
@@ -3126,7 +3173,8 @@ test('setup suggests serve with the same --config it was run with', async () => 
       cwd: project,
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['4\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['4\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '7\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
@@ -3159,7 +3207,8 @@ test('the Channels menu drops duplicate roster ids the way the gateway does', as
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['4\n', '3\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['4\n', '3\n', '7\n']),
     },
   });
 
@@ -3188,7 +3237,8 @@ test('the Channels menu follows STRATUS_SOUL over the configured soul', async ()
       homeDir: home,
       // `stratus serve` would resolve this soul, not the configured one.
       processEnv: { STRATUS_SOUL: overridden },
-      setupInput: Readable.from(['4\n', '3\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['4\n', '3\n', '7\n']),
     },
   });
 
@@ -4242,7 +4292,8 @@ test('the Channels menu connects the built-in agent on a fresh install', async (
       // dispatches as the built-in Stratus agent, so it has to be
       // connectable here — otherwise Slack is unreachable until you
       // create an agent you may not want.
-      setupInput: Readable.from(['4\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '2\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['4\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '2\n', '7\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B7', team: 'Acme', team_id: 'T7' }
@@ -4275,7 +4326,8 @@ test('a roster file claiming the built-in id is skipped in the Channels menu', a
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      setupInput: Readable.from(['4\n', '2\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['4\n', '2\n', '7\n']),
     },
   });
 
@@ -4305,7 +4357,8 @@ test('the Channels menu can clear orphaned tokens with no soul files present', a
       homeDir: home,
       processEnv: {},
       // Channels → the orphan (2, after the built-in) → Remove → Back → Save
-      setupInput: Readable.from(['4\n', '2\n', '1\n', '3\n', '6\n']),
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['4\n', '2\n', '1\n', '3\n', '7\n']),
     },
   });
 
@@ -4314,4 +4367,916 @@ test('the Channels menu can clear orphaned tokens with no soul files present', a
   assert.match(output.stdout, /Removed the Slack tokens for ghost\./);
   const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
   assert.deepEqual(credentials.channels, { slack: {} });
+});
+
+test('the launchd plist runs the daemon by absolute path and starts at login', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const result = await installService({
+    platform: 'darwin',
+    homeDir: home,
+    execPath: '/opt/homebrew/bin/node',
+    scriptPath: '/opt/homebrew/lib/node_modules/@stratusagent/cli/dist/bin.js',
+    uid: 501,
+    run: async (command, args) => { calls.push({ command, args }); return { code: 0, stdout: '', stderr: '' }; },
+  });
+
+  assert.equal(result.ok, true);
+  const plist = await readFile(path.join(home, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
+  // A service manager starts with a minimal environment, so a bare
+  // `stratus` would depend on a shell profile it never loads.
+  assert.match(plist, /<string>\/opt\/homebrew\/bin\/node<\/string>/);
+  assert.match(plist, /dist\/bin\.js<\/string>/);
+  assert.match(plist, /<string>serve<\/string>/);
+  assert.match(plist, /<key>RunAtLoad<\/key>\s*<true\/>/);
+  // Restart on crash, but not on a clean SIGTERM shutdown.
+  assert.match(plist, /<key>SuccessfulExit<\/key>\s*<false\/>/);
+
+  // bootout before bootstrap, or replacing an existing job is refused with
+  // "service already loaded" and the new unit never takes effect.
+  assert.deepEqual(calls.map((call) => `${call.command} ${call.args[0]}`), ['launchctl bootout', 'launchctl bootstrap']);
+  assert.equal(calls[1]?.args[1], 'gui/501');
+  // The login-vs-power-on distinction is stated, not left to be discovered
+  // after a reboot leaves the roster silent.
+  assert.ok(result.messages.some((message) => /starts at login, not at power-on/.test(message)));
+});
+
+test('--no-login installs the service without the login trigger', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService(
+    { platform: 'darwin', homeDir: home, uid: 501, run: async () => ({ code: 0, stdout: '', stderr: '' }) },
+    { runAtLogin: false },
+  );
+  const plist = await readFile(path.join(home, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
+  assert.match(plist, /<key>RunAtLoad<\/key>\s*<false\/>/);
+});
+
+test('the systemd unit restarts on failure and enables at login', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const calls: string[] = [];
+  const result = await installService({
+    platform: 'linux',
+    homeDir: home,
+    execPath: '/usr/bin/node',
+    scriptPath: '/usr/lib/node_modules/@stratusagent/cli/dist/bin.js',
+    run: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+  });
+
+  assert.equal(result.ok, true);
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  assert.match(unit, /ExecStart="\/usr\/bin\/node" ".*bin\.js" "serve"/);
+  assert.match(unit, /Restart=on-failure/);
+  // serve drains on SIGTERM, so systemd must send it and wait.
+  assert.match(unit, /KillSignal=SIGTERM/);
+  assert.match(unit, /WantedBy=default\.target/);
+  // The restart is not redundant: `enable --now` no-ops on an already
+  // active unit, so a rerun would leave the old process — and its old
+  // config path — running while reporting the new unit as installed.
+  assert.deepEqual(calls, [
+    'systemctl --user daemon-reload',
+    'systemctl --user enable --now stratusd.service',
+    'systemctl --user restart stratusd.service',
+  ]);
+});
+
+test('a failing service manager is reported, not swallowed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'install'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: async (command) => (command === 'launchctl'
+        ? { code: 1, stdout: '', stderr: 'Load failed: 5: Input/output error' }
+        : { code: 1, stdout: '', stderr: 'Failed to connect to bus' }),
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.match(output.stderr, /failed/i);
+});
+
+test('service status distinguishes not installed, installed, and running', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+
+  const missing = await readServiceStatus({ platform: 'linux', homeDir: home, run: async () => ({ code: 3, stdout: 'inactive', stderr: '' }) });
+  assert.equal(missing?.installed, false);
+  assert.equal(missing?.running, false);
+
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+
+  // A unit on disk the manager has not started is installed but inert.
+  const stopped = await readServiceStatus({ platform: 'linux', homeDir: home, run: async () => ({ code: 3, stdout: 'inactive\n', stderr: '' }) });
+  assert.equal(stopped?.installed, true);
+  assert.equal(stopped?.running, false);
+
+  const running = await readServiceStatus({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: 'active\n', stderr: '' }) });
+  assert.equal(running?.running, true);
+});
+
+test('uninstall tells the manager before removing the unit file', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const seen: string[] = [];
+  await installService({ platform: 'darwin', homeDir: home, uid: 501, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const unitPath = serviceUnitPath({ platform: 'darwin', homeDir: home });
+
+  await uninstallService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    run: async (command, args) => {
+      // Removing the file first would leave a running job with no unit to
+      // stop it by.
+      seen.push([command, ...args].join(' '));
+      assert.ok(await readFile(unitPath, 'utf8').catch(() => undefined), 'the unit is still on disk while stopping');
+      return { code: 0, stdout: '', stderr: '' };
+    },
+  });
+
+  assert.deepEqual(seen, ['launchctl bootout gui/501/com.stratusagent.stratusd']);
+  assert.equal(await readFile(unitPath, 'utf8').catch(() => undefined), undefined);
+});
+
+test('setup installs the always-on service when it saves', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A stored sign-in, or the install is refused — a daemon that cannot
+  // authenticate is worse than no daemon.
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+  const calls: string[] = [];
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      // Straight to Save & finish: the service is on by default, because a
+      // runtime you have to remember to start is not always-on.
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.ok(calls.some((call) => /enable --now|bootstrap/.test(call)), `expected an install, got ${calls.join(', ')}`);
+  assert.match(output.stdout, /will start again when you log in/);
+});
+
+test('setup can be told not to run the service', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const calls: string[] = [];
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      // Always on → "Do not run it for me" → Save & finish.
+      setupInput: Readable.from(['5\n', '3\n', '7\n']),
+    },
+  });
+
+  assert.deepEqual(calls, [], 'nothing should be handed to the service manager');
+  assert.match(output.stdout, /Always on {12}off/);
+});
+
+test('parseCommand parses service actions', () => {
+  assert.deepEqual(parseCommand(['service', 'install']), { command: 'service', action: 'install' });
+  assert.deepEqual(parseCommand(['service', 'install', '--no-login']), { command: 'service', action: 'install', runAtLogin: false });
+  assert.deepEqual(parseCommand(['service', 'status']), { command: 'service', action: 'status' });
+  assert.throws(() => parseCommand(['service', 'restart']), /Unknown service action/);
+  assert.throws(() => parseCommand(['service', 'status', '--no-login']), /applies to/);
+});
+
+test('the managed daemon is pinned to the config setup wrote', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup', '--config', './custom.json'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  // The unit's working directory is the home directory, so discovery from
+  // there would find a different config entirely — the daemon would come up
+  // on the wrong roster and leave configured Slack agents offline.
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  // --no-events sits between them: the managed daemon keeps stdout to
+  // lifecycle lines, since launchd's redirect file is never rotated.
+  assert.match(unit, /"serve" "--no-events" "--config" "[^"]*custom\.json"/);
+});
+
+test('service install can pin the daemon to a config of its own', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+
+  await writeFile(path.join(project, 'team.json'), JSON.stringify({ provider: 'demo' }));
+  await runCli({
+    argv: ['service', 'install', '--config', './team.json'],
+    streams: createStreams().streams,
+    env: { cwd: project, homeDir: home, processEnv: {}, serviceRunner: stubServiceRunner },
+  });
+
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  // Resolved against the invoking directory, not the home the unit runs in.
+  assert.match(unit, new RegExp(`"--config" "${path.join(project, 'team.json')}"`));
+});
+
+test('a --no-login LaunchAgent does not smuggle RunAtLoad back in', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const calls: string[] = [];
+  const result = await installService(
+    {
+      platform: 'darwin',
+      homeDir: home,
+      uid: 501,
+      run: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+    { runAtLogin: false },
+  );
+
+  const plist = await readFile(path.join(home, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
+  assert.match(plist, /<key>RunAtLoad<\/key>\s*<false\/>/);
+  // launchd's KeepAlive.SuccessfulExit implies RunAtLoad — the job has to
+  // run to produce an exit status — so keeping it would restart the agent
+  // at every login and quietly contradict the flag.
+  assert.doesNotMatch(plist, /KeepAlive/);
+  // Which means bootstrap alone will not start it: it is kickstarted.
+  assert.ok(calls.some((call) => /kickstart/.test(call)), calls.join(', '));
+  assert.equal(result.ok, true);
+  assert.ok(result.messages.some((message) => /will not start at login/.test(message)));
+});
+
+test('reinstalling with --no-login clears an existing systemd enablement', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const run = async () => ({ code: 0, stdout: '', stderr: '' });
+  await installService({ platform: 'linux', homeDir: home, run });
+
+  const calls: string[] = [];
+  await installService(
+    { platform: 'linux', homeDir: home, run: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; } },
+    { runAtLogin: false },
+  );
+
+  // `start` alone leaves the enablement symlink from the first install, so
+  // the unit keeps starting at login despite the success message.
+  assert.deepEqual(calls, [
+    'systemctl --user daemon-reload',
+    'systemctl --user disable stratusd.service',
+    'systemctl --user start stratusd.service',
+    'systemctl --user restart stratusd.service',
+  ]);
+});
+
+test('systemd status asks whether the unit is enabled', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+
+  // The unit file says nothing about enablement — that lives in a symlink,
+  // so a unit installed with --no-login would otherwise be reported as
+  // starting at login, contradicting its own install output.
+  const disabled = await readServiceStatus({
+    platform: 'linux',
+    homeDir: home,
+    run: async (_command, args) => (args.includes('is-enabled')
+      ? { code: 1, stdout: 'disabled\n', stderr: '' }
+      : { code: 0, stdout: 'active\n', stderr: '' }),
+  });
+  assert.equal(disabled?.runAtLogin, false);
+
+  const enabled = await readServiceStatus({
+    platform: 'linux',
+    homeDir: home,
+    run: async (_command, args) => (args.includes('is-enabled')
+      ? { code: 0, stdout: 'enabled\n', stderr: '' }
+      : { code: 0, stdout: 'active\n', stderr: '' }),
+  });
+  assert.equal(enabled?.runAtLogin, true);
+});
+
+test('uninstall keeps the unit when the manager could not stop the daemon', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'darwin', homeDir: home, uid: 501, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const unitPath = serviceUnitPath({ platform: 'darwin', homeDir: home });
+
+  const result = await uninstallService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    run: async () => ({ code: 124, stdout: '', stderr: 'launchctl did not respond within 15s' }),
+  });
+
+  assert.equal(result.ok, false);
+  // Removing it anyway would strand a live daemon with nothing left to stop
+  // it by, while reporting that it had been shut down.
+  assert.ok(await readFile(unitPath, 'utf8').catch(() => undefined), 'the unit must survive a failed stop');
+  assert.ok(result.messages.some((message) => /left in place/.test(message)));
+});
+
+test('uninstall still cleans up a unit the manager never loaded', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'darwin', homeDir: home, uid: 501, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const unitPath = serviceUnitPath({ platform: 'darwin', homeDir: home });
+
+  // Nothing to stop is not a failure to stop.
+  const result = await uninstallService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    run: async () => ({ code: 3, stdout: '', stderr: 'Could not find service "com.stratusagent.stratusd"' }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(await readFile(unitPath, 'utf8').catch(() => undefined), undefined);
+});
+
+test('the unit runs where it was installed, so relative config paths still work', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+
+  await runCli({
+    argv: ['service', 'install'],
+    streams: createStreams().streams,
+    env: { cwd: project, homeDir: home, processEnv: {}, serviceRunner: stubServiceRunner },
+  });
+
+  // A config's `soul` resolves against the process working directory, so
+  // forcing the home directory would make the service load a different —
+  // or missing — soul than `stratus serve` does from the same project.
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  assert.match(unit, new RegExp(`WorkingDirectory=${project}`));
+});
+
+test('a failed disable stops --no-login claiming the login trigger is gone', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const result = await installService(
+    {
+      platform: 'linux',
+      homeDir: home,
+      run: async (_command, args) => (args.includes('disable')
+        ? { code: 1, stdout: '', stderr: 'Failed to disable: permission denied' }
+        : { code: 0, stdout: '', stderr: '' }),
+    },
+    { runAtLogin: false },
+  );
+
+  assert.equal(result.ok, false);
+  assert.ok(result.messages.some((message) => /Could not remove the login trigger/.test(message)));
+  assert.ok(!result.messages.some((message) => /will not start automatically/.test(message)));
+});
+
+test('a unit that was never enabled is not treated as a failed disable', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const result = await installService(
+    {
+      platform: 'linux',
+      homeDir: home,
+      run: async (_command, args) => (args.includes('disable')
+        ? { code: 1, stdout: '', stderr: 'Unit stratusd.service is not enabled' }
+        : { code: 0, stdout: '', stderr: '' }),
+    },
+    { runAtLogin: false },
+  );
+
+  assert.equal(result.ok, true);
+});
+
+test('a stored sign-in installs the service as usual', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+
+  const calls: string[] = [];
+  await runCli({
+    argv: ['setup'],
+    streams: createStreams().streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  assert.ok(calls.some((call) => /enable --now/.test(call)), calls.join(', '));
+});
+
+test('opting out in setup removes a service an earlier run installed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const unitPath = serviceUnitPath({ platform: 'linux', homeDir: home });
+  assert.ok(await readFile(unitPath, 'utf8').catch(() => undefined), 'installed to begin with');
+
+  const calls: string[] = [];
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      // Always on → "Do not run it for me" → Save & finish.
+      setupInput: Readable.from(['5\n', '3\n', '7\n']),
+    },
+  });
+
+  // Skipping the install would leave the daemon running and enabled while
+  // the menu said "off" — still burning usage and still answering in Slack.
+  assert.ok(calls.some((call) => /disable --now/.test(call)), calls.join(', '));
+  assert.equal(await readFile(unitPath, 'utf8').catch(() => undefined), undefined);
+});
+
+test('starting a LaunchAgent works after it has been booted out', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'darwin', homeDir: home, uid: 501, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+
+  const calls: string[] = [];
+  const result = await startService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    run: async (command, args) => {
+      calls.push([command, ...args].join(' '));
+      // kickstart cannot find a job that bootout removed from the domain.
+      return args[0] === 'kickstart' && !calls.some((call) => call.includes('bootstrap'))
+        ? { code: 3, stdout: '', stderr: 'Could not find service' }
+        : { code: 0, stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(calls[0]?.includes('bootstrap'), true, `expected a bootstrap first, got ${calls.join(', ')}`);
+  assert.ok(calls.some((call) => /kickstart/.test(call)));
+});
+
+test('stopping a --no-login service does not promise it comes back at login', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService(
+    { platform: 'darwin', homeDir: home, uid: 501, run: async () => ({ code: 0, stdout: '', stderr: '' }) },
+    { runAtLogin: false },
+  );
+
+  const quiet = await stopService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+  // Believing it will return at login leaves the agents offline indefinitely.
+  assert.ok(quiet.messages.some((message) => /NOT start again on its own/.test(message)), quiet.messages.join(' '));
+
+  await installService({ platform: 'darwin', homeDir: home, uid: 501, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const managed = await stopService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+  assert.ok(managed.messages.some((message) => /start again at your next login/.test(message)));
+});
+
+test('systemd unit values escape percent signs', async () => {
+  // systemd expands % specifiers in unit values, including inside quoted
+  // ExecStart arguments — %b becomes the boot id, so a path containing one
+  // silently turns into a nonexistent executable or directory.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const odd = path.join(home, '100%b-project');
+  await mkdir(odd, { recursive: true });
+
+  await installService({
+    platform: 'linux',
+    homeDir: home,
+    cwd: odd,
+    execPath: '/usr/bin/node',
+    scriptPath: path.join(odd, 'bin.js'),
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  assert.match(unit, /100%%b-project/);
+  assert.doesNotMatch(unit, /100%b-project/);
+});
+
+test('rerunning setup keeps an existing --no-login install as it was', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+  await installService(
+    { platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) },
+    { runAtLogin: false },
+  );
+
+  const calls: string[] = [];
+  await runCli({
+    argv: ['setup'],
+    streams: createStreams().streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => {
+        calls.push([command, ...args].join(' '));
+        return args.includes('is-enabled')
+          ? { code: 1, stdout: 'disabled\n', stderr: '' }
+          : { code: 0, stdout: '', stderr: '' };
+      },
+      // Straight to Save & finish, without visiting Always on.
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  // Saving must not quietly undo a deliberate `service install --no-login`.
+  assert.ok(!calls.some((call) => /enable --now/.test(call)), calls.join(', '));
+  assert.ok(calls.some((call) => /--user start/.test(call)), calls.join(', '));
+});
+
+test('service install pins the config STRATUS_CONFIG selected', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+
+  await writeFile(path.join(project, 'team.json'), JSON.stringify({ provider: 'demo' }));
+  await runCli({
+    argv: ['service', 'install'],
+    streams: createStreams().streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      // A service manager passes none of this shell on, so a config chosen
+      // here has to be baked into the unit or the daemon rediscovers and
+      // can come up on a different roster.
+      processEnv: { STRATUS_CONFIG: './team.json' },
+      serviceRunner: stubServiceRunner,
+    },
+  });
+
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  assert.match(unit, new RegExp(`"--config" "${path.join(project, 'team.json')}"`));
+});
+
+test('an unanswerable enablement query is not read as --no-login', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+
+  // A broken user bus exits non-zero with nothing on stdout, which looks
+  // exactly like "disabled" unless the known states are checked.
+  const unknown = await readServiceStatus({
+    platform: 'linux',
+    homeDir: home,
+    run: async (_command, args) => (args.includes('is-enabled')
+      ? { code: 1, stdout: '', stderr: 'Failed to connect to bus' }
+      : { code: 0, stdout: 'active\n', stderr: '' }),
+  });
+  assert.equal(unknown?.runAtLogin, undefined);
+
+  const disabled = await readServiceStatus({
+    platform: 'linux',
+    homeDir: home,
+    run: async (_command, args) => (args.includes('is-enabled')
+      ? { code: 1, stdout: 'disabled\n', stderr: '' }
+      : { code: 0, stdout: 'active\n', stderr: '' }),
+  });
+  assert.equal(disabled?.runAtLogin, false);
+});
+
+test('a transient status failure does not disable a service on the next save', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+
+  const calls: string[] = [];
+  await runCli({
+    argv: ['setup'],
+    streams: createStreams().streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => {
+        calls.push([command, ...args].join(' '));
+        return args.includes('is-enabled')
+          ? { code: 1, stdout: '', stderr: 'Failed to connect to bus' }
+          : { code: 0, stdout: '', stderr: '' };
+      },
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  // Reading the failure as "they chose --no-login" would quietly strip an
+  // enabled service's login startup.
+  assert.ok(calls.some((call) => /enable --now/.test(call)), calls.join(', '));
+  assert.ok(!calls.some((call) => /--user disable/.test(call)), calls.join(', '));
+});
+
+test('service install refuses a config the daemon could not parse', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  await writeFile(path.join(project, 'broken.json'), '{ not json');
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'install', '--config', './broken.json'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+  });
+
+  // Installing would let the manager accept the start, then restart the
+  // daemon in a loop as it exits on the unreadable config.
+  assert.equal(exitCode, 1);
+  assert.deepEqual(calls, []);
+  assert.match(output.stderr, /cannot be used/);
+  assert.match(output.stderr, /restarted in a loop/);
+});
+
+test('systemd ExecStart escapes dollar signs as well as percents', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const odd = path.join(home, 'proj-${HOME}-100%');
+  await mkdir(odd, { recursive: true });
+
+  await installService({
+    platform: 'linux',
+    homeDir: home,
+    cwd: odd,
+    execPath: '/usr/bin/node',
+    scriptPath: path.join(odd, 'bin.js'),
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  const execStart = unit.split('\n').find((line) => line.startsWith('ExecStart='));
+  // JSON quoting does not disable systemd's expansion; systemd.service(5)
+  // spells a literal dollar `$$`.
+  assert.match(String(execStart), /\$\$\{HOME\}/);
+  assert.match(String(execStart), /100%%/);
+  // WorkingDirectory is not a command line, so it takes % escaping only.
+  assert.match(unit, /WorkingDirectory=.*\$\{HOME\}-100%%/);
+});
+
+test('an unanswerable enablement is reported as unknown, not as no', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const brokenBus: ServiceRunner = async (_command, args) => (args.includes('is-enabled')
+    ? { code: 1, stdout: '', stderr: 'Failed to connect to bus' }
+    : { code: 0, stdout: 'active\n', stderr: '' });
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['service', 'status'],
+    streams,
+    env: { cwd: home, homeDir: home, processEnv: {}, serviceRunner: brokenBus },
+  });
+  assert.match(output.stdout, /at login {2}unknown — the service manager did not answer/);
+
+  // Stopping must not claim it will never come back either.
+  const stopped = await stopService({ platform: 'linux', homeDir: home, run: brokenBus });
+  assert.ok(stopped.messages.some((message) => /could not be determined/.test(message)), stopped.messages.join(' '));
+});
+
+test('the managed daemon does not duplicate the event stream to an unrotated file', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+
+  const plist = await readFile(path.join(home, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
+  // launchd holds StandardOutPath open and never rotates it, so an event
+  // line per Slack dispatch would grow that file for the daemon's whole
+  // lifetime. Those lines are already in ~/.stratus/logs, which rotates.
+  assert.match(plist, /<string>--no-events<\/string>/);
+  assert.match(plist, /stratusd\.out\.log/);
+});
+
+test('service install refuses a malformed config it would have discovered', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  // No --config, so the unit carries no flag and discovers from this very
+  // directory once it runs. A broken file here breaks every dispatch.
+  await writeFile(path.join(project, 'stratus.config.json'), '{ broken');
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'install'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.deepEqual(calls, []);
+  assert.match(output.stderr, /cannot be used/);
+});
+
+test('a demo setup still installs, since it needs no credential at all', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+
+  const calls: string[] = [];
+  const exitCode = await runCli({
+    argv: ['service', 'install'],
+    streams: createStreams().streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.ok(calls.some((call) => /enable --now/.test(call)), calls.join(', '));
+});
+
+test('a config that exists but cannot be read blocks the install', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  // A directory where a config file belongs: discovery throws rather than
+  // moving on, and treating that as "no config" would install a daemon
+  // that hits the same error on its first dispatch.
+  await mkdir(path.join(project, 'stratus.config.json'), { recursive: true });
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'install'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.deepEqual(calls, []);
+  assert.match(output.stderr, /Not installing:/);
+});
+
+test('the unit keeps the node flags the entrypoint needs', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({
+    platform: 'linux',
+    homeDir: home,
+    execPath: '/usr/bin/node',
+    // From a source checkout the entrypoint is .ts and needs the flag; a
+    // unit without it starts a daemon that cannot load its own bin.
+    execArgv: ['--experimental-strip-types', '--inspect=9229'],
+    scriptPath: '/repo/packages/cli/src/bin.ts',
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  assert.match(unit, /"--experimental-strip-types"/);
+  // An inspector flag would leave the service waiting on a debugger.
+  assert.doesNotMatch(unit, /--inspect/);
+});
+
+test('a service install that throws does not fail setup', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A file where the LaunchAgents/systemd directory belongs: mkdir rejects,
+  // and the rejection used to escape after the config was already written.
+  await mkdir(path.join(home, '.config'), { recursive: true });
+  await writeFile(path.join(home, '.config', 'systemd'), 'not a directory');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0, 'the optional service must not take setup down with it');
+  assert.match(output.stderr, /Could not install the always-on service/);
+  assert.match(output.stderr, /Setup is saved either way/);
+  // And the settings it had already written are still there.
+  assert.ok(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+});
+
+test('a unit that cannot be read is not reported as uninstalled', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  // A directory where the unit file belongs: reading it fails with EISDIR,
+  // not ENOENT. Calling that "not installed" would hide a live daemon and
+  // cost setup the login preference it reads from here.
+  const unitPath = serviceUnitPath({ platform: 'linux', homeDir: home });
+  await rm(unitPath);
+  await mkdir(unitPath, { recursive: true });
+
+  const status = await readServiceStatus({
+    platform: 'linux',
+    homeDir: home,
+    run: async () => ({ code: 0, stdout: 'active\n', stderr: '' }),
+  });
+  assert.equal(status?.installed, true);
+  assert.equal(status?.runAtLogin, undefined);
+  assert.match(String(status?.detail), /could not be read/);
+});
+
+test('a failed removal does not take setup down with it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  // Make the unit undeletable by turning it into a non-empty directory.
+  const unitPath = serviceUnitPath({ platform: 'linux', homeDir: home });
+  await rm(unitPath);
+  await mkdir(unitPath, { recursive: true });
+  await writeFile(path.join(unitPath, 'blocker'), 'x');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Always on → "Do not run it for me" → Save & finish.
+      setupInput: Readable.from(['5\n', '3\n', '7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stderr, /Could not remove the always-on service/);
+  assert.match(output.stderr, /still in place/);
+});
+
+test('rotation truncates the service manager redirect files', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  await mkdir(dir, { recursive: true });
+  // launchd holds these open with no rotation of its own. --no-events
+  // bounded stdout, but every warn still reaches stderr — and a Slack
+  // failure loop warns per attempt.
+  const errPath = path.join(dir, 'stratusd.err.log');
+  await writeFile(errPath, 'x'.repeat(500));
+
+  const writer = createLogWriter({ dir, maxBytes: 200, keep: 2 });
+  for (let index = 0; index < 8; index += 1) {
+    await writer.write({ ts: new Date(index * 1000).toISOString(), level: 'warn', msg: `warned ${index}` });
+  }
+
+  assert.ok((await stat(errPath)).size < 500, 'the redirect file must be bounded too');
 });
