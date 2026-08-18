@@ -4209,19 +4209,47 @@ const servedRuntimes = async (
  * makes the check pass while the daemon resolves the real provider from the
  * pinned config and cannot authenticate.
  */
-const daemonEnvironment = (env: CliEnvironment): CliEnvironment => {
+const daemonEnvironment = (env: CliEnvironment, customKeyVars: Iterable<string> = []): CliEnvironment => {
   const processEnv = readProcessEnv(env);
+  // A config's apiKeyEnv can name anything — WORK_CLAUDE_KEY, a per-project
+  // variable — and letting one through means the preflight authenticates
+  // with a key the daemon will never have.
+  const custom = new Set(customKeyVars);
   const stripped: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(processEnv)) {
     if (name.startsWith('STRATUS_') || name.startsWith('STRATUSCLAW_')) {
       continue;
     }
-    if (name === 'ANTHROPIC_API_KEY' || name === 'OPENAI_API_KEY') {
+    if (name === 'ANTHROPIC_API_KEY' || name === 'OPENAI_API_KEY' || custom.has(name)) {
       continue;
     }
     stripped[name] = value;
   }
   return { ...env, processEnv: stripped };
+};
+
+/**
+ * Every variable that could hand a credential to a run: the two selector
+ * variables' targets, and the apiKeyEnv of whichever config the daemon
+ * will read. Collected from the shell, because that is where the names
+ * live before they are stripped.
+ */
+const credentialVarNames = async (env: CliEnvironment, configPath?: string): Promise<Set<string>> => {
+  const processEnv = readProcessEnv(env);
+  const names = new Set<string>();
+  for (const selector of ['STRATUS_API_KEY_ENV', 'STRATUSCLAW_API_KEY_ENV'] as const) {
+    const named = readNonEmptyString(processEnv[selector]);
+    if (typeof named === 'string') {
+      names.add(named);
+    }
+  }
+  const config = configPath
+    ? await loadConfigFile(configPath).catch(() => undefined)
+    : (await discoverActiveConfig(env, () => {})).config;
+  if (config?.apiKeyEnv) {
+    names.add(config.apiKeyEnv);
+  }
+  return names;
 };
 
 /**
@@ -4231,17 +4259,19 @@ const daemonEnvironment = (env: CliEnvironment): CliEnvironment => {
  */
 const shellOnlyCredential = async (
   env: CliEnvironment,
-  // The config setup just wrote, which is also what the unit will be
-  // pinned to. Plain discovery would resolve some other file — or nothing,
-  // giving the demo provider and a clean bill of health for a daemon that
-  // cannot authenticate.
-  configPath: string,
+  // The config the unit will be pinned to, when it is pinned to one.
+  // Undefined means the unit carries no --config flag, so the daemon
+  // rediscovers from its working directory exactly as this check must —
+  // forcing the global config here would check a file the daemon may
+  // never read, and miss a project config that outranks it.
+  configPath: string | undefined,
 ): Promise<string | undefined> => {
-  const bare = daemonEnvironment(env);
+  const customKeyVars = await credentialVarNames(env, configPath);
+  const bare = daemonEnvironment(env, customKeyVars);
   const processEnv = readProcessEnv(env);
   const covering = (provider: string): string | undefined => {
     const conventional = provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
-    for (const name of ['STRATUS_API_KEY', 'STRATUSCLAW_API_KEY', conventional]) {
+    for (const name of ['STRATUS_API_KEY', 'STRATUSCLAW_API_KEY', ...customKeyVars, conventional]) {
       if (readNonEmptyString(processEnv[name]) !== undefined) {
         return name;
       }
@@ -4329,7 +4359,7 @@ export const runService = async (
     // that fails every dispatch while reporting a successful install.
     const shellOnly = await shellOnlyCredential(
       env,
-      selectedConfig ? path.resolve(readWorkingDirectory(env), String(selectedConfig)) : globalConfigPath(env),
+      selectedConfig ? path.resolve(readWorkingDirectory(env), String(selectedConfig)) : undefined,
     );
     if (shellOnly) {
       writeLine(streams.stderr, `Not installing: your API key comes from ${shellOnly} in this shell, and a background service never sees it.`);

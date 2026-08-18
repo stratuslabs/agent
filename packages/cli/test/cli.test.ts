@@ -5189,3 +5189,63 @@ test('a transient status failure does not disable a service on the next save', a
   assert.ok(calls.some((call) => /enable --now/.test(call)), calls.join(', '));
   assert.ok(!calls.some((call) => /--user disable/.test(call)), calls.join(', '));
 });
+
+test('a custom apiKeyEnv is stripped from the daemon preflight too', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // apiKeyEnv can name anything. Letting one through means the preflight
+  // authenticates with a key the daemon will never have.
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'anthropic', apiKeyEnv: 'WORK_CLAUDE_KEY' }),
+  );
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { WORK_CLAUDE_KEY: 'sk-ant-shell-only' },
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  assert.deepEqual(calls, [], 'the daemon cannot see WORK_CLAUDE_KEY either');
+  assert.match(output.stderr, /comes from WORK_CLAUDE_KEY in this shell/);
+});
+
+test('a direct install checks the project config the daemon will discover', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A healthy global config, so forcing the global path would pass the
+  // check — but the unit carries no --config flag and runs from this
+  // directory, where the project config outranks it and has no sign-in.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'openai' }));
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'install'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: { OPENAI_API_KEY: 'sk-openai-shell-only' },
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.deepEqual(calls, []);
+  assert.match(output.stderr, /comes from OPENAI_API_KEY in this shell/);
+});
