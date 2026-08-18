@@ -103,11 +103,32 @@ const slugify = (name: string): string =>
  */
 export const AGENT_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
+/**
+ * Bounded as well as shaped: an id becomes a path segment, and file
+ * systems have limits an unbounded one would discover the hard way.
+ */
+export const MAX_AGENT_ID_LENGTH = 64;
+
 /** Whether `id` is safe to key an agent's resources and paths by. */
 export const isValidAgentId = (id: string): boolean =>
-  // Bounded as well as shaped: an id becomes a path segment, and file
-  // systems have limits an unbounded one would discover the hard way.
-  id.length > 0 && id.length <= 64 && AGENT_ID_PATTERN.test(id);
+  id.length > 0 && id.length <= MAX_AGENT_ID_LENGTH && AGENT_ID_PATTERN.test(id);
+
+/**
+ * A derived id, bounded — `base` trimmed so that appending `suffix` still
+ * fits, with any hyphen left dangling by the trim removed.
+ *
+ * Derived ids may be trimmed where explicit ones are rejected, and the
+ * difference is consent: nobody chose this string, so shortening it takes
+ * nothing away. Shared rather than re-derived, because the two callers that
+ * build ids this way — a generated agent's name-plus-suffix, and `agent
+ * new` retrying a filename collision — would otherwise each own half of the
+ * bound and drift.
+ */
+export const agentIdWithSuffix = (base: string, suffix?: string): string => {
+  const tail = suffix ? `-${suffix}` : '';
+  const room = Math.max(1, MAX_AGENT_ID_LENGTH - tail.length);
+  return `${base.slice(0, room).replace(/-+$/, '') || 'agent'}${tail}`;
+};
 
 export interface DefineAgentInput {
   name?: string;
@@ -150,8 +171,8 @@ export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
   }
   return {
     id: input.id ?? (nameWasGenerated
-      ? `${slugify(name)}-${generatedIdSuffix(input.seed)}`
-      : slugify(name)),
+      ? agentIdWithSuffix(slugify(name), generatedIdSuffix(input.seed))
+      : agentIdWithSuffix(slugify(name))),
     name,
     ...(input.instructions ? { instructions: input.instructions } : {}),
     avatar: input.avatar ?? generateAvatarTheme(name),

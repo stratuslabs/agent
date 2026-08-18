@@ -388,7 +388,9 @@ refuses to load and names both files, `stratus serve` will not start, and
 `stratus doctor` reports it. (An unreadable *single* soul still degrades to a
 warning — one broken file never takes the team down. A collision has no
 correct winner, which is the difference.) The built-in `stratus` id is
-reserved: a soul claiming it is skipped, not treated as a collision.
+reserved: souls claiming it are skipped — including two of them, since
+neither was going to get the id, so their agreeing on it is not a collision
+to refuse over.
 
 ## Options
 

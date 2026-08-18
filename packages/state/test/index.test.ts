@@ -482,3 +482,23 @@ test('an unreadable soul still degrades to a warning, unlike a duplicate', async
   assert.equal(warnings.length, 2, `expected both bad files skipped, got ${JSON.stringify(warnings)}`);
   assert.ok(warnings.some((line) => line.includes('Invalid agent id')), JSON.stringify(warnings));
 });
+
+test('two souls claiming the reserved id are skipped, not treated as a collision', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-reserved-'));
+  const dir = agentsDirPath({ homeDir: home });
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'a.md'), '---\nname: One\nid: stratus\n---\n\nYou are one.\n');
+  await writeFile(path.join(dir, 'b.md'), '---\nname: Two\nid: stratus\n---\n\nYou are two.\n');
+  await writeFile(path.join(dir, 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+
+  // Neither was going to get the id — it is reserved — so their agreeing
+  // on it is not an ambiguity worth refusing over. Left after the
+  // collision check, a repository could take a daemon down just by
+  // shipping two souls named `stratus`, turning a guard against hijacking
+  // the built-in into a way to deny service.
+  const warnings: string[] = [];
+  const entries = await loadRosterSouls({ homeDir: home }, (line) => warnings.push(line));
+
+  assert.deepEqual(entries.map((entry) => entry.soul.agent.id), ['ava']);
+  assert.equal(warnings.filter((line) => line.includes('reserved')).length, 2);
+});

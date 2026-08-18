@@ -45,6 +45,7 @@ import {
   type ClaudeCodeToolExecutor,
 } from '@stratusagent/provider-claude-code';
 import {
+  agentIdWithSuffix,
   createRememberTool,
   defineAgent,
   formatSoul,
@@ -3163,7 +3164,7 @@ export const runSetup = async (
    * Reads state.soulPath rather than the saved config so a soul chosen
    * earlier in this same setup session is already connectable.
    */
-  const channelRoster = async (): Promise<ChannelRosterEntry[]> => {
+  const channelRoster = async (): Promise<{ entries: ChannelRosterEntry[]; loaded: boolean }> => {
     const warnOnce = (message: string): void => writeLine(streams.stderr, `Warning: ${message}.`);
     // Seeded before the roster loads, exactly as loadRoster does it: a
     // fresh install with no soul files still has an agent to put on
@@ -3171,12 +3172,11 @@ export const runSetup = async (
     // built-in's place — the gateway skips it, so offering it here would
     // name an app after an agent that never receives the messages.
     const entries: ChannelRosterEntry[] = [{ soul: { agent: { ...DEFAULT_STRATUS_AGENT } } }];
-    // Mirror the gateway's loadRoster: two soul files declaring the same
-    // id are not two agents. Offering both would let someone create and
-    // name an app for the loser, which can never receive a message —
-    // Slack credentials are keyed by the shared id, and dispatch reaches
-    // the first sorted file.
+    // loadRosterSouls refuses a roster whose files collide, and drops the
+    // ones claiming the reserved built-in id, so what comes back here is
+    // already unambiguous.
     let rosterSouls: RosterEntry[] = [];
+    let rosterLoaded = true;
     try {
       rosterSouls = await loadRosterSouls(env, warnOnce);
     } catch (error) {
@@ -3184,19 +3184,10 @@ export const runSetup = async (
       // configured for them — but the rest of setup (providers, models,
       // sign-ins) still works, so this reports and moves on rather than
       // taking the whole command down.
+      rosterLoaded = false;
       warnOnce(error instanceof Error ? error.message : String(error));
     }
-    for (const entry of rosterSouls) {
-      const clash = entries.find((seen) => seen.soul.agent.id === entry.soul.agent.id);
-      if (clash) {
-        // Reaches here only against the built-in id, which is reserved
-        // rather than duplicated: a soul may not take over the documented
-        // fallback, and that is a skip, not a collision between two souls.
-        warnOnce(`agent id ${entry.soul.agent.id} is reserved for the built-in agent; ignoring ${entry.path}`);
-        continue;
-      }
-      entries.push(entry);
-    }
+    entries.push(...rosterSouls);
 
     // The soul a run resolves to, in resolveSoulPath's own order: an env
     // override outranks the config value this setup session is editing.
@@ -3210,11 +3201,11 @@ export const runSetup = async (
     }
     const effectiveSoul = typeof envSoul === 'string' ? envSoul : state.soulPath;
     if (!effectiveSoul) {
-      return entries;
+      return { entries, loaded: rosterLoaded };
     }
     const resolved = path.resolve(readWorkingDirectory(env), effectiveSoul);
     if (entries.some((entry) => entry.path === resolved)) {
-      return entries;
+      return { entries, loaded: rosterLoaded };
     }
     try {
       const soul = await loadSoulFile(resolved);
@@ -3232,7 +3223,7 @@ export const runSetup = async (
     } catch (error) {
       warnOnce(`could not read the default soul ${resolved} (${error instanceof Error ? error.message : String(error)})`);
     }
-    return entries;
+    return { entries, loaded: rosterLoaded };
   };
 
   const serviceSummary = (): string => {
@@ -3281,7 +3272,7 @@ export const runSetup = async (
 
   const chooseChannels = async (): Promise<void> => {
     while (true) {
-      const roster = await channelRoster();
+      const { entries: roster, loaded: rosterLoaded } = await channelRoster();
       const slack = state.channels.slack ?? {};
 
       // The roster always holds at least the built-in agent, so there is
@@ -3294,7 +3285,19 @@ export const runSetup = async (
       });
       // Orphans: tokens whose agent left the roster would otherwise be
       // invisible here while still being loaded by `stratus serve`.
-      const orphans = Object.keys(slack).filter((id) => !roster.some((entry) => entry.soul.agent.id === id));
+      //
+      // Only when the roster actually loaded. "No agent has this id" is a
+      // claim about the roster, and a roster that refused to load cannot
+      // support it — every stored token would look orphaned, and this list
+      // offers to DELETE them. Losing a working agent's Slack credentials
+      // because a different pair of files collided is a far worse outcome
+      // than leaving a real orphan on screen for one run.
+      const orphans = rosterLoaded
+        ? Object.keys(slack).filter((id) => !roster.some((entry) => entry.soul.agent.id === id))
+        : [];
+      if (!rosterLoaded && Object.keys(slack).length > 0) {
+        writeLine(streams.stderr, 'Warning: not offering to clear unmatched Slack tokens while the roster is unreadable — fix the roster first.');
+      }
       for (const id of orphans) {
         options.push(`${id}`.padEnd(34) + '! tokens without a matching agent');
       }
@@ -4578,7 +4581,14 @@ export const runAgentNew = async (
           if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
             throw error;
           }
-          agent = defineAgent({ id: `${baseId}-${randomUUID().slice(0, 4)}`, name, instructions: persona });
+          // Through the shared bound: a long name derives a long base, and
+          // appending a suffix to a maxed-out one would build an id the
+          // validator refuses — turning a filename collision into a crash.
+          agent = defineAgent({
+            id: agentIdWithSuffix(baseId, randomUUID().slice(0, 4)),
+            name,
+            instructions: persona,
+          });
           soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
         }
       }

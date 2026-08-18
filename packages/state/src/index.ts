@@ -961,6 +961,18 @@ export const loadRosterSouls = async (
       warn(`skipping ${soulPath}: ${error instanceof Error ? error.message : String(error)}`);
       continue;
     }
+    // Reserved ids are dropped BEFORE collision detection, and the order
+    // matters. A soul claiming the built-in id is skipped either way — it
+    // may not take the documented fallback over — so two of them are not
+    // an ambiguity to refuse over: neither was going to get the id. Left
+    // after the check, a repository could take a daemon down simply by
+    // shipping two souls named `stratus`, turning a guard against hijack
+    // into a way to deny service.
+    if (entry.soul.agent.id === DEFAULT_STRATUS_AGENT.id) {
+      warn(`agent id ${entry.soul.agent.id} is reserved for the built-in agent; ignoring ${soulPath}`);
+      continue;
+    }
+
     const claimed = byId.get(entry.soul.agent.id);
     if (claimed !== undefined) {
       throw new DuplicateAgentIdError(entry.soul.agent.id, [claimed, soulPath]);

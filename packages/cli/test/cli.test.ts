@@ -5685,3 +5685,42 @@ test('doctor reports an unloadable roster instead of dying on it', async () => {
   // Still a real report, not a stack trace.
   assert.match(output.stdout, /Stratus Agent/);
 });
+
+test('a roster that will not load never offers to delete Slack tokens', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-orphan-guard-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // Two files collide, so the roster refuses — while a third, perfectly
+  // valid agent has working Slack tokens.
+  await writeFile(path.join(agentsDir, 'a-first.md'), '---\nname: First\nid: twin\n---\n\nYou are First.\n');
+  await writeFile(path.join(agentsDir, 'b-second.md'), '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-keep', botToken: 'xoxb-keep' } } } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['4\n', '2\n', '7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // "No agent has this id" is a claim about the roster, and a roster that
+  // refused to load cannot support it. Offering to clear Ava's tokens
+  // because a different pair of files collided would destroy working
+  // credentials over an unrelated mistake.
+  assert.doesNotMatch(output.stdout, /tokens without a matching agent/);
+  assert.match(output.stderr, /not offering to clear unmatched Slack tokens/);
+
+  const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+  assert.deepEqual(credentials.channels.slack.ava, { appToken: 'xapp-keep', botToken: 'xoxb-keep' });
+});

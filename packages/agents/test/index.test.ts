@@ -18,6 +18,7 @@ import {
   generateAgentName,
   generateAvatarTheme,
   parseSoul,
+  agentIdWithSuffix,
   isValidAgentId,
 } from '../src/index.ts';
 
@@ -506,4 +507,28 @@ test('a soul declaring a path-capable id is rejected at parse', async () => {
   // The rule lives in one place; parseSoul inherits it rather than
   // repeating it.
   assert.equal(parseSoul('---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n').agent.id, 'ava');
+});
+
+test('a derived id is bounded, where an explicit one is refused', async () => {
+  // Derived ids may be trimmed and explicit ones may not, and the
+  // difference is consent: nobody chose this string, so shortening it
+  // takes nothing away — whereas silently shortening an id someone wrote
+  // would key their agent to a name they never picked.
+  const long = 'Ada '.repeat(40);
+  const named = defineAgent({ name: long });
+  assert.equal(isValidAgentId(named.id), true, `derived id was ${named.id.length} chars`);
+
+  const generated = defineAgent({ seed: 'x'.repeat(200) });
+  assert.equal(isValidAgentId(generated.id), true);
+  // The uniqueness suffix survives the trim — it is what keeps two agents
+  // drawing the same name from becoming one.
+  assert.match(generated.id, /-[a-z0-9]+$/);
+
+  // And the helper both id-builders share keeps a suffix intact rather
+  // than letting the bound eat it.
+  const suffixed = agentIdWithSuffix('a'.repeat(200), 'beef');
+  assert.equal(isValidAgentId(suffixed), true);
+  assert.match(suffixed, /-beef$/);
+  // No dangling hyphen where the trim landed.
+  assert.equal(agentIdWithSuffix('ava-', 'beef'), 'ava-beef');
 });
