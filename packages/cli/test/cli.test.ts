@@ -12,6 +12,7 @@ import {
   createFileMemoryStore,
   createLogWriter,
   currentLogPosition,
+  truncateRedirectLogs,
   installService,
   readServiceStatus,
   serviceUnitPath,
@@ -5279,4 +5280,53 @@ test('rotation truncates the service manager redirect files', async () => {
   }
 
   assert.ok((await stat(errPath)).size < 500, 'the redirect file must be bounded too');
+});
+
+test('an unreadable unit still asks the manager whether it is running', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const unitPath = serviceUnitPath({ platform: 'linux', homeDir: home });
+  await rm(unitPath);
+  await mkdir(unitPath, { recursive: true });
+
+  // The unit file says nothing about whether a daemon is alive; asserting
+  // "not running" without asking would report a live service as stopped.
+  const status = await readServiceStatus({
+    platform: 'linux',
+    homeDir: home,
+    run: async () => ({ code: 0, stdout: 'active\n', stderr: '' }),
+  });
+  assert.equal(status?.installed, true);
+  assert.equal(status?.running, true);
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'status'],
+    streams,
+    env: {
+      cwd: home,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async () => ({ code: 0, stdout: 'active\n', stderr: '' }),
+    },
+  });
+  assert.equal(exitCode, 0, 'a running service exits 0');
+  assert.match(output.stdout, /stratusd {2}running/);
+  // The reason it could not be read is shown rather than swallowed.
+  assert.match(output.stdout, /note {6}.*could not be read/);
+});
+
+test('redirect logs are bounded without waiting for a rotation', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  await mkdir(dir, { recursive: true });
+  // A crash loop writes launchd diagnostics but never enough structured
+  // records to rotate the JSONL, so tying truncation to rotation alone
+  // leaves exactly that case unbounded.
+  const errPath = path.join(dir, 'stratusd.err.log');
+  await writeFile(errPath, 'x'.repeat(900));
+  assert.equal(await readdir(dir).then((names) => names.includes('stratusd.jsonl')), false);
+
+  await truncateRedirectLogs(dir, 500);
+
+  assert.equal((await stat(errPath)).size, 0);
 });

@@ -246,18 +246,31 @@ export const readServiceStatus = async (env: ServiceEnvironment = {}): Promise<S
     return undefined;
   }
   const unitPath = serviceUnitPath(env);
+  const run = runnerFor(env);
+  // Whether a daemon is alive is the manager's answer, never the file's —
+  // asked the same way whatever the unit file turned out to be.
+  const isRunning = async (): Promise<boolean> => {
+    if (platform === 'launchd') {
+      const printed = await run('launchctl', ['print', `gui/${uidOf(env)}/${SERVICE_LABEL}`]);
+      // `state = running` appears only while the process is alive; a
+      // loaded but stopped job prints `state = not running`.
+      return printed.code === 0 && /state\s*=\s*running/.test(printed.stdout);
+    }
+    return (await run('systemctl', ['--user', 'is-active', SYSTEMD_UNIT])).stdout.trim() === 'active';
+  };
+
   let contents: string;
   try {
     contents = await readFile(unitPath, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      // The unit is there — the manager may well still be running it — we
-      // just cannot read it. Reporting "not installed" would hide a live
-      // daemon, and would cost setup the login preference it reads here.
+      // The unit is there and we cannot read it. Reporting "not installed"
+      // would hide a live daemon, and asserting it is stopped without
+      // asking would do the same — so the manager still gets asked.
       return {
         platform,
         installed: true,
-        running: false,
+        running: await isRunning(),
         runAtLogin: undefined,
         unitPath,
         detail: `${unitPath} exists but could not be read (${error instanceof Error ? error.message : String(error)})`,
@@ -267,7 +280,6 @@ export const readServiceStatus = async (env: ServiceEnvironment = {}): Promise<S
   }
   // A unit on disk that the manager has not been told about is installed
   // but inert, so "installed" and "running" are asked separately.
-  const run = runnerFor(env);
   // launchd's answer is in the plist; systemd's is the enablement symlink,
   // which the unit file itself says nothing about — a unit installed with
   // --no-login would otherwise be reported as starting at login.
@@ -283,23 +295,10 @@ export const readServiceStatus = async (env: ServiceEnvironment = {}): Promise<S
     // enabled service into a --no-login one on the next save.
     runAtLogin = KNOWN_ENABLEMENT_STATES.has(state) ? state === 'enabled' : undefined;
   }
-  if (platform === 'launchd') {
-    const result = await run('launchctl', ['print', `gui/${uidOf(env)}/${SERVICE_LABEL}`]);
-    return {
-      platform,
-      installed: true,
-      // `state = running` appears only while the process is alive; a loaded
-      // but stopped job prints `state = not running`.
-      running: result.code === 0 && /state\s*=\s*running/.test(result.stdout),
-      runAtLogin,
-      unitPath,
-    };
-  }
-  const result = await run('systemctl', ['--user', 'is-active', SYSTEMD_UNIT]);
   return {
     platform,
     installed: true,
-    running: result.stdout.trim() === 'active',
+    running: await isRunning(),
     runAtLogin,
     unitPath,
   };

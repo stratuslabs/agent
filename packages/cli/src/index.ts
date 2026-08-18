@@ -123,6 +123,7 @@ export {
 import {
   createLogWriter,
   currentLogPosition,
+  truncateRedirectLogs,
   formatLogRecord,
   readRecentRecords,
   tailLog,
@@ -133,6 +134,7 @@ import {
 export {
   createLogWriter,
   currentLogPosition,
+  truncateRedirectLogs,
   formatLogRecord,
   parseLogLines,
   readRecentRecords,
@@ -4222,6 +4224,9 @@ export const runService = async (
     writeLine(streams.stdout, `stratusd  ${status.running ? 'running' : status.installed ? 'installed, not running' : 'not installed'}`);
     writeLine(streams.stdout, `  manager   ${status.platform}`);
     writeLine(streams.stdout, `  unit      ${status.unitPath}`);
+    if (status.detail) {
+      writeLine(streams.stdout, `  note      ${status.detail}`);
+    }
     if (status.installed) {
       writeLine(streams.stdout, `  at login  ${status.runAtLogin === undefined
         ? 'unknown — the service manager did not answer'
@@ -4539,6 +4544,18 @@ export const runServe = async (
           `Warning: could not write the log file (${error instanceof Error ? error.message : String(error)}); continuing.`,
         ),
       });
+  // The manager's redirect files are bounded on their own clock, not only
+  // when the structured log rotates: a daemon crash-looping at startup
+  // writes launchd diagnostics without ever producing enough records to
+  // trigger a rotation. Once now — which covers each restart of a loop —
+  // and periodically for a long-running daemon that warns without
+  // rotating. Unref'd, so it never holds the process open.
+  let redirectTimer: NodeJS.Timeout | undefined;
+  if (logWriter) {
+    void truncateRedirectLogs(logsDirPath(env));
+    redirectTimer = setInterval(() => void truncateRedirectLogs(logsDirPath(env)), 5 * 60_000);
+    redirectTimer.unref?.();
+  }
   const log = (line: string): void => {
     writeLine(streams.stdout, line);
     void logWriter?.write({ ts: new Date().toISOString(), level: 'info', msg: line });
@@ -4696,6 +4713,9 @@ export const runServe = async (
       }
       settled = true;
       clearInterval(keepAlive);
+      if (redirectTimer) {
+        clearInterval(redirectTimer);
+      }
       process.off('SIGTERM', shutdown);
       process.off('SIGINT', shutdown);
       resolve();
