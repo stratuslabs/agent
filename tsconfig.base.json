@@ -1,6 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2022",
+    // Emit ES2022 syntax, but type against the ES2024 library: the Node
+    // floor this repo declares (22.13+) ships those built-ins, and without
+    // it a test using one — `String.prototype.isWellFormed` — reads as a
+    // typo rather than as the runtime feature it is.
+    "lib": ["ES2024"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "declaration": true,

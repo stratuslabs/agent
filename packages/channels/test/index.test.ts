@@ -46,6 +46,10 @@ test('the contract runs end to end against a fake adapter and a stub gateway', a
   const gateway: GatewayLike = {
     bus,
     agents: () => [{ id: 'ava', name: 'Ava' }],
+    // Not what this contract test exercises, but part of GatewayLike — the
+    // stub had gone stale against the interface without anything noticing,
+    // which is the whole reason tests are typechecked now.
+    resolveApproval: () => false,
     async dispatch(input) {
       dispatched.push({ sessionId: input.sessionId, ...(input.agentId ? { agentId: input.agentId } : {}), userMessage: input.userMessage });
       const now = new Date().toISOString();
