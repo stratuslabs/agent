@@ -18,6 +18,9 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types"
   },
+  "engines": {
+    "node": ">=22.13"
+  },
   "devDependencies": {
     "typescript": "^5.9.3"
   },

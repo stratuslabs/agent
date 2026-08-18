@@ -297,6 +297,36 @@ export const CLI_VERSION = '0.2.5';
 const DEFAULT_DASHBOARD_HOST = '127.0.0.1';
 const DASHBOARD_TITLE = 'Stratus Agent Dashboard';
 
+/** The floor every package declares in its `engines` field. */
+export const MINIMUM_NODE_VERSION = '22.13';
+
+/**
+ * Why the CLI checks a version its manifests already declare: `engines` is
+ * advisory. npm and pnpm print EBADENGINE and carry on unless the user has
+ * turned on engine-strict, so an install on Node 20 succeeds and the floor
+ * is discovered later as an ERR_UNKNOWN_BUILTIN_MODULE for `node:sqlite`,
+ * thrown from a lazy import inside whichever command first needed the
+ * session store. That error names neither Node nor the version required.
+ *
+ * Returns the message to print, or undefined when the version is fine —
+ * including when it cannot be parsed at all, since an unrecognized build
+ * string is a bad reason to refuse to run.
+ */
+export const unsupportedNodeMessage = (version: string): string | undefined => {
+  const parts = version.replace(/^v/, '').split('.');
+  const major = Number.parseInt(parts[0] ?? '', 10);
+  const minor = Number.parseInt(parts[1] ?? '', 10);
+  if (!Number.isInteger(major) || !Number.isInteger(minor)) {
+    return undefined;
+  }
+  if (major > 22 || (major === 22 && minor >= 13)) {
+    return undefined;
+  }
+  return `Stratus Agent needs Node ${MINIMUM_NODE_VERSION} or newer, but this is Node ${version.replace(/^v/, '')}.\n`
+    + "The gateway's session store uses node:sqlite, which is flagged before 22.13.\n"
+    + 'Upgrade with `brew install node` on macOS, or your package manager or nvm on Linux.';
+};
+
 const HELP_TEXT = `Stratus Agent CLI
 
 Usage:

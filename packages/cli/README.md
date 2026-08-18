@@ -4,7 +4,7 @@ Stratus Agent CLI — create always-on agents that get smarter over time. Quickl
 
 ## Install
 
-Needs **Node.js 22.13+** — the gateway's session store uses `node:sqlite`, which runs unflagged from 22.13.
+Needs **Node.js 22.13+** — the gateway's session store uses `node:sqlite`, which runs unflagged from 22.13. Every package declares that floor, and the CLI checks it at startup, so an older Node gets a line naming the version it needs rather than a missing-builtin error later on.
 
 ```bash
 npm install -g @stratusagent/cli
