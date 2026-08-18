@@ -41,8 +41,11 @@ If you need a rule that is not exported, export it. Do not copy it.
 
 ## Runtime and tests
 
-- **Node 22.13+.** The gateway's session store uses `node:sqlite`, which
-  is unflagged from 22.13. Do not raise or lower this casually.
+- **Node `>=22.13 <23 || >=23.4`.** The gateway's session store uses
+  `node:sqlite`, which was unflagged on each release line separately —
+  22.13.0 and 23.4.0 — so 23.0 through 23.3 are newer than the 22.x floor
+  and still ship it behind a flag. Write the range, never a bare `>=22.13`,
+  and do not raise or lower it casually.
 - Tests run under `node --test --experimental-strip-types`. Type
   stripping means **no TypeScript parameter properties** (`constructor(private x)`)
   and no enums — write the assignment out.

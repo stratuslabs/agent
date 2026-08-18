@@ -23,7 +23,7 @@
     "test": "node --test --experimental-strip-types ./test/**/*.test.ts"
   },
   "engines": {
-    "node": ">=22.13"
+    "node": ">=22.13 <23 || >=23.4"
   },
   "dependencies": {
     "@stratusagent/agents": "workspace:*",

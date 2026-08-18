@@ -297,8 +297,14 @@ export const CLI_VERSION = '0.2.5';
 const DEFAULT_DASHBOARD_HOST = '127.0.0.1';
 const DASHBOARD_TITLE = 'Stratus Agent Dashboard';
 
-/** The floor every package declares in its `engines` field. */
-export const MINIMUM_NODE_VERSION = '22.13';
+/**
+ * The range every package declares in its `engines` field. Two floors, not
+ * one: `node:sqlite` was unflagged in 22.13.0 on the LTS line and in 23.4.0
+ * on the 23.x line, so 23.0 through 23.3 are NEWER than the 22.x floor and
+ * still ship it behind `--experimental-sqlite`. A plain `>=22.13` admits
+ * exactly those releases.
+ */
+export const SUPPORTED_NODE_RANGE = '>=22.13 <23 || >=23.4';
 
 /**
  * Why the CLI checks a version its manifests already declare: `engines` is
@@ -319,11 +325,14 @@ export const unsupportedNodeMessage = (version: string): string | undefined => {
   if (!Number.isInteger(major) || !Number.isInteger(minor)) {
     return undefined;
   }
-  if (major > 22 || (major === 22 && minor >= 13)) {
+  const supported = major > 23
+    || (major === 23 && minor >= 4)
+    || (major === 22 && minor >= 13);
+  if (supported) {
     return undefined;
   }
-  return `Stratus Agent needs Node ${MINIMUM_NODE_VERSION} or newer, but this is Node ${version.replace(/^v/, '')}.\n`
-    + "The gateway's session store uses node:sqlite, which is flagged before 22.13.\n"
+  return `Stratus Agent needs Node 22.13 or newer, and 23.4 or newer on the 23.x line — this is Node ${version.replace(/^v/, '')}.\n`
+    + "The gateway's session store uses node:sqlite, unflagged in 22.13.0 and, on the 23.x line, not until 23.4.0.\n"
     + 'Upgrade with `brew install node` on macOS, or your package manager or nvm on Linux.';
 };
 
