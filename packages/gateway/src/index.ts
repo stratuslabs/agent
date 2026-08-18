@@ -9,12 +9,14 @@ import {
   EventBus,
   RunAbortedError,
   ToolRegistry,
+  readPendingApproval,
   type AgentDefinition,
   type ApprovalAnswer,
   type ApprovalPolicy,
   type ApprovalResolutionReason,
   type JsonObject,
   type Session,
+  type SessionStatus,
   type SessionStore,
   type StratusEvent,
   type ToolRisk,
@@ -162,6 +164,18 @@ export class SqliteSessionStore implements SessionStore {
     this.db
       .prepare('INSERT OR REPLACE INTO sessions (id, agent_id, status, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run(updated.id, updated.agent.id, updated.status, JSON.stringify(updated), updated.createdAt, updated.updatedAt);
+  }
+
+  /**
+   * Session ids in a state, oldest first — the index a restarting daemon
+   * sweeps for turns parked on a human. The `status` column carries it, so
+   * no conversation body is deserialized to answer the question.
+   */
+  async listIdsByStatus(status: SessionStatus): Promise<string[]> {
+    const rows = this.db
+      .prepare('SELECT id FROM sessions WHERE status = ? ORDER BY updated_at ASC')
+      .all(status) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
   }
 
   /** Newest-first session listing for one agent (or all agents). */
@@ -972,25 +986,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const inflight = new Set<Promise<unknown>>();
   let stopping = false;
 
-  const dispatchInternal = async (input: DispatchInput): Promise<Session> => {
-    // A dispatch whose signal fired while it queued behind another turn
-    // must not touch durable state: without this check, the runner would
-    // load the session, append the cancelled user message, and save it as
-    // failed — polluting future model history with input never processed.
-    if (input.signal?.aborted) {
-      throw new RunAbortedError();
-    }
-
-    // A session pins its agent: when the caller names none, an existing
-    // conversation keeps the agent it was created with even if the
-    // configured default soul has changed since — only a brand-new session
-    // takes the current default. (Loaded here, before the watchdog, also
-    // because whether this turn streams depends on durable session state.)
-    const existing = await store.get(input.sessionId);
-    const agentId = input.agentId ?? existing?.agent.id ?? await defaultAgentId();
-    const source = await refreshAgent(agentId);
-    const agent = source.definition;
-
+  /**
+   * The runtime one agent would run on right now — config snapshot, soul
+   * pins, degradation and all.
+   *
+   * Extracted so recovery resolves it exactly as a dispatch does. A second
+   * copy of this chain is the difference between a recovered turn finishing
+   * on its agent's provider and finishing on the daemon's default, and it
+   * would drift the first time either side gained a rule.
+   */
+  const runtimeForAgent = async (source: AgentSource): Promise<RuntimeConfig> => {
     // Config re-resolves per dispatch, so a changed model, credential, or
     // soul pin applies without a restart. The pool dedupes runners by the
     // resolved configuration. The gateway-wide selection and the daemon's
@@ -1053,7 +1058,29 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     // The preset snapshot means resolution reads no config file — every
     // failure from here is a credential or provider problem and surfaces.
-    const config = await resolveRuntimeConfig(selection, resolveEnv);
+    return resolveRuntimeConfig(selection, resolveEnv);
+  };
+
+  const dispatchInternal = async (input: DispatchInput): Promise<Session> => {
+    // A dispatch whose signal fired while it queued behind another turn
+    // must not touch durable state: without this check, the runner would
+    // load the session, append the cancelled user message, and save it as
+    // failed — polluting future model history with input never processed.
+    if (input.signal?.aborted) {
+      throw new RunAbortedError();
+    }
+
+    // A session pins its agent: when the caller names none, an existing
+    // conversation keeps the agent it was created with even if the
+    // configured default soul has changed since — only a brand-new session
+    // takes the current default. (Loaded here, before the watchdog, also
+    // because whether this turn streams depends on durable session state.)
+    const existing = await store.get(input.sessionId);
+    const agentId = input.agentId ?? existing?.agent.id ?? await defaultAgentId();
+    const source = await refreshAgent(agentId);
+    const agent = source.definition;
+
+    const config = await runtimeForAgent(source);
     const runner = runnerFor(config);
 
     const metadata: JsonObject = {
@@ -1102,6 +1129,61 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         signal,
       });
     });
+  };
+
+  /**
+   * Finishes the turns that were parked on a human when this daemon last
+   * went down.
+   *
+   * Run after the channels are up, deliberately: recovery re-asks, and a
+   * request emitted into a gateway with no live adapter would be declined
+   * for want of anywhere to put it — turning "your approval survived the
+   * restart" into "your approval was denied by the restart".
+   *
+   * Each session is recovered independently and failures are per-session:
+   * one unrecoverable turn must not stop the daemon from serving, or from
+   * recovering the others.
+   */
+  const recoverParkedTurns = async (): Promise<void> => {
+    if (!store.listIdsByStatus) {
+      return;
+    }
+    const parked = await store.listIdsByStatus('pending_approval');
+    if (parked.length === 0) {
+      return;
+    }
+    log(`recovering ${parked.length} turn(s) parked on approval`);
+
+    for (const sessionId of parked) {
+      if (stopping) {
+        return;
+      }
+      try {
+        const session = await store.get(sessionId);
+        if (!session) {
+          continue;
+        }
+        const record = readPendingApproval(session);
+        // A deadline that passed while the daemon was down is honoured, not
+        // restarted: the request really did go unanswered for its whole
+        // window, and downtime is not a reason to extend a security
+        // decision. Denying goes through the same recovery path, so the
+        // queue behind it still drains and no tool_use is left unanswered.
+        const expired = record?.expiresAt !== undefined && Date.parse(record.expiresAt) <= Date.now();
+        if (expired) {
+          log(`${sessionId}: the approval for ${record?.toolName} expired while the daemon was down; denying it`);
+        }
+
+        // Resolved the way a dispatch for this agent would resolve it, so a
+        // recovered turn finishes on the same provider, model, and
+        // credentials it was parked on.
+        const source = await refreshAgent(session.agent.id);
+        const runner = runnerFor(await runtimeForAgent(source));
+        await runner.recoverPendingApproval(sessionId, { denyPending: expired });
+      } catch (error) {
+        warn(`could not recover parked session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   };
 
   const dispatch = async (input: DispatchInput): Promise<Session> => {
@@ -1158,6 +1240,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           }
         }
       }
+
+      // Last, and not awaited: recovery re-asks, so it needs the channels
+      // above already listening — but a turn parked behind a slow approver
+      // must not hold up start(), or a daemon with one outstanding request
+      // would refuse to finish booting.
+      void recoverParkedTurns().catch((error) => {
+        warn(`recovering parked turns failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
     },
 
     // Drain: channels stop taking messages, in-flight turns finish, new
