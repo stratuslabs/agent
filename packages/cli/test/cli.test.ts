@@ -4926,3 +4926,73 @@ test('the shell-only credential check reads the config setup just wrote', async 
   assert.deepEqual(calls, [], 'a daemon that cannot authenticate must not be installed');
   assert.match(output.stderr, /your API key comes from OPENAI_API_KEY in this shell/);
 });
+
+test('a shell-only key on any served agent blocks the install', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // The default provider is properly signed in, so a config-wide check
+  // passes — but this agent pins openai, whose key exists only in the
+  // shell. The gateway applies each soul's provider independently, so
+  // every message to Nova would fail under the managed daemon.
+  await writeFile(path.join(agentsDir, 'nova.md'), '---\nname: Nova\nprovider: openai\n---\n\nYou are Nova.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { OPENAI_API_KEY: 'sk-openai-shell-only' },
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  assert.deepEqual(calls, []);
+  assert.match(output.stderr, /your API key comes from OPENAI_API_KEY in this shell/);
+});
+
+test('rerunning setup keeps an existing --no-login install as it was', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+  await installService(
+    { platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) },
+    { runAtLogin: false },
+  );
+
+  const calls: string[] = [];
+  await runCli({
+    argv: ['setup'],
+    streams: createStreams().streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => {
+        calls.push([command, ...args].join(' '));
+        return args.includes('is-enabled')
+          ? { code: 1, stdout: 'disabled\n', stderr: '' }
+          : { code: 0, stdout: '', stderr: '' };
+      },
+      // Straight to Save & finish, without visiting Always on.
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  // Saving must not quietly undo a deliberate `service install --no-login`.
+  assert.ok(!calls.some((call) => /enable --now/.test(call)), calls.join(', '));
+  assert.ok(calls.some((call) => /--user start/.test(call)), calls.join(', '));
+});

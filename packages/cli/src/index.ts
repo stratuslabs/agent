@@ -2310,8 +2310,13 @@ export const runSetup = async (
     // On by default: setup's whole promise is that you finish it and the
     // agents are working. An always-on runtime you have to remember to
     // start is not always-on, and every Slack app configured here stays
-    // silent until stratusd is up. Already-installed stays installed.
-    service: { install: true, runAtLogin: true },
+    // silent until stratusd is up. An existing install keeps ITS login
+    // setting, though — rerunning setup and pressing save must not quietly
+    // undo a deliberate `service install --no-login`.
+    service: await (async () => {
+      const status = await readServiceStatus(serviceEnvFor(env)).catch(() => undefined);
+      return { install: true, runAtLogin: status?.installed ? status.runAtLogin : true };
+    })(),
   };
 
   const prompter = createSetupPrompter(baseStreams, env, {
@@ -4140,6 +4145,42 @@ const serviceEnvFor = (env: CliEnvironment): ServiceEnvironment => ({
  * profile, so the unit would come up unauthenticated while setup had just
  * reported everything ready. Returns the variable to name, if so.
  */
+/**
+ * Every runtime the daemon would resolve: the config-wide default plus one
+ * per roster soul, normalized the way a dispatch normalizes it. A soul that
+ * pins its own provider resolves to different credentials entirely, so any
+ * check that looks only at the default misses exactly the agent that is
+ * misconfigured.
+ */
+const servedRuntimes = async (
+  env: CliEnvironment,
+  configPath?: string,
+): Promise<Array<{ runtime: RuntimeConfig; env: CliEnvironment }>> => {
+  const { applySoulPins } = await import('@stratusagent/gateway');
+  const { config: activeConfig, location } = await discoverActiveConfig(env, () => {});
+  const context = {
+    ...(activeConfig.provider !== undefined ? { configProvider: activeConfig.provider } : {}),
+    configPresent: location !== undefined,
+  };
+  const passes: Array<{ selection: RuntimeSelection; env: CliEnvironment }> = [{ selection: {}, env }];
+  for (const entry of await loadRosterSouls(env, () => {})) {
+    const normalized = applySoulPins(entry.soul, {}, env, context);
+    passes.push({ selection: normalized.selection, env: normalized.env as CliEnvironment });
+  }
+
+  const resolved: Array<{ runtime: RuntimeConfig; env: CliEnvironment }> = [];
+  for (const pass of passes) {
+    const runtime = await resolveStateRuntimeConfig(
+      { ...pass.selection, ...(configPath ? { configPath } : {}) },
+      pass.env,
+    ).catch(() => undefined);
+    if (runtime) {
+      resolved.push({ runtime, env: pass.env });
+    }
+  }
+  return resolved;
+};
+
 const shellOnlyCredential = async (
   env: CliEnvironment,
   // The config setup just wrote, which is also what the unit will be
@@ -4148,12 +4189,16 @@ const shellOnlyCredential = async (
   // cannot authenticate.
   configPath: string,
 ): Promise<string | undefined> => {
-  const runtime = await resolveStateRuntimeConfig({ configPath }, env).catch(() => undefined);
-  if (!runtime || runtime.provider === 'demo' || !runtime.apiKeyEnvVar) {
-    return undefined;
+  const credentials = await loadCredentials(env);
+  for (const { runtime } of await servedRuntimes(env, configPath)) {
+    if (runtime.provider === 'demo' || !runtime.apiKeyEnvVar) {
+      continue;
+    }
+    if (!credentials[runtime.provider]) {
+      return runtime.apiKeyEnvVar;
+    }
   }
-  const stored = (await loadCredentials(env))[runtime.provider];
-  return stored ? undefined : runtime.apiKeyEnvVar;
+  return undefined;
 };
 
 /**
@@ -4517,30 +4562,11 @@ export const runServe = async (
       stdout: { write: () => true },
       stderr: { write: (chunk: string) => { collect(chunk.replace(/\n$/, '')); return true; } },
     };
-    const { applySoulPins } = await import('@stratusagent/gateway');
     // A pinned soul does not merely add a provider — the gateway DEMOTES
-    // the daemon-wide defaults it outranks, including STRATUS_PROVIDER.
-    // Resolving with the pin bolted onto an unmodified environment would
-    // keep the env provider and check the wrong provider entirely, which
-    // is how an agent silently billed per token stays silent.
-    const { config: activeConfig, location } = await discoverActiveConfig(env, () => {});
-    const context = {
-      ...(activeConfig.provider !== undefined ? { configProvider: activeConfig.provider } : {}),
-      configPresent: location !== undefined,
-    };
-    const passes: Array<{ selection: RuntimeSelection; env: CliEnvironment }> = [{ selection: {}, env }];
-    for (const entry of await loadRosterSouls(env, () => {})) {
-      const normalized = applySoulPins(entry.soul, {}, env, context);
-      passes.push({ selection: normalized.selection, env: normalized.env as CliEnvironment });
-    }
-    for (const pass of passes) {
-      await resolveStateRuntimeConfig(
-        { ...pass.selection, ...(command.configPath ? { configPath: command.configPath } : {}) },
-        pass.env,
-      ).then((runtime) => warnOnCredentialOverride(runtime, captured, pass.env)).catch(() => {
-        // Resolution problems are the gateway's to report as it starts and
-        // per dispatch; this pass exists only for the billing surprise.
-      });
+    // the daemon-wide defaults it outranks, including STRATUS_PROVIDER, so
+    // each served runtime is resolved the way a dispatch resolves it.
+    for (const served of await servedRuntimes(env, command.configPath)) {
+      await warnOnCredentialOverride(served.runtime, captured, served.env);
     }
   }
 
