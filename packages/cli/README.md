@@ -79,6 +79,37 @@ live at once on its own provider and model, sessions in SQLite so they survive
 restarts, delegation between agents, a watchdog for stalled turns, and any
 installed channels connected. Ctrl+C or SIGTERM drains cleanly.
 
+### What the daemon will do on its own
+
+Tools declare how much damage they could do — `safe`, `gated`, or
+`dangerous` — and the daemon runs only the safe ones without asking. Anything
+riskier is refused, with a line in the log saying which agent wanted what:
+
+```text
+09:14:36  —           warning: ava: shell.run is gated and nobody is available to approve it (session slack:ava:…)
+```
+
+That is the honest behavior behind a service manager, where there is no
+terminal to prompt on. Asking a human through Slack and resuming the turn on
+their answer is the next piece of this; until then the daemon refuses rather
+than assumes.
+
+A tool that declares no risk counts as `gated`, never `safe` — forgetting to
+classify something should cost a prompt, not an unattended command. Every
+tool that ships today (`demo.echo`, `memory.remember`, `agent.delegate`) is
+`safe`, so nothing changes until you add one that isn't.
+
+The line is *acting outside Stratus* — the filesystem, the network, another
+service — not cost. Every turn spends provider tokens, including the one
+that decided to call a tool, so a policy that gated on spend would have to
+gate the conversation itself. Delegation stays `safe` for the same reason:
+it hands work to a teammate inside the fleet, that teammate's own tool
+calls face this policy again under their allowlist, and the chain is depth
+bounded.
+
+`stratus chat` and `stratus run` are unaffected: at a terminal, `--approvals`
+works exactly as before.
+
 ## Always on
 
 `stratus serve` stays a foreground process on purpose — debuggable, and

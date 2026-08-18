@@ -1054,6 +1054,10 @@ export const createDemoTool = () =>
   defineLocalCommandTool({
     name: 'demo.echo',
     description: 'Return a tiny transformed summary for CLI demos through a real local process.',
+    // It does spawn a process, but a fixed one: `node -e` over a script this
+    // tool builds, with the model's text placed as a JSON string literal and
+    // no shell involved. Nothing the model says becomes a command.
+    risk: 'safe',
     parameters: {
       type: 'object',
       properties: {

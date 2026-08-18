@@ -30,6 +30,7 @@
     "@stratusagent/core": "workspace:*",
     "@stratusagent/executor-local": "workspace:*",
     "@stratusagent/gateway": "workspace:*",
+    "@stratusagent/permissions": "workspace:*",
     "@stratusagent/provider-anthropic": "workspace:*",
     "@stratusagent/provider-claude-code": "workspace:*",
     "@stratusagent/providers": "workspace:*",

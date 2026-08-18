@@ -24,6 +24,7 @@ import {
   createLocalCommandExecutor,
   defineLocalCommandTool,
 } from '@stratusagent/executor-local';
+import { createPermissionPolicy } from '@stratusagent/permissions';
 import {
   createOpenAICompatibleProvider,
   createProviderResponseBuilder,
@@ -4670,8 +4671,30 @@ export const runServe = async (
     }
   }
 
+  // The daemon had no policy at all: createGateway falls back to
+  // AllowAllApprovalPolicy, so every tool call from every agent
+  // auto-approved, indefinitely, with nobody watching. That was survivable
+  // while `serve` was something you ran in a terminal you were sitting at;
+  // it is not, now that setup installs it under launchd by default.
+  //
+  // Headless is the only honest mode here until a turn can park and ask
+  // through a channel: there is no terminal behind a service manager, so
+  // `safe` runs and anything riskier is refused rather than waved through.
+  // Every refusal is logged — an unattended denial that appears nowhere
+  // reads like an agent that decided not to bother.
+  const approvals = createPermissionPolicy({
+    mode: 'headless',
+    onDecision: (decision) => {
+      if (decision.allowed) {
+        return;
+      }
+      warn(`${decision.agentId}: ${decision.reason} (session ${decision.sessionId})`);
+    },
+  });
+
   const gateway = createGateway({
     env,
+    approvals,
     ...(command.configPath ? { selection: { configPath: command.configPath } } : {}),
     ...(command.idleTimeoutMs !== undefined ? { idleTimeoutMs: command.idleTimeoutMs } : {}),
     ...(channels.length > 0 ? { channels } : {}),

@@ -61,6 +61,9 @@ importers:
       '@stratusagent/gateway':
         specifier: workspace:*
         version: link:../gateway
+      '@stratusagent/permissions':
+        specifier: workspace:*
+        version: link:../permissions
       '@stratusagent/provider-anthropic':
         specifier: workspace:*
         version: link:../provider-anthropic
@@ -130,6 +133,16 @@ importers:
       '@stratusagent/state':
         specifier: workspace:*
         version: link:../state
+    devDependencies:
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/permissions:
+    dependencies:
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       typescript:
         specifier: ^5.9.3
