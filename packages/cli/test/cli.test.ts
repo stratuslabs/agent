@@ -5424,3 +5424,56 @@ test('a demo setup still installs, since it needs no credential at all', async (
   assert.equal(exitCode, 0);
   assert.ok(calls.some((call) => /enable --now/.test(call)), calls.join(', '));
 });
+
+test('a missing default soul does not block the install', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The gateway catches this and serves the built-in agent, so the daemon
+  // runs fine — refusing here would reject a working service, and for a
+  // demo config it would demand a credential that is never needed.
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'demo', soul: '/nowhere/ghost.md' }),
+  );
+
+  const calls: string[] = [];
+  const exitCode = await runCli({
+    argv: ['service', 'install'],
+    streams: createStreams().streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.ok(calls.some((call) => /enable --now/.test(call)), calls.join(', '));
+});
+
+test('a config that exists but cannot be read blocks the install', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  // A directory where a config file belongs: discovery throws rather than
+  // moving on, and treating that as "no config" would install a daemon
+  // that hits the same error on its first dispatch.
+  await mkdir(path.join(project, 'stratus.config.json'), { recursive: true });
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'install'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.deepEqual(calls, []);
+  assert.match(output.stderr, /Not installing:/);
+});

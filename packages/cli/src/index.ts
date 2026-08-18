@@ -4296,9 +4296,25 @@ const serviceBlocker = async (
 
   for (const served of await servedRuntimes(bare, configPath)) {
     if (served.error) {
-      // Resolution failing in the daemon's environment IS the daemon
-      // failing to start a turn — the error names the provider.
-      const provider = /provider=(\w+)/.exec(served.error.message)?.[1] ?? 'anthropic';
+      // Not every resolution failure is fatal to the daemon. The gateway
+      // catches a missing or unreadable default soul and serves the
+      // built-in agent instead, so blocking on that would refuse an
+      // install for a service that runs perfectly well — including a demo
+      // config, which needs no credential at all. Only the resolver's
+      // credential failures are terminal for every dispatch.
+      const message = served.error.message;
+      const missingKey = /Missing API key for provider=(\w+)/.exec(message);
+      const boundKey = /saved (\w+) sign-in is bound to/.exec(message);
+      const untrustedUrl = /saved sign-in is not sent to it/.test(message);
+      if (!missingKey && !boundKey && !untrustedUrl) {
+        continue;
+      }
+      if (boundKey || untrustedUrl) {
+        // The key exists but the resolver refuses to send it to this
+        // endpoint; naming a shell variable would be misleading.
+        return { detail: message };
+      }
+      const provider = String(missingKey?.[1]);
       const name = covering(provider);
       // Either way the daemon cannot run this agent. A key in the shell
       // explains where it went; no key at all means there is no sign-in,
@@ -4378,9 +4394,21 @@ export const runService = async (
     // discovers from its working directory — the same directory this is
     // running in — so the discovered file has to be validated too, not
     // just an explicitly named one.
-    const configToCheck = selectedConfig
-      ? path.resolve(readWorkingDirectory(env), String(selectedConfig))
-      : await resolveConfigLocation({}, env).then((location) => location?.path).catch(() => undefined);
+    let configToCheck: string | undefined;
+    if (selectedConfig) {
+      configToCheck = path.resolve(readWorkingDirectory(env), String(selectedConfig));
+    } else {
+      try {
+        configToCheck = (await resolveConfigLocation({}, env))?.path;
+      } catch (error) {
+        // Discovery throws when a candidate exists but cannot be read.
+        // Treating that as "no config" would install a daemon that hits
+        // the same error on its first dispatch.
+        writeLine(streams.stderr, `Not installing: ${error instanceof Error ? error.message : String(error)}`);
+        writeLine(streams.stderr, 'The daemon would fail the same way on startup. Fix the file, or move it aside.');
+        return 1;
+      }
+    }
     if (configToCheck) {
       try {
         await loadConfigFile(configToCheck);
