@@ -3379,9 +3379,18 @@ export const runSetup = async (
       // leave a unit from an earlier setup running and enabled at login,
       // while the menu said "off" — still burning provider usage and still
       // answering in Slack after an explicit opt-out.
-      const existing = await readServiceStatus(serviceEnvFor(env));
+      const existing = await readServiceStatus(serviceEnvFor(env)).catch(() => undefined);
       if (existing?.installed) {
-        const removed = await uninstallService(serviceEnvFor(env));
+        // Removal deletes the unit file, so it can reject the same way the
+        // install can. Setup's settings are already written by this point;
+        // the optional service must not take the whole command down.
+        const removed = await uninstallService(serviceEnvFor(env)).catch((error: unknown) => ({
+          ok: false,
+          messages: [
+            `Could not remove the always-on service: ${error instanceof Error ? error.message : String(error)}`,
+            `${serviceUnitPath(serviceEnvFor(env))} is still in place — remove it by hand, or it will start again at login.`,
+          ],
+        }));
         for (const message of removed.messages) {
           writeLine(removed.ok ? streams.stdout : streams.stderr, message);
         }

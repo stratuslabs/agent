@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { Readable } from 'node:stream';
@@ -5213,4 +5213,70 @@ test('a service install that throws does not fail setup', async () => {
   assert.match(output.stderr, /Setup is saved either way/);
   // And the settings it had already written are still there.
   assert.ok(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+});
+
+test('a unit that cannot be read is not reported as uninstalled', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  // A directory where the unit file belongs: reading it fails with EISDIR,
+  // not ENOENT. Calling that "not installed" would hide a live daemon and
+  // cost setup the login preference it reads from here.
+  const unitPath = serviceUnitPath({ platform: 'linux', homeDir: home });
+  await rm(unitPath);
+  await mkdir(unitPath, { recursive: true });
+
+  const status = await readServiceStatus({
+    platform: 'linux',
+    homeDir: home,
+    run: async () => ({ code: 0, stdout: 'active\n', stderr: '' }),
+  });
+  assert.equal(status?.installed, true);
+  assert.equal(status?.runAtLogin, undefined);
+  assert.match(String(status?.detail), /could not be read/);
+});
+
+test('a failed removal does not take setup down with it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  // Make the unit undeletable by turning it into a non-empty directory.
+  const unitPath = serviceUnitPath({ platform: 'linux', homeDir: home });
+  await rm(unitPath);
+  await mkdir(unitPath, { recursive: true });
+  await writeFile(path.join(unitPath, 'blocker'), 'x');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Always on → "Do not run it for me" → Save & finish.
+      setupInput: Readable.from(['5\n', '3\n', '7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stderr, /Could not remove the always-on service/);
+  assert.match(output.stderr, /still in place/);
+});
+
+test('rotation truncates the service manager redirect files', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  await mkdir(dir, { recursive: true });
+  // launchd holds these open with no rotation of its own. --no-events
+  // bounded stdout, but every warn still reaches stderr — and a Slack
+  // failure loop warns per attempt.
+  const errPath = path.join(dir, 'stratusd.err.log');
+  await writeFile(errPath, 'x'.repeat(500));
+
+  const writer = createLogWriter({ dir, maxBytes: 200, keep: 2 });
+  for (let index = 0; index < 8; index += 1) {
+    await writer.write({ ts: new Date(index * 1000).toISOString(), level: 'warn', msg: `warned ${index}` });
+  }
+
+  assert.ok((await stat(errPath)).size < 500, 'the redirect file must be bounded too');
 });

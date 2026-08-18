@@ -33,6 +33,15 @@ export interface LogWriter {
   readonly path: string;
 }
 
+/**
+ * Files a service manager redirects the daemon's stdout/stderr into. They
+ * are plain files it holds open with no rotation of its own, so they grow
+ * for the life of the daemon — and everything in them is already in this
+ * log, which does rotate. Truncated alongside a rotation rather than
+ * deleted: launchd and systemd keep writing to the same open descriptor.
+ */
+export const REDIRECT_LOG_FILENAMES = ['stratusd.out.log', 'stratusd.err.log'];
+
 export interface LogWriterOptions {
   dir: string;
   maxBytes?: number;
@@ -55,7 +64,21 @@ export const createLogWriter = (options: LogWriterOptions): LogWriter => {
   let queue: Promise<void> = Promise.resolve();
   let ensured = false;
 
+  const truncateRedirects = async (): Promise<void> => {
+    const { truncate } = await import('node:fs/promises');
+    for (const name of REDIRECT_LOG_FILENAMES) {
+      const target = path.join(options.dir, name);
+      const size = await stat(target).then((info) => info.size).catch(() => 0);
+      if (size >= maxBytes) {
+        // O_APPEND writers resume at the new end, so the daemon keeps
+        // logging; only the duplicate history goes.
+        await truncate(target, 0).catch(() => undefined);
+      }
+    }
+  };
+
   const rotate = async (): Promise<void> => {
+    await truncateRedirects();
     // Oldest first, so each generation moves into a free slot.
     for (let index = keep; index >= 1; index -= 1) {
       const from = path.join(options.dir, index === 1 ? LOG_FILENAME : rotatedName(index - 1));

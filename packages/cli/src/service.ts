@@ -246,8 +246,23 @@ export const readServiceStatus = async (env: ServiceEnvironment = {}): Promise<S
     return undefined;
   }
   const unitPath = serviceUnitPath(env);
-  const contents = await readFile(unitPath, 'utf8').catch(() => undefined);
-  if (contents === undefined) {
+  let contents: string;
+  try {
+    contents = await readFile(unitPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      // The unit is there — the manager may well still be running it — we
+      // just cannot read it. Reporting "not installed" would hide a live
+      // daemon, and would cost setup the login preference it reads here.
+      return {
+        platform,
+        installed: true,
+        running: false,
+        runAtLogin: undefined,
+        unitPath,
+        detail: `${unitPath} exists but could not be read (${error instanceof Error ? error.message : String(error)})`,
+      };
+    }
     return { platform, installed: false, running: false, runAtLogin: false, unitPath };
   }
   // A unit on disk that the manager has not been told about is installed
