@@ -4745,6 +4745,11 @@ export const runServe = async (
     if (redirectTimer) {
       clearInterval(redirectTimer);
     }
+    // Writes are queued and dropped on the hot path so logging never sits
+    // on a streamed token. That makes the tail of the log the part most
+    // likely to be lost — and the tail is the shutdown reason, the last
+    // warning, the line explaining a restart.
+    await logWriter?.flush();
   }
 };
 

@@ -29,6 +29,13 @@ export const LOG_KEEP = 3;
 
 export interface LogWriter {
   write(record: LogRecord): Promise<void>;
+  /**
+   * Resolves once every queued write has reached disk. Callers on the hot
+   * path drop the promise `write` returns, so a process that exits without
+   * flushing loses whatever is still queued — which is exactly the last
+   * few lines, the ones saying why it stopped.
+   */
+  flush(): Promise<void>;
   /** Absolute path of the live log file. */
   readonly path: string;
 }
@@ -132,6 +139,11 @@ export const createLogWriter = (options: LogWriterOptions): LogWriter => {
       queue = queue.then(() => append(record)).catch((error) => {
         options.onError?.(error);
       });
+      return queue;
+    },
+    flush(): Promise<void> {
+      // The chain already swallows its own errors through onError, so this
+      // settles rather than rejecting into a shutdown path.
       return queue;
     },
   };

@@ -5379,6 +5379,22 @@ test('redirect logs are truncated even when serve cannot start', async () => {
   assert.equal((await stat(errPath)).size, 0);
 });
 
+test('a stopping daemon does not lose the writes still queued', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  const writer = createLogWriter({ dir });
+  // Exactly how runServe logs: the promise is dropped so a write never
+  // sits on the path that produced the line.
+  for (let index = 0; index < 25; index += 1) {
+    void writer.write({ ts: '2026-08-17T14:32:07.000Z', level: 'info', msg: `line ${index}` });
+  }
+
+  await writer.flush();
+
+  const records = await readRecentRecords(dir, 100);
+  assert.equal(records.length, 25, 'every queued write lands before flush resolves');
+  assert.equal(records.at(-1)?.msg, 'line 24');
+});
+
 test('a serve that cannot start reports the failure instead of escaping', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-'));
   await mkdir(path.join(home, '.stratus', 'logs'), { recursive: true });
