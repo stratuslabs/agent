@@ -18,6 +18,7 @@ import {
   generateAgentName,
   generateAvatarTheme,
   parseSoul,
+  isValidAgentId,
 } from '../src/index.ts';
 
 test('generateAgentName is a human-ish first name, deterministic for a seed', () => {
@@ -458,4 +459,51 @@ test('delegation forwards the parent turn abort signal into the dispatcher', asy
 
   await tool.execute({ agent: 'Target', prompt: 'go' }, session, { signal: controller.signal });
   assert.equal(receivedSignal, controller.signal);
+});
+
+test('an explicit agent id must be a slug, because ids become paths', async () => {
+  // A soul file travels with a repository, and in the hosted profile the
+  // id comes from a tenant. It keys sessions, memory, credentials, Slack
+  // tokens, and per-agent paths — so the shape is enforced once, here,
+  // rather than defended at every join.
+  const rejected = [
+    '../../escape',
+    'a/b',
+    'a\\b',
+    '.hidden',
+    '-leading',
+    'Upper',
+    'has space',
+    'trailing.',
+    '',
+    'x'.repeat(65),
+  ];
+  for (const id of rejected) {
+    assert.throws(
+      () => defineAgent({ name: 'Ava', id }),
+      /Invalid agent id/,
+      `expected ${JSON.stringify(id)} to be rejected`,
+    );
+  }
+
+  // Rejected, never sanitized: quietly rewriting `../../escape` to
+  // `escape` would hand back an agent nobody asked for, keyed to
+  // resources nobody named.
+  for (const id of ['ava', 'ava-2', 'a', '0', 'a-b-c', 'x'.repeat(64)]) {
+    assert.equal(defineAgent({ name: 'Ava', id }).id, id);
+  }
+
+  // Derived ids come out of slugify and cannot be anything else.
+  assert.equal(isValidAgentId(defineAgent({ name: 'Ava Löf!' }).id), true);
+  assert.equal(isValidAgentId(defineAgent({ seed: 'x' }).id), true);
+});
+
+test('a soul declaring a path-capable id is rejected at parse', async () => {
+  assert.throws(
+    () => parseSoul('---\nname: Ava\nid: ../../escape\n---\n\nYou are Ava.\n'),
+    /Invalid agent id/,
+  );
+  // The rule lives in one place; parseSoul inherits it rather than
+  // repeating it.
+  assert.equal(parseSoul('---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n').agent.id, 'ava');
 });

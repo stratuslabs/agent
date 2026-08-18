@@ -90,6 +90,25 @@ const slugify = (name: string): string =>
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'agent';
 
+/**
+ * The only shape an agent id may take: lowercase alphanumerics and
+ * internal hyphens, starting with an alphanumeric.
+ *
+ * Ids are not labels. They key sessions, memory, credentials, Slack
+ * channel tokens, and every per-agent path on disk — and an explicit
+ * frontmatter `id` is untrusted input: a soul file travels with a
+ * repository, and in the hosted profile it comes from a tenant. `../../`
+ * or a leading dot in an id reaches every one of those joins intact, so
+ * the shape is enforced once here rather than defended at each of them.
+ */
+export const AGENT_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+/** Whether `id` is safe to key an agent's resources and paths by. */
+export const isValidAgentId = (id: string): boolean =>
+  // Bounded as well as shaped: an id becomes a path segment, and file
+  // systems have limits an unbounded one would discover the hard way.
+  id.length > 0 && id.length <= 64 && AGENT_ID_PATTERN.test(id);
+
 export interface DefineAgentInput {
   name?: string;
   id?: string;
@@ -119,6 +138,16 @@ const generatedIdSuffix = (seed?: string): string => {
 export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
   const nameWasGenerated = input.name === undefined;
   const name = input.name ?? generateAgentName(input.seed);
+  // Only an explicit id is checked: the derived ones come out of slugify,
+  // which cannot produce anything else. Rejected rather than sanitized —
+  // silently rewriting `../../escape` into `escape` would hand the caller
+  // an agent they did not ask for, keyed to resources they did not name.
+  if (input.id !== undefined && !isValidAgentId(input.id)) {
+    throw new Error(
+      `Invalid agent id: ${JSON.stringify(input.id)}. Ids may contain lowercase letters, digits, and hyphens, `
+      + 'must start with a letter or digit, and are at most 64 characters — they key files and credentials, not just labels.',
+    );
+  }
   return {
     id: input.id ?? (nameWasGenerated
       ? `${slugify(name)}-${generatedIdSuffix(input.seed)}`

@@ -29,7 +29,14 @@ Agents can be trusted with real tools (shell, files, browser) while running unat
 - Only calls from a kernel provider response are checkpointed. A provider driving its own inner loop is excluded, because recovery re-enters the kernel loop and cannot rebuild that provider's — which is exactly the clean failure [04](./04-agent-sdk-bridge.md) specifies for the SDK path.
 - A wait that outlived its window while the process was down is denied rather than re-asked, and a re-asked one keeps the remainder of its original window rather than winning a fresh one — measured from `parkedAt` against the configured timeout — the transport's original deadline was chosen after the checkpoint was written and died with the process that chose it. The queue behind it still drains.
 
-**Next: agent ids as a validated invariant.** Slug-only ids rejected at the parse/load boundary, and duplicate ids failing roster loading with both soul files named.
+**Shipped (#52). Agent ids as a validated invariant.**
+
+- An explicit id must match `[a-z0-9][a-z0-9-]*` and be at most 64 characters, enforced once in `defineAgent` — which `parseSoul` and every other constructor inherit — rather than defended at each path join. Rejected, never sanitized: quietly rewriting `../../escape` into `escape` would hand back an agent nobody asked for, keyed to resources nobody named. Derived ids come out of `slugify` and cannot be anything else.
+- Two roster souls claiming one id refuse the roster, with both files named. This deliberately does *not* follow the "one broken soul must never take the team down" rule, because the failures are different: skipping an unreadable soul loses one agent and it is obvious which, while picking a winner between two files makes an agent silently inherit the other's sessions, memory, and credentials, with the winner decided by filename sort order. There is no degraded behaviour that is right.
+- A soul claiming the built-in `stratus` id is still *skipped*, not treated as a collision — reserved is not duplicated, and a roster file must not be able to take the documented fallback over, nor take the daemon down by trying.
+- Diagnostic callers report rather than crash: `stratus doctor` lists the collision as a finding, and `stratus setup`'s Channels menu names both files and offers neither agent, so the rest of setup still works.
+
+`AgentRegistry.register` still overwrites by id, deliberately: live-refresh re-registers the same id on every dispatch, so the invariant belongs at the parse/load boundary — which is where it now is.
 
 **Moved to [06](./06-tool-packs.md): the command-scope allowlist.** Safe `git` scopes, flag and refspec constraints, control-operator defeat, and the persistent per-agent whitelist are still the right design — they were not built because **they have no caller**. Every tool in the repo today (`demo.echo`, `memory.remember`, `agent.delegate`) is fixed-argv; nothing takes a command string. A shell parser and a scope-normalization format written against no consumer would be shaped by guesses and rediscovered as wrong when `shell.run` lands. They belong with that tool, where the requirements are observable and testable against real invocations.
 
@@ -71,9 +78,9 @@ Phase 1 gives agents an always-on body; before they get real capabilities (step 
 - After **Always allow** on `git push origin main`, a plain `git push origin feature` skips approval but `git push --force`, `git push origin :main`, and `git push origin +main` all still prompt (flag and destructive-refspec constraints survive scope persistence — tested).
 - ~~A click from a Slack user outside the configured approver set is rejected with an ephemeral notice and the request stays pending; only an approver's click resolves it.~~ Shipped (#49).
 - ~~Aborting a turn while its approval is pending invalidates the request: the prompt is expired, and a subsequent Allow click is rejected instead of executing a tool for a cancelled turn (the abort signal reaches approval waits via `ApprovalContext` — see 01).~~ Shipped (#49).
-- A soul whose frontmatter declares `id: ../../escape` (or any non-slug id) is rejected at load; two souls declaring the same id fail roster loading with an error naming both files, and creating an agent with an existing id through the API is rejected.
+- ~~A soul whose frontmatter declares `id: ../../escape` (or any non-slug id) is rejected at load; two souls declaring the same id fail roster loading with an error naming both files.~~ Shipped (#52). The management API's own id-collision check lands with that API in [05](./05-control-api.md).
 - ~~A pending approval survives a daemon restart and, when resolved, resumes the exact pending call — earlier tool calls from the same turn are not re-executed, and in a multi-call response the calls *after* the pending one still execute from the persisted queue, leaving no `tool_use` without a `tool_result` (idempotency + pairing tests required).~~ Shipped (#51), with both tests.
-- The CLI's `--approvals ask` behavior is unchanged for humans at a terminal.
+- ~~The CLI's `--approvals ask` behavior is unchanged for humans at a terminal.~~ Held throughout (#47, #49) and covered by the existing prompt tests.
 - Unit tests cover the control-operator matrix (including `&`, CR/LF, and subshells) and whitelist persistence.
 
 ## Open questions

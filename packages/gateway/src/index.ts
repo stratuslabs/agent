@@ -711,15 +711,21 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // The built-in id is reserved BEFORE ordinary roster entries load: a
     // roster file that happens to declare id "stratus" must not hijack
     // the documented built-in fallback for agentId-less dispatches — the
-    // duplicate guard below skips it with a warning. Only the explicitly
+    // guard below skips it with a warning. Only the explicitly
     // configured default soul may take the id over (defaultAgentId
     // replaces a pathless source).
     registerSource({ definition: { ...DEFAULT_STRATUS_AGENT } });
+    // Throws on two roster files claiming one id: that is a collision with
+    // no correct winner, and refusing to serve beats letting sort order
+    // decide whose sessions, memory, and credentials an agent inherits.
     const entries: RosterEntry[] = await loadRosterSouls(env, warn);
     for (const entry of entries) {
       if (sources.has(entry.soul.agent.id)) {
-        const existing = sources.get(entry.soul.agent.id);
-        warn(`duplicate agent id ${entry.soul.agent.id} (${existing?.soulPath ?? 'built-in'} vs ${entry.path}); keeping the first`);
+        // Only reachable for the reserved built-in id now — roster-vs-
+        // roster duplicates never get this far. Reserved is not the same
+        // failure as duplicated: a soul may not take the fallback over,
+        // and must not be able to take the daemon down by trying.
+        warn(`agent id ${entry.soul.agent.id} is reserved for the built-in agent; ignoring ${entry.path}`);
         continue;
       }
       registerSource({ definition: entry.soul.agent, soulPath: entry.path, soul: entry.soul });

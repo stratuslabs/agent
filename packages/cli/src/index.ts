@@ -3176,10 +3176,23 @@ export const runSetup = async (
     // name an app for the loser, which can never receive a message —
     // Slack credentials are keyed by the shared id, and dispatch reaches
     // the first sorted file.
-    for (const entry of await loadRosterSouls(env, warnOnce)) {
+    let rosterSouls: RosterEntry[] = [];
+    try {
+      rosterSouls = await loadRosterSouls(env, warnOnce);
+    } catch (error) {
+      // A roster that cannot say who its agents are cannot have channels
+      // configured for them — but the rest of setup (providers, models,
+      // sign-ins) still works, so this reports and moves on rather than
+      // taking the whole command down.
+      warnOnce(error instanceof Error ? error.message : String(error));
+    }
+    for (const entry of rosterSouls) {
       const clash = entries.find((seen) => seen.soul.agent.id === entry.soul.agent.id);
       if (clash) {
-        warnOnce(`duplicate agent id ${entry.soul.agent.id} (${clash.path ?? 'built-in'} vs ${entry.path}); keeping the first`);
+        // Reaches here only against the built-in id, which is reserved
+        // rather than duplicated: a soul may not take over the documented
+        // fallback, and that is a skip, not a collision between two souls.
+        warnOnce(`agent id ${entry.soul.agent.id} is reserved for the built-in agent; ignoring ${entry.path}`);
         continue;
       }
       entries.push(entry);
@@ -4087,7 +4100,15 @@ export const collectDoctorReport = async (
   }
   // Tokens keyed to an agent the roster no longer has are loaded and
   // skipped on every start, silently.
-  const rosterIds = new Set((await loadRosterSouls(env, warn)).map((entry) => entry.soul.agent.id));
+  let rosterEntries: RosterEntry[] = [];
+  try {
+    rosterEntries = await loadRosterSouls(env, warn);
+  } catch (error) {
+    // Doctor exists to name problems, so a roster it cannot load is a
+    // finding to report — not an exception that replaces the report.
+    problems.push(error instanceof Error ? error.message : String(error));
+  }
+  const rosterIds = new Set(rosterEntries.map((entry) => entry.soul.agent.id));
   rosterIds.add(DEFAULT_STRATUS_AGENT.id);
   if (soul) {
     rosterIds.add(soul.agent.id);
@@ -4283,7 +4304,11 @@ const servedRuntimes = async (
     configPresent: location !== undefined,
   };
   const passes: Array<{ selection: RuntimeSelection; env: CliEnvironment }> = [{ selection: {}, env }];
-  for (const entry of await loadRosterSouls(env, () => {})) {
+  // A roster that will not load is the gateway's to refuse, with a better
+  // message than this preflight could give — so it checks what it can and
+  // leaves the failing to start().
+  const rosterForRuntimes = await loadRosterSouls(env, () => {}).catch(() => []);
+  for (const entry of rosterForRuntimes) {
     const normalized = applySoulPins(entry.soul, {}, env, context);
     passes.push({ selection: normalized.selection, env: normalized.env as CliEnvironment });
   }

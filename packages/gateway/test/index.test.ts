@@ -1646,7 +1646,10 @@ test('a roster soul cannot hijack the reserved built-in agent id', async () => {
   assert.equal(session.status, 'completed');
   assert.match(session.agent.instructions ?? '', /Stratus Agent platform/);
   assert.ok(!(session.agent.instructions ?? '').includes('imposter'));
-  assert.ok(warnings.some((line) => line.includes('duplicate agent id stratus')), `expected a collision warning, got ${JSON.stringify(warnings)}`);
+  assert.ok(
+    warnings.some((line) => line.includes('reserved for the built-in agent')),
+    `expected a reservation warning, got ${JSON.stringify(warnings)}`,
+  );
 });
 
 // ---- approval brokering ---------------------------------------------------
@@ -2347,5 +2350,43 @@ test('a request whose window is already spent is denied without being announced'
   const resolved = events.find((event) => event.type === 'tool.approval-resolved');
   assert.equal(resolved?.reason, 'timeout');
 
+  await gateway.stop();
+});
+
+test('a duplicate agent id stops the daemon starting, rather than picking a winner', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await writeSoul(home, 'a-first.md', '---\nname: First\nid: twin\n---\n\nYou are First.\n');
+  await writeSoul(home, 'b-second.md', '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, selection: { provider: 'demo' } });
+  // Refusing to serve is the honest outcome: every id-keyed resource —
+  // sessions, memory, credentials, Slack tokens — would otherwise belong
+  // to whichever file sorted first.
+  await assert.rejects(gateway.start(), /Two soul files declare the agent id twin/);
+  await gateway.stop();
+});
+
+test('a soul claiming the built-in id is still skipped, not treated as a collision', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await writeSoul(home, 'impostor.md', '---\nname: Impostor\nid: stratus\n---\n\nYou are an impostor.\n');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+
+  const warnings: string[] = [];
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    selection: { provider: 'demo' },
+    warn: (line) => warnings.push(line),
+  });
+  // Reserved is not duplicated. The built-in fallback is documented, so a
+  // roster file must not be able to take it over — and must not be able to
+  // take the daemon down by trying.
+  await gateway.start();
+  const ids = gateway.agents().map((agent) => agent.id).sort();
+  assert.deepEqual(ids, ['ava', 'stratus']);
+  assert.equal(gateway.agents().find((agent) => agent.id === 'stratus')?.name, 'Stratus');
+  assert.ok(warnings.some((line) => line.includes('reserved')), JSON.stringify(warnings));
   await gateway.stop();
 });

@@ -375,6 +375,21 @@ You are a sharp, warm generalist. Answer first, explain second...
 
 Agents remember: facts saved with the built-in `memory.remember` tool persist to `~/.stratus/memory.jsonl`, keyed to the agent — so the Ava you talk to tomorrow remembers today, from any directory.
 
+**Ids are not labels.** Frontmatter may set `id:` explicitly, and it keys the
+agent's sessions, memory, credentials, Slack tokens, and every per-agent path
+on disk. So it must be a slug — lowercase letters, digits, and hyphens,
+starting with a letter or digit, up to 64 characters. Anything else is
+rejected when the soul loads rather than quietly cleaned up. Omit it and one
+is derived from the name.
+
+**Two souls cannot share an id.** That is not two agents; it is one agent
+whose memory and sign-ins belong to whichever file sorted first. The roster
+refuses to load and names both files, `stratus serve` will not start, and
+`stratus doctor` reports it. (An unreadable *single* soul still degrades to a
+warning — one broken file never takes the team down. A collision has no
+correct winner, which is the difference.) The built-in `stratus` id is
+reserved: a soul claiming it is skipped, not treated as a collision.
+
 ## Options
 
 | Flag | Purpose |

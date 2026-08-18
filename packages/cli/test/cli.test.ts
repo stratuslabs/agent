@@ -3323,13 +3323,13 @@ test('setup suggests serve with the same --config it was run with', async () => 
   assert.match(output.stdout, /run `stratus serve --config \.\/custom\.json` to bring them online/);
 });
 
-test('the Channels menu drops duplicate roster ids the way the gateway does', async () => {
+test('the Channels menu refuses a roster with a duplicate id instead of picking a winner', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const agentsDir = path.join(home, '.stratus', 'agents');
   await mkdir(agentsDir, { recursive: true });
-  // Two files, one id. The gateway keeps the first sorted file; offering
-  // the other would name a Slack app for an agent that can never be
-  // dispatched to, since credentials are keyed by the shared id.
+  // Two files, one id. Offering either would name a Slack app for an
+  // ambiguous agent — credentials are keyed by the shared id, so whichever
+  // file loses the sort silently answers with the winner's tokens.
   await writeFile(path.join(agentsDir, 'a-first.md'), '---\nname: First\nid: twin\n---\n\nYou are First.\n');
   await writeFile(path.join(agentsDir, 'b-second.md'), '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
 
@@ -3346,10 +3346,15 @@ test('the Channels menu drops duplicate roster ids the way the gateway does', as
     },
   });
 
+  // Setup still runs — providers and sign-ins are configurable regardless
+  // — but neither twin is offered a Slack app, and the reason names both
+  // files so it can actually be fixed.
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /First \(twin\)/);
+  assert.doesNotMatch(output.stdout, /First \(twin\)/);
   assert.doesNotMatch(output.stdout, /Second \(twin\)/);
-  assert.match(output.stderr, /duplicate agent id twin/);
+  assert.match(output.stderr, /Two soul files declare the agent id twin/);
+  assert.match(output.stderr, /a-first\.md/);
+  assert.match(output.stderr, /b-second\.md/);
 });
 
 test('the Channels menu follows STRATUS_SOUL over the configured soul', async () => {
@@ -4494,7 +4499,11 @@ test('a roster file claiming the built-in id is skipped in the Channels menu', a
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /Stratus \(stratus\)/);
   assert.doesNotMatch(output.stdout, /Impostor \(stratus\)/);
-  assert.match(output.stderr, /duplicate agent id stratus \(built-in vs .*impostor\.md\)/);
+  // Reserved, not duplicated: a soul may not take over the documented
+  // fallback, and that is a skip rather than the collision between two
+  // soul files that refuses the whole roster.
+  assert.match(output.stderr, /agent id stratus is reserved for the built-in agent/);
+  assert.match(output.stderr, /impostor\.md/);
 });
 
 test('the Channels menu can clear orphaned tokens with no soul files present', async () => {
@@ -5652,4 +5661,27 @@ test('a config the daemon was pointed at may set approvals', async () => {
   assert.equal(code, 0);
   assert.match(output.stdout, /approvals: remote/);
   assert.doesNotMatch(output.stderr, /cannot decide who may approve/);
+});
+
+test('doctor reports an unloadable roster instead of dying on it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-doctor-dup-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'a-first.md'), '---\nname: First\nid: twin\n---\n\nYou are First.\n');
+  await writeFile(path.join(agentsDir, 'b-second.md'), '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: home, homeDir: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
+  });
+
+  // Doctor exists to name problems, so a roster it cannot load is a
+  // finding — not an exception that replaces the whole report.
+  assert.equal(exitCode, 1, 'a problem was found');
+  assert.match(output.stdout, /Two soul files declare the agent id twin/);
+  assert.match(output.stdout, /a-first\.md/);
+  // Still a real report, not a stack trace.
+  assert.match(output.stdout, /Stratus Agent/);
 });
