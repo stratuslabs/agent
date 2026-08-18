@@ -71,6 +71,17 @@ export interface ServiceDefinition {
   runAtLogin: boolean;
 }
 
+export interface ServiceInstallOptions {
+  runAtLogin?: boolean;
+  /**
+   * Config the daemon should load, absolute. The unit runs from the home
+   * directory, so a relative path — or none, when setup wrote somewhere
+   * other than the discovered location — would start the daemon on a
+   * different config than the one just saved, with a different roster.
+   */
+  configPath?: string;
+}
+
 export const launchdPlist = (definition: ServiceDefinition): string => `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -83,12 +94,12 @@ ${definition.argv.map((argument) => `    <string>${xml(argument)}</string>`).joi
   </array>
   <key>RunAtLoad</key>
   <${definition.runAtLogin ? 'true' : 'false'}/>
-  <key>KeepAlive</key>
+${definition.runAtLogin ? `  <key>KeepAlive</key>
   <dict>
     <key>SuccessfulExit</key>
     <false/>
   </dict>
-  <key>WorkingDirectory</key>
+` : ''}  <key>WorkingDirectory</key>
   <string>${xml(definition.workingDirectory)}</string>
   <key>StandardOutPath</key>
   <string>${xml(path.join(definition.logDir, 'stratusd.out.log'))}</string>
@@ -117,11 +128,20 @@ TimeoutStopSec=30
 WantedBy=default.target
 `;
 
-export const serviceDefinition = (env: ServiceEnvironment, runAtLogin: boolean): ServiceDefinition => ({
+export const serviceDefinition = (
+  env: ServiceEnvironment,
+  runAtLogin: boolean,
+  configPath?: string,
+): ServiceDefinition => ({
   // The node binary and script are resolved from the running process, not
   // from PATH: a service manager starts with a minimal environment, and a
   // bare `stratus` would depend on a shell profile it never loads.
-  argv: [env.execPath ?? process.execPath, env.scriptPath ?? process.argv[1] ?? 'stratus', 'serve'],
+  argv: [
+    env.execPath ?? process.execPath,
+    env.scriptPath ?? process.argv[1] ?? 'stratus',
+    'serve',
+    ...(configPath ? ['--config', configPath] : []),
+  ],
   logDir: path.join(homeOf(env), '.stratus', 'logs'),
   workingDirectory: homeOf(env),
   runAtLogin,
@@ -188,10 +208,13 @@ export const readServiceStatus = async (env: ServiceEnvironment = {}): Promise<S
   }
   // A unit on disk that the manager has not been told about is installed
   // but inert, so "installed" and "running" are asked separately.
+  const run = runnerFor(env);
+  // launchd's answer is in the plist; systemd's is the enablement symlink,
+  // which the unit file itself says nothing about — a unit installed with
+  // --no-login would otherwise be reported as starting at login.
   const runAtLogin = platform === 'launchd'
     ? /<key>RunAtLoad<\/key>\s*<true\/>/.test(contents)
-    : true;
-  const run = runnerFor(env);
+    : (await run('systemctl', ['--user', 'is-enabled', SYSTEMD_UNIT])).stdout.trim() === 'enabled';
   if (platform === 'launchd') {
     const result = await run('launchctl', ['print', `gui/${uidOf(env)}/${SERVICE_LABEL}`]);
     return {
@@ -222,7 +245,7 @@ export interface ServiceActionResult {
 
 export const installService = async (
   env: ServiceEnvironment = {},
-  options: { runAtLogin?: boolean } = {},
+  options: ServiceInstallOptions = {},
 ): Promise<ServiceActionResult> => {
   const platform = servicePlatform(env);
   if (!platform) {
@@ -233,7 +256,7 @@ export const installService = async (
   }
   const runAtLogin = options.runAtLogin ?? true;
   const unitPath = serviceUnitPath(env);
-  const definition = serviceDefinition(env, runAtLogin);
+  const definition = serviceDefinition(env, runAtLogin, options.configPath);
   await mkdir(path.dirname(unitPath), { recursive: true });
   await mkdir(definition.logDir, { recursive: true, mode: 0o700 });
   await writeFile(
@@ -253,6 +276,18 @@ export const installService = async (
     if (result.code !== 0) {
       return { ok: false, messages: [...messages, `launchctl bootstrap failed: ${result.stderr.trim() || result.stdout.trim()}`] };
     }
+    if (!runAtLogin) {
+      // RunAtLoad is false, so bootstrap alone loads the job without
+      // starting it. KeepAlive is omitted in that case too: launchd's
+      // SuccessfulExit condition implies RunAtLoad, which would restart
+      // the job at every login and quietly contradict --no-login.
+      const started = await run('launchctl', ['kickstart', `${domain}/${SERVICE_LABEL}`]);
+      if (started.code !== 0) {
+        return { ok: false, messages: [...messages, `launchctl kickstart failed: ${started.stderr.trim() || started.stdout.trim()}`] };
+      }
+      messages.push('stratusd is running. It will not start at login, and will not be restarted if it crashes.');
+      return { ok: true, messages };
+    }
     messages.push('stratusd is running, and will start again when you log in.');
     // Said plainly rather than left to be discovered: a LaunchAgent is
     // tied to a login session, so a headless machine that reboots without
@@ -264,6 +299,11 @@ export const installService = async (
   const reload = await run('systemctl', ['--user', 'daemon-reload']);
   if (reload.code !== 0) {
     return { ok: false, messages: [...messages, `systemctl daemon-reload failed: ${reload.stderr.trim()}`] };
+  }
+  if (!runAtLogin) {
+    // A prior `install` left an enablement symlink; `start` alone would
+    // leave it in place and the unit would keep starting at login.
+    await run('systemctl', ['--user', 'disable', SYSTEMD_UNIT]);
   }
   const enable = await run('systemctl', ['--user', ...(runAtLogin ? ['enable', '--now'] : ['start']), SYSTEMD_UNIT]);
   if (enable.code !== 0) {
@@ -285,13 +325,22 @@ export const uninstallService = async (env: ServiceEnvironment = {}): Promise<Se
   }
   const unitPath = serviceUnitPath(env);
   const run = runnerFor(env);
-  if (platform === 'launchd') {
-    await run('launchctl', ['bootout', `gui/${uidOf(env)}/${SERVICE_LABEL}`]);
-  } else {
-    await run('systemctl', ['--user', 'disable', '--now', SYSTEMD_UNIT]);
+  const stopped = platform === 'launchd'
+    ? await run('launchctl', ['bootout', `gui/${uidOf(env)}/${SERVICE_LABEL}`])
+    : await run('systemctl', ['--user', 'disable', '--now', SYSTEMD_UNIT]);
+  // Removing the unit after a FAILED stop would strand a live daemon with
+  // nothing left to stop it by, while telling the user it was shut down.
+  // A job that was never loaded is not a failure — there is nothing to stop.
+  const alreadyGone = /not (?:find|loaded)|No such process|could not find/i.test(`${stopped.stderr} ${stopped.stdout}`);
+  if (stopped.code !== 0 && !alreadyGone) {
+    return {
+      ok: false,
+      messages: [
+        `Could not stop stratusd: ${stopped.stderr.trim() || stopped.stdout.trim()}`,
+        `${unitPath} was left in place — removing it would leave the daemon running with nothing to stop it by.`,
+      ],
+    };
   }
-  // Removed after the manager has been told to forget it, so a failed stop
-  // never leaves a running job with no unit file to stop it by.
   await rm(unitPath, { force: true });
   if (platform === 'systemd') {
     await run('systemctl', ['--user', 'daemon-reload']);

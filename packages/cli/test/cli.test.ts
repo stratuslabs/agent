@@ -4546,3 +4546,149 @@ test('parseCommand parses service actions', () => {
   assert.throws(() => parseCommand(['service', 'restart']), /Unknown service action/);
   assert.throws(() => parseCommand(['service', 'status', '--no-login']), /applies to/);
 });
+
+test('the managed daemon is pinned to the config setup wrote', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup', '--config', './custom.json'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  // The unit's working directory is the home directory, so discovery from
+  // there would find a different config entirely — the daemon would come up
+  // on the wrong roster and leave configured Slack agents offline.
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  assert.match(unit, /"serve" "--config" "[^"]*custom\.json"/);
+});
+
+test('service install can pin the daemon to a config of its own', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+
+  await runCli({
+    argv: ['service', 'install', '--config', './team.json'],
+    streams: createStreams().streams,
+    env: { cwd: project, homeDir: home, processEnv: {}, serviceRunner: stubServiceRunner },
+  });
+
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  // Resolved against the invoking directory, not the home the unit runs in.
+  assert.match(unit, new RegExp(`"--config" "${path.join(project, 'team.json')}"`));
+});
+
+test('a --no-login LaunchAgent does not smuggle RunAtLoad back in', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const calls: string[] = [];
+  const result = await installService(
+    {
+      platform: 'darwin',
+      homeDir: home,
+      uid: 501,
+      run: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+    { runAtLogin: false },
+  );
+
+  const plist = await readFile(path.join(home, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
+  assert.match(plist, /<key>RunAtLoad<\/key>\s*<false\/>/);
+  // launchd's KeepAlive.SuccessfulExit implies RunAtLoad — the job has to
+  // run to produce an exit status — so keeping it would restart the agent
+  // at every login and quietly contradict the flag.
+  assert.doesNotMatch(plist, /KeepAlive/);
+  // Which means bootstrap alone will not start it: it is kickstarted.
+  assert.ok(calls.some((call) => /kickstart/.test(call)), calls.join(', '));
+  assert.equal(result.ok, true);
+  assert.ok(result.messages.some((message) => /will not start at login/.test(message)));
+});
+
+test('reinstalling with --no-login clears an existing systemd enablement', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const run = async () => ({ code: 0, stdout: '', stderr: '' });
+  await installService({ platform: 'linux', homeDir: home, run });
+
+  const calls: string[] = [];
+  await installService(
+    { platform: 'linux', homeDir: home, run: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; } },
+    { runAtLogin: false },
+  );
+
+  // `start` alone leaves the enablement symlink from the first install, so
+  // the unit keeps starting at login despite the success message.
+  assert.deepEqual(calls, [
+    'systemctl --user daemon-reload',
+    'systemctl --user disable stratusd.service',
+    'systemctl --user start stratusd.service',
+  ]);
+});
+
+test('systemd status asks whether the unit is enabled', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+
+  // The unit file says nothing about enablement — that lives in a symlink,
+  // so a unit installed with --no-login would otherwise be reported as
+  // starting at login, contradicting its own install output.
+  const disabled = await readServiceStatus({
+    platform: 'linux',
+    homeDir: home,
+    run: async (_command, args) => (args.includes('is-enabled')
+      ? { code: 1, stdout: 'disabled\n', stderr: '' }
+      : { code: 0, stdout: 'active\n', stderr: '' }),
+  });
+  assert.equal(disabled?.runAtLogin, false);
+
+  const enabled = await readServiceStatus({
+    platform: 'linux',
+    homeDir: home,
+    run: async (_command, args) => (args.includes('is-enabled')
+      ? { code: 0, stdout: 'enabled\n', stderr: '' }
+      : { code: 0, stdout: 'active\n', stderr: '' }),
+  });
+  assert.equal(enabled?.runAtLogin, true);
+});
+
+test('uninstall keeps the unit when the manager could not stop the daemon', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'darwin', homeDir: home, uid: 501, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const unitPath = serviceUnitPath({ platform: 'darwin', homeDir: home });
+
+  const result = await uninstallService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    run: async () => ({ code: 124, stdout: '', stderr: 'launchctl did not respond within 15s' }),
+  });
+
+  assert.equal(result.ok, false);
+  // Removing it anyway would strand a live daemon with nothing left to stop
+  // it by, while reporting that it had been shut down.
+  assert.ok(await readFile(unitPath, 'utf8').catch(() => undefined), 'the unit must survive a failed stop');
+  assert.ok(result.messages.some((message) => /left in place/.test(message)));
+});
+
+test('uninstall still cleans up a unit the manager never loaded', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'darwin', homeDir: home, uid: 501, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const unitPath = serviceUnitPath({ platform: 'darwin', homeDir: home });
+
+  // Nothing to stop is not a failure to stop.
+  const result = await uninstallService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    run: async () => ({ code: 3, stdout: '', stderr: 'Could not find service "com.stratusagent.stratusd"' }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(await readFile(unitPath, 'utf8').catch(() => undefined), undefined);
+});

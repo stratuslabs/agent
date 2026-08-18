@@ -240,6 +240,8 @@ export interface ParsedServiceCommand {
   action: 'install' | 'uninstall' | 'status' | 'start' | 'stop';
   /** install only: start automatically at login. Defaults to true. */
   runAtLogin?: boolean;
+  /** install only: the config the managed daemon should load. */
+  configPath?: string;
 }
 
 export interface ParsedLogsCommand {
@@ -332,7 +334,8 @@ Commands:
   service          Keep stratusd running under launchd (macOS) or systemd
                    (Linux): install, uninstall, status, start, stop.
                    Installing starts it now and at every login
-                   (--no-login installs without the login trigger)
+                   (--no-login installs without the login trigger,
+                   --config <path> pins the daemon to one config file)
   logs             Read the daemon's log from any terminal: -f to follow,
                    -n <count> for backlog, --agent / --session to filter,
                    --format json for the raw records
@@ -619,7 +622,12 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       throw new Error(`Unknown service action: ${action} (expected install, uninstall, status, start, or stop)`);
     }
     const parsed: ParsedServiceCommand = { command: 'service', action };
-    for (const token of rest.slice(1)) {
+    const serviceRest = rest.slice(1);
+    for (let index = 0; index < serviceRest.length; index += 1) {
+      const token = serviceRest[index];
+      if (!token) {
+        continue;
+      }
       if (token === '--help' || token === '-h') {
         return { command: 'help' };
       }
@@ -628,6 +636,14 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
           throw new Error('--no-login applies to `stratus service install`.');
         }
         parsed.runAtLogin = false;
+        continue;
+      }
+      if (token === '--config') {
+        if (action !== 'install') {
+          throw new Error('--config applies to `stratus service install`.');
+        }
+        parsed.configPath = readOptionValue(serviceRest, index, '--config');
+        index += 1;
         continue;
       }
       throw new Error(`Unknown option: ${token}`);
@@ -3347,7 +3363,15 @@ export const runSetup = async (
     // ago. A service failure is reported and never fails setup: the
     // settings are already saved, and `stratus serve` still works by hand.
     if (state.service.install && servicePlatform(serviceEnvFor(env))) {
-      const result = await installService(serviceEnvFor(env), { runAtLogin: state.service.runAtLogin });
+      // The unit is pinned to the file setup just wrote. Its working
+      // directory is the home directory, so discovery from there would
+      // find a different config whenever setup was run with --config or
+      // STRATUS_CONFIG — the daemon would come up on another roster and
+      // leave the Slack apps configured above offline.
+      const result = await installService(serviceEnvFor(env), {
+        runAtLogin: state.service.runAtLogin,
+        configPath,
+      });
       for (const message of result.messages) {
         writeLine(result.ok ? streams.stdout : streams.stderr, message);
       }
@@ -4122,7 +4146,12 @@ export const runService = async (
   }
 
   const action = command.action === 'install'
-    ? installService(serviceEnv, command.runAtLogin === false ? { runAtLogin: false } : {})
+    ? installService(serviceEnv, {
+        ...(command.runAtLogin === false ? { runAtLogin: false } : {}),
+        // Absolute: the unit runs from the home directory, so a relative
+        // path would resolve against the wrong place.
+        ...(command.configPath ? { configPath: path.resolve(readWorkingDirectory(env), command.configPath) } : {}),
+      })
     : command.action === 'uninstall'
       ? uninstallService(serviceEnv)
       : command.action === 'start'
