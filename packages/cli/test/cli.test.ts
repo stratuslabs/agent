@@ -4878,3 +4878,51 @@ test('stopping a --no-login service does not promise it comes back at login', as
   });
   assert.ok(managed.messages.some((message) => /start again at your next login/.test(message)));
 });
+
+test('systemd unit values escape percent signs', async () => {
+  // systemd expands % specifiers in unit values, including inside quoted
+  // ExecStart arguments — %b becomes the boot id, so a path containing one
+  // silently turns into a nonexistent executable or directory.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const odd = path.join(home, '100%b-project');
+  await mkdir(odd, { recursive: true });
+
+  await installService({
+    platform: 'linux',
+    homeDir: home,
+    cwd: odd,
+    execPath: '/usr/bin/node',
+    scriptPath: path.join(odd, 'bin.js'),
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  assert.match(unit, /100%%b-project/);
+  assert.doesNotMatch(unit, /100%b-project/);
+});
+
+test('the shell-only credential check reads the config setup just wrote', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  // Nothing discoverable from the working directory, so plain discovery
+  // would resolve the demo provider and report no problem — while the unit
+  // is pinned to this file, whose provider has no stored credential.
+  await writeFile(path.join(project, 'custom.json'), JSON.stringify({ provider: 'openai' }));
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup', '--config', './custom.json'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: { OPENAI_API_KEY: 'sk-openai-shell-only' },
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  assert.deepEqual(calls, [], 'a daemon that cannot authenticate must not be installed');
+  assert.match(output.stderr, /your API key comes from OPENAI_API_KEY in this shell/);
+});

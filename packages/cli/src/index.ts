@@ -3362,7 +3362,7 @@ export const runSetup = async (
     // were just written rather than the ones it would have found a moment
     // ago. A service failure is reported and never fails setup: the
     // settings are already saved, and `stratus serve` still works by hand.
-    const shellOnly = state.service.install ? await shellOnlyCredential(env) : undefined;
+    const shellOnly = state.service.install ? await shellOnlyCredential(env, configPath) : undefined;
     if (shellOnly) {
       // Installing here would produce a daemon that fails every dispatch on
       // a missing key, minutes after setup said it was ready.
@@ -4140,8 +4140,15 @@ const serviceEnvFor = (env: CliEnvironment): ServiceEnvironment => ({
  * profile, so the unit would come up unauthenticated while setup had just
  * reported everything ready. Returns the variable to name, if so.
  */
-const shellOnlyCredential = async (env: CliEnvironment): Promise<string | undefined> => {
-  const runtime = await resolveStateRuntimeConfig({}, env).catch(() => undefined);
+const shellOnlyCredential = async (
+  env: CliEnvironment,
+  // The config setup just wrote, which is also what the unit will be
+  // pinned to. Plain discovery would resolve some other file — or nothing,
+  // giving the demo provider and a clean bill of health for a daemon that
+  // cannot authenticate.
+  configPath: string,
+): Promise<string | undefined> => {
+  const runtime = await resolveStateRuntimeConfig({ configPath }, env).catch(() => undefined);
   if (!runtime || runtime.provider === 'demo' || !runtime.apiKeyEnvVar) {
     return undefined;
   }

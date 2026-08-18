@@ -113,14 +113,22 @@ ${definition.runAtLogin ? `  <key>KeepAlive</key>
 </plist>
 `;
 
+/**
+ * systemd expands `%` specifiers in unit values — including inside quoted
+ * ExecStart arguments — so a path containing one (say a directory named
+ * `100%`) would silently become something else entirely, or a nonexistent
+ * executable. systemd.unit(5) spells a literal percent `%%`.
+ */
+const systemdValue = (value: string): string => value.replace(/%/g, '%%');
+
 export const systemdUnit = (definition: ServiceDefinition): string => `[Unit]
 Description=Stratus Agent daemon (stratusd)
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${definition.argv.map((argument) => JSON.stringify(argument)).join(' ')}
-WorkingDirectory=${definition.workingDirectory}
+ExecStart=${definition.argv.map((argument) => systemdValue(JSON.stringify(argument))).join(' ')}
+WorkingDirectory=${systemdValue(definition.workingDirectory)}
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
