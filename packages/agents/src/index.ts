@@ -394,9 +394,20 @@ export const createDelegateTool = ({
   return {
   name: DELEGATE_TOOL_NAME,
   description: 'Delegate a task to another agent by name and get their reply back.',
-  // Handing work to a teammate is the point of a fleet, and it is not a
-  // hole: the delegate's own tool calls face the policy again, under the
-  // delegate's allowlist, and delegationDepth bounds the chain.
+  // Safe, and the call is arguable enough to record why. Delegation spends
+  // provider tokens and starts work as another agent, which reads like
+  // `gated` — but the money argument proves too much: the turn that decides
+  // to delegate was itself an unapproved provider call, so gating on spend
+  // gates the conversation. What delegation does NOT do is act outside
+  // Stratus. It stays in the fleet, the delegate's own tool calls face the
+  // policy again under the delegate's allowlist, and maxDepth bounds the
+  // chain.
+  //
+  // The practical half: `gated` here means a headless daemon refuses every
+  // delegation, and headless is what every installed service runs. That
+  // would remove the orchestrator pattern from the product until remote
+  // approval exists — a feature removal wearing a safety hat, with no way
+  // for an operator to say yes. Revisit when a human can actually be asked.
   risk: 'safe',
   parameters: {
     type: 'object',

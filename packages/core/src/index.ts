@@ -135,11 +135,18 @@ export type ProviderDelta =
  * a policy needs to separate "let it run unattended" from "a human decides"
  * without understanding what any particular tool does.
  *
- * - `safe` — reversible and contained: reads, and writes the agent already
- *   owns (its own memory).
+ * - `safe` — contained: reads, work inside the fleet, and writes the agent
+ *   already owns (its own memory).
  * - `gated` — a human should decide when nobody is watching: anything that
- *   reaches outside the agent, spends money, or writes where others read.
+ *   acts on the world outside Stratus — the filesystem, the network,
+ *   another service — or writes where other people read.
  * - `dangerous` — destructive or hard to undo.
+ *
+ * Provider spend is deliberately not the line. Every turn spends: a message
+ * arriving in Slack causes a provider call nobody approved, so a policy
+ * that gated on cost would have to gate the conversation itself. What is
+ * worth a human's attention is effects that outlive the turn and reach
+ * past Stratus — which is also what containment (later) would isolate.
  *
  * Undeclared is not `safe`. `resolveToolRisk` treats a missing risk as
  * `gated`, so a tool added without thinking about this is held back rather

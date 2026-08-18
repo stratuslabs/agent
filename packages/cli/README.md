@@ -99,6 +99,14 @@ classify something should cost a prompt, not an unattended command. Every
 tool that ships today (`demo.echo`, `memory.remember`, `agent.delegate`) is
 `safe`, so nothing changes until you add one that isn't.
 
+The line is *acting outside Stratus* — the filesystem, the network, another
+service — not cost. Every turn spends provider tokens, including the one
+that decided to call a tool, so a policy that gated on spend would have to
+gate the conversation itself. Delegation stays `safe` for the same reason:
+it hands work to a teammate inside the fleet, that teammate's own tool
+calls face this policy again under their allowlist, and the chain is depth
+bounded.
+
 `stratus chat` and `stratus run` are unaffected: at a terminal, `--approvals`
 works exactly as before.
 
