@@ -372,11 +372,15 @@ export interface PendingApprovalRecord {
    */
   remainingCallIds: string[];
   /**
-   * When the request gives up, ISO-8601. Carried across the restart so a
-   * deadline is honoured rather than restarted: downtime is not a reason to
-   * extend a security decision.
+   * When the wait began, ISO-8601.
+   *
+   * The deadline itself is deliberately NOT stored: it is chosen by
+   * whatever transport publishes the request, strictly after this record is
+   * written, so a field for it here could only ever be empty. A recovering
+   * daemon has its own configured timeout and can measure the elapsed wait
+   * from this — which is what honouring the original window means, rather
+   * than restarting the clock because the process died.
    */
-  expiresAt?: string;
   parkedAt: string;
 }
 
@@ -396,7 +400,6 @@ export const readPendingApproval = (session: Session): PendingApprovalRecord | u
     remainingCallIds: Array.isArray(record.remainingCallIds)
       ? record.remainingCallIds.filter((id): id is string => typeof id === 'string')
       : [],
-    ...(typeof record.expiresAt === 'string' ? { expiresAt: record.expiresAt } : {}),
     parkedAt: typeof record.parkedAt === 'string' ? record.parkedAt : '',
   };
 };

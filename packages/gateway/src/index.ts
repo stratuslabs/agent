@@ -1164,14 +1164,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           continue;
         }
         const record = readPendingApproval(session);
-        // A deadline that passed while the daemon was down is honoured, not
-        // restarted: the request really did go unanswered for its whole
-        // window, and downtime is not a reason to extend a security
-        // decision. Denying goes through the same recovery path, so the
-        // queue behind it still drains and no tool_use is left unanswered.
-        const expired = record?.expiresAt !== undefined && Date.parse(record.expiresAt) <= Date.now();
+        // A wait that outlived its window while the daemon was down is
+        // honoured, not restarted: the request really did go unanswered for
+        // the whole time it was configured to wait, and downtime is not a
+        // reason to extend a security decision. Measured from when the turn
+        // parked against this daemon's timeout — the transport's original
+        // deadline was chosen after the checkpoint was written and is gone
+        // with the process that chose it. Denying goes through the same
+        // recovery path, so the queue behind it still drains.
+        const parkedAt = record ? Date.parse(record.parkedAt) : Number.NaN;
+        const expired = effectiveApprovalTimeoutMs > 0
+          && Number.isFinite(parkedAt)
+          && Date.now() - parkedAt >= effectiveApprovalTimeoutMs;
         if (expired) {
-          log(`${sessionId}: the approval for ${record?.toolName} expired while the daemon was down; denying it`);
+          log(`${sessionId}: the approval for ${record?.toolName} outlived its window while the daemon was down; denying it`);
         }
 
         // Resolved the way a dispatch for this agent would resolve it, so a

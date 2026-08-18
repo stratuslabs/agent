@@ -4,7 +4,12 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { RunAbortedError, type ApprovalAnswer, type StratusEvent } from '@stratusagent/core';
+import {
+  PENDING_APPROVAL_METADATA_KEY,
+  RunAbortedError,
+  type ApprovalAnswer,
+  type StratusEvent,
+} from '@stratusagent/core';
 import {
   createGateway,
   SqliteSessionStore,
@@ -2024,4 +2029,122 @@ test('a resolution never reaches a subscriber before the request it answers', as
   await settles(gateway.stop(), 'the shutdown drain');
 
   assert.deepEqual(seen, ['tool.approval-requested', 'tool.approval-resolved']);
+});
+
+test('a daemon restart finishes the turns that were parked on a human', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const dbPath = path.join(home, 'sessions.db');
+  // Recovery resolves the runtime the way a dispatch would, which starts
+  // from the agent's soul — so the roster has to hold the parked agent.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+
+  // A session left exactly as a kill mid-approval leaves one: the response
+  // durable, one call answered, the next checkpointed as parked, and the
+  // one behind it never started.
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'parked-session',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+      {
+        id: 'm3',
+        role: 'tool',
+        name: 'demo.echo',
+        content: '{}',
+        createdAt: now,
+        toolResult: { callId: 'c1', toolName: 'demo.echo', ok: true, output: null },
+      },
+      { id: 'm4', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c2', toolName: 'demo.echo', input: { text: 'two' } }] },
+    ],
+    metadata: {
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        callId: 'c2',
+        toolName: 'demo.echo',
+        remainingCallIds: [],
+        parkedAt: now,
+      },
+    },
+  });
+  seed.close();
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const recovered = nextEvent(gateway.bus, 'session.completed');
+  await gateway.start();
+  await settles(recovered, 'the recovered turn');
+  await gateway.stop();
+
+  const after = new SqliteSessionStore(dbPath);
+  const session = await after.get('parked-session');
+  after.close();
+
+  // The checkpoint is spent, and the parked call finally has its result —
+  // with the earlier one's untouched, never re-executed.
+  assert.equal(session?.metadata?.[PENDING_APPROVAL_METADATA_KEY], undefined);
+  assert.notEqual(session?.status, 'pending_approval');
+  const results = (session?.messages ?? []).flatMap((message) => (message.toolResult ? [message.toolResult.callId] : []));
+  assert.deepEqual(results, ['c1', 'c2'], 'every tool_use ended up with one tool_result');
+});
+
+test('a parked turn whose window ran out while the daemon was down is denied, not re-asked', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const dbPath = path.join(home, 'sessions.db');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'stale-session',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: {} }] },
+    ],
+    metadata: {
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        callId: 'c1',
+        toolName: 'demo.echo',
+        remainingCallIds: [],
+        // Parked an hour ago, against a one-minute window.
+        parkedAt: new Date(Date.now() - 3_600_000).toISOString(),
+      },
+    },
+  });
+  seed.close();
+
+  const asked: string[] = [];
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    sessionDbPath: dbPath,
+    approvalTimeoutMs: 60_000,
+    selection: { provider: 'demo' },
+    approvals: () => ({
+      async approve({ call }) {
+        asked.push(call.toolName);
+        return true;
+      },
+    }),
+  });
+  const recovered = nextEvent(gateway.bus, 'session.completed');
+  await gateway.start();
+  await settles(recovered, 'the recovered turn');
+  await gateway.stop();
+
+  // Nobody was asked: the request really did go unanswered for its whole
+  // window, and downtime is not a reason to extend a security decision.
+  assert.deepEqual(asked, []);
+
+  const after = new SqliteSessionStore(dbPath);
+  const session = await after.get('stale-session');
+  after.close();
+  const denied = (session?.messages ?? []).find((message) => message.toolResult?.callId === 'c1');
+  assert.equal(denied?.toolResult?.ok, false);
+  assert.match(denied?.toolResult?.error ?? '', /denied by approval policy/);
 });
