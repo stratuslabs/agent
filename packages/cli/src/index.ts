@@ -3526,9 +3526,20 @@ export const collectDoctorReport = async (
   // Config discovery, spelled out rather than delegated: doctor has to
   // report the files that LOST as well as the one in use, which is the
   // whole point when a stray project config is the answer.
-  const explicit = command.configPath ?? processEnv.STRATUS_CONFIG ?? processEnv.STRATUSCLAW_CONFIG;
-  const candidates = explicit
-    ? [{ path: path.resolve(cwd, String(explicit)), label: command.configPath ? '--config' : 'STRATUS_CONFIG' }]
+  // Which of the three named it, not just that one did: telling someone to
+  // fix STRATUS_CONFIG when STRATUSCLAW_CONFIG is what is set leaves the
+  // real override in place — the same mistake as provider and key
+  // attribution, in the one place a typo is most likely.
+  const explicitSource = command.configPath !== undefined
+    ? { name: '--config', value: command.configPath }
+    : readNonEmptyString(processEnv.STRATUS_CONFIG)
+      ? { name: 'STRATUS_CONFIG', value: String(processEnv.STRATUS_CONFIG) }
+      : readNonEmptyString(processEnv.STRATUSCLAW_CONFIG)
+        ? { name: 'STRATUSCLAW_CONFIG', value: String(processEnv.STRATUSCLAW_CONFIG) }
+        : undefined;
+  const explicit = explicitSource?.value;
+  const candidates = explicitSource
+    ? [{ path: path.resolve(cwd, explicitSource.value), label: explicitSource.name }]
     : [
         { path: path.join(cwd, DEFAULT_CONFIG_FILENAME), label: 'project' },
         { path: path.join(cwd, LEGACY_CONFIG_FILENAME), label: 'project (legacy)' },
@@ -4235,15 +4246,27 @@ export const runServe = async (
       stdout: { write: () => true },
       stderr: { write: (chunk: string) => { collect(chunk.replace(/\n$/, '')); return true; } },
     };
-    const selections: RuntimeSelection[] = [{}];
+    const { applySoulPins } = await import('@stratusagent/gateway');
+    // A pinned soul does not merely add a provider — the gateway DEMOTES
+    // the daemon-wide defaults it outranks, including STRATUS_PROVIDER.
+    // Resolving with the pin bolted onto an unmodified environment would
+    // keep the env provider and check the wrong provider entirely, which
+    // is how an agent silently billed per token stays silent.
+    const { config: activeConfig, location } = await discoverActiveConfig(env, () => {});
+    const context = {
+      ...(activeConfig.provider !== undefined ? { configProvider: activeConfig.provider } : {}),
+      configPresent: location !== undefined,
+    };
+    const passes: Array<{ selection: RuntimeSelection; env: CliEnvironment }> = [{ selection: {}, env }];
     for (const entry of await loadRosterSouls(env, () => {})) {
-      selections.push({ presetSoul: entry.soul });
+      const normalized = applySoulPins(entry.soul, {}, env, context);
+      passes.push({ selection: normalized.selection, env: normalized.env as CliEnvironment });
     }
-    for (const selection of selections) {
+    for (const pass of passes) {
       await resolveStateRuntimeConfig(
-        { ...selection, ...(command.configPath ? { configPath: command.configPath } : {}) },
-        env,
-      ).then((runtime) => warnOnCredentialOverride(runtime, captured, env)).catch(() => {
+        { ...pass.selection, ...(command.configPath ? { configPath: command.configPath } : {}) },
+        pass.env,
+      ).then((runtime) => warnOnCredentialOverride(runtime, captured, pass.env)).catch(() => {
         // Resolution problems are the gateway's to report as it starts and
         // per dispatch; this pass exists only for the billing surprise.
       });
