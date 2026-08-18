@@ -1344,7 +1344,7 @@ test('generic credentials survive when the soul pins the config-file provider', 
   assert.ok(authHeaders.some((header) => header === 'sk-generic'));
 });
 
-test('the sticky-fallback switch is durable while the fallback is still in flight', async () => {
+test('the sticky-fallback switch is durable while the fallback is still in flight', { timeout: 20_000 }, async () => {
   const home = await newHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
@@ -1354,6 +1354,20 @@ test('the sticky-fallback switch is durable while the fallback is still in fligh
     fallbackProvider: 'openai',
   }));
 
+  // A gate, not a sleep: the wrapper persists the switch before it calls
+  // the fallback, so blocking the fallback's first byte pins the exact
+  // window the assertion is about. A timed race here passes locally and
+  // flakes on a loaded runner, which is a property of the clock rather
+  // than of the code under test.
+  let fallbackReached = (): void => {};
+  const fallbackInFlight = new Promise<void>((resolve) => {
+    fallbackReached = () => resolve();
+  });
+  let releaseFallback = (): void => {};
+  const fallbackReleased = new Promise<void>((resolve) => {
+    releaseFallback = () => resolve();
+  });
+
   const fetchImpl = (async (url: unknown) => {
     if (String(url).includes('anthropic')) {
       return new Response(
@@ -1361,8 +1375,10 @@ test('the sticky-fallback switch is durable while the fallback is still in fligh
         { status: 400, headers: { 'content-type': 'application/json' } },
       );
     }
-    // The fallback is slow: the switch must already be durable meanwhile.
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    // The fallback hangs until the test has read the store: the switch
+    // must already be durable while the fallback is still in flight.
+    fallbackReached();
+    await fallbackReleased;
     return openAiText('slow fallback reply');
   }) as typeof fetch;
 
@@ -1376,10 +1392,16 @@ test('the sticky-fallback switch is durable while the fallback is still in fligh
   await gateway.start();
 
   const pending = gateway.dispatch({ sessionId: 'durable-switch-1', userMessage: 'go' });
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  // The gate also loses to the dispatch settling. A regression that never
+  // reaches the fallback at all — the primary failure surfacing as a failed
+  // session, say — would otherwise leave this waiting on a promise nobody
+  // resolves, and a hung run reports nothing at all where the assertion
+  // below reports exactly what broke.
+  await Promise.race([fallbackInFlight, pending.then(() => {}, () => {})]);
   const midFlight = await gateway.store.get('durable-switch-1');
   assert.equal(midFlight?.metadata?.fallbackActive, true, 'the switch must be durable before the fallback returns');
 
+  releaseFallback();
   const session = await pending;
   await gateway.stop();
   assert.equal(session.status, 'completed');

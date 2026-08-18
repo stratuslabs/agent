@@ -12,6 +12,7 @@ import {
   createFileMemoryStore,
   createLogWriter,
   currentLogPosition,
+  truncateRedirectLogs,
   installService,
   readServiceStatus,
   serviceUnitPath,
@@ -5279,4 +5280,97 @@ test('rotation truncates the service manager redirect files', async () => {
   }
 
   assert.ok((await stat(errPath)).size < 500, 'the redirect file must be bounded too');
+});
+
+test('an unreadable unit still asks the manager whether it is running', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const unitPath = serviceUnitPath({ platform: 'linux', homeDir: home });
+  await rm(unitPath);
+  await mkdir(unitPath, { recursive: true });
+
+  // The unit file says nothing about whether a daemon is alive; asserting
+  // "not running" without asking would report a live service as stopped.
+  const status = await readServiceStatus({
+    platform: 'linux',
+    homeDir: home,
+    run: async () => ({ code: 0, stdout: 'active\n', stderr: '' }),
+  });
+  assert.equal(status?.installed, true);
+  assert.equal(status?.running, true);
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'status'],
+    streams,
+    env: {
+      cwd: home,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async () => ({ code: 0, stdout: 'active\n', stderr: '' }),
+    },
+  });
+  assert.equal(exitCode, 0, 'a running service exits 0');
+  assert.match(output.stdout, /stratusd {2}running/);
+  // The reason it could not be read is shown rather than swallowed.
+  assert.match(output.stdout, /note {6}.*could not be read/);
+});
+
+test('redirect logs are bounded without waiting for a rotation', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  await mkdir(dir, { recursive: true });
+  // A crash loop writes launchd diagnostics but never enough structured
+  // records to rotate the JSONL, so tying truncation to rotation alone
+  // leaves exactly that case unbounded.
+  const errPath = path.join(dir, 'stratusd.err.log');
+  await writeFile(errPath, 'x'.repeat(900));
+  assert.equal(await readdir(dir).then((names) => names.includes('stratusd.jsonl')), false);
+
+  await truncateRedirectLogs(dir, 500);
+
+  assert.equal((await stat(errPath)).size, 0);
+});
+
+test('redirect logs are truncated even when serve cannot start', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-'));
+  const logs = path.join(home, '.stratus', 'logs');
+  await mkdir(logs, { recursive: true });
+  const errPath = path.join(logs, 'stratusd.err.log');
+  await writeFile(errPath, 'x'.repeat(9 * 1024 * 1024));
+
+  // A start that fails before the gateway is ready is the crash-loop case
+  // this bounding exists for: the manager restarts, the CLI appends its
+  // error to the redirect file, and round trips forever. Truncation has to
+  // happen before anything that can throw.
+  const controller = new AbortController();
+  controller.abort();
+  await runCli({
+    argv: ['serve', '--no-events'],
+    streams: createStreams().streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  assert.equal((await stat(errPath)).size, 0);
+});
+
+test('a serve that cannot start reports the failure instead of escaping', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-'));
+  await mkdir(path.join(home, '.stratus', 'logs'), { recursive: true });
+  // A directory where the session store expects its file: the gateway
+  // throws on startup.
+  await mkdir(path.join(home, '.stratus', 'sessions.db'), { recursive: true });
+
+  const streams = createStreams();
+  const code = await runCli({
+    argv: ['serve', '--no-events'],
+    streams: streams.streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  // Every command handler is awaited inside runCli's try. Bare-returned,
+  // the async function settles before the catch runs and a daemon that
+  // cannot open its store escapes as an unhandled rejection — a raw stack
+  // trace and no error line, in the one place nobody is watching.
+  assert.equal(code, 1);
+  assert.match(streams.output.stderr, /Error: .*database file/);
 });

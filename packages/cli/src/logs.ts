@@ -42,6 +42,28 @@ export interface LogWriter {
  */
 export const REDIRECT_LOG_FILENAMES = ['stratusd.out.log', 'stratusd.err.log'];
 
+/**
+ * Truncate the manager's redirect files if they have grown past `maxBytes`.
+ *
+ * Called on rotation AND on its own schedule, because the two can come
+ * apart: a daemon crash-looping at startup, or one whose structured
+ * logging is itself failing, produces launchd diagnostics without ever
+ * producing enough records to rotate the JSONL. Tying this to rotation
+ * alone would leave exactly that case unbounded.
+ */
+export const truncateRedirectLogs = async (dir: string, maxBytes = LOG_MAX_BYTES): Promise<void> => {
+  const { truncate } = await import('node:fs/promises');
+  for (const name of REDIRECT_LOG_FILENAMES) {
+    const target = path.join(dir, name);
+    const size = await stat(target).then((info) => info.size).catch(() => 0);
+    if (size >= maxBytes) {
+      // O_APPEND writers resume at the new end, so the daemon keeps
+      // logging; only the duplicate history goes.
+      await truncate(target, 0).catch(() => undefined);
+    }
+  }
+};
+
 export interface LogWriterOptions {
   dir: string;
   maxBytes?: number;
@@ -64,21 +86,8 @@ export const createLogWriter = (options: LogWriterOptions): LogWriter => {
   let queue: Promise<void> = Promise.resolve();
   let ensured = false;
 
-  const truncateRedirects = async (): Promise<void> => {
-    const { truncate } = await import('node:fs/promises');
-    for (const name of REDIRECT_LOG_FILENAMES) {
-      const target = path.join(options.dir, name);
-      const size = await stat(target).then((info) => info.size).catch(() => 0);
-      if (size >= maxBytes) {
-        // O_APPEND writers resume at the new end, so the daemon keeps
-        // logging; only the duplicate history goes.
-        await truncate(target, 0).catch(() => undefined);
-      }
-    }
-  };
-
   const rotate = async (): Promise<void> => {
-    await truncateRedirects();
+    await truncateRedirectLogs(options.dir, maxBytes);
     // Oldest first, so each generation moves into a free slot.
     for (let index = keep; index >= 1; index -= 1) {
       const from = path.join(options.dir, index === 1 ? LOG_FILENAME : rotatedName(index - 1));
