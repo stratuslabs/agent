@@ -82,6 +82,19 @@ These are deliberate. Changing one is a decision, not a refactor.
 - A stored sign-in is endpoint-bound: a credential saved for one endpoint
   is never sent to an endpoint a project-local config selects.
 
+## Two asymmetries that documentation keeps getting wrong
+
+- **`--no-login` gives up crash restarts on macOS, not on Linux.** launchd
+  ties `KeepAlive` to `RunAtLoad`, so a LaunchAgent that must not start at
+  login cannot ask to be revived either; systemd's `Restart=on-failure` is
+  independent of enablement. Do not write an unqualified crash-restart
+  guarantee.
+- **A daemon that fails before it starts serving writes nothing to the
+  structured log.** Those errors reach stderr, which the service manager
+  captures in `~/.stratus/logs/stratusd.err.log`. `stratus logs` cannot
+  show them, so anything describing the JSONL as the whole record of a run
+  is wrong for exactly the case someone is debugging.
+
 ## Commands
 
 ```bash

@@ -104,8 +104,14 @@ most people never run these by hand. What they get:
 The unit runs the daemon by **absolute path** — the node binary and script of
 the process that installed it, never a bare `stratus`. A service manager starts
 with a minimal environment and never loads the shell profile that puts `stratus`
-on your `PATH`. It restarts on crash but not after a clean exit, and stops with
-SIGTERM so the gateway's drain actually runs.
+on your `PATH`. It stops with SIGTERM, so the gateway's drain actually runs.
+
+A default install restarts the daemon if it crashes, but not after a clean
+exit — stopping it yourself keeps it stopped. **`--no-login` gives up crash
+restarts on macOS**, and that is launchd's rule rather than a choice: `KeepAlive`
+implies `RunAtLoad`, so a job that must not start at login cannot ask to be
+revived either. `stratus service install --no-login` says so when it finishes.
+On Linux the two are independent, and `Restart=on-failure` applies either way.
 
 `status` asks the service manager, not the unit file, whether the daemon is
 alive, and exits non-zero when it isn't — so it works in a health check:
@@ -130,7 +136,7 @@ them to be discovered after a reboot.
 
 Under a service manager the daemon's stdout is gone, so everything `stratus
 serve` says is also written to `~/.stratus/logs/stratusd.jsonl` (owner-read-only,
-rotated at 8 MB, three generations kept). That file is the only record of an
+rotated at 8 MB, three generations kept). That file is the record of an
 overnight run, and `stratus logs` reads it from any terminal:
 
 ```bash
@@ -159,6 +165,22 @@ records the **provider's error text verbatim**, and providers routinely quote
 the request that failed — so a malformed prompt can end up inside an error
 message. Skim a log before sharing it, and prefer `--agent` or `--session` to
 narrow it to the run you actually mean.
+
+### When the log is empty
+
+A daemon that fails *before* it starts serving — a broken install, an
+unreadable credentials file — never gets as far as opening the structured log,
+so `stratus logs` shows nothing or shows yesterday. Those errors go to stderr,
+which the service manager captures beside it:
+
+```bash
+tail ~/.stratus/logs/stratusd.err.log
+```
+
+That file is the one that explains a restart loop. Both redirect logs
+(`stratusd.out.log`, `stratusd.err.log`) are truncated when `serve` starts and
+every five minutes while it runs, so a crash loop cannot fill the disk with the
+same error a million times.
 
 ## When something looks off
 
