@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { Readable } from 'node:stream';
@@ -4055,7 +4055,7 @@ test('the backlog stops where following begins', async () => {
   // read: it belongs to the stream, and printing it in both is a duplicate.
   await writer.write({ ts: new Date(1000).toISOString(), level: 'info', msg: 'in between' });
 
-  const backlog = await readRecentRecords(dir, 50, {}, from.offset);
+  const backlog = await readRecentRecords(dir, 50, {}, from);
   assert.deepEqual(backlog.map((record) => record.msg), ['before']);
 
   const seen: string[] = [];
@@ -4126,4 +4126,102 @@ test('doctor names the legacy config variable that pointed at a missing file', a
   assert.equal(exitCode, 1);
   assert.match(output.stdout, /gone\.json does not exist, but STRATUSCLAW_CONFIG names it/);
   assert.doesNotMatch(output.stdout, /but STRATUS_CONFIG names it/);
+});
+
+test('following recovers whole generations after several rotations', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  const writer = createLogWriter({ dir, maxBytes: 150, keep: 5 });
+  const line = async (n: number): Promise<void> =>
+    writer.write({ ts: new Date(n * 1000).toISOString(), level: 'info', msg: `burst ${n}` });
+
+  await line(1);
+  const from = await currentLogPosition(dir);
+  // Enough writes to rotate more than once: the file `from` refers to ends
+  // up at .2 or later, and every generation in between is a complete file
+  // the follower never saw. Checking only .1 would drop all of them.
+  for (let index = 2; index <= 9; index += 1) {
+    await line(index);
+  }
+  const generations = (await readdir(dir)).filter((name) => name.startsWith('stratusd.jsonl.'));
+  assert.ok(generations.length >= 2, `expected several rotations, got ${generations.join(', ')}`);
+
+  const seen: string[] = [];
+  const controller = new AbortController();
+  const tail = tailLog({
+    dir,
+    intervalMs: 5,
+    startPosition: from,
+    signal: controller.signal,
+    onRecord: (record) => seen.push(String(record.msg)),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  controller.abort();
+  await tail;
+
+  assert.deepEqual(seen, Array.from({ length: 8 }, (_, i) => `burst ${i + 2}`));
+});
+
+test('the backlog cutoff follows the file it was captured in', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  const writer = createLogWriter({ dir, maxBytes: 150, keep: 3 });
+  const line = async (n: number): Promise<void> =>
+    writer.write({ ts: new Date(n * 1000).toISOString(), level: 'info', msg: `line ${n}` });
+
+  await line(1);
+  const from = await currentLogPosition(dir);
+  // Rotation between capturing the cutoff and reading the backlog: applying
+  // the offset to the replacement would truncate the wrong file and read
+  // the old one whole, printing everything past the cutoff twice.
+  await line(2);
+  await line(3);
+  await line(4);
+
+  const backlog = await readRecentRecords(dir, 50, {}, from);
+  assert.deepEqual(backlog.map((record) => record.msg), ['line 1']);
+});
+
+test('the live log is tightened to owner-only even when it already exists', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  await mkdir(dir, { recursive: true });
+  // A log left behind by an older build, a restored backup, or a looser
+  // umask: appendFile's mode applies only when it creates the file.
+  const logPath = path.join(dir, 'stratusd.jsonl');
+  await writeFile(logPath, '', { mode: 0o644 });
+  await chmod(logPath, 0o644);
+
+  const writer = createLogWriter({ dir });
+  await writer.write({ ts: new Date(0).toISOString(), level: 'info', msg: 'hello' });
+
+  assert.equal((await stat(logPath)).mode & 0o777, 0o600);
+});
+
+test('serve writes its credential warning to the log, not just to stderr', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-x' } }),
+  );
+
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 200);
+  await runCli({
+    argv: ['serve', '--no-events'],
+    streams: createStreams().streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: { ANTHROPIC_API_KEY: 'sk-ant-env' },
+      shutdownSignal: controller.signal,
+    },
+  });
+
+  // Under a service manager stderr is gone; a cost warning that lives only
+  // there is invisible in the deployment it matters for.
+  const records = await readRecentRecords(path.join(home, '.stratus', 'logs'), 50);
+  assert.ok(
+    records.some((record) => record.level === 'warn' && /outranks the Claude subscription/.test(String(record.msg))),
+    'the warning has to survive in the log',
+  );
 });

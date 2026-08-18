@@ -1,4 +1,4 @@
-import { appendFile, mkdir, open, readdir, rename, stat, unlink } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, open, readdir, rename, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 
 /**
@@ -76,12 +76,20 @@ export const createLogWriter = (options: LogWriterOptions): LogWriter => {
       await mkdir(options.dir, { recursive: true, mode: 0o700 });
       ensured = true;
     }
-    // Sessions carry prompts and tool output, so the log is as sensitive as
-    // the transcript it describes.
     const size = await stat(logPath).then((info) => info.size).catch(() => 0);
     if (size >= maxBytes) {
       await rotate();
     }
+    // Sessions carry prompts and tool output, so the log is as sensitive
+    // as the transcript it describes. appendFile's mode applies only when
+    // it CREATES the file, so a log that already exists — from an older
+    // build, a restored backup, a different umask — would keep whatever
+    // permissions it had while the daemon kept writing to it.
+    await chmod(logPath, 0o600).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') {
+        throw error;
+      }
+    });
     await appendFile(logPath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
   };
 
@@ -142,11 +150,13 @@ export const readRecentRecords = async (
   limit: number,
   filter: LogFilter = {},
   /**
-   * Read the live file only up to this byte offset. A follower that starts
-   * from the same offset then covers everything after it — without the
-   * bound, records written between the two reads appear in both.
+   * Stop where a follower will resume. The bound is an offset INTO A
+   * SPECIFIC FILE: if the log rotated between capturing it and reading
+   * here, applying the offset to the replacement would truncate the wrong
+   * file and re-read the whole of the old one, duplicating everything past
+   * the cutoff. Matching by inode puts the bound back on the right file.
    */
-  untilOffset?: number,
+  until?: LogPosition,
 ): Promise<LogRecord[]> => {
   let names: string[];
   try {
@@ -174,12 +184,37 @@ export const readRecentRecords = async (
 
   const collected: LogRecord[] = [];
   const { readFile } = await import('node:fs/promises');
-  for (const name of ordered) {
+  // Which file the cutoff belongs to now — the live one until a rotation
+  // moved it, and nothing at all once it has been evicted.
+  let boundedName: string | undefined;
+  if (until !== undefined) {
+    if (until.ino === undefined) {
+      boundedName = LOG_FILENAME;
+    } else {
+      const liveIno = await stat(path.join(dir, LOG_FILENAME)).then((info) => info.ino).catch(() => undefined);
+      if (liveIno === until.ino) {
+        boundedName = LOG_FILENAME;
+      } else {
+        const rotated = (await rotatedGenerations(dir)).find((entry) => entry.ino === until.ino);
+        boundedName = rotated ? path.basename(rotated.path) : undefined;
+      }
+    }
+  }
+  // Everything newer than the file the cutoff lives in is, by definition,
+  // after the cutoff — it belongs to the follower, not the backlog.
+  const scanned = until === undefined
+    ? ordered
+    : boundedName === undefined
+      // The cutoff's file has been evicted, so every retained generation
+      // was written after it.
+      ? []
+      : ordered.slice(ordered.indexOf(boundedName));
+  for (const name of scanned) {
     const raw = await readFile(path.join(dir, name)).catch(() => Buffer.alloc(0));
     // Sliced as bytes, not characters: the offset a follower resumes from
     // is a byte count, and a multi-byte character would shift the seam.
-    const contents = (name === LOG_FILENAME && untilOffset !== undefined
-      ? raw.subarray(0, untilOffset)
+    const contents = (until !== undefined && name === boundedName
+      ? raw.subarray(0, until.offset)
       : raw).toString('utf8');
     const matching = parseLogLines(contents).filter((record) => matchesFilter(record, filter));
     collected.unshift(...matching);
@@ -205,6 +240,27 @@ export const currentLogPosition = async (dir: string): Promise<LogPosition> =>
   stat(path.join(dir, LOG_FILENAME))
     .then((info) => ({ offset: info.size, ino: info.ino }))
     .catch(() => ({ offset: 0 }));
+
+/** Rotated generations present on disk, newest first, with their inodes. */
+const rotatedGenerations = async (dir: string): Promise<Array<{ index: number; path: string; ino: number }>> => {
+  const names = await readdir(dir).catch(() => [] as string[]);
+  const entries: Array<{ index: number; path: string; ino: number }> = [];
+  for (const name of names) {
+    if (!name.startsWith(`${LOG_FILENAME}.`)) {
+      continue;
+    }
+    const index = Number(name.slice(LOG_FILENAME.length + 1));
+    if (!Number.isInteger(index) || index < 1) {
+      continue;
+    }
+    const full = path.join(dir, name);
+    const ino = await stat(full).then((info) => info.ino).catch(() => undefined);
+    if (ino !== undefined) {
+      entries.push({ index, path: full, ino });
+    }
+  }
+  return entries.sort((left, right) => left.index - right.index);
+};
 
 export interface TailOptions {
   dir: string;
@@ -274,14 +330,23 @@ export const tailLog = async (options: TailOptions): Promise<void> => {
     const info = await stat(logPath).catch(() => undefined);
     if (info) {
       if (liveIno !== undefined && info.ino !== liveIno) {
-        // The file we were reading is now .1 — drain the bytes we never
-        // got to before switching. Only if .1 really is that file: a
-        // second rotation in one interval evicts it, and draining the
-        // wrong generation would replay records instead of recovering them.
-        const rotated = path.join(options.dir, rotatedName(1));
-        const rotatedIno = await stat(rotated).then((entry) => entry.ino).catch(() => undefined);
-        if (rotatedIno === liveIno) {
-          await drain(rotated, offset).catch(() => offset);
+        // The file we were reading has been rotated away. It is not
+        // necessarily .1: several rotations can happen between polls under
+        // a burst, in which case it is .2 or later and every generation
+        // newer than it is a complete file we never saw at all. Find it by
+        // inode, drain the rest of it, then walk forward through the
+        // generations it was pushed past — anything less loses whole
+        // files, and draining by position instead of identity would replay
+        // records rather than recover them.
+        const generations = await rotatedGenerations(options.dir);
+        const previous = generations.find((entry) => entry.ino === liveIno);
+        if (previous) {
+          await drain(previous.path, offset).catch(() => offset);
+          carry = '';
+          for (const entry of generations.filter((candidate) => candidate.index < previous.index).reverse()) {
+            await drain(entry.path, 0).catch(() => 0);
+            carry = '';
+          }
         }
         offset = 0;
         carry = '';

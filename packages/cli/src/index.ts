@@ -3905,7 +3905,7 @@ export const runLogs = async (
   // Bounded by the same offset the follower resumes from: without it, a
   // record written between the two reads is printed by the backlog and
   // then again by the stream.
-  const recent = await readRecentRecords(dir, command.limit, filter, followFrom?.offset);
+  const recent = await readRecentRecords(dir, command.limit, filter, followFrom);
   for (const record of recent) {
     emit(record);
   }
@@ -4237,10 +4237,15 @@ export const runServe = async (
   {
     const warned = new Set<string>();
     const collect = (line: string): void => {
-      if (!warned.has(line)) {
-        warned.add(line);
-        writeLine(streams.stderr, line);
+      if (warned.has(line)) {
+        return;
       }
+      warned.add(line);
+      // Through `warn`, not straight to stderr: under a service manager
+      // stderr is gone, and a cost warning that only exists there is
+      // invisible in exactly the deployment it matters for. `warn` adds
+      // its own prefix, so the one already on the line comes off.
+      warn(line.replace(/^Warning: /, ''));
     };
     const captured: CliStreams = {
       stdout: { write: () => true },
