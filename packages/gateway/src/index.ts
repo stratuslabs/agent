@@ -1154,14 +1154,24 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
     log(`recovering ${parked.length} turn(s) parked on approval`);
 
-    for (const sessionId of parked) {
+    // Started together, not one after another. Each recovery re-asks and
+    // then waits on a human, so awaiting them in sequence would mean the
+    // second parked turn is not even *announced* until the first is
+    // answered — fifteen minutes later by default, and never at all with a
+    // zero timeout. They are independent turns; only same-session work is
+    // ordered, and onSessionChain already guarantees that.
+    await Promise.allSettled(parked.map((sessionId) => recoverOne(sessionId)));
+  };
+
+  const recoverOne = (sessionId: string): Promise<void> =>
+    onSessionChain(sessionId, async () => {
       if (stopping) {
         return;
       }
       try {
         const session = await store.get(sessionId);
         if (!session) {
-          continue;
+          return;
         }
         const record = readPendingApproval(session);
         // A wait that outlived its window while the daemon was down is
@@ -1177,19 +1187,59 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           && Number.isFinite(parkedAt)
           && Date.now() - parkedAt >= effectiveApprovalTimeoutMs;
         if (expired) {
-          log(`${sessionId}: the approval for ${record?.toolName} outlived its window while the daemon was down; denying it`);
+          log(`${sessionId}: the approval for ${record?.call.toolName} outlived its window while the daemon was down; denying it`);
         }
 
         // Resolved the way a dispatch for this agent would resolve it, so a
         // recovered turn finishes on the same provider, model, and
         // credentials it was parked on.
         const source = await refreshAgent(session.agent.id);
+
+        // And on the CURRENT definition, saved before recovery reads the
+        // session back. An allowlist is a permission boundary: a soul that
+        // dropped a tool while the daemon was down must not have that tool
+        // executed by the turn that outlived the change, and
+        // `allowedToolsFor` reads the definition frozen into the session
+        // ahead of the registry. Dispatch refreshes it the same way before
+        // resuming.
+        session.agent = source.definition;
+        await store.save(session);
+
         const runner = runnerFor(await runtimeForAgent(source));
         await runner.recoverPendingApproval(sessionId, { denyPending: expired });
       } catch (error) {
         warn(`could not recover parked session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
       }
-    }
+    });
+
+  /**
+   * Runs `work` as the session's next turn: queued behind whatever that
+   * session is already doing, and tracked so shutdown drains it.
+   *
+   * Recovery goes through here as well as dispatch, and must. Channels are
+   * live before a sweep finishes, so an inbound message for a parked
+   * session could otherwise `resume()` alongside `recoverPendingApproval()`
+   * — one closing the parked call as interrupted while the other re-enters
+   * it, both saving divergent copies of the same transcript, and the tool
+   * possibly running twice. Single-flight per session is the invariant that
+   * stops that, and it only holds if everything that writes a session goes
+   * through it.
+   */
+  const onSessionChain = <T>(sessionId: string, work: () => Promise<T>): Promise<T> => {
+    const previous = sessionChains.get(sessionId) ?? Promise.resolve();
+    const turn = previous.then(work, work);
+
+    const settled = turn.catch(() => {});
+    sessionChains.set(sessionId, settled);
+    inflight.add(settled);
+    void settled.finally(() => {
+      inflight.delete(settled);
+      if (sessionChains.get(sessionId) === settled) {
+        sessionChains.delete(sessionId);
+      }
+    });
+
+    return turn;
   };
 
   const dispatch = async (input: DispatchInput): Promise<Session> => {
@@ -1197,23 +1247,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       throw new Error('The gateway is stopping and no longer accepts new work.');
     }
 
-    const previous = sessionChains.get(input.sessionId) ?? Promise.resolve();
-    const turn = previous.then(
-      () => dispatchInternal(input),
-      () => dispatchInternal(input),
-    );
-
-    const settled = turn.catch(() => {});
-    sessionChains.set(input.sessionId, settled);
-    inflight.add(settled);
-    void settled.finally(() => {
-      inflight.delete(settled);
-      if (sessionChains.get(input.sessionId) === settled) {
-        sessionChains.delete(input.sessionId);
-      }
-    });
-
-    return turn;
+    return onSessionChain(input.sessionId, () => dispatchInternal(input));
   };
 
   const startedChannels: GatewayChannelAdapter[] = [];

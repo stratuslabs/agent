@@ -362,15 +362,25 @@ export const PENDING_APPROVAL_METADATA_KEY = 'pendingApproval';
  * the window it covers is exactly the window in which nothing has happened.
  */
 export interface PendingApprovalRecord {
-  /** The parked call, by id — not by index, which shifts as history grows. */
-  callId: string;
-  toolName: string;
+  /**
+   * The parked call itself, not a reference to it.
+   *
+   * Ids are not unique across a transcript — the OpenAI-compatible adapter
+   * synthesizes `tool-call-1`, `tool-call-2` per response whenever an
+   * endpoint omits them, so the same id recurs every turn, and
+   * `reconcileInterruptedToolCalls` already matches by occurrence for that
+   * reason. Looking the call up by id would find an earlier turn's and
+   * execute it with *its* input — replaying a side effect under the guise
+   * of recovering a different one. Carrying the call removes the lookup,
+   * and adds nothing to the store the transcript did not already hold.
+   */
+  call: ToolCall;
   /**
    * The calls after it in the same provider response, in order and none of
    * them started. Recovery drains these once the parked one settles, so
    * every `tool_use` in the response still gets its `tool_result`.
    */
-  remainingCallIds: string[];
+  remaining: ToolCall[];
   /**
    * When the wait began, ISO-8601.
    *
@@ -391,15 +401,17 @@ export const readPendingApproval = (session: Session): PendingApprovalRecord | u
     return undefined;
   }
   const record = raw as unknown as PendingApprovalRecord;
-  if (typeof record.callId !== 'string' || typeof record.toolName !== 'string') {
+  const isCall = (value: unknown): value is ToolCall =>
+    typeof value === 'object' && value !== null
+    && typeof (value as ToolCall).id === 'string'
+    && typeof (value as ToolCall).toolName === 'string';
+
+  if (!isCall(record.call)) {
     return undefined;
   }
   return {
-    callId: record.callId,
-    toolName: record.toolName,
-    remainingCallIds: Array.isArray(record.remainingCallIds)
-      ? record.remainingCallIds.filter((id): id is string => typeof id === 'string')
-      : [],
+    call: record.call,
+    remaining: Array.isArray(record.remaining) ? record.remaining.filter(isCall) : [],
     parkedAt: typeof record.parkedAt === 'string' ? record.parkedAt : '',
   };
 };
@@ -1015,25 +1027,8 @@ export class AgentRunner {
       return undefined;
     }
 
-    // Rebuilt from the transcript by id: the response is already durable,
-    // so the calls are already there, and the record says which of them had
-    // not run. An id the transcript no longer holds means the record and
-    // the history disagree — recovery stops rather than inventing a call.
-    const byId = new Map<string, ToolCall>();
-    for (const message of session.messages) {
-      for (const call of message.toolCalls ?? []) {
-        if (!byId.has(call.id)) {
-          byId.set(call.id, call);
-        }
-      }
-    }
-    const pending = byId.get(record.callId);
-    if (!pending) {
-      return undefined;
-    }
-    const remaining = record.remainingCallIds
-      .map((id) => byId.get(id))
-      .filter((call): call is ToolCall => call !== undefined);
+    const pending = record.call;
+    const remaining = record.remaining;
 
     // The checkpoint comes off before anything runs. It describes a wait
     // that is over either way, and leaving it would let a second sweep
@@ -1211,9 +1206,8 @@ export class AgentRunner {
     const parks = risk !== 'safe';
     if (parks) {
       await this.checkpointPendingApproval(session, {
-        callId: call.id,
-        toolName: call.toolName,
-        remainingCallIds: remaining.map((queued) => queued.id),
+        call,
+        remaining,
         parkedAt: new Date().toISOString(),
       });
     }

@@ -2063,9 +2063,8 @@ test('a daemon restart finishes the turns that were parked on a human', async ()
     ],
     metadata: {
       [PENDING_APPROVAL_METADATA_KEY]: {
-        callId: 'c2',
-        toolName: 'demo.echo',
-        remainingCallIds: [],
+        call: { id: 'c2', toolName: 'demo.echo', input: { text: 'two' } },
+        remaining: [],
         parkedAt: now,
       },
     },
@@ -2108,9 +2107,8 @@ test('a parked turn whose window ran out while the daemon was down is denied, no
     ],
     metadata: {
       [PENDING_APPROVAL_METADATA_KEY]: {
-        callId: 'c1',
-        toolName: 'demo.echo',
-        remainingCallIds: [],
+        call: { id: 'c1', toolName: 'demo.echo', input: {} },
+        remaining: [],
         // Parked an hour ago, against a one-minute window.
         parkedAt: new Date(Date.now() - 3_600_000).toISOString(),
       },
@@ -2147,4 +2145,164 @@ test('a parked turn whose window ran out while the daemon was down is denied, no
   const denied = (session?.messages ?? []).find((message) => message.toolResult?.callId === 'c1');
   assert.equal(denied?.toolResult?.ok, false);
   assert.match(denied?.toolResult?.error ?? '', /denied by approval policy/);
+});
+
+test('recovery runs on the session chain, so an inbound message cannot race it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const dbPath = path.join(home, 'sessions.db');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'raced-session',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+    ],
+    metadata: {
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  seed.close();
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  await gateway.start();
+  // Channels are live before a sweep finishes, so this is the real race: a
+  // message arriving for a session still being recovered. Unserialized,
+  // resume() would close the parked call as interrupted while recovery
+  // re-entered it, and both would save divergent transcripts.
+  await gateway.dispatch({ sessionId: 'raced-session', agentId: 'ava', userMessage: 'still there?' });
+  await gateway.stop();
+
+  const after = new SqliteSessionStore(dbPath);
+  const session = await after.get('raced-session');
+  after.close();
+
+  // One result for the parked call, and it is not the interrupted marker
+  // resume() writes — recovery got there first, on the chain.
+  const results = (session?.messages ?? []).filter((message) => message.toolResult?.callId === 'c1');
+  assert.equal(results.length, 1, 'the call was answered exactly once');
+  assert.doesNotMatch(results[0]?.toolResult?.error ?? '', /may not have run to completion/);
+  assert.equal(session?.metadata?.[PENDING_APPROVAL_METADATA_KEY], undefined);
+});
+
+test('a soul that dropped a tool while the daemon was down is honoured on recovery', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const dbPath = path.join(home, 'sessions.db');
+  // The current soul allows only memory.remember — demo.echo is gone.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\ntools:\n  - memory.remember\n---\n\nYou are Ava.\n');
+
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'tightened-session',
+    // The definition frozen into the session still carries the old, wider
+    // allowlist — which is what allowedToolsFor reads first.
+    agent: { id: 'ava', name: 'Ava', tools: ['demo.echo', 'memory.remember'] },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+    ],
+    metadata: {
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  seed.close();
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const recovered = nextEvent(gateway.bus, 'session.completed');
+  await gateway.start();
+  await settles(recovered, 'the recovered turn');
+  await gateway.stop();
+
+  const after = new SqliteSessionStore(dbPath);
+  const session = await after.get('tightened-session');
+  after.close();
+
+  // An allowlist is a permission boundary: a turn that outlived the change
+  // must not execute what the change removed.
+  const result = (session?.messages ?? []).find((message) => message.toolResult?.callId === 'c1');
+  assert.equal(result?.toolResult?.ok, false);
+  assert.match(result?.toolResult?.error ?? '', /not permitted for agent ava/);
+});
+
+test('one unanswered recovery does not hold up the other parked turns', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const dbPath = path.join(home, 'sessions.db');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  for (const id of ['parked-a', 'parked-b']) {
+    await seed.create({
+      id,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'pending_approval',
+      messages: [
+        { id: 'm1', role: 'user', content: 'go', createdAt: now },
+        { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: id } }] },
+      ],
+      metadata: {
+        [PENDING_APPROVAL_METADATA_KEY]: {
+          call: { id: 'c1', toolName: 'demo.echo', input: { text: id } },
+          remaining: [],
+          parkedAt: now,
+        },
+      },
+    });
+  }
+  seed.close();
+
+  // `parked-a` sorts first, and its approver never answers. Recovered in
+  // sequence, `parked-b` would not even be asked until that resolves —
+  // fifteen minutes by default, and never at all with a zero timeout.
+  let releaseA: (() => void) | undefined;
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    sessionDbPath: dbPath,
+    selection: { provider: 'demo' },
+    approvals: () => ({
+      async approve({ session }) {
+        if (session.id === 'parked-a') {
+          await new Promise<void>((resolve) => {
+            releaseA = resolve;
+          });
+        }
+        return true;
+      },
+    }),
+  });
+
+  const bDone = new Promise<void>((resolve) => {
+    const off = gateway.bus.subscribe((event) => {
+      if (event.type === 'session.completed' && event.sessionId === 'parked-b') {
+        off();
+        resolve();
+      }
+    });
+  });
+
+  await gateway.start();
+  await settles(bDone, 'the second parked turn');
+
+  // Let the first one go so the drain can finish; in the daemon proper,
+  // stop() denies what the broker still holds.
+  releaseA?.();
+  await settles(gateway.stop(), 'the shutdown drain');
 });

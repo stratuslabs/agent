@@ -1231,9 +1231,11 @@ test('a turn parked on approval checkpoints what has not run, and clears it on a
 
   assert.equal(parked?.status, 'pending_approval');
   const record = readPendingApproval(parked!);
-  assert.equal(record?.callId, 'c2', 'the parked call is named');
+  // The call itself, not a reference to it: ids repeat across turns when a
+  // provider omits them, so looking one up could find an earlier turn's.
+  assert.deepEqual(record?.call, { id: 'c2', toolName: 'gated', input: {} });
   // The queue behind it, so recovery can finish the response.
-  assert.deepEqual(record?.remainingCallIds, ['c3']);
+  assert.deepEqual(record?.remaining.map((call) => call.id), ['c3']);
   assert.ok(record?.parkedAt, 'the wait is timestamped, so its window can be honoured later');
 
   // And it is gone the moment the decision lands — the record describes a
@@ -1364,4 +1366,97 @@ test('a call interrupted mid-execution is not recoverable, only a parked one is'
   const resumed = await runner.resume({ sessionId: 'mid-flight', userMessage: 'still there?' });
   const closed = resumed.messages.find((message) => message.toolResult?.callId === 'c9');
   assert.match(closed?.toolResult?.error ?? '', /may not have run to completion/);
+});
+
+test('a parked call is recovered by identity, not by an id an earlier turn also used', async () => {
+  // The OpenAI-compatible adapter synthesizes `tool-call-1`, `tool-call-2`
+  // per response whenever an endpoint omits ids, so the same id recurs
+  // every turn — which is why reconcileInterruptedToolCalls already matches
+  // by occurrence. A checkpoint that named its call by id would let
+  // recovery find turn one's call and execute it with turn one's input:
+  // replaying a side effect while appearing to recover a different one.
+  const ran: Array<Record<string, unknown>> = [];
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'write',
+    risk: 'gated',
+    async execute(input) {
+      ran.push(input);
+      return { ok: true };
+    },
+  });
+
+  let turns = 0;
+  const provider: ModelProvider = {
+    name: 'fake',
+    async generate() {
+      turns += 1;
+      // Both turns reuse `tool-call-1`, with different arguments.
+      if (turns <= 2) {
+        return {
+          parts: [{
+            type: 'tool-call' as const,
+            call: { id: 'tool-call-1', toolName: 'write', input: { target: turns === 1 ? 'first' : 'second' } },
+          }],
+        };
+      }
+      return { parts: [{ type: 'text', text: 'done' }] };
+    },
+  };
+
+  // Turn one approves and runs; turn two parks.
+  let approvals = 0;
+  const dying = new AgentRunner({
+    provider,
+    tools,
+    store,
+    approvals: {
+      approve: () => {
+        approvals += 1;
+        return approvals === 1 ? Promise.resolve(true) : new Promise<boolean>(() => {});
+      },
+    },
+  });
+  void dying.run({
+    sessionId: 'reused-ids',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'go',
+  }).catch(() => undefined);
+
+  await new Promise<void>((resolve, reject) => {
+    let polling = true;
+    const giveUp = setTimeout(() => {
+      polling = false;
+      reject(new Error('never parked'));
+    }, 5_000);
+    const wait = async (): Promise<void> => {
+      if (!polling) {
+        return;
+      }
+      const stored = await store.get('reused-ids');
+      if (stored && readPendingApproval(stored)) {
+        polling = false;
+        clearTimeout(giveUp);
+        resolve();
+        return;
+      }
+      setImmediate(() => void wait());
+    };
+    void wait();
+  });
+
+  assert.deepEqual(ran, [{ target: 'first' }], 'only turn one ran before the crash');
+
+  const revived = new AgentRunner({
+    provider,
+    tools,
+    store,
+    approvals: { async approve() { return true; } },
+  });
+  await revived.recoverPendingApproval('reused-ids');
+
+  // The recovered call is turn TWO's, with turn two's input. Resolving the
+  // id against the transcript would have re-run `first`.
+  assert.deepEqual(ran, [{ target: 'first' }, { target: 'second' }]);
 });
