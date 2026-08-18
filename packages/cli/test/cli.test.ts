@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import {
   createFileMemoryStore,
   createLogWriter,
-  currentLogOffset,
+  currentLogPosition,
   HELP_TEXT,
   parseCommand,
   resolveRuntimeConfig,
@@ -3852,8 +3852,10 @@ test('following the log keeps the records that rotation moved aside', async () =
 
   await line(1);
   await line(2);
-  // Where a follower would have been when the rotation happened.
-  const from = await currentLogOffset(dir);
+  // Where a follower would have been when the rotation happened — the
+  // file identity travels with the offset, or the offset points into the
+  // replacement instead of the file those bytes actually belong to.
+  const from = await currentLogPosition(dir);
   await line(3);
   await line(4);
   await line(5);
@@ -3866,7 +3868,7 @@ test('following the log keeps the records that rotation moved aside', async () =
   const tail = tailLog({
     dir,
     intervalMs: 5,
-    startOffset: from,
+    startPosition: from,
     signal: controller.signal,
     onRecord: (record) => seen.push(String(record.msg)),
   });
@@ -3896,7 +3898,7 @@ test('following resumes from before the backlog was read', async () => {
 
   // The daemon keeps writing while a backlog prints. Capturing the offset
   // first is what keeps these records from falling between the two reads.
-  const from = await currentLogOffset(dir);
+  const from = await currentLogPosition(dir);
   await writer.write({ ts: new Date(1000).toISOString(), level: 'info', msg: 'written during the backlog print' });
 
   const seen: string[] = [];
@@ -3904,7 +3906,7 @@ test('following resumes from before the backlog was read', async () => {
   const tail = tailLog({
     dir,
     intervalMs: 5,
-    startOffset: from,
+    startPosition: from,
     signal: controller.signal,
     onRecord: (record) => seen.push(String(record.msg)),
   });
@@ -4005,4 +4007,70 @@ test('doctor blames the setting that actually selected demo', async () => {
 
   assert.match(output.stdout, /Unset STRATUS_PROVIDER; it outranks both your config and any soul/);
   assert.doesNotMatch(output.stdout, /Run `stratus setup` → Providers and sign in/);
+});
+
+test('rotation is detected even when the replacement outgrows the old offset', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  const writer = createLogWriter({ dir, maxBytes: 220, keep: 3 });
+  const line = async (n: number): Promise<void> =>
+    writer.write({ ts: new Date(n * 1000).toISOString(), level: 'info', msg: `burst ${n}` });
+
+  await line(1);
+  await line(2);
+  const from = await currentLogPosition(dir);
+  await line(3);
+  await line(4);
+  // Rotates, then the replacement is grown well past `from.offset` before
+  // any poll happens. A size comparison reads that as "the file grew" and
+  // starts partway into the new file, losing both the old tail and the new
+  // prefix — only the file's identity distinguishes the two cases.
+  await line(5);
+  await line(6);
+  await line(7);
+  assert.ok((await currentLogPosition(dir)).offset > from.offset, 'the replacement must outgrow the old offset');
+
+  const seen: string[] = [];
+  const controller = new AbortController();
+  const tail = tailLog({
+    dir,
+    intervalMs: 5,
+    startPosition: from,
+    signal: controller.signal,
+    onRecord: (record) => seen.push(String(record.msg)),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  controller.abort();
+  await tail;
+
+  assert.deepEqual(seen, ['burst 3', 'burst 4', 'burst 5', 'burst 6', 'burst 7']);
+});
+
+test('the backlog stops where following begins', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  const writer = createLogWriter({ dir });
+  await writer.write({ ts: new Date(0).toISOString(), level: 'info', msg: 'before' });
+
+  const from = await currentLogPosition(dir);
+  // Written after the follow offset is captured but before the backlog is
+  // read: it belongs to the stream, and printing it in both is a duplicate.
+  await writer.write({ ts: new Date(1000).toISOString(), level: 'info', msg: 'in between' });
+
+  const backlog = await readRecentRecords(dir, 50, {}, from.offset);
+  assert.deepEqual(backlog.map((record) => record.msg), ['before']);
+
+  const seen: string[] = [];
+  const controller = new AbortController();
+  const tail = tailLog({
+    dir,
+    intervalMs: 5,
+    startPosition: from,
+    signal: controller.signal,
+    onRecord: (record) => seen.push(String(record.msg)),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  controller.abort();
+  await tail;
+
+  // Exactly once, between the two halves — no gap and no repeat.
+  assert.deepEqual(seen, ['in between']);
 });

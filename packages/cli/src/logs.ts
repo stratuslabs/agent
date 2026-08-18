@@ -141,6 +141,12 @@ export const readRecentRecords = async (
   dir: string,
   limit: number,
   filter: LogFilter = {},
+  /**
+   * Read the live file only up to this byte offset. A follower that starts
+   * from the same offset then covers everything after it — without the
+   * bound, records written between the two reads appear in both.
+   */
+  untilOffset?: number,
 ): Promise<LogRecord[]> => {
   let names: string[];
   try {
@@ -167,9 +173,14 @@ export const readRecentRecords = async (
   }
 
   const collected: LogRecord[] = [];
+  const { readFile } = await import('node:fs/promises');
   for (const name of ordered) {
-    const { readFile } = await import('node:fs/promises');
-    const contents = await readFile(path.join(dir, name), 'utf8').catch(() => '');
+    const raw = await readFile(path.join(dir, name)).catch(() => Buffer.alloc(0));
+    // Sliced as bytes, not characters: the offset a follower resumes from
+    // is a byte count, and a multi-byte character would shift the seam.
+    const contents = (name === LOG_FILENAME && untilOffset !== undefined
+      ? raw.subarray(0, untilOffset)
+      : raw).toString('utf8');
     const matching = parseLogLines(contents).filter((record) => matchesFilter(record, filter));
     collected.unshift(...matching);
     if (collected.length >= limit) {
@@ -179,9 +190,21 @@ export const readRecentRecords = async (
   return collected.slice(-limit);
 };
 
-/** The current end of the live log — the offset a follower should resume from. */
-export const currentLogOffset = async (dir: string): Promise<number> =>
-  stat(path.join(dir, LOG_FILENAME)).then((info) => info.size).catch(() => 0);
+/**
+ * Where a follower should resume from: a byte offset AND the identity of
+ * the file it refers to. The offset alone is meaningless after a rotation,
+ * because the bytes it counted are in a different file by then.
+ */
+export interface LogPosition {
+  offset: number;
+  /** inode of the live file; undefined when there is no file yet. */
+  ino?: number;
+}
+
+export const currentLogPosition = async (dir: string): Promise<LogPosition> =>
+  stat(path.join(dir, LOG_FILENAME))
+    .then((info) => ({ offset: info.size, ino: info.ino }))
+    .catch(() => ({ offset: 0 }));
 
 export interface TailOptions {
   dir: string;
@@ -190,11 +213,13 @@ export interface TailOptions {
   intervalMs?: number;
   signal?: AbortSignal;
   /**
-   * Byte offset to resume from. Callers that print a backlog first must
-   * capture this BEFORE reading it (`currentLogOffset`), or records written
-   * in between are in neither the backlog nor the stream.
+   * Where to resume. Callers that print a backlog first must capture this
+   * BEFORE reading it (`currentLogPosition`), or records written in between
+   * are in neither the backlog nor the stream — and the file identity has
+   * to travel with the offset, or a rotation in that same window makes the
+   * offset point into the wrong file.
    */
-  startOffset?: number;
+  startPosition?: LogPosition;
   onRecord: (record: LogRecord) => void;
 }
 
@@ -207,8 +232,14 @@ export const tailLog = async (options: TailOptions): Promise<void> => {
   const intervalMs = options.intervalMs ?? 400;
   const filter = options.filter ?? {};
   const logPath = path.join(options.dir, LOG_FILENAME);
-  let offset = options.startOffset ?? await currentLogOffset(options.dir);
+  const start = options.startPosition ?? await currentLogPosition(options.dir);
+  let offset = start.offset;
   let carry = '';
+  // Rotation is a file-identity change, not a size change. A burst can
+  // rotate and grow the replacement past the old offset before the next
+  // poll, and a size comparison reads that as "the file just grew" —
+  // skipping the replacement's prefix and never draining what moved to .1.
+  let liveIno = start.ino;
 
   /** Reads from `from` to EOF, emitting whole lines. Returns the new offset. */
   const drain = async (target: string, from: number): Promise<number> => {
@@ -240,17 +271,22 @@ export const tailLog = async (options: TailOptions): Promise<void> => {
   };
 
   while (!options.signal?.aborted) {
-    const size = await stat(logPath).then((info) => info.size).catch(() => -1);
-    if (size >= 0) {
-      if (size < offset) {
-        // Rotation: the bytes we had not read yet moved to .1 with the rest
-        // of the old file. Draining it first is the difference between
-        // seeing the events around a rotation and silently losing them —
-        // and a rotation happens mid-burst, when they matter most.
-        await drain(path.join(options.dir, rotatedName(1)), offset).catch(() => offset);
+    const info = await stat(logPath).catch(() => undefined);
+    if (info) {
+      if (liveIno !== undefined && info.ino !== liveIno) {
+        // The file we were reading is now .1 — drain the bytes we never
+        // got to before switching. Only if .1 really is that file: a
+        // second rotation in one interval evicts it, and draining the
+        // wrong generation would replay records instead of recovering them.
+        const rotated = path.join(options.dir, rotatedName(1));
+        const rotatedIno = await stat(rotated).then((entry) => entry.ino).catch(() => undefined);
+        if (rotatedIno === liveIno) {
+          await drain(rotated, offset).catch(() => offset);
+        }
         offset = 0;
         carry = '';
       }
+      liveIno = info.ino;
       offset = await drain(logPath, offset);
     }
     if (options.signal?.aborted) {

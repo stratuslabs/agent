@@ -94,7 +94,7 @@ import {
 
 import {
   createLogWriter,
-  currentLogOffset,
+  currentLogPosition,
   formatLogRecord,
   readRecentRecords,
   tailLog,
@@ -104,7 +104,7 @@ import {
 
 export {
   createLogWriter,
-  currentLogOffset,
+  currentLogPosition,
   formatLogRecord,
   parseLogLines,
   readRecentRecords,
@@ -3890,8 +3890,11 @@ export const runLogs = async (
   // Captured BEFORE the backlog is read: the daemon keeps writing while a
   // large backlog prints, and a follower that takes its offset afterwards
   // skips everything written in between — permanently.
-  const followFrom = command.follow ? await currentLogOffset(dir) : 0;
-  const recent = await readRecentRecords(dir, command.limit, filter);
+  const followFrom = command.follow ? await currentLogPosition(dir) : undefined;
+  // Bounded by the same offset the follower resumes from: without it, a
+  // record written between the two reads is printed by the backlog and
+  // then again by the stream.
+  const recent = await readRecentRecords(dir, command.limit, filter, followFrom?.offset);
   for (const record of recent) {
     emit(record);
   }
@@ -3912,7 +3915,13 @@ export const runLogs = async (
     stop();
   }
   try {
-    await tailLog({ dir, filter, startOffset: followFrom, signal: controller.signal, onRecord: emit });
+    await tailLog({
+      dir,
+      filter,
+      ...(followFrom !== undefined ? { startPosition: followFrom } : {}),
+      signal: controller.signal,
+      onRecord: emit,
+    });
   } finally {
     process.off('SIGINT', stop);
     process.off('SIGTERM', stop);
