@@ -55,7 +55,7 @@ The tool half of this step landed early, in [#31](https://github.com/stratuslabs
 | SDK built-ins disallowed | **Shipped.** `tools: []` plus an `allowedTools` restricted to the bridged names. |
 | Kernel-faithful events | **Shipped.** Bridged calls emit the standard `tool.called` / `tool.completed` / `tool.denied`. |
 | SDK-native history via `resume` | **Open.** Still transcript flattening — `createTranscript` builds a `Conversation so far:` prompt from kernel messages. Correct, and durable across restarts because the kernel session is, but it re-sends the whole conversation every turn and cannot carry SDK-side state. |
-| Provider parity tests | **Open.** No parity suite exists; the word appears in this spec and nowhere in the test tree. |
+| Provider parity tests | **Partly shipped.** `packages/state/test/parity.test.ts` runs one scripted turn (tool call + memory write) on both providers and asserts the kernel-observable result — tool and arguments, memory written, `tool.*` events, paired call/result records, final text, status. It lives in `state` because that is the package depending on both providers, and it is where `createRuntimeProvider` chooses between them. The **resume** half of the scenario lands with SDK-native history. |
 
 One acceptance criterion below is *not* met despite the bridge being live, and it is worth knowing before starting:
 
