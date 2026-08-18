@@ -4502,6 +4502,13 @@ test('uninstall tells the manager before removing the unit file', async () => {
 
 test('setup installs the always-on service when it saves', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A stored sign-in, or the install is refused — a daemon that cannot
+  // authenticate is worse than no daemon.
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
   const calls: string[] = [];
 
   const { streams, output } = createStreams();
@@ -4557,6 +4564,11 @@ test('parseCommand parses service actions', () => {
 test('the managed daemon is pinned to the config setup wrote', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
 
   const { streams } = createStreams();
   await runCli({
@@ -5365,4 +5377,50 @@ test('service install refuses a malformed config it would have discovered', asyn
   assert.equal(exitCode, 1);
   assert.deepEqual(calls, []);
   assert.match(output.stderr, /cannot be used/);
+});
+
+test('an unauthenticated config blocks the install rather than installing a dead daemon', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // No stored credential and nothing in the shell either: every dispatch
+  // would fail with "Missing API key" while the install reported success.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai' }));
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'install'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.deepEqual(calls, []);
+  assert.match(output.stderr, /there is no sign-in for openai yet/);
+});
+
+test('a demo setup still installs, since it needs no credential at all', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
+
+  const calls: string[] = [];
+  const exitCode = await runCli({
+    argv: ['service', 'install'],
+    streams: createStreams().streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.ok(calls.some((call) => /enable --now/.test(call)), calls.join(', '));
 });

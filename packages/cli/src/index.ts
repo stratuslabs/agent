@@ -3374,11 +3374,11 @@ export const runSetup = async (
     // were just written rather than the ones it would have found a moment
     // ago. A service failure is reported and never fails setup: the
     // settings are already saved, and `stratus serve` still works by hand.
-    const shellOnly = state.service.install ? await shellOnlyCredential(env, configPath) : undefined;
-    if (shellOnly) {
+    const blocked = state.service.install ? await serviceBlocker(env, configPath) : undefined;
+    if (blocked) {
       // Installing here would produce a daemon that fails every dispatch on
       // a missing key, minutes after setup said it was ready.
-      writeLine(streams.stderr, `Not installing the always-on service: your API key comes from ${shellOnly} in this shell, and a background service never sees it.`);
+      writeLine(streams.stderr, `Not installing the always-on service: ${blocked.detail}.`);
       writeLine(streams.stderr, 'Sign in from Providers so the key is stored, then run `stratus service install`.');
       // Skipping is not enough when one is already installed: it keeps
       // running against the config just overwritten, cannot see the shell
@@ -4258,7 +4258,18 @@ const credentialVarNames = async (env: CliEnvironment, configPath?: string): Pro
  * the daemon will. Returns the shell variable that is covering for the
  * missing credential today, so the message can name it.
  */
-const shellOnlyCredential = async (
+/**
+ * Why the managed daemon could not serve a turn: a credential that exists
+ * only in the installing shell, or none at all. Both make the service
+ * useless; only the wording differs.
+ */
+interface ServiceBlocker {
+  /** The shell variable covering for it today, when there is one. */
+  variable?: string;
+  detail: string;
+}
+
+const serviceBlocker = async (
   env: CliEnvironment,
   // The config the unit will be pinned to, when it is pinned to one.
   // Undefined means the unit carries no --config flag, so the daemon
@@ -4266,7 +4277,7 @@ const shellOnlyCredential = async (
   // forcing the global config here would check a file the daemon may
   // never read, and miss a project config that outranks it.
   configPath: string | undefined,
-): Promise<string | undefined> => {
+): Promise<ServiceBlocker | undefined> => {
   const customKeyVars = await credentialVarNames(env, configPath);
   const bare = daemonEnvironment(env, customKeyVars);
   const processEnv = readProcessEnv(env);
@@ -4289,10 +4300,13 @@ const shellOnlyCredential = async (
       // failing to start a turn — the error names the provider.
       const provider = /provider=(\w+)/.exec(served.error.message)?.[1] ?? 'anthropic';
       const name = covering(provider);
-      if (name) {
-        return name;
-      }
-      continue;
+      // Either way the daemon cannot run this agent. A key in the shell
+      // explains where it went; no key at all means there is no sign-in,
+      // and installing a service that fails every dispatch while
+      // reporting success is the worse outcome of the two.
+      return name
+        ? { variable: name, detail: `your API key comes from ${name} in this shell, and a background service never sees it` }
+        : { detail: `there is no sign-in for ${provider} yet, so the daemon could not authenticate` };
     }
     const runtime = served.runtime;
     if (!runtime || runtime.provider === 'demo') {
@@ -4308,7 +4322,7 @@ const shellOnlyCredential = async (
       if (shellFallback) {
         const name = covering(shellFallback.provider);
         if (name) {
-          return name;
+          return { variable: name, detail: `your API key comes from ${name} in this shell, and a background service never sees it` };
         }
       }
     }
@@ -4380,12 +4394,12 @@ export const runService = async (
     // The same question setup asks: launchd and systemd hand the daemon
     // none of this shell, so a key that lives only here produces a service
     // that fails every dispatch while reporting a successful install.
-    const shellOnly = await shellOnlyCredential(
+    const blocked = await serviceBlocker(
       env,
       selectedConfig ? path.resolve(readWorkingDirectory(env), String(selectedConfig)) : undefined,
     );
-    if (shellOnly) {
-      writeLine(streams.stderr, `Not installing: your API key comes from ${shellOnly} in this shell, and a background service never sees it.`);
+    if (blocked) {
+      writeLine(streams.stderr, `Not installing: ${blocked.detail}.`);
       writeLine(streams.stderr, 'Run `stratus setup` → Providers to store the sign-in, then install again.');
       return 1;
     }
