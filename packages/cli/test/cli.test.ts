@@ -3822,6 +3822,32 @@ test('logs filters by agent and can emit the raw records', async () => {
   assert.equal(parsed.detail.tool, 'demo.echo');
 });
 
+test('logs render the whole session id and a detail that is not an object', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const dir = path.join(home, '.stratus', 'logs');
+  await mkdir(dir, { recursive: true });
+  // A channel session id is `channel:agent:team:conversation[:thread]`, so
+  // eight characters of one is `slack:av` for every Slack conversation on
+  // the machine — and this is the column you copy into `stratus logs
+  // --session`, which matches on equality.
+  await writeFile(path.join(dir, 'stratusd.jsonl'), [
+    JSON.stringify({ ts: '2026-08-17T14:32:07.000Z', level: 'event', event: 'session.created', agentId: 'ava', sessionId: 'slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456' }),
+    // Records are parsed from a file, not handed over in-process: another
+    // version's line, or a hand-edited one, can carry a string here.
+    JSON.stringify({ ts: '2026-08-17T14:32:08.000Z', level: 'event', event: 'tool.completed', agentId: 'ava', sessionId: 'sess-1', detail: 'memory.remember' }),
+    '',
+  ].join('\n'));
+
+  const text = createStreams();
+  assert.equal(await runCli({
+    argv: ['logs'],
+    streams: text.streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  }), 0);
+  assert.match(text.output.stdout, /session\.created \[slack:ava:T01ABCDEF:C07GHIJKL:1731900000\.123456\]/);
+  assert.match(text.output.stdout, /tool\.completed memory\.remember \[sess-1\]/);
+});
+
 test('following the log picks up new lines and survives a rotation', async () => {
   const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
   const writer = createLogWriter({ dir, maxBytes: 160, keep: 2 });
@@ -5351,6 +5377,22 @@ test('redirect logs are truncated even when serve cannot start', async () => {
   });
 
   assert.equal((await stat(errPath)).size, 0);
+});
+
+test('a stopping daemon does not lose the writes still queued', async () => {
+  const dir = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-logs-')), 'logs');
+  const writer = createLogWriter({ dir });
+  // Exactly how runServe logs: the promise is dropped so a write never
+  // sits on the path that produced the line.
+  for (let index = 0; index < 25; index += 1) {
+    void writer.write({ ts: '2026-08-17T14:32:07.000Z', level: 'info', msg: `line ${index}` });
+  }
+
+  await writer.flush();
+
+  const records = await readRecentRecords(dir, 100);
+  assert.equal(records.length, 25, 'every queued write lands before flush resolves');
+  assert.equal(records.at(-1)?.msg, 'line 24');
 });
 
 test('a serve that cannot start reports the failure instead of escaping', async () => {

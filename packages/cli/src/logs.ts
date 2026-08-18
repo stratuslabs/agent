@@ -29,6 +29,13 @@ export const LOG_KEEP = 3;
 
 export interface LogWriter {
   write(record: LogRecord): Promise<void>;
+  /**
+   * Resolves once every queued write has reached disk. Callers on the hot
+   * path drop the promise `write` returns, so a process that exits without
+   * flushing loses whatever is still queued — which is exactly the last
+   * few lines, the ones saying why it stopped.
+   */
+  flush(): Promise<void>;
   /** Absolute path of the live log file. */
   readonly path: string;
 }
@@ -132,6 +139,11 @@ export const createLogWriter = (options: LogWriterOptions): LogWriter => {
       queue = queue.then(() => append(record)).catch((error) => {
         options.onError?.(error);
       });
+      return queue;
+    },
+    flush(): Promise<void> {
+      // The chain already swallows its own errors through onError, so this
+      // settles rather than rejecting into a shutdown path.
       return queue;
     },
   };
@@ -407,12 +419,31 @@ export const tailLog = async (options: TailOptions): Promise<void> => {
 };
 
 /** `14:32:07  ava  tool.called memory.remember` — time, who, what. */
+const formatDetail = (detail: LogRecord['detail']): string => {
+  if (detail === undefined || detail === null) {
+    return '';
+  }
+  if (typeof detail !== 'object') {
+    return String(detail);
+  }
+  return Object.entries(detail).map(([key, value]) => `${key}=${String(value)}`).join(' ');
+};
+
 export const formatLogRecord = (record: LogRecord): string => {
   const time = record.ts.slice(11, 19);
   const who = (record.agentId ?? '—').padEnd(12);
   if (record.level === 'event') {
-    const detail = record.detail ? Object.entries(record.detail).map(([key, value]) => `${key}=${String(value)}`).join(' ') : '';
-    const session = record.sessionId ? ` [${record.sessionId.slice(0, 8)}]` : '';
+    // Records are parsed from a file, not handed over in-process: a
+    // hand-edited line or one written by another version can carry a
+    // string where this version writes an object, and spreading that
+    // into entries renders a word one character per pair.
+    const detail = formatDetail(record.detail);
+    // The whole session id, never a prefix of it. A channel id is
+    // `channel:agent:team:conversation[:thread]`, so eight characters of
+    // one is `slack:av` — the same string for every Slack conversation on
+    // the machine. This is also the column you copy into `stratus logs
+    // --session`, which matches on equality, so a prefix finds nothing.
+    const session = record.sessionId ? ` [${record.sessionId}]` : '';
     return `${time}  ${who}${record.event ?? 'event'}${detail ? ` ${detail}` : ''}${session}`;
   }
   const prefix = record.level === 'warn' ? 'warning: ' : '';

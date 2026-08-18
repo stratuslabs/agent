@@ -36,8 +36,9 @@ serve` says so and starts anyway, serving every other channel.
   2) Models               default claude-opus-5 · fallback gpt-4.1-mini
   3) Agent                ~/.stratus/agents/ava.md
   4) Channels             Slack: 1 agent connected
-  5) Test run             say hello with the current settings
-  6) Save & finish
+  5) Always on            stratusd runs after setup, and at every login
+  6) Test run             say hello with the current settings
+  7) Save & finish
 ```
 
 - **Providers** — sign in to one or more. For Claude, choose how you pay: a **Claude Pro/Max subscription** (run `claude setup-token`, paste the token — runs route through the Claude Code runtime, so your plan covers usage; requires Claude Code installed and signed in. Tool runs and memory work there too, so it's the same agent as on an API key) or an **Anthropic API key**, pasted straight into the prompt (input is hidden) and checked against the live API when the endpoint supports it — a rejected key is refused; an unreachable endpoint saves the key and verifies it on your first run. OpenAI-compatible services work like API keys, including local models and proxies via a custom base URL.
@@ -45,6 +46,7 @@ serve` says so and starts anyway, serving every other channel.
 - **Menus are keyboard-driven** — arrow keys (or `j`/`k`) to move, Enter to pick, digits to jump, Esc to go back.
 - **Agent** — name your agent (or accept a generated identity), describe their personality, and their soul file lands in `~/.stratus/agents/`, ready to edit.
 - **Channels** — put an agent on Slack without opening a file. Pick the agent, and setup prints the app manifest with their name already filled in, walks you through the two tokens (input hidden), verifies each against Slack before accepting it, and stores them where `stratus serve` looks. The list marks who is connected; picking a connected agent offers to replace their tokens or disconnect.
+- **Always on** — whether the roster keeps answering once you close the terminal. On by default, because an agent you have to remember to start is not always-on, and every Slack app you connected above stays silent until `stratusd` runs. Save & finish installs it (see [Always on](#always-on)); choose *do not run it for me* and setup removes any service it previously installed.
 - **Test run** — say hello with the current settings before saving anything.
 
 Credentials are stored in `~/.stratus/credentials.json` (owner-read-only) and settings in `~/.stratus/config.json`, so `stratus run` works from any directory afterwards. No env vars to export, no config files to hand-edit.
@@ -61,6 +63,11 @@ stratus run --provider anthropic --model claude-opus-5 "hello"
 stratus run --prompt "use the echo tool" --format json
 stratus serve                          # stratusd: the whole roster, always on
 stratus serve --idle-timeout 120 --no-events
+stratus service install                # keep stratusd running under launchd/systemd
+stratus service status
+stratus logs -f                        # what the daemon has been doing
+stratus logs --agent ava -n 200
+stratus doctor                         # what a run would use right now, and why
 stratus agent new                      # create an agent (guided on a terminal)
 stratus agent new --format soul > ava.md
 stratus agents                         # who's on the team: souls, models, memory
@@ -71,6 +78,163 @@ stratus dashboard                      # local browser dashboard
 live at once on its own provider and model, sessions in SQLite so they survive
 restarts, delegation between agents, a watchdog for stalled turns, and any
 installed channels connected. Ctrl+C or SIGTERM drains cleanly.
+
+## Always on
+
+`stratus serve` stays a foreground process on purpose — debuggable, and
+composable with whatever supervisor you already run. Surviving logout, crashes,
+and reboots is the platform's job, so `stratus service` hands the daemon to
+launchd on macOS and to systemd on Linux:
+
+```bash
+stratus service install          # write the unit, start now, start at every login
+stratus service install --no-login
+stratus service status
+stratus service start
+stratus service stop
+stratus service uninstall
+```
+
+`stratus setup` installs it for you at Save & finish unless you opt out, so
+most people never run these by hand. What they get:
+
+- **macOS** — a LaunchAgent at `~/Library/LaunchAgents/com.stratusagent.stratusd.plist`
+- **Linux** — a systemd user unit at `~/.config/systemd/user/stratusd.service`
+
+The unit runs the daemon by **absolute path** — the node binary and script of
+the process that installed it, never a bare `stratus`. A service manager starts
+with a minimal environment and never loads the shell profile that puts `stratus`
+on your `PATH`. It stops with SIGTERM, so the gateway's drain actually runs.
+
+A default install restarts the daemon if it crashes, but not after a clean
+exit — stopping it yourself keeps it stopped. **`--no-login` gives up crash
+restarts on macOS**, and that is launchd's rule rather than a choice: `KeepAlive`
+implies `RunAtLoad`, so a job that must not start at login cannot ask to be
+revived either. `stratus service install --no-login` says so when it finishes.
+On Linux the two are independent, and `Restart=on-failure` applies either way.
+
+`status` asks the service manager, not the unit file, whether the daemon is
+alive, and exits non-zero when it isn't — so it works in a health check:
+
+```text
+stratusd  running
+  manager   launchd
+  unit      ~/Library/LaunchAgents/com.stratusagent.stratusd.plist
+  at login  yes
+```
+
+**One limit worth knowing before you rely on it.** A LaunchAgent starts at
+**login, not at power-on**, and only while that user is logged in — an
+unattended Mac needs automatic login turned on too. (A `LaunchDaemon` would
+start without a login, but it runs as a system user, which breaks `~/.stratus`
+paths and the Claude subscription token entirely, so the LaunchAgent is the
+right choice.) The systemd equivalent is `loginctl enable-linger` on a machine
+you don't stay logged in to. Setup says both in the menu rather than leaving
+them to be discovered after a reboot.
+
+## Logs
+
+Under a service manager the daemon's stdout is gone, so everything `stratus
+serve` says is also written to `~/.stratus/logs/stratusd.jsonl` (owner-read-only,
+rotated at 8 MB, three generations kept). That file is the record of an
+overnight run, and `stratus logs` reads it from any terminal:
+
+```bash
+stratus logs                     # the last 50 records
+stratus logs -f                  # follow, across rotations
+stratus logs -n 200
+stratus logs --agent ava
+stratus logs --session slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456
+stratus logs --format json       # the raw records, for jq
+```
+
+```text
+09:14:02  —           stratusd ready — 3 agents, slack connected
+09:14:31  ava         session.created [slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456]
+09:14:36  ava         tool.completed tool=memory.remember ok=true [slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456]
+09:21:07  —           warning: anthropic returned 529; retrying on the fallback model
+```
+
+Session ids are the channel's own key — `channel:agent:team:conversation[:thread]`
+— so the id in the last column is exactly what `--session` wants, and the same
+conversation keeps it across daemon restarts.
+
+The log is a **trace, not a second transcript**: it records that a tool ran and
+that a session completed, with the tool's name, the agent, and the session id.
+Prompts, replies, and tool inputs are not written — what was said lives in the
+session store instead.
+
+One exception worth knowing before you paste a log anywhere. A failed session
+records the **provider's error text verbatim**, and providers routinely quote
+the request that failed — so a malformed prompt can end up inside an error
+message. Skim a log before sharing it, and prefer `--agent` or `--session` to
+narrow it to the run you actually mean.
+
+### When the log is empty
+
+A daemon that fails *before* it starts serving — a broken install, an
+unreadable credentials file — never gets as far as opening the structured log,
+so `stratus logs` shows nothing or shows yesterday. Those errors go to stderr,
+and where stderr lands is the service manager's business, so it differs by
+platform:
+
+```bash
+tail ~/.stratus/logs/stratusd.err.log      # macOS
+journalctl --user-unit=stratusd.service    # Linux
+```
+
+That is where a restart loop explains itself. On macOS the LaunchAgent redirects
+both streams to files, so Stratus truncates them when `serve` starts and every
+five minutes while it runs — a crash loop cannot fill the disk with the same
+error a million times. On Linux systemd keeps the same output in the journal
+instead, which does its own rotation, so there is nothing beside the JSONL to
+bound and nothing to clean up.
+
+## When something looks off
+
+`stratus doctor` answers one question — *what would a run use right now, and
+who decided that?* Every setting is shown with the file or environment variable
+it came from, because the answer is usually that something outranks what you
+thought you configured:
+
+```bash
+stratus doctor
+stratus doctor --format json
+```
+
+```text
+Stratus Agent — what a run would use right now
+
+  provider  anthropic
+            from ~/.stratus/agents/ava.md (soul frontmatter)
+  model     claude-opus-5
+            from ~/.stratus/agents/ava.md (soul frontmatter)
+  soul      ~/.stratus/agents/ava.md
+            from ~/.stratus/config.json
+  agent     Ava (ava)
+
+Files
+  config    ~/.stratus/config.json
+  agents    1 soul file
+
+Sign-ins
+  anthropic Claude subscription (Pro/Max) — runs go through the Claude Code runtime
+  openai    not signed in
+
+Channels
+  slack     no agents connected
+            @stratusagent/channel-slack installed
+
+1 problem found:
+  ! A fallback model (gpt-4.1-mini) is configured but could not be resolved — usually
+    no sign-in for its provider. A failing primary model has nothing to retry on.
+```
+
+It resolves the config exactly the way a run does rather than re-deriving the
+rules, so what it prints is what you would get. It exits non-zero when it finds
+a problem, and it is the fastest answer to the two most common surprises: a run
+that turns out to be on the `demo` provider, and an `ANTHROPIC_API_KEY` in the
+environment quietly demoting a Claude subscription sign-in to per-token billing.
 
 ## Agents are people
 
@@ -105,9 +269,14 @@ Agents remember: facts saved with the built-in `memory.remember` tool persist to
 | `--format` | `text` or `json` |
 | `--idle-timeout` | `stratus serve`: seconds of provider silence before the watchdog aborts a turn (default 120) |
 | `--no-events` | Hide the event log |
+| `--no-log-file` | `stratus serve`: do not write `~/.stratus/logs/stratusd.jsonl` |
+| `--no-login` | `stratus service install`: install without the start-at-login trigger |
+| `-f`, `--follow` | `stratus logs`: follow the log, across rotations |
+| `-n <count>` | `stratus logs`: how much backlog to print (default 50) |
+| `--agent`, `--session` | `stratus logs`: show only one agent's or one session's records |
 
 Precedence: flags → `STRATUS_*` env vars → soul file hints → config file. Project-local `stratus.config.json` outranks the global `~/.stratus/config.json`; stored sign-ins are endpoint-bound and never sent to endpoints a project config selects.
 
-Today the CLI covers setup, chat, one-shot runs, agent creation, the always-on gateway, Slack, and the local dashboard. More channels — and one control API that every surface talks to — are next.
+Today the CLI covers setup, chat, one-shot runs, agent creation, the always-on gateway and its service integration, logs, diagnostics, Slack, and the local dashboard. More channels — and one control API that every surface talks to — are next.
 
 Part of [Stratus Agent](https://github.com/stratuslabs/agent) — a tiny TypeScript agent runtime.
