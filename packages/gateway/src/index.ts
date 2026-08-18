@@ -9,12 +9,14 @@ import {
   EventBus,
   RunAbortedError,
   ToolRegistry,
+  readPendingApproval,
   type AgentDefinition,
   type ApprovalAnswer,
   type ApprovalPolicy,
   type ApprovalResolutionReason,
   type JsonObject,
   type Session,
+  type SessionStatus,
   type SessionStore,
   type StratusEvent,
   type ToolRisk,
@@ -164,6 +166,18 @@ export class SqliteSessionStore implements SessionStore {
       .run(updated.id, updated.agent.id, updated.status, JSON.stringify(updated), updated.createdAt, updated.updatedAt);
   }
 
+  /**
+   * Session ids in a state, oldest first — the index a restarting daemon
+   * sweeps for turns parked on a human. The `status` column carries it, so
+   * no conversation body is deserialized to answer the question.
+   */
+  async listIdsByStatus(status: SessionStatus): Promise<string[]> {
+    const rows = this.db
+      .prepare('SELECT id FROM sessions WHERE status = ? ORDER BY updated_at ASC')
+      .all(status) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
   /** Newest-first session listing for one agent (or all agents). */
   list(agentId?: string): Array<Pick<Session, 'id' | 'status' | 'createdAt' | 'updatedAt'> & { agentId: string }> {
     const rows = (agentId
@@ -297,6 +311,14 @@ export interface GatewayApprovalRequest {
   session: Session;
   call: { id: string; toolName: string; input: JsonObject };
   risk: ToolRisk;
+  /**
+   * When this call first parked, if a restart is re-asking it. The wait is
+   * measured from here, so a request keeps the window it started with
+   * instead of winning a fresh one — otherwise a daemon that restarts a
+   * minute before the deadline grants another full timeout, and one that
+   * crash-loops keeps a request alive forever.
+   */
+  parkedAt?: string;
   signal?: AbortSignal;
 }
 
@@ -542,13 +564,28 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     pendingApprovals.set(requestId, settle);
 
-    if (effectiveApprovalTimeoutMs > 0) {
+    // What is left of the window, not a fresh one: a re-asked request
+    // carries when it originally parked, and the elapsed time counts.
+    const alreadyWaitedMs = request.parkedAt ? Date.now() - Date.parse(request.parkedAt) : 0;
+    const remainingTimeoutMs = effectiveApprovalTimeoutMs > 0
+      ? effectiveApprovalTimeoutMs - (Number.isFinite(alreadyWaitedMs) ? Math.max(0, alreadyWaitedMs) : 0)
+      : 0;
+
+    if (effectiveApprovalTimeoutMs > 0 && remainingTimeoutMs <= 0) {
+      // Nothing left to wait with. Settled here rather than armed with a
+      // zero timer, which `setTimeout` would still run a tick later — long
+      // enough to announce a request that is already over.
+      settle('deny', 'timeout');
+      return;
+    }
+
+    if (remainingTimeoutMs > 0) {
       // Deliberately NOT unref'd. A parked turn is real outstanding work,
       // and its timer is the only thing that will ever finish it — letting
       // the process exit out from under one would abandon the turn instead
       // of denying it. Shutdown is handled where it belongs, in stop(),
       // which settles every outstanding request before draining.
-      timer = setTimeout(() => settle('deny', 'timeout'), effectiveApprovalTimeoutMs);
+      timer = setTimeout(() => settle('deny', 'timeout'), remainingTimeoutMs);
     }
 
     // The abort listener is attached before the request is announced, so a
@@ -578,8 +615,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       call: request.call,
       risk: request.risk,
       ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
-      ...(effectiveApprovalTimeoutMs > 0
-        ? { expiresAt: new Date(Date.now() + effectiveApprovalTimeoutMs).toISOString() }
+      ...(remainingTimeoutMs > 0
+        ? { expiresAt: new Date(Date.now() + remainingTimeoutMs).toISOString() }
         : {}),
     });
     // Drained at shutdown alongside the resolutions: a channel that has not
@@ -972,25 +1009,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const inflight = new Set<Promise<unknown>>();
   let stopping = false;
 
-  const dispatchInternal = async (input: DispatchInput): Promise<Session> => {
-    // A dispatch whose signal fired while it queued behind another turn
-    // must not touch durable state: without this check, the runner would
-    // load the session, append the cancelled user message, and save it as
-    // failed — polluting future model history with input never processed.
-    if (input.signal?.aborted) {
-      throw new RunAbortedError();
-    }
-
-    // A session pins its agent: when the caller names none, an existing
-    // conversation keeps the agent it was created with even if the
-    // configured default soul has changed since — only a brand-new session
-    // takes the current default. (Loaded here, before the watchdog, also
-    // because whether this turn streams depends on durable session state.)
-    const existing = await store.get(input.sessionId);
-    const agentId = input.agentId ?? existing?.agent.id ?? await defaultAgentId();
-    const source = await refreshAgent(agentId);
-    const agent = source.definition;
-
+  /**
+   * The runtime one agent would run on right now — config snapshot, soul
+   * pins, degradation and all.
+   *
+   * Extracted so recovery resolves it exactly as a dispatch does. A second
+   * copy of this chain is the difference between a recovered turn finishing
+   * on its agent's provider and finishing on the daemon's default, and it
+   * would drift the first time either side gained a rule.
+   */
+  const runtimeForAgent = async (source: AgentSource): Promise<RuntimeConfig> => {
     // Config re-resolves per dispatch, so a changed model, credential, or
     // soul pin applies without a restart. The pool dedupes runners by the
     // resolved configuration. The gateway-wide selection and the daemon's
@@ -1053,7 +1081,29 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     // The preset snapshot means resolution reads no config file — every
     // failure from here is a credential or provider problem and surfaces.
-    const config = await resolveRuntimeConfig(selection, resolveEnv);
+    return resolveRuntimeConfig(selection, resolveEnv);
+  };
+
+  const dispatchInternal = async (input: DispatchInput): Promise<Session> => {
+    // A dispatch whose signal fired while it queued behind another turn
+    // must not touch durable state: without this check, the runner would
+    // load the session, append the cancelled user message, and save it as
+    // failed — polluting future model history with input never processed.
+    if (input.signal?.aborted) {
+      throw new RunAbortedError();
+    }
+
+    // A session pins its agent: when the caller names none, an existing
+    // conversation keeps the agent it was created with even if the
+    // configured default soul has changed since — only a brand-new session
+    // takes the current default. (Loaded here, before the watchdog, also
+    // because whether this turn streams depends on durable session state.)
+    const existing = await store.get(input.sessionId);
+    const agentId = input.agentId ?? existing?.agent.id ?? await defaultAgentId();
+    const source = await refreshAgent(agentId);
+    const agent = source.definition;
+
+    const config = await runtimeForAgent(source);
     const runner = runnerFor(config);
 
     const metadata: JsonObject = {
@@ -1104,28 +1154,123 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     });
   };
 
+  /**
+   * Finishes the turns that were parked on a human when this daemon last
+   * went down.
+   *
+   * Run after the channels are up, deliberately: recovery re-asks, and a
+   * request emitted into a gateway with no live adapter would be declined
+   * for want of anywhere to put it — turning "your approval survived the
+   * restart" into "your approval was denied by the restart".
+   *
+   * Each session is recovered independently and failures are per-session:
+   * one unrecoverable turn must not stop the daemon from serving, or from
+   * recovering the others.
+   */
+  const recoverParkedTurns = async (): Promise<void> => {
+    if (!store.listIdsByStatus) {
+      return;
+    }
+    const parked = await store.listIdsByStatus('pending_approval');
+    if (parked.length === 0) {
+      return;
+    }
+    log(`recovering ${parked.length} turn(s) parked on approval`);
+
+    // Started together, not one after another. Each recovery re-asks and
+    // then waits on a human, so awaiting them in sequence would mean the
+    // second parked turn is not even *announced* until the first is
+    // answered — fifteen minutes later by default, and never at all with a
+    // zero timeout. They are independent turns; only same-session work is
+    // ordered, and onSessionChain already guarantees that.
+    await Promise.allSettled(parked.map((sessionId) => recoverOne(sessionId)));
+  };
+
+  const recoverOne = (sessionId: string): Promise<void> =>
+    onSessionChain(sessionId, async () => {
+      if (stopping) {
+        return;
+      }
+      try {
+        const session = await store.get(sessionId);
+        if (!session) {
+          return;
+        }
+        const record = readPendingApproval(session);
+        // A wait that outlived its window while the daemon was down is
+        // honoured, not restarted: the request really did go unanswered for
+        // the whole time it was configured to wait, and downtime is not a
+        // reason to extend a security decision. Measured from when the turn
+        // parked against this daemon's timeout — the transport's original
+        // deadline was chosen after the checkpoint was written and is gone
+        // with the process that chose it. Denying goes through the same
+        // recovery path, so the queue behind it still drains.
+        const parkedAt = record ? Date.parse(record.parkedAt) : Number.NaN;
+        const expired = effectiveApprovalTimeoutMs > 0
+          && Number.isFinite(parkedAt)
+          && Date.now() - parkedAt >= effectiveApprovalTimeoutMs;
+        if (expired) {
+          log(`${sessionId}: the approval for ${record?.call.toolName} outlived its window while the daemon was down; denying it`);
+        }
+
+        // Resolved the way a dispatch for this agent would resolve it, so a
+        // recovered turn finishes on the same provider, model, and
+        // credentials it was parked on.
+        const source = await refreshAgent(session.agent.id);
+
+        // And on the CURRENT definition, saved before recovery reads the
+        // session back. An allowlist is a permission boundary: a soul that
+        // dropped a tool while the daemon was down must not have that tool
+        // executed by the turn that outlived the change, and
+        // `allowedToolsFor` reads the definition frozen into the session
+        // ahead of the registry. Dispatch refreshes it the same way before
+        // resuming.
+        session.agent = source.definition;
+        await store.save(session);
+
+        const runner = runnerFor(await runtimeForAgent(source));
+        await runner.recoverPendingApproval(sessionId, { denyPending: expired });
+      } catch (error) {
+        warn(`could not recover parked session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+
+  /**
+   * Runs `work` as the session's next turn: queued behind whatever that
+   * session is already doing, and tracked so shutdown drains it.
+   *
+   * Recovery goes through here as well as dispatch, and must. Channels are
+   * live before a sweep finishes, so an inbound message for a parked
+   * session could otherwise `resume()` alongside `recoverPendingApproval()`
+   * — one closing the parked call as interrupted while the other re-enters
+   * it, both saving divergent copies of the same transcript, and the tool
+   * possibly running twice. Single-flight per session is the invariant that
+   * stops that, and it only holds if everything that writes a session goes
+   * through it.
+   */
+  const onSessionChain = <T>(sessionId: string, work: () => Promise<T>): Promise<T> => {
+    const previous = sessionChains.get(sessionId) ?? Promise.resolve();
+    const turn = previous.then(work, work);
+
+    const settled = turn.catch(() => {});
+    sessionChains.set(sessionId, settled);
+    inflight.add(settled);
+    void settled.finally(() => {
+      inflight.delete(settled);
+      if (sessionChains.get(sessionId) === settled) {
+        sessionChains.delete(sessionId);
+      }
+    });
+
+    return turn;
+  };
+
   const dispatch = async (input: DispatchInput): Promise<Session> => {
     if (stopping) {
       throw new Error('The gateway is stopping and no longer accepts new work.');
     }
 
-    const previous = sessionChains.get(input.sessionId) ?? Promise.resolve();
-    const turn = previous.then(
-      () => dispatchInternal(input),
-      () => dispatchInternal(input),
-    );
-
-    const settled = turn.catch(() => {});
-    sessionChains.set(input.sessionId, settled);
-    inflight.add(settled);
-    void settled.finally(() => {
-      inflight.delete(settled);
-      if (sessionChains.get(input.sessionId) === settled) {
-        sessionChains.delete(input.sessionId);
-      }
-    });
-
-    return turn;
+    return onSessionChain(input.sessionId, () => dispatchInternal(input));
   };
 
   const startedChannels: GatewayChannelAdapter[] = [];
@@ -1158,6 +1303,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           }
         }
       }
+
+      // Last, and not awaited: recovery re-asks, so it needs the channels
+      // above already listening — but a turn parked behind a slow approver
+      // must not hold up start(), or a daemon with one outstanding request
+      // would refuse to finish booting.
+      void recoverParkedTurns().catch((error) => {
+        warn(`recovering parked turns failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
     },
 
     // Drain: channels stop taking messages, in-flight turns finish, new

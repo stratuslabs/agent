@@ -167,6 +167,13 @@ Three things are worth knowing before you turn it on:
   ```text
   approvals: remote — gated calls are parked and asked in Slack (approvers set for ava)
   ```
+- **A parked turn survives a restart.** The daemon records what has not run
+  before it asks, so an approval outstanding when it stops is finished when
+  it starts again — the question is re-asked in Slack, the call runs on the
+  answer, and anything queued behind it still runs too. The re-asked request
+  keeps the window it started with rather than getting a fresh one, and a
+  wait that has already used up its `timeoutMs` is denied instead of
+  re-asked: downtime is not a reason to extend a security decision.
 - **Always allow lasts for the session**, not forever. It stops the same tool
   asking again in the same conversation, and it is forgotten when the daemon
   restarts. A durable per-agent whitelist is a narrower promise (a normalized

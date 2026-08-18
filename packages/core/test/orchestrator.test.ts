@@ -5,7 +5,9 @@ import {
   AgentRunner,
   EventBus,
   InMemorySessionStore,
+  PENDING_APPROVAL_METADATA_KEY,
   PluginRegistry,
+  readPendingApproval,
   ToolRegistry,
   type Executor,
   type ModelProvider,
@@ -1070,4 +1072,621 @@ test('the response is durable before provider.response reaches subscribers', asy
   assert.ok(saveIndex >= 0, 'the text-only response must be saved');
   assert.ok(eventIndex >= 0, 'provider.response must fire');
   assert.ok(saveIndex < eventIndex, `the save must precede the event: ${JSON.stringify(order)}`);
+});
+
+// ---- restart recovery ------------------------------------------------------
+
+/**
+ * A three-call response with a gated tool, and a policy that never answers
+ * — the shape a daemon dies in when someone was still deciding.
+ *
+ * `ran` records real executions across BOTH halves of the test, which is
+ * how re-execution would show up: a recovered turn that replayed the
+ * response would run `first` a second time.
+ */
+const parkedTurnHarness = () => {
+  const ran: string[] = [];
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+
+  for (const name of ['first', 'gated', 'third']) {
+    tools.register({
+      name,
+      // `first` and `third` run unattended; only `gated` reaches a human.
+      risk: name === 'gated' ? 'gated' : 'safe',
+      async execute() {
+        ran.push(name);
+        return { name };
+      },
+    });
+  }
+
+  const response = {
+    parts: [
+      { type: 'tool-call' as const, call: { id: 'c1', toolName: 'first', input: {} } },
+      { type: 'tool-call' as const, call: { id: 'c2', toolName: 'gated', input: {} } },
+      { type: 'tool-call' as const, call: { id: 'c3', toolName: 'third', input: {} } },
+    ],
+  };
+
+  let turns = 0;
+  const provider: ModelProvider = {
+    name: 'fake',
+    async generate() {
+      turns += 1;
+      return turns === 1 ? response : { parts: [{ type: 'text', text: 'done' }] };
+    },
+  };
+
+  return { ran, store, tools, provider, providerTurns: () => turns };
+};
+
+/**
+ * Runs until the turn parks, then walks away from it — the honest
+ * simulation of `kill -9` mid-approval. The run is deliberately never
+ * awaited and never aborted: an abort is a *decision* the policy would
+ * observe and the turn would continue from, which is the opposite of a
+ * process that stopped existing. The promise simply never settles, which
+ * keeps nothing alive.
+ *
+ * Returns once the checkpoint is durable, since that is exactly what a
+ * restarting daemon would find — gated on the record itself, never on a
+ * delay.
+ */
+const parkAndAbandon = async (
+  store: InMemorySessionStore,
+  tools: ToolRegistry,
+  provider: ModelProvider,
+  sessionId: string,
+): Promise<void> => {
+  const dying = new AgentRunner({
+    provider,
+    tools,
+    store,
+    approvals: {
+      // Waves safe calls through and hangs on the gated one, as a real
+      // policy does — the runner asks about every call, so a policy that
+      // blocked on all of them would stall before the turn ever parked.
+      approve: ({ risk }) => (risk === 'safe'
+        ? Promise.resolve(true)
+        : new Promise<boolean>(() => {})),
+    },
+  });
+  void dying.run({
+    sessionId,
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'go',
+  }).catch(() => undefined);
+
+  await new Promise<void>((resolve, reject) => {
+    // Bounded so a regression fails this assertion instead of hanging a
+    // suite that has no timeout of its own. `polling` stops the loop as
+    // well as settling the promise: a setImmediate chain keeps the event
+    // loop alive by itself, so one left running past the deadline would
+    // hang the suite anyway — the exact failure the bound exists to avoid.
+    let polling = true;
+    const giveUp = setTimeout(() => {
+      polling = false;
+      reject(new Error(`${sessionId} never parked`));
+    }, 5_000);
+    const wait = async (): Promise<void> => {
+      if (!polling) {
+        return;
+      }
+      const stored = await store.get(sessionId);
+      if (stored && readPendingApproval(stored)) {
+        polling = false;
+        clearTimeout(giveUp);
+        resolve();
+        return;
+      }
+      setImmediate(() => void wait());
+    };
+    void wait();
+  });
+};
+
+const pairing = (session: Session): { calls: string[]; results: string[] } => {
+  const calls: string[] = [];
+  const results: string[] = [];
+  for (const message of session.messages) {
+    for (const call of message.toolCalls ?? []) {
+      calls.push(call.id);
+    }
+    if (message.toolResult) {
+      results.push(message.toolResult.callId);
+    }
+  }
+  return { calls, results };
+};
+
+test('a turn parked on approval checkpoints what has not run, and clears it on a decision', async () => {
+  const { store, tools, provider } = parkedTurnHarness();
+  let parked: Session | undefined;
+
+  const runner = new AgentRunner({
+    provider,
+    tools,
+    store,
+    approvals: {
+      async approve({ session, call }) {
+        // Captured only for the gated call. The policy is consulted for
+        // every call — it is the policy, not the runner, that waves safe
+        // ones through — so the two safe calls around this one would
+        // otherwise overwrite the snapshot with an unparked session.
+        if (call.toolName === 'gated') {
+          // Read from the store rather than the in-memory session: the
+          // point is that a separate process could see this.
+          parked = await store.get(session.id);
+        }
+        return true;
+      },
+    },
+  });
+
+  const session = await runner.run({
+    sessionId: 'parked-1',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'go',
+  });
+
+  assert.equal(parked?.status, 'pending_approval');
+  const record = readPendingApproval(parked!);
+  // The call itself, not a reference to it: ids repeat across turns when a
+  // provider omits them, so looking one up could find an earlier turn's.
+  assert.deepEqual(record?.call, { id: 'c2', toolName: 'gated', input: {} });
+  // The queue behind it, so recovery can finish the response.
+  assert.deepEqual(record?.remaining.map((call) => call.id), ['c3']);
+  assert.ok(record?.parkedAt, 'the wait is timestamped, so its window can be honoured later');
+
+  // And it is gone the moment the decision lands — the record describes a
+  // window in which nothing has happened, so it must not outlive one.
+  assert.equal(readPendingApproval(session), undefined);
+  assert.equal(session.status, 'completed');
+});
+
+test('a recovered turn resumes the exact parked call without replaying what already ran', async () => {
+  const { ran, store, tools, provider, providerTurns } = parkedTurnHarness();
+
+  // First half: the daemon dies while the approver is deciding.
+  await parkAndAbandon(store, tools, provider, 'recover-1');
+
+  assert.deepEqual(ran, ['first'], 'only the call before the parked one ran');
+
+  // Second half: a fresh runner over the same store, as a restarted daemon
+  // is. Its approver says yes.
+  const revived = new AgentRunner({
+    provider,
+    tools,
+    store,
+    approvals: { async approve() { return true; } },
+  });
+  const recovered = await revived.recoverPendingApproval('recover-1');
+
+  assert.ok(recovered, 'the parked turn was recoverable');
+  // Idempotency: `first` ran once, before the crash, and its result was
+  // already durable. Replaying the response would show up as a second one.
+  assert.deepEqual(ran, ['first', 'gated', 'third']);
+  // Pairing: every tool_use in the response has its tool_result, including
+  // the call queued behind the parked one.
+  const { calls, results } = pairing(recovered);
+  assert.deepEqual(calls, ['c1', 'c2', 'c3']);
+  assert.deepEqual(results, ['c1', 'c2', 'c3']);
+  assert.equal(recovered.status, 'completed');
+  assert.equal(readPendingApproval(recovered), undefined);
+  // The turn continued to the provider after draining, rather than stopping
+  // at the recovered calls.
+  assert.ok(providerTurns() >= 2, `expected the loop to continue, saw ${providerTurns()} provider turn(s)`);
+});
+
+test('a recovery that denies the parked call still drains the queue behind it', async () => {
+  const { ran, store, tools, provider } = parkedTurnHarness();
+
+  await parkAndAbandon(store, tools, provider, 'recover-deny');
+
+  let asked = 0;
+  const revived = new AgentRunner({
+    provider,
+    tools,
+    store,
+    approvals: {
+      async approve() {
+        asked += 1;
+        return true;
+      },
+    },
+  });
+  // What an outlived window does: refuse the parked call without asking.
+  const recovered = await revived.recoverPendingApproval('recover-deny', { denyPending: true });
+
+  assert.ok(recovered);
+  // The parked call never ran and nobody was asked about it…
+  assert.equal(ran.includes('gated'), false);
+  // …but the calls behind it were never asked about either, so they still
+  // face the policy normally rather than inheriting the refusal.
+  assert.deepEqual(ran, ['first', 'third']);
+  // Exactly one call reached the policy: `third`. `first` had already run
+  // before the crash, and `gated` was refused without asking. (The runner
+  // consults the policy for every call it executes — it is the policy that
+  // waves `safe` through, not the runner.)
+  assert.equal(asked, 1);
+
+  // Pairing survives a denial: the refusal is a tool_result like any other.
+  const { calls, results } = pairing(recovered);
+  assert.deepEqual(calls, ['c1', 'c2', 'c3']);
+  assert.deepEqual(results, ['c1', 'c2', 'c3']);
+  const denied = recovered.messages.find((message) => message.toolResult?.callId === 'c2');
+  assert.equal(denied?.toolResult?.ok, false);
+  assert.match(denied?.toolResult?.error ?? '', /denied by approval policy/);
+});
+
+test('a call interrupted mid-execution is not recoverable, only a parked one is', async () => {
+  // The distinction the checkpoint exists to draw. A tool that started and
+  // died leaves the same trace as one that never started — a call with no
+  // result — and only the record can tell them apart. Without it, recovery
+  // would re-run side effects that already happened.
+  const store = new InMemorySessionStore();
+  const now = new Date().toISOString();
+  await store.create({
+    id: 'mid-flight',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      {
+        id: 'm2',
+        role: 'assistant',
+        content: '',
+        createdAt: now,
+        toolCalls: [{ id: 'c9', toolName: 'gated', input: {} }],
+      },
+    ],
+  });
+
+  const { tools } = parkedTurnHarness();
+  const talker: ModelProvider = {
+    name: 'fake',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'ok' }] };
+    },
+  };
+  const runner = new AgentRunner({
+    provider: talker,
+    tools,
+    store,
+    approvals: { async approve() { return true; } },
+  });
+
+  assert.equal(
+    await runner.recoverPendingApproval('mid-flight'),
+    undefined,
+    'a dangling call with no checkpoint must not be re-entered',
+  );
+
+  // resume() still closes it the conservative way, unchanged by any of this.
+  const resumed = await runner.resume({ sessionId: 'mid-flight', userMessage: 'still there?' });
+  const closed = resumed.messages.find((message) => message.toolResult?.callId === 'c9');
+  assert.match(closed?.toolResult?.error ?? '', /may not have run to completion/);
+});
+
+test('a parked call is recovered by identity, not by an id an earlier turn also used', async () => {
+  // The OpenAI-compatible adapter synthesizes `tool-call-1`, `tool-call-2`
+  // per response whenever an endpoint omits ids, so the same id recurs
+  // every turn — which is why reconcileInterruptedToolCalls already matches
+  // by occurrence. A checkpoint that named its call by id would let
+  // recovery find turn one's call and execute it with turn one's input:
+  // replaying a side effect while appearing to recover a different one.
+  const ran: Array<Record<string, unknown>> = [];
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'write',
+    risk: 'gated',
+    async execute(input) {
+      ran.push(input);
+      return { ok: true };
+    },
+  });
+
+  let turns = 0;
+  const provider: ModelProvider = {
+    name: 'fake',
+    async generate() {
+      turns += 1;
+      // Both turns reuse `tool-call-1`, with different arguments.
+      if (turns <= 2) {
+        return {
+          parts: [{
+            type: 'tool-call' as const,
+            call: { id: 'tool-call-1', toolName: 'write', input: { target: turns === 1 ? 'first' : 'second' } },
+          }],
+        };
+      }
+      return { parts: [{ type: 'text', text: 'done' }] };
+    },
+  };
+
+  // Turn one approves and runs; turn two parks.
+  let approvals = 0;
+  const dying = new AgentRunner({
+    provider,
+    tools,
+    store,
+    approvals: {
+      approve: () => {
+        approvals += 1;
+        return approvals === 1 ? Promise.resolve(true) : new Promise<boolean>(() => {});
+      },
+    },
+  });
+  void dying.run({
+    sessionId: 'reused-ids',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'go',
+  }).catch(() => undefined);
+
+  await new Promise<void>((resolve, reject) => {
+    let polling = true;
+    const giveUp = setTimeout(() => {
+      polling = false;
+      reject(new Error('never parked'));
+    }, 5_000);
+    const wait = async (): Promise<void> => {
+      if (!polling) {
+        return;
+      }
+      const stored = await store.get('reused-ids');
+      if (stored && readPendingApproval(stored)) {
+        polling = false;
+        clearTimeout(giveUp);
+        resolve();
+        return;
+      }
+      setImmediate(() => void wait());
+    };
+    void wait();
+  });
+
+  assert.deepEqual(ran, [{ target: 'first' }], 'only turn one ran before the crash');
+
+  const revived = new AgentRunner({
+    provider,
+    tools,
+    store,
+    approvals: { async approve() { return true; } },
+  });
+  await revived.recoverPendingApproval('reused-ids');
+
+  // The recovered call is turn TWO's, with turn two's input. Resolving the
+  // id against the transcript would have re-run `first`.
+  assert.deepEqual(ran, [{ target: 'first' }, { target: 'second' }]);
+});
+
+test('a hosted tool call is never checkpointed, so a restart fails it cleanly', async () => {
+  // 04 excludes the SDK path from the resume-the-exact-call guarantee on
+  // purpose: recovery re-enters the KERNEL loop, and it cannot rebuild an
+  // SDK inner loop or the handler waiting to consume this result. A
+  // checkpoint here would have a restart execute the call and then continue
+  // from a state the hosting provider never produced. No checkpoint is the
+  // clean failure that doc asks for.
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'gated',
+    risk: 'gated',
+    async execute() {
+      return { ok: true };
+    },
+  });
+
+  let parked: Session | undefined;
+  const runner = new AgentRunner({
+    provider: { name: 'fake', async generate() { return { parts: [{ type: 'text', text: 'ok' }] }; } },
+    tools,
+    store,
+    approvals: {
+      async approve({ session }) {
+        parked = await store.get(session.id);
+        return true;
+      },
+    },
+  });
+
+  const session = await runner.run({
+    sessionId: 'hosted-1',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'go',
+  });
+  await runner.executeHostedToolCall(session, { id: 'h1', toolName: 'gated', input: {} });
+
+  // Asked about — the gate still applies on the hosted path…
+  assert.ok(parked, 'the policy was consulted');
+  // …but nothing durable claims the call is re-enterable.
+  assert.equal(readPendingApproval(parked!), undefined);
+  assert.notEqual(parked!.status, 'pending_approval');
+
+  const stored = await store.get('hosted-1');
+  assert.equal(readPendingApproval(stored!), undefined);
+  assert.equal(await runner.recoverPendingApproval('hosted-1'), undefined);
+});
+
+test('a recovered call is re-asked with the time it originally parked', async () => {
+  // Otherwise every restart hands the request a fresh full window, and a
+  // crash-looping daemon keeps one alive forever — the opposite of
+  // honouring the deadline it was given.
+  const parkedAt = new Date(Date.now() - 3_600_000).toISOString();
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'gated',
+    risk: 'gated',
+    async execute() {
+      return { ok: true };
+    },
+  });
+
+  const now = new Date().toISOString();
+  const call = { id: 'c1', toolName: 'gated', input: {} };
+  await store.create({
+    id: 'carried-park',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [call] },
+    ],
+    metadata: { [PENDING_APPROVAL_METADATA_KEY]: { call, remaining: [], parkedAt } },
+  });
+
+  const seen: Array<string | undefined> = [];
+  const runner = new AgentRunner({
+    provider: { name: 'fake', async generate() { return { parts: [{ type: 'text', text: 'ok' }] }; } },
+    tools,
+    store,
+    approvals: {
+      async approve(context) {
+        seen.push(context.parkedAt);
+        return true;
+      },
+    },
+  });
+
+  await runner.recoverPendingApproval('carried-park');
+
+  // The transport is told when the wait began, so it can arm what is left
+  // of the window rather than a whole new one.
+  assert.deepEqual(seen, [parkedAt]);
+});
+
+test('recovery holds the checkpoint until the wait is re-established or answered', async () => {
+  // Clearing it up front leaves a window where the session reads `running`
+  // with the approval still unanswered. A daemon that dies inside that
+  // window is skipped by the next sweep, and the call is later closed as
+  // interrupted — a recoverable turn quietly lost.
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'gated',
+    risk: 'gated',
+    async execute() {
+      return { ok: true };
+    },
+  });
+
+  const now = new Date().toISOString();
+  const call = { id: 'c1', toolName: 'gated', input: {} };
+  const seed = async (id: string): Promise<void> => {
+    await store.create({
+      id,
+      agent: { id: 'ava', name: 'Ava' },
+      status: 'pending_approval',
+      messages: [
+        { id: 'm1', role: 'user', content: 'go', createdAt: now },
+        { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [call] },
+      ],
+      metadata: { [PENDING_APPROVAL_METADATA_KEY]: { call, remaining: [], turn: 1, parkedAt: now } },
+    });
+  };
+
+  // Every persisted state is inspected, not just the one after recovery
+  // settles: the defect is a *window*, and sampling either side of it
+  // passes whether the window exists or not. The invariant is that while
+  // the parked call has no result, nothing durable ever says otherwise.
+  await seed('held');
+  const snapshots: Array<{ status: string; parked: boolean }> = [];
+  const watched: InMemorySessionStore = Object.assign(Object.create(store) as InMemorySessionStore, {
+    async save(session: Session) {
+      if (session.id === 'held') {
+        snapshots.push({ status: session.status, parked: Boolean(readPendingApproval(session)) });
+      }
+      return store.save(session);
+    },
+    get: (id: string) => store.get(id),
+    create: (input: Parameters<InMemorySessionStore['create']>[0]) => store.create(input),
+  });
+
+  const stalled = new AgentRunner({
+    provider: { name: 'fake', async generate() { return { parts: [{ type: 'text', text: 'ok' }] }; } },
+    tools,
+    store: watched,
+    approvals: { approve: () => new Promise<boolean>(() => {}) },
+  });
+  void stalled.recoverPendingApproval('held').catch(() => undefined);
+  for (let tick = 0; tick < 20; tick += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.ok(snapshots.length > 0, 'recovery persisted something');
+  const unfindable = snapshots.filter((snapshot) => !snapshot.parked);
+  assert.deepEqual(
+    unfindable,
+    [],
+    `every state saved while the approval was unanswered must stay findable by a sweep, saw ${JSON.stringify(snapshots)}`,
+  );
+
+  // And once a decision lands, the record retires with the result rather
+  // than in a separate write.
+  await seed('answered');
+  const revived = new AgentRunner({
+    provider: { name: 'fake', async generate() { return { parts: [{ type: 'text', text: 'ok' }] }; } },
+    tools,
+    store,
+    approvals: { async approve() { return true; } },
+  });
+  const done = await revived.recoverPendingApproval('answered');
+  assert.equal(readPendingApproval(done!), undefined);
+  assert.ok(done!.messages.some((message) => message.toolResult?.callId === 'c1'));
+});
+
+test('a recovered turn spends the provider budget it was already on', async () => {
+  // maxTurns is a runaway and cost guard. Restarting the counter would let
+  // a call parked on the last permitted turn buy the whole allowance again,
+  // and every crash-and-recover cycle would extend it further.
+  const store = new InMemorySessionStore();
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'gated',
+    risk: 'gated',
+    async execute() {
+      return { ok: true };
+    },
+  });
+
+  let generates = 0;
+  const now = new Date().toISOString();
+  const call = { id: 'c1', toolName: 'gated', input: {} };
+  await store.create({
+    id: 'budgeted',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [call] },
+    ],
+    // Parked on the third and last permitted turn.
+    metadata: { [PENDING_APPROVAL_METADATA_KEY]: { call, remaining: [], turn: 3, parkedAt: now } },
+  });
+
+  const runner = new AgentRunner({
+    provider: {
+      name: 'fake',
+      async generate() {
+        generates += 1;
+        // Always asks for another tool, so only the budget can stop it.
+        return { parts: [{ type: 'tool-call' as const, call: { id: `c${generates + 1}`, toolName: 'gated', input: {} } }] };
+      },
+    },
+    tools,
+    store,
+    maxTurns: 3,
+    approvals: { async approve() { return true; } },
+  });
+
+  await assert.rejects(
+    runner.recoverPendingApproval('budgeted'),
+    /maximum of 3 provider turns/,
+  );
+  // The recovered calls drain, then the loop is out of budget immediately —
+  // it does not get turns 1 through 3 over again.
+  assert.equal(generates, 0, `expected no further provider turns, saw ${generates}`);
 });

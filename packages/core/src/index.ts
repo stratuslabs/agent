@@ -1,7 +1,13 @@
 export type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
 export type JsonObject = { [key: string]: JsonValue };
 
-export type SessionStatus = 'idle' | 'running' | 'completed' | 'failed';
+/**
+ * `pending_approval` is a turn parked on a human, and it is durable on
+ * purpose: it is the index a restarting daemon uses to find the turns it
+ * owes an answer. Everything else about the turn is already in the
+ * session; this is what makes it findable without reading every row.
+ */
+export type SessionStatus = 'idle' | 'running' | 'pending_approval' | 'completed' | 'failed';
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
 export interface Message {
@@ -325,6 +331,13 @@ export interface ApprovalContext {
   tool: Tool;
   risk: ToolRisk;
   /**
+   * When this call first parked, if it is being re-asked after a restart.
+   * A transport that imposes a deadline should measure from here, or a
+   * request would win a fresh full window on every restart — and a
+   * crash-looping daemon could keep one alive indefinitely.
+   */
+  parkedAt?: string;
+  /**
    * The turn's abort signal. A policy that waits on a human MUST observe it:
    * an aborted turn rejects the in-flight wait and invalidates its pending
    * request, so a later approval can never execute a tool for a cancelled
@@ -336,6 +349,92 @@ export interface ApprovalContext {
 export interface ApprovalPolicy {
   approve(context: ApprovalContext): Promise<boolean>;
 }
+
+/** Where a parked turn's checkpoint lives in `session.metadata`. */
+export const PENDING_APPROVAL_METADATA_KEY = 'pendingApproval';
+
+/**
+ * The checkpoint a turn leaves behind while it waits for a human.
+ *
+ * Its whole job is to record something the transcript cannot: that this
+ * call **has not started**. A tool result is saved only after execution, so
+ * a call with no result looks identical whether the daemon died waiting for
+ * an approver or died halfway through the tool's side effects — and
+ * `resume()` rightly treats that ambiguity as "may not have run to
+ * completion". Approval happens strictly *before* execution, so a call
+ * carrying this record is unambiguous, and the only kind that can safely be
+ * re-entered rather than closed as interrupted.
+ *
+ * Written before the policy is asked and cleared before the tool runs, so
+ * the window it covers is exactly the window in which nothing has happened.
+ */
+export interface PendingApprovalRecord {
+  /**
+   * The parked call itself, not a reference to it.
+   *
+   * Ids are not unique across a transcript — the OpenAI-compatible adapter
+   * synthesizes `tool-call-1`, `tool-call-2` per response whenever an
+   * endpoint omits them, so the same id recurs every turn, and
+   * `reconcileInterruptedToolCalls` already matches by occurrence for that
+   * reason. Looking the call up by id would find an earlier turn's and
+   * execute it with *its* input — replaying a side effect under the guise
+   * of recovering a different one. Carrying the call removes the lookup,
+   * and adds nothing to the store the transcript did not already hold.
+   */
+  call: ToolCall;
+  /**
+   * The calls after it in the same provider response, in order and none of
+   * them started. Recovery drains these once the parked one settles, so
+   * every `tool_use` in the response still gets its `tool_result`.
+   */
+  remaining: ToolCall[];
+  /**
+   * Which provider turn this call belongs to, 1-based.
+   *
+   * Recovery resumes the loop counter here rather than restarting it, or a
+   * call parked on the last permitted turn would come back with the whole
+   * budget again — and every crash-and-recover cycle would extend it
+   * further. `maxTurns` is a runaway and cost guard; a turn that survives a
+   * restart must not be worth more than one that did not.
+   */
+  turn: number;
+  /**
+   * When the wait began, ISO-8601.
+   *
+   * The deadline itself is deliberately NOT stored: it is chosen by
+   * whatever transport publishes the request, strictly after this record is
+   * written, so a field for it here could only ever be empty. A recovering
+   * daemon has its own configured timeout and can measure the elapsed wait
+   * from this — which is what honouring the original window means, rather
+   * than restarting the clock because the process died.
+   */
+  parkedAt: string;
+}
+
+/** Reads the checkpoint off a session, if it is parked. */
+export const readPendingApproval = (session: Session): PendingApprovalRecord | undefined => {
+  const raw = session.metadata?.[PENDING_APPROVAL_METADATA_KEY];
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return undefined;
+  }
+  const record = raw as unknown as PendingApprovalRecord;
+  const isCall = (value: unknown): value is ToolCall =>
+    typeof value === 'object' && value !== null
+    && typeof (value as ToolCall).id === 'string'
+    && typeof (value as ToolCall).toolName === 'string';
+
+  if (!isCall(record.call)) {
+    return undefined;
+  }
+  return {
+    call: record.call,
+    remaining: Array.isArray(record.remaining) ? record.remaining.filter(isCall) : [],
+    // A record written before this field existed resumes at 1, which is
+    // the old behaviour and never *more* permissive than a fresh turn.
+    turn: typeof record.turn === 'number' && Number.isFinite(record.turn) ? record.turn : 1,
+    parkedAt: typeof record.parkedAt === 'string' ? record.parkedAt : '',
+  };
+};
 
 /**
  * What a human decided about one gated call.
@@ -462,6 +561,15 @@ export interface SessionStore {
   create(input: Omit<Session, 'createdAt' | 'updatedAt'>): Promise<Session>;
   get(id: string): Promise<Session | undefined>;
   save(session: Session): Promise<void>;
+  /**
+   * Session ids in a given state, oldest first. Optional: a store that
+   * cannot enumerate simply cannot recover parked turns, and a caller that
+   * needs to sweep says so by checking for the method.
+   *
+   * Ids rather than sessions, deliberately — a sweep over a large store
+   * should not deserialize every conversation body to find the few it wants.
+   */
+  listIdsByStatus?(status: SessionStatus): Promise<string[]>;
 }
 
 export class InMemorySessionStore implements SessionStore {
@@ -480,6 +588,13 @@ export class InMemorySessionStore implements SessionStore {
 
   async save(session: Session): Promise<void> {
     this.sessions.set(session.id, { ...session, updatedAt: new Date().toISOString() });
+  }
+
+  async listIdsByStatus(status: SessionStatus): Promise<string[]> {
+    return [...this.sessions.values()]
+      .filter((session) => session.status === status)
+      .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
+      .map((session) => session.id);
   }
 }
 
@@ -769,8 +884,19 @@ export class AgentRunner {
     return tools ? new Set(tools) : undefined;
   }
 
-  private async executeTurns(initialSession: Session, signal?: AbortSignal): Promise<Session> {
+  private async executeTurns(
+    initialSession: Session,
+    signal?: AbortSignal,
+    /**
+     * Re-enter an interrupted turn at its parked call instead of starting
+     * with the provider. The response these calls came from is already in
+     * the session — replaying it would duplicate the assistant messages and
+     * re-ask the model — so recovery picks up exactly where the wait was.
+     */
+    resumeFrom?: { pending: ToolCall | undefined; remaining: ToolCall[]; parkedAt?: string; turn?: number },
+  ): Promise<Session> {
     let session = initialSession;
+    let pendingEntry = resumeFrom;
 
     try {
       const allowedTools = this.allowedToolsFor(session);
@@ -778,10 +904,31 @@ export class AgentRunner {
         .describe()
         .filter((tool) => allowedTools === undefined || allowedTools.has(tool.name));
 
-      for (let turn = 1; ; turn += 1) {
+      // Resumed, not restarted: a recovered turn spends the budget it was
+      // already on. Starting at 1 would let a call parked on the last
+      // permitted turn buy the whole allowance again.
+      for (let turn = resumeFrom?.turn ?? 1; ; turn += 1) {
         throwIfAborted(signal);
         if (turn > this.maxTurns) {
           throw new Error(`Session exceeded the maximum of ${this.maxTurns} provider turns.`);
+        }
+
+        if (pendingEntry) {
+          // The whole recovered queue — the parked call first, then the
+          // ones behind it — so the response's every `tool_use` ends up
+          // with a `tool_result` before the loop goes back to the provider.
+          const recovered = [
+            ...(pendingEntry.pending ? [pendingEntry.pending] : []),
+            ...pendingEntry.remaining,
+          ];
+          // The original park time rides along, so a wait is measured from
+          // when it began rather than restarted by the recovery. Only
+          // meaningful when the parked call itself is being re-asked;
+          // a denied one is already answered.
+          const carriedParkedAt = pendingEntry.pending ? pendingEntry.parkedAt : undefined;
+          pendingEntry = undefined;
+          await this.runToolCalls(session, recovered, signal, carriedParkedAt, turn);
+          continue;
         }
 
         const memory = this.memory ? await this.memory.list(session.agent.id) : [];
@@ -841,22 +988,7 @@ export class AgentRunner {
         await this.store.save(session);
         await this.bus.emit({ type: 'provider.response', sessionId: session.id, parts: response.parts });
 
-        for (const call of calls) {
-          throwIfAborted(signal);
-          const result = await this.executeToolCall(session, call, signal);
-
-          // The result lands immediately after execution, so side effects
-          // are never durable without their record.
-          session.messages.push({
-            id: `${session.id}:tool:${result.callId}`,
-            role: 'tool',
-            name: result.toolName,
-            content: JSON.stringify(result),
-            createdAt: new Date().toISOString(),
-            toolResult: result,
-          });
-          await this.store.save(session);
-        }
+        await this.runToolCalls(session, calls, signal, undefined, turn);
 
         if (!sawToolCall) {
           break;
@@ -890,6 +1022,138 @@ export class AgentRunner {
   }
 
   /**
+   * Finishes a turn that was parked on a human when the process died.
+   *
+   * This is the one path allowed to re-enter a tool call rather than close
+   * it as interrupted, and the checkpoint is what earns that: approval
+   * happens strictly before execution, so a call carrying the record
+   * provably never started. `resume()`'s reconciliation must not run first
+   * — it would answer the parked call with "may not have run to
+   * completion" and strand the queue behind it.
+   *
+   * Returns undefined when the session is not parked, so a caller sweeping
+   * the store does not have to pre-filter.
+   */
+  async recoverPendingApproval(
+    sessionId: string,
+    options: {
+      /**
+       * Refuse the parked call without asking — its deadline passed while
+       * the process was down. The calls queued behind it were never asked
+       * about at all, so they still face the policy normally.
+       */
+      denyPending?: boolean;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<Session | undefined> {
+    const session = await this.store.get(sessionId);
+    if (!session) {
+      return undefined;
+    }
+    const record = readPendingApproval(session);
+    if (!record) {
+      return undefined;
+    }
+
+    const pending = record.call;
+    const remaining = record.remaining;
+
+    // The checkpoint deliberately stays put here. Clearing it before the
+    // recovered wait is durably re-established leaves a window in which the
+    // session reads as `running` with the approval still unanswered — a
+    // daemon that dies inside it is skipped by the next sweep, and the call
+    // is later closed as interrupted rather than recovered. Re-parking
+    // overwrites it; answering retires it, in the same save as the result.
+    if (options.denyPending) {
+      // Written exactly as executeToolCall would have written a refusal,
+      // so a turn denied by an expired deadline is indistinguishable
+      // downstream from one denied by a person — and the queue behind it
+      // still drains, leaving no `tool_use` without a `tool_result`.
+      const result: ToolResult = {
+        callId: pending.id,
+        toolName: pending.toolName,
+        ok: false,
+        output: null,
+        error: `Tool call denied by approval policy: ${pending.toolName}`,
+      };
+      await this.bus.emit({ type: 'tool.denied', sessionId: session.id, call: pending });
+      // Result and retirement in one write: a crash between them would
+      // either re-deny an answered call or lose the denial.
+      await this.recordToolResult(session, result);
+        return this.executeTurns(session, options.signal, { pending: undefined, remaining, turn: record.turn });
+    }
+
+    return this.executeTurns(session, options.signal, {
+      pending,
+      remaining,
+      parkedAt: record.parkedAt,
+      turn: record.turn,
+    });
+  }
+
+  /**
+   * Records one tool result — and, in the *same* save, retires the
+   * checkpoint if it was for this call.
+   *
+   * Two writes would leave a window where the result is durable and the
+   * record is not (a later sweep re-executes an answered call) or the other
+   * way round. Since a call with a recorded result is by definition no
+   * longer re-enterable, the two facts belong in one write.
+   */
+  private async recordToolResult(session: Session, result: ToolResult): Promise<void> {
+    session.messages.push({
+      id: `${session.id}:tool:${result.callId}`,
+      role: 'tool',
+      name: result.toolName,
+      content: JSON.stringify(result),
+      createdAt: new Date().toISOString(),
+      toolResult: result,
+    });
+
+    if (readPendingApproval(session)?.call.id === result.callId) {
+      const metadata = { ...(session.metadata ?? {}) };
+      delete metadata[PENDING_APPROVAL_METADATA_KEY];
+      session.metadata = metadata;
+      session.status = 'running';
+    }
+
+    await this.store.save(session);
+  }
+
+  /**
+   * Runs a response's tool calls in order, recording each result as it
+   * lands. Shared by the normal path and by recovery, so a resumed turn
+   * writes exactly what an uninterrupted one would.
+   */
+  private async runToolCalls(
+    session: Session,
+    calls: ToolCall[],
+    signal?: AbortSignal,
+    /**
+     * The original park time, when these calls come from a recovered turn.
+     * Applies to the first call only — it is the one that was already
+     * waiting; anything behind it has not been asked about yet.
+     */
+    parkedAt?: string,
+    turn = 1,
+  ): Promise<void> {
+    for (let index = 0; index < calls.length; index += 1) {
+      const call = calls[index]!;
+      throwIfAborted(signal);
+      const result = await this.executeToolCall(session, call, {
+        ...(signal ? { signal } : {}),
+        remaining: calls.slice(index + 1),
+        turn,
+        ...(index === 0 && parkedAt ? { parkedAt } : {}),
+      });
+
+      // The result lands immediately after execution, so side effects
+      // are never durable without their record.
+      await this.recordToolResult(session, result);
+    }
+  }
+
+  /**
    * Executes one tool call with this runner's allowlist, approval policy,
    * events, and executor — for providers that drive their own inner loop
    * (e.g. the Claude Code runtime) but must run Stratus tools exactly as
@@ -913,7 +1177,12 @@ export class AgentRunner {
     });
     await this.store.save(session);
 
-    const result = await this.executeToolCall(session, call, context?.signal);
+    // Not recoverable: this result is consumed by the hosting provider's
+    // own loop, which a restart cannot rebuild. See the option's docs.
+    const result = await this.executeToolCall(session, call, {
+      ...(context?.signal ? { signal: context.signal } : {}),
+      recoverable: false,
+    });
 
     session.messages.push({
       id: `${session.id}:tool:${result.callId}`,
@@ -928,7 +1197,71 @@ export class AgentRunner {
     return result;
   }
 
-  private async executeToolCall(session: Session, call: ToolCall, signal?: AbortSignal): Promise<ToolResult> {
+  /**
+   * Marks the turn parked, durably, for the window in which nothing has
+   * happened yet — and unmarks it the instant a decision arrives, before
+   * the tool runs. A crash inside that window is recoverable exactly; a
+   * crash outside it is not, and must stay indistinguishable from any other
+   * interrupted call.
+   */
+  private async checkpointPendingApproval(
+    session: Session,
+    record: PendingApprovalRecord | undefined,
+  ): Promise<void> {
+    const metadata = { ...(session.metadata ?? {}) };
+    if (record) {
+      metadata[PENDING_APPROVAL_METADATA_KEY] = record as unknown as JsonObject;
+    } else {
+      delete metadata[PENDING_APPROVAL_METADATA_KEY];
+    }
+    session.metadata = metadata;
+    session.status = record ? 'pending_approval' : 'running';
+    // Saved, not announced. The durable status exists so a restarting
+    // daemon can find this turn; live consumers already get
+    // tool.approval-requested and tool.approval-resolved, which say the
+    // same thing with the call and the risk attached. Emitting here would
+    // add two session.updated events to every gated call and tell nobody
+    // anything they were not told better.
+    await this.store.save(session);
+  }
+
+  private async executeToolCall(
+    session: Session,
+    call: ToolCall,
+    options: {
+      signal?: AbortSignal;
+      /**
+       * The calls queued behind this one in the same response. Recorded on
+       * the checkpoint so a recovering daemon can finish the response
+       * rather than leaving its later `tool_use` blocks unanswered.
+       */
+      remaining?: ToolCall[];
+      /**
+       * Whether a parked wait here is a checkpoint a restart may re-enter.
+       *
+       * False for a provider that drives its own inner loop. Recovery
+       * re-enters the *kernel* loop, which can only continue a turn whose
+       * next step is a kernel provider call — it cannot reconstruct an SDK
+       * inner loop or the handler that was waiting to consume this result.
+       * Checkpointing such a call would have a restart execute it and then
+       * continue from a state the hosting provider never produced. 04 makes
+       * that explicit: the SDK path is excluded from the resume-the-exact-
+       * call guarantee and must fail cleanly instead, with the pending call
+       * never executed. No checkpoint is exactly that failure — the call is
+       * closed as interrupted like any other dangling one.
+       */
+      recoverable?: boolean;
+      /**
+       * When this wait began, if it began before a restart. Preserved so a
+       * window is measured from the original park rather than restarted on
+       * every recovery.
+       */
+      parkedAt?: string;
+      /** The provider turn these calls came from, for the checkpoint. */
+      turn?: number;
+    } = {},
+  ): Promise<ToolResult> {
+    const { signal, remaining = [] } = options;
     // Every tool call settles with exactly one event — tool.completed
     // (executed or rejected, the result says which) or tool.denied. Event
     // consumers tracking a response's outstanding calls (the gateway's
@@ -960,13 +1293,42 @@ export class AgentRunner {
       return rejected(`Tool not found: ${call.toolName}`);
     }
 
-    const approved = await this.approvals.approve({
-      session,
-      call,
-      tool,
-      risk: resolveToolRisk(tool),
-      ...(signal ? { signal } : {}),
-    });
+    // Only a call that can actually be held for a human is checkpointed:
+    // a `safe` one is never asked about, and writing a record for it would
+    // add a save to every unattended call to describe a wait that does not
+    // happen.
+    const risk = resolveToolRisk(tool);
+    // Asked about either way — only whether the wait leaves a re-enterable
+    // checkpoint differs.
+    const checkpointed = risk !== 'safe' && options.recoverable !== false;
+    if (checkpointed) {
+      await this.checkpointPendingApproval(session, {
+        call,
+        remaining,
+        turn: options.turn ?? 1,
+        parkedAt: options.parkedAt ?? new Date().toISOString(),
+      });
+    }
+
+    let approved: boolean;
+    try {
+      approved = await this.approvals.approve({
+        session,
+        call,
+        tool,
+        risk,
+        ...(signal ? { signal } : {}),
+        ...(options.parkedAt ? { parkedAt: options.parkedAt } : {}),
+      });
+    } finally {
+      // Cleared before anything executes and on every exit — an abort that
+      // throws out of the policy must not leave the session looking parked
+      // on a question nobody is waiting for.
+      if (checkpointed) {
+        await this.checkpointPendingApproval(session, undefined);
+      }
+    }
+
     if (!approved) {
       await this.bus.emit({ type: 'tool.denied', sessionId: session.id, call });
       return {
