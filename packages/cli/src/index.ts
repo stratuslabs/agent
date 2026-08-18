@@ -3186,6 +3186,14 @@ export const runSetup = async (
       // taking the whole command down.
       rosterLoaded = false;
       warnOnce(error instanceof Error ? error.message : String(error));
+      // Nothing is offered, not merely the colliding pair. A roster that
+      // refuses to load fails `createGateway.start()` outright, so no
+      // agent is servable — not the built-in seeded above, and not the
+      // configured soul resolved below (which can itself BE one of the
+      // colliding files). Listing any of them invites connecting a Slack
+      // app to an agent the daemon cannot bring online, and connecting an
+      // app is the expensive half of that mistake.
+      return { entries: [], loaded: false };
     }
     entries.push(...rosterSouls);
 
@@ -3295,8 +3303,11 @@ export const runSetup = async (
       const orphans = rosterLoaded
         ? Object.keys(slack).filter((id) => !roster.some((entry) => entry.soul.agent.id === id))
         : [];
-      if (!rosterLoaded && Object.keys(slack).length > 0) {
-        writeLine(streams.stderr, 'Warning: not offering to clear unmatched Slack tokens while the roster is unreadable — fix the roster first.');
+      if (!rosterLoaded) {
+        writeLine(
+          streams.stderr,
+          'Warning: no agents are offered while the roster is unreadable — the daemon cannot start either. Fix the roster first.',
+        );
       }
       for (const id of orphans) {
         options.push(`${id}`.padEnd(34) + '! tokens without a matching agent');
@@ -4104,11 +4115,13 @@ export const collectDoctorReport = async (
   // Tokens keyed to an agent the roster no longer has are loaded and
   // skipped on every start, silently.
   let rosterEntries: RosterEntry[] = [];
+  let rosterLoaded = true;
   try {
     rosterEntries = await loadRosterSouls(env, warn);
   } catch (error) {
     // Doctor exists to name problems, so a roster it cannot load is a
     // finding to report — not an exception that replaces the report.
+    rosterLoaded = false;
     problems.push(error instanceof Error ? error.message : String(error));
   }
   const rosterIds = new Set(rosterEntries.map((entry) => entry.soul.agent.id));
@@ -4116,7 +4129,12 @@ export const collectDoctorReport = async (
   if (soul) {
     rosterIds.add(soul.agent.id);
   }
-  const orphans = slackAgents.filter((id) => !rosterIds.has(id));
+  // Only against a roster that actually loaded. "No agent has this id" is
+  // a claim about the roster, and a refused one cannot support it — every
+  // stored token would be reported as orphaned, and this advises clearing
+  // them. Advice is not deletion, but an operator who follows it loses the
+  // same credentials by hand.
+  const orphans = rosterLoaded ? slackAgents.filter((id) => !rosterIds.has(id)) : [];
   if (orphans.length > 0) {
     problems.push(
       `Slack tokens are stored for ${orphans.join(', ')}, which no agent matches — \`stratus serve\` skips them. `

@@ -384,8 +384,13 @@ is derived from the name.
 
 **Two souls cannot share an id.** That is not two agents; it is one agent
 whose memory and sign-ins belong to whichever file sorted first. The roster
-refuses to load and names both files, `stratus serve` will not start, and
-`stratus doctor` reports it. (An unreadable *single* soul still degrades to a
+refuses to load and names both files, `stratus serve` will not start,
+`stratus doctor` reports it, and `stratus setup` → Channels offers no
+agents at all — nothing is servable while the roster is ambiguous, so
+connecting a Slack app would configure something that cannot run. Neither
+command offers to clear "unmatched" Slack tokens in that state either: a
+roster that would not load cannot prove which ids are missing, and the
+tokens at risk belong to agents that are perfectly fine. (An unreadable *single* soul still degrades to a
 warning — one broken file never takes the team down. A collision has no
 correct winner, which is the difference.) The built-in `stratus` id is
 reserved: souls claiming it are skipped — including two of them, since

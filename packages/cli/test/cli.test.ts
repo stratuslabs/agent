@@ -5719,8 +5719,74 @@ test('a roster that will not load never offers to delete Slack tokens', async ()
   // because a different pair of files collided would destroy working
   // credentials over an unrelated mistake.
   assert.doesNotMatch(output.stdout, /tokens without a matching agent/);
-  assert.match(output.stderr, /not offering to clear unmatched Slack tokens/);
+  // Nothing is offered at all, not just the colliding pair: a roster that
+  // refuses to load fails `stratus serve` outright, so connecting a Slack
+  // app to any of these agents configures something that cannot run.
+  assert.doesNotMatch(output.stdout, /Ava \(ava\)/);
+  assert.match(output.stderr, /no agents are offered while the roster is unreadable/);
 
   const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
   assert.deepEqual(credentials.channels.slack.ava, { appToken: 'xapp-keep', botToken: 'xoxb-keep' });
+});
+
+test('a configured soul from a colliding pair is not offered a Slack app', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-soul-collide-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'a-first.md'), '---\nname: First\nid: twin\n---\n\nYou are First.\n');
+  await writeFile(path.join(agentsDir, 'b-second.md'), '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
+  // The configured default soul IS one of the colliding files, so the
+  // effective-soul path would reload and offer it even though the roster
+  // that contains it just refused.
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'demo', soul: path.join(agentsDir, 'a-first.md') }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['4\n', '1\n', '7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // `createGateway.start()` fails in loadRoster before it ever resolves a
+  // default soul, so offering this one would invite naming a Slack app for
+  // an agent the daemon cannot bring online.
+  assert.doesNotMatch(output.stdout, /First \(twin\)/);
+  assert.match(output.stderr, /no agents are offered while the roster is unreadable/);
+});
+
+test('doctor does not advise clearing tokens it cannot prove are orphaned', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-doctor-orphan-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'a-first.md'), '---\nname: First\nid: twin\n---\n\nYou are First.\n');
+  await writeFile(path.join(agentsDir, 'b-second.md'), '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-a', botToken: 'xoxb-a' } } } }),
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['doctor'],
+    streams,
+    env: { cwd: home, homeDir: home, processEnv: { STRATUS_PROVIDER: 'demo' } },
+  });
+
+  assert.equal(exitCode, 1);
+  // The collision is the finding. Ava's tokens are not — doctor advises,
+  // and an operator who follows advice to clear them loses good
+  // credentials just as surely as a delete would.
+  assert.match(output.stdout, /Two soul files declare the agent id twin/);
+  assert.doesNotMatch(output.stdout, /Slack tokens are stored for ava/);
 });
