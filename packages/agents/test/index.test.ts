@@ -401,6 +401,12 @@ test('parseSoul rejects malformed frontmatter with helpful errors', () => {
   assert.throws(() => parseSoul('---\nname: Ava\n'), /never closed/);
   assert.throws(() => parseSoul('---\nnickname: Av\n---\nHi'), /Unknown soul frontmatter key/);
   assert.throws(() => parseSoul('---\nname:\n---\nHi'), /has no value/);
+  // A blank id never falls through to a name-derived one: an id keys
+  // sessions, memory, and credentials, so an explicit-but-empty one is a
+  // mistake to surface, not a value to guess at.
+  assert.throws(() => parseSoul('---\nname: Ava\nid:\n---\nHi'), /"id" has no value/);
+  assert.throws(() => parseSoul('---\nname: Ava\nid: ""\n---\nHi'), /"id" has no value/);
+  assert.throws(() => parseSoul('---\nname: Ava\nid: "   "\n---\nHi'), /Invalid agent id/);
   assert.throws(() => parseSoul('---\n  - stray\n---\nHi'), /outside a list/);
   assert.throws(() => parseSoul('---\nnot a mapping\n---\nHi'), /key: value/);
 });
