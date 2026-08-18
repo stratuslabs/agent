@@ -16,6 +16,7 @@ import {
 } from '@stratusagent/core';
 import { createRememberTool, MEMORY_TOOL_NAME } from '@stratusagent/agents';
 import {
+  SDK_SESSION_METADATA_KEY,
   type ClaudeCodeQueryFn,
   type ClaudeCodeStreamMessage,
   type ClaudeCodeToolExecutor,
@@ -53,6 +54,8 @@ const AGENT: AgentDefinition = {
 const USER_MESSAGE = 'remember that I like short answers';
 const REMEMBERED = 'The user likes short answers.';
 const FINAL_TEXT = 'Noted — short answers from here on.';
+const FOLLOW_UP = 'what did I ask for?';
+const RECALLED = 'Short answers.';
 
 /**
  * A fresh session per provider-level assertion. Deliberately not shared:
@@ -72,6 +75,7 @@ const fallbackSession = (id: string): Session => ({
 
 /** What both paths must agree on, gathered from one scripted run. */
 interface Observed {
+  sdkSessionId: unknown;
   memory: MemoryEntry[];
   toolCalls: Array<{ toolName: string; input: unknown }>;
   toolResults: Array<{ toolName: string; ok: boolean }>;
@@ -113,7 +117,7 @@ const anthropicFetch = (): typeof fetch => {
         'tool_use',
       );
     }
-    return anthropicMessage([{ type: 'text', text: FINAL_TEXT }], 'end_turn');
+    return anthropicMessage([{ type: 'text', text: call === 2 ? FINAL_TEXT : RECALLED }], 'end_turn');
   }) as typeof fetch;
 };
 
@@ -129,8 +133,15 @@ const claudeCodeQuery = (): ClaudeCodeQueryFn => (params) => {
       instance?: { _registeredTools?: Record<string, { handler: (input: unknown, extra: unknown) => Promise<unknown> }> };
     }>;
   }).mcpServers;
+  const resume = (params.options as { resume?: string }).resume;
   return (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
-    yield { type: 'system', subtype: 'init' } as ClaudeCodeStreamMessage;
+    yield { type: 'system', subtype: 'init', session_id: SDK_SESSION_ID } as ClaudeCodeStreamMessage;
+    if (resume) {
+      // A resumed turn answers from the SDK's own history. Nothing is
+      // re-sent and no tool runs again.
+      yield { type: 'result', subtype: 'success', is_error: false, result: RECALLED, session_id: SDK_SESSION_ID } as ClaudeCodeStreamMessage;
+      return;
+    }
     // `memory.remember` reaches the SDK as `memory_remember`: the MCP name
     // charset has no dots, and the dotted original travels in the closure
     // so the kernel still sees its own naming.
@@ -138,12 +149,15 @@ const claudeCodeQuery = (): ClaudeCodeQueryFn => (params) => {
     const handler = registered.memory_remember?.handler;
     assert.ok(handler, `the memory tool was not bridged: ${JSON.stringify(Object.keys(registered))}`);
     await handler({ fact: REMEMBERED }, {});
-    yield { type: 'result', subtype: 'success', is_error: false, result: FINAL_TEXT } as ClaudeCodeStreamMessage;
+    yield { type: 'result', subtype: 'success', is_error: false, result: FINAL_TEXT, session_id: SDK_SESSION_ID } as ClaudeCodeStreamMessage;
   })();
 };
 
+const SDK_SESSION_ID = 'sdk-parity-1';
+
 const observe = async (
   build: (executeTool: ClaudeCodeToolExecutor) => ModelProvider,
+  followUp?: string,
 ): Promise<Observed> => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-parity-'));
   const memoryStore = createFileMemoryStore(path.join(home, 'memory.jsonl'));
@@ -171,11 +185,15 @@ const observe = async (
   runner = new AgentRunner({ provider, tools, bus, memory: memoryStore });
   await runner.initialize();
 
-  const session = await runner.run({
+  let session = await runner.run({
     sessionId: 'parity-1',
     agent: AGENT,
     userMessage: USER_MESSAGE,
   });
+
+  if (followUp !== undefined) {
+    session = await runner.resume({ sessionId: session.id, userMessage: followUp });
+  }
 
   const toolCalls: Observed['toolCalls'] = [];
   const toolResults: Observed['toolResults'] = [];
@@ -193,6 +211,7 @@ const observe = async (
   }
 
   return {
+    sdkSessionId: session.metadata?.[SDK_SESSION_METADATA_KEY],
     memory: await memoryStore.list(AGENT.id),
     toolCalls,
     toolResults,
@@ -416,4 +435,40 @@ test('a fallback naming its own transport is not overridden by the primary\'s', 
 
   // Not ['primary', 'primary']: the fallback used the one it named.
   assert.deepEqual(used, ['primary', 'fallback-own']);
+});
+
+test('a second turn lands identically, and the subscription path resumes rather than replays', async () => {
+  const apiKey = await observe((executeTool) => createRuntimeProvider(
+    { provider: 'anthropic', model: 'claude-opus-5', apiKey: 'sk-ant-test', fetch: anthropicFetch() },
+    undefined,
+    executeTool,
+  ), FOLLOW_UP);
+
+  const subscription = await observe((executeTool) => createRuntimeProvider(
+    { provider: 'anthropic', model: 'claude-opus-5', authToken: 'sk-ant-oat-test', queryFn: claudeCodeQuery() },
+    undefined,
+    executeTool,
+  ), FOLLOW_UP);
+
+  // The turn the user sees is the same one, and the fact written on turn
+  // one is still there — which is the point of the whole step: an agent
+  // that cannot carry a conversation is not the same agent.
+  assert.equal(subscription.finalText, apiKey.finalText);
+  assert.equal(apiKey.finalText, RECALLED);
+  assert.deepEqual(
+    subscription.memory.map((entry) => entry.content),
+    apiKey.memory.map((entry) => entry.content),
+  );
+  assert.equal(apiKey.memory.length, 1, 'the second turn must not remember twice');
+
+  // Neither path ran the tool again on the follow-up.
+  assert.deepEqual(subscription.toolCalls, apiKey.toolCalls);
+  assert.equal(apiKey.toolCalls.length, 1);
+
+  // Not parity — the two carry history differently by design, and this is
+  // the difference. The API-key path replays the transcript because the
+  // Messages API is stateless; the subscription path hands the SDK back
+  // its own session id and sends only the new message.
+  assert.equal(apiKey.sdkSessionId, undefined);
+  assert.equal(subscription.sdkSessionId, SDK_SESSION_ID);
 });

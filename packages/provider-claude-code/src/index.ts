@@ -179,6 +179,12 @@ export interface ClaudeCodeStreamMessage {
   subtype?: string;
   result?: string;
   is_error?: boolean;
+  /**
+   * The SDK's own session id, carried on every message it emits — the
+   * init system message, each assistant message, the result. Reading it
+   * needs no handshake; the first message that arrives has it.
+   */
+  session_id?: string;
 }
 
 export type ClaudeCodeQueryFn = (params: {
@@ -187,6 +193,13 @@ export type ClaudeCodeQueryFn = (params: {
 }) => AsyncIterable<ClaudeCodeStreamMessage>;
 
 export interface ClaudeCodeProviderConfig {
+  /**
+   * Called when a stored SDK session could not be resumed and the turn is
+   * about to replay the kernel's history into a fresh one instead. The
+   * conversation continues either way; this exists so a host can say so
+   * rather than leave a silently more expensive turn unexplained.
+   */
+  onResumeFailed?: (error: unknown) => void;
   /**
    * Claude Code setup token (`claude setup-token`) minted from a Pro/Max
    * subscription. Omit to use the machine's existing Claude Code sign-in.
@@ -262,6 +275,43 @@ const linkedAbortController = (signal: AbortSignal): AbortController => {
 
 // The Agent SDK takes a single prompt string per query, so multi-turn
 // sessions are rendered as a transcript with the latest user message last.
+/**
+ * Where a session records the SDK session it is continuing.
+ *
+ * The pairing is the whole point of resuming: the kernel's session id is
+ * ours and durable, the SDK's is its own and lives beside its transcript
+ * under `~/.claude/projects`. Storing the link in session metadata means
+ * it survives tool execution, approval waits, and a daemon restart, and
+ * is garbage-collected with the session — the same treatment the
+ * Anthropic provider gives its raw turns, for the same reasons.
+ */
+export const SDK_SESSION_METADATA_KEY = 'claudeCodeSessionId';
+
+const readSdkSessionId = (session: ProviderRequest['session']): string | undefined => {
+  const stored = session.metadata?.[SDK_SESSION_METADATA_KEY];
+  return typeof stored === 'string' && stored.length > 0 ? stored : undefined;
+};
+
+const rememberSdkSessionId = (session: ProviderRequest['session'], id: string): void => {
+  (session.metadata ??= {})[SDK_SESSION_METADATA_KEY] = id;
+};
+
+/**
+ * The newest user message, which is all a resumed session needs: the SDK
+ * is holding everything before it. Falls back to the full transcript when
+ * there is no user message to isolate, so a caller can never end up
+ * sending nothing.
+ */
+const createResumePrompt = (request: ProviderRequest): string => {
+  for (let index = request.session.messages.length - 1; index >= 0; index -= 1) {
+    const message = request.session.messages[index];
+    if (message?.role === 'user') {
+      return message.content;
+    }
+  }
+  return createPrompt(request);
+};
+
 const createPrompt = (request: ProviderRequest): string => {
   const conversational = request.session.messages.filter(
     (message) => message.role === 'user' || message.role === 'assistant' || message.role === 'tool',
@@ -318,6 +368,7 @@ export const createClaudeCodeProvider = ({
   pathToClaudeCodeExecutable,
   queryFn = sdkQuery as unknown as ClaudeCodeQueryFn,
   idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
+  onResumeFailed,
 }: ClaudeCodeProviderConfig = {}): ModelProvider => ({
   name,
   async generate(request: ProviderRequest) {
@@ -418,10 +469,25 @@ export const createClaudeCodeProvider = ({
 
     let resultText: string | undefined;
 
-    try {
+    // Resume the SDK's own session when this conversation already has one.
+    // The alternative — replaying a flattened transcript every turn — re-
+    // sends the whole history on each request and leaves the SDK no way to
+    // carry state of its own between turns.
+    const resumeId = readSdkSessionId(request.session);
+    const attempt = async (resume: string | undefined): Promise<void> => {
+      const attemptOptions: Options = { ...options, ...(resume ? { resume } : {}) };
       resetIdleTimer();
-      for await (const message of queryFn({ prompt: createPrompt(request), options })) {
+      for await (const message of queryFn({
+        prompt: resume ? createResumePrompt(request) : createPrompt(request),
+        options: attemptOptions,
+      })) {
         resetIdleTimer();
+        // Every message carries it, so the id is captured whether the turn
+        // succeeds or not — a session that fails mid-turn is still the
+        // session the next turn should continue.
+        if (message.session_id) {
+          rememberSdkSessionId(request.session, message.session_id);
+        }
         if (message.type !== 'result') {
           continue;
         }
@@ -432,6 +498,28 @@ export const createClaudeCodeProvider = ({
         throw new Error(
           `Claude Code run failed (${message.subtype ?? 'unknown error'})${message.result ? `: ${message.result}` : ''}`,
         );
+      }
+    };
+
+    try {
+      try {
+        await attempt(resumeId);
+      } catch (error) {
+        // A stored id the SDK no longer has — the transcript was cleared,
+        // or the session was made on another machine — must not strand the
+        // conversation. Start a fresh SDK session and replay the kernel's
+        // history into it, which is what this provider did before resume
+        // existed and is still correct, just costlier.
+        //
+        // Only when nothing has run yet. Once a hosted tool has executed,
+        // its side effects are real and already recorded, so replaying the
+        // turn would do them twice — the same rule the fallback provider
+        // follows, for the same reason.
+        if (resumeId === undefined || hostedToolRuns > 0 || controller.signal.aborted) {
+          throw error;
+        }
+        onResumeFailed?.(error);
+        await attempt(undefined);
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
