@@ -8,6 +8,10 @@ Real capabilities as optional packages — filesystem, shell, and browser tools 
 
 The permission engine (03) exists precisely so agents can be trusted with these, and an agent's usefulness is bounded by its tools. Existing work to fold in: `stratuslabs/tool-browser` and `stratuslabs/tool-screenshot`.
 
+**Inherited from [03](./03-permissions.md): the command-scope allowlist.** 03 shipped the risk model and the `headless` / `interactive` modes, but deliberately left the shell-command machinery unbuilt — safe `git` scopes with flag and refspec constraints, control-operator defeat, and the persistent per-agent whitelist at `~/.stratus/agents/<id>.whitelist.json`. It has no caller until `shell.run` exists: every tool in the repo today is fixed-argv, so a parser and a scope format written earlier would have been shaped by guesses about this pack rather than by it.
+
+That work lands here, with `@stratusagent/tool-shell`, where each rule can be tested against real invocations. The design is specified in 03 and does not need re-deriving; what this step adds is the consumer and the evidence. Until it exists, `shell.run` in a daemon is refused rather than narrowed — every gated call needs a human, which is the honest behavior but not a usable one for a shell.
+
 ## Scope
 
 **In:**
