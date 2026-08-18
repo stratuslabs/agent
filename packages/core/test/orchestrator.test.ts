@@ -158,6 +158,81 @@ test('plugins can register tools before a run', async () => {
   assert.equal(tools.get('ping')?.name, 'ping');
 });
 
+test('the approval policy is handed the resolved tool and its risk', async () => {
+  const seen: Array<{ toolName: string; risk: string; declared: string | undefined }> = [];
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'safe.read',
+    risk: 'safe',
+    async execute() {
+      return { ok: true };
+    },
+  });
+  // No risk declared. A policy must see this as gated, not safe: forgetting
+  // to classify a tool should cost a prompt, never an unattended run.
+  tools.register({
+    name: 'unclassified',
+    async execute() {
+      return { ok: true };
+    },
+  });
+
+  const calls = [
+    { id: 'call-a', toolName: 'safe.read', input: {} },
+    { id: 'call-b', toolName: 'unclassified', input: {} },
+    // Nothing registered under this name: it must never reach the policy,
+    // since asking a human to approve a tool that does not exist is noise.
+    { id: 'call-c', toolName: 'ghost.tool', input: {} },
+  ];
+
+  const provider: ModelProvider = {
+    name: 'risk-provider',
+    async generate() {
+      const next = calls.shift();
+      if (!next) {
+        return { parts: [{ type: 'text', text: 'done' }] };
+      }
+      return { parts: [{ type: 'tool-call', call: next }] };
+    },
+  };
+
+  const runner = new AgentRunner({
+    provider,
+    tools,
+    bus: new EventBus(),
+    maxTurns: 8,
+    approvals: {
+      async approve({ call, tool, risk }) {
+        seen.push({ toolName: call.toolName, risk, declared: tool.risk });
+        return true;
+      },
+    },
+  });
+
+  const session = await runner.run({
+    sessionId: 'risk-session',
+    agent: { id: 'risk-agent', name: 'Risk Agent' },
+    userMessage: 'use the tools',
+  });
+
+  assert.equal(session.status, 'completed');
+  assert.deepEqual(seen, [
+    { toolName: 'safe.read', risk: 'safe', declared: 'safe' },
+    { toolName: 'unclassified', risk: 'gated', declared: undefined },
+  ]);
+});
+
+test('advertised tool descriptors carry the resolved risk', () => {
+  const tools = new ToolRegistry();
+  tools.register({ name: 'safe.read', risk: 'safe', async execute() { return null; } });
+  tools.register({ name: 'unclassified', async execute() { return null; } });
+
+  assert.deepEqual(
+    tools.describe().map((descriptor) => [descriptor.name, descriptor.risk]),
+    [['safe.read', 'safe'], ['unclassified', 'gated']],
+  );
+});
+
 test('denied tool calls are fed back to the provider instead of failing the session', async () => {
   const events: StratusEvent[] = [];
   const bus = new EventBus();

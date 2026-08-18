@@ -328,6 +328,8 @@ export const MEMORY_TOOL_NAME = 'memory.remember';
 export const createRememberTool = (store: AgentMemoryStore): Tool => ({
   name: MEMORY_TOOL_NAME,
   description: 'Save a fact to your long-term memory so you can recall it in future conversations on any channel.',
+  // The agent's own memory, keyed to the agent and read by nobody else.
+  risk: 'safe',
   parameters: {
     type: 'object',
     properties: {
@@ -392,6 +394,10 @@ export const createDelegateTool = ({
   return {
   name: DELEGATE_TOOL_NAME,
   description: 'Delegate a task to another agent by name and get their reply back.',
+  // Handing work to a teammate is the point of a fleet, and it is not a
+  // hole: the delegate's own tool calls face the policy again, under the
+  // delegate's allowlist, and delegationDepth bounds the chain.
+  risk: 'safe',
   parameters: {
     type: 'object',
     properties: {

@@ -1,0 +1,47 @@
+{
+  "name": "@stratusagent/permissions",
+  "version": "0.3.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types"
+  },
+  "engines": {
+    "node": ">=22.13 <23 || >=23.4"
+  },
+  "dependencies": {
+    "@stratusagent/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/permissions"
+  },
+  "description": "The Stratus Agent permission engine: what a tool call may do unattended, what needs a human, and what is refused outright",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "permissions"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

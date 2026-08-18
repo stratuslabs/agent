@@ -7,7 +7,7 @@ You can talk to an agent in the terminal, run your whole roster as an always-on 
 ## What it includes
 
 Installing the CLI (`npm install -g @stratusagent/cli`) brings the whole
-runtime with it — these ten packages are what you get, and you never install
+runtime with it — these eleven packages are what you get, and you never install
 them individually:
 
 - `@stratusagent/cli`, the `stratus` command: setup, chat, one-shot runs, the gateway, the dashboard
@@ -15,6 +15,7 @@ them individually:
 - `@stratusagent/agents`, agent identities, souls, memory, delegation, and routing
 - `@stratusagent/state`, shared state wiring: config resolution, credentials, the soul roster, file memory, provider construction
 - `@stratusagent/gateway`, stratusd — the always-on gateway with durable SQLite sessions and a per-provider runner pool
+- `@stratusagent/permissions`, the policy layer deciding what a tool call may do unattended, what needs a human, and what is refused
 - `@stratusagent/providers`, helpers for building model providers
 - `@stratusagent/provider-anthropic`, the Claude provider on the official Anthropic SDK
 - `@stratusagent/provider-claude-code`, the Claude subscription runtime on the Claude Agent SDK
@@ -341,6 +342,7 @@ packages/
   executor-local/
   executors/
   gateway/
+  permissions/
   provider-anthropic/
   provider-claude-code/
   providers/

@@ -130,10 +130,36 @@ export type ProviderDelta =
   | { type: 'thinking' }
   | { type: 'reset' };
 
+/**
+ * How much damage an invocation of this tool could do, coarse on purpose:
+ * a policy needs to separate "let it run unattended" from "a human decides"
+ * without understanding what any particular tool does.
+ *
+ * - `safe` — reversible and contained: reads, and writes the agent already
+ *   owns (its own memory).
+ * - `gated` — a human should decide when nobody is watching: anything that
+ *   reaches outside the agent, spends money, or writes where others read.
+ * - `dangerous` — destructive or hard to undo.
+ *
+ * Undeclared is not `safe`. `resolveToolRisk` treats a missing risk as
+ * `gated`, so a tool added without thinking about this is held back rather
+ * than waved through — the failure mode of forgetting should be a prompt,
+ * not an unattended shell command.
+ */
+export type ToolRisk = 'safe' | 'gated' | 'dangerous';
+
+export const DEFAULT_TOOL_RISK: ToolRisk = 'gated';
+
+/** The declared risk, or the fail-closed default for a tool that omits it. */
+export const resolveToolRisk = (tool: Pick<Tool, 'risk'> | undefined): ToolRisk =>
+  tool?.risk ?? DEFAULT_TOOL_RISK;
+
 export interface ToolDescriptor {
   name: string;
   description?: string;
   parameters?: JsonObject;
+  /** Carried so providers hosting their own loop can see it too. */
+  risk?: ToolRisk;
 }
 
 /**
@@ -264,6 +290,8 @@ export interface Tool {
   description?: string;
   /** JSON Schema describing the tool's input, advertised to model providers. */
   parameters?: JsonObject;
+  /** See ToolRisk. Omitted means `gated`, never `safe`. */
+  risk?: ToolRisk;
   execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue>;
 }
 
@@ -274,6 +302,14 @@ export interface Executor {
 export interface ApprovalContext {
   session: Session;
   call: ToolCall;
+  /**
+   * The resolved tool, and the risk the policy should judge by. A call name
+   * alone cannot classify an invocation — the policy would have to guess
+   * from a string — so the runner resolves the tool before asking, and a
+   * call naming no registered tool never reaches a policy at all.
+   */
+  tool: Tool;
+  risk: ToolRisk;
   /**
    * The turn's abort signal. A policy that waits on a human MUST observe it:
    * an aborted turn rejects the in-flight wait and invalidates its pending
@@ -418,6 +454,7 @@ export class ToolRegistry {
       name: tool.name,
       ...(tool.description ? { description: tool.description } : {}),
       ...(tool.parameters ? { parameters: tool.parameters } : {}),
+      risk: resolveToolRisk(tool),
     }));
   }
 }
@@ -840,7 +877,23 @@ export class AgentRunner {
       return rejected(`Tool not permitted for agent ${session.agent.id}: ${call.toolName}`);
     }
 
-    const approved = await this.approvals.approve({ session, call, ...(signal ? { signal } : {}) });
+    // Resolved before the policy is asked, not after: a policy classifies
+    // an invocation by the tool's declared risk, and a call name is not
+    // enough to look that up on the policy's side. It also stops an unknown
+    // tool from reaching a human — a call naming nothing registered is a
+    // model mistake, and prompting someone to approve it is noise.
+    const tool = this.tools.get(call.toolName);
+    if (!tool) {
+      return rejected(`Tool not found: ${call.toolName}`);
+    }
+
+    const approved = await this.approvals.approve({
+      session,
+      call,
+      tool,
+      risk: resolveToolRisk(tool),
+      ...(signal ? { signal } : {}),
+    });
     if (!approved) {
       await this.bus.emit({ type: 'tool.denied', sessionId: session.id, call });
       return {
@@ -850,11 +903,6 @@ export class AgentRunner {
         output: null,
         error: `Tool call denied by approval policy: ${call.toolName}`,
       };
-    }
-
-    const tool = this.tools.get(call.toolName);
-    if (!tool) {
-      return rejected(`Tool not found: ${call.toolName}`);
     }
 
     throwIfAborted(signal);

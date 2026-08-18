@@ -14,6 +14,7 @@ import type {
   Tool,
   ToolCall,
   ToolResult,
+  ToolRisk,
 } from '@stratusagent/core';
 import {
   createDirectExecutor,
@@ -62,6 +63,8 @@ export interface LocalCommandToolDefinition {
   name: string;
   description?: string;
   parameters?: JsonObject;
+  /** See ToolRisk in @stratusagent/core. Omitted means `gated`. */
+  risk?: ToolRisk;
   createCommand(input: ToolCall['input'], session: Session): LocalCommandInvocation | Promise<LocalCommandInvocation>;
   parseResult?(result: LocalCommandExecution, context: LocalCommandContext): JsonValue | Promise<JsonValue>;
 }
@@ -86,12 +89,16 @@ export const defineLocalCommandTool = ({
   name,
   description,
   parameters,
+  risk,
   createCommand,
   parseResult,
 }: LocalCommandToolDefinition): LocalCommandTool => ({
   name,
   ...(description ? { description } : {}),
   ...(parameters ? { parameters } : {}),
+  // Forwarded, not dropped: this factory makes the tools that spawn
+  // processes, so it is the last place a declared risk should go missing.
+  ...(risk ? { risk } : {}),
   runtime: 'local-command',
   createCommand,
   ...(parseResult ? { parseResult } : {}),
