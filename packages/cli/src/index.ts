@@ -75,6 +75,7 @@ import {
   DEFAULT_CONFIG_FILENAME,
   LEGACY_CONFIG_FILENAME,
   loadConfigFile,
+  resolveConfigLocation,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
   saveChannelCredentials,
   saveCredentials,
@@ -4359,13 +4360,19 @@ export const runService = async (
     // A config the daemon cannot parse kills it during gateway.start(),
     // and the manager — having accepted the start — restarts it on a
     // loop. Better to refuse now, while there is someone reading stderr.
-    if (selectedConfig) {
-      const resolvedConfig = path.resolve(readWorkingDirectory(env), String(selectedConfig));
+    // Without an explicit selection the unit carries no --config flag and
+    // discovers from its working directory — the same directory this is
+    // running in — so the discovered file has to be validated too, not
+    // just an explicitly named one.
+    const configToCheck = selectedConfig
+      ? path.resolve(readWorkingDirectory(env), String(selectedConfig))
+      : await resolveConfigLocation({}, env).then((location) => location?.path).catch(() => undefined);
+    if (configToCheck) {
       try {
-        await loadConfigFile(resolvedConfig);
+        await loadConfigFile(configToCheck);
       } catch (error) {
-        writeLine(streams.stderr, `Not installing: ${resolvedConfig} cannot be used (${error instanceof Error ? error.message : String(error)}).`);
-        writeLine(streams.stderr, 'The daemon would exit on startup and be restarted in a loop. Fix the file, or install without --config.');
+        writeLine(streams.stderr, `Not installing: ${configToCheck} cannot be used (${error instanceof Error ? error.message : String(error)}).`);
+        writeLine(streams.stderr, 'The daemon would exit on startup and be restarted in a loop. Fix the file, or move it aside.');
         return 1;
       }
     }

@@ -4575,7 +4575,9 @@ test('the managed daemon is pinned to the config setup wrote', async () => {
   // there would find a different config entirely — the daemon would come up
   // on the wrong roster and leave configured Slack agents offline.
   const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
-  assert.match(unit, /"serve" "--config" "[^"]*custom\.json"/);
+  // --no-events sits between them: the managed daemon keeps stdout to
+  // lifecycle lines, since launchd's redirect file is never rotated.
+  assert.match(unit, /"serve" "--no-events" "--config" "[^"]*custom\.json"/);
 });
 
 test('service install can pin the daemon to a config of its own', async () => {
@@ -5321,4 +5323,46 @@ test('an unanswerable enablement is reported as unknown, not as no', async () =>
   // Stopping must not claim it will never come back either.
   const stopped = await stopService({ platform: 'linux', homeDir: home, run: brokenBus });
   assert.ok(stopped.messages.some((message) => /could not be determined/.test(message)), stopped.messages.join(' '));
+});
+
+test('the managed daemon does not duplicate the event stream to an unrotated file', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await installService({
+    platform: 'darwin',
+    homeDir: home,
+    uid: 501,
+    run: async () => ({ code: 0, stdout: '', stderr: '' }),
+  });
+
+  const plist = await readFile(path.join(home, 'Library', 'LaunchAgents', 'com.stratusagent.stratusd.plist'), 'utf8');
+  // launchd holds StandardOutPath open and never rotates it, so an event
+  // line per Slack dispatch would grow that file for the daemon's whole
+  // lifetime. Those lines are already in ~/.stratus/logs, which rotates.
+  assert.match(plist, /<string>--no-events<\/string>/);
+  assert.match(plist, /stratusd\.out\.log/);
+});
+
+test('service install refuses a malformed config it would have discovered', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  // No --config, so the unit carries no flag and discovers from this very
+  // directory once it runs. A broken file here breaks every dispatch.
+  await writeFile(path.join(project, 'stratus.config.json'), '{ broken');
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['service', 'install'],
+    streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+    },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.deepEqual(calls, []);
+  assert.match(output.stderr, /cannot be used/);
 });

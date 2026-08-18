@@ -158,6 +158,13 @@ export const serviceDefinition = (
     env.execPath ?? process.execPath,
     env.scriptPath ?? process.argv[1] ?? 'stratus',
     'serve',
+    // launchd redirects stdout to a plain file it holds open, and nothing
+    // rotates it — a daemon printing an event line per Slack dispatch
+    // would grow that file for its whole lifetime. Every one of those
+    // lines is already in ~/.stratus/logs, which DOES rotate and is what
+    // `stratus logs` reads, so the managed process keeps stdout to
+    // lifecycle and warnings instead of duplicating the stream.
+    '--no-events',
     ...(configPath ? ['--config', configPath] : []),
   ],
   logDir: path.join(homeOf(env), '.stratus', 'logs'),
