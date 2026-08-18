@@ -76,6 +76,7 @@ import {
   parseProviderName,
   readNonEmptyString,
   readProcessEnv,
+  resolveConfiguredSoul,
   logsDirPath,
   readWorkingDirectory,
   resolveAgentApprovals,
@@ -2326,24 +2327,39 @@ const KNOWN_CLAUDE_MODELS = [
 ];
 
 /**
- * The ids a newly created soul must not claim: every id the roster
- * declares, plus the reserved built-in one.
+ * The ids a newly created soul must not claim: every id the served roster
+ * holds, which is three things and not one directory.
  *
- * A filename is not an id. A soul at `renamed.md` may declare `id: ava`,
- * so `ava.md` being free proves nothing — and since a duplicate id now
- * refuses the whole roster, writing one would hand back an agent whose
- * daemon cannot start. `stratus` is included because a soul claiming the
- * built-in id is skipped at load, so writing one creates an agent that
- * silently never appears.
+ * - **What the roster files declare.** A filename is not an id: a soul at
+ *   `renamed.md` may declare `id: ava`, so `ava.md` being free proves
+ *   nothing — and since a duplicate refuses the whole roster, writing one
+ *   would hand back an agent whose daemon cannot start.
+ * - **The configured default soul**, which the daemon registers whether or
+ *   not its file lives in the agents directory. It wins a same-id contest
+ *   with a roster file — `defaultAgentId` replaces the source when the
+ *   path differs — so a new agent sharing its id is not refused, it is
+ *   shadowed: created, then undispatchable by id or from Slack, with
+ *   nothing saying so.
+ * - **The reserved `stratus`**, since a roster soul claiming it is skipped
+ *   at load, so writing one creates an agent that silently never appears.
  *
- * `undefined` means the roster could not be read, which is not the same
+ * `undefined` means the answer could not be read, which is not the same
  * as nothing being taken. Creating an agent is never blocked on it — the
  * caller says so instead, rather than implying a check that did not run.
  */
 const declaredAgentIds = async (env: CliEnvironment): Promise<Set<string> | undefined> => {
   try {
-    const entries = await loadRosterSouls(env, () => {});
-    return new Set([DEFAULT_STRATUS_AGENT.id, ...entries.map((entry) => entry.soul.agent.id)]);
+    const [entries, configured] = await Promise.all([
+      loadRosterSouls(env, () => {}),
+      // Empty selection: the soul a run started here would resolve, by the
+      // same precedence the daemon uses — never a second reading of it.
+      resolveConfiguredSoul({}, env),
+    ]);
+    return new Set([
+      DEFAULT_STRATUS_AGENT.id,
+      ...entries.map((entry) => entry.soul.agent.id),
+      ...(configured ? [configured.soul.agent.id] : []),
+    ]);
   } catch {
     return undefined;
   }

@@ -1945,6 +1945,45 @@ test('creating an agent never claims an id another soul already declares', async
   assert.deepEqual(roster.map((entry) => entry.soul.agent.id).sort(), ['ava', written[0]?.replace(/\.md$/, '')]);
 });
 
+test('creating an agent never claims the configured soul\'s id', async () => {
+  const { loadRosterSouls } = await import('@stratusagent/state');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The configured soul is part of the served roster even though its file
+  // is nowhere near the agents directory — and it WINS a same-id contest
+  // with a roster file, so a new agent sharing its id is not refused, it
+  // is shadowed.
+  const configuredPath = path.join(home, 'elsewhere.md');
+  await writeFile(configuredPath, '---\nname: Ava\nid: ava\n---\n\nThe configured Ava.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'demo', soul: configuredPath }),
+  );
+
+  const { streams } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '7\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  const written = await readdir(path.join(home, '.stratus', 'agents'));
+  assert.equal(written.length, 1, `agents dir held ${JSON.stringify(written)}`);
+  assert.match(written[0] ?? '', /^ava-[a-z0-9]+\.md$/);
+
+  // Both are dispatchable: the roster one by its own id, the configured
+  // one still answering as `ava`.
+  const roster = await loadRosterSouls({ homeDir: home });
+  assert.deepEqual(roster.map((entry) => entry.soul.agent.id), [written[0]?.replace(/\.md$/, '')]);
+});
+
 test('creating an agent never claims the reserved built-in id', async () => {
   const { loadRosterSouls } = await import('@stratusagent/state');
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
