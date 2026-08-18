@@ -4426,9 +4426,13 @@ test('the systemd unit restarts on failure and enables at login', async () => {
   // serve drains on SIGTERM, so systemd must send it and wait.
   assert.match(unit, /KillSignal=SIGTERM/);
   assert.match(unit, /WantedBy=default\.target/);
+  // The restart is not redundant: `enable --now` no-ops on an already
+  // active unit, so a rerun would leave the old process — and its old
+  // config path — running while reporting the new unit as installed.
   assert.deepEqual(calls, [
     'systemctl --user daemon-reload',
     'systemctl --user enable --now stratusd.service',
+    'systemctl --user restart stratusd.service',
   ]);
 });
 
@@ -4628,6 +4632,7 @@ test('reinstalling with --no-login clears an existing systemd enablement', async
     'systemctl --user daemon-reload',
     'systemctl --user disable stratusd.service',
     'systemctl --user start stratusd.service',
+    'systemctl --user restart stratusd.service',
   ]);
 });
 
@@ -4691,4 +4696,107 @@ test('uninstall still cleans up a unit the manager never loaded', async () => {
 
   assert.equal(result.ok, true);
   assert.equal(await readFile(unitPath, 'utf8').catch(() => undefined), undefined);
+});
+
+test('the unit runs where it was installed, so relative config paths still work', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+
+  await runCli({
+    argv: ['service', 'install'],
+    streams: createStreams().streams,
+    env: { cwd: project, homeDir: home, processEnv: {}, serviceRunner: stubServiceRunner },
+  });
+
+  // A config's `soul` resolves against the process working directory, so
+  // forcing the home directory would make the service load a different —
+  // or missing — soul than `stratus serve` does from the same project.
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  assert.match(unit, new RegExp(`WorkingDirectory=${project}`));
+});
+
+test('a failed disable stops --no-login claiming the login trigger is gone', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const result = await installService(
+    {
+      platform: 'linux',
+      homeDir: home,
+      run: async (_command, args) => (args.includes('disable')
+        ? { code: 1, stdout: '', stderr: 'Failed to disable: permission denied' }
+        : { code: 0, stdout: '', stderr: '' }),
+    },
+    { runAtLogin: false },
+  );
+
+  assert.equal(result.ok, false);
+  assert.ok(result.messages.some((message) => /Could not remove the login trigger/.test(message)));
+  assert.ok(!result.messages.some((message) => /will not start automatically/.test(message)));
+});
+
+test('a unit that was never enabled is not treated as a failed disable', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const result = await installService(
+    {
+      platform: 'linux',
+      homeDir: home,
+      run: async (_command, args) => (args.includes('disable')
+        ? { code: 1, stdout: '', stderr: 'Unit stratusd.service is not enabled' }
+        : { code: 0, stdout: '', stderr: '' }),
+    },
+    { runAtLogin: false },
+  );
+
+  assert.equal(result.ok, true);
+});
+
+test('setup will not install a service that cannot see your credential', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      // Authenticated only by this shell: launchd and systemd start with
+      // their own environment and never source a profile, so the daemon
+      // would fail every dispatch minutes after setup said it was ready.
+      processEnv: { ANTHROPIC_API_KEY: 'sk-ant-shell-only' },
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  assert.deepEqual(calls, [], 'nothing should be handed to the service manager');
+  assert.match(output.stderr, /your API key comes from ANTHROPIC_API_KEY in this shell/);
+  assert.match(output.stderr, /Sign in from Providers/);
+});
+
+test('a stored sign-in installs the service as usual', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+
+  const calls: string[] = [];
+  await runCli({
+    argv: ['setup'],
+    streams: createStreams().streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  assert.ok(calls.some((call) => /enable --now/.test(call)), calls.join(', '));
 });

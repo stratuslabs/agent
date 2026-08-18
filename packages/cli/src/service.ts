@@ -29,6 +29,8 @@ export type ServiceRunner = (command: string, args: string[]) => Promise<Service
 export interface ServiceEnvironment {
   platform?: NodeJS.Platform;
   homeDir?: string;
+  /** Directory the install ran from; becomes the unit's working directory. */
+  cwd?: string;
   /** Absolute path of the node binary that should run the daemon. */
   execPath?: string;
   /** Absolute path of the CLI entrypoint (bin.js). */
@@ -143,7 +145,12 @@ export const serviceDefinition = (
     ...(configPath ? ['--config', configPath] : []),
   ],
   logDir: path.join(homeOf(env), '.stratus', 'logs'),
-  workingDirectory: homeOf(env),
+  // Where the install ran, not the home directory: a config's `soul` (and
+  // any other relative path in it) resolves against the process working
+  // directory, so forcing home would make the service load a different —
+  // or missing — soul than `stratus serve --config …` does from the same
+  // project. Falls back to home when there is nothing better.
+  workingDirectory: env.cwd ?? homeOf(env),
   runAtLogin,
 });
 
@@ -302,12 +309,28 @@ export const installService = async (
   }
   if (!runAtLogin) {
     // A prior `install` left an enablement symlink; `start` alone would
-    // leave it in place and the unit would keep starting at login.
-    await run('systemctl', ['--user', 'disable', SYSTEMD_UNIT]);
+    // leave it in place and the unit would keep starting at login. A
+    // failure here has to stop us claiming otherwise.
+    const disable = await run('systemctl', ['--user', 'disable', SYSTEMD_UNIT]);
+    const notEnabled = /not (?:enabled|found)|No such file/i.test(`${disable.stderr} ${disable.stdout}`);
+    if (disable.code !== 0 && !notEnabled) {
+      return {
+        ok: false,
+        messages: [...messages, `Could not remove the login trigger: ${disable.stderr.trim() || disable.stdout.trim()}`],
+      };
+    }
   }
   const enable = await run('systemctl', ['--user', ...(runAtLogin ? ['enable', '--now'] : ['start']), SYSTEMD_UNIT]);
   if (enable.code !== 0) {
     return { ok: false, messages: [...messages, `systemctl failed: ${enable.stderr.trim()}`] };
+  }
+  // `enable --now` and `start` both no-op on an already-active unit, so a
+  // rerun would report the new argv as installed while the old process —
+  // with the old config path — kept running. launchd needs no equivalent:
+  // bootout + bootstrap replaces the job outright.
+  const restart = await run('systemctl', ['--user', 'restart', SYSTEMD_UNIT]);
+  if (restart.code !== 0) {
+    return { ok: false, messages: [...messages, `systemctl restart failed: ${restart.stderr.trim() || restart.stdout.trim()}`] };
   }
   messages.push(runAtLogin
     ? 'stratusd is running, and will start again when you log in.'

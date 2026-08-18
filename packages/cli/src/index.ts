@@ -3362,7 +3362,13 @@ export const runSetup = async (
     // were just written rather than the ones it would have found a moment
     // ago. A service failure is reported and never fails setup: the
     // settings are already saved, and `stratus serve` still works by hand.
-    if (state.service.install && servicePlatform(serviceEnvFor(env))) {
+    const shellOnly = state.service.install ? await shellOnlyCredential(env) : undefined;
+    if (shellOnly) {
+      // Installing here would produce a daemon that fails every dispatch on
+      // a missing key, minutes after setup said it was ready.
+      writeLine(streams.stderr, `Not installing the always-on service: your API key comes from ${shellOnly} in this shell, and a background service never sees it.`);
+      writeLine(streams.stderr, 'Sign in from Providers so the key is stored, then run `stratus service install`.');
+    } else if (state.service.install && servicePlatform(serviceEnvFor(env))) {
       // The unit is pinned to the file setup just wrote. Its working
       // directory is the home directory, so discovery from there would
       // find a different config whenever setup was run with --config or
@@ -4112,8 +4118,24 @@ export const runLogs = async (
 /** Builds the service view of the CLI environment (home, exec paths, runner). */
 const serviceEnvFor = (env: CliEnvironment): ServiceEnvironment => ({
   ...(env.homeDir !== undefined ? { homeDir: env.homeDir } : {}),
+  cwd: readWorkingDirectory(env),
   ...(env.serviceRunner !== undefined ? { run: env.serviceRunner } : {}),
 });
+
+/**
+ * A credential that exists only in this shell cannot reach the daemon: a
+ * service manager starts with its own environment and never sources a
+ * profile, so the unit would come up unauthenticated while setup had just
+ * reported everything ready. Returns the variable to name, if so.
+ */
+const shellOnlyCredential = async (env: CliEnvironment): Promise<string | undefined> => {
+  const runtime = await resolveStateRuntimeConfig({}, env).catch(() => undefined);
+  if (!runtime || runtime.provider === 'demo' || !runtime.apiKeyEnvVar) {
+    return undefined;
+  }
+  const stored = (await loadCredentials(env))[runtime.provider];
+  return stored ? undefined : runtime.apiKeyEnvVar;
+};
 
 /**
  * `stratus service` — run the daemon under launchd or systemd, so it
