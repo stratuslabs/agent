@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import {
   createFileMemoryStore,
   unsupportedNodeMessage,
+  CLI_VERSION,
   createLogWriter,
   currentLogPosition,
   truncateRedirectLogs,
@@ -59,6 +60,22 @@ const createStreams = () => {
     },
   };
 };
+
+test('the version the CLI reports is the version it was published as', async () => {
+  // CLI_VERSION is a second copy of a number that lives in package.json,
+  // and it is the one people see: the setup header draws it and the
+  // dashboard serves it from /api/status. A release bumps the manifest;
+  // nothing makes it bump the constant, and nothing fails if it does not.
+  const manifest = JSON.parse(
+    await readFile(new URL('../package.json', import.meta.url), 'utf8'),
+  ) as { version: string };
+
+  assert.equal(
+    CLI_VERSION,
+    manifest.version,
+    'CLI_VERSION drifted from package.json — the CLI would report a version it is not',
+  );
+});
 
 test('the CLI refuses Node versions below the floor its manifests declare', () => {
   // The failure this replaces is an ERR_UNKNOWN_BUILTIN_MODULE for

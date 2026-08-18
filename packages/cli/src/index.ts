@@ -292,7 +292,11 @@ export interface DashboardServerHandle {
   close: () => Promise<void>;
 }
 
-export const CLI_VERSION = '0.2.5';
+// Kept in step with this package's own version by a test, because it is a
+// second copy of a number nobody re-reads: it is drawn in the setup header
+// and served from the dashboard's /api/status, so drift here misreports the
+// running build rather than failing anything.
+export const CLI_VERSION = '0.3.0';
 
 const DEFAULT_DASHBOARD_HOST = '127.0.0.1';
 const DASHBOARD_TITLE = 'Stratus Agent Dashboard';
