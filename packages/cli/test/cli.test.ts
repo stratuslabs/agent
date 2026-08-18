@@ -4996,3 +4996,87 @@ test('rerunning setup keeps an existing --no-login install as it was', async () 
   assert.ok(!calls.some((call) => /enable --now/.test(call)), calls.join(', '));
   assert.ok(calls.some((call) => /--user start/.test(call)), calls.join(', '));
 });
+
+test('service install pins the config STRATUS_CONFIG selected', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+
+  await runCli({
+    argv: ['service', 'install'],
+    streams: createStreams().streams,
+    env: {
+      cwd: project,
+      homeDir: home,
+      // A service manager passes none of this shell on, so a config chosen
+      // here has to be baked into the unit or the daemon rediscovers and
+      // can come up on a different roster.
+      processEnv: { STRATUS_CONFIG: './team.json' },
+      serviceRunner: stubServiceRunner,
+    },
+  });
+
+  const unit = await readFile(path.join(home, '.config', 'systemd', 'user', 'stratusd.service'), 'utf8');
+  assert.match(unit, new RegExp(`"--config" "${path.join(project, 'team.json')}"`));
+});
+
+test('a fallback reachable only from the shell blocks the install', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The primary is properly stored, so it has no apiKeyEnvVar at all — but
+  // the fallback exists to rescue a failing primary, and under the daemon
+  // it would not be there at all.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    fallbackProvider: 'openai',
+    fallbackModel: 'gpt-4.1-mini',
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }),
+  );
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { OPENAI_API_KEY: 'sk-openai-shell-only' },
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  assert.deepEqual(calls, []);
+  assert.match(output.stderr, /your API key comes from OPENAI_API_KEY in this shell/);
+});
+
+test('a shell-only credential also removes a service already installed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
+  await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
+  const unitPath = serviceUnitPath({ platform: 'linux', homeDir: home });
+
+  const calls: string[] = [];
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: { ANTHROPIC_API_KEY: 'sk-ant-shell-only' },
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  // Leaving it running would keep failing every Slack dispatch against the
+  // config just overwritten, while the warning says nothing was installed.
+  assert.match(output.stderr, /comes from ANTHROPIC_API_KEY in this shell/);
+  assert.ok(calls.some((call) => /disable --now/.test(call)), calls.join(', '));
+  assert.equal(await readFile(unitPath, 'utf8').catch(() => undefined), undefined);
+});

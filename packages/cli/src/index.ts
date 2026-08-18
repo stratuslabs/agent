@@ -3373,6 +3373,17 @@ export const runSetup = async (
       // a missing key, minutes after setup said it was ready.
       writeLine(streams.stderr, `Not installing the always-on service: your API key comes from ${shellOnly} in this shell, and a background service never sees it.`);
       writeLine(streams.stderr, 'Sign in from Providers so the key is stored, then run `stratus service install`.');
+      // Skipping is not enough when one is already installed: it keeps
+      // running against the config just overwritten, cannot see the shell
+      // key either, and fails every Slack dispatch while this warning says
+      // the service was not installed.
+      const existing = await readServiceStatus(serviceEnvFor(env)).catch(() => undefined);
+      if (existing?.installed) {
+        const removed = await uninstallService(serviceEnvFor(env));
+        for (const message of removed.messages) {
+          writeLine(removed.ok ? streams.stdout : streams.stderr, message);
+        }
+      }
     } else if (!state.service.install && servicePlatform(serviceEnvFor(env))) {
       // Opting out has to actually take effect. Skipping the install would
       // leave a unit from an earlier setup running and enabled at login,
@@ -4190,12 +4201,23 @@ const shellOnlyCredential = async (
   configPath: string,
 ): Promise<string | undefined> => {
   const credentials = await loadCredentials(env);
+  const processEnv = readProcessEnv(env);
   for (const { runtime } of await servedRuntimes(env, configPath)) {
-    if (runtime.provider === 'demo' || !runtime.apiKeyEnvVar) {
+    if (runtime.provider === 'demo') {
       continue;
     }
-    if (!credentials[runtime.provider]) {
+    if (runtime.apiKeyEnvVar && !credentials[runtime.provider]) {
       return runtime.apiKeyEnvVar;
+    }
+    // The fallback exists to rescue a failing primary, so a fallback the
+    // daemon cannot authenticate is a retry path that silently is not
+    // there. It reads only its provider's own conventional variable.
+    const fallback = runtime.fallback;
+    if (fallback && !credentials[fallback.provider] && fallback.apiKey) {
+      const name = fallback.provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+      if (readNonEmptyString(processEnv[name]) === fallback.apiKey) {
+        return name;
+      }
     }
   }
   return undefined;
@@ -4231,12 +4253,19 @@ export const runService = async (
     return status.running ? 0 : 1;
   }
 
+  // A service manager passes none of this shell's environment on, so a
+  // config selected by STRATUS_CONFIG has to be baked into the unit
+  // exactly as --config is. Without it the daemon rediscovers from the
+  // install directory and can come up on a different roster entirely.
+  const processEnv = readProcessEnv(env);
+  const selectedConfig = command.configPath
+    ?? readNonEmptyString(processEnv.STRATUS_CONFIG)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_CONFIG);
   const action = command.action === 'install'
     ? installService(serviceEnv, {
         ...(command.runAtLogin === false ? { runAtLogin: false } : {}),
-        // Absolute: the unit runs from the home directory, so a relative
-        // path would resolve against the wrong place.
-        ...(command.configPath ? { configPath: path.resolve(readWorkingDirectory(env), command.configPath) } : {}),
+        // Absolute: resolved against the directory the install ran in.
+        ...(selectedConfig ? { configPath: path.resolve(readWorkingDirectory(env), String(selectedConfig)) } : {}),
       })
     : command.action === 'uninstall'
       ? uninstallService(serviceEnv)
