@@ -406,6 +406,7 @@ const OUTCOME_TEXT: Record<string, string> = {
   // Covers both endings that reach here: the turn was aborted, and the
   // daemon shut down with the request still outstanding.
   'cancelled:deny': 'Cancelled before anyone answered — denied',
+  'undeliverable:deny': 'Could not be put to an approver — denied',
 };
 
 /** Comfortably inside Slack's 3000-character section limit. */
@@ -646,9 +647,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const channel = sameChannel ?? connection.config.approvalChannel;
     const thread = sameChannel && typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
 
+    // Undeliverable, not decided: nobody was asked, so filing this next to
+    // the denials somebody actually made would make the audit record lie
+    // about which is which.
     const decline = (reason: string): void => {
       warn(`slack: ${reason}; denying ${event.call.toolName} for ${event.agentId}`);
-      gateway.resolveApproval({ requestId: event.requestId, answer: 'deny' });
+      gateway.resolveApproval({ requestId: event.requestId, answer: 'deny', reason: 'undeliverable' });
     };
 
     if (approvers.size === 0) {

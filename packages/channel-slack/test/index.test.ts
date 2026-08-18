@@ -123,7 +123,7 @@ const sessionWithReply = (id: string, reply: string): Session => {
 
 interface StubGateway extends GatewayLike {
   dispatches: Array<{ sessionId: string; agentId?: string; userMessage: string }>;
-  resolutions: Array<{ requestId: string; answer: ApprovalAnswer; actor?: string }>;
+  resolutions: Array<{ requestId: string; answer: ApprovalAnswer; actor?: string; reason?: string }>;
   /** Request ids the gateway still considers pending. */
   pendingApprovals: Set<string>;
 }
@@ -151,7 +151,7 @@ const createStubGateway = (
         sessionId: 'sess-1',
         requestId: input.requestId,
         answer: input.answer,
-        reason: 'decided',
+        reason: input.reason ?? 'decided',
         ...(input.actor ? { actor: input.actor } : {}),
       });
       return true;
@@ -850,7 +850,13 @@ test('a request with no approver configured is denied on arrival, not left to ex
 
   // Waiting out the timeout would tell the agent nothing it cannot be told
   // now, while holding the turn — and the thread — open for the whole window.
-  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'deny' }]);
+  // `undeliverable`, not `decided`: nobody was asked, and filing this
+  // beside the denials somebody actually made would make the audit record
+  // lie about which is which.
+  assert.deepEqual(
+    gateway.resolutions,
+    [{ requestId: 'req-1', answer: 'deny', reason: 'undeliverable' }],
+  );
   assert.equal(web.posts.length, 0, 'nothing is asked when nobody can answer');
 
   await adapter.stop();

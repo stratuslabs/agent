@@ -311,6 +311,14 @@ export interface ResolveApprovalInput {
    * question, since the approver set is written in its ids.
    */
   actor?: string;
+  /**
+   * Why, when it was not a person. A channel that cannot deliver a request
+   * — nobody configured to ask, nowhere to ask — still has to settle it,
+   * and recording that as `decided` would file a denial nobody made
+   * alongside the ones somebody did. `timeout` and `cancelled` are not
+   * offered here: those are the gateway's own endings to declare.
+   */
+  reason?: 'decided' | 'undeliverable';
 }
 
 export interface GatewayOptions {
@@ -413,6 +421,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // ---- approval brokering -------------------------------------------------
 
   const approvalTimeoutMs = options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
+  // Refused at construction, not absorbed: a negative or NaN timeout fails
+  // the `> 0` test below and quietly means "never expire" — the one
+  // behavior documented for an explicit 0, and the last one a caller who
+  // typed a bad number wants. Config-file values are already rejected with
+  // a better message; this catches the programmatic path.
+  if (!Number.isFinite(approvalTimeoutMs) || approvalTimeoutMs < 0) {
+    throw new Error(
+      `approvalTimeoutMs must be a non-negative number of milliseconds (0 to wait indefinitely); received ${String(options.approvalTimeoutMs)}.`,
+    );
+  }
   // Clamped, not trusted: a delay past Node's timer range is not a long
   // wait, it is a 1ms one, so an over-large value would turn every approval
   // into an instant expiry — the opposite of what it asked for. The CLI
@@ -544,7 +562,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (!settle) {
       return false;
     }
-    settle(input.answer, 'decided', input.actor);
+    settle(input.answer, input.reason ?? 'decided', input.actor);
     return true;
   };
 

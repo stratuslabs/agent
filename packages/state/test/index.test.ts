@@ -413,3 +413,31 @@ test('an agent inherits the default approval route key by key', async () => {
   // Nothing configured means nobody may approve — never everybody.
   assert.deepEqual(resolveAgentApprovals(undefined, 'ava'), {});
 });
+
+test('an explicitly empty approver list excludes an agent instead of inheriting', async () => {
+  const approvals = {
+    slackApprovers: ['U-OPS'],
+    agents: { ava: { slackApprovers: [] }, bea: {} },
+  };
+
+  // Writing `[]` for one agent is how an operator takes that agent out of a
+  // global approver list. Treating it as "unset" would fall back to exactly
+  // the list they were excluding — turning "nobody may approve for Ava"
+  // into "everyone on the default list may".
+  assert.deepEqual(resolveAgentApprovals(approvals, 'ava'), { slackApprovers: [] });
+  // An absent key still inherits: that is what the fallback is for.
+  assert.deepEqual(resolveAgentApprovals(approvals, 'bea'), { slackApprovers: ['U-OPS'] });
+
+  // And it survives config parsing, which is where it was being dropped.
+  const configPath = await writeConfig('empty-approvers.json', {
+    approvals: { slackApprovers: ['U-OPS'], agents: { ava: { slackApprovers: [] } } },
+  });
+  const parsed = (await loadConfigFile(configPath)).approvals;
+  assert.deepEqual(resolveAgentApprovals(parsed, 'ava'), { slackApprovers: [] });
+  // A list of nothing but junk is the same statement as an empty one.
+  const junkPath = await writeConfig('junk-approvers.json', {
+    approvals: { slackApprovers: ['U-OPS'], agents: { ava: { slackApprovers: ['', ''] } } },
+  });
+  const junk = (await loadConfigFile(junkPath)).approvals;
+  assert.deepEqual(resolveAgentApprovals(junk, 'ava'), { slackApprovers: [] });
+});

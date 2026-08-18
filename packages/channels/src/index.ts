@@ -82,7 +82,17 @@ export interface GatewayLike {
    * approver set is written in the channel's own user ids, and posting a
    * request into a conversation must never make everyone in it an approver.
    */
-  resolveApproval(input: { requestId: string; answer: ApprovalAnswer; actor?: string }): boolean;
+  resolveApproval(input: {
+    requestId: string;
+    answer: ApprovalAnswer;
+    actor?: string;
+    /**
+     * `undeliverable` when the adapter settled the request itself because
+     * it could not put it to anyone. Defaults to `decided`, which means a
+     * person answered — never claim it for an automatic denial.
+     */
+    reason?: 'decided' | 'undeliverable';
+  }): boolean;
 }
 
 export interface ChannelAdapter {

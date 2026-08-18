@@ -345,11 +345,14 @@ export type ApprovalAnswer = 'once' | 'always' | 'deny';
 
 /**
  * Why an approval request stopped being pending. Only `decided` involved a
- * person — the other two are the request running out of patience or the
- * turn it belonged to disappearing, and a channel rendering the request
- * needs to tell those apart when it retracts the buttons.
+ * person; the rest are the request running out of patience, the turn it
+ * belonged to disappearing, or nobody ever being asked at all.
+ *
+ * The distinction is not cosmetic. `decided` is what an audit record means
+ * by "somebody refused this", and folding an undelivered request into it
+ * would put a denial nobody made on the same footing as one somebody did.
  */
-export type ApprovalResolutionReason = 'decided' | 'timeout' | 'cancelled';
+export type ApprovalResolutionReason = 'decided' | 'timeout' | 'cancelled' | 'undeliverable';
 
 export type StratusEvent =
   | { type: 'session.created'; sessionId: string; agentId: string }

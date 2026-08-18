@@ -79,7 +79,10 @@ else's click is refused with a notice only they see, and the request stays
 open for someone who may actually answer — which matters most for **Always
 allow**, since that widens what the agent may do for the rest of the session.
 An agent with no approvers listed denies every request on arrival rather than
-leaving it hanging.
+leaving it hanging — set `"slackApprovers": []` on an agent to exclude it
+from a shared default list. Those automatic denials are recorded as
+`undeliverable` rather than `decided`, so the log never shows a refusal
+nobody made as one somebody did.
 
 The message shows the tool's arguments as well as its name — approving
 `shell.run` without seeing what it would run is not approval. Arguments are

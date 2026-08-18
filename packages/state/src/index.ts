@@ -51,7 +51,11 @@ export type StratusProviderName = 'demo' | 'openai' | 'anthropic';
  * a lookup that can only ever be wrong.
  */
 export interface AgentApprovalConfig {
-  /** Slack user ids allowed to decide. Nobody listed means nobody may. */
+  /**
+   * Slack user ids allowed to decide. Nobody listed means nobody may — an
+   * explicit empty array is how an agent is excluded from a global approver
+   * list, and is kept distinct from the key being absent, which inherits.
+   */
   slackApprovers?: string[];
   /**
    * Conversation to ask in when the turn is not itself in Slack. A turn
@@ -649,12 +653,15 @@ const parseApprovalRoute = (raw: unknown): AgentApprovalConfig | undefined => {
   const source = raw as Record<string, unknown>;
   const route: AgentApprovalConfig = {};
   if (Array.isArray(source.slackApprovers)) {
-    const approvers = source.slackApprovers.filter(
+    // Kept even when it filters down to nothing. An agent entry saying
+    // `"slackApprovers": []` is an operator excluding that agent from a
+    // global approver list, and dropping it would fall back to exactly the
+    // list they were excluding — turning a deliberate "nobody may approve
+    // for Ava" into "everyone on the default list may". The empty array
+    // survives; the fallback is for a key that was never written.
+    route.slackApprovers = source.slackApprovers.filter(
       (entry): entry is string => typeof entry === 'string' && entry.length > 0,
     );
-    if (approvers.length > 0) {
-      route.slackApprovers = approvers;
-    }
   }
   if (typeof source.slackChannel === 'string' && source.slackChannel.length > 0) {
     route.slackChannel = source.slackChannel;

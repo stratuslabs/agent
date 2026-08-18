@@ -136,7 +136,10 @@ Turn it on for the daemon with `--approvals remote`, or in
 ```
 
 An agent inherits the top-level route key by key, so `ava` above asks her own
-approver in the shared `C07OPS` fallback channel.
+approver in the shared `C07OPS` fallback channel. An explicit
+`"slackApprovers": []` on an agent excludes it from the default list — that
+agent's gated calls are then denied outright — while omitting the key
+inherits.
 
 **Only a config you chose is allowed to set this block** — `--config`,
 `STRATUS_CONFIG`, or the global `~/.stratus/config.json`. An auto-discovered

@@ -1934,3 +1934,43 @@ test('an approval timeout past the timer range is clamped, not silently instant'
   assert.equal(await settles(answer, 'the parked call'), 'deny');
   await gateway.stop();
 });
+
+test('an approval timeout that is not a number of milliseconds is refused', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  // Both of these fail the `> 0` test and silently mean "never expire" —
+  // the one behavior documented for an explicit 0, and the last thing a
+  // caller who typed a bad number wants. Config values are rejected with a
+  // better message; this is the programmatic path.
+  for (const approvalTimeoutMs of [-1, Number.NaN]) {
+    assert.throws(
+      () => createGateway({ env, idleTimeoutMs: 0, approvalTimeoutMs }),
+      /non-negative number of milliseconds/,
+      `expected ${String(approvalTimeoutMs)} to be refused`,
+    );
+  }
+  // Zero still means "wait indefinitely", which is a real (test-only) choice.
+  const gateway = createGateway({ env, idleTimeoutMs: 0, approvalTimeoutMs: 0 });
+  await gateway.stop();
+});
+
+test('a resolution a channel could not deliver is not filed as a human decision', async () => {
+  const { gateway, transport, events } = await brokerHarness();
+
+  const requested = nextEvent(gateway.bus, 'tool.approval-requested');
+  const answer = transport.request(parkedCall('sess-undeliverable'));
+  const request = await settles(requested, 'the approval request');
+
+  // What a channel does when it has nobody to ask.
+  assert.equal(
+    gateway.resolveApproval({ requestId: request.requestId, answer: 'deny', reason: 'undeliverable' }),
+    true,
+  );
+  assert.equal(await settles(answer, 'the parked call'), 'deny');
+
+  const resolved = events.find((event) => event.type === 'tool.approval-resolved');
+  assert.equal(resolved?.reason, 'undeliverable');
+  assert.equal(resolved?.actor, undefined);
+
+  await gateway.stop();
+});
