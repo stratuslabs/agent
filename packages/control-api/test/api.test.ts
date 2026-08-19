@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { CONTROL_API_VERSION } from '../src/index.ts';
@@ -308,7 +308,11 @@ test('health reports the roster and its runtimes without probing a provider', as
 });
 
 test('credentials are writable but never readable, and channel tokens keep their own door', async () => {
-  const harness = await startApi();
+  const home = await newHome();
+  // A real roster agent, because a Slack binding must name one the daemon
+  // serves — the adapter skips any it cannot match.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
   try {
     const stored = await harness.call('/api/v1/credentials/anthropic', {
       method: 'PUT',
@@ -680,7 +684,9 @@ test('a subscription token is refused for a provider that cannot use one', async
 });
 
 test('concurrent credential writes do not erase each other', async () => {
-  const harness = await startApi();
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
   try {
     // saveCredentials treats what it is given as the complete provider set,
     // so two unserialized read-modify-writes each save a snapshot taken
@@ -1127,6 +1133,130 @@ test('creating an agent claims its id against the pinned config', async () => {
     assert.notEqual(agent.id, 'ava');
     const roster = await json<{ agents: Array<{ id: string }> }>(await harness.call('/api/v1/agents'));
     assert.ok(roster.agents.some((entry) => entry.id === agent.id), 'the new agent is actually served');
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('a raw soul edit is stored as written, not reserialized', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
+  try {
+    // Valid, and formatted the way its author wrote it rather than the way
+    // `formatSoul` would: frontmatter in their order, and a blank line it
+    // collapses.
+    const raw = [
+      '---',
+      'id: ava',
+      'name: Ava',
+      'provider: anthropic',
+      '---',
+      '',
+      '',
+      '# Ava',
+      '',
+      'You are Ava.',
+      '',
+      '- terse',
+      '- precise',
+    ].join('\n');
+
+    const edited = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ soul: raw }),
+    });
+    assert.equal(edited.status, 200);
+
+    const onDisk = await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8');
+    // Byte for byte. Rewriting it through `formatSoul` hands back a file the
+    // author did not write, and drops an edit that was only formatting.
+    assert.equal(onDisk, raw);
+
+    // And it is still a soul the daemon reads: the parse above is the check
+    // that matters, so this must not have bought fidelity with correctness.
+    const read = await json<{ agent: { id: string }; provider?: string }>(await harness.call('/api/v1/agents/ava'));
+    assert.equal(read.agent.id, 'ava');
+    assert.equal(read.provider, 'anthropic');
+
+    // A field edit still renders, so an unparseable soul cannot be written
+    // through the other branch.
+    const byField = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Ava II' }),
+    });
+    assert.equal(byField.status, 200);
+    assert.match(await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8'), /name: Ava II/);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('the model catalog uses the provider the daemon actually resolves', async () => {
+  const home = await newHome();
+  // A config that names no provider at all, but does name where the key is.
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ apiKeyEnv: 'MY_OPENAI_KEY' })}\n`);
+  const harness = await startApi({
+    home,
+    // The provider chosen by the environment, which is what every dispatch
+    // resolves — and a key reachable only through the configured selector.
+    env: {
+      processEnv: { STRATUS_PROVIDER: 'openai', MY_OPENAI_KEY: 'sk-test' },
+      fetch: (async () => new Response(
+        JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as typeof fetch,
+    },
+  });
+  try {
+    const { models } = await json<{ models: Array<{ provider: string; id: string }> }>(
+      await harness.call('/api/v1/catalog/models'),
+    );
+    // Read from the config alone the default provider is undefined, so openai
+    // may not touch the configured selector and the catalog comes back empty
+    // for a provider every turn is using.
+    assert.ok(
+      models.some((model) => model.provider === 'openai' && model.id === 'gpt-4.1-mini'),
+      `the catalog listed nothing for the resolved provider: ${JSON.stringify(models)}`,
+    );
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('a Slack binding must name an agent the daemon serves', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
+  try {
+    const typo = await harness.call('/api/v1/credentials/channels/slack', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'avaa', appToken: 'xapp-1', botToken: 'xoxb-1' }),
+    });
+    // The adapter skips a binding it cannot match, so storing this would put
+    // real Slack secrets behind an agent that never comes online — reported
+    // connected here and silently absent there.
+    assert.equal(typo.status, 404);
+    assert.equal((await json<{ error: { code: string } }>(typo)).error.code, 'agent_not_found');
+
+    // Nothing was written for it.
+    const listed = await json<{ channels: { slack: string[] } }>(await harness.call('/api/v1/credentials'));
+    assert.ok(!listed.channels.slack.includes('avaa'));
+
+    // A real agent still binds, the built-in included — it is the only agent
+    // a fresh install has, and Slack can dispatch to it.
+    for (const agentId of ['ava', 'stratus']) {
+      const stored = await harness.call('/api/v1/credentials/channels/slack', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ agentId, appToken: 'xapp-1', botToken: 'xoxb-1' }),
+      });
+      assert.equal(stored.status, 200, `${agentId} should be bindable`);
+    }
   } finally {
     await harness.stop();
   }

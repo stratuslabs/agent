@@ -19,6 +19,7 @@ import {
   loadSoulFile,
   parseProviderName,
   resolveConfigLocation,
+  resolveRuntimeConfig,
   saveChannelCredentials,
   saveConfigFile,
   saveCredentials,
@@ -516,15 +517,29 @@ export const routes: Route[] = [
         throw new ApiError(400, 'invalid_agent_id', `${next.agent.id} is not a usable agent id.`);
       }
 
-      const rendered = formatSoul(next);
-      // Re-parsed before it is written: `formatSoul` is the inverse of
-      // `parseSoul`, and the only honest way to promise a round-trip is to
-      // perform it. A soul that survives the write but not the next read is
-      // an agent that vanishes from the roster on restart.
-      try {
-        parseSoul(rendered, { seed: soulPath });
-      } catch (error) {
-        throw new ApiError(500, 'soul_round_trip_failed', `Refusing to write a soul that will not parse back: ${error instanceof Error ? error.message : String(error)}`);
+      // A raw edit writes the bytes it was given.
+      //
+      // `formatSoul` canonicalizes — frontmatter order, quoting, list layout,
+      // trailing whitespace — so reserializing a source edit hands back a
+      // file the author did not write, and silently discards an edit that was
+      // only formatting. It has already been through `parseSoul` above, which
+      // is the check that matters; there is nothing left for a round-trip to
+      // prove about text that came in as text.
+      //
+      // A field edit still renders, and still round-trips before it lands:
+      // `formatSoul` is the inverse of `parseSoul`, and the only honest way
+      // to promise that is to perform it. A soul that survives the write but
+      // not the next read is an agent that vanishes on restart.
+      let rendered: string;
+      if (raw !== undefined) {
+        rendered = raw;
+      } else {
+        rendered = formatSoul(next);
+        try {
+          parseSoul(rendered, { seed: soulPath });
+        } catch (error) {
+          throw new ApiError(500, 'soul_round_trip_failed', `Refusing to write a soul that will not parse back: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
 
       await writeFile(soulPath, rendered);
@@ -694,12 +709,29 @@ export const routes: Route[] = [
       // otherwise the catalog probes a different provider or base URL than
       // the one dispatches actually resolve to.
       const { config } = await discoverActiveConfig(context.env, () => {}, context.configPath);
+      // And the *resolved* default rather than the config's copy of it. Which
+      // provider is default decides who may use the generic `STRATUS_API_KEY`
+      // and the configured `apiKeyEnv`, and a daemon started with
+      // `STRATUS_PROVIDER=openai` over a provider-less config resolves openai
+      // for every dispatch while a config-only reading calls it undefined —
+      // so the catalog withheld the very credential the runtime was using and
+      // listed no models for a provider that works. Asked of the resolver
+      // rather than re-derived, and a resolution that fails (no credentials
+      // yet, which is exactly when someone opens this page) falls back to the
+      // config's own values.
+      const runtime = await resolveRuntimeConfig(
+        context.configPath ? { configPath: context.configPath } : {},
+        context.env,
+      ).catch(() => undefined);
+      const provider = runtime && runtime.provider !== 'demo' ? runtime.provider : config.provider;
+      const baseUrl = (runtime && runtime.provider !== 'demo' ? runtime.baseUrl : undefined) ?? config.baseUrl;
+      const apiKeyEnv = (runtime && runtime.provider !== 'demo' ? runtime.apiKeyEnvVar : undefined) ?? config.apiKeyEnv;
       const credentials = await loadCredentials(context.env);
       const models = await collectAvailableModels(
         {
-          ...(config.provider !== undefined ? { provider: config.provider } : {}),
-          ...(config.baseUrl !== undefined ? { baseUrl: config.baseUrl } : {}),
-          ...(config.apiKeyEnv !== undefined ? { apiKeyEnv: config.apiKeyEnv } : {}),
+          ...(provider !== undefined ? { provider } : {}),
+          ...(baseUrl !== undefined ? { baseUrl } : {}),
+          ...(apiKeyEnv !== undefined ? { apiKeyEnv } : {}),
           credentials,
         },
         context.env,
@@ -814,6 +846,12 @@ export const routes: Route[] = [
       const agentId = requireString(body, 'agentId');
       const appToken = requireString(body, 'appToken');
       const botToken = requireString(body, 'botToken');
+      if (!context.gateway.agents().some((agent) => agent.id === agentId)) {
+        // The adapter skips a binding whose id is not on the roster, so a
+        // typo stores real Slack secrets against an agent that never comes
+        // online — reported connected here and silently absent there.
+        throw new ApiError(404, 'agent_not_found', `No agent with id ${agentId}, so a Slack app bound to it would never come online.`);
+      }
 
       // Channel tokens are gateway infrastructure secrets and live in their
       // own namespace: this is the only route that writes them, and the

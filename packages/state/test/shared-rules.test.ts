@@ -221,6 +221,32 @@ test('servedRuntimes takes its pin context from the config the daemon was pinned
   assert.ok(models.includes('gpt-4.1-mini'), 'and the daemon-wide default too');
 });
 
+test('a summary reports the runtime a pinned soul dispatches on, not the environment', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: anthropic\n---\n\nYou are Ava.\n');
+  await saveConfigFile(globalConfigPath({ homeDir: home }), { provider: 'openai', model: 'gpt-4.1-mini' });
+
+  // A daemon started with the environment naming a different provider than
+  // the soul pins. Dispatch runs `applySoulPins`, which demotes the
+  // daemon-wide default and its model, so Ava's turns go to anthropic — and
+  // a listing that ranked the environment above the pin claimed openai.
+  const summaries = await listAgentSummaries({
+    homeDir: home,
+    cwd: home,
+    processEnv: { STRATUS_PROVIDER: 'openai', STRATUS_MODEL: 'gpt-4o' },
+  });
+
+  const ava = summaries.find((entry) => entry.id === 'ava');
+  assert.ok(ava);
+  assert.equal(ava.runsOn.provider, 'anthropic', `reported ${JSON.stringify(ava.runsOn)}`);
+  assert.notEqual(ava.runsOn.model, 'gpt-4o', 'the demoted default model must not ride along either');
+
+  // The built-in pins nothing, so it does follow the environment.
+  const builtIn = summaries.find((entry) => entry.builtIn);
+  assert.ok(builtIn);
+  assert.deepEqual(builtIn.runsOn, { provider: 'openai', model: 'gpt-4o' });
+});
+
 test('applySoulPins drops a default model chosen for a different provider', async () => {
   const soul = {
     agent: { id: 'ava', name: 'Ava', instructions: 'You are Ava.' },

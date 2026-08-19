@@ -2120,17 +2120,44 @@ export const listAgentSummaries = async (
   const processEnv = readProcessEnv(env);
   // Listing must never be blocked by a broken config — it only feeds the
   // default marker and the "runs on" lines.
-  const { config: activeConfig } = await discoverActiveConfig(env, warn, configPath);
+  const { config: activeConfig, location: activeConfigLocation } = await discoverActiveConfig(env, warn, configPath);
 
-  const envProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'));
-  const envModel = readNonEmptyString(processEnv.STRATUS_MODEL)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL);
+  const pinContext: SoulPinContext = {
+    ...(activeConfig.provider !== undefined ? { configProvider: activeConfig.provider } : {}),
+    // Whether a file was actually found, not whether one was asked for: a
+    // config with no provider key predates the anthropic option and names
+    // openai as the default, while no config at all names nothing — and the
+    // difference decides whether a soul's pin demotes anything.
+    configPresent: activeConfigLocation !== undefined,
+  };
 
-  // What a run as this soul would actually use right now — the same
-  // precedence as resolveRuntimeConfig (env vars, soul hints, config,
-  // demo), so a model-only or provider-only pin still resolves honestly.
-  const runsOnFor = (soulProvider?: string, soulModel?: string): { provider: string; model?: string } => {
+  /**
+   * What a run as this soul would actually use right now.
+   *
+   * The soul's pins are normalized through `applySoulPins` first — the same
+   * call dispatch makes — rather than by ranking the environment above them
+   * here. That ordering was wrong in exactly the case the pins exist for: a
+   * daemon started with `STRATUS_PROVIDER=openai` serving a soul pinned to
+   * anthropic dispatches anthropic, because the pin demotes the daemon-wide
+   * default, while a listing that read the raw environment reported openai.
+   * Two surfaces disagreeing about which provider is being billed.
+   *
+   * What is left afterwards still follows `resolveRuntimeConfig`'s precedence
+   * — env, soul, config, demo — because a listing must answer even when no
+   * credential resolves, which is precisely when someone is looking at it.
+   */
+  const runsOnFor = (soul?: ParsedSoul): { provider: string; model?: string } => {
+    const normalized = soul
+      ? applySoulPins(soul, {}, env, pinContext).env
+      : env;
+    const soulEnv = readProcessEnv(normalized);
+    const envProvider = readNonEmptyString(soulEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
+      ?? readNonEmptyString(soulEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'));
+    const envModel = readNonEmptyString(soulEnv.STRATUS_MODEL)
+      ?? readNonEmptyString(soulEnv.STRATUSCLAW_MODEL);
+
+    const soulProvider = soul?.provider;
+    const soulModel = soul?.model;
     const provider = envProvider ?? soulProvider ?? activeConfig.provider ?? 'demo';
     if (provider === 'demo') {
       return { provider };
@@ -2171,7 +2198,7 @@ export const listAgentSummaries = async (
       soulPath,
       ...(parsed.provider ? { provider: parsed.provider } : {}),
       ...(parsed.model ? { model: parsed.model } : {}),
-      runsOn: runsOnFor(parsed.provider, parsed.model),
+      runsOn: runsOnFor(parsed),
       memories: (await memory.list(agent.id)).length,
       ...(persona ? { persona } : {}),
       ...(agent.avatar ? { avatar: agent.avatar } : {}),

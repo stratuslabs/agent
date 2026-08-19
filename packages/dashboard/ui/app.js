@@ -357,6 +357,11 @@ connectEvents({
       // the store, so re-read rather than leaving a stale page behind.
       void refreshCore();
       void refreshForRoute();
+      // Shared data is not enough for a view holding a turn of its own. A
+      // completion that arrived during the outage is never replayed, so a
+      // chat view would sit disabled on "Working…" for a turn that finished
+      // minutes ago.
+      current.view?.reconcile?.();
     }
     render();
   },

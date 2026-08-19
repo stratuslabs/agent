@@ -570,8 +570,26 @@ export const renderAgent = (agentId, initialSessionId) => {
     paintTranscript();
   };
 
+  /**
+   * Re-read after the event stream was down.
+   *
+   * Nothing replays what was missed, so a turn that finished during the
+   * outage leaves this view waiting on a completion that already happened —
+   * the composer disabled on "Working…" forever. The stored transcript is the
+   * authority, so this drops the in-flight rendering and reads it again.
+   */
+  const reconcile = () => {
+    state.sending = false;
+    state.turnId = undefined;
+    state.pending = [];
+    state.streaming = '';
+    state.toolLines = [];
+    void loadSessions();
+    update();
+  };
+
   update();
   void loadSessions();
 
-  return { node, update, openSession, destroy: detach };
+  return { node, update, openSession, reconcile, destroy: detach };
 };

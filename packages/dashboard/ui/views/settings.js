@@ -290,9 +290,14 @@ export const renderSettings = (section) => {
         el('div', { class: 'actions' }, saveButton),
       ),
       refresh() {
+        // The built-in agent included, deliberately. It is the only agent a
+        // fresh install has, the gateway dispatches Slack turns to it, and
+        // the CLI's own Channels list starts with it — filtering it out here
+        // left the picker empty on exactly the install that needs it, with a
+        // Save that could only fail validation.
         syncOptions(
           agentPicker,
-          store.agents.filter((agent) => !agent.builtIn).map((agent) => ({ value: agent.id, label: agent.name })),
+          store.agents.map((agent) => ({ value: agent.id, label: agent.name })),
         );
         const connected = state.credentials?.channels?.slack ?? [];
         bound.replaceChildren(connected.length === 0
