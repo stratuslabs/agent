@@ -38,17 +38,28 @@ skills relate to tools and to the packages that ship them.
   `skill.read` tool, `risk: 'safe'` — reading a file the operator installed and
   the soul opted into is not an act on the world. This is the whole point of
   the step: the marginal cost of an enabled-but-unused skill is one line.
-- **Enabling any skill exposes `skill.read`, implicitly.** `skill.read` is part
-  of the skills mechanism, not a capability an agent opts into separately, and
-  this needs saying because the runner would otherwise silently break it:
-  `executeTurns` filters descriptors by exact-name membership in the soul's
-  `tools` set, so an agent with `skills: [code-review]` and `tools: [fs.*]`
-  would be offered every `fs` tool and no way to read the skill it was given.
-  The skills allowlist cannot rescue that — the reader is gone before it is
-  consulted. So the descriptor filter gains an explicit exemption when the
-  agent has any skill enabled, rather than souls being required to list a tool
-  that is really an implementation detail of the `skills:` key. An agent with
-  no skills does not see it.
+- **Enabling any skill exposes `skill.read`, implicitly, at both gates.**
+  `skill.read` is part of the skills mechanism, not a capability an agent opts
+  into separately, and this needs saying because the tool allowlist would
+  otherwise silently break it in **two independent places**:
+
+  1. `executeTurns` filters descriptors by exact-name membership in the soul's
+     `tools` set, so the reader is never advertised to the model; and
+  2. `executeToolCall` re-checks `call.toolName` against the same set before
+     anything runs, so even a model that calls the reader by name — from a
+     remembered turn, or through the hosted-provider path in
+     [04](./04-agent-sdk-bridge.md), which routes through the same check — gets
+     "Tool not permitted".
+
+  An exemption at the first gate alone produces the worse failure of the two: a
+  tool the agent can see, is told to use, and is refused when it does. Both
+  gates take the exemption, keyed on the agent having any skill enabled. An
+  agent with no skills sees and gets neither.
+
+  The skills allowlist cannot substitute for either — it decides *which* skill
+  may be read, and it is consulted only after the reader has already survived
+  both gates. Souls are not asked to list a tool that is really an
+  implementation detail of the `skills:` key.
 - **`skills:` in soul frontmatter**, added to `SOUL_LIST_KEYS`, and
   `AgentDefinition.skills?: string[]` — the same allowlist shape as `tools:`,
   including glob. Globs match the qualified id, so a package's skills are
@@ -87,8 +98,10 @@ a plugin contributing a tool); distribution and discovery ([12](./12-plugin-regi
 - `skill.read` on an id outside the soul's `skills:` list is refused, and the
   refusal is the allowlist's, not a second copy of it.
 - An agent with `skills:` set and a `tools:` list that does *not* name
-  `skill.read` can still read its skills — the test that fails without the
-  descriptor-filter exemption, and the one this design exists for.
+  `skill.read` can still read its skills. Two tests, not one, because there are
+  two gates: the reader is *advertised* (descriptor filter) and the call
+  *executes* (`executeToolCall`). Exempting only the first passes a test that
+  asserts the tool is offered while the agent is still refused when it uses it.
 - A soul with no `skills:` key gets no skills — not every installed one.
 - `stratuslabs/skill-code-review` and `stratuslabs/skill-web-research` load
   unmodified except for frontmatter.

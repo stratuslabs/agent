@@ -29,10 +29,30 @@ every morning" is a procedure, not a prompt.
   parked approval does. A firing creates a session with the agent's own
   provider, memory, and allowlist, through the same dispatch path a channel
   message uses — never a second runner.
-- **`message.send`** — post to a channel or DM outside the current turn, over
-  the [02](./02-slack-channel.md) channel contract's outbound operation. This
+- **`message.send`** — post to a channel or DM outside the current turn. This
   is what makes a scheduled turn observable; without it a scheduled agent works
   in silence.
+- **An addressable outbound seam on the channel contract**, which this step has
+  to add before `message.send` can exist. `@stratusagent/channels` today has no
+  way to say *where*: `OutboundConnection` (`post` / `edit` / `upload`) is the
+  write side of one conversation and is only ever handed to you inside that
+  conversation, and `ChannelAdapter` is `{ name, start, stop }`. Nothing in
+  either lets a caller name a destination it is not already talking to.
+
+  So the contract gains one operation — obtaining an `OutboundConnection` for a
+  destination given by a **channel-native id** (a Slack channel or DM id, the
+  same convention `AgentApprovalConfig.slackApprovers` already uses, because
+  mapping through a Stratus identity adds a lookup that can only be wrong).
+  The connection shape itself is reused unchanged; what is new is being able to
+  get one by address. `SessionRouting` is the near neighbour and deliberately
+  not this: it exists so a channel can reach a session with no live turn to
+  hang the message on, which is finding an *existing* conversation rather than
+  addressing an arbitrary one.
+
+  An adapter that cannot address destinations (a transport with no concept of
+  one) declines the operation, and a schedule naming a destination it cannot
+  serve fails at creation — when a person is present to hear why — rather than
+  at 6am.
 - **A schedule declares its destination, and that destination is
   pre-authorized.** Without this the step does not work at all, and the
   arithmetic is worth stating: `message.send` is `gated`, headless refuses every
@@ -94,6 +114,9 @@ a *health* mechanism, which is monitoring and belongs with 08.
   passes only under `remote` with a human clicking has not tested this step.
 - The same scheduled turn sending to a channel the schedule did not declare is
   gated normally: refused under headless, parked under remote.
+- A schedule naming a destination its agent's channel cannot address is refused
+  at `schedule.every` time, with a message saying so — not accepted and then
+  silently unable to report.
 - Schedules survive a daemon restart, and a restart during a firing does not
   double-run it.
 - A gated tool call inside a scheduled turn parks and asks exactly as it would
