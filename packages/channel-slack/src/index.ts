@@ -51,7 +51,13 @@ export interface SlackSocketEventArgs {
     user?: { id?: string };
     actions?: SlackBlockAction[];
     channel?: { id?: string };
-    message?: { ts?: string; thread_ts?: string };
+    /**
+     * block_actions only: the message the click came from, as Slack holds
+     * it at the moment it processes the interaction — so `blocks` is the
+     * message's real current state, not what the clicking client had
+     * rendered.
+     */
+    message?: { ts?: string; thread_ts?: string; blocks?: SlackBlock[] };
   };
   event?: SlackInboundEvent;
   retry_num?: number;
@@ -592,8 +598,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // before the sockets close, or a message keeps offering buttons that
   // nothing is listening for.
   const track = (work: Promise<void>): void => {
-    inflight.add(work);
-    void work.finally(() => inflight.delete(work));
+    // Also the rejection boundary, because this is where the work stops
+    // being anyone's to await: the caller hands it over and returns to the
+    // event loop, so a rejection past this point is attached to nothing
+    // and takes the daemon down under Node's default. One call site below
+    // remembers to catch before handing over, which is exactly the kind of
+    // rule that holds until the next call site forgets it -- so it lives
+    // here instead, where there is one of it.
+    const settled = work.catch((error) => {
+      warn(`slack: background work failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    inflight.add(settled);
+    void settled.finally(() => inflight.delete(settled));
   };
 
   const alreadySeen = (key: string): boolean => {
@@ -777,6 +793,53 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * — so a message can never keep offering a decision that no longer has
    * anywhere to land.
    */
+  /**
+   * Rewrites a prompt left behind by a daemon that is gone, using the
+   * click's own coordinates.
+   *
+   * The index of posted requests is in-memory and keyed by request id, so
+   * a new process starts empty and has no way to find the messages its
+   * predecessor posted. An interaction payload carries the channel and
+   * timestamp of the message it came from, which is the one handle on such
+   * a message that survives — so the click that discovers the prompt is
+   * dead is also what retires it. Unclicked orphans stay as they are;
+   * clearing those needs the posts to be durable, which is a larger change
+   * than this and belongs to both billing paths equally.
+   */
+  const offersDecision = (blocks: SlackBlock[] | undefined): boolean =>
+    (blocks ?? []).some((block) => block.type === 'actions');
+
+  const retireOrphanedPrompt = async (
+    connection: AgentConnection,
+    args: SlackSocketEventArgs,
+  ): Promise<void> => {
+    const channel = args.body?.channel?.id;
+    const ts = args.body?.message?.ts;
+    if (!channel || !ts) {
+      return;
+    }
+    // The message decides, not a memory of it. Every ending rewrites this
+    // message into a plain section, so buttons still on it mean nothing
+    // has been written there yet — and no buttons means something has, and
+    // overwriting it would replace a real outcome and the person who made
+    // it. Reading the click's own copy answers that with no bookkeeping to
+    // disagree with, and no second API call to ask.
+    if (!offersDecision(args.body?.message?.blocks)) {
+      return;
+    }
+    const text = 'This request is no longer pending — the daemon that asked it is no longer running.';
+    try {
+      await connection.web.chat.update({
+        channel,
+        ts,
+        text,
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
+      });
+    } catch (error) {
+      warn(`slack: could not retire an orphaned approval request: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   const retractApprovalRequest = async (
     event: Extract<StratusEvent, { type: 'tool.approval-resolved' }>,
   ): Promise<void> => {
@@ -806,6 +869,58 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
   };
 
+  /**
+   * Says so in the thread when a turn fails with nobody rendering it.
+   *
+   * The intake path reports a failure through the renderer it opened, so a
+   * turn this process started is always answered. A turn it did NOT start
+   * has no renderer: one the startup sweep failed because the last daemon
+   * died mid-turn, or one whose recovery could not be finished. Those are
+   * exactly the cases where the person is still looking at the thread,
+   * and silence there reads as an agent that simply never replied.
+   *
+   * The routing has to come from the durable session, because the only
+   * in-memory copy died with the process that had it.
+   */
+  const reportUnrenderedFailure = async (
+    event: Extract<StratusEvent, { type: 'session.failed' }>,
+  ): Promise<void> => {
+    const gateway = gatewayRef;
+    if (!gateway?.sessionRouting) {
+      return;
+    }
+    let routing;
+    try {
+      routing = await gateway.sessionRouting(event.sessionId);
+    } catch (error) {
+      // A store that cannot answer is not a reason to lose the daemon, and
+      // the turn is already failed — there is nothing here to salvage
+      // beyond saying why the thread stayed quiet.
+      warn(`slack: could not read the routing for a failed turn: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    const metadata = routing?.metadata;
+    // Another surface's session, or one with no conversation to speak
+    // into. Not this adapter's to answer either way.
+    if (!routing || metadata?.channel !== 'slack' || typeof metadata.slackChannel !== 'string') {
+      return;
+    }
+    const connection = connectionFor(routing.agentId);
+    if (!connection) {
+      return;
+    }
+    const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
+    try {
+      await connection.web.chat.postMessage({
+        channel: metadata.slackChannel,
+        text: `Something went wrong: ${event.error}`,
+        ...(thread ? { thread_ts: thread } : {}),
+      });
+    } catch (error) {
+      warn(`slack: could not report a failed turn: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   const handleInteractive = async (connection: AgentConnection, args: SlackSocketEventArgs): Promise<void> => {
     // Ack first and unconditionally: Slack retries an unacked interaction,
     // and a redelivered click on a request that is no longer pending would
@@ -826,6 +941,19 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // click is answered where it was made, not silently dropped.
     if (!post) {
       await tellClicker(connection, args, 'That approval request is no longer pending.');
+      // And the message itself is corrected, so the next person to read it
+      // is not offered a decision nothing is waiting for — unless it is
+      // one still being posted, which is live with the index simply not
+      // caught up yet. Slack can show a message before postMessage
+      // resolves here, so a fast click lands inside that window, and
+      // stripping its buttons would strand the turn until the approval
+      // times out: the record written when the post lands does not put
+      // them back. Whether anything has already been written on the
+      // message is `retireOrphanedPrompt`'s own question, answered from
+      // the message rather than from a memory of it.
+      if (!rendering.has(requestId)) {
+        await retireOrphanedPrompt(connection, args);
+      }
       return;
     }
     // A different agent's app relaying a click would bypass the approver
@@ -1026,6 +1154,28 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           track(retractApprovalRequest(event));
           return;
         }
+        // A failure with no renderer is not a turn this process is
+        // serving — it is one the startup sweep or a failed recovery
+        // closed out. Nothing downstream would say anything about it.
+        //
+        // A non-empty queue is not proof the failure belongs to a turn
+        // this adapter dispatched, only that it has one for this session.
+        // A renderer is queued at intake, before the gateway starts the
+        // turn it belongs to, so a message arriving while a recovery is
+        // still ahead of it on the session chain leaves the recovery's
+        // failure looking rendered when it is not. Suppressing is the
+        // conservative half of that trade: the alternative reports every
+        // ordinary failure twice.
+        //
+        // Telling them apart needs a turn identifier, which `StratusEvent`
+        // does not carry — the same gap 05's WS envelope closes with
+        // `{ sessionId, turnId, event }`. The routing a line below has it
+        // too: recovery events are already delivered to whichever renderer
+        // is at the head of the queue, whether or not it is theirs.
+        if (event.type === 'session.failed' && !renderers.get(event.sessionId)?.length) {
+          track(reportUnrenderedFailure(event));
+          return;
+        }
         if ('sessionId' in event) {
           renderers.get(event.sessionId)?.[0]?.onEvent(event);
         }
@@ -1073,9 +1223,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     },
 
     async stop() {
-      // Stop intake first: with the sockets down no new event can slip
-      // into `inflight` after the drain snapshot below, so nothing posts
-      // to Slack after stop() returns.
+      // Stop intake first, so no new INBOUND event can slip into
+      // `inflight` after the drain snapshot below.
+      //
+      // That is narrower than it used to claim. The snapshot is taken
+      // once, and this unsubscribes from the bus only after it, so a turn
+      // still finishing can emit an event whose subscriber tracks work
+      // this drain never waits for — a retraction posted after stop()
+      // returns, or dropped with the process. Draining until `inflight`
+      // stays empty would close it, and would make stop() wait on turns
+      // the gateway drains after this call rather than before; worth doing
+      // deliberately, not as a side effect.
       await Promise.allSettled(connections.map((connection) => connection.socket.disconnect()));
       await Promise.allSettled([...inflight]);
       unsubscribe?.();

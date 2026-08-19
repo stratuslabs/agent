@@ -53,6 +53,10 @@ interface FakeWeb extends SlackWebLike {
   ephemerals: Array<{ channel: string; user: string; text: string }>;
   uploads: Array<{ channel_id: string; filename?: string; contents: string; wasBuffer: boolean }>;
   userInfoDelayMs?: (callIndex: number) => number;
+  /** Called as chat.postMessage is entered, before it awaits `postGate`. */
+  onPostEnter?: () => void;
+  /** Held by chat.postMessage, so a test can act while a post is in flight. */
+  postGate?: Promise<void>;
 }
 
 const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
@@ -72,7 +76,12 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
       async postMessage(args) {
         web.posts.push(args);
         counter += 1;
-        return { ts: `bot-ts-${counter}`, channel: args.channel };
+        const ts = `bot-ts-${counter}`;
+        web.onPostEnter?.();
+        if (web.postGate) {
+          await web.postGate;
+        }
+        return { ts, channel: args.channel };
       },
       async update(args) {
         web.updates.push(args);
@@ -581,7 +590,9 @@ test('inbound order per session survives slow user lookups', async () => {
     event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-AVA> second', ts: '800.2', thread_ts: '800.0', channel: 'C1' },
   });
   await Promise.all([one, two]);
-  await new Promise((resolve) => setTimeout(resolve, 80));
+  // stop() drains what the adapter still owes Slack, so it is the gate —
+  // a sleep in front of it was guessing at the same thing, and losing that
+  // guess on a loaded runner would fail an assertion about ordering.
   await adapter.stop();
 
   assert.deepEqual(gateway.dispatches.map((d) => d.userMessage), ['Dylan: first', 'Dylan: second']);
@@ -743,12 +754,42 @@ const approvalRequest = (
   ...overrides,
 });
 
-const click = (actionId: string, requestId: string, user: string) => ({
+/**
+ * A click, carrying the message it came from the way Slack does.
+ *
+ * `blocks` is not decoration: a block_actions payload includes the message
+ * as Slack holds it when it processes the interaction, and that is how the
+ * adapter tells a prompt still offering a decision from one already
+ * rewritten with an outcome. `settled: true` is the second kind — what a
+ * message looks like after any ending has been written onto it.
+ */
+const click = (
+  actionId: string,
+  requestId: string,
+  user: string,
+  options: { settled?: boolean } = {},
+) => ({
   body: {
     team_id: 'T1',
     user: { id: user },
     channel: { id: 'C1' },
-    message: { ts: 'bot-ts-1', thread_ts: '100.1' },
+    message: {
+      ts: 'bot-ts-1',
+      thread_ts: '100.1',
+      blocks: options.settled
+        ? [{ type: 'section', text: { type: 'mrkdwn', text: 'already decided' } }]
+        : [
+            { type: 'section', text: { type: 'mrkdwn', text: 'Ava wants to run shell.run (gated).' } },
+            {
+              type: 'actions',
+              elements: [
+                { type: 'button', action_id: 'stratus_approve_once', value: requestId },
+                { type: 'button', action_id: 'stratus_approve_always', value: requestId },
+                { type: 'button', action_id: 'stratus_deny', value: requestId },
+              ],
+            },
+          ],
+    },
     actions: [{ action_id: actionId, value: requestId }],
   },
 });
@@ -1193,4 +1234,279 @@ test('a denied hosted tool still separates the turns around it', async () => {
     web.updates.every((update) => !update.text.includes('shell.run…')) || !(web.updates.at(-1)?.text ?? '').includes('shell.run…'),
     `a denied tool kept its running status: ${JSON.stringify(web.updates.at(-1)?.text)}`,
   );
+});
+
+test('a click on a prompt left by a dead daemon retires it, using the click\'s own coordinates', async () => {
+  // The index of posted requests is in-memory and keyed by request id, so
+  // a restarted daemon starts empty and cannot find what its predecessor
+  // posted. Telling the clicker is not enough on its own: the message
+  // keeps its buttons, and the next person to read it is offered a
+  // decision nothing is waiting for.
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  // No approvalRequest emitted: this adapter has never heard of req-ghost,
+  // exactly as a fresh process has never heard of anything.
+  await socket.deliver('interactive', click('stratus_approve_once', 'req-ghost', 'U-DYLAN'));
+
+  assert.match(web.ephemerals.at(-1)?.text ?? '', /no longer pending/);
+  const update = web.updates.at(-1);
+  assert.equal(update?.channel, 'C1');
+  assert.equal(update?.ts, 'bot-ts-1', 'the click carries the only handle on a message this process never posted');
+  assert.equal(buttonIds(update?.blocks).length, 0, 'the retired prompt offers no decision');
+  assert.match(update?.text ?? '', /no longer running/);
+
+  await adapter.stop();
+});
+
+test('a click on a message that already carries its outcome does not overwrite it', async () => {
+  // A click can still arrive for a request that is already decided — from
+  // a stale render, or from a message whose outcome this process never
+  // wrote. Treating either as an orphan would replace a real decision with
+  // "no longer pending", losing the record of who decided what, which is
+  // the whole point of rewriting the message. The message itself says
+  // which it is: an ending has been written onto it, so it no longer
+  // offers a decision.
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
+
+  const settled = web.updates.at(-1);
+  assert.match(settled?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+  const updatesAfterDecision = web.updates.length;
+
+  // The same button, clicked again — the message now carries the outcome.
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN', { settled: true }));
+
+  assert.equal(web.updates.length, updatesAfterDecision, 'the settled message is left exactly as it was');
+  assert.match(web.updates.at(-1)?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+  assert.match(web.ephemerals.at(-1)?.text ?? '', /no longer pending/);
+
+  await adapter.stop();
+});
+
+test('a turn that failed with nobody rendering it is reported in its own thread', async () => {
+  // The intake path reports through the renderer it opened, so a turn this
+  // process started is always answered. One it did not start — failed by
+  // the startup sweep after a daemon died mid-turn — has no renderer, and
+  // silence in the thread reads as an agent that simply never replied.
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },
+  ]);
+  gateway.sessionRouting = async (sessionId: string) =>
+    sessionId === 'slack:ava:T1:C1:100.1'
+      ? {
+          agentId: 'ava',
+          metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+        }
+      : undefined;
+  await adapter.start(gateway);
+
+  await gateway.bus.emit({
+    type: 'session.failed',
+    sessionId: 'slack:ava:T1:C1:100.1',
+    error: 'stratusd stopped while this turn was still running; it was not resumed.',
+  });
+  // stop() drains what the adapter owes Slack, so this gates on the work
+  // rather than on a sleep.
+  await adapter.stop();
+
+  const posted = web.posts.at(-1);
+  assert.equal(posted?.channel, 'C1');
+  assert.equal(posted?.thread_ts, '100.1', 'the report belongs in the thread the turn came from');
+  assert.match(posted?.text ?? '', /not resumed/);
+});
+
+test('a failure the running turn is already rendering is not reported twice', async () => {
+  // The renderer opened at intake reports this one. Posting again would
+  // put the same failure in the thread a second time, from the far side of
+  // the same event.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(async ({ sessionId }) => {
+    await gateway.bus.emit({ type: 'session.failed', sessionId, error: 'provider said no' });
+    throw new Error('provider said no');
+  });
+  let routingReads = 0;
+  gateway.sessionRouting = async () => {
+    routingReads += 1;
+    return { agentId: 'ava', metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1' } };
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> do the thing'));
+  await adapter.stop();
+
+  assert.equal(routingReads, 0, 'a rendered turn is the renderer\'s to report');
+  const failures = [
+    ...web.posts.filter((entry) => /provider said no/.test(entry.text)),
+    ...web.updates.filter((entry) => /provider said no/.test(entry.text)),
+  ];
+  assert.equal(failures.length, 1, 'exactly one report of the failure');
+});
+
+test('a store that cannot answer does not take the daemon down with it', async () => {
+  // The report is detached: the subscriber hands it to track() and returns
+  // to the event loop, so nothing is awaiting it when it rejects. Under
+  // Node's default that ends the process — the daemon dying because it
+  // could not explain why a turn died.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = async () => {
+    throw new Error('sqlite is having a day');
+  };
+  const warnings: string[] = [];
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (line) => warnings.push(line),
+  });
+  await adapter.start(gateway);
+
+  await gateway.bus.emit({
+    type: 'session.failed',
+    sessionId: 'slack:ava:T1:C1:100.1',
+    error: 'whatever went wrong',
+  });
+  // Drains the detached work, so the rejection has landed by the time the
+  // assertions run rather than after the test is over.
+  await adapter.stop();
+
+  assert.equal(web.posts.length, 0, 'nothing to post when the routing is unknown');
+  assert.ok(
+    warnings.some((line) => /could not read the routing/.test(line)),
+    `the failure is reported as a warning, not a crash: ${JSON.stringify(warnings)}`,
+  );
+});
+
+test('a click that beats the post is not treated as an orphan', async () => {
+  // Slack can show a message before postMessage resolves here, so a fast
+  // click lands while the request is mid-post: absent from the index of
+  // posts, but very much alive. Retiring it there would take the buttons
+  // off a live question, and the record written when the post lands does
+  // not put them back — the turn would wait out its whole approval window
+  // with no way to answer.
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  let reachedPost = (): void => {};
+  const posting = new Promise<void>((resolve) => { reachedPost = resolve; });
+  let releasePost = (): void => {};
+  web.onPostEnter = () => reachedPost();
+  web.postGate = new Promise<void>((resolve) => { releasePost = resolve; });
+
+  gateway.pendingApprovals.add('req-1');
+  void gateway.bus.emit(approvalRequest());
+  // Gated on the post being entered, not on a delay: the window opens when
+  // postMessage is reached and closes when it returns.
+  await posting;
+
+  await socket.deliver('interactive', click('stratus_approve_once', 'req-1', 'U-DYLAN'));
+  releasePost();
+  // Asserted after the drain, not straight after deliver(): the retirement
+  // this checks does NOT happen is an awaited API call, so checking before
+  // the adapter has finished would pass whether or not the guard works.
+  // deliver() waits a fixed 20ms for handlers to settle, which is a guess;
+  // stop() drains them, which is not.
+  await adapter.stop();
+
+  assert.equal(web.updates.length, 0, 'a live request keeps its buttons');
+  // Still answerable, which is the thing that was at stake.
+  assert.equal(gateway.pendingApprovals.has('req-1'), true);
+  const buttons = buttonIds(web.posts.at(-1)?.blocks);
+  assert.deepEqual(buttons, ['stratus_approve_once', 'stratus_approve_always', 'stratus_deny']);
+});
+
+test('a resolution Slack refused leaves the prompt repairable by the next click', async () => {
+  // Slack rejected the update, so the outcome never reached the message and
+  // it still shows live buttons. There is nothing on it to protect, and a
+  // later click has to be able to clean it up.
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+
+  const realUpdate = web.chat.update;
+  let refuse = true;
+  web.chat.update = async (args) => {
+    if (refuse) {
+      refuse = false;
+      throw new Error('slack said no');
+    }
+    return realUpdate(args);
+  };
+
+  // Decided, but the message never got rewritten.
+  await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-DYLAN'));
+  // Length rather than deepEqual against []: under assert/strict that is an
+  // assertion signature, and it would narrow `web.updates` to never[] for
+  // the rest of the test — where the repair below is read back.
+  assert.equal(web.updates.length, 0, 'the outcome never reached the message');
+
+  // A later click on those still-live buttons must be able to clean it up.
+  await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-DYLAN'));
+  await adapter.stop();
+
+  const repaired = web.updates.at(-1);
+  assert.match(repaired?.text ?? '', /no longer running/);
+  assert.equal(buttonIds(repaired?.blocks).length, 0);
+});
+
+test('an update Slack applied but never confirmed does not lose its outcome', async () => {
+  // The ambiguous half of a failed update: Slack commits the edit and the
+  // response is lost, so the promise rejects over a message that now
+  // carries the real decision. Deciding from the error would have to guess
+  // which half this was; deciding from the message does not have to,
+  // because the message is the thing at stake.
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+
+  const realUpdate = web.chat.update;
+  let swallowResponse = true;
+  web.chat.update = async (args) => {
+    await realUpdate(args);
+    if (swallowResponse) {
+      swallowResponse = false;
+      throw new Error('connection reset after Slack committed the edit');
+    }
+    return {};
+  };
+
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
+  const outcome = web.updates.at(-1);
+  assert.match(outcome?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+  const updatesAfterOutcome = web.updates.length;
+
+  // A later click on that message, which now carries the decision.
+  await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-DYLAN', { settled: true }));
+  await adapter.stop();
+
+  assert.equal(web.updates.length, updatesAfterOutcome, 'the decision is left exactly as Slack stored it');
+  assert.match(web.updates.at(-1)?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
 });

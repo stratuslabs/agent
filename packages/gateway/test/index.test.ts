@@ -1141,7 +1141,13 @@ test('the watchdog observes activity ahead of slow external event consumers', as
     processEnv: { ANTHROPIC_API_KEY: 'sk-a', OPENAI_API_KEY: 'sk-o' },
     fetch: fetchImpl,
   };
-  const gateway = createGateway({ env, idleTimeoutMs: 300, warn: () => {} });
+  // Same margin as the other two tests that arm the watchdog and then
+  // require it to suspend: the armed window before the first delta holds
+  // real work, which measures in single milliseconds here and stretches by
+  // an order of magnitude on a loaded runner. This is the test that
+  // actually lost that race in CI.
+  const IDLE_MS = 500;
+  const gateway = createGateway({ env, idleTimeoutMs: IDLE_MS, warn: () => {} });
   await gateway.start();
 
   // An external consumer (think: a throttled channel edit) that takes
@@ -1150,7 +1156,7 @@ test('the watchdog observes activity ahead of slow external event consumers', as
   // BEFORE this consumer blocks the chain, or a healthy turn dies.
   gateway.bus.subscribe(async (event) => {
     if (event.type === 'provider.response') {
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, IDLE_MS * 2));
     }
   });
 
