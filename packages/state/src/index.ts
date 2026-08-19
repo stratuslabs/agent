@@ -1710,7 +1710,12 @@ export const servedRuntimes = async (
   env: StateEnvironment,
   configPath?: string,
 ): Promise<ServedRuntime[]> => {
-  const { config: activeConfig, location } = await discoverActiveConfig(env, () => {});
+  // The pinned file, not whatever the working directory holds. What this
+  // discovers decides which daemon-wide model, endpoint, and credentials
+  // `applySoulPins` demotes, so resolving against `configPath` while deriving
+  // the pin context from a different file describes a runtime the gateway
+  // never builds.
+  const { config: activeConfig, location } = await discoverActiveConfig(env, () => {}, configPath);
   const context: SoulPinContext = {
     ...(activeConfig.provider !== undefined ? { configProvider: activeConfig.provider } : {}),
     configPresent: location !== undefined,

@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import type { IncomingMessage } from 'node:http';
 import path from 'node:path';
 
@@ -40,52 +40,72 @@ export type Principal =
  */
 export const ensureGatewayToken = async (env: StateEnvironment): Promise<string> => {
   const tokenPath = gatewayTokenPath(env);
-  try {
-    const existing = (await readFile(tokenPath, 'utf8')).trim();
-    if (existing.length > 0) {
-      await chmod(tokenPath, 0o600);
-      return existing;
+  await mkdir(path.dirname(tokenPath), { recursive: true, mode: 0o700 });
+
+  const settle = async (value: string): Promise<string> => {
+    await chmod(tokenPath, 0o600);
+    // The home directory holds credentials and sessions too; an install that
+    // predates this tightening must not leave the new token world-readable
+    // through a traversable parent.
+    await chmod(stratusHomePath(env), 0o700).catch(() => undefined);
+    return value;
+  };
+
+  // Claimed by exclusive create, never by overwriting.
+  //
+  // Two daemons can start together on one home, and a third case sits
+  // between "no file" and "a good file": a process interrupted between
+  // creating the file and writing to it leaves an empty one, which is not a
+  // token any bearer header can satisfy. Replacing that in place would
+  // reintroduce exactly what the exclusive create exists to prevent — both
+  // daemons write their own value, one wins the disk, and the loser goes on
+  // authenticating against a secret no client can read. So an empty file is
+  // unlinked and the claim is raced for again, and every path below returns
+  // what the FILE ended up holding rather than what this process generated:
+  // a daemon that loses adopts the winner's token instead of locking itself
+  // out.
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      const existing = (await readFile(tokenPath, 'utf8')).trim();
+      if (existing.length > 0) {
+        return settle(existing);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
     }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw error;
+
+    // 32 bytes of CSPRNG output. base64url so it survives a URL, a header,
+    // and a shell argument without escaping. Minted per attempt, so a token
+    // that lost a race is never offered again.
+    const token = randomBytes(32).toString('base64url');
+    try {
+      await writeFile(tokenPath, `${token}\n`, { flag: 'wx', mode: 0o600 });
+      // Read back rather than trusting the write: this claim was exclusive,
+      // but a concurrent recovery that observed the empty file before this
+      // one created it can still unlink and replace it. The file is the
+      // authority, and it is what every client reads.
+      const onDisk = (await readFile(tokenPath, 'utf8')).trim();
+      return settle(onDisk.length > 0 ? onDisk : token);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw error;
+      }
     }
+
+    // Lost the claim, or found the corrupt file again. If it holds a real
+    // token the next pass adopts it; if it is still empty, clear the way.
+    const winner = await readFile(tokenPath, 'utf8').then((raw) => raw.trim()).catch(() => '');
+    if (winner.length > 0) {
+      return settle(winner);
+    }
+    await rm(tokenPath, { force: true });
   }
 
-  // 32 bytes of CSPRNG output. base64url so it survives a URL, a header, and
-  // a shell argument without escaping.
-  const token = randomBytes(32).toString('base64url');
-  await mkdir(path.dirname(tokenPath), { recursive: true, mode: 0o700 });
-  try {
-    // Exclusive create, so of two daemons starting together on a fresh home
-    // exactly one wins. Without it both observe ENOENT, both generate a
-    // token, and the loser goes on authenticating against a value no client
-    // can read — its API reachable by nobody, with nothing saying so.
-    await writeFile(tokenPath, `${token}\n`, { flag: 'wx', mode: 0o600 });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-      throw error;
-    }
-    const winner = (await readFile(tokenPath, 'utf8')).trim();
-    await chmod(tokenPath, 0o600);
-    if (winner.length > 0) {
-      return winner;
-    }
-    // The file exists but holds nothing — a process interrupted between
-    // creating it and writing to it. Returning that would start an API whose
-    // secret no bearer header can satisfy, while every client reads the same
-    // empty string: authenticated by nobody, across restarts, with nothing
-    // saying why. A plain write replaces it, since there is no valid token to
-    // race against.
-    await writeFile(tokenPath, `${token}\n`, { mode: 0o600 });
-    await chmod(tokenPath, 0o600);
-  }
-  await chmod(tokenPath, 0o600);
-  // The home directory holds credentials and sessions too; an install that
-  // predates this tightening must not leave the new token world-readable
-  // through a traversable parent.
-  await chmod(stratusHomePath(env), 0o700).catch(() => undefined);
-  return token;
+  throw new Error(
+    `Could not claim ${tokenPath}: it keeps coming back empty. Remove it and start the daemon again.`,
+  );
 };
 
 /**

@@ -743,9 +743,16 @@ test('the roster lists only agents the daemon can actually be asked about', asyn
       assert.equal(accepted.status, 202, `${agent.id} was listed but not dispatchable`);
     }
 
+    // Health describes the same daemon, so it answers from the same roster.
+    const health = await json<{ agents: Array<{ id: string }> }>(await harness.call('/api/v1/health'));
+    assert.ok(health.agents.some((agent) => agent.id === 'ava'));
+    assert.ok(!health.agents.some((agent) => agent.id === 'rex'), 'health does not report an unserved soul');
+
     await harness.call('/api/v1/roster/reload', { method: 'POST' });
     const after = await json<{ agents: Array<{ id: string; name: string }> }>(await harness.call('/api/v1/agents'));
     assert.ok(after.agents.some((agent) => agent.id === 'rex'), 'a reload brings it in');
+    const healthAfter = await json<{ agents: Array<{ id: string }> }>(await harness.call('/api/v1/health'));
+    assert.ok(healthAfter.agents.some((agent) => agent.id === 'rex'));
   } finally {
     await harness.stop();
   }
@@ -777,6 +784,19 @@ test('the API answers from the config the daemon was pinned to', async () => {
 
     const read = await json<{ path: string }>(await harness.call('/api/v1/config'));
     assert.equal(read.path, pinned);
+
+    // And the runtimes health reports, which is where the pin context comes
+    // from: `applySoulPins` demotes the daemon-wide defaults against the
+    // config it discovers, so discovering the wrong one describes a runtime
+    // the gateway never builds.
+    const health = await json<{ runtimes: Array<{ provider: string; model?: string }> }>(
+      await harness.call('/api/v1/health'),
+    );
+    assert.ok(
+      health.runtimes.every((runtime) => runtime.provider === 'anthropic'),
+      `health described a runtime from the wrong config: ${JSON.stringify(health.runtimes)}`,
+    );
+    assert.ok(health.runtimes.some((runtime) => runtime.model === 'claude-opus-5'));
   } finally {
     await harness.stop();
   }

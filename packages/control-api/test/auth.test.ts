@@ -352,3 +352,24 @@ test('a loopback bind does not trust a Host header', async () => {
     await harness.stop();
   }
 });
+
+test('two daemons recovering the same empty token file agree', async () => {
+  const home = await newHome();
+  const tokenPath = path.join(home, '.stratus', 'gateway-token');
+  await mkdir(path.dirname(tokenPath), { recursive: true });
+  await writeFile(tokenPath, '');
+
+  // Recovery has to claim the file the same exclusive way a fresh start
+  // claims it. Overwriting it in place is what the exclusive create exists to
+  // prevent: both daemons write their own value, one wins the disk, and the
+  // loser authenticates against a secret no client can read.
+  const [first, second] = await Promise.all([
+    ensureGatewayToken({ homeDir: home }),
+    ensureGatewayToken({ homeDir: home }),
+  ]);
+
+  assert.ok(first.length > 0);
+  assert.equal(first, second, 'both daemons ended on the same token');
+  assert.equal((await readFile(tokenPath, 'utf8')).trim(), first, 'and it is the one on disk');
+  assert.equal((await stat(tokenPath)).mode & 0o777, 0o600);
+});

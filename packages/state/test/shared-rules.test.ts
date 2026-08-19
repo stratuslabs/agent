@@ -196,6 +196,31 @@ test('servedRuntimes resolves one runtime per pinned soul, not just the daemon d
   assert.equal(pinned.runtime.provider === 'anthropic' ? pinned.runtime.model : undefined, 'claude-opus-5');
 });
 
+test('servedRuntimes takes its pin context from the config the daemon was pinned to', async () => {
+  const home = await newHome();
+  const pinned = path.join(home, 'pinned.json');
+  await writeFile(pinned, `${JSON.stringify({ provider: 'openai', model: 'gpt-4.1-mini' })}\n`);
+  // A different config in the working directory, which discovery prefers
+  // unless it is told which file the daemon is actually running.
+  await writeFile(path.join(home, 'stratus.config.json'), `${JSON.stringify({ provider: 'anthropic' })}\n`);
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: gpt-4o-mini\n---\n\nYou are Ava.\n');
+
+  const runtimes = await servedRuntimes(
+    { homeDir: home, cwd: home, processEnv: { STRATUS_API_KEY: 'sk-generic' } },
+    pinned,
+  );
+
+  // The discovered config decides what `applySoulPins` demotes. Read from the
+  // working directory it says the daemon-wide default is anthropic, so Ava's
+  // openai pin looks like a provider switch and the generic key is stripped
+  // as "chosen for the other provider" — leaving Ava with no credential and
+  // dropping her runtime from the list entirely. Read from the pinned file
+  // the default is openai, the key is hers to use, and she resolves.
+  const models = runtimes.map((served) => (served.runtime.provider === 'openai' ? served.runtime.model : undefined));
+  assert.ok(models.includes('gpt-4o-mini'), `Ava's pinned runtime is missing: ${JSON.stringify(models)}`);
+  assert.ok(models.includes('gpt-4.1-mini'), 'and the daemon-wide default too');
+});
+
 test('applySoulPins drops a default model chosen for a different provider', async () => {
   const soul = {
     agent: { id: 'ava', name: 'Ava', instructions: 'You are Ava.' },

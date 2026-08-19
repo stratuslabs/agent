@@ -4,6 +4,29 @@ import { refreshCore, store } from '../app.js';
 
 const PROVIDERS = ['anthropic', 'openai'];
 
+/**
+ * Bring a `<select>`'s options up to date without disturbing a choice.
+ *
+ * The option lists here are data — models a sign-in can reach, agents on the
+ * roster — and they arrive after the form is already on screen. Rebuilding
+ * the whole pane to show them would throw away everything typed into it, so
+ * the select is kept and only its options are replaced, restoring the current
+ * value when it survived the refresh.
+ */
+const syncOptions = (select, options, fallback) => {
+  const signature = options.map((option) => option.value).join(' ');
+  if (select.dataset.signature === signature) {
+    return;
+  }
+  const chosen = select.dataset.signature === undefined ? fallback : select.value;
+  select.dataset.signature = signature;
+  select.replaceChildren(...options.map((option) => el('option', { value: option.value }, option.label)));
+  const wanted = options.some((option) => option.value === chosen) ? chosen : fallback;
+  if (wanted !== undefined) {
+    select.value = wanted;
+  }
+};
+
 export const renderSettings = (section) => {
   const state = { credentials: undefined, models: undefined, config: undefined, notice: undefined, busy: false };
   const node = el('div', { class: 'main solo' });
@@ -30,9 +53,21 @@ export const renderSettings = (section) => {
     update();
   };
 
+  /**
+   * The pane, built once and kept.
+   *
+   * `update()` runs on every notice and on both edges of every request — the
+   * busy flag alone fires it twice per click. Rebuilding the pane there put a
+   * fresh, empty form on screen the moment someone pressed Verify, so a key
+   * that had just been checked was gone before it could be saved, and Save
+   * would then store an empty credential. Only the data-driven regions
+   * refresh; what someone typed is state, not a projection of the server.
+   */
+  let pane;
+
   // ---- providers ---------------------------------------------------------
 
-  const providersPane = () => {
+  const buildProviders = () => {
     const provider = el('select', {}, ...PROVIDERS.map((name) => el('option', { value: name }, name)));
     const type = el('select', {},
       el('option', { value: 'api_key' }, 'API key'),
@@ -80,47 +115,49 @@ export const renderSettings = (section) => {
       state.busy = false; update();
     };
 
-    return el('section', { class: 'card' },
-      el('h2', {}, 'Providers'),
-      el('div', { class: 'rows' }, ...(state.credentials?.providers ?? []).map((entry) => el('div', { class: 'row' },
-        el('div', { class: 'grow' },
-          el('div', { class: 'title' }, entry.provider),
-          el('div', { class: 'sub' }, entry.stored
-            ? `${entry.type === 'oauth_token' ? 'Claude subscription' : 'API key'}${entry.baseUrl ? ` · ${entry.baseUrl}` : ''}`
-            : 'not signed in')),
-        el('span', { class: `pill${entry.stored ? ' running' : ''}` }, entry.stored ? 'signed in' : 'none'),
-      ))),
-      el('p', { class: 'field-note' }, 'Keys are never sent back out — this page can tell you a sign-in exists, not what it is.'),
-      el('h3', {}, 'Add or replace a sign-in'),
-      el('div', { class: 'form-grid' },
-        el('div', {}, el('label', {}, 'Provider'), provider),
-        el('div', {}, el('label', {}, 'Type'), type),
+    const signIns = el('div', { class: 'rows' });
+    const verifyButton = el('button', { onClick: () => void verify() }, 'Verify');
+    const saveButton = el('button', { class: 'primary', onClick: () => void save() }, 'Save');
+
+    return {
+      node: el('section', { class: 'card' },
+        el('h2', {}, 'Providers'),
+        signIns,
+        el('p', { class: 'field-note' }, 'Keys are never sent back out — this page can tell you a sign-in exists, not what it is.'),
+        el('h3', {}, 'Add or replace a sign-in'),
+        el('div', { class: 'form-grid' },
+          el('div', {}, el('label', {}, 'Provider'), provider),
+          el('div', {}, el('label', {}, 'Type'), type),
+        ),
+        el('label', {}, 'Key'), value,
+        el('label', {}, 'Endpoint'), baseUrl,
+        el('p', { class: 'field-note' }, 'A key is bound to the endpoint you save it with, and is never sent anywhere else.'),
+        el('div', { class: 'actions' }, verifyButton, saveButton),
       ),
-      el('label', {}, 'Key'), value,
-      el('label', {}, 'Endpoint'), baseUrl,
-      el('p', { class: 'field-note' }, 'A key is bound to the endpoint you save it with, and is never sent anywhere else.'),
-      el('div', { class: 'actions' },
-        el('button', { disabled: state.busy, onClick: () => void verify() }, 'Verify'),
-        el('button', { class: 'primary', disabled: state.busy, onClick: () => void save() }, 'Save'),
-      ),
-    );
+      refresh() {
+        signIns.replaceChildren(...(state.credentials?.providers ?? []).map((entry) => el('div', { class: 'row' },
+          el('div', { class: 'grow' },
+            el('div', { class: 'title' }, entry.provider),
+            el('div', { class: 'sub' }, entry.stored
+              ? `${entry.type === 'oauth_token' ? 'Claude subscription' : 'API key'}${entry.baseUrl ? ` · ${entry.baseUrl}` : ''}`
+              : 'not signed in')),
+          el('span', { class: `pill${entry.stored ? ' running' : ''}` }, entry.stored ? 'signed in' : 'none'),
+        )));
+        verifyButton.disabled = state.busy;
+        saveButton.disabled = state.busy;
+      },
+    };
   };
 
   // ---- models ------------------------------------------------------------
 
-  const modelsPane = () => {
-    const config = state.config ?? {};
-    const options = state.models ?? [];
-    const picker = el('select', {},
-      el('option', { value: '' }, 'follow the default'),
-      ...options.map((model) => el('option', {
-        value: `${model.provider}:${model.id}`,
-        selected: config.provider === model.provider && config.model === model.id,
-      }, `${model.id} — ${model.provider}`)));
+  const buildModels = () => {
+    const picker = el('select', {});
 
     const save = async () => {
       state.busy = true; update();
       try {
+        const config = state.config ?? {};
         const [provider, model] = picker.value ? picker.value.split(/:(.*)/s) : [undefined, undefined];
         // A whole document, because PUT replaces rather than merges — sending
         // only the two changed keys would silently drop everything else in
@@ -155,26 +192,40 @@ export const renderSettings = (section) => {
       state.busy = false; update();
     };
 
-    return el('section', { class: 'card' },
-      el('h2', {}, 'Models'),
-      options.length === 0
-        ? el('p', { class: 'empty' }, 'No models reachable yet — add a provider sign-in first.')
-        : null,
-      el('label', {}, 'Default model'), picker,
-      el('p', { class: 'field-note' }, 'Listed live from the sign-ins you have. An agent whose soul pins a provider or model keeps it, whatever this says.'),
-      el('div', { class: 'actions' },
-        el('button', { class: 'primary', disabled: state.busy, onClick: () => void save() }, 'Save'),
+    const empty = el('p', { class: 'empty' }, 'No models reachable yet — add a provider sign-in first.');
+    const saveButton = el('button', { class: 'primary', onClick: () => void save() }, 'Save');
+
+    return {
+      node: el('section', { class: 'card' },
+        el('h2', {}, 'Models'),
+        empty,
+        el('label', {}, 'Default model'), picker,
+        el('p', { class: 'field-note' }, 'Listed live from the sign-ins you have. An agent whose soul pins a provider or model keeps it, whatever this says.'),
+        el('div', { class: 'actions' }, saveButton),
       ),
-    );
+      refresh() {
+        const config = state.config ?? {};
+        syncOptions(
+          picker,
+          [
+            { value: '', label: 'follow the default' },
+            ...(state.models ?? []).map((model) => ({
+              value: `${model.provider}:${model.id}`,
+              label: `${model.id} — ${model.provider}`,
+            })),
+          ],
+          config.provider && config.model ? `${config.provider}:${config.model}` : '',
+        );
+        empty.hidden = (state.models ?? []).length > 0;
+        saveButton.disabled = state.busy;
+      },
+    };
   };
 
   // ---- channels ----------------------------------------------------------
 
-  const channelsPane = () => {
-    const bound = state.credentials?.channels?.slack ?? [];
-    const agentPicker = el('select', {}, ...store.agents
-      .filter((agent) => !agent.builtIn)
-      .map((agent) => el('option', { value: agent.id }, agent.name)));
+  const buildChannels = () => {
+    const agentPicker = el('select', {});
     const appToken = el('input', { type: 'password', placeholder: 'xapp-…' });
     const botToken = el('input', { type: 'password', placeholder: 'xoxb-…' });
 
@@ -196,38 +247,55 @@ export const renderSettings = (section) => {
       state.busy = false; update();
     };
 
-    return el('section', { class: 'card' },
-      el('h2', {}, 'Channels'),
-      bound.length === 0
-        ? el('p', { class: 'empty' }, 'No agent is connected to Slack yet.')
-        : el('div', { class: 'rows' }, ...bound.map((agentId) => {
-            const agent = store.agents.find((candidate) => candidate.id === agentId);
-            return el('div', { class: 'row' },
-              el('div', { class: 'grow' },
-                el('div', { class: 'title' }, agent?.name ?? agentId),
-                el('div', { class: 'sub' }, 'Slack app connected')),
-              el('span', { class: 'pill running' }, 'slack'),
-            );
-          })),
-      el('h3', {}, 'Connect an agent'),
-      el('label', {}, 'Agent'), agentPicker,
-      el('label', {}, 'App token'), appToken,
-      el('label', {}, 'Bot token'), botToken,
-      el('p', { class: 'field-note' }, 'Channel tokens are gateway secrets in their own namespace — an agent can never read the tokens of the transport carrying it.'),
-      el('div', { class: 'actions' },
-        el('button', { class: 'primary', disabled: state.busy, onClick: () => void save() }, 'Save'),
+    const bound = el('div', {});
+    const saveButton = el('button', { class: 'primary', onClick: () => void save() }, 'Save');
+
+    return {
+      node: el('section', { class: 'card' },
+        el('h2', {}, 'Channels'),
+        bound,
+        el('h3', {}, 'Connect an agent'),
+        el('label', {}, 'Agent'), agentPicker,
+        el('label', {}, 'App token'), appToken,
+        el('label', {}, 'Bot token'), botToken,
+        el('p', { class: 'field-note' }, 'Channel tokens are gateway secrets in their own namespace — an agent can never read the tokens of the transport carrying it.'),
+        el('div', { class: 'actions' }, saveButton),
       ),
-    );
+      refresh() {
+        syncOptions(
+          agentPicker,
+          store.agents.filter((agent) => !agent.builtIn).map((agent) => ({ value: agent.id, label: agent.name })),
+        );
+        const connected = state.credentials?.channels?.slack ?? [];
+        bound.replaceChildren(connected.length === 0
+          ? el('p', { class: 'empty' }, 'No agent is connected to Slack yet.')
+          : el('div', { class: 'rows' }, ...connected.map((agentId) => {
+              const agent = store.agents.find((candidate) => candidate.id === agentId);
+              return el('div', { class: 'row' },
+                el('div', { class: 'grow' },
+                  el('div', { class: 'title' }, agent?.name ?? agentId),
+                  el('div', { class: 'sub' }, 'Slack app connected')),
+                el('span', { class: 'pill running' }, 'slack'),
+              );
+            })));
+        saveButton.disabled = state.busy;
+      },
+    };
   };
 
+  const notice = el('div', {});
+
   const update = () => {
-    const pane = section === 'models' ? modelsPane()
-      : section === 'channels' ? channelsPane()
-        : providersPane();
-    node.replaceChildren(el('div', { class: 'column' },
-      pane,
-      state.notice ? el('div', { class: `notice ${state.notice.kind}` }, state.notice.text) : null,
-    ));
+    pane ??= section === 'models' ? buildModels()
+      : section === 'channels' ? buildChannels()
+        : buildProviders();
+    pane.refresh();
+    notice.replaceChildren(
+      ...(state.notice ? [el('div', { class: `notice ${state.notice.kind}` }, state.notice.text)] : []),
+    );
+    if (!node.firstChild) {
+      node.replaceChildren(el('div', { class: 'column' }, pane.node, notice));
+    }
   };
 
   update();

@@ -281,7 +281,12 @@ export const routes: Route[] = [
     method: 'GET',
     pattern: `${API_PREFIX}/health`,
     async handler(context) {
+      // The roster the daemon is serving, enriched by the files — the same
+      // source `GET /agents` uses, and for the same reason: a soul added or
+      // broken since the last reload would otherwise make health report
+      // agents that dispatch refuses, or omit ones it is still serving.
       const summaries = await listAgentSummaries(context.env, () => {}, context.configPath);
+      const byId = new Map(summaries.map((summary) => [summary.id, summary]));
       // Counted in the database. Listing every session to add them up made
       // the cost of a health poll grow with everything the install had ever
       // stored — steadily slower at exactly the endpoint that exists to say
@@ -309,13 +314,16 @@ export const routes: Route[] = [
         version: context.version,
         startedAt: new Date(context.startedAt).toISOString(),
         uptimeMs: Date.now() - context.startedAt,
-        agents: summaries.map((summary) => ({
-          id: summary.id,
-          name: summary.name,
-          default: summary.default,
-          builtIn: summary.builtIn,
-          runsOn: summary.runsOn,
-        })),
+        agents: context.gateway.agents().map((agent) => {
+          const summary = byId.get(agent.id);
+          return {
+            id: agent.id,
+            name: agent.name,
+            default: summary?.default ?? false,
+            builtIn: summary?.builtIn ?? agent.id === DEFAULT_STRATUS_AGENT.id,
+            runsOn: summary?.runsOn ?? { provider: 'demo' },
+          };
+        }),
         sessions: { total: storedSessions, byStatus },
         approvals: { pending: context.gateway.pendingApprovals().length },
         runtimes: [...runtimes.values()],
