@@ -502,3 +502,36 @@ test('two souls claiming the reserved id are skipped, not treated as a collision
   assert.deepEqual(entries.map((entry) => entry.soul.agent.id), ['ava']);
   assert.equal(warnings.filter((line) => line.includes('reserved')).length, 2);
 });
+
+test('an injected query transport reaches a subscription fallback behind any primary', async () => {
+  // The pair is supported and the failure is silent: an OpenAI primary
+  // carries no queryFn of its own, so a fallback that does not receive one
+  // reaches the real Agent SDK the moment the primary fails — launching
+  // Claude Code out of a test, or out from under an embedder that pinned
+  // its transport on purpose.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({
+      openai: { type: 'api_key', value: 'sk-openai' },
+      anthropic: { type: 'oauth_token', value: 'sk-ant-oat' },
+    }),
+  );
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'openai', model: 'gpt-4o', fallbackProvider: 'anthropic', fallbackModel: 'claude-opus-5' }),
+  );
+
+  const queryFn = (() => (async function* () {})()) as never;
+  const resolved = await resolveRuntimeConfig({}, {
+    homeDir: home,
+    cwd: home,
+    processEnv: {},
+    queryFn,
+  });
+
+  assert.equal(resolved.provider, 'openai');
+  assert.equal(resolved.fallback?.provider, 'anthropic');
+  assert.equal(resolved.fallback?.queryFn, queryFn, 'the fallback must carry the injected transport');
+});

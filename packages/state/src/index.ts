@@ -1270,6 +1270,12 @@ export const resolveRuntimeConfig = async (
             : (fallbackAnthropicBaseUrl ? { baseUrl: fallbackAnthropicBaseUrl } : {})),
           ...(fallbackApiKey ? { apiKey: String(fallbackApiKey) } : {}),
           ...(fallbackAuthToken ? { authToken: fallbackAuthToken } : {}),
+          // Here rather than with the primary's transport above, because
+          // the fallback does not exist yet at that point. A subscription
+          // fallback behind an OpenAI primary has no transport to inherit,
+          // so without this it reaches the real Agent SDK the moment the
+          // primary fails.
+          ...(env.queryFn && fallbackProvider === 'anthropic' ? { queryFn: env.queryFn } : {}),
         };
       }
     }

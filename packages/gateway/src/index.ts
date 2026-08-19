@@ -868,7 +868,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * tool phases are covered by executor timeouts regardless).
    */
   const fallbackStreamsDeltas = (fallback: FallbackRuntime): boolean =>
-    fallback.provider === 'anthropic' && Boolean(fallback.apiKey);
+    // The same two modes as a primary. A subscription fallback that is not
+    // recognised as streaming gets no watchdog at all once a session
+    // switches to it, so a stall there would run to the provider's own
+    // ten-minute timer instead of the idle timeout the operator set.
+    fallback.provider === 'anthropic' && Boolean(fallback.apiKey || fallback.authToken);
 
   const streamsDeltas = (config: RuntimeConfig): boolean =>
     // Both Anthropic modes stream now: an API key through the Messages

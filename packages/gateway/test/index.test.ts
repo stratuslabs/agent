@@ -2463,3 +2463,80 @@ test('a hosted tool phase holds the watchdog, on a provider that never announces
   assert.equal(session.status, 'completed', `session failed: ${session.lastError ?? ''}`);
   assert.match(session.messages.at(-1)?.content ?? '', /all done/);
 });
+
+test('a stalled subscription fallback is cut loose by the gateway idle timeout', async () => {
+  // A fallback the gateway does not recognise as streaming gets no
+  // watchdog once a session switches to it, so a stall there would run to
+  // the provider's own ten-minute timer instead of the idle timeout the
+  // operator configured. Same two auth modes as a primary.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({
+      openai: { type: 'api_key', value: 'sk-o' },
+      anthropic: { type: 'oauth_token', value: 'sk-ant-oat' },
+    }),
+  );
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'openai', model: 'model-a', fallbackProvider: 'anthropic', fallbackModel: 'claude-opus-5' }),
+  );
+
+  const IDLE_MS = 300;
+  // The primary fails, so the turn switches to the subscription fallback.
+  const fetchImpl = (async () => new Response('nope', { status: 500 })) as typeof fetch;
+  // Which then yields one message and stops — a stall, not an error.
+  const queryFn = ((params: { options?: unknown }) => (async function* () {
+    yield { type: 'system', subtype: 'init', session_id: 'sdk-1' };
+    yield {
+      type: 'stream_event',
+      session_id: 'sdk-1',
+      event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'thinking' } },
+    };
+    // Silent until aborted, which is what a wedged query looks like — and
+    // it honours the controller the provider hands it, so the watchdog's
+    // abort actually ends this generator rather than leaving it resident.
+    const signal = (params.options as { abortController?: AbortController }).abortController?.signal;
+    await new Promise<void>((resolve) => {
+      if (!signal || signal.aborted) {
+        resolve();
+        return;
+      }
+      signal.addEventListener('abort', () => resolve(), { once: true });
+    });
+  })()) as never;
+
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {}, fetch: fetchImpl, queryFn },
+    idleTimeoutMs: IDLE_MS,
+    warn: () => {},
+  });
+  await gateway.start();
+
+  // The gate needs a way to lose, and losing has to end the turn as well
+  // as report it: unrecognised, the stall waits on the provider's own
+  // ten-minute timer, and a deadline that only rejected would leave the
+  // dispatch resident and hang the shutdown drain instead of failing.
+  const rescue = new AbortController();
+  const timer = setTimeout(() => rescue.abort(), 10_000);
+  const dispatched = gateway.dispatch({
+    sessionId: 'stall-1',
+    agentId: 'ava',
+    userMessage: 'hello',
+    signal: rescue.signal,
+  }).then((session) => session.lastError ?? 'completed', (error: unknown) => String(error));
+
+  try {
+    const outcome = await dispatched;
+    assert.ok(
+      !rescue.signal.aborted,
+      'the stalled subscription fallback was never cut loose — the gateway watchdog did not arm for it',
+    );
+    assert.match(outcome, /no activity/);
+  } finally {
+    clearTimeout(timer);
+    await gateway.stop();
+  }
+});
