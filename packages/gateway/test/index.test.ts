@@ -2684,3 +2684,78 @@ test('a policy that throws does not leave the next turn without a watchdog', asy
     await gateway.stop();
   }
 });
+
+test('a provider retrying its own attempt keeps its watchdog', async () => {
+  // A failed resume discards its partial output and replays into a fresh
+  // SDK session — same provider, same turn. Reading that reset as the
+  // fallback switch would disarm the watchdog for the rest of a turn that
+  // never changed provider, and a stall in the replay would then wait on
+  // the SDK's own ten-minute timer.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\n---\n\nYou are Ava.\n');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat' } }),
+  );
+
+  const IDLE_MS = 300;
+  let attempt = 0;
+  const queryFn = ((params: { options?: unknown }) => {
+    const options = params.options as { resume?: string; abortController?: AbortController };
+    attempt += 1;
+    const thisAttempt = attempt;
+    return (async function* () {
+      yield { type: 'system', subtype: 'init', session_id: 'sdk-1' };
+      yield {
+        type: 'stream_event',
+        session_id: 'sdk-1',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } },
+      };
+      if (options.resume) {
+        // The stored session is gone: this is what triggers the replay.
+        throw new Error(`No conversation found with session ID: ${options.resume}`);
+      }
+      if (thisAttempt > 1) {
+        // The replay stalls. Its watchdog has to still be armed.
+        const signal = options.abortController?.signal;
+        await new Promise<void>((resolve) => {
+          if (!signal || signal.aborted) {
+            resolve();
+            return;
+          }
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return;
+      }
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'first', session_id: 'sdk-1' };
+    })();
+  }) as never;
+
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {}, queryFn },
+    idleTimeoutMs: IDLE_MS,
+    warn: () => {},
+  });
+  await gateway.start();
+
+  // Turn one records the SDK session id, so turn two resumes — and fails.
+  await gateway.dispatch({ sessionId: 'retry-1', agentId: 'ava', userMessage: 'first' });
+
+  const rescue = new AbortController();
+  const timer = setTimeout(() => rescue.abort(), 10_000);
+  const second = gateway.dispatch({ sessionId: 'retry-1', agentId: 'ava', userMessage: 'second', signal: rescue.signal })
+    .then((session) => session.lastError ?? 'completed', (error: unknown) => String(error));
+
+  try {
+    const outcome = await second;
+    assert.ok(
+      !rescue.signal.aborted,
+      'the replayed attempt ran without a watchdog — its reset was read as a fallback switch',
+    );
+    assert.match(outcome, /no activity/);
+  } finally {
+    clearTimeout(timer);
+    await gateway.stop();
+  }
+});

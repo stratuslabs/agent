@@ -638,7 +638,7 @@ export const createClaudeCodeProvider = ({
         // a reset an aggregator concatenates the two into one garbled
         // reply. This is precisely what reset is for: a partial attempt
         // the provider gave up on.
-        await request.onDelta?.({ type: 'reset' });
+        await request.onDelta?.({ type: 'reset', reason: 'retry' });
         toolNamesByIndex.clear();
         await attempt(undefined);
       }

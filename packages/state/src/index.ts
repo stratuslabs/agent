@@ -1416,7 +1416,7 @@ export const createFallbackWrappedProvider = (
           // watchdog) rely on it even when the primary died before its
           // first delta.
           if (request.onDelta) {
-            await request.onDelta({ type: 'reset' });
+            await request.onDelta({ type: 'reset', reason: 'fallback' });
           }
         }
       }

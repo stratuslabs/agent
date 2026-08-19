@@ -596,7 +596,9 @@ test('a failed resume discards its streamed fragments before replaying', async (
 
   assert.deepEqual(deltas, [
     { type: 'text', text: 'stale half-' },
-    { type: 'reset' },
+    // `retry`, not `fallback`: the same provider is starting over, and a
+    // consumer tracking which provider serves the turn must see that.
+    { type: 'reset', reason: 'retry' },
     { type: 'text', text: 'fresh answer' },
   ]);
 });

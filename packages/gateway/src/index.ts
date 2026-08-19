@@ -1037,9 +1037,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       switch (event.type) {
         case 'provider.delta':
-          // A reset marks the mid-turn, session-sticky fallback switch:
-          // the timer follows whether the now-active provider streams.
-          if (event.delta.type === 'reset') {
+          // Only a *fallback* reset marks the mid-turn, session-sticky
+          // switch that the timer follows. A provider retrying its own
+          // attempt abandons its partial output too, but nothing about
+          // who is serving the turn changed — reading that as a switch
+          // would disarm the watchdog for the rest of a turn that is
+          // still running on the provider it started on.
+          if (event.delta.type === 'reset' && event.delta.reason === 'fallback') {
             streamingActive = fallbackStreams;
           }
           break;

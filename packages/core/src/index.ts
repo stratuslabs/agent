@@ -141,7 +141,23 @@ export type ProviderDelta =
    * reasoning itself is deliberately never carried here.
    */
   | { type: 'thinking' }
-  | { type: 'reset' };
+  | {
+      type: 'reset';
+      /**
+       * Why the partial was abandoned.
+       *
+       * `fallback` means a *different provider* is now serving this turn,
+       * and is the only case in which anything about the active provider
+       * changed. Everything else is the same provider starting over — a
+       * retried attempt after a failed resume, say — and a consumer that
+       * tracks which provider is running must not treat it as a switch.
+       *
+       * Absent reads as `retry`, deliberately: the conservative answer for
+       * an emitter that has not thought about it is "nothing changed", not
+       * "the provider swapped underneath you".
+       */
+      reason?: 'fallback' | 'retry';
+    };
 
 /**
  * How much damage an invocation of this tool could do, coarse on purpose:
