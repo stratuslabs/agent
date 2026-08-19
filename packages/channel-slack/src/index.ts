@@ -600,8 +600,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // before the sockets close, or a message keeps offering buttons that
   // nothing is listening for.
   const track = (work: Promise<void>): void => {
-    inflight.add(work);
-    void work.finally(() => inflight.delete(work));
+    // Also the rejection boundary, because this is where the work stops
+    // being anyone's to await: the caller hands it over and returns to the
+    // event loop, so a rejection past this point is attached to nothing
+    // and takes the daemon down under Node's default. One call site below
+    // remembers to catch before handing over, which is exactly the kind of
+    // rule that holds until the next call site forgets it -- so it lives
+    // here instead, where there is one of it.
+    const settled = work.catch((error) => {
+      warn(`slack: background work failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    inflight.add(settled);
+    void settled.finally(() => inflight.delete(settled));
   };
 
   const alreadySeen = (key: string): boolean => {
@@ -884,7 +894,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (!gateway?.sessionRouting) {
       return;
     }
-    const routing = await gateway.sessionRouting(event.sessionId);
+    let routing;
+    try {
+      routing = await gateway.sessionRouting(event.sessionId);
+    } catch (error) {
+      // A store that cannot answer is not a reason to lose the daemon, and
+      // the turn is already failed — there is nothing here to salvage
+      // beyond saying why the thread stayed quiet.
+      warn(`slack: could not read the routing for a failed turn: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
     const metadata = routing?.metadata;
     // Another surface's session, or one with no conversation to speak
     // into. Not this adapter's to answer either way.

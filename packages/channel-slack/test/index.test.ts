@@ -1313,3 +1313,40 @@ test('a failure the running turn is already rendering is not reported twice', as
   ];
   assert.equal(failures.length, 1, 'exactly one report of the failure');
 });
+
+test('a store that cannot answer does not take the daemon down with it', async () => {
+  // The report is detached: the subscriber hands it to track() and returns
+  // to the event loop, so nothing is awaiting it when it rejects. Under
+  // Node's default that ends the process — the daemon dying because it
+  // could not explain why a turn died.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = async () => {
+    throw new Error('sqlite is having a day');
+  };
+  const warnings: string[] = [];
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (line) => warnings.push(line),
+  });
+  await adapter.start(gateway);
+
+  await gateway.bus.emit({
+    type: 'session.failed',
+    sessionId: 'slack:ava:T1:C1:100.1',
+    error: 'whatever went wrong',
+  });
+  // Drains the detached work, so the rejection has landed by the time the
+  // assertions run rather than after the test is over.
+  await adapter.stop();
+
+  assert.equal(web.posts.length, 0, 'nothing to post when the routing is unknown');
+  assert.ok(
+    warnings.some((line) => /could not read the routing/.test(line)),
+    `the failure is reported as a warning, not a crash: ${JSON.stringify(warnings)}`,
+  );
+});
