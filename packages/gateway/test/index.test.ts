@@ -2759,3 +2759,82 @@ test('a provider retrying its own attempt keeps its watchdog', async () => {
     await gateway.stop();
   }
 });
+
+test('an approved tool on a turn with no watchdog leaves nothing behind', async () => {
+  // The sibling of the throwing-policy case, and the one that made the
+  // old shape untenable: on a turn with no armed watchdog there is no
+  // event observer, so nothing settled what the approval wrapper opened —
+  // not even a perfectly ordinary approved call. The entry then suppressed
+  // the watchdog for the next turn on that session.
+  const home = await newHome();
+  const soul = path.join(home, '.stratus', 'agents', 'ava.md');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\ntools:\n  - demo.echo\n---\n\nYou are Ava.\n');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({
+      openai: { type: 'api_key', value: 'sk-o' },
+      anthropic: { type: 'oauth_token', value: 'sk-ant-oat' },
+    }),
+  );
+
+  const IDLE_MS = 300;
+  let openAiCalls = 0;
+  const fetchImpl = (async () => {
+    openAiCalls += 1;
+    return openAiCalls === 1 ? openAiToolCall('demo_echo', { text: 'hi' }) : openAiText('first done');
+  }) as typeof fetch;
+
+  const queryFn = ((params: { options?: unknown }) => {
+    const signal = (params.options as { abortController?: AbortController }).abortController?.signal;
+    return (async function* () {
+      yield { type: 'system', subtype: 'init', session_id: 'sdk-1' };
+      yield {
+        type: 'stream_event',
+        session_id: 'sdk-1',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'working' } },
+      };
+      await new Promise<void>((resolve) => {
+        if (!signal || signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    })();
+  }) as never;
+
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {}, fetch: fetchImpl, queryFn },
+    idleTimeoutMs: IDLE_MS,
+    // Approves normally. Nothing exotic — that is the point.
+    approvals: { async approve() { return true; } },
+    warn: () => {},
+  });
+  await gateway.start();
+
+  // Turn one, non-streaming: withWatchdog returns before installing an
+  // observer, so no tool event is ever seen for this call.
+  const first = await gateway.dispatch({ sessionId: 'approved-1', agentId: 'ava', userMessage: 'first' });
+  assert.equal(first.status, 'completed', `first turn failed: ${first.lastError ?? ''}`);
+
+  // The same agent moves to the subscription runtime, which streams.
+  await writeFile(soul, '---\nname: Ava\nprovider: anthropic\ntools:\n  - demo.echo\n---\n\nYou are Ava.\n');
+
+  const rescue = new AbortController();
+  const timer = setTimeout(() => rescue.abort(), 10_000);
+  const second = gateway.dispatch({ sessionId: 'approved-1', agentId: 'ava', userMessage: 'second', signal: rescue.signal })
+    .then((session) => session.lastError ?? 'completed', (error: unknown) => String(error));
+
+  try {
+    const outcome = await second;
+    assert.ok(
+      !rescue.signal.aborted,
+      'the next turn ran without a watchdog — an ordinary approved call was never settled',
+    );
+    assert.match(outcome, /no activity/);
+  } finally {
+    clearTimeout(timer);
+    await gateway.stop();
+  }
+});

@@ -638,7 +638,17 @@ export const createClaudeCodeProvider = ({
         // a reset an aggregator concatenates the two into one garbled
         // reply. This is precisely what reset is for: a partial attempt
         // the provider gave up on.
-        await request.onDelta?.({ type: 'reset', reason: 'retry' });
+        //
+        // Clock stopped around it for the same reason every other awaited
+        // sink is: it is the consumer's time, and billing it to the SDK
+        // would turn a recoverable resume failure into an idle timeout
+        // before the replacement attempt even starts.
+        suspendIdleTimer();
+        try {
+          await request.onDelta?.({ type: 'reset', reason: 'retry' });
+        } finally {
+          resetIdleTimer();
+        }
         toolNamesByIndex.clear();
         await attempt(undefined);
       }

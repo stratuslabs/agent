@@ -638,42 +638,50 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   /**
-   * Tool calls whose phase is open, per session.
-   *
-   * Gateway-level rather than per-turn because two different things open a
-   * phase and only one of them has a turn in scope: the watchdog's event
-   * observer, and the approval policy below — which is asked before any
-   * event announces the call, and knows only its `ApprovalContext`.
-   */
-  const openToolCalls = new Map<string, Set<string>>();
-  /**
    * How a turn's watchdog stops its own clock, registered while it runs.
    *
-   * Recording the phase is not enough on its own: the timer is only ever
-   * re-evaluated when an event arrives, so a phase opened by something
-   * that emits nothing — an approval policy handed straight to the gateway
-   * — would leave an already-armed timer running to fire mid-wait.
+   * Recording that a tool phase is open is not enough on its own: the
+   * timer is only re-evaluated when an event arrives, so a phase opened by
+   * something that emits nothing — an approval policy handed straight to
+   * the gateway — would leave an already-armed timer running to fire
+   * mid-wait.
    */
   const suspendWatchdog = new Map<string, () => void>();
-  const openToolPhase = (sessionId: string, callId: string): void => {
-    const open = openToolCalls.get(sessionId) ?? new Set<string>();
-    open.add(callId);
-    openToolCalls.set(sessionId, open);
+
+  /**
+   * Approval waits in progress, per session.
+   *
+   * Deliberately a balanced counter and not a set of call ids. An earlier
+   * shape had the approval wrapper *open* a phase that the watchdog's
+   * event observer was expected to close, and that handoff was wrong in
+   * every way it could be: the observer does not exist when no watchdog is
+   * armed, so nothing closed it; a policy that threw closed nothing; and a
+   * stale entry did not merely leak, it suppressed the watchdog for the
+   * next turn on that session. Four separate exits, each patched in turn.
+   *
+   * A counter incremented and decremented in one `finally` cannot have any
+   * of those bugs, because the thing that opens the phase is the thing
+   * that closes it, in the same scope, on every path out.
+   */
+  const approvalWaits = new Map<string, number>();
+  const holdApprovalWait = (sessionId: string): (() => void) => {
+    approvalWaits.set(sessionId, (approvalWaits.get(sessionId) ?? 0) + 1);
+    // Stop any clock already running: this wait produces no events, so
+    // nothing else would.
     suspendWatchdog.get(sessionId)?.();
-  };
-  const settleToolPhase = (sessionId: string, callId: string): void => {
-    const open = openToolCalls.get(sessionId);
-    if (!open) {
-      return;
-    }
-    open.delete(callId);
-    // Dropped as soon as it empties, not only when a turn ends: a gateway
-    // with no idle timeout returns from withWatchdog before its cleanup
-    // exists, so on the ordinary non-streaming path the entry would be the
-    // one thing a long-running daemon accumulated per tool-using session.
-    if (open.size === 0) {
-      openToolCalls.delete(sessionId);
-    }
+    let released = false;
+    return () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      const remaining = (approvalWaits.get(sessionId) ?? 1) - 1;
+      if (remaining > 0) {
+        approvalWaits.set(sessionId, remaining);
+      } else {
+        approvalWaits.delete(sessionId);
+      }
+    };
   };
 
   const configuredApprovals = typeof options.approvals === 'function'
@@ -693,18 +701,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const approvals: ApprovalPolicy | undefined = configuredApprovals
     ? {
         async approve(context) {
-          openToolPhase(context.session.id, context.call.id);
+          const release = holdApprovalWait(context.session.id);
           try {
             return await configuredApprovals.approve(context);
-          } catch (error) {
-            // A policy that throws settles nothing: the runner propagates
-            // without emitting tool.denied or tool.completed, so the phase
-            // this opened would stay open for the life of the session —
-            // and a later streaming turn on it would find the watchdog
-            // suppressed before it started. Worse than the turn that
-            // failed, and silent.
-            settleToolPhase(context.session.id, context.call.id);
-            throw error;
+          } finally {
+            // Every path out, including a policy that throws. What happens
+            // after the answer is the tool events' business, and they are
+            // observed by the watchdog itself.
+            release();
           }
         },
       }
@@ -988,15 +992,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     let streamingActive = idleEnabled;
     let pendingTools = 0;
     /**
+     * Tool calls this turn has started and not finished.
+     *
      * `pendingTools` above reads a count off `provider.response`, which
      * only a provider that hands its calls back to the kernel loop emits.
      * A provider hosting its own loop dispatches inside `generate`, so that
-     * count is zero for the whole of a hosted tool — approval wait,
-     * executor, and all. The open-phase set is the signal both shapes
-     * produce, opened by the approval or by `tool.called` and settled when
-     * the call does.
+     * count is zero for the whole of a hosted tool. These are the kernel's
+     * own tool events, which every path emits because every path runs its
+     * tools through the same executor — and they are turn-local, so an
+     * aborted turn takes them with it rather than leaving anything behind.
      */
-    const openHere = (): number => openToolCalls.get(sessionId)?.size ?? 0;
+    const openToolCalls = new Set<string>();
     // Set at a text-only provider.response: the turn is wrapping up
     // (saves, completion events); nothing left for the timer to guard.
     let turnSettling = false;
@@ -1058,22 +1064,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           }
           break;
         case 'tool.approval-requested':
-          // Redundant with the policy wrapper for a gateway-owned
+          // Redundant with the approval wrapper for a gateway-owned
           // transport, and not redundant for a recovered turn, whose
           // request is re-announced without going through a policy again.
-          openToolPhase(sessionId, event.call.id);
+          openToolCalls.add(event.call.id);
           break;
         case 'tool.called':
-          openToolPhase(sessionId, event.call.id);
+          openToolCalls.add(event.call.id);
           break;
         case 'tool.completed':
           // Completion names the call through its result; denial carries
-          // the call itself. Both settle the phase.
-          settleToolPhase(sessionId, event.result.callId);
+          // the call itself. Both settle it.
+          openToolCalls.delete(event.result.callId);
           pendingTools = Math.max(0, pendingTools - 1);
           break;
         case 'tool.denied':
-          settleToolPhase(sessionId, event.call.id);
+          openToolCalls.delete(event.call.id);
           pendingTools = Math.max(0, pendingTools - 1);
           break;
         default:
@@ -1086,7 +1092,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (!('sessionId' in event) || event.sessionId !== sessionId) {
         return;
       }
-      if (streamingActive && pendingTools === 0 && openHere() === 0 && !turnSettling) {
+      if (
+        streamingActive
+        && pendingTools === 0
+        && openToolCalls.size === 0
+        && (approvalWaits.get(sessionId) ?? 0) === 0
+        && !turnSettling
+      ) {
         armTimer();
       }
     });
@@ -1108,9 +1120,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       suspendTimer();
       unsubscribeObserver();
       unsubscribeDrain();
-      // A turn aborted mid-phase would otherwise leave its call ids behind
-      // and hold the next turn's timer down forever.
-      openToolCalls.delete(sessionId);
       suspendWatchdog.delete(sessionId);
       external?.removeEventListener('abort', onExternalAbort);
     }
