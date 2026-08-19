@@ -1977,12 +1977,18 @@ export const collectAvailableModels = async (
  */
 export const declaredAgentIds = async (
   env: StateEnvironment,
+  configPath?: string,
 ): Promise<{ ids: Set<string>; unread: string[] }> => {
   const [roster, configured] = await Promise.allSettled([
     loadRosterSouls(env, () => {}),
-    // Empty selection: the soul a run started here would resolve, by the
-    // same precedence the daemon uses — never a second reading of it.
-    resolveConfiguredSoul({}, env),
+    // The soul a run started here would resolve, by the same precedence the
+    // daemon uses — never a second reading of it. Pinned when the caller has
+    // a pinned config: a daemon on `--config custom.json` may name a default
+    // soul the working directory's config does not, and an id claimed without
+    // seeing it is claimed against the wrong set. The write then succeeds and
+    // the roster reload hands that id to the configured soul instead, so the
+    // agent just created is reported 201 and never served.
+    resolveConfiguredSoul(configPath ? { configPath } : {}, env),
   ]);
 
   const ids = new Set([DEFAULT_STRATUS_AGENT.id]);
@@ -2028,8 +2034,9 @@ export const claimSoulFile = async (
   input: { name?: string; instructions: string },
   render: (agent: AgentDefinition) => string,
   note: (message: string) => void,
+  configPath?: string,
 ): Promise<{ agent: AgentDefinition; soulPath: string }> => {
-  const { ids: taken, unread } = await declaredAgentIds(env);
+  const { ids: taken, unread } = await declaredAgentIds(env, configPath);
   if (unread.length > 0) {
     note(`Note: could not read ${unread.join(' or ')}, so this id was not checked against the ids it declares.`);
   }

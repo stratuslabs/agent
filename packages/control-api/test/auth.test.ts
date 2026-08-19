@@ -2,11 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { request as httpRequest } from 'node:http';
 
 import { allowedOrigins, ensureGatewayToken } from '../src/auth.ts';
 import { authority } from '../src/index.ts';
-import { newHome, openSocket, startApi } from './harness.ts';
+import { newHome, openSocket, rawPost, startApi } from './harness.ts';
 
 /**
  * A cookie, extracted from the one-time-token exchange the way a browser
@@ -26,29 +25,6 @@ const signIn = async (harness: Awaited<ReturnType<typeof startApi>>): Promise<st
   assert.match(setCookie, /SameSite=Strict/);
   return setCookie.split(';')[0] ?? '';
 };
-
-/**
- * A POST with headers `fetch` will not let a caller set — `Host` above all,
- * which is exactly what the wildcard-bind rule turns on.
- */
-const rawPost = (
-  port: number,
-  pathname: string,
-  headers: Record<string, string>,
-): Promise<{ status: number; body: string }> =>
-  new Promise((resolve, reject) => {
-    const request = httpRequest(
-      { host: '127.0.0.1', port, path: pathname, method: 'POST', headers: { ...headers, 'content-length': '0' } },
-      (response) => {
-        let body = '';
-        response.setEncoding('utf8');
-        response.on('data', (chunk) => { body += chunk; });
-        response.on('end', () => resolve({ status: response.statusCode ?? 0, body }));
-      },
-    );
-    request.on('error', reject);
-    request.end();
-  });
 
 test('every route and the WS upgrade reject a request with no credential', async () => {
   const harness = await startApi();

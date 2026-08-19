@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
+import { request as httpRequest } from 'node:http';
 import path from 'node:path';
 
 import { createGateway, type ApprovalTransport, type Gateway } from '@stratusagent/gateway';
@@ -25,6 +26,29 @@ export interface Harness {
   call(pathname: string, init?: RequestInit & { auth?: 'bearer' | 'cookie' | 'none'; cookie?: string }): Promise<Response>;
   stop(): Promise<void>;
 }
+
+/**
+ * A POST with headers `fetch` will not let a caller set — `Host` above all,
+ * which is exactly what the wildcard-bind rule turns on.
+ */
+export const rawPost = (
+  port: number,
+  pathname: string,
+  headers: Record<string, string>,
+): Promise<{ status: number; body: string }> =>
+  new Promise((resolve, reject) => {
+    const request = httpRequest(
+      { host: '127.0.0.1', port, path: pathname, method: 'POST', headers: { ...headers, 'content-length': '0' } },
+      (response) => {
+        let body = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => { body += chunk; });
+        response.on('end', () => resolve({ status: response.statusCode ?? 0, body }));
+      },
+    );
+    request.on('error', reject);
+    request.end();
+  });
 
 export const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-api-'));
 

@@ -245,17 +245,27 @@ export const renderAgent = (agentId, initialSessionId) => {
     state.sending = true;
     state.error = undefined;
     composer.value = '';
+    // Which conversation this message is for. Opening or starting another one
+    // while the POST is in flight would otherwise stamp this turn's id onto
+    // that conversation — so its own next message would drain its opening
+    // events against a turn it never sent, and a brand-new conversation would
+    // be marked as stored when nothing had been written for it.
+    const sentTo = state.sessionId;
     // Shown immediately rather than waiting for the round trip: the daemon
     // will persist exactly this, and a message that vanishes for a second
     // reads as a dropped one.
-    state.messages = [...state.messages, { id: `local:${crypto.randomUUID()}`, role: 'user', content: text }];
+    const optimistic = { id: `local:${crypto.randomUUID()}`, role: 'user', content: text };
+    state.messages = [...state.messages, optimistic];
     state.streaming = '';
     state.toolLines = [];
     paintTranscript();
     update();
 
     try {
-      const { turnId } = await api.send(state.sessionId, { message: text, agentId });
+      const { turnId } = await api.send(sentTo, { message: text, agentId });
+      if (state.sessionId !== sentTo) {
+        return;
+      }
       // It exists in the store now, so later reads are real reads.
       state.unsent = false;
       // Kept so deltas can be attributed to *this* message: a session runs
@@ -268,8 +278,20 @@ export const renderAgent = (agentId, initialSessionId) => {
         applyEnvelope(envelope);
       }
     } catch (error) {
+      if (state.sessionId !== sentTo) {
+        return;
+      }
+      // Nothing was stored, so nothing should look stored. Left in place, the
+      // bubble reads as a sent message forever, and the next message that
+      // does succeed renders after a turn that never existed. The text goes
+      // back in the composer rather than being lost with it.
+      state.messages = state.messages.filter((message) => message !== optimistic);
+      if (!composer.value) {
+        composer.value = text;
+      }
       state.error = error.message;
       state.sending = false;
+      paintTranscript();
       update();
     }
   };

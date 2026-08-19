@@ -252,11 +252,27 @@ export const routes: Route[] = [
     bearerOnly: true,
     async handler(context) {
       const ott = context.mintOneTimeToken();
+      const path = `${API_PREFIX}/auth/session?ott=${encodeURIComponent(ott)}`;
+      // Built from the address this caller reached the daemon on, not the one
+      // it bound to. Every request URL is parsed against the bound origin, so
+      // `context.url.origin` is `http://127.0.0.1:4123` even for a caller that
+      // arrived over a LAN address or a TLS-terminating proxy — a link that
+      // points somewhere their browser cannot go, on exactly the deployments
+      // origin binding now allows. `Host` is what they connected to, and a
+      // browser cannot forge it; `x-forwarded-proto` is the proxy's own word
+      // for the scheme it terminated, and it is read for nothing else.
+      const host = context.request.headers.host;
+      const forwarded = context.request.headers['x-forwarded-proto'];
+      const scheme = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0]?.trim();
+      const origin = host ? `${scheme === 'https' ? 'https' : 'http'}://${host}` : context.url.origin;
       return {
         ott,
         // Absolute, so the caller opens exactly the origin this token is
         // bound to rather than reassembling one and missing the port.
-        url: `${context.url.origin}${API_PREFIX}/auth/session?ott=${encodeURIComponent(ott)}`,
+        url: `${origin}${path}`,
+        // The same link without an origin, for a client that would rather
+        // join it to a base it already holds than trust this one.
+        path,
       };
     },
   },
@@ -431,6 +447,7 @@ export const routes: Route[] = [
           ...(model ? { model } : {}),
         }),
         (message) => notes.push(message),
+        context.configPath,
       );
 
       // The new soul is dispatchable immediately: 07 creates an agent and

@@ -174,6 +174,16 @@ test('parseCommand accepts dashboard flags', () => {
     host: '0.0.0.0',
     openBrowser: false,
   });
+
+  // Absent, not defaulted. A defaulted host cannot be told from an explicit
+  // `--host 127.0.0.1`, and the two mean opposite things against a config
+  // that binds wider.
+  assert.deepEqual(parseCommand(['dashboard']), { command: 'dashboard', openBrowser: true });
+  assert.deepEqual(parseCommand(['dashboard', '--host', '127.0.0.1']), {
+    command: 'dashboard',
+    host: '127.0.0.1',
+    openBrowser: true,
+  });
 });
 
 test('parseCommand accepts the setup command', () => {
@@ -694,6 +704,62 @@ test('stratus dashboard starts a daemon, mints a one-time link, and opens it', a
 
   // The daemon it started stops with it, leaving nothing pointing at a dead port.
   await assert.rejects(readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8'));
+});
+
+test('an explicit dashboard --host narrows a config that binds wider', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-dash-host-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A trusted config that opens the API to every interface — reasonable for a
+  // box the operator meant to expose.
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({ provider: 'demo', api: { host: '0.0.0.0' } })}\n`,
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    // And an operator asking, on this one run, for the opposite. A host that
+    // happens to equal the built-in default is still something they typed.
+    argv: ['dashboard', '--host', '127.0.0.1', '--port', '0', '--no-open'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      dashboardAutoShutdownMs: 50,
+    },
+  });
+
+  assert.equal(exitCode, 0, output.stderr);
+  // Read from the daemon's own record of where it bound, not from the URL
+  // this command printed: the point is the interface, not the text.
+  assert.match(output.stdout, /ready at http:\/\/127\.0\.0\.1:\d+/);
+  assert.doesNotMatch(output.stdout, /0\.0\.0\.0/);
+});
+
+test('a daemon that dies before it binds is reported, not left unhandled', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-dash-fail-'));
+  const agents = path.join(home, '.stratus', 'agents');
+  await mkdir(agents, { recursive: true });
+  // Two souls claiming one id refuse the roster, so `runServe` rejects before
+  // it publishes anything. That rejection had no handler while the readiness
+  // loop waited out its fifteen seconds — an unhandled rejection, which ends
+  // the process rather than reaching the message below.
+  await writeFile(path.join(agents, 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(agents, 'other.md'), '---\nname: Other\nid: ava\n---\n\nAlso Ava.\n');
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['dashboard', '--port', '0', '--no-open'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, dashboardAutoShutdownMs: 50 },
+  });
+
+  assert.equal(exitCode, 1);
+  // The daemon's own reason, not a generic timeout: "is control-api
+  // installed?" sends someone to check a package that is installed fine.
+  assert.match(output.stderr, /the daemon could not start/);
+  assert.match(output.stderr, /ava/);
 });
 
 test('runCli reports missing prompt errors', async () => {

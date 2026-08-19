@@ -47,6 +47,13 @@ POST /api/v1/auth/ott          → { ott, url }          (bearer only)
 GET  /api/v1/auth/session?ott= → 302 /, Set-Cookie      (single use, 60s)
 ```
 
+`POST /auth/ott` answers with `{ ott, url, path }`. `path` is the exchange
+link with no origin on it, and a client holding the address it just reached
+should prefer joining that to its own base: `url` is built from the request's
+`Host` (and `x-forwarded-proto`, read for nothing else), which is right for a
+LAN address or a tunnel but is still the daemon's best guess rather than the
+caller's own knowledge.
+
 The cookie is `HttpOnly`, `SameSite=Strict`, and rides along on the WebSocket
 upgrade, so `/api/v1/events` authenticates the same way. It carries no
 `Secure` flag: the gateway serves plain HTTP on loopback, and a `Secure`

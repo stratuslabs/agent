@@ -220,7 +220,17 @@ export interface ParsedRunCommand {
 export interface ParsedDashboardCommand {
   command: 'dashboard';
   port?: number;
-  host: string;
+  /**
+   * Present only when `--host` was actually given.
+   *
+   * A defaulted string here would be indistinguishable from an explicit
+   * `--host 127.0.0.1`, and the two mean opposite things when a trusted
+   * config says `api.host: "0.0.0.0"`: absent means "let the config decide",
+   * while explicit means "bind loopback, whatever the config says". Collapsing
+   * them exposed the API on every interface to an operator who had just asked
+   * for the opposite.
+   */
+  host?: string;
   openBrowser: boolean;
 }
 
@@ -329,7 +339,6 @@ type CliConfigFile = StratusConfigFile;
 
 export const CLI_VERSION = '0.5.0';
 
-const DEFAULT_DASHBOARD_HOST = '127.0.0.1';
 const DASHBOARD_TITLE = 'Stratus Agent Dashboard';
 
 /**
@@ -519,7 +528,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
 
   if (command === 'dashboard') {
     let port: number | undefined;
-    let host = DEFAULT_DASHBOARD_HOST;
+    let host: string | undefined;
     let openBrowser = true;
 
     for (let index = 0; index < rest.length; index += 1) {
@@ -551,7 +560,12 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       throw new Error(`Unknown option: ${token}`);
     }
 
-    return { command: 'dashboard', ...(port !== undefined ? { port } : {}), host, openBrowser };
+    return {
+      command: 'dashboard',
+      ...(port !== undefined ? { port } : {}),
+      ...(host !== undefined ? { host } : {}),
+      openBrowser,
+    };
   }
 
   if (command === 'serve') {
@@ -4383,7 +4397,13 @@ const mintDashboardUrl = async (
   if (!response.ok) {
     throw new Error(`The gateway at ${base} refused to open a dashboard session (HTTP ${response.status}).`);
   }
-  const payload = await response.json() as { url?: string };
+  const payload = await response.json() as { url?: string; path?: string };
+  // The relative form joined to the base we already reached, in preference to
+  // the absolute one: this command knows exactly which address answered, and
+  // the daemon can only infer it from headers.
+  if (payload.path) {
+    return `${base.replace(/\/+$/, '')}${payload.path}`;
+  }
   if (!payload.url) {
     throw new Error(`The gateway at ${base} did not return a dashboard URL.`);
   }
@@ -4446,7 +4466,11 @@ export const runDashboard = async (
         // with no API and then time out waiting for the one it promised.
         api: true,
         ...(command.port !== undefined ? { apiPort: command.port } : {}),
-        ...(command.host !== DEFAULT_DASHBOARD_HOST ? { apiHost: command.host } : {}),
+        // Passed whenever it was asked for, including when it is the default.
+        // `--host 127.0.0.1` against a config saying `0.0.0.0` is an operator
+        // narrowing the bind, and dropping it because it matched the default
+        // did the reverse of what they typed.
+        ...(command.host !== undefined ? { apiHost: command.host } : {}),
       },
       // The daemon's own chatter belongs on stderr here: stdout is where this
       // command says where to point a browser, and interleaving the two makes
@@ -4455,11 +4479,26 @@ export const runDashboard = async (
       { ...env, shutdownSignal: ownDaemon.signal },
     );
 
+    // Attached now, not at the end. `runServe` can reject before it publishes
+    // anything — an unreadable roster, a session store that will not open —
+    // and a rejected promise nobody is watching for fifteen seconds is an
+    // unhandled rejection, which terminates the process instead of reaching
+    // the message below. Captured rather than swallowed, so the reason the
+    // daemon gave is the reason this command reports.
+    let daemonFailure: unknown;
+    const daemonExit = serving.then(
+      () => undefined,
+      (error: unknown) => { daemonFailure = error; },
+    );
+
     // Gated on the daemon actually answering, not on a delay: it publishes
     // where it bound the moment it binds, and anything less would be a race
-    // dressed up as a timeout.
+    // dressed up as a timeout. It also stops the moment the daemon gives up,
+    // rather than waiting out a timeout for a process that is already gone.
     const startedBy = Date.now() + 15_000;
-    while (!base && Date.now() < startedBy) {
+    let daemonStopped = false;
+    void daemonExit.then(() => { daemonStopped = true; });
+    while (!base && !daemonStopped && Date.now() < startedBy) {
       const info = await readGatewayInfo(env);
       if (info && await gatewayAnswering(env, info.url, fetchImpl)) {
         base = info.url;
@@ -4469,8 +4508,13 @@ export const runDashboard = async (
     }
     if (!base) {
       ownDaemon.abort();
-      await serving.catch(() => 0);
-      writeLine(streams.stderr, 'Error: the daemon did not start serving its control API. Is @stratusagent/control-api installed?');
+      await daemonExit;
+      writeLine(
+        streams.stderr,
+        daemonFailure
+          ? `Error: the daemon could not start: ${daemonFailure instanceof Error ? daemonFailure.message : String(daemonFailure)}`
+          : 'Error: the daemon did not start serving its control API. Is @stratusagent/control-api installed?',
+      );
       return 1;
     }
   }

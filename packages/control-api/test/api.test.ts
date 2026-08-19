@@ -4,7 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { CONTROL_API_VERSION } from '../src/index.ts';
-import { newHome, openSocket, settles, startApi, writeSoul } from './harness.ts';
+import { newHome, openSocket, rawPost, settles, startApi, writeSoul } from './harness.ts';
 
 const json = async <T>(response: Response): Promise<T> => response.json() as Promise<T>;
 
@@ -1064,4 +1064,70 @@ test('the version the API reports is the version it was published as', async () 
     manifest.version,
     'CONTROL_API_VERSION drifted from package.json — the API would report a version it is not',
   );
+});
+
+test('the sign-in link points where the caller reached the daemon', async () => {
+  const harness = await startApi();
+  try {
+    const port = Number(new URL(harness.url).port);
+    // A caller arriving through a TLS-terminating tunnel, which is the
+    // documented way to reach a loopback daemon remotely.
+    const minted = await rawPost(port, '/api/v1/auth/ott', {
+      authorization: `Bearer ${harness.token}`,
+      host: 'gateway.example',
+      'x-forwarded-proto': 'https',
+    });
+    assert.equal(minted.status, 200);
+    const body = JSON.parse(minted.body) as { url: string; path: string; ott: string };
+
+    // Built from the bound origin it would be http://127.0.0.1:<port>/… —
+    // a link the remote browser cannot reach, on exactly the deployment
+    // origin binding now allows.
+    assert.equal(body.url, `https://gateway.example${body.path}`);
+    assert.match(body.path, /^\/api\/v1\/auth\/session\?ott=/);
+    assert.ok(!body.path.startsWith('http'), 'the relative form carries no origin');
+
+    // A local caller still gets its own address, and the token still works.
+    const local = await harness.call('/api/v1/auth/ott', { method: 'POST' });
+    const localBody = await json<{ url: string }>(local);
+    assert.ok(localBody.url.startsWith(harness.url), localBody.url);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('creating an agent claims its id against the pinned config', async () => {
+  const home = await newHome();
+  // A default soul named only by the pinned config, holding the id the
+  // generated one would take.
+  const soulPath = path.join(home, 'default.md');
+  await writeFile(soulPath, '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  const pinned = path.join(home, 'pinned.json');
+  await writeFile(pinned, `${JSON.stringify({ provider: 'demo', soul: soulPath })}\n`);
+  // A different config in the working directory, which discovery prefers and
+  // which names no soul at all.
+  await writeFile(path.join(home, 'stratus.config.json'), `${JSON.stringify({ provider: 'demo' })}\n`);
+
+  const harness = await startApi({
+    home,
+    options: { configPath: pinned, env: { homeDir: home, cwd: home, processEnv: {} } },
+  });
+  try {
+    const created = await harness.call('/api/v1/agents', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Ava', instructions: 'You are also Ava.' }),
+    });
+    assert.equal(created.status, 201);
+    const { agent } = await json<{ agent: { id: string } }>(created);
+
+    // Claimed without seeing the pinned config, this takes `ava`, reports 201,
+    // and is then shadowed by the configured soul on the very reload the
+    // route performs — an agent created successfully and never served.
+    assert.notEqual(agent.id, 'ava');
+    const roster = await json<{ agents: Array<{ id: string }> }>(await harness.call('/api/v1/agents'));
+    assert.ok(roster.agents.some((entry) => entry.id === agent.id), 'the new agent is actually served');
+  } finally {
+    await harness.stop();
+  }
 });

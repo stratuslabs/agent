@@ -18,13 +18,25 @@ const syncOptions = (select, options, fallback) => {
   if (select.dataset.signature === signature) {
     return;
   }
-  const chosen = select.dataset.signature === undefined ? fallback : select.value;
   select.dataset.signature = signature;
+  // A choice someone made survives; a value the browser merely settled on
+  // does not. The pane renders once before its data arrives, so the picker
+  // starts on whatever the empty option list allowed — and treating that as a
+  // selection meant the configured model never got selected when it finally
+  // appeared, leaving the picker on "follow the default" and the next Save
+  // deleting a pin nobody touched.
+  const chosen = select.dataset.touched === 'yes' ? select.value : fallback;
   select.replaceChildren(...options.map((option) => el('option', { value: option.value }, option.label)));
   const wanted = options.some((option) => option.value === chosen) ? chosen : fallback;
   if (wanted !== undefined) {
     select.value = wanted;
   }
+};
+
+/** Mark a select as carrying a real choice rather than a default. */
+const touchOnChange = (select) => {
+  select.addEventListener('change', () => { select.dataset.touched = 'yes'; });
+  return select;
 };
 
 export const renderSettings = (section) => {
@@ -157,7 +169,7 @@ export const renderSettings = (section) => {
   // ---- models ------------------------------------------------------------
 
   const buildModels = () => {
-    const picker = el('select', {});
+    const picker = touchOnChange(el('select', {}));
 
     const save = async () => {
       state.busy = true; update();
@@ -217,17 +229,21 @@ export const renderSettings = (section) => {
       ),
       refresh() {
         const config = state.config ?? {};
-        syncOptions(
-          picker,
-          [
-            { value: '', label: 'follow the default' },
-            ...(state.models ?? []).map((model) => ({
-              value: `${model.provider}:${model.id}`,
-              label: `${model.id} — ${model.provider}`,
-            })),
-          ],
-          config.provider && config.model ? `${config.provider}:${config.model}` : '',
-        );
+        const pinned = config.provider && config.model ? `${config.provider}:${config.model}` : '';
+        const listed = (state.models ?? []).map((model) => ({
+          value: `${model.provider}:${model.id}`,
+          label: `${model.id} — ${model.provider}`,
+        }));
+        // The configured model, even when the live catalog does not list it —
+        // an endpoint that omits it, or a sign-in the provider is currently
+        // refusing. Without an option to select, the browser leaves the picker
+        // on "follow the default", and the next Save deletes a pin nobody
+        // touched. Marked, because a model the catalog cannot see is worth
+        // knowing about rather than presenting as a normal choice.
+        if (pinned && !listed.some((option) => option.value === pinned)) {
+          listed.unshift({ value: pinned, label: `${config.model} — ${config.provider} (not listed right now)` });
+        }
+        syncOptions(picker, [{ value: '', label: 'follow the default' }, ...listed], pinned);
         empty.hidden = (state.models ?? []).length > 0;
         saveButton.disabled = state.busy;
       },
@@ -237,7 +253,7 @@ export const renderSettings = (section) => {
   // ---- channels ----------------------------------------------------------
 
   const buildChannels = () => {
-    const agentPicker = el('select', {});
+    const agentPicker = touchOnChange(el('select', {}));
     const appToken = el('input', { type: 'password', placeholder: 'xapp-…' });
     const botToken = el('input', { type: 'password', placeholder: 'xoxb-…' });
 
