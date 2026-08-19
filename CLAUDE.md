@@ -64,6 +64,21 @@ If you need a rule that is not exported, export it. Do not copy it.
   give the gate a way to lose so a regression fails the assertion instead
   of hanging a suite that has no timeout.
 
+  Two real gates already exist, and a sleep in front of either is only
+  guessing at what it already guarantees: `adapter.stop()` drains
+  everything the Slack adapter still owes Slack, and `gateway.stop()`
+  drains its in-flight turns and the sweeps `start()` left running. Prove
+  a gate is the gate by removing it — the assertion should fail, not pass
+  more slowly.
+
+  A wall-clock number that *must* stay a wall-clock number — the watchdog
+  tests, where the point is that a phase outlasts the idle timeout —
+  belongs far above the work inside its own armed window, not just above
+  it. That window holds soul loading, the session write, and building the
+  provider: single milliseconds locally, an order of magnitude more on a
+  loaded runner. The convention is `IDLE_MS = 500` with the slow phase at
+  `IDLE_MS * 2`. A 100ms budget lost that race in CI and cost a cycle.
+
 ## Git
 
 - **Merge, never rebase a branch that has been pushed.** Never
