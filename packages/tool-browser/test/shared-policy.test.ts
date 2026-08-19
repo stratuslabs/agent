@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 
 import { ToolRegistry, type Session, type Tool } from '@stratusagent/core';
 import { HOSTILE_URLS } from '@stratusagent/egress';
@@ -107,7 +108,7 @@ const toolsFor = async (): Promise<{ web: Tool; browser: Tool; close: () => Prom
   return {
     web: registry.get('web.fetch') as Tool,
     browser: registry.get('browser.goto') as Tool,
-    close: () => browserPlugin.close(),
+    close: async () => { await browserPlugin.dispose(); },
   };
 };
 
@@ -128,4 +129,47 @@ test('web.fetch and browser.goto refuse the same hostile URLs', async (t) => {
     assert.ok(webRefusal, `web.fetch should refuse ${entry.what}: ${entry.url}`);
     assert.ok(browserRefusal, `browser.goto should refuse ${entry.what}: ${entry.url}`);
   }
+});
+
+test('a per-agent policy is enforced where connections are made, not only where URLs are read', async (t) => {
+  // An internal service, reachable only by name — so nothing in the URL
+  // gives it away and only the connection can refuse it.
+  const service = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('internal service reached');
+  });
+  await new Promise<void>((resolve) => service.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => service.close(() => resolve())));
+  const port = (service.address() as AddressInfo).port;
+
+  const registry = new ToolRegistry();
+  const plugin = createBrowserPlugin(
+    // The permissive default, with one agent locked down under it.
+    { allowedHosts: ['localhost'], agents: { ava: { allowedHosts: [] } } },
+    { driver: proxyHonouringDriver() },
+  );
+  await plugin.setup({
+    bus: { emit: async () => undefined, subscribe: () => () => undefined } as never,
+    tools: registry,
+  });
+  t.after(() => plugin.dispose());
+  const goto = registry.get('browser.goto') as Tool;
+
+  const asAgent = (agentId: string): Session => ({
+    ...session,
+    id: `session-${agentId}`,
+    agent: { id: agentId, name: agentId },
+  });
+
+  // Juno has the default exemption and gets through.
+  const reached = await goto.execute({ url: `http://localhost:${port}/` }, asAgent('juno'));
+  assert.ok(reached);
+
+  // Ava's config takes it away. Nothing about the URL differs — the
+  // refusal has to come from the proxy her browser was launched with,
+  // which is the whole reason she gets her own.
+  await assert.rejects(
+    () => goto.execute({ url: `http://localhost:${port}/` }, asAgent('ava')),
+    /Refusing to connect to localhost/,
+  );
 });

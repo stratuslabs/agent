@@ -84,14 +84,18 @@ const READABLE_TEXT_SCRIPT = `(() => {
  * refused here, on every request the page makes: the navigation itself,
  * each redirect, and every subresource.
  */
-const guardRequests = async (page: PageLike, policy: EgressPolicy, blocked: string[]): Promise<void> => {
+const guardRequests = async (
+  page: PageLike,
+  policy: EgressPolicy,
+  record: (entry: string) => void,
+): Promise<void> => {
   await page.route('**/*', async (route: RouteLike) => {
     const url = route.request().url();
     try {
       assertRequestAllowed(url, policy);
       await route.continue();
     } catch (error) {
-      blocked.push(`${url} — ${error instanceof Error ? error.message : String(error)}`);
+      record(`${url} — ${error instanceof Error ? error.message : String(error)}`);
       await route.abort('blockedbyclient');
     }
   });
@@ -99,18 +103,29 @@ const guardRequests = async (page: PageLike, policy: EgressPolicy, blocked: stri
 
 interface BrowserRuntime {
   pool: BrowserSessionPool;
-  blocked: string[];
+  /**
+   * What each conversation's own page was refused, keyed by session.
+   *
+   * Per session because these are URLs the *page* asked for, and a
+   * `file:` path or a query string from one agent's browsing is not
+   * another agent's to read — the contexts are isolated, and a report
+   * assembled from a process-wide list would hand back what that
+   * isolation exists to prevent.
+   */
+  blocked: Map<string, string[]>;
   pageFor(session: Session): Promise<PageLike>;
 }
 
 /**
- * What was refused while this page was loading, from both halves of the
- * policy: the scheme guard inside the browser, and the proxy that owns the
- * connections. Reported to the agent because a page that renders empty
- * because its requests were blocked is otherwise a mystery it will retry.
+ * What was refused while this session's page was loading, from both halves
+ * of the policy: the scheme guard inside the browser, and the proxy that
+ * owns the connections. Reported to the agent because a page that renders
+ * empty because its requests were blocked is otherwise a mystery it retries.
  */
-const refusalsFor = (runtime: BrowserRuntime): string[] =>
-  [...runtime.blocked, ...runtime.pool.refusals].slice(-10);
+const refusalsFor = (runtime: BrowserRuntime, session: Session): string[] => [
+  ...(runtime.blocked.get(session.id) ?? []),
+  ...runtime.pool.refusalsFor(session.id),
+].slice(-10);
 
 const truncate = (value: string, maxBytes: number): { text: string; truncated: boolean } =>
   Buffer.byteLength(value, 'utf8') <= maxBytes
@@ -168,7 +183,9 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
         url: page.url(),
         ...(status === undefined ? {} : { status }),
         title: await page.title(),
-        ...(refusalsFor(runtime).length > 0 ? { blockedRequests: refusalsFor(runtime) } : {}),
+        ...(refusalsFor(runtime, session).length > 0
+          ? { blockedRequests: refusalsFor(runtime, session) }
+          : {}),
       };
     },
   };
@@ -197,7 +214,9 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
         title: await page.title(),
         text,
         truncated,
-        ...(refusalsFor(runtime).length > 0 ? { blockedRequests: refusalsFor(runtime) } : {}),
+        ...(refusalsFor(runtime, session).length > 0
+          ? { blockedRequests: refusalsFor(runtime, session) }
+          : {}),
       };
     },
   };
@@ -284,19 +303,8 @@ export interface BrowserPluginOptions {
 export const createBrowserPlugin = (
   config: JsonObject = {},
   options: BrowserPluginOptions = {},
-): Plugin & { close(): Promise<void>; sweepIdle(now: number): Promise<string[]> } => {
-  const blocked: string[] = [];
-  // The policy the *pool* is built with is the top-level one: a browser is
-  // one process shared by every session, so its proxy cannot be per-agent.
-  // Per-agent settings still narrow what a call may request, and an
-  // operator who needs two genuinely different network postures runs two
-  // daemons rather than believing one browser enforces both.
-  //
-  // Read from the block directly rather than resolved for some stand-in
-  // agent id: `resolvePluginAgentConfig(config, 'default')` would quietly
-  // pick up the settings of an agent that happened to be called `default`.
-  const basePolicy = policyFrom(config);
-
+): Plugin & { dispose(): Promise<void>; sweepIdle(now: number): Promise<string[]> } => {
+  const blocked = new Map<string, string[]>();
   const resolved = config;
   const pool = new BrowserSessionPool({
     driver: options.driver ?? createPlaywrightDriver(
@@ -305,24 +313,33 @@ export const createBrowserPlugin = (
         import: (specifier) => import(specifier),
       },
     ),
-    policy: basePolicy,
     ...(resolved.headless === false ? { headless: false } : {}),
     ...(typeof resolved.executablePath === 'string' ? { executablePath: resolved.executablePath } : {}),
     ...(typeof resolved.channel === 'string' ? { channel: resolved.channel } : {}),
     ...(typeof resolved.idleMs === 'number' ? { idleMs: resolved.idleMs } : {}),
     ...(typeof resolved.maxContexts === 'number' ? { maxContexts: resolved.maxContexts } : {}),
+    onEvicted: ({ sessionId }) => {
+      // The page that recorded them is gone, so its refusals go with it.
+      blocked.delete(sessionId);
+    },
   });
 
   const runtime: BrowserRuntime = {
     pool,
     blocked,
     async pageFor(session) {
-      const page = await pool.pageFor(session.id, Date.now());
       const settings = settingsFor(config, session);
+      // The agent's own policy decides which browser serves it: a proxy is
+      // chosen when Chromium launches, so an agent whose config narrows the
+      // address policy needs a browser launched under that policy rather
+      // than a context inside somebody else's.
+      const page = await pool.pageFor(session.id, Date.now(), settings.policy);
       // Routed once per page. A page created for this session gets the
       // scheme guard before anything is asked of it.
       if (!(page as PageLike & { __stratusGuarded?: boolean }).__stratusGuarded) {
-        await guardRequests(page, settings.policy, blocked);
+        await guardRequests(page, settings.policy, (entry) => {
+          blocked.set(session.id, [...(blocked.get(session.id) ?? []), entry].slice(-20));
+        });
         (page as PageLike & { __stratusGuarded?: boolean }).__stratusGuarded = true;
       }
       return page;
@@ -336,9 +353,18 @@ export const createBrowserPlugin = (
         context.tools.register(tool);
       }
     },
-    /** Close every context and the browser. For a daemon shutting down. */
-    close: () => pool.close(),
-    /** See `BrowserSessionPool.sweepIdle` — the clock is the caller's. */
+    /**
+     * The kernel's teardown hook, which is what a host actually calls.
+     * Named anything else, a browser and a listening proxy survive both
+     * `stratus run` and a daemon shutdown — the second of which is the
+     * whole reason `Plugin.dispose` exists.
+     */
+    dispose: () => pool.close(),
+    /**
+     * The sweep, for a caller that wants it at a chosen instant. The pool
+     * also runs it on its own timer; this is what makes the behaviour
+     * testable without a test that sleeps.
+     */
     sweepIdle: (now: number) => pool.sweepIdle(now),
   };
 };

@@ -7,6 +7,37 @@ import type { AddressInfo } from 'node:net';
 import { assertRequestAllowed, checkAddress, EgressPolicyError, type EgressPolicy } from './addresses.ts';
 
 /**
+ * One policy, as a key — sorted, because `{a,b}` and `{b,a}` are the same
+ * policy. Exported because anything that keeps a per-policy resource needs
+ * the same answer to "is this the same policy", and two spellings of that
+ * question would be two answers.
+ */
+export const policyKeyFor = (policy: EgressPolicy): string => JSON.stringify({
+  allowPrivateAddresses: policy.allowPrivateAddresses ?? false,
+  allowedHosts: [...(policy.allowedHosts ?? [])].sort(),
+  allowedSchemes: [...(policy.allowedSchemes ?? [])].sort(),
+});
+
+/**
+ * Connection options that keep a policy's sockets to itself.
+ *
+ * `agent: false` is the load-bearing half. Node's global agent pools
+ * sockets by host and port and knows nothing about `lookup`, so a
+ * connection opened under a permissive policy is a connection a stricter
+ * one can be handed — no DNS resolution happens on a reused socket, and the
+ * pinned lookup that would have refused it is never called. That is a
+ * policy bypass that gets *more* likely the busier the daemon is, and it
+ * cost us a browser test that passed alone and failed in company.
+ *
+ * The price is no keep-alive for tool traffic, which for a fetch an agent
+ * makes a few times a turn is not a price worth a shared pool.
+ */
+const pinnedConnection = (policy: EgressPolicy): { agent: false; lookup: net.LookupFunction } => ({
+  agent: false,
+  lookup: createPinnedLookup(policy),
+});
+
+/**
  * A DNS lookup that hands the socket only addresses the policy allows.
  *
  * This is the whole point of the module. Resolving a name in one place and
@@ -98,7 +129,7 @@ export const requestThroughPolicy = async (
       {
         method: 'GET',
         headers: options.headers ?? {},
-        lookup: createPinnedLookup(policy),
+        ...pinnedConnection(policy),
         ...(options.signal ? { signal: options.signal } : {}),
       },
       (response) => {
@@ -249,7 +280,7 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
         path: `${target.pathname}${target.search}`,
         method: request.method ?? 'GET',
         headers: request.headers,
-        lookup: createPinnedLookup(policy),
+        ...pinnedConnection(policy),
       },
       (upstreamResponse) => {
         response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);

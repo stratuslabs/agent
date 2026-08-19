@@ -21,6 +21,7 @@ export {
   chromiumProxyOptions,
   createEgressProxy,
   createPinnedLookup,
+  policyKeyFor,
   requestThroughPolicy,
   type EgressProxy,
   type PolicyRequestOptions,

@@ -123,3 +123,43 @@ test('a browser is launched pinned to the proxy, loopback included', () => {
   // proxy exists to refuse.
   assert.ok(args.includes('--proxy-bypass-list=<-loopback>'));
 });
+
+test('a permitted connection is never reused by a policy that would have refused it', async (t) => {
+  const service = await startInternalService();
+  t.after(() => service.close());
+  const target = `http://localhost:${service.port}/`;
+
+  // One policy that may reach this host, used first so a socket to it
+  // exists and is warm.
+  const allowed = await requestThroughPolicy(target, { policy: { allowedHosts: ['localhost'] } });
+  assert.equal(allowed.status, 200);
+
+  // A second policy that may not. Node's global agent pools sockets by
+  // host and port and knows nothing about `lookup`, so a shared pool would
+  // hand this request the connection above — no resolution, no check, and
+  // a policy bypass that gets likelier the busier the process is.
+  await assert.rejects(
+    () => requestThroughPolicy(target, { policy: {} }),
+    /Refusing to connect to localhost/,
+  );
+
+  // And the same, one layer up: two proxies, two policies, one host.
+  const open = await createEgressProxy({ allowedHosts: ['localhost'] });
+  const strict = await createEgressProxy({});
+  t.after(() => Promise.all([open.close(), strict.close()]));
+
+  const through = (proxy: { port: number }): Promise<number> => new Promise((resolve, reject) => {
+    const request = http.request(
+      { host: '127.0.0.1', port: proxy.port, method: 'GET', path: target },
+      (response) => {
+        response.resume();
+        response.on('end', () => resolve(response.statusCode ?? 0));
+      },
+    );
+    request.on('error', reject);
+    request.end();
+  });
+
+  assert.equal(await through(open), 200);
+  assert.equal(await through(strict), 403);
+});

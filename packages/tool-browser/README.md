@@ -62,10 +62,17 @@ fails that one call with a message naming the fix.
 | `navigationTimeoutMs` | `30000` | Per navigation and per action. |
 | `workspaceRoot` | supplied by the daemon | Where screenshots go: `<root>/<agent-id>/screenshots`. |
 
-Address settings apply per agent under `agents`. **The proxy does not**: a
-browser is one process shared by every conversation, so it is launched with
-the top-level policy. Two genuinely different network postures want two
-daemons, not one browser you believe is enforcing both.
+Address settings apply per agent under `agents`, and they are enforced —
+including when an agent's policy is *narrower* than the default. A proxy is
+chosen when Chromium launches, so a browser can only ever enforce one
+address policy: agents whose policy differs get their own browser, and
+agents that share a policy share one. Interception inside the browser cannot
+substitute, because it does not resolve names and so cannot narrow a
+hostname destination without re-opening the rebinding race the proxy closes.
+
+The practical cost is one Chromium per distinct policy. Most deployments
+have exactly one; a config that gives every agent its own posture pays for
+every one of them.
 
 ## Why a proxy rather than request interception
 
@@ -103,12 +110,18 @@ a provider bill nobody wanted.
 
 ## Lifecycle
 
-One browser per plugin, started on the first call. One **context** per
-conversation, so two conversations never share a cookie jar or a login. A
-context that has been quiet longer than `idleMs` is closed; when the last
-one goes, so does the browser. `maxContexts` bounds how many can exist at
-once, dropping the least recently used.
+One browser per address policy, started on the first call that needs it.
+One **context** per conversation, so two conversations never share a cookie
+jar or a login. A context that has been quiet longer than `idleMs` is
+closed; when a browser's last conversation goes, so does the browser and its
+proxy. `maxContexts` bounds how many contexts can exist at once, dropping
+the least recently used.
 
-The daemon sweeps on a timer and closes everything on shutdown. The sweep
-takes the current time as an argument rather than reading the clock, which
-is what makes the lifecycle testable without a test that sleeps.
+The sweep runs on the plugin's own timer — unref'd, so it never holds a
+one-shot `stratus run` open, and disarmed once no browser is left. It also
+takes the current time as an argument, which is what makes the lifecycle
+testable without a test that sleeps.
+
+Shutdown is the kernel's `dispose` hook, which the gateway calls after
+in-flight turns drain and `stratus run`/`chat` call when they finish. Every
+context, every browser, and every proxy goes with it.

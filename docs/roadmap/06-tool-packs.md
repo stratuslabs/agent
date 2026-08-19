@@ -44,8 +44,10 @@ that turned out to belong outside the packs that own them.
   validated hop at a time.
 - **`@stratusagent/tool-browser`** — `browser.goto`/`.read`/`.screenshot`
   (`gated`) and `.act` (`dangerous`) on `playwright-core`, loaded lazily, with
-  one browser, a context per conversation, an LRU cap, and an idle sweep that
-  takes the clock as an argument rather than reading it. Screenshots land in
+  one browser **per address policy** (a proxy is chosen at launch, so an agent
+  whose config narrows the policy needs its own), a context per conversation,
+  an LRU cap, and an idle sweep on the plugin's own unref'd timer that also
+  takes the clock as an argument so it stays testable. Screenshots land in
   `~/.stratus/workspaces/<agent-id>/screenshots`, supplied by the host rather
   than derived by the plugin.
 - **The address policy is one module**, `@stratusagent/egress`: scheme

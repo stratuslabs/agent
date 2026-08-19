@@ -110,7 +110,7 @@ const pluginWith = async (config: JsonObject, recorder: Recorder) => {
 test('one browser, a context per conversation, dropped when idle', async (t) => {
   const recorder = emptyRecorder();
   const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'], idleMs: 60_000 }, recorder);
-  t.after(() => plugin.close());
+  t.after(() => plugin.dispose());
 
   await tool('browser.goto').execute({ url: 'https://example.com/a' }, sessionFor('conversation-1'));
   await tool('browser.goto').execute({ url: 'https://example.com/b' }, sessionFor('conversation-1'));
@@ -136,7 +136,7 @@ test('the concurrency cap drops the oldest conversation, not the newest', async 
   const recorder = emptyRecorder();
   const evicted: string[] = [];
   const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'], maxContexts: 2 }, recorder);
-  t.after(() => plugin.close());
+  t.after(() => plugin.dispose());
   void evicted;
 
   await tool('browser.goto').execute({ url: 'https://example.com/1' }, sessionFor('one'));
@@ -153,7 +153,7 @@ test('the concurrency cap drops the oldest conversation, not the newest', async 
 test('a file: URL is refused before the browser is asked to navigate', async (t) => {
   const recorder = emptyRecorder();
   const { plugin, tool } = await pluginWith({}, recorder);
-  t.after(() => plugin.close());
+  t.after(() => plugin.dispose());
 
   await assert.rejects(
     () => tool('browser.goto').execute({ url: 'file:///home/ada/.stratus/credentials.json' }, sessionFor('s')),
@@ -171,7 +171,7 @@ test('a file: URL is refused before the browser is asked to navigate', async (t)
 test('every request the page makes faces the scheme policy, not only the navigation', async (t) => {
   const recorder = emptyRecorder();
   const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'] }, recorder);
-  t.after(() => plugin.close());
+  t.after(() => plugin.dispose());
 
   await tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor('s'));
   const handler = recorder.routes[0];
@@ -208,7 +208,7 @@ test('a screenshot lands in the agent’s own workspace and comes back as a path
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-shots-'));
   const recorder = emptyRecorder();
   const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'], workspaceRoot }, recorder);
-  t.after(() => plugin.close());
+  t.after(() => plugin.dispose());
 
   const result = await tool('browser.screenshot').execute(
     { url: 'https://example.com/' },
@@ -225,7 +225,7 @@ test('a screenshot lands in the agent’s own workspace and comes back as a path
   // Without somewhere to write, it says so rather than picking a directory
   // on the operator's behalf.
   const homeless = await pluginWith({ allowedHosts: ['example.com'] }, emptyRecorder());
-  t.after(() => homeless.plugin.close());
+  t.after(() => homeless.plugin.dispose());
   await assert.rejects(
     () => homeless.tool('browser.screenshot').execute({ url: 'https://example.com/' }, sessionFor('s')),
     /nowhere to write/,
@@ -238,11 +238,120 @@ test('acting is dangerous and reading is not, exactly as the manifest declares',
   };
   const recorder = emptyRecorder();
   const { plugin, tools } = await pluginWith({}, recorder);
-  await plugin.close();
+  await plugin.dispose();
 
   assert.deepEqual(
     tools.list().map((tool) => [tool.name, tool.risk]),
     manifest.stratus.contributes.tools.map((entry) => [entry.name, entry.risk]),
   );
   assert.equal(tools.get('browser.act')?.risk, 'dangerous');
+});
+
+test('the plugin is torn down through the hook a host actually calls', async () => {
+  const recorder = emptyRecorder();
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'] }, recorder);
+
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor('s'));
+  assert.equal(recorder.launches, 1);
+
+  // `dispose` is the kernel's teardown hook, and the only one the gateway
+  // and the CLI call. A plugin that named its cleanup anything else would
+  // leave a Chromium and a listening proxy behind every shutdown — and a
+  // `stratus run` that never exits.
+  assert.equal(typeof (plugin as { dispose?: unknown }).dispose, 'function');
+  await plugin.dispose();
+  assert.equal(recorder.closedContexts, 1);
+  assert.equal(recorder.closedBrowsers, 1);
+});
+
+test('an agent whose policy is narrower than the default gets a browser that enforces it', async (t) => {
+  const recorder = emptyRecorder();
+  // A permissive default, and one agent locked down under it — the shape an
+  // operator writes to exempt everyone but Ava, or to exempt only Ava.
+  const { plugin, tool } = await pluginWith(
+    { allowPrivateAddresses: true, agents: { ava: { allowPrivateAddresses: false } } },
+    recorder,
+  );
+  t.after(() => plugin.dispose());
+
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor('juno-1', 'juno'));
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor('ava-1', 'ava'));
+
+  // Two browsers, because a proxy is chosen when Chromium launches: a
+  // context inside the permissive browser could not have enforced Ava's
+  // narrower policy, and interception cannot narrow a hostname without
+  // re-opening the rebinding race the proxy closes.
+  assert.equal(recorder.launches, 2);
+
+  // Ava's own policy is what refuses hers, at her browser's proxy.
+  await assert.rejects(
+    () => tool('browser.goto').execute({ url: 'http://169.254.169.254/' }, sessionFor('ava-1', 'ava')),
+    /link-local/,
+  );
+  // And the permissive agent still has what the default granted: the two
+  // are enforced separately rather than one winning.
+  const permitted = await tool('browser.goto').execute(
+    { url: 'http://169.254.169.254/' },
+    sessionFor('juno-1', 'juno'),
+  ) as JsonObject;
+  assert.equal(permitted.url, 'http://169.254.169.254/');
+
+  // A third agent with no entry shares the default's browser rather than
+  // launching a third.
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor('rex-1', 'rex'));
+  assert.equal(recorder.launches, 2);
+});
+
+test('one agent’s blocked requests are not reported to another', async (t) => {
+  const recorder = emptyRecorder();
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'] }, recorder);
+  t.after(() => plugin.dispose());
+
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor('ava-session', 'ava'));
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor('juno-session', 'juno'));
+
+  const [avaRoute, junoRoute] = recorder.routes;
+  assert.ok(avaRoute && junoRoute, 'both pages were routed');
+
+  const routeFor = (url: string): RouteLike => ({
+    request: () => ({ url: () => url }),
+    async abort() {},
+    async continue() {},
+  });
+  // Ava's page asks for something with a secret in it and is refused.
+  await avaRoute(routeFor('file:///home/ada/.stratus/credentials.json?token=ava-secret'));
+
+  const ava = await tool('browser.read').execute({}, sessionFor('ava-session', 'ava')) as JsonObject;
+  assert.match(String((ava.blockedRequests as string[])[0]), /ava-secret/);
+
+  // Juno's page was refused nothing, and must not be handed Ava's URL —
+  // the contexts are isolated, and a report assembled process-wide would
+  // hand back exactly what that isolation exists to prevent.
+  const juno = await tool('browser.read').execute({}, sessionFor('juno-session', 'juno')) as JsonObject;
+  assert.equal(juno.blockedRequests, undefined);
+});
+
+test('the idle sweep runs on its own timer, not only when a caller asks for it', async (t) => {
+  // A mocked clock rather than a slept-through one: this asserts that the
+  // pool schedules the sweep, and a test that waited for a real interval
+  // would be racing the machine it runs on.
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: 0 });
+
+  const recorder = emptyRecorder();
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'], idleMs: 60_000 }, recorder);
+  t.after(() => plugin.dispose());
+
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor('quiet'));
+  assert.equal(recorder.launches, 1);
+  assert.equal(recorder.closedContexts, 0);
+
+  // Nobody calls sweepIdle here. `idleMs` has to mean something on its own,
+  // or it is a setting that reads as a promise the daemon never keeps.
+  t.mock.timers.tick(60_000);
+  await new Promise((resolve) => {
+    setImmediate(resolve);
+  });
+
+  assert.equal(recorder.closedContexts, 1, 'the idle context was closed by the timer');
+  assert.equal(recorder.closedBrowsers, 1, 'and the browser went with its last conversation');
 });

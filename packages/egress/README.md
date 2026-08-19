@@ -40,6 +40,12 @@ import { createPinnedLookup, requestThroughPolicy, createEgressProxy } from '@st
 - `requestThroughPolicy(url, …)` is one exchange over that lookup, with a byte
   cap. It deliberately does **not** follow redirects: each hop is a new request
   to a new host, so the caller loops and each hop faces the policy again.
+Both of those pass `agent: false` alongside the lookup. Node's global agent
+pools sockets by host and port and knows nothing about `lookup`, so a
+connection opened under a permissive policy is one a stricter policy can be
+handed — and a reused socket resolves nothing, so the pinned lookup that
+would have refused it is never called.
+
 - `createEgressProxy(policy)` is a loopback proxy for a browser, which resolves
   names for itself whatever an interception handler decides. It resolves,
   checks, and dials the checked address. `chromiumProxyOptions` /
