@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { appendFile, chmod, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
@@ -98,6 +97,7 @@ import {
   verifyProviderKey,
   stratusHomePath,
   withLegacyDefaultMemories,
+  gatewayInfoPath,
   gatewayTokenPath,
   type AgentSummary,
   type ApiConfig,
@@ -327,15 +327,6 @@ export type ParsedCommand =
 
 type CliConfigFile = StratusConfigFile;
 
-export interface DashboardServerHandle {
-  url: string;
-  close: () => Promise<void>;
-}
-
-// Kept in step with this package's own version by a test, because it is a
-// second copy of a number nobody re-reads: it is drawn in the setup header
-// and served from the dashboard's /api/status, so drift here misreports the
-// running build rather than failing anything.
 export const CLI_VERSION = '0.4.0';
 
 const DEFAULT_DASHBOARD_HOST = '127.0.0.1';
@@ -439,7 +430,9 @@ Commands:
   doctor           Show what a run would use right now — provider, model, soul —
                    and which file or environment variable decided each, then
                    flag anything that would surprise you (--format json)
-  dashboard        Start the local Stratus Agent dashboard and open it in your browser
+  dashboard        Open the web dashboard: finds a running daemon (or starts one),
+                   mints a single-use sign-in link, and opens your browser at it.
+                   Needs @stratusagent/control-api and @stratusagent/dashboard
   help             Show this help message
 
 Agent options:
@@ -462,8 +455,8 @@ Options:
                    gated call) or remote (ask in Slack). Default headless, or
                    the config file's "approvals.mode"
   --max-turns      Maximum provider turns per run (default: 8)
-  --port           Dashboard port, defaults to an open local port
-  --host           Dashboard host (default: 127.0.0.1)
+  --port           dashboard: port for a daemon it starts (default: 4123)
+  --host           dashboard: host for a daemon it starts (default: 127.0.0.1)
   --no-open        Do not open the browser automatically
   --gateway        agents: read the roster from a running daemon's control API
   --token          Bearer token for --gateway (default: ~/.stratus/gateway-token)
@@ -1625,123 +1618,6 @@ const formatRuntimeBanner = (runtime: RuntimeConfig): string => {
   return `Starting Stratus Agent local loop with provider=${runtime.provider} model=${runtime.model}${fallbackSuffix}${soulSuffix}`;
 };
 
-const escapeHtml = (value: string): string => value
-  .replaceAll('&', '&amp;')
-  .replaceAll('<', '&lt;')
-  .replaceAll('>', '&gt;')
-  .replaceAll('"', '&quot;');
-
-const renderDashboardHtml = (url: string): string => `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>${DASHBOARD_TITLE}</title>
-    <style>
-      :root { color-scheme: dark; }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-        background: radial-gradient(circle at top, #1f3a5f 0%, #0b1020 45%, #05070f 100%);
-        color: #f3f7ff;
-      }
-      main { max-width: 960px; margin: 0 auto; padding: 40px 20px 72px; }
-      .hero, .card { background: rgba(10, 16, 32, 0.74); border: 1px solid rgba(148, 163, 184, 0.2); border-radius: 20px; backdrop-filter: blur(12px); }
-      .hero { padding: 32px; margin-bottom: 20px; }
-      .eyebrow { display: inline-block; font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: #93c5fd; }
-      h1 { font-size: clamp(32px, 6vw, 56px); line-height: 1; margin: 14px 0 12px; }
-      p { color: #cbd5e1; line-height: 1.6; }
-      .grid { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
-      .card { padding: 24px; }
-      .stat { font-size: 28px; font-weight: 700; margin: 6px 0; }
-      code, pre, textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-      textarea {
-        width: 100%; min-height: 120px; border-radius: 14px; border: 1px solid rgba(148, 163, 184, 0.28);
-        background: rgba(15, 23, 42, 0.9); color: #e2e8f0; padding: 14px; resize: vertical;
-      }
-      button {
-        margin-top: 12px; border: 0; border-radius: 999px; padding: 12px 18px; font-weight: 700; cursor: pointer;
-        background: linear-gradient(135deg, #60a5fa, #22d3ee); color: #08111f;
-      }
-      pre {
-        margin: 14px 0 0; padding: 14px; border-radius: 14px; overflow: auto;
-        background: rgba(2, 6, 23, 0.9); border: 1px solid rgba(148, 163, 184, 0.2); color: #bfdbfe;
-      }
-      a { color: #7dd3fc; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <section class="hero">
-        <span class="eyebrow">Stratus Agent local dashboard</span>
-        <h1>Stratus Agent is up.</h1>
-        <p>A tiny dashboard for local testing. It confirms the CLI is reachable, gives you a quick action, and keeps the current repo intent visible.</p>
-        <p><strong>Local URL:</strong> <a href="${escapeHtml(url)}">${escapeHtml(url)}</a></p>
-      </section>
-      <section class="grid">
-        <article class="card">
-          <div class="eyebrow">Status</div>
-          <div class="stat">Ready</div>
-          <p>The local server is running with Node standard library primitives only.</p>
-        </article>
-        <article class="card">
-          <div class="eyebrow">About</div>
-          <div class="stat">Minimal by design</div>
-          <p>Use <code>stratus run</code> for the agent loop, or use the tester here to verify browser-to-local requests during development.</p>
-        </article>
-      </section>
-      <section class="card" style="margin-top:20px;">
-        <div class="eyebrow">Actionable test</div>
-        <h2 style="margin:12px 0 8px;">Echo tester</h2>
-        <p>Send a payload to the local dashboard API and inspect the response.</p>
-        <textarea id="payload">Hello from Stratus Agent dashboard</textarea>
-        <button id="send">POST /api/echo</button>
-        <pre id="result">Waiting for input…</pre>
-      </section>
-    </main>
-    <script>
-      const button = document.getElementById('send');
-      const payload = document.getElementById('payload');
-      const result = document.getElementById('result');
-      button.addEventListener('click', async () => {
-        result.textContent = 'Sending...';
-        try {
-          const response = await fetch('/api/echo', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ text: payload.value })
-          });
-          const data = await response.json();
-          result.textContent = JSON.stringify(data, null, 2);
-        } catch (error) {
-          result.textContent = String(error);
-        }
-      });
-    </script>
-  </body>
-</html>`;
-
-const readBody = async (request: IncomingMessage): Promise<string> => {
-  let data = '';
-  for await (const chunk of request) {
-    data += chunk.toString();
-  }
-  return data;
-};
-
-const sendJson = (response: ServerResponse, statusCode: number, payload: unknown): void => {
-  response.statusCode = statusCode;
-  response.setHeader('content-type', 'application/json; charset=utf-8');
-  response.end(JSON.stringify(payload, null, 2));
-};
-
-const sendHtml = (response: ServerResponse, html: string): void => {
-  response.statusCode = 200;
-  response.setHeader('content-type', 'text/html; charset=utf-8');
-  response.end(html);
-};
-
 export const openExternalUrl = async (url: string): Promise<void> => {
   const platform = process.platform;
   const command = platform === 'darwin' ? 'open' : platform === 'win32' ? 'cmd' : 'xdg-open';
@@ -1755,85 +1631,6 @@ export const openExternalUrl = async (url: string): Promise<void> => {
       resolve();
     });
   });
-};
-
-export const startDashboardServer = async (
-  options: { host: string; port?: number },
-): Promise<DashboardServerHandle> => {
-  const server = createServer(async (request, response) => {
-    const method = request.method ?? 'GET';
-    const requestUrl = new URL(request.url ?? '/', 'http://localhost');
-
-    if (method === 'GET' && requestUrl.pathname === '/') {
-      const address = server.address();
-      const port = typeof address === 'object' && address ? address.port : options.port ?? 0;
-      const host = typeof address === 'object' && address && address.address ? address.address : options.host;
-      sendHtml(response, renderDashboardHtml(`http://${host === '::' ? '127.0.0.1' : host}:${port}`));
-      return;
-    }
-
-    if (method === 'GET' && requestUrl.pathname === '/api/status') {
-      sendJson(response, 200, {
-        ok: true,
-        service: 'stratus-dashboard',
-        version: CLI_VERSION,
-        now: new Date().toISOString(),
-      });
-      return;
-    }
-
-    if (method === 'POST' && requestUrl.pathname === '/api/echo') {
-      const raw = await readBody(request);
-      let text = '';
-      if (raw.trim().length > 0) {
-        const payload = JSON.parse(raw) as { text?: unknown };
-        text = typeof payload.text === 'string' ? payload.text : '';
-      }
-      sendJson(response, 200, {
-        ok: true,
-        received: text,
-        uppercase: text.toUpperCase(),
-        length: text.length,
-      });
-      return;
-    }
-
-    sendJson(response, 404, { ok: false, error: 'Not found' });
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(options.port ?? 0, options.host, () => {
-      server.off('error', reject);
-      resolve();
-    });
-  });
-
-  const address = server.address();
-  if (!address || typeof address === 'string') {
-    throw new Error('Unable to determine dashboard server address.');
-  }
-
-  const host = address.address === '::' ? '127.0.0.1' : address.address;
-  const url = `http://${host}:${address.port}`;
-
-  return {
-    url,
-    close: async () => {
-      if (!server.listening) {
-        return;
-      }
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
-      });
-    },
-  };
 };
 
 // Printed commands must survive copy-paste into a shell, so anything outside
@@ -4549,37 +4346,166 @@ export const runAgentNew = async (
   return 0;
 };
 
+/** What a running daemon published about itself, if one is running. */
+interface GatewayInfo {
+  url: string;
+  pid?: number;
+}
+
+const readGatewayInfo = async (env: CliEnvironment): Promise<GatewayInfo | undefined> => {
+  try {
+    const parsed = JSON.parse(await readFile(gatewayInfoPath(env), 'utf8')) as Partial<GatewayInfo>;
+    return typeof parsed.url === 'string' ? { url: parsed.url, ...(parsed.pid ? { pid: parsed.pid } : {}) } : undefined;
+  } catch {
+    // No file, or one left behind by a daemon that died without cleaning up.
+    // Either way there is nothing to talk to until the health check says so.
+    return undefined;
+  }
+};
+
+/**
+ * A one-time URL for the browser.
+ *
+ * This is the whole reason the exchange exists: the CLI can read the token
+ * file and a page cannot, so the CLI lends its authority for exactly one
+ * short-lived trip.
+ */
+const mintDashboardUrl = async (
+  env: CliEnvironment,
+  base: string,
+  fetchImpl: typeof fetch,
+): Promise<string> => {
+  const token = await gatewayToken(env, undefined);
+  const response = await fetchImpl(`${base}/api/v1/auth/ott`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`The gateway at ${base} refused to open a dashboard session (HTTP ${response.status}).`);
+  }
+  const payload = await response.json() as { url?: string };
+  if (!payload.url) {
+    throw new Error(`The gateway at ${base} did not return a dashboard URL.`);
+  }
+  return payload.url;
+};
+
+/** Whether something is actually answering there, as opposed to a stale file. */
+const gatewayAnswering = async (
+  env: CliEnvironment,
+  base: string,
+  fetchImpl: typeof fetch,
+): Promise<boolean> => {
+  try {
+    const token = await gatewayToken(env, undefined);
+    const response = await fetchImpl(`${base}/api/v1/health`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * `stratus dashboard` — open the web UI against a running daemon, starting
+ * one in the foreground when there is none.
+ *
+ * The daemon is started by calling `runServe`, not by rebuilding its wiring:
+ * channels, approvals, the credential preflight, and the log writer are all
+ * decisions `serve` already makes, and a second copy of them here would drift
+ * the first time either side gained a rule.
+ */
 export const runDashboard = async (
   command: ParsedDashboardCommand,
   streams: CliStreams,
   env: CliEnvironment = {},
 ): Promise<number> => {
-  const handle = await startDashboardServer({
-    host: command.host,
-    ...(command.port !== undefined ? { port: command.port } : {}),
-  });
+  const fetchImpl = env.fetch ?? globalThis.fetch;
+  if (typeof fetchImpl !== 'function') {
+    writeLine(streams.stderr, 'Error: fetch is unavailable, so the dashboard cannot reach a gateway.');
+    return 1;
+  }
 
-  writeLine(streams.stdout, `${DASHBOARD_TITLE} ready at ${handle.url}`);
-  writeLine(streams.stdout, 'Press Ctrl+C to stop.');
+  const existing = await readGatewayInfo(env);
+  let base = existing && await gatewayAnswering(env, existing.url, fetchImpl) ? existing.url : undefined;
 
-  if (command.openBrowser) {
-    try {
-      await (env.openExternal ?? openExternalUrl)(handle.url);
-      writeLine(streams.stdout, 'Opened your default browser.');
-    } catch (error) {
-      writeLine(streams.stderr, `Warning: Could not open the browser automatically: ${error instanceof Error ? error.message : String(error)}`);
+  const ownDaemon = new AbortController();
+  let serving: Promise<number> | undefined;
+
+  if (!base) {
+    writeLine(streams.stdout, 'No daemon is running — starting one. It stops when you do.');
+    writeLine(streams.stdout, 'Run `stratus service install` to keep one running instead.');
+    serving = runServe(
+      {
+        command: 'serve',
+        events: false,
+        ...(command.port !== undefined ? { apiPort: command.port } : {}),
+        ...(command.host !== DEFAULT_DASHBOARD_HOST ? { apiHost: command.host } : {}),
+      },
+      // The daemon's own chatter belongs on stderr here: stdout is where this
+      // command says where to point a browser, and interleaving the two makes
+      // the one line that matters hard to find.
+      { stdout: streams.stderr, stderr: streams.stderr },
+      { ...env, shutdownSignal: ownDaemon.signal },
+    );
+
+    // Gated on the daemon actually answering, not on a delay: it publishes
+    // where it bound the moment it binds, and anything less would be a race
+    // dressed up as a timeout.
+    const startedBy = Date.now() + 15_000;
+    while (!base && Date.now() < startedBy) {
+      const info = await readGatewayInfo(env);
+      if (info && await gatewayAnswering(env, info.url, fetchImpl)) {
+        base = info.url;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+    if (!base) {
+      ownDaemon.abort();
+      await serving.catch(() => 0);
+      writeLine(streams.stderr, 'Error: the daemon did not start serving its control API. Is @stratusagent/control-api installed?');
+      return 1;
     }
   }
 
-  if (env.dashboardAutoShutdownMs !== undefined) {
-    await new Promise((resolve) => setTimeout(resolve, env.dashboardAutoShutdownMs));
-    await handle.close();
+  let url: string;
+  try {
+    url = await mintDashboardUrl(env, base, fetchImpl);
+  } catch (error) {
+    ownDaemon.abort();
+    await serving?.catch(() => 0);
+    writeLine(streams.stderr, `Error: ${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
+
+  writeLine(streams.stdout, `${DASHBOARD_TITLE} ready at ${base}`);
+  writeLine(streams.stdout, 'That link signs one browser in and can only be used once.');
+
+  if (command.openBrowser) {
+    try {
+      await (env.openExternal ?? openExternalUrl)(url);
+      writeLine(streams.stdout, 'Opened your default browser.');
+    } catch (error) {
+      writeLine(streams.stderr, `Warning: Could not open the browser automatically: ${error instanceof Error ? error.message : String(error)}`);
+      writeLine(streams.stdout, `Open this yourself: ${url}`);
+    }
+  } else {
+    writeLine(streams.stdout, `Open this to sign in: ${url}`);
+  }
+
+  if (!serving) {
+    // Someone else owns the daemon; this command's job is done.
     return 0;
   }
 
-  await once(process, 'SIGINT');
-  await handle.close();
-  return 0;
+  writeLine(streams.stdout, 'Press Ctrl+C to stop the daemon.');
+  if (env.dashboardAutoShutdownMs !== undefined) {
+    await new Promise((resolve) => setTimeout(resolve, env.dashboardAutoShutdownMs));
+    ownDaemon.abort();
+  }
+  return serving;
 };
 
 type SlackAdapterFactory = typeof import('@stratusagent/channel-slack').createSlackChannelAdapter;
@@ -4730,13 +4656,18 @@ export const runServe = async (
   const controlApiChannels: GatewayChannelAdapter[] = [];
   if (apiWanted) {
     const createControlApi = await loadControlApi();
+    // Resolved into locals first. Inlined, `a ?? b !== undefined` parses as
+    // `a ?? (b !== undefined)` — so an explicit `--api-port 0`, which is how
+    // you ask for any free port, was falsy and fell through to the default.
+    // Everything still bound and every test still passed, on whichever port
+    // nobody happened to be using.
+    const apiHost = command.apiHost ?? apiConfig.host;
+    const apiPort = command.apiPort ?? apiConfig.port;
     if (createControlApi) {
       controlApiChannels.push(createControlApi({
         env,
-        ...(command.apiHost ?? apiConfig.host ? { host: (command.apiHost ?? apiConfig.host) as string } : {}),
-        ...(command.apiPort ?? apiConfig.port !== undefined
-          ? { port: (command.apiPort ?? apiConfig.port) as number }
-          : {}),
+        ...(apiHost !== undefined ? { host: apiHost } : {}),
+        ...(apiPort !== undefined ? { port: apiPort } : {}),
         ...(command.configPath ? { configPath: command.configPath } : {}),
         log,
         warn,

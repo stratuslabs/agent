@@ -41,6 +41,25 @@ export interface DashboardAssets {
   serve(pathname: string, response: ServerResponse): Promise<boolean>;
 }
 
+/**
+ * Load the optional dashboard package, or undefined when it is absent.
+ *
+ * The same two-step the CLI uses for channels, for the same reason: only the
+ * package failing to *resolve* means "not installed". A package that is
+ * installed but broken throws ERR_MODULE_NOT_FOUND naming its own missing
+ * dependency, and reading that as absence would silently serve no UI to
+ * someone who installed one.
+ */
+const loadDashboardAssets = async (): Promise<DashboardAssets | undefined> => {
+  try {
+    import.meta.resolve('@stratusagent/dashboard');
+  } catch {
+    return undefined;
+  }
+  const { createDashboardAssets } = await import('@stratusagent/dashboard');
+  return createDashboardAssets();
+};
+
 export interface ControlApiOptions {
   env?: StateEnvironment;
   /**
@@ -52,8 +71,12 @@ export interface ControlApiOptions {
   port?: number;
   /** The config file the daemon was pinned to, if any. */
   configPath?: string;
-  /** The web UI, when @stratusagent/dashboard is installed. */
-  ui?: DashboardAssets;
+  /**
+   * The web UI. Left unset, the package is auto-loaded when installed —
+   * installing it is the whole opt-in. Pass `false` to serve the API alone on
+   * a headless deployment that has it present anyway.
+   */
+  ui?: DashboardAssets | false;
   log?: (line: string) => void;
   warn?: (line: string) => void;
 }
@@ -93,6 +116,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
   let token: string | undefined;
   let origins = new Set<string>();
   let startedAt = Date.now();
+  let ui: DashboardAssets | undefined;
 
   const handleApiRequest = async (
     gateway: Gateway,
@@ -192,7 +216,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       );
       return;
     }
-    if (options.ui && (await options.ui.serve(requestUrl.pathname, response))) {
+    if (ui && (await ui.serve(requestUrl.pathname, response))) {
       return;
     }
     throw new ApiError(
@@ -272,6 +296,9 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
 
     async start(gateway: Gateway) {
       startedAt = Date.now();
+      ui = options.ui === false
+        ? undefined
+        : options.ui ?? await loadDashboardAssets();
       token = await ensureGatewayToken(env);
       auth = createAuthenticator({ token });
       stream = createEventStream(gateway);
@@ -306,7 +333,9 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       url = `http://${host}:${address.port}`;
       origins = allowedOrigins(host, address.port);
       await writeGatewayInfo();
-      log(`control API on ${url} — token in ~/.stratus/gateway-token`);
+      log(ui
+        ? `control API on ${url} — dashboard served there; token in ~/.stratus/gateway-token`
+        : `control API on ${url} — token in ~/.stratus/gateway-token`);
     },
 
     async stop() {
@@ -327,6 +356,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
         });
       }
       await removeGatewayInfo().catch(() => undefined);
+      ui = undefined;
       auth = undefined;
       url = undefined;
       token = undefined;

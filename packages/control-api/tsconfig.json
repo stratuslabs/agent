@@ -24,6 +24,9 @@
     },
     {
       "path": "../provider-anthropic"
+    },
+    {
+      "path": "../dashboard"
     }
   ],
   "include": [

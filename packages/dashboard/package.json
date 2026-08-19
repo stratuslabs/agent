@@ -1,5 +1,5 @@
 {
-  "name": "@stratusagent/control-api",
+  "name": "@stratusagent/dashboard",
   "version": "0.4.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,7 +11,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "ui"
   ],
   "scripts": {
     "build": "tsc -b",
@@ -21,43 +22,25 @@
   "engines": {
     "node": ">=22.13 <23 || >=23.4"
   },
-  "dependencies": {
-    "@stratusagent/agents": "workspace:*",
-    "@stratusagent/core": "workspace:*",
-    "@stratusagent/gateway": "workspace:*",
-    "@stratusagent/provider-anthropic": "workspace:*",
-    "@stratusagent/state": "workspace:*",
-    "ws": "^8.18.0"
-  },
   "devDependencies": {
-    "@stratusagent/dashboard": "workspace:*",
     "@types/node": "^24.6.0",
-    "@types/ws": "^8.5.13",
     "typescript": "^5.9.3"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git",
-    "directory": "packages/control-api"
+    "directory": "packages/dashboard"
   },
-  "description": "The Stratus control API: one authenticated HTTP + WebSocket surface over a running stratusd, consumed by the web dashboard and the macOS app alike",
+  "description": "The Stratus web dashboard: a static, build-step-free UI served by @stratusagent/control-api — roster, live chat, approvals, and settings",
   "keywords": [
     "stratus",
     "agent",
     "ai",
     "llm",
-    "api"
+    "dashboard"
   ],
   "publishConfig": {
     "access": "public"
-  },
-  "peerDependencies": {
-    "@stratusagent/dashboard": "workspace:*"
-  },
-  "peerDependenciesMeta": {
-    "@stratusagent/dashboard": {
-      "optional": true
-    }
   }
 }

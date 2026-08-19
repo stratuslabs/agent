@@ -29,7 +29,6 @@ import {
   runCli,
   readRecentRecords,
   slackAppManifest,
-  startDashboardServer,
   tailLog,
 } from '../src/index.ts';
 
@@ -666,55 +665,35 @@ test('runCli completes a real-provider tool round trip across two turns', async 
   assert.equal(output.stderr, '');
 });
 
-test('startDashboardServer serves the landing page and echo api', async () => {
-  const dashboard = await startDashboardServer({ host: '127.0.0.1' });
-
-  try {
-    const pageResponse = await fetch(`${dashboard.url}/`);
-    const pageHtml = await pageResponse.text();
-    assert.equal(pageResponse.status, 200);
-    assert.match(pageHtml, /Stratus Agent Dashboard/);
-    assert.match(pageHtml, /POST \/api\/echo/);
-
-    const echoResponse = await fetch(`${dashboard.url}/api/echo`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text: 'local test' }),
-    });
-    const echoPayload = await echoResponse.json();
-
-    assert.deepEqual(echoPayload, {
-      ok: true,
-      received: 'local test',
-      uppercase: 'LOCAL TEST',
-      length: 10,
-    });
-  } finally {
-    await dashboard.close();
-  }
-});
-
-test('runCli starts the dashboard, prints the URL, and opens the browser callback', async () => {
+test('stratus dashboard starts a daemon, mints a one-time link, and opens it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-dash-'));
   const { streams, output } = createStreams();
   let openedUrl = '';
 
   const exitCode = await runCli({
+    // Port 0 keeps the suite off a developer's own daemon.
     argv: ['dashboard', '--port', '0'],
     streams,
     env: {
-      openExternal: async (url) => {
-        openedUrl = url;
-      },
-      dashboardAutoShutdownMs: 25,
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      openExternal: async (url) => { openedUrl = url; },
+      dashboardAutoShutdownMs: 50,
     },
   });
 
   assert.equal(exitCode, 0);
+  assert.match(output.stdout, /No daemon is running/);
   assert.match(output.stdout, /Stratus Agent Dashboard ready at http:\/\/127\.0\.0\.1:\d+/);
   assert.match(output.stdout, /Opened your default browser\./);
-  assert.match(output.stdout, /Press Ctrl\+C to stop\./);
-  assert.match(openedUrl, /^http:\/\/127\.0\.0\.1:\d+$/);
-  assert.equal(output.stderr, '');
+
+  // The whole reason the exchange exists: this command can read the token
+  // file and a browser cannot, so it lends its authority for one short trip.
+  assert.match(openedUrl, /\/api\/v1\/auth\/session\?ott=/);
+
+  // The daemon it started stops with it, leaving nothing pointing at a dead port.
+  await assert.rejects(readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8'));
 });
 
 test('runCli reports missing prompt errors', async () => {
@@ -6141,4 +6120,31 @@ test('a project-local config cannot decide which interface the daemon binds', as
   assert.match(output.stderr, /ignoring the api config/);
   assert.ok(!output.stdout.includes('0.0.0.0'), output.stdout);
   assert.match(output.stdout, /control API on http:\/\/127\.0\.0\.1:/);
+});
+
+test('stratus dashboard opens against a daemon that is already running', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-dash-live-'));
+
+  await withServedApi(home, async ({ url }) => {
+    const { streams, output } = createStreams();
+    let openedUrl = '';
+
+    const exitCode = await runCli({
+      argv: ['dashboard'],
+      streams,
+      env: {
+        homeDir: home,
+        cwd: home,
+        processEnv: {},
+        openExternal: async (opened) => { openedUrl = opened; },
+      },
+    });
+
+    assert.equal(exitCode, 0);
+    // Found through ~/.stratus/gateway.json rather than started a second time
+    // on top of the one already there.
+    assert.ok(!output.stdout.includes('No daemon is running'), output.stdout);
+    assert.ok(output.stdout.includes(`ready at ${url}`), output.stdout);
+    assert.ok(openedUrl.startsWith(`${url}/api/v1/auth/session?ott=`), openedUrl);
+  });
 });

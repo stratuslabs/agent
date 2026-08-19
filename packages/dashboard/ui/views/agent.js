@@ -1,0 +1,425 @@
+import { ago, el } from '../lib/dom.js';
+import { api } from '../lib/api.js';
+import { avatar } from '../lib/avatar.js';
+import { onEnvelope, refreshCore, store } from '../app.js';
+
+/** A conversation started from this page, distinguishable from a Slack thread. */
+const newSessionId = (agentId) => `web:${agentId}:${crypto.randomUUID()}`;
+
+/**
+ * Session ids are addresses, not names — a Slack thread key or a UUID. Show
+ * enough to tell two apart without letting one eat the row it sits in.
+ */
+const shortId = (id) => (id.length <= 28 ? id : `${id.slice(0, 12)}…${id.slice(-8)}`);
+
+const TOOL_OUTPUT_LIMIT = 260;
+
+/**
+ * A tool result, as a person would want to read it.
+ *
+ * The stored message is the raw result envelope — call id, tool name, ok
+ * flag, output — because that is what the model consumed. Rendering it
+ * verbatim puts a wall of JSON with an internal id in the middle of a
+ * conversation, so this pulls out the part a reader is actually asking about
+ * and leaves the rest to the transcript in the store.
+ */
+const summariseTool = (content) => {
+  const text = String(content ?? '');
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return text.length > TOOL_OUTPUT_LIMIT ? `${text.slice(0, TOOL_OUTPUT_LIMIT)}…` : text;
+  }
+  if (typeof parsed !== 'object' || parsed === null || !parsed.toolName) {
+    return text.length > TOOL_OUTPUT_LIMIT ? `${text.slice(0, TOOL_OUTPUT_LIMIT)}…` : text;
+  }
+  const outcome = parsed.ok === false
+    ? `failed — ${parsed.error ?? 'no reason given'}`
+    : typeof parsed.output === 'string' ? parsed.output : JSON.stringify(parsed.output);
+  const body = String(outcome ?? '');
+  return `${parsed.toolName} → ${body.length > TOOL_OUTPUT_LIMIT ? `${body.slice(0, TOOL_OUTPUT_LIMIT)}…` : body}`;
+};
+
+export const renderAgent = (agentId, initialSessionId) => {
+  const state = {
+    tab: 'chat',
+    sessions: [],
+    sessionId: initialSessionId,
+    /**
+     * True while this conversation exists only in the page.
+     *
+     * A session id minted here has nothing stored behind it until the first
+     * message lands, so asking the daemon for it would 404 — correctly, and
+     * confusingly: a red line in the console for the ordinary act of opening
+     * a new conversation.
+     */
+    unsent: initialSessionId === undefined,
+    /** Canonical history, re-read from the daemon whenever a turn settles. */
+    messages: [],
+    /** The reply currently arriving, token by token. */
+    streaming: '',
+    /** Tool status lines for the turn in flight. */
+    toolLines: [],
+    turnId: undefined,
+    sending: false,
+    error: undefined,
+    saved: undefined,
+  };
+
+  const node = el('div', { class: 'main' });
+  const transcriptBox = el('div', { class: 'transcript' });
+  const composer = el('textarea', {
+    placeholder: 'Message this agent…',
+    rows: 2,
+    onKeyDown: (event) => {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        void send();
+      }
+    },
+  });
+
+  const agent = () => store.agents.find((candidate) => candidate.id === agentId);
+
+  // ---- transcript --------------------------------------------------------
+
+  const bubbles = () => {
+    const nodes = [];
+    for (const message of state.messages) {
+      if (message.role === 'system') {
+        continue;
+      }
+      if (message.role === 'tool') {
+        nodes.push(el('div', { class: 'bubble tool' }, summariseTool(message.content)));
+        continue;
+      }
+      if (!message.content) {
+        // An assistant turn that only carried tool calls has no text to show;
+        // the tool bubbles beside it are the story.
+        continue;
+      }
+      nodes.push(el('div', { class: `bubble ${message.role}` }, message.content));
+    }
+    for (const line of state.toolLines) {
+      nodes.push(el('div', { class: 'bubble tool' }, line));
+    }
+    if (state.streaming) {
+      nodes.push(el('div', { class: 'bubble assistant streaming' }, state.streaming));
+    }
+    return nodes;
+  };
+
+  const paintTranscript = () => {
+    // Pinned to the bottom only when the reader already was: yanking someone
+    // back down while they are reading earlier output is worse than a reply
+    // they have to scroll to.
+    const pinned = transcriptBox.scrollHeight - transcriptBox.scrollTop - transcriptBox.clientHeight < 60;
+    transcriptBox.replaceChildren(...bubbles());
+    if (pinned) {
+      transcriptBox.scrollTop = transcriptBox.scrollHeight;
+    }
+  };
+
+  // ---- data --------------------------------------------------------------
+
+  const loadSessions = async () => {
+    const listed = await api.sessions(agentId, 50).catch(() => ({ sessions: [] }));
+    state.sessions = listed.sessions ?? [];
+    if (!state.sessionId) {
+      const newest = state.sessions[0]?.id;
+      state.sessionId = newest ?? newSessionId(agentId);
+      state.unsent = newest === undefined;
+    }
+    await loadTranscript();
+  };
+
+  const loadTranscript = async () => {
+    if (!state.sessionId) {
+      return;
+    }
+    if (state.unsent) {
+      // Nothing to fetch: this conversation has never been sent anywhere.
+      state.messages = [];
+      state.streaming = '';
+      state.toolLines = [];
+      paintTranscript();
+      update();
+      return;
+    }
+    try {
+      const { session } = await api.session(state.sessionId);
+      state.messages = session.messages ?? [];
+    } catch {
+      // Raced with a turn that has not saved yet, or a session removed out
+      // from under the page. An empty transcript is the honest render.
+      state.messages = [];
+    }
+    state.streaming = '';
+    state.toolLines = [];
+    paintTranscript();
+    update();
+  };
+
+  const openSession = (sessionId) => {
+    state.sessionId = sessionId;
+    state.unsent = false;
+    state.tab = 'chat';
+    void loadTranscript();
+  };
+
+  const startSession = () => {
+    state.sessionId = newSessionId(agentId);
+    state.unsent = true;
+    state.messages = [];
+    state.streaming = '';
+    state.toolLines = [];
+    paintTranscript();
+    update();
+  };
+
+  const send = async () => {
+    const text = composer.value.trim();
+    if (!text || state.sending) {
+      return;
+    }
+    state.sending = true;
+    state.error = undefined;
+    composer.value = '';
+    // Shown immediately rather than waiting for the round trip: the daemon
+    // will persist exactly this, and a message that vanishes for a second
+    // reads as a dropped one.
+    state.messages = [...state.messages, { id: `local:${crypto.randomUUID()}`, role: 'user', content: text }];
+    state.streaming = '';
+    state.toolLines = [];
+    paintTranscript();
+    update();
+
+    try {
+      const { turnId } = await api.send(state.sessionId, { message: text, agentId });
+      // It exists in the store now, so later reads are real reads.
+      state.unsent = false;
+      // Kept so deltas can be attributed to *this* message: a session runs
+      // its turns in sequence, and without the id there is no telling our
+      // reply from the next one.
+      state.turnId = turnId;
+    } catch (error) {
+      state.error = error.message;
+      state.sending = false;
+      update();
+    }
+  };
+
+  // ---- live --------------------------------------------------------------
+
+  const detach = onEnvelope((envelope) => {
+    if (envelope.sessionId !== state.sessionId) {
+      return;
+    }
+    const event = envelope.event;
+
+    switch (event.type) {
+      case 'provider.delta':
+        if (event.delta.type === 'text') {
+          state.streaming += event.delta.text;
+          paintTranscript();
+        } else if (event.delta.type === 'reset') {
+          // The provider abandoned this attempt — a fallback taking over, or
+          // a retry. Everything streamed so far belongs to an answer that is
+          // not coming, so it goes rather than being fused with the next one.
+          state.streaming = '';
+          paintTranscript();
+        }
+        break;
+      case 'tool.called':
+        state.toolLines = [...state.toolLines, `running ${event.call.toolName}…`];
+        paintTranscript();
+        break;
+      case 'tool.completed':
+        state.toolLines = [...state.toolLines, `${event.result.toolName} ${event.result.ok ? 'finished' : 'failed'}`];
+        paintTranscript();
+        break;
+      case 'tool.denied':
+        state.toolLines = [...state.toolLines, `${event.call.toolName} was denied`];
+        paintTranscript();
+        break;
+      case 'tool.approval-requested':
+        state.toolLines = [...state.toolLines, `${event.call.toolName} is waiting for approval`];
+        paintTranscript();
+        break;
+      case 'session.failed':
+        state.error = event.error;
+        state.sending = false;
+        state.turnId = undefined;
+        void loadTranscript();
+        break;
+      case 'session.completed':
+        state.sending = false;
+        state.turnId = undefined;
+        // Re-read rather than keeping what was streamed: the stored
+        // transcript is what every other surface will show, and a page that
+        // quietly disagrees with it is worse than one that flickers.
+        void loadTranscript();
+        void loadSessions();
+        break;
+      default:
+        break;
+    }
+  });
+
+  // ---- tabs --------------------------------------------------------------
+
+  const chatTab = () => el('div', { class: 'chat' },
+    transcriptBox,
+    state.error ? el('div', { class: 'notice bad' }, state.error) : null,
+    el('div', { class: 'composer' },
+      composer,
+      el('button', { class: 'primary', disabled: state.sending, onClick: () => void send() },
+        state.sending ? 'Working…' : 'Send'),
+    ),
+  );
+
+  const activityTab = () => {
+    const ours = new Set(state.sessions.map((session) => session.id));
+    ours.add(state.sessionId);
+    const lines = store.activity.filter((line) => ours.has(line.sessionId)).slice(0, 80);
+    return lines.length === 0
+      ? el('p', { class: 'empty' }, 'Nothing yet for this agent.')
+      : el('div', { class: 'activity' }, ...lines.map((line) => el('div', { class: 'line' },
+          el('span', { class: 'when' }, ago(new Date(line.at).toISOString())),
+          el('span', { class: 'what', title: line.sessionId },
+            line.agent ? `${line.agent} ${line.text}` : line.text),
+        )));
+  };
+
+  const settingsTab = () => {
+    const current = agent();
+    if (!current) {
+      return el('p', { class: 'empty' }, 'This agent is no longer on the roster.');
+    }
+    if (current.builtIn) {
+      return el('p', { class: 'empty' }, 'The built-in agent has no soul file to edit. Create your own agent to customise one.');
+    }
+
+    const name = el('input', { value: current.name });
+    const instructions = el('textarea', { rows: 8, value: current.persona ?? '' });
+    const provider = el('input', { value: current.provider ?? '', placeholder: 'follows your setup' });
+    const model = el('input', { value: current.model ?? '', placeholder: 'follows your setup' });
+
+    const save = async () => {
+      state.saved = undefined;
+      state.error = undefined;
+      try {
+        await api.updateAgent(agentId, {
+          name: name.value,
+          instructions: instructions.value,
+          // An empty string clears a pin; leaving it alone keeps it.
+          provider: provider.value.trim(),
+          model: model.value.trim(),
+        });
+        await refreshCore();
+        state.saved = 'Saved. The next turn in every conversation uses it.';
+      } catch (error) {
+        state.error = error.message;
+      }
+      update();
+    };
+
+    return el('div', {},
+      el('div', { class: 'form-grid' },
+        el('div', {}, el('label', {}, 'Name'), name),
+        el('div', {}, el('label', {}, 'Agent id'), el('input', { value: current.id, disabled: true })),
+        el('div', {}, el('label', {}, 'Provider'), provider),
+        el('div', {}, el('label', {}, 'Model'), model),
+      ),
+      el('p', { class: 'field-note' }, 'An id keys sessions, memory, and credentials, so it cannot be changed in place.'),
+      el('label', {}, 'Persona'),
+      instructions,
+      el('p', { class: 'field-note' }, current.soulPath ? `Soul file: ${current.soulPath}` : ''),
+      state.saved ? el('div', { class: 'notice ok' }, state.saved) : null,
+      state.error ? el('div', { class: 'notice bad' }, state.error) : null,
+      el('div', { class: 'actions' }, el('button', { class: 'primary', onClick: () => void save() }, 'Save')),
+    );
+  };
+
+  // ---- shell -------------------------------------------------------------
+
+  const sessionPicker = () => {
+    const picker = el('select', {
+      onChange: (event) => openSession(event.target.value),
+    }, ...state.sessions.map((session) => el('option', {
+      value: session.id,
+      selected: session.id === state.sessionId,
+    }, `${session.status.replace('_', ' ')} · ${ago(session.updatedAt)} · ${shortId(session.id)}`)));
+
+    if (!state.sessions.some((session) => session.id === state.sessionId)) {
+      // A conversation this page just started is not in the store yet, so it
+      // would otherwise be missing from the very picker that is selecting it.
+      picker.prepend(el('option', { value: state.sessionId, selected: true }, 'new conversation'));
+    }
+    return picker;
+  };
+
+  const header = () => {
+    const current = agent();
+    return el('div', { class: 'card-head' },
+      el('div', { class: 'row' },
+        current ? avatar(current, 34) : null,
+        el('div', { class: 'grow' },
+          el('div', { class: 'title' }, current?.name ?? agentId),
+          el('div', { class: 'sub' }, current
+            ? `${current.runsOn?.provider ?? 'demo'}${current.runsOn?.model ? ` · ${current.runsOn.model}` : ''} · ${current.memories ?? 0} remembered`
+            : agentId),
+        ),
+      ),
+      el('div', { class: 'actions' },
+        ...['chat', 'activity', 'settings'].map((tab) => el('button', {
+          class: `small${state.tab === tab ? ' primary' : ''}`,
+          onClick: () => { state.tab = tab; update(); },
+        }, tab.charAt(0).toUpperCase() + tab.slice(1))),
+      ),
+    );
+  };
+
+  const update = () => {
+    const body = state.tab === 'chat' ? chatTab()
+      : state.tab === 'activity' ? activityTab()
+        : settingsTab();
+
+    node.replaceChildren(
+      el('div', { class: 'column' },
+        el('section', { class: 'card' },
+          header(),
+          state.tab === 'chat'
+            ? el('div', {}, el('label', {}, 'Conversation'), sessionPicker())
+            : null,
+          body,
+        ),
+      ),
+      el('div', { class: 'column' },
+        el('section', { class: 'card' },
+          el('div', { class: 'card-head' },
+            el('h2', {}, 'Conversations'),
+            el('button', { class: 'small', onClick: startSession }, 'New'),
+          ),
+          state.sessions.length === 0
+            ? el('p', { class: 'empty' }, 'No stored conversations yet.')
+            : el('div', { class: 'rows' }, ...state.sessions.slice(0, 12).map((session) => el('div', { class: 'row' },
+                el('div', { class: 'grow' },
+                  el('div', { class: 'title', title: session.id },
+                    session.id === state.sessionId ? `▸ ${shortId(session.id)}` : shortId(session.id)),
+                  el('div', { class: 'sub' }, ago(session.updatedAt))),
+                el('span', { class: `pill ${session.status}` }, session.status.replace('_', ' ')),
+                el('button', { class: 'small', onClick: () => openSession(session.id) }, 'Open'),
+              ))),
+        ),
+      ),
+    );
+    paintTranscript();
+  };
+
+  update();
+  void loadSessions();
+
+  return { node, update, openSession, destroy: detach };
+};
