@@ -208,12 +208,32 @@ class ReplyRenderer {
       return;
     }
     if (event.type === 'tool.called') {
+      // Also a turn boundary. On the kernel path `provider.response` has
+      // already marked one, and marking it twice costs nothing; on a
+      // provider that hosts its own loop there is no provider.response at
+      // all, so this is the only thing between the text before a tool and
+      // the text after it — without it they fuse in the live message.
+      this.turnBreakPending = true;
       this.toolLine = `⚙ ${event.call.toolName}…`;
+      this.scheduleEdit();
+      return;
+    }
+    if (event.type === 'tool.denied') {
+      // Denial settles a call that never reached tool.called, so nothing
+      // else clears the status line or marks the boundary for it — the
+      // message would keep claiming a refused tool is running, and the
+      // model's follow-up would fuse with the text before the attempt.
+      this.toolLine = undefined;
+      this.turnBreakPending = true;
       this.scheduleEdit();
       return;
     }
     if (event.type === 'tool.completed') {
       this.toolLine = undefined;
+      // Also a boundary, and not only for symmetry: a call rejected before
+      // execution settles as tool.completed without ever having emitted
+      // tool.called, so this is the only mark that attempt leaves.
+      this.turnBreakPending = true;
       // Clear the visible status promptly: the next provider turn may be
       // non-streaming or slow to its first delta, and the message must not
       // claim a finished tool is still running that whole time.

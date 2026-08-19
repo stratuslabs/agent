@@ -516,3 +516,172 @@ test('a failed resume is not replayed once a hosted tool has run', async () => {
   assert.deepEqual(attempts, ['sdk-gone'], 'the turn must not be replayed after a tool ran');
   assert.deepEqual(executed, ['demo.echo']);
 });
+
+test('SDK partial messages become kernel deltas, in the kernel\'s own tool naming', async () => {
+  const { queryFn, calls } = createFakeQuery([
+    { type: 'system', subtype: 'init', session_id: 'sdk-1' },
+    { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hel' } } },
+    { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta' } } },
+    // The SDK names the tool the way MCP does; consumers are the kernel's.
+    { type: 'stream_event', event: { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', name: 'mcp__stratus__demo_echo' } } },
+    { type: 'stream_event', event: { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"a":' } } },
+    { type: 'result', subtype: 'success', is_error: false, result: 'Hello.', session_id: 'sdk-1' },
+  ]);
+
+  const deltas: unknown[] = [];
+  const provider = createClaudeCodeProvider({
+    authToken: 'sk-ant-oat-test',
+    queryFn,
+    executeTool: async (_session, call) => ({ callId: call.id, toolName: call.toolName, ok: true, output: {} }),
+  });
+
+  await provider.generate({
+    session: createSession(),
+    memory: [],
+    tools: [{ name: 'demo.echo', description: 'echo', parameters: { type: 'object', properties: {} } }],
+    onDelta: (delta) => {
+      deltas.push(delta);
+    },
+  });
+
+  assert.deepEqual(deltas, [
+    { type: 'text', text: 'Hel' },
+    { type: 'thinking' },
+    { type: 'tool-call', toolName: 'demo.echo' },
+    { type: 'tool-call', toolName: 'demo.echo', inputFragment: '{"a":' },
+  ]);
+
+  // Partial messages are only requested when someone is listening.
+  assert.equal((calls[0]!.options as { includePartialMessages?: boolean }).includePartialMessages, true);
+});
+
+test('partial messages are not requested when nothing consumes them', async () => {
+  const { queryFn, calls } = createFakeQuery([
+    { type: 'result', subtype: 'success', is_error: false, result: 'Hi.', session_id: 'sdk-1' },
+  ]);
+  const provider = createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn });
+
+  await provider.generate({ session: createSession(), memory: [] });
+
+  assert.equal((calls[0]!.options as { includePartialMessages?: boolean }).includePartialMessages, undefined);
+});
+
+test('a failed resume discards its streamed fragments before replaying', async () => {
+  // The abandoned attempt may already have streamed text, and the replay
+  // is a different answer to the same question. Without a reset an
+  // aggregator concatenates them into one garbled reply — which is the
+  // exact case the reset delta exists for.
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    const resume = (params.options as { resume?: string }).resume;
+    return (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
+      if (resume) {
+        yield { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'stale half-' } } };
+        throw new Error(`No conversation found with session ID: ${resume}`);
+      }
+      yield { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'fresh answer' } } };
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'fresh answer', session_id: 'sdk-new' };
+    })();
+  };
+
+  const deltas: unknown[] = [];
+  const provider = createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn });
+
+  await provider.generate({
+    session: createSession({ metadata: { [SDK_SESSION_METADATA_KEY]: 'sdk-gone' } }),
+    memory: [],
+    onDelta: (delta) => {
+      deltas.push(delta);
+    },
+  });
+
+  assert.deepEqual(deltas, [
+    { type: 'text', text: 'stale half-' },
+    // `retry`, not `fallback`: the same provider is starting over, and a
+    // consumer tracking which provider serves the turn must see that.
+    { type: 'reset', reason: 'retry' },
+    { type: 'text', text: 'fresh answer' },
+  ]);
+});
+
+test('a slow delta consumer is not counted as SDK silence', async () => {
+  // The sink is awaited per fragment on purpose — that is the backpressure
+  // contract. Counting the wait as provider idleness would abort a healthy
+  // query for honouring it.
+  const IDLE_MS = 60;
+  // The fake honours the controller the provider hands it, as a real query
+  // does — otherwise an abort has no visible effect and this test would
+  // pass whether the timer fired or not.
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    const signal = (params.options as { abortController?: AbortController }).abortController?.signal;
+    return (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
+      for (const message of [
+        { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'one' } } },
+        { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'two' } } },
+        { type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: 'sdk-1' },
+      ] as ClaudeCodeStreamMessage[]) {
+        if (signal?.aborted) {
+          throw new Error('aborted');
+        }
+        yield message;
+      }
+    })();
+  };
+
+  const provider = createClaudeCodeProvider({
+    authToken: 'sk-ant-oat-test',
+    queryFn,
+    idleTimeoutMs: IDLE_MS,
+  });
+
+  const response = await provider.generate({
+    session: createSession(),
+    memory: [],
+    // A throttled channel edit, slower than the idle timeout.
+    onDelta: async () => {
+      await new Promise((resolve) => setTimeout(resolve, IDLE_MS * 2));
+    },
+  });
+
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'done' }]);
+});
+
+test('a slow consumer of the retry reset does not abort the replay', async () => {
+  // The reset uses the same awaited-sink contract as every other delta, so
+  // it needs the same treatment: billing the consumer's time to the SDK
+  // would turn a recoverable resume failure into an idle timeout before
+  // the replacement attempt even starts.
+  const IDLE_MS = 60;
+  const attempts: Array<string | undefined> = [];
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    const options = params.options as { resume?: string; abortController?: AbortController };
+    attempts.push(options.resume);
+    return (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
+      if (options.abortController?.signal.aborted) {
+        throw new Error('aborted');
+      }
+      yield { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } } };
+      if (options.resume) {
+        throw new Error(`No conversation found with session ID: ${options.resume}`);
+      }
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'replayed', session_id: 'sdk-new' };
+    })();
+  };
+
+  const provider = createClaudeCodeProvider({
+    authToken: 'sk-ant-oat-test',
+    queryFn,
+    idleTimeoutMs: IDLE_MS,
+  });
+
+  const response = await provider.generate({
+    session: createSession({ metadata: { [SDK_SESSION_METADATA_KEY]: 'sdk-gone' } }),
+    memory: [],
+    // Slower than the idle timeout, on every delta including the reset.
+    onDelta: async () => {
+      await new Promise((resolve) => setTimeout(resolve, IDLE_MS * 2));
+    },
+  });
+
+  assert.deepEqual(attempts, ['sdk-gone', undefined], 'the replay must have run');
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'replayed' }]);
+});

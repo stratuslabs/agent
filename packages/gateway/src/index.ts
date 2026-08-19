@@ -637,9 +637,82 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return true;
   };
 
-  const approvals = typeof options.approvals === 'function'
+  /**
+   * How a turn's watchdog stops its own clock, registered while it runs.
+   *
+   * Recording that a tool phase is open is not enough on its own: the
+   * timer is only re-evaluated when an event arrives, so a phase opened by
+   * something that emits nothing — an approval policy handed straight to
+   * the gateway — would leave an already-armed timer running to fire
+   * mid-wait.
+   */
+  const suspendWatchdog = new Map<string, () => void>();
+
+  /**
+   * Approval waits in progress, per session.
+   *
+   * Deliberately a balanced counter and not a set of call ids. An earlier
+   * shape had the approval wrapper *open* a phase that the watchdog's
+   * event observer was expected to close, and that handoff was wrong in
+   * every way it could be: the observer does not exist when no watchdog is
+   * armed, so nothing closed it; a policy that threw closed nothing; and a
+   * stale entry did not merely leak, it suppressed the watchdog for the
+   * next turn on that session. Four separate exits, each patched in turn.
+   *
+   * A counter incremented and decremented in one `finally` cannot have any
+   * of those bugs, because the thing that opens the phase is the thing
+   * that closes it, in the same scope, on every path out.
+   */
+  const approvalWaits = new Map<string, number>();
+  const holdApprovalWait = (sessionId: string): (() => void) => {
+    approvalWaits.set(sessionId, (approvalWaits.get(sessionId) ?? 0) + 1);
+    // Stop any clock already running: this wait produces no events, so
+    // nothing else would.
+    suspendWatchdog.get(sessionId)?.();
+    let released = false;
+    return () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      const remaining = (approvalWaits.get(sessionId) ?? 1) - 1;
+      if (remaining > 0) {
+        approvalWaits.set(sessionId, remaining);
+      } else {
+        approvalWaits.delete(sessionId);
+      }
+    };
+  };
+
+  const configuredApprovals = typeof options.approvals === 'function'
     ? options.approvals({ request: requestApproval })
     : options.approvals;
+
+  /**
+   * Every approval opens a tool phase, whatever policy answers it.
+   *
+   * `tool.approval-requested` is the broker's event, so it exists only for
+   * the remote path; a policy handed straight to the gateway emits nothing
+   * at all, and `tool.called` comes only *after* the answer. Without this,
+   * a slow custom policy on a streaming provider that hosts its own loop
+   * would be indistinguishable from a stalled turn — the case this
+   * watchdog work exists to stop, arriving through a different door.
+   */
+  const approvals: ApprovalPolicy | undefined = configuredApprovals
+    ? {
+        async approve(context) {
+          const release = holdApprovalWait(context.session.id);
+          try {
+            return await configuredApprovals.approve(context);
+          } finally {
+            // Every path out, including a policy that throws. What happens
+            // after the answer is the tool events' business, and they are
+            // observed by the watchdog itself.
+            release();
+          }
+        },
+      }
+    : undefined;
   const registry = new AgentRegistry();
   const sources = new Map<string, AgentSource>();
 
@@ -868,10 +941,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * tool phases are covered by executor timeouts regardless).
    */
   const fallbackStreamsDeltas = (fallback: FallbackRuntime): boolean =>
-    fallback.provider === 'anthropic' && Boolean(fallback.apiKey);
+    // The same two modes as a primary. A subscription fallback that is not
+    // recognised as streaming gets no watchdog at all once a session
+    // switches to it, so a stall there would run to the provider's own
+    // ten-minute timer instead of the idle timeout the operator set.
+    fallback.provider === 'anthropic' && Boolean(fallback.apiKey || fallback.authToken);
 
   const streamsDeltas = (config: RuntimeConfig): boolean =>
-    config.provider === 'anthropic' && Boolean(config.apiKey);
+    // Both Anthropic modes stream now: an API key through the Messages
+    // API, a subscription token through the Agent SDK's partial messages.
+    config.provider === 'anthropic' && Boolean(config.apiKey || config.authToken);
 
   /**
    * Progress-based abort, armed only while the turn is actually awaiting a
@@ -912,6 +991,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // the primary until a reset delta announces the sticky fallback switch.
     let streamingActive = idleEnabled;
     let pendingTools = 0;
+    /**
+     * Tool calls this turn has started and not finished.
+     *
+     * `pendingTools` above reads a count off `provider.response`, which
+     * only a provider that hands its calls back to the kernel loop emits.
+     * A provider hosting its own loop dispatches inside `generate`, so that
+     * count is zero for the whole of a hosted tool. These are the kernel's
+     * own tool events, which every path emits because every path runs its
+     * tools through the same executor — and they are turn-local, so an
+     * aborted turn takes them with it rather than leaving anything behind.
+     */
+    const openToolCalls = new Set<string>();
     // Set at a text-only provider.response: the turn is wrapping up
     // (saves, completion events); nothing left for the timer to guard.
     let turnSettling = false;
@@ -952,9 +1043,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       switch (event.type) {
         case 'provider.delta':
-          // A reset marks the mid-turn, session-sticky fallback switch:
-          // the timer follows whether the now-active provider streams.
-          if (event.delta.type === 'reset') {
+          // Only a *fallback* reset marks the mid-turn, session-sticky
+          // switch that the timer follows. A provider retrying its own
+          // attempt abandons its partial output too, but nothing about
+          // who is serving the turn changed — reading that as a switch
+          // would disarm the watchdog for the rest of a turn that is
+          // still running on the provider it started on.
+          if (event.delta.type === 'reset' && event.delta.reason === 'fallback') {
             streamingActive = fallbackStreams;
           }
           break;
@@ -968,8 +1063,23 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
             turnSettling = true;
           }
           break;
+        case 'tool.approval-requested':
+          // Redundant with the approval wrapper for a gateway-owned
+          // transport, and not redundant for a recovered turn, whose
+          // request is re-announced without going through a policy again.
+          openToolCalls.add(event.call.id);
+          break;
+        case 'tool.called':
+          openToolCalls.add(event.call.id);
+          break;
         case 'tool.completed':
+          // Completion names the call through its result; denial carries
+          // the call itself. Both settle it.
+          openToolCalls.delete(event.result.callId);
+          pendingTools = Math.max(0, pendingTools - 1);
+          break;
         case 'tool.denied':
+          openToolCalls.delete(event.call.id);
           pendingTools = Math.max(0, pendingTools - 1);
           break;
         default:
@@ -982,10 +1092,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (!('sessionId' in event) || event.sessionId !== sessionId) {
         return;
       }
-      if (streamingActive && pendingTools === 0 && !turnSettling) {
+      if (
+        streamingActive
+        && pendingTools === 0
+        && openToolCalls.size === 0
+        && (approvalWaits.get(sessionId) ?? 0) === 0
+        && !turnSettling
+      ) {
         armTimer();
       }
     });
+
+    suspendWatchdog.set(sessionId, suspendTimer);
 
     if (streamingActive) {
       armTimer();
@@ -1002,6 +1120,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       suspendTimer();
       unsubscribeObserver();
       unsubscribeDrain();
+      suspendWatchdog.delete(sessionId);
       external?.removeEventListener('abort', onExternalAbort);
     }
   };

@@ -1103,3 +1103,94 @@ test('an agent this adapter was never given is left for whoever does carry it', 
 
   await adapter.stop();
 });
+
+test('a hosted tool separates the assistant turns around it', async () => {
+  // The kernel loop marks the boundary with provider.response. A provider
+  // that hosts its own loop never emits one mid-turn — the SDK consumes
+  // the tool call internally — so tool.called is the only thing standing
+  // between the text before the tool and the text after it.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const bus = new EventBus();
+
+  const gateway: GatewayLike = {
+    bus,
+    resolveApproval: () => false,
+    agents: () => [{ id: 'ava', name: 'Ava' }],
+    async dispatch(input) {
+      const call = { id: 'c1', toolName: 'demo.echo', input: {} };
+      await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: "I'll check." } });
+      // No provider.response here: that is the whole difference.
+      await bus.emit({ type: 'tool.called', sessionId: input.sessionId, call });
+      await bus.emit({
+        type: 'tool.completed',
+        sessionId: input.sessionId,
+        result: { callId: call.id, toolName: call.toolName, ok: true, output: {} },
+      });
+      await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: 'The result is 4.' } });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return sessionWithReply(input.sessionId, "I'll check.\n\nThe result is 4.");
+    },
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> what is 2+2'));
+  await adapter.stop();
+
+  assert.ok(
+    web.updates.every((update) => !update.text.includes('check.The')),
+    `turns fused in a streaming edit: ${JSON.stringify(web.updates.map((u) => u.text))}`,
+  );
+});
+
+test('a denied hosted tool still separates the turns around it', async () => {
+  // A denied call never emits tool.called, so the boundary that branch
+  // sets is never reached — and the SDK keeps going, streaming the
+  // model's reaction to the refusal straight onto the text before it.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const bus = new EventBus();
+
+  const gateway: GatewayLike = {
+    bus,
+    resolveApproval: () => false,
+    agents: () => [{ id: 'ava', name: 'Ava' }],
+    async dispatch(input) {
+      await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: "I'll check." } });
+      await bus.emit({
+        type: 'tool.denied',
+        sessionId: input.sessionId,
+        call: { id: 'c1', toolName: 'shell.run', input: {} },
+      });
+      await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: 'The result is 4.' } });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return sessionWithReply(input.sessionId, "I'll check.\n\nThe result is 4.");
+    },
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> what is 2+2'));
+  await adapter.stop();
+
+  assert.ok(
+    web.updates.every((update) => !update.text.includes('check.The')),
+    `turns fused after a denial: ${JSON.stringify(web.updates.map((u) => u.text))}`,
+  );
+  // And the refused tool stops claiming to be running.
+  assert.ok(
+    web.updates.every((update) => !update.text.includes('shell.run…')) || !(web.updates.at(-1)?.text ?? '').includes('shell.run…'),
+    `a denied tool kept its running status: ${JSON.stringify(web.updates.at(-1)?.text)}`,
+  );
+});

@@ -41,6 +41,13 @@ export interface StateEnvironment {
   /** Home directory override (tests). Defaults to os.homedir(). */
   homeDir?: string;
   fetch?: typeof fetch;
+  /**
+   * The Agent SDK transport, for the same reason `fetch` is here: an
+   * environment can pin how a run reaches the outside world. Without it
+   * the subscription path is the one runtime nothing can drive except by
+   * launching Claude Code for real.
+   */
+  queryFn?: ClaudeCodeQueryFn;
 }
 
 export type StratusProviderName = 'demo' | 'openai' | 'anthropic';
@@ -1194,6 +1201,10 @@ export const resolveRuntimeConfig = async (
     resolved.fetch = env.fetch;
   }
 
+  if (env.queryFn && resolved.provider === 'anthropic') {
+    resolved.queryFn = env.queryFn;
+  }
+
   if (soul) {
     resolved.soul = soul;
   }
@@ -1259,6 +1270,12 @@ export const resolveRuntimeConfig = async (
             : (fallbackAnthropicBaseUrl ? { baseUrl: fallbackAnthropicBaseUrl } : {})),
           ...(fallbackApiKey ? { apiKey: String(fallbackApiKey) } : {}),
           ...(fallbackAuthToken ? { authToken: fallbackAuthToken } : {}),
+          // Here rather than with the primary's transport above, because
+          // the fallback does not exist yet at that point. A subscription
+          // fallback behind an OpenAI primary has no transport to inherit,
+          // so without this it reaches the real Agent SDK the moment the
+          // primary fails.
+          ...(env.queryFn && fallbackProvider === 'anthropic' ? { queryFn: env.queryFn } : {}),
         };
       }
     }
@@ -1399,7 +1416,7 @@ export const createFallbackWrappedProvider = (
           // watchdog) rely on it even when the primary died before its
           // first delta.
           if (request.onDelta) {
-            await request.onDelta({ type: 'reset' });
+            await request.onDelta({ type: 'reset', reason: 'fallback' });
           }
         }
       }
