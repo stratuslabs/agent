@@ -207,3 +207,35 @@ test('a dispatch that fails before the runner starts still reports on the stream
     await harness.stop();
   }
 });
+
+test('a preflight failure is stamped with its own turn, not whatever is running now', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
+  const client = await connect(harness);
+  try {
+    // Two messages can be queued on one session, and the chain can start the
+    // second turn before the first one's rejection handler emits. Standing in
+    // for that ordering, because a real one would be a race to stage: the
+    // gateway reports a different turn as active than the one whose failure
+    // the route is emitting.
+    harness.gateway.activeTurnId = () => 'a-turn-that-is-running-now';
+
+    await writeSoul(home, 'ava.md', '---\nname: Someone Else\nid: someone-else\n---\n\nNot Ava.\n');
+    const accepted = await send(harness, 'doomed', 'ava', 'hello');
+    assert.equal(accepted.status, 202);
+    const { turnId } = await accepted.json() as { turnId: string };
+
+    const envelope = await client.waitFor<Envelope>(isEnvelopeOf('session.failed'), 'the failure frame');
+    // Stamped with the other turn, this failure kills a turn that was fine
+    // while the client waiting on this one never hears anything at all.
+    assert.equal(
+      envelope.turnId,
+      turnId,
+      'the failure belongs to the turn that was rejected, whatever else is running',
+    );
+  } finally {
+    client.close();
+    await harness.stop();
+  }
+});

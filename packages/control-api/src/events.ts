@@ -140,7 +140,17 @@ export const createEventStream = (gateway: Gateway) => {
         }
       }
     }
-    const turnId = gateway.activeTurnId(event.sessionId) ?? turnOverrides.get(event.sessionId);
+    // The override wins, and is not a fallback. It is set only for the span
+    // of a `withTurn` call, and everything emitted inside that span belongs
+    // to the turn it names — while `activeTurnId` answers about whatever the
+    // session chain is running *now*. Those differ exactly when two messages
+    // are queued on one session and the first is rejected during preflight:
+    // the chain can already have started the second turn by the time the
+    // first route emits its synthetic failure, so ranking `activeTurnId`
+    // first stamped that failure with the second turn's id — falsely killing
+    // a turn that was fine while the client waiting on the first one never
+    // heard anything.
+    const turnId = turnOverrides.get(event.sessionId) ?? gateway.activeTurnId(event.sessionId);
     if (turnId !== undefined && (event.type === 'session.failed' || event.type === 'session.completed')) {
       // Noted before the no-clients shortcut below: whether a turn reported
       // its own outcome is not a question about who is watching.

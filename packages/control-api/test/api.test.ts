@@ -1487,3 +1487,36 @@ test('health keeps the cached pin when a served soul becomes unreadable', async 
     await harness.stop();
   }
 });
+
+test('health drops the runtime of a soul that now belongs to another agent', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'rex.md', '---\nname: Rex\nid: rex\nprovider: openai\nmodel: gpt-4.1-mini\n---\n\nYou are Rex.\n');
+  const harness = await startApi({
+    home,
+    options: { env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' } } },
+    env: { processEnv: { OPENAI_API_KEY: 'sk-test' } },
+  });
+  try {
+    // Given to someone else with no reload. `refreshAgent` refuses every
+    // dispatch for `rex` until the roster catches up, so nothing runs on
+    // those pins — unlike an unreadable file, where the cached soul is
+    // exactly what the gateway goes on dispatching from.
+    await writeSoul(home, 'rex.md', '---\nname: Rex\nid: rex-two\nprovider: openai\nmodel: gpt-4.1-mini\n---\n\nYou are Rex.\n');
+
+    const health = await json<{ runtimes: Array<{ model?: string }> }>(await harness.call('/api/v1/health'));
+    assert.ok(
+      !health.runtimes.some((runtime) => runtime.model === 'gpt-4.1-mini'),
+      `claimed a runtime no turn can reach: ${JSON.stringify(health.runtimes)}`,
+    );
+
+    // And the refusal is real, so the claim would have been wrong.
+    const accepted = await harness.call('/api/v1/sessions/rex-session/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hello', agentId: 'rex' }),
+    });
+    assert.equal(accepted.status, 202, 'the route accepts it and the dispatch is what refuses');
+  } finally {
+    await harness.stop();
+  }
+});

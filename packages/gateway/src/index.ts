@@ -481,9 +481,14 @@ export interface Gateway {
    * Async because it re-reads each soul file, exactly as `refreshAgent` does
    * before every dispatch: a pin edited on disk is live on the next turn, so
    * a caller answering from the load-time snapshot would name the provider
-   * the daemon has already stopped billing. Falls back to the cached soul
-   * when the file is unreadable or has been given away to another agent id —
-   * which is what that next dispatch falls back to, or refuses over.
+   * the daemon has already stopped billing. An unreadable file falls back to
+   * the cached soul, which is what that next dispatch falls back to as well.
+   *
+   * An agent is **absent** from this list when its file now declares a
+   * different id: `refreshAgent` refuses every dispatch for the old one until
+   * the roster reloads, so nothing is served under it and no runtime should
+   * be claimed for it. The roster it reports is therefore what can currently
+   * run, which is a narrower thing than `agents()`.
    */
   servedSouls(): Promise<Array<{ id: string; soul?: ParsedSoul }>>;
   /**
@@ -1812,13 +1817,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         const fresh = source?.soulPath
           ? await loadSoulFile(source.soulPath).catch(() => undefined)
           : undefined;
-        // A file that now declares someone else is one `refreshAgent` refuses
-        // to dispatch on, so the cached pins remain the honest answer for
-        // this agent — the alternative is reporting another identity's
-        // billing under this one's name.
-        const soul = fresh?.agent.id === agent.id ? fresh : source?.soul;
+        if (fresh && fresh.agent.id !== agent.id) {
+          // The file was given to another agent. `refreshAgent` refuses every
+          // dispatch for this id until the roster reloads, so there is no
+          // runtime being served under it — reporting the cached pins would
+          // claim billing for turns that cannot run, and reporting no soul at
+          // all would claim the daemon-wide default instead. It is omitted.
+          return undefined;
+        }
+        // Unreadable is the one case the cache answers for: the gateway goes
+        // on dispatching from the soul it loaded, so those pins are live.
+        const soul = fresh ?? source?.soul;
         return { id: agent.id, ...(soul ? { soul } : {}) };
-      }));
+      })).then((entries) => entries.filter((entry) => entry !== undefined));
     },
 
     resolveApproval,

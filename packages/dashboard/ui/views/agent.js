@@ -101,6 +101,17 @@ export const renderAgent = (agentId, initialSessionId) => {
      * response lands, which is the earliest point anything can decide.
      */
     reconcileAfterSend: new Set(),
+    /**
+     * The turn this page started on each conversation, by session id.
+     *
+     * `turnId` above is only the selected conversation's. Switching away and
+     * back used to clear it, which enabled the composer on a turn that was
+     * still running and made the rest of that turn's envelopes fail
+     * `isOurTurn` — so its reply rendered nowhere and its completion cleared
+     * nothing. An entry lives from the POST that minted it until that turn
+     * ends, or until the store says it already has.
+     */
+    turns: new Map(),
     error: undefined,
     saved: undefined,
     /**
@@ -246,10 +257,18 @@ export const renderAgent = (agentId, initialSessionId) => {
     state.sessionId = sessionId;
     state.unsent = false;
     state.pending = [];
-    state.turnId = undefined;
-    state.sending = false;
+    // Restored, not cleared: this page may still be waiting on a turn here.
+    state.turnId = state.turns.get(sessionId);
+    state.sending = state.turnId !== undefined || state.awaitingSend.has(sessionId);
     state.tab = 'chat';
     void loadTranscript();
+    if (state.sending) {
+      // It may equally have finished while we were looking elsewhere — the
+      // completion only reaches `applyEnvelope` for the selected
+      // conversation. The store is what settles that, and `reconcile` already
+      // knows how to ask it without disturbing a turn that is genuinely live.
+      void reconcile();
+    }
   };
 
   const startSession = () => {
@@ -299,6 +318,9 @@ export const renderAgent = (agentId, initialSessionId) => {
     try {
       const { turnId } = await api.send(sentTo, { message: text, agentId });
       state.awaitingSend.delete(sentTo);
+      // Recorded before the selection check, so a turn started here is
+      // recoverable even when the user walked away before it was answered.
+      state.turns.set(sentTo, turnId);
       if (state.sessionId !== sentTo) {
         // The view moved on, and `openSession`/`startSession` already reset
         // the in-flight state it would have reconciled.
@@ -403,11 +425,13 @@ export const renderAgent = (agentId, initialSessionId) => {
         state.error = event.error;
         state.sending = false;
         state.turnId = undefined;
+        state.turns.delete(envelope.sessionId);
         void loadTranscript();
         break;
       case 'session.completed':
         state.sending = false;
         state.turnId = undefined;
+        state.turns.delete(envelope.sessionId);
         // Re-read rather than keeping what was streamed: the stored
         // transcript is what every other surface will show, and a page that
         // quietly disagrees with it is worse than one that flickers.
@@ -663,6 +687,9 @@ export const renderAgent = (agentId, initialSessionId) => {
     }
     state.sending = false;
     state.turnId = undefined;
+    if (state.sessionId) {
+      state.turns.delete(state.sessionId);
+    }
     state.pending = [];
     state.streaming = '';
     state.toolLines = [];
