@@ -196,6 +196,15 @@ its credentials. It makes **no** network call — a monitoring view polls this,
 and a live call per poll would spend the operator's rate limit to say
 something resolution can answer for free.
 
+Both the roster and the runtimes come from the roster the gateway is
+**serving**, not from the agents directory. The two diverge in ordinary use: a
+soul dropped on disk is not dispatchable until a reload, and a soul deleted or
+left momentarily unparseable is still dispatched from the copy the gateway
+loaded. Reading the directory would name a provider and model for turns the
+daemon refuses to run, and omit the pins it is really billing — in the one
+endpoint whose job is to say what the daemon is doing right now. `POST
+/roster/reload` is what closes the gap.
+
 ## The event stream
 
 `WS /api/v1/events`, filterable at connect (`?session=`, `?agent=`) or with a

@@ -184,22 +184,36 @@ const credentialSource = (runtime: RuntimeConfig): string => {
 };
 
 /**
- * Summaries keyed by id, keeping the one the daemon is actually serving.
+ * How strongly a summary claims its id, by the gateway's own rules.
  *
  * `listAgentSummaries` describes *files*, and two files can name one id: a
  * configured default soul shadowing a roster file, or a roster file claiming
- * the reserved built-in id. The daemon serves exactly one of each pair — the
- * configured soul in the first case (it replaces the roster source), the
- * built-in in the second (a soul claiming `stratus` is skipped at load) — so
- * a last-write-wins map enriches a live agent with the persona, soul path,
- * resolved runtime, and flags of the file it is *not* running.
+ * the reserved built-in id. A last-write-wins map would enrich a live agent
+ * with the persona, soul path, resolved runtime, and flags of the file it is
+ * *not* running, so the pair is settled the way `loadRoster` settles it:
+ *
+ * - The configured default soul replaces whatever shares its id, the pathless
+ *   built-in source included — `defaultAgentId` re-registers over a source
+ *   with no `soulPath`, which is exactly what the built-in is. A configured
+ *   soul declaring `id: stratus` is therefore the agent being served, and
+ *   ranking the built-in over it reported the served soul as built-in and
+ *   uneditable, hiding its own persona and settings behind the stock ones.
+ * - Nothing else may take the reserved id: an ordinary roster file claiming
+ *   `stratus` is skipped at load with a warning.
  */
+const idClaim = (summary: AgentSummary): number => {
+  if (summary.default) {
+    return 2;
+  }
+  return summary.id === DEFAULT_STRATUS_AGENT.id && summary.builtIn ? 1 : 0;
+};
+
+/** Summaries keyed by id, keeping the one the daemon is actually serving. */
 const summariesById = (summaries: AgentSummary[]): Map<string, AgentSummary> => {
   const byId = new Map<string, AgentSummary>();
   for (const summary of summaries) {
     const existing = byId.get(summary.id);
-    const wins = summary.id === DEFAULT_STRATUS_AGENT.id ? summary.builtIn : summary.default;
-    if (!existing || wins) {
+    if (!existing || idClaim(summary) > idClaim(existing)) {
       byId.set(summary.id, summary);
     }
   }
@@ -350,7 +364,13 @@ export const routes: Route[] = [
       // would spend the operator's rate limit to tell them what resolution
       // already knows.
       const runtimes = new Map<string, { provider: string; model?: string; credentials: string }>();
-      for (const served of await servedRuntimes(context.env, context.configPath)) {
+      // Resolved from the roster the gateway is serving, not from the agents
+      // directory. A soul added without a successful reload is not dispatched
+      // yet, and a loaded soul that was deleted or broken since still is —
+      // either way a directory scan bills the wrong set. `servedSouls` hands
+      // over the pins the gateway itself would apply.
+      const roster = context.gateway.servedSouls().map((entry) => entry.soul);
+      for (const served of await servedRuntimes(context.env, context.configPath, roster)) {
         const model = served.runtime.provider === 'demo' ? undefined : served.runtime.model;
         const entry = {
           provider: served.runtime.provider,

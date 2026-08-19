@@ -1709,6 +1709,20 @@ export interface ServedRuntime {
 export const servedRuntimes = async (
   env: StateEnvironment,
   configPath?: string,
+  /**
+   * The roster to resolve, for a caller that knows it better than the disk
+   * does — one entry per served agent, its parsed soul when it has one and
+   * `undefined` for the built-in (which pins nothing, so it resolves the
+   * daemon-wide default).
+   *
+   * A running gateway is that caller: it keeps dispatching from the soul it
+   * loaded when the file is deleted or momentarily unparseable, and it has
+   * not seen a soul added since the last reload — so a directory scan
+   * describes runtimes it does not serve and omits ones it does. Before
+   * start, and for the CLI's preflight, there is no roster but the disk's,
+   * which is why scanning stays the default rather than moving to the caller.
+   */
+  roster?: Array<ParsedSoul | undefined>,
 ): Promise<ServedRuntime[]> => {
   // The pinned file, not whatever the working directory holds. What this
   // discovers decides which daemon-wide model, endpoint, and credentials
@@ -1730,19 +1744,29 @@ export const servedRuntimes = async (
   // the default agent's runtime is reported as whatever `STRATUS_PROVIDER`
   // says while its turns run somewhere else, and the startup credential
   // check looks for the wrong provider's key.
-  const configuredSoul = await resolveConfiguredSoul(configPath ? { configPath } : {}, env)
-    .catch(() => undefined);
-  const basePass = configuredSoul
-    ? applySoulPins(configuredSoul.soul, {}, env, context)
-    : { selection: {} as RuntimeSelection, env };
-  const passes: Array<{ selection: RuntimeSelection; env: StateEnvironment }> = [basePass];
-  // A roster that will not load is the gateway's to refuse, with a better
-  // message than this preflight could give — so it checks what it can and
-  // leaves the failing to start().
-  const rosterForRuntimes = await loadRosterSouls(env, () => {}).catch(() => []);
-  for (const entry of rosterForRuntimes) {
-    const normalized = applySoulPins(entry.soul, {}, env, context);
-    passes.push(normalized);
+  const passes: Array<{ selection: RuntimeSelection; env: StateEnvironment }> = [];
+  if (roster) {
+    // No separate default pass: a supplied roster already contains whatever
+    // answers an agentId-less dispatch — the configured default soul with its
+    // pins, or the unpinned built-in, which resolves the daemon-wide default
+    // exactly as the base pass below does. Adding one anyway would report a
+    // runtime for a default that a soul had taken over and nothing serves.
+    for (const soul of roster) {
+      passes.push(soul ? applySoulPins(soul, {}, env, context) : { selection: {} as RuntimeSelection, env });
+    }
+  } else {
+    const configuredSoul = await resolveConfiguredSoul(configPath ? { configPath } : {}, env)
+      .catch(() => undefined);
+    passes.push(configuredSoul
+      ? applySoulPins(configuredSoul.soul, {}, env, context)
+      : { selection: {} as RuntimeSelection, env });
+    // A roster that will not load is the gateway's to refuse, with a better
+    // message than this preflight could give — so it checks what it can and
+    // leaves the failing to start().
+    const rosterForRuntimes = await loadRosterSouls(env, () => {}).catch(() => []);
+    for (const entry of rosterForRuntimes) {
+      passes.push(applySoulPins(entry.soul, {}, env, context));
+    }
   }
 
   const resolved: ServedRuntime[] = [];

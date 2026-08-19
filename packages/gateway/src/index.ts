@@ -468,6 +468,18 @@ export interface Gateway {
   /** Every call parked on a human right now, oldest first. */
   pendingApprovals(): PendingApproval[];
   /**
+   * The soul behind each agent in the current roster, built-in included
+   * (which has none).
+   *
+   * The roster the daemon is *serving*, which the agents directory stops
+   * describing the moment a soul is added, deleted, or broken since the last
+   * reload — and the gateway keeps dispatching from the soul it cached. A
+   * caller that has to answer "what would a turn as this agent run on" needs
+   * the pins that answer it, so this hands back the parsed soul rather than a
+   * path a second reader would have to re-read (and now read differently).
+   */
+  servedSouls(): Array<{ id: string; soul?: ParsedSoul }>;
+  /**
    * Where a durable session came from — its agent, and the metadata the
    * dispatching surface attached to it.
    *
@@ -1779,6 +1791,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return [...pendingApprovals.values()]
         .map((parked) => parked.pending)
         .sort((a, b) => a.parkedAt.localeCompare(b.parkedAt));
+    },
+
+    servedSouls() {
+      // From the registry rather than `sources` directly, so the order and
+      // the membership are the roster's own — one entry per agent `agents()`
+      // reports, and no entry for a source the registry no longer serves.
+      return registry.list().map((agent) => {
+        const soul = sources.get(agent.id)?.soul;
+        return { id: agent.id, ...(soul ? { soul } : {}) };
+      });
     },
 
     resolveApproval,

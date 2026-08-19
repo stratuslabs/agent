@@ -1359,3 +1359,76 @@ test('an agent whose soul file vanished reports no runtime rather than a wrong o
     await harness.stop();
   }
 });
+
+test('a configured default soul that claims the built-in id is served as itself', async () => {
+  const home = await newHome();
+  // The one case where a soul may take the reserved id: an explicitly
+  // configured default. `defaultAgentId` re-registers it over the pathless
+  // built-in source, so this persona — not the stock one — is what an
+  // agentId-less dispatch runs as.
+  const soul = path.join(home, 'house.md');
+  await writeFile(soul, '---\nname: House\nid: stratus\n---\n\nYou are the house agent.\n');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ soul })}\n`);
+
+  const harness = await startApi({ home });
+  try {
+    const { agents } = await json<{ agents: Array<Record<string, unknown>> }>(await harness.call('/api/v1/agents'));
+    const served = agents.find((agent) => agent.id === 'stratus');
+    assert.ok(served, 'the daemon serves exactly one agent under the reserved id');
+    // Ranking the built-in summary over the configured one reported the
+    // served soul as built-in and pathless — which the dashboard reads as
+    // "no settings to edit", hiding the operator's own agent behind the
+    // stock persona and runtime.
+    assert.equal(served.name, 'House', 'named by the soul the daemon loaded');
+    assert.equal(served.builtIn, false, 'a file backs it, so it is not the built-in');
+    assert.ok(String(served.persona ?? '').includes('house agent'), 'its own persona, not the stock one');
+
+    // And it is editable through the API, which is the consequence that
+    // matters: a summary marked built-in has no soul path to write back to.
+    const read = await json<{ soulPath: string; soul: string }>(await harness.call('/api/v1/agents/stratus'));
+    assert.equal(read.soulPath, soul);
+    assert.ok(read.soul.includes('You are the house agent.'));
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('health bills the roster the gateway serves, not the directory it was built from', async () => {
+  const home = await newHome();
+  const harness = await startApi({
+    home,
+    options: { env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' } } },
+    env: { processEnv: { OPENAI_API_KEY: 'sk-test' } },
+  });
+  try {
+    // Dropped on disk after start and deliberately NOT reloaded: dispatch
+    // refuses this agent, so nothing it pins is being billed for.
+    await writeSoul(home, 'rex.md', '---\nname: Rex\nid: rex\nprovider: openai\nmodel: gpt-4.1-mini\n---\n\nYou are Rex.\n');
+
+    const health = await json<{
+      agents: Array<{ id: string }>;
+      runtimes: Array<{ provider: string; model?: string }>;
+    }>(await harness.call('/api/v1/health'));
+
+    assert.ok(!health.agents.some((agent) => agent.id === 'rex'), 'the roster has not been reloaded');
+    // A directory scan reported gpt-4.1-mini here — a provider, a model, and
+    // a credential source for a turn the daemon would refuse to run.
+    assert.ok(
+      !health.runtimes.some((runtime) => runtime.model === 'gpt-4.1-mini'),
+      `billed a runtime it does not serve: ${JSON.stringify(health.runtimes)}`,
+    );
+
+    // Once the roster catches up it is served, and health says so.
+    await harness.call('/api/v1/roster/reload', { method: 'POST' });
+    const after = await json<{ runtimes: Array<{ provider: string; model?: string }> }>(
+      await harness.call('/api/v1/health'),
+    );
+    assert.ok(
+      after.runtimes.some((runtime) => runtime.model === 'gpt-4.1-mini'),
+      `a served pin went unreported: ${JSON.stringify(after.runtimes)}`,
+    );
+  } finally {
+    await harness.stop();
+  }
+});

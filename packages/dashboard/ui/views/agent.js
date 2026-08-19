@@ -256,7 +256,13 @@ export const renderAgent = (agentId, initialSessionId) => {
 
   const send = async () => {
     const text = composer.value.trim();
-    if (!text || state.sending) {
+    // No session id yet means the first `/sessions` listing has not come back,
+    // so we do not know whether to resume the newest conversation or mint a
+    // new one. Sending anyway posted to `/sessions/undefined/messages`, which
+    // the daemon accepts — creating a durable conversation literally named
+    // `undefined` — and whose response the arriving listing then discards.
+    // The button is disabled for this window; Enter reaches here regardless.
+    if (!text || state.sending || !state.sessionId) {
       return;
     }
     state.sending = true;
@@ -410,7 +416,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     state.error ? el('div', { class: 'notice bad' }, state.error) : null,
     el('div', { class: 'composer' },
       composer,
-      el('button', { class: 'primary', disabled: state.sending, onClick: () => void send() },
+      el('button', { class: 'primary', disabled: state.sending || !state.sessionId, onClick: () => void send() },
         state.sending ? 'Working…' : 'Send'),
     ),
   );
