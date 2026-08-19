@@ -72,8 +72,8 @@ The clean-restart criterion was the last one open, and working it out changed th
 
 ## Follow-ups this step named but does not own
 
-- **A durable index of posted approval messages, in the Slack adapter.** It would let a restarted daemon retract the buttons the lost one posted, on both billing paths, instead of leaving them to be answered on click. Cheaper half worth considering first: rewrite the message *from the click*, since an interactive payload carries its own channel and timestamp — that removes the dead-end without persisting anything.
-- **Reporting a turn's failure into its thread when no renderer is live.** The Slack adapter reports failures through the renderer it opened at intake, so a turn failed by the startup sweep is silent in the thread it belongs to. The session metadata already carries `slackChannel` and `slackThread`, so the routing exists; what is missing is a `session.failed` subscription that fires only when nothing is rendering that session.
+- **A durable index of posted approval messages, in the Slack adapter.** ~~Shipped in part.~~ The cheap half is done: a click on a prompt this process never posted rewrites the message from the click's own coordinates, so the dead-end corrects itself without persisting anything. What remains is the expensive half — retracting prompts *nobody clicks*, which needs the posts to survive the process that made them. Still applies to both billing paths equally.
+- ~~**Reporting a turn's failure into its thread when no renderer is live.**~~ **Shipped.** A `session.failed` with nothing rendering that session is reported where the turn was asked, routed through a new `sessionRouting` accessor on the gateway — the session's agent and the metadata the dispatching surface wrote, deliberately not the session itself, since reading a channel's own routing keys back is a different capability from reading the conversation.
 
 ## Open questions
 

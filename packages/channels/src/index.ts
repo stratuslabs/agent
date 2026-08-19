@@ -62,6 +62,22 @@ export interface OutboundConnection {
  * back out. Providers, tools, and memory are never theirs to reach; if an
  * adapter needs more, the fix belongs in the gateway.
  */
+/**
+ * Where a session came from, for a channel that has to reach it with no
+ * live turn to hang the message on.
+ *
+ * Deliberately not the session. The routing keys are what the channel
+ * itself wrote at dispatch, and reading those back is a different
+ * capability from reading the conversation — an adapter that needs the
+ * transcript has stopped translating events and become something else.
+ */
+export interface SessionRouting {
+  /** Whose app must do the talking. */
+  agentId: string;
+  /** The metadata the dispatching channel attached to the session. */
+  metadata: JsonObject;
+}
+
 export interface GatewayLike {
   dispatch(input: {
     sessionId: string;
@@ -72,6 +88,17 @@ export interface GatewayLike {
   }): Promise<Session>;
   readonly bus: EventBus;
   agents(): AgentDefinition[];
+  /**
+   * Where a durable session came from, or undefined if there is no such
+   * session.
+   *
+   * Optional for the same reason `SessionStore.listIdsByStatus` is: a
+   * gateway that cannot answer simply cannot be asked, and a caller that
+   * needs it says so by checking for the method rather than assuming one
+   * exists. An adapter without it loses the ability to speak about a turn
+   * whose process is gone — nothing else.
+   */
+  sessionRouting?(sessionId: string): Promise<SessionRouting | undefined>;
   /**
    * Settles a call parked on `tool.approval-requested`. False means the
    * request is no longer pending — decided already, expired, or its turn
