@@ -585,6 +585,15 @@ test('the watchdog suspends across a slow tool phase and re-arms for the next pr
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Ava.\n');
   await writeSoul(home, 'bea.md', '---\nname: Bea\nprovider: openai\nmodel: model-b\n---\n\nYou are Bea.\n');
 
+  // Two independent constraints, and the first is the one a contended CI
+  // runner breaks. An armed window here holds real work — soul loading,
+  // the session write, building the provider — which measures in single
+  // milliseconds locally and can stretch by an order of magnitude under a
+  // loaded runner, so the timeout has to sit far above it, not just above
+  // it. The slow phase then only has to outlast the timeout to prove the
+  // suspension, which doubling covers with room to spare.
+  const IDLE_MS = 500;
+
   let anthropicCalls = 0;
   const fetchImpl = (async (url: unknown) => {
     if (String(url).includes('anthropic')) {
@@ -593,7 +602,7 @@ test('the watchdog suspends across a slow tool phase and re-arms for the next pr
         ? anthropicSseToolCall('agent_delegate', { agent: 'bea', prompt: 'take your time' })
         : anthropicSseText('bea finally answered');
     }
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    await new Promise((resolve) => setTimeout(resolve, IDLE_MS * 2));
     return openAiText('slow but healthy delegate');
   }) as typeof fetch;
 
@@ -603,7 +612,7 @@ test('the watchdog suspends across a slow tool phase and re-arms for the next pr
     processEnv: { ANTHROPIC_API_KEY: 'sk-a', OPENAI_API_KEY: 'sk-o' },
     fetch: fetchImpl,
   };
-  const gateway = createGateway({ env, idleTimeoutMs: 100, warn: () => {} });
+  const gateway = createGateway({ env, idleTimeoutMs: IDLE_MS, warn: () => {} });
   await gateway.start();
 
   const session = await gateway.dispatch({ sessionId: 'tool-phase-1', agentId: 'ava', userMessage: 'delegate this' });
@@ -628,6 +637,10 @@ test('a mid-turn switch to a non-streaming fallback suspends the watchdog for th
     fallbackProvider: 'openai',
   }));
 
+  // Same margin as the tool-phase test above, and for the same reason: the
+  // window between arming and the primary's failure holds real work.
+  const IDLE_MS = 500;
+
   const fetchImpl = (async (url: unknown) => {
     if (String(url).includes('anthropic')) {
       // A 400 fails the primary immediately — the SDK does not retry it,
@@ -637,7 +650,7 @@ test('a mid-turn switch to a non-streaming fallback suspends the watchdog for th
         { status: 400, headers: { 'content-type': 'application/json' } },
       );
     }
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    await new Promise((resolve) => setTimeout(resolve, IDLE_MS * 2));
     return openAiText('fallback rode out the silence');
   }) as typeof fetch;
 
@@ -647,7 +660,7 @@ test('a mid-turn switch to a non-streaming fallback suspends the watchdog for th
     processEnv: { ANTHROPIC_API_KEY: 'sk-a', OPENAI_API_KEY: 'sk-o' },
     fetch: fetchImpl,
   };
-  const gateway = createGateway({ env, idleTimeoutMs: 100, warn: () => {} });
+  const gateway = createGateway({ env, idleTimeoutMs: IDLE_MS, warn: () => {} });
   await gateway.start();
 
   const session = await gateway.dispatch({ sessionId: 'mid-turn-1', userMessage: 'hang in there' });
