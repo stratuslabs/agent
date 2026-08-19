@@ -15,6 +15,34 @@ import type {
  */
 export { atLeastAsRisky } from '@stratusagent/core';
 
+import {
+  analyzeCommand,
+  describeCommandScope,
+  findMatchingScope,
+  normalizeCommandScope,
+  SAFE_COMMAND_SCOPES,
+  type CommandScope,
+} from './commands.ts';
+import type { CommandWhitelistStore } from './whitelist.ts';
+
+export {
+  analyzeCommand,
+  describeCommandScope,
+  findMatchingScope,
+  matchesScope,
+  normalizeCommandScope,
+  parseCommandScope,
+  sameScope,
+  SAFE_COMMAND_SCOPES,
+  type CommandAnalysis,
+  type CommandScope,
+} from './commands.ts';
+export {
+  createFileCommandWhitelist,
+  whitelistPathFor,
+  type CommandWhitelistStore,
+} from './whitelist.ts';
+
 /**
  * How a policy reaches a human — or admits that it cannot.
  *
@@ -95,6 +123,29 @@ export interface PermissionPolicyOptions {
    * from an agent that chose not to act.
    */
   onDecision?: (decision: PermissionDecision) => void;
+  /**
+   * The command-scope engine, for tools that carry a command string
+   * (`Tool.commandFor`). Omitted, every gated call needs a human however
+   * innocuous its arguments — which is the honest behaviour for a daemon
+   * with no scope list, and an unusable one for a shell.
+   */
+  commands?: CommandScopeOptions;
+}
+
+export interface CommandScopeOptions {
+  /**
+   * Scopes that run unattended. Defaults to `SAFE_COMMAND_SCOPES`; pass a
+   * list to replace it, or spread it to extend.
+   */
+  safeScopes?: readonly CommandScope[];
+  /** Where "always allow" persists a scope, and where one is read back. */
+  whitelist?: CommandWhitelistStore;
+  /**
+   * Called when a scope is persisted. The daemon logs it: an approval that
+   * widens what runs unattended, for every future session, is exactly the
+   * decision that must not be the one leaving no trace.
+   */
+  onScopeRemembered?: (event: { agentId: string; scope: CommandScope }) => void;
 }
 
 const YES = new Set(['y', 'yes', 'always', 'a']);
@@ -163,10 +214,16 @@ const sessionKey = (sessionId: string, toolName: string): string => `${sessionId
 const awaitPrompt = async (
   context: ApprovalContext,
   ask: NonNullable<PermissionPolicyOptions['ask']>,
+  command: string | undefined,
 ): Promise<ApprovalAnswer | typeof ABORTED> => {
   const { call, risk, session } = context;
+  // The command, when there is one: for a shell call the tool name is the
+  // least interesting half of the question, and an approver shown only
+  // `shell.run (gated)` is being asked to trust something they cannot see.
+  const what = command === undefined ? `${call.toolName} (${risk})` : `${call.toolName}: ${command}`;
+  const always = command === undefined ? 'always this session' : 'always this scope';
   const pending = ask(
-    `Allow ${call.toolName} (${risk}) for ${session.agent.name}? [y]es / [a]lways this session / [N]o: `,
+    `Allow ${what} for ${session.agent.name}? [y]es / [a]lways (${always}) / [N]o: `,
   );
   // The answer is never read after this point if the turn ends first,
   // so a late yes cannot execute a tool for work that no longer exists.
@@ -215,17 +272,19 @@ const awaitRemote = async (
 };
 
 /**
- * The kernel's ApprovalPolicy, deciding by the tool's declared risk rather
- * than by its name. `safe` runs unattended; anything else needs a human,
- * and whether one exists is what `mode` answers.
+ * The kernel's ApprovalPolicy, deciding by the tool's declared risk and —
+ * for a tool that carries one — by the command an invocation would run.
+ * `safe` runs unattended; anything else needs a human unless a scope covers
+ * it, and whether a human exists at all is what `mode` answers.
  *
- * This is deliberately coarse. Fine-grained judgment — which *arguments* to
- * a shell tool are safe, which flags turn a read into a write — belongs with
- * the shell tool itself, which does not exist yet; writing that machinery
- * now would mean guessing at the shape of a caller nobody has built.
+ * The three tiers resolve in order: scopes granted "always" in this session,
+ * then the agent's persistent whitelist, then the built-in safe list —
+ * after which there is nothing left but asking. A `dangerous` tool skips
+ * the scope engine entirely: its risk is a statement about the tool, and no
+ * argument shape makes `rm -rf` a read.
  */
 export const createPermissionPolicy = (options: PermissionPolicyOptions): ApprovalPolicy => {
-  const { mode, ask, request, onDecision } = options;
+  const { mode, ask, request, onDecision, commands } = options;
   if (mode === 'interactive' && !ask) {
     throw new Error('interactive permission mode needs an `ask` function to reach a human.');
   }
@@ -237,6 +296,11 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
   }
 
   const alwaysAllowed = new Set<string>();
+  // Tier one of the three: scopes granted with "always" during this
+  // process's life. It is not merely a cache of the file — a policy built
+  // with no whitelist store still has to remember an answer for the rest of
+  // the session, which is what `always` means at a terminal.
+  const sessionScopes = new Map<string, CommandScope[]>();
 
   const report = (context: ApprovalContext, allowed: boolean, reason: string): boolean => {
     onDecision?.({
@@ -259,7 +323,41 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         return report(context, true, `${call.toolName} is safe and runs without approval`);
       }
 
-      if (alwaysAllowed.has(sessionKey(session.id, call.toolName))) {
+      // What this *invocation* would run, for a tool whose danger lives in
+      // its arguments. Resolved before anything else so that the tool-wide
+      // "always" below can never apply to it: one yes to `git status` must
+      // not become a standing yes to every command the shell can run.
+      const command = risk === 'gated' ? context.tool.commandFor?.(call.input) : undefined;
+      const analysis = command === undefined ? undefined : analyzeCommand(command);
+
+      if (analysis) {
+        if (analysis.disqualifiedBy) {
+          // Never auto-approved, whatever the base command is: a safe scope
+          // in front of a pipe is the exact shape this rule exists for.
+          if (mode === 'headless') {
+            return report(
+              context,
+              false,
+              `${call.toolName} cannot run unattended (${analysis.disqualifiedBy}): ${command}`,
+            );
+          }
+        } else {
+          const stored = commands?.whitelist ? await commands.whitelist.scopesFor(session.agent.id) : [];
+          const candidates = [
+            ...(sessionScopes.get(session.agent.id) ?? []),
+            ...stored,
+            ...(commands?.safeScopes ?? SAFE_COMMAND_SCOPES),
+          ];
+          const scope = findMatchingScope(analysis, candidates);
+          if (scope) {
+            return report(
+              context,
+              true,
+              `${command} is inside the approved scope "${describeCommandScope(scope)}"`,
+            );
+          }
+        }
+      } else if (alwaysAllowed.has(sessionKey(session.id, call.toolName))) {
         return report(context, true, `${call.toolName} was approved for the rest of this session`);
       }
 
@@ -267,7 +365,9 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         return report(
           context,
           false,
-          `${call.toolName} is ${risk} and nobody is available to approve it`,
+          command === undefined
+            ? `${call.toolName} is ${risk} and nobody is available to approve it`
+            : `${command} is outside every approved scope and nobody is available to approve it`,
         );
       }
 
@@ -285,7 +385,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // different things.
       const answer = mode === 'remote'
         ? await awaitRemote(context, request!)
-        : await awaitPrompt(context, ask!);
+        : await awaitPrompt(context, ask!, command);
 
       if (answer === ABORTED) {
         return report(context, false, `${call.toolName} was cancelled while awaiting approval`);
@@ -302,11 +402,32 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       }
 
       if (answer === 'always') {
+        const scope = analysis ? normalizeCommandScope(analysis) : undefined;
+        if (scope) {
+          // A scope, never the command string (useless next time) and never
+          // the bare executable (a shell). `git push origin main` persists
+          // `git push` minus its destructive forms, so `git push --force`
+          // asks again.
+          sessionScopes.set(session.agent.id, [...(sessionScopes.get(session.agent.id) ?? []), scope]);
+          if (commands?.whitelist) {
+            await commands.whitelist.remember(session.agent.id, scope);
+            commands.onScopeRemembered?.({ agentId: session.agent.id, scope });
+          }
+          return report(
+            context,
+            true,
+            `${command} was approved, and "${describeCommandScope(scope)}" now runs without asking`,
+          );
+        }
         alwaysAllowed.add(sessionKey(session.id, call.toolName));
         return report(context, true, `${call.toolName} was approved for the rest of this session`);
       }
 
-      return report(context, true, `${call.toolName} was approved once`);
+      return report(
+        context,
+        true,
+        command === undefined ? `${call.toolName} was approved once` : `${command} was approved once`,
+      );
     },
   };
 };

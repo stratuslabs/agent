@@ -302,3 +302,55 @@ test('cancellation settles the turn even when parseResult never resolves', async
   assert.equal(result.ok, false);
   assert.match(result.error ?? '', /aborted/i);
 });
+
+test('a replacement environment gives the child only what was granted', async (t) => {
+  // A secret in the daemon's own environment, exactly where a real one
+  // lives: exported by the operator before `stratus serve` started.
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-not-for-the-child';
+  process.env.STRATUS_TEST_AMBIENT = 'ambient';
+  t.after(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.STRATUS_TEST_AMBIENT;
+  });
+
+  const dumpEnv = (envMode: 'inherit' | 'replace'): Tool => defineLocalCommandTool({
+    name: `demo.env.${envMode}`,
+    async createCommand() {
+      return {
+        command: process.execPath,
+        args: ['-e', 'console.log(JSON.stringify(process.env))'],
+        env: { GRANTED: 'yes' },
+        envMode,
+      };
+    },
+    parseResult(result) {
+      return JSON.parse(result.stdout) as Record<string, string>;
+    },
+  });
+
+  const executor = createLocalCommandExecutor();
+  const replaced = await executor.execute(
+    { id: 'call-replace', toolName: 'demo.env.replace', input: {} },
+    dumpEnv('replace'),
+    session,
+  );
+  assert.equal(replaced.ok, true);
+  const replacedEnv = replaced.output as Record<string, string>;
+  assert.equal(replacedEnv.GRANTED, 'yes');
+  assert.equal(replacedEnv.ANTHROPIC_API_KEY, undefined);
+  assert.equal(replacedEnv.STRATUS_TEST_AMBIENT, undefined);
+  // Not "mostly scrubbed": the child's environment is what was granted and
+  // nothing else, so a variable nobody thought to blocklist is still absent.
+  assert.deepEqual(Object.keys(replacedEnv), ['GRANTED']);
+
+  // The default is unchanged, because a fixed-argv tool written in this
+  // repository is not the thing being defended against.
+  const inherited = await executor.execute(
+    { id: 'call-inherit', toolName: 'demo.env.inherit', input: {} },
+    dumpEnv('inherit'),
+    session,
+  );
+  const inheritedEnv = inherited.output as Record<string, string>;
+  assert.equal(inheritedEnv.GRANTED, 'yes');
+  assert.equal(inheritedEnv.STRATUS_TEST_AMBIENT, 'ambient');
+});
