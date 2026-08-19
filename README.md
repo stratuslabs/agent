@@ -301,6 +301,7 @@ Opened your default browser.
 ## CLI usage
 
 ```bash
+stratus                       # welcome screen and the command list
 stratus setup
 stratus chat
 stratus chat --soul ./examples/souls/ava.md

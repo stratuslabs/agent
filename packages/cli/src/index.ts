@@ -152,6 +152,9 @@ import {
   type LogRecord,
   type LogWriter,
 } from './logs.ts';
+import { bannerFacts, renderBanner, shouldShowBanner, STRATUS_ART } from './banner.ts';
+
+export { bannerFacts, renderBanner, shouldShowBanner, STRATUS_ART } from './banner.ts';
 
 export {
   createLogWriter,
@@ -320,6 +323,15 @@ export interface ParsedServeCommand {
 
 export interface ParsedHelpCommand {
   command: 'help';
+  /**
+   * True only for a bare `stratus` with no arguments at all.
+   *
+   * Both spellings print the same help, but they are different questions.
+   * `stratus --help` is somebody wanting the reference, quite possibly into a
+   * pager or a grep; a bare `stratus` is somebody asking what this is, and gets
+   * the welcome banner above it.
+   */
+  bare?: boolean;
 }
 
 export type ParsedCommand =
@@ -383,6 +395,7 @@ export const unsupportedNodeMessage = (version: string): string | undefined => {
 const HELP_TEXT = `Stratus Agent CLI
 
 Usage:
+  stratus
   stratus setup
   stratus chat
   stratus chat --soul ./examples/souls/ava.md
@@ -522,7 +535,11 @@ const readOptionValue = (tokens: string[], index: number, flag: string): string 
 export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCommand => {
   const [command, ...rest] = argv;
 
-  if (!command || command === 'help' || command === '--help' || command === '-h') {
+  if (!command) {
+    return { command: 'help', bare: true };
+  }
+
+  if (command === 'help' || command === '--help' || command === '-h') {
     return { command: 'help' };
   }
 
@@ -4999,6 +5016,21 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     const command = parseCommand(argv, resolvedEnv);
 
     if (command.command === 'help') {
+      if (
+        command.bare === true
+        && shouldShowBanner({
+          stdoutIsTty: process.stdout.isTTY === true,
+          processEnv: resolvedEnv.processEnv ?? process.env,
+        })
+      ) {
+        writeLine(
+          streams.stdout,
+          renderBanner(STRATUS_ART, bannerFacts(CLI_VERSION, process.platform), {
+            columns: process.stdout.columns,
+          }).join('\n'),
+        );
+        writeLine(streams.stdout);
+      }
       writeLine(streams.stdout, HELP_TEXT);
       return 0;
     }

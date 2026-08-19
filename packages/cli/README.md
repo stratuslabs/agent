@@ -131,7 +131,14 @@ Credentials are stored in `~/.stratus/credentials.json` (owner-read-only) and se
 
 ## Usage
 
+`stratus` on its own shows a welcome screen — the wordmark, the CLI version,
+the Node version, and the platform — above the command list. It appears there
+and nowhere else: not for `stratus help` or `--help`, which is reference
+material you may well be piping somewhere, and not when stdout is redirected,
+in CI, or under `NO_COLOR` / `TERM=dumb`.
+
 ```bash
+stratus                                # the welcome screen and the command list
 stratus setup                          # onboarding menu: providers, models, agent, channels
 stratus chat                           # talk — the conversation persists
 stratus chat --soul ./ava.md
