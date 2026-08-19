@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { CONTROL_API_VERSION } from '../src/index.ts';
 import { newHome, openSocket, settles, startApi, writeSoul } from './harness.ts';
 
 const json = async <T>(response: Response): Promise<T> => response.json() as Promise<T>;
@@ -1045,4 +1046,22 @@ test('a subscription token is not condemned by a check it cannot pass', async ()
   } finally {
     await harness.stop();
   }
+});
+
+test('the version the API reports is the version it was published as', async () => {
+  // CONTROL_API_VERSION is a second copy of a number that lives in
+  // package.json, and it is the one clients see: `GET /health` returns it and
+  // ~/.stratus/gateway.json is written with it, which is how a client decides
+  // whether the daemon it found speaks the API it expects. A release bumps the
+  // manifest; nothing makes it bump the constant, and nothing fails if it does
+  // not. Same reasoning, and same test, as the CLI's own version pin.
+  const manifest = JSON.parse(
+    await readFile(new URL('../package.json', import.meta.url), 'utf8'),
+  ) as { version: string };
+
+  assert.equal(
+    CONTROL_API_VERSION,
+    manifest.version,
+    'CONTROL_API_VERSION drifted from package.json — the API would report a version it is not',
+  );
 });

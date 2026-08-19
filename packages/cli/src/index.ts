@@ -327,7 +327,7 @@ export type ParsedCommand =
 
 type CliConfigFile = StratusConfigFile;
 
-export const CLI_VERSION = '0.4.0';
+export const CLI_VERSION = '0.5.0';
 
 const DEFAULT_DASHBOARD_HOST = '127.0.0.1';
 const DASHBOARD_TITLE = 'Stratus Agent Dashboard';
