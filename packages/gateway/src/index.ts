@@ -179,11 +179,57 @@ export class SqliteSessionStore implements SessionStore {
     return rows.map((row) => row.id);
   }
 
-  /** Newest-first session listing for one agent (or all agents). */
-  list(agentId?: string): Array<Pick<Session, 'id' | 'status' | 'createdAt' | 'updatedAt'> & { agentId: string }> {
+  /**
+   * When each agent last did anything, and how many of its sessions are live
+   * right now.
+   *
+   * One aggregate over the indexed columns — no conversation body is
+   * deserialized, for the same reason `listIdsByStatus` returns ids: a
+   * roster view asks this on every load, and it must not cost a JSON parse
+   * per session to answer.
+   *
+   * Both halves are needed and neither is sufficient. `lastActiveAt` alone
+   * reads a turn parked on a human as idle, because the save that recorded
+   * the park is the last thing that touched the row — and a turn waiting
+   * twenty minutes on an approval is exactly when someone wants to see the
+   * agent lit. `activeSessions` alone loses an agent that finished a moment
+   * ago. The caller decides what window counts as "recent"; a daemon that
+   * baked one in would need upgrading to change it.
+   */
+  lastActivityByAgent(): Record<string, { lastActiveAt: string; activeSessions: number }> {
+    const rows = this.db
+      .prepare(`
+        SELECT agent_id,
+               MAX(updated_at) AS last_active_at,
+               SUM(CASE WHEN status IN ('running', 'pending_approval') THEN 1 ELSE 0 END) AS active_sessions
+        FROM sessions
+        GROUP BY agent_id
+      `)
+      .all() as Array<{ agent_id: string; last_active_at: string; active_sessions: number }>;
+    const activity: Record<string, { lastActiveAt: string; activeSessions: number }> = {};
+    for (const row of rows) {
+      activity[row.agent_id] = {
+        lastActiveAt: row.last_active_at,
+        activeSessions: Number(row.active_sessions),
+      };
+    }
+    return activity;
+  }
+
+  /**
+   * Newest-first session listing for one agent (or all agents).
+   *
+   * `limit` is not decoration: this table grows for the life of an install,
+   * and a surface that renders "recent conversations" would otherwise pull
+   * every session anyone has ever had to show ten of them.
+   */
+  list(agentId?: string, limit?: number): Array<Pick<Session, 'id' | 'status' | 'createdAt' | 'updatedAt'> & { agentId: string }> {
+    // -1 is SQLite's "no limit", so one prepared statement serves both cases
+    // rather than four.
+    const bound = limit !== undefined && Number.isInteger(limit) && limit >= 0 ? limit : -1;
     const rows = (agentId
-      ? this.db.prepare('SELECT id, agent_id, status, created_at, updated_at FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC').all(agentId)
-      : this.db.prepare('SELECT id, agent_id, status, created_at, updated_at FROM sessions ORDER BY updated_at DESC').all()) as Array<{
+      ? this.db.prepare('SELECT id, agent_id, status, created_at, updated_at FROM sessions WHERE agent_id = ? ORDER BY updated_at DESC LIMIT ?').all(agentId, bound)
+      : this.db.prepare('SELECT id, agent_id, status, created_at, updated_at FROM sessions ORDER BY updated_at DESC LIMIT ?').all(bound)) as Array<{
       id: string;
       agent_id: string;
       status: Session['status'];

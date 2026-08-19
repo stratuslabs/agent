@@ -3120,3 +3120,38 @@ test('reloading the roster picks up a new soul and forgets a deleted one', async
 
   await gateway.stop();
 });
+
+test('per-agent activity counts a parked turn as live, and listings can be bounded', async () => {
+  const home = await newHome();
+  const store = new SqliteSessionStore(path.join(home, 'sessions.db'));
+  const session = (id: string, agentId: string, status: 'completed' | 'pending_approval') => ({
+    id,
+    agent: { id: agentId, name: agentId },
+    status,
+    messages: [],
+  });
+
+  await store.create(session('a-1', 'ava', 'completed'));
+  await store.create(session('a-2', 'ava', 'pending_approval'));
+  await store.create(session('b-1', 'bea', 'completed'));
+
+  const activity = store.lastActivityByAgent();
+  // A turn parked on a human has not saved since it parked, so a
+  // last-activity timestamp alone would read it as idle — which is exactly
+  // when someone wants to see the agent lit.
+  assert.equal(activity.ava?.activeSessions, 1);
+  assert.equal(activity.bea?.activeSessions, 0);
+  assert.ok(activity.ava?.lastActiveAt && Date.parse(activity.ava.lastActiveAt) > 0);
+  // A timestamp and a count, never a verdict: what counts as "recent" is the
+  // caller's decision, so nothing here is compared against a window.
+  assert.equal(activity.nobody, undefined);
+
+  assert.equal(store.list().length, 3);
+  assert.equal(store.list(undefined, 2).length, 2);
+  assert.equal(store.list('ava').length, 2);
+  assert.equal(store.list('ava', 1).length, 1);
+  // The table grows for the life of an install; an unbounded default is what
+  // the limit exists to opt out of, not a value to be clamped silently.
+  assert.equal(store.list(undefined, 0).length, 0);
+  store.close();
+});

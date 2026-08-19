@@ -268,7 +268,25 @@ export const routes: Route[] = [
     method: 'GET',
     pattern: `${API_PREFIX}/agents`,
     async handler(context) {
-      return { agents: await listAgentSummaries(context.env) };
+      const summaries = await listAgentSummaries(context.env);
+      // Merged here rather than inside `listAgentSummaries`, which answers
+      // from files alone: activity is a property of a running daemon's
+      // session store, and the shared builder has no store to ask. The CLI's
+      // local listing is about identity and configuration; this one is about
+      // a daemon that is actually serving.
+      const activity = context.gateway.store.lastActivityByAgent();
+      return {
+        agents: summaries.map((summary) => {
+          const seen = activity[summary.id];
+          return {
+            ...summary,
+            // A timestamp and a count, never a verdict. What counts as
+            // "recently active" is a rendering decision, and a daemon that
+            // baked a window in would need upgrading to change it.
+            ...(seen ? { lastActiveAt: seen.lastActiveAt, activeSessions: seen.activeSessions } : { activeSessions: 0 }),
+          };
+        }),
+      };
     },
   },
   {
@@ -395,7 +413,13 @@ export const routes: Route[] = [
     pattern: `${API_PREFIX}/sessions`,
     async handler(context) {
       const agent = context.url.searchParams.get('agent') ?? undefined;
-      return { sessions: context.gateway.store.list(agent) };
+      const raw = context.url.searchParams.get('limit');
+      if (raw !== null && !/^\d+$/.test(raw)) {
+        throw new ApiError(400, 'invalid_limit', 'limit must be a non-negative whole number.');
+      }
+      return {
+        sessions: context.gateway.store.list(agent, raw === null ? undefined : Number(raw)),
+      };
     },
   },
   {

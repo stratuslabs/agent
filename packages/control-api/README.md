@@ -69,11 +69,11 @@ log, and an address bar is one that gets noticed when it changes.
 | Method | Path | What |
 | --- | --- | --- |
 | GET | `/health` | Uptime, roster, session counts, pending approvals, resolved runtimes |
-| GET | `/agents` | The roster as data — soul metadata, avatar palette, resolved provider/model, memory counts |
+| GET | `/agents` | The roster as data — soul metadata, avatar palette, resolved provider/model, memory counts, activity |
 | POST | `/agents` | Create an agent: writes a soul file and reloads the roster |
 | PUT | `/agents/:id` | Edit a soul, by field or as raw markdown |
 | POST | `/roster/reload` | Re-read the agents directory and the configured default soul |
-| GET | `/sessions?agent=` | Durable sessions, newest first |
+| GET | `/sessions?agent=&limit=` | Durable sessions, newest first. `limit` bounds the result — the table grows for the life of an install |
 | GET | `/sessions/:id` | One session, provider replay state stripped |
 | POST | `/sessions/:id/messages` | Dispatch a message; returns `202 { sessionId, turnId }` |
 | GET | `/approvals` | Calls parked on a human right now |
@@ -98,6 +98,21 @@ everyone.
 `GET /catalog/tools` is deliberately absent until tool packs exist
 ([06](../../docs/roadmap/06-tool-packs.md)); today it could only list the
 three kernel tools.
+
+### Activity, for a roster that shows who is busy
+
+Each entry in `GET /agents` carries `activeSessions` (turns running or parked
+on a human right now) and, once the agent has done anything, `lastActiveAt`.
+
+Both, because neither is sufficient. A timestamp alone reads a turn parked on
+an approval as idle — the save that recorded the park is the last thing that
+touched the row, and a turn waiting twenty minutes on a person is exactly when
+you want the agent lit. A count alone loses an agent that finished a moment
+ago.
+
+What counts as "recently active" is the client's decision, so this reports a
+timestamp and a count and never a verdict. A daemon that baked a window in
+would need upgrading to change it.
 
 ### Two invariants worth stating
 

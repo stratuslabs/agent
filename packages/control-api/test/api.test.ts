@@ -442,3 +442,65 @@ test('reloading the roster picks up a soul written behind the daemon\'s back', a
     await harness.stop();
   }
 });
+
+test('the roster carries when each agent was last active, and how many turns are live', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
+  try {
+    const before = await json<{ agents: Array<{ id: string; lastActiveAt?: string; activeSessions: number }> }>(
+      await harness.call('/api/v1/agents'),
+    );
+    const idle = before.agents.find((agent) => agent.id === 'ava');
+    // Never talked to: no timestamp to report, rather than a fabricated one.
+    assert.equal(idle?.lastActiveAt, undefined);
+    assert.equal(idle?.activeSessions, 0);
+
+    await settles(
+      harness.gateway.dispatch({ sessionId: 'ava-live', agentId: 'ava', userMessage: 'hello' }),
+      'a turn for Ava',
+    );
+
+    const after = await json<{ agents: Array<{ id: string; lastActiveAt?: string; activeSessions: number }> }>(
+      await harness.call('/api/v1/agents'),
+    );
+    const active = after.agents.find((agent) => agent.id === 'ava');
+    assert.ok(active?.lastActiveAt, 'the roster now reports when Ava last did something');
+    assert.ok(Date.parse(active.lastActiveAt) > 0);
+    // Finished, so nothing is live — the timestamp is what a "recently
+    // active" indicator reads, and the window it applies is the UI's call.
+    assert.equal(active.activeSessions, 0);
+
+    // Another agent's turn does not light this one up.
+    const builtIn = after.agents.find((agent) => agent.id === 'stratus');
+    assert.equal(builtIn?.lastActiveAt, undefined);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('session listings can be bounded, and a bad bound is refused', async () => {
+  const harness = await startApi();
+  try {
+    for (const id of ['s-1', 's-2', 's-3']) {
+      await harness.gateway.store.create({
+        id,
+        agent: { id: 'stratus', name: 'Stratus' },
+        status: 'completed',
+        messages: [],
+      });
+    }
+
+    const all = await json<{ sessions: unknown[] }>(await harness.call('/api/v1/sessions'));
+    assert.equal(all.sessions.length, 3);
+
+    const bounded = await json<{ sessions: unknown[] }>(await harness.call('/api/v1/sessions?limit=2'));
+    assert.equal(bounded.sessions.length, 2);
+
+    const bad = await harness.call('/api/v1/sessions?limit=lots');
+    assert.equal(bad.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(bad)).error.code, 'invalid_limit');
+  } finally {
+    await harness.stop();
+  }
+});
