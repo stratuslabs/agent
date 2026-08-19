@@ -1805,6 +1805,71 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
   };
 
+  /**
+   * Everything after the plugins: the roster, the channels, and the sweeps
+   * that need both. Split out so `start()` can wrap it in the cleanup a
+   * failure here requires — see the call site.
+   */
+  const startServing = async (): Promise<void> => {
+    await loadRoster();
+    const named = registry.list().map((agent) => agent.name).join(', ');
+    log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
+
+    // Read before anything can dispatch, so this is exactly what the
+    // last process left running and not a turn of ours caught in flight.
+    // Applied further down, once there is somewhere for the failure to
+    // be heard.
+    const abandoned = await listAbandonedTurns();
+
+    // Channels come up after the roster so their first inbound message
+    // already has agents to dispatch to. One failing adapter must not
+    // keep the rest (or the gateway) down.
+    for (const adapter of options.channels ?? []) {
+      try {
+        await adapter.start(gateway);
+        startedChannels.push(adapter);
+      } catch (error) {
+        warn(`channel ${adapter.name} failed to start: ${error instanceof Error ? error.message : String(error)}`);
+        // A start() that rejected may still hold sockets or listeners it
+        // acquired before failing; it never reaches startedChannels, so
+        // this is its only cleanup.
+        try {
+          await adapter.stop();
+        } catch (stopError) {
+          warn(`channel ${adapter.name} cleanup after failed start also failed: ${stopError instanceof Error ? stopError.message : String(stopError)}`);
+        }
+      }
+    }
+
+    // Last, and not awaited: recovery re-asks, so it needs the channels
+    // above already listening — but a turn parked behind a slow approver
+    // must not hold up start(), or a daemon with one outstanding request
+    // would refuse to finish booting.
+    void recoverParkedTurns().catch((error) => {
+      warn(`recovering parked turns failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+
+    // Not awaited for the same reason, and independent of the sweep
+    // above: these sessions are not parked, so the two never touch the
+    // same one.
+    void failAbandonedTurns(abandoned).catch((error) => {
+      warn(`failing abandoned turns failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    
+  };
+
+  /** Release what the plugins acquired, reporting rather than throwing. */
+  const disposePlugins = async (): Promise<void> => {
+    await Promise.allSettled(loadedPlugins.map(async (plugin) => {
+      try {
+        await plugin.instance.dispose?.();
+      } catch (error) {
+        warn(`plugin ${plugin.package} failed to shut down: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }));
+    loadedPlugins = [];
+  };
+
   const startedChannels: GatewayChannelAdapter[] = [];
 
   const gateway: Gateway = {
@@ -1817,50 +1882,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // an agent whose soul lists a tool the daemon has not registered yet,
       // which would refuse the call as "not permitted" and blame the soul.
       await startPlugins();
-      await loadRoster();
-      const named = registry.list().map((agent) => agent.name).join(', ');
-      log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
-
-      // Read before anything can dispatch, so this is exactly what the
-      // last process left running and not a turn of ours caught in flight.
-      // Applied further down, once there is somewhere for the failure to
-      // be heard.
-      const abandoned = await listAbandonedTurns();
-
-      // Channels come up after the roster so their first inbound message
-      // already has agents to dispatch to. One failing adapter must not
-      // keep the rest (or the gateway) down.
-      for (const adapter of options.channels ?? []) {
-        try {
-          await adapter.start(gateway);
-          startedChannels.push(adapter);
-        } catch (error) {
-          warn(`channel ${adapter.name} failed to start: ${error instanceof Error ? error.message : String(error)}`);
-          // A start() that rejected may still hold sockets or listeners it
-          // acquired before failing; it never reaches startedChannels, so
-          // this is its only cleanup.
-          try {
-            await adapter.stop();
-          } catch (stopError) {
-            warn(`channel ${adapter.name} cleanup after failed start also failed: ${stopError instanceof Error ? stopError.message : String(stopError)}`);
-          }
-        }
+      try {
+        await startServing();
+      } catch (error) {
+        // Everything after the plugins loaded is inside that try for one
+        // reason: a `start()` that rejects never reaches its caller's
+        // shutdown path — `stratus serve` awaits it *before* the try/finally
+        // that calls `stop()` — so a duplicate agent id in the roster would
+        // leave a plugin's browser, socket, or subscription held for the
+        // life of a process that is on its way out.
+        await disposePlugins();
+        throw error;
       }
-
-      // Last, and not awaited: recovery re-asks, so it needs the channels
-      // above already listening — but a turn parked behind a slow approver
-      // must not hold up start(), or a daemon with one outstanding request
-      // would refuse to finish booting.
-      void recoverParkedTurns().catch((error) => {
-        warn(`recovering parked turns failed: ${error instanceof Error ? error.message : String(error)}`);
-      });
-
-      // Not awaited for the same reason, and independent of the sweep
-      // above: these sessions are not parked, so the two never touch the
-      // same one.
-      void failAbandonedTurns(abandoned).catch((error) => {
-        warn(`failing abandoned turns failed: ${error instanceof Error ? error.message : String(error)}`);
-      });
     },
 
     // Drain: channels stop taking messages, in-flight turns finish, new
@@ -1888,13 +1921,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // After the turns that might still be using them. A plugin holding a
       // browser is the reason this exists, and closing it out from under a
       // running screenshot would fail that turn rather than tidy up.
-      await Promise.allSettled(loadedPlugins.map(async (plugin) => {
-        try {
-          await plugin.instance.dispose?.();
-        } catch (error) {
-          warn(`plugin ${plugin.package} failed to shut down: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }));
+      await disposePlugins();
       store.close();
       log('stratusd stopped');
     },

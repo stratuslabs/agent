@@ -227,6 +227,29 @@ export interface EgressProxy {
  * checked. Redirects and subresources come back through here too, because
  * every request does.
  */
+/**
+ * The `host:port` a CONNECT carries, which is not a plain split on colons.
+ *
+ * A literal IPv6 host arrives bracketed — `[2606:4700::1111]:443` — and
+ * splitting that on every colon yields a host of `[`, which is then looked
+ * up in DNS and fails. Every IPv6-literal HTTPS page a browser is pointed
+ * at would be unreachable, and the failure would read as a policy refusal
+ * rather than a parse bug.
+ */
+const parseAuthority = (authority: string): { host: string; port: number } | undefined => {
+  const bracketed = /^\[(?<host>[^\]]+)\](?::(?<port>\d+))?$/.exec(authority);
+  const plain = /^(?<host>[^:]+)(?::(?<port>\d+))?$/.exec(authority);
+  const groups = (bracketed ?? plain)?.groups;
+  if (!groups?.host) {
+    return undefined;
+  }
+  const port = groups.port === undefined ? 443 : Number(groups.port);
+  if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
+    return undefined;
+  }
+  return { host: groups.host, port };
+};
+
 export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<EgressProxy> => {
   const refusals: string[] = [];
   const sockets = new Set<net.Socket>();
@@ -252,12 +275,12 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
   server.on('connect', (request, clientSocket: net.Socket, head: Buffer) => {
     sockets.add(clientSocket);
     clientSocket.on('close', () => sockets.delete(clientSocket));
-    const [host, rawPort] = (request.url ?? '').split(':');
-    const port = Number(rawPort ?? 443);
-    if (!host || !Number.isInteger(port)) {
+    const target = parseAuthority(request.url ?? '');
+    if (!target) {
       clientSocket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
       return;
     }
+    const { host, port } = target;
     dial(host, port).then(
       (upstream) => {
         sockets.add(upstream);

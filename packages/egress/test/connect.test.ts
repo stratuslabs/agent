@@ -201,3 +201,43 @@ test('the timeout bounds the whole exchange, not just a quiet socket', async (t)
   assert.notEqual(outcome, 'still running', 'the request outlived its own timeout');
   assert.match(outcome, /Timed out after 300ms/);
 });
+
+test('a CONNECT authority with a bracketed IPv6 host is parsed, not split on every colon', async (t) => {
+  const proxy = await createEgressProxy();
+  t.after(() => proxy.close());
+
+  const connect = (authority: string): Promise<void> => new Promise((resolve, reject) => {
+    const request = http.request({
+      host: '127.0.0.1',
+      port: proxy.port,
+      method: 'CONNECT',
+      path: authority,
+    });
+    request.on('connect', (_response, socket) => {
+      socket.destroy();
+      resolve();
+    });
+    request.on('response', (response) => {
+      response.resume();
+      response.on('end', () => resolve());
+    });
+    request.on('error', reject);
+    request.end();
+  });
+
+  // Split on every colon, `[fd00::1]:443` yields a host of `[`, which is
+  // then looked up in DNS — so the refusal would name a bracket, and an
+  // IPv6-literal address a browser is *allowed* to reach would fail as if
+  // the policy had refused it.
+  await connect('[fd00::1]:443');
+  assert.match(proxy.refusals.at(-1) ?? '', /fd00::1/);
+  assert.doesNotMatch(proxy.refusals.at(-1) ?? '', /connect to \[/);
+
+  // No port is 443, not a parse failure.
+  await connect('[fd00::1]');
+  assert.match(proxy.refusals.at(-1) ?? '', /fd00::1/);
+
+  // And the ordinary form still parses as it did.
+  await connect('nothing.invalid:443');
+  assert.match(proxy.refusals.at(-1) ?? '', /nothing\.invalid/);
+});

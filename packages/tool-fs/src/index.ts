@@ -305,7 +305,15 @@ const createSearchTool = (config: JsonObject): Tool => ({
     // A file is searched as itself. Falling back to its parent would answer
     // a question nobody asked — `{ path: 'notes/today.md' }` coming back
     // with hits from every other note is a wrong answer, not a generous one.
-    const files = (await isRealDirectory(resolved.path))
+    if (resolved.kind === 'other') {
+      // The same trap `fs.read` has: `readFile` on a fifo with no writer
+      // does not fail, it waits — and `fs.search` is `safe`, so it waits
+      // with nobody watching. The walk below cannot hit this (a directory
+      // entry is only yielded when it is a regular file); a path handed to
+      // us directly can.
+      throw new Error(`${resolved.path} is not a regular file.`);
+    }
+    const files = resolved.kind === 'directory'
       ? walkFiles(resolved.path)
       : (async function* single() {
           yield resolved.path;

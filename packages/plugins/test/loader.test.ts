@@ -375,3 +375,43 @@ test('a plugin that fails after it was constructed is still told to let go', asy
   assert.match(result.failures[0]?.reason ?? '', /could not reach the notes service/);
   assert.match(result.failures[1]?.reason ?? '', /already registered by the kernel/);
 });
+
+test('a plugin can require the setting the host supplies', async () => {
+  let received: JsonObject | undefined;
+  const host = await fakeHost({
+    '@stratusagent/tool-browser': {
+      manifest: {
+        stratus: {
+          pluginVersion: 1,
+          contributes: { tools: [{ name: 'browser.goto', risk: 'gated' }] },
+          // Required, because this plugin cannot work without somewhere to
+          // write — and the host is what knows where that is.
+          config: {
+            type: 'object',
+            properties: { workspaceRoot: { type: 'string' } },
+            required: ['workspaceRoot'],
+          },
+        },
+      },
+      module: pluginModule('tool-browser', (tools, config) => {
+        received = config;
+        tools.register(tool('browser.goto', 'gated'));
+      }),
+    },
+  });
+
+  const result = await loadPlugins({
+    config: { '@stratusagent/tool-browser': { enabled: true } },
+    host,
+    tools: new ToolRegistry(),
+    bus: new EventBus(),
+    workspaceRoot: '/home/ada/.stratus/workspaces',
+  });
+
+  // Validated against what the plugin is actually handed, not against the
+  // operator's block before the defaults were folded in — otherwise a
+  // manifest that requires this setting is refused for missing the very
+  // thing the loader was about to supply.
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(received, { workspaceRoot: '/home/ada/.stratus/workspaces' });
+});

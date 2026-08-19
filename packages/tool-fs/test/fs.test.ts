@@ -301,3 +301,35 @@ test('a search pattern is literal text, so no query can stall the process', asyn
   const words = await run(tools, 'fs.search', { query: 'cup', wholeWord: true, path: 'words.md' }, session) as JsonObject;
   assert.deepEqual((words.matches as Array<{ text: string }>).map((match) => match.text), ['cup']);
 });
+
+test('searching a fifo is refused rather than waited on', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-search-fifo-'));
+  const fifo = path.join(root, 'pipe');
+  await new Promise<void>((resolve, reject) => {
+    execFile('mkfifo', [fifo], (error) => (error ? reject(error) : resolve()));
+  });
+  await writeFile(path.join(root, 'notes.md'), 'kettle\n');
+
+  const tools = await registryFor({ roots: [root] });
+  const session = sessionFor('ava');
+
+  // The same trap `fs.read` has, one tool over: `readFile` on a fifo with
+  // no writer waits, and `fs.search` is `safe` — so it waits unattended.
+  const outcome = await Promise.race([
+    run(tools, 'fs.search', { query: 'kettle', path: 'pipe' }, session).then(
+      () => 'searched the pipe',
+      (error: Error) => error.message,
+    ),
+    new Promise<string>((resolve) => {
+      const timer = setTimeout(() => resolve('blocked'), 5_000);
+      timer.unref?.();
+    }),
+  ]);
+  assert.notEqual(outcome, 'blocked', 'fs.search blocked on a fifo instead of refusing it');
+  assert.match(outcome, /is not a regular file/);
+
+  // Walking a directory that contains one is unaffected: a fifo is never a
+  // directory entry the walk yields.
+  const walked = await run(tools, 'fs.search', { query: 'kettle' }, session) as JsonObject;
+  assert.equal((walked.matches as unknown[]).length, 1);
+});

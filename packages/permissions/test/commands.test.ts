@@ -316,3 +316,41 @@ test('a command that can be handed a path is not safe, whatever it is called', a
   assert.equal(await withDate.approve(contextFor('date --file=/etc/passwd')), false);
   assert.equal(await withDate.approve(contextFor('date -f /etc/passwd')), true, 'short -f is not the same flag');
 });
+
+test('a listing scope names the flags it allows, so a mutating one it never heard of is refused', async () => {
+  const policy = createPermissionPolicy({ mode: 'headless', commands: {} });
+
+  // The listing flags, including bundles, `=` forms, and the numeric
+  // argument `git tag -n5` carries.
+  for (const command of [
+    'git branch --list',
+    'git branch -a',
+    'git branch -av',
+    'git branch --sort=-committerdate',
+    'git branch --show-current',
+    'git tag --list',
+    'git tag -n5',
+    'git remote -v',
+  ]) {
+    assert.equal(await policy.approve(contextFor(command)), true, `should allow: ${command}`);
+  }
+
+  // Flag-only mutations: no positional, not a delete, not a force — which
+  // is exactly why a deny list would have had to think of them first.
+  for (const command of [
+    'git branch --unset-upstream',
+    'git branch --set-upstream-to=origin/main',
+    'git branch -u origin/main',
+    'git branch --edit-description',
+    'git tag --sign',
+    'git remote --mirror=push',
+  ]) {
+    assert.equal(await policy.approve(contextFor(command)), false, `should refuse: ${command}`);
+  }
+
+  // And a scope persisted from a listing form carries the allowlist, so it
+  // is no wider than the built-in it came from.
+  const scope = normalizeCommandScope(analyzeCommand('git branch --list'));
+  assert.ok(scope?.allowedFlags?.includes('--list'));
+  assert.equal(scope?.allowedFlags?.includes('--unset-upstream'), false);
+});

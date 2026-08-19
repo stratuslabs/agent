@@ -198,7 +198,12 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
       const resolved = options.host.resolve(specifier);
       const manifest = parsePluginManifest(await packageJsonFor(resolved, specifier), specifier);
       const isTrusted = trusted(manifest.packageName);
-      validatePluginConfig(manifest, block);
+      // Validated *after* the host's defaults are folded in, because that
+      // is the configuration the plugin will actually be handed: a manifest
+      // that declares `workspaceRoot` required would otherwise be refused
+      // for missing the very setting the host supplies.
+      const config = configFor(block, manifest, options.workspaceRoot);
+      validatePluginConfig(manifest, config);
 
       const module = (await options.host.import(specifier)) as { createPlugin?: CreatePlugin };
       if (typeof module.createPlugin !== 'function') {
@@ -207,7 +212,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
         );
       }
 
-      const plugin = await module.createPlugin(configFor(block, manifest, options.workspaceRoot));
+      const plugin = await module.createPlugin(config);
       if (!plugin || typeof plugin.setup !== 'function') {
         throw new PluginManifestError(
           `Plugin ${manifest.packageName}: createPlugin did not return a plugin with a setup(context).`,

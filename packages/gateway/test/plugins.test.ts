@@ -180,3 +180,52 @@ test('a plugin that fails does not stop the daemon serving the ones that did not
     await gateway.stop();
   }
 });
+
+test('a startup that fails after the plugins loaded still lets them go', async () => {
+  const home = await newHome();
+  let disposed = 0;
+  const host = await hostFor({
+    'stratus-plugin-holds-something': {
+      manifest: { stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'notes.read', risk: 'gated' }] } } },
+      module: {
+        createPlugin: () => ({
+          name: 'holds-something',
+          setup(context: { tools: { register(tool: unknown): void } }) {
+            context.tools.register({ name: 'notes.read', risk: 'gated', async execute() { return null; } });
+          },
+          dispose() {
+            disposed += 1;
+          },
+        }),
+      },
+    },
+  });
+
+  // Two souls claiming one id: the roster refuses, which is a failure
+  // *after* the plugins are up. `stratus serve` awaits start() before the
+  // try/finally that would call stop(), so this is the only chance a
+  // plugin gets to release a browser, a socket, or a subscription.
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  for (const file of ['one.md', 'two.md']) {
+    await writeFile(
+      path.join(home, '.stratus', 'agents', file),
+      '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n',
+    );
+  }
+
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    plugins: { 'stratus-plugin-holds-something': {} },
+    pluginHost: host,
+    log: () => {},
+    warn: () => {},
+  });
+
+  await assert.rejects(() => gateway.start());
+  assert.equal(disposed, 1, 'the plugin was disposed when startup failed');
+
+  // And stopping afterwards does not dispose it a second time.
+  await gateway.stop();
+  assert.equal(disposed, 1);
+});

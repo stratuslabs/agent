@@ -37,6 +37,19 @@ export interface CommandScope {
    */
   listOnly?: boolean;
   /**
+   * The only flags this scope permits. Present, it replaces "anything not
+   * denied" with "nothing but these" — which is the direction to fail in
+   * for a command whose flags can mutate: `git branch --unset-upstream`
+   * changes repository config, takes no positional, and is not a delete or
+   * a force, so a deny list has to have thought of it and an allow list
+   * does not.
+   *
+   * Long flags match by name, so `--sort=-committerdate` is `--sort`.
+   * Short flags match per letter inside a bundle, and digits are ignored
+   * because they are arguments rather than flags (`git tag -n5`).
+   */
+  allowedFlags?: string[];
+  /**
    * Refuse `:branch` and `+branch` arguments. Git's refspec syntax makes
    * those a delete and a forced update *without any flag*, so a scope that
    * only excluded flags would let `git push origin :main` through as an
@@ -124,13 +137,36 @@ export const SAFE_COMMAND_SCOPES: CommandScope[] = [
     command: 'git',
     args: ['branch'],
     listOnly: true,
-    deniedFlags: ['--delete', '--move', '--copy', '--force', 'd', 'D', 'm', 'M', 'C'],
+    // Named rather than excluded: `git branch` has flag-only mutations
+    // (`--unset-upstream`, `-u origin/main`) that no list of destructive
+    // *shapes* would have caught, so this scope covers the listing flags
+    // and nothing else.
+    allowedFlags: [
+      '--list', '--all', '--remotes', '--show-current', '--verbose', '--no-verbose',
+      '--color', '--no-color', '--column', '--no-column', '--sort', '--format',
+      '--contains', '--no-contains', '--merged', '--no-merged', '--points-at',
+      '--ignore-case', '--omit-empty', '--abbrev', '--no-abbrev',
+      'l', 'a', 'r', 'v', 'i', 'q',
+    ],
+    deniedFlags: ['--delete', '--move', '--copy', '--force', 'd', 'D', 'm', 'M', 'C', 'u'],
   },
-  { command: 'git', args: ['tag'], listOnly: true, deniedFlags: ['--delete', '--force', 'd', 'f'] },
+  {
+    command: 'git',
+    args: ['tag'],
+    listOnly: true,
+    allowedFlags: [
+      '--list', '--contains', '--no-contains', '--merged', '--no-merged', '--points-at',
+      '--sort', '--format', '--color', '--no-color', '--column', '--no-column',
+      '--ignore-case', '--omit-empty',
+      'l', 'n', 'i',
+    ],
+    deniedFlags: ['--delete', '--force', 'd', 'f'],
+  },
   {
     command: 'git',
     args: ['remote'],
     listOnly: true,
+    allowedFlags: ['--verbose', 'v'],
     deniedArgs: ['add', 'remove', 'rm', 'rename', 'set-url', 'set-head', 'set-branches', 'prune', 'update'],
   },
   { command: 'pwd' },
@@ -262,6 +298,16 @@ const deniesFlag = (denied: string[], token: string): boolean => {
   return shorts.some((letter) => denied.includes(letter));
 };
 
+/** Whether every part of a flag token is on an allowlist. */
+const allowsFlag = (allowed: string[], token: string): boolean => {
+  const { long, shorts } = flagsOf(token);
+  if (long) {
+    return allowed.includes(long);
+  }
+  const letters = shorts.filter((letter) => !/[0-9]/.test(letter));
+  return letters.length > 0 && letters.every((letter) => allowed.includes(letter));
+};
+
 /** Whether an invocation falls inside one scope. */
 export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): boolean => {
   if (analysis.disqualifiedBy || analysis.base === undefined) {
@@ -287,6 +333,9 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
   for (const token of rest) {
     if (token.startsWith('-')) {
       if (deniesFlag(denied, token)) {
+        return false;
+      }
+      if (scope.allowedFlags && !allowsFlag(scope.allowedFlags, token)) {
         return false;
       }
       continue;
@@ -330,6 +379,12 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
     .filter((scope) => scope.command === analysis.base && (scope.args ?? []).join(' ') === args.join(' '));
   const inherited = sameScope.flatMap((scope) => scope.deniedFlags ?? []);
   const deniedArgs = sameScope.flatMap((scope) => scope.deniedArgs ?? []);
+  // Only when every safe scope for this command names one: a persisted
+  // scope must be no wider than the built-in, and an allowlist from one of
+  // two scopes would narrow the other by accident.
+  const allowedFlags = sameScope.length > 0 && sameScope.every((scope) => scope.allowedFlags)
+    ? [...new Set(sameScope.flatMap((scope) => scope.allowedFlags ?? []))]
+    : undefined;
 
   return {
     command: analysis.base,
@@ -340,6 +395,7 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
     // same command: approving `git branch` once must not turn creating a
     // branch into something that runs unattended forever after.
     ...(sameScope.some((scope) => scope.listOnly) ? { listOnly: true } : {}),
+    ...(allowedFlags ? { allowedFlags } : {}),
     // Git's syntax, so git's rule: elsewhere a leading `+` is an ordinary
     // argument (`chmod +x`) and refusing it would only cost a prompt for no
     // safety.
@@ -362,6 +418,7 @@ const normalizeForCompare = (scope: CommandScope) => ({
   deniedArgs: [...(scope.deniedArgs ?? [])].sort(),
   denyRefspecForms: scope.denyRefspecForms ?? false,
   listOnly: scope.listOnly ?? false,
+  allowedFlags: [...(scope.allowedFlags ?? [])].sort(),
 });
 
 /** Read one scope out of a whitelist file, or refuse it. */
@@ -379,6 +436,7 @@ export const parseCommandScope = (raw: unknown): CommandScope | undefined => {
   const args = strings(source.args);
   const deniedFlags = strings(source.deniedFlags);
   const deniedArgs = strings(source.deniedArgs);
+  const allowedFlags = strings(source.allowedFlags);
   return {
     command: source.command,
     ...(args ? { args } : {}),
@@ -386,5 +444,6 @@ export const parseCommandScope = (raw: unknown): CommandScope | undefined => {
     ...(deniedArgs ? { deniedArgs } : {}),
     ...(source.denyRefspecForms === true ? { denyRefspecForms: true } : {}),
     ...(source.listOnly === true ? { listOnly: true } : {}),
+    ...(allowedFlags ? { allowedFlags } : {}),
   };
 };
