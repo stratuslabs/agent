@@ -917,3 +917,132 @@ test('one agent reads back with its whole persona, not the roster snippet', asyn
     await harness.stop();
   }
 });
+
+test('a preflight failure is reported even when the session already failed', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
+  const client = await openSocket(`${harness.url.replace('http', 'ws')}/api/v1/events`, {
+    headers: { authorization: `Bearer ${harness.token}` },
+  });
+  try {
+    await client.waitFor((frame) => frame.type === 'subscribed', 'the subscribe ack');
+
+    // A session left failed by an earlier turn — a retry after credentials
+    // lapsed, which is exactly when someone sends another message.
+    const agent = harness.gateway.agents().find((candidate) => candidate.id === 'ava');
+    assert.ok(agent);
+    const created = await harness.gateway.store.create({
+      id: 'retried',
+      agent,
+      status: 'failed',
+      messages: [],
+      lastError: 'the previous turn failed',
+    });
+    assert.equal(created.status, 'failed');
+
+    // Now the next turn fails in preflight too, before the runner can touch
+    // the session. Judged by the session's status this is indistinguishable
+    // from a failure the runner already reported — so the report was
+    // suppressed and the caller's turn id received nothing at all.
+    await writeSoul(home, 'ava.md', '---\nname: Someone Else\nid: someone-else\n---\n\nNot Ava.\n');
+    const accepted = await harness.call('/api/v1/sessions/retried/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'try again', agentId: 'ava' }),
+    });
+    assert.equal(accepted.status, 202);
+    const { turnId } = await json<{ turnId: string }>(accepted);
+
+    const envelope = await settles(
+      client.waitFor<{ turnId?: string }>(
+        (frame) => (frame.event as { type?: string } | undefined)?.type === 'session.failed',
+        'the failure frame',
+      ),
+      'the retried turn reports its failure',
+    );
+    assert.equal(envelope.turnId, turnId);
+  } finally {
+    client.close();
+    await harness.stop();
+  }
+});
+
+test('a failure the runner reported is not repeated by the route', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: gpt-4.1-mini\n---\n\nYou are Ava.\n');
+  const harness = await startApi({
+    home,
+    // A key that resolves, behind a transport that does not: the turn gets
+    // past preflight and dies inside the runner, which is the one path that
+    // reports its own failure *and* rejects the dispatch.
+    env: { processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: (async () => { throw new Error('no network here'); }) as typeof fetch },
+  });
+  const client = await openSocket(`${harness.url.replace('http', 'ws')}/api/v1/events`, {
+    headers: { authorization: `Bearer ${harness.token}` },
+  });
+  try {
+    await client.waitFor((frame) => frame.type === 'subscribed', 'the subscribe ack');
+
+    const accepted = await harness.call('/api/v1/sessions/doomed-run/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hello', agentId: 'ava' }),
+    });
+    assert.equal(accepted.status, 202);
+
+    await settles(
+      client.waitFor((frame) => (frame.event as { type?: string } | undefined)?.type === 'session.failed', 'the failure'),
+      'the runner reports the failure',
+    );
+    // Gated on something that can only arrive after: the route's own emit
+    // would already have run by the time this round trip answers.
+    const health = await harness.call('/api/v1/health');
+    assert.equal(health.status, 200);
+
+    const failures = client.frames.filter(
+      (frame) => (frame.event as { type?: string } | undefined)?.type === 'session.failed',
+    );
+    assert.equal(failures.length, 1, `the failure was reported ${failures.length} times`);
+  } finally {
+    client.close();
+    await harness.stop();
+  }
+});
+
+test('a subscription token is not condemned by a check it cannot pass', async () => {
+  let called = 0;
+  const harness = await startApi({
+    env: {
+      // Whatever reaches the models endpoint is refused, which is what a
+      // subscription token would get: it is not an API key.
+      fetch: (async () => { called += 1; return new Response('{}', { status: 401 }); }) as typeof fetch,
+    },
+  });
+  try {
+    const subscription = await harness.call('/api/v1/credentials/verify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'anthropic', type: 'oauth_token', key: 'sk-ant-oat-whatever' }),
+    });
+    assert.equal(subscription.status, 200);
+    const verdict = await json<{ status: string; detail?: string }>(subscription);
+    // `rejected` would tell someone to throw away a credential that works
+    // perfectly well once saved — the same reason the model catalog falls
+    // back to the known lineup for a subscription rather than listing none.
+    assert.equal(verdict.status, 'unreachable');
+    assert.match(verdict.detail ?? '', /subscription/i);
+    assert.equal(called, 0, 'a subscription token is not sent to the models endpoint at all');
+
+    // An API key is still checked for real, and a 401 still condemns it.
+    const apiKey = await harness.call('/api/v1/credentials/verify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'anthropic', type: 'api_key', key: 'sk-ant-bad' }),
+    });
+    assert.equal((await json<{ status: string }>(apiKey)).status, 'rejected');
+    assert.equal(called, 1);
+  } finally {
+    await harness.stop();
+  }
+});

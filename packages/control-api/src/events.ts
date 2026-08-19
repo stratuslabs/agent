@@ -67,6 +67,20 @@ export const createEventStream = (gateway: Gateway) => {
    * shows as running forever.
    */
   const turnOverrides = new Map<string, string>();
+  /**
+   * Turns whose own terminal event this stream has already seen.
+   *
+   * A dispatch that rejects has to decide whether the runner got far enough
+   * to report the failure itself. Asking the session's status cannot answer
+   * that: a session left `failed` by an earlier turn looks identical to one
+   * this turn just failed, so a preflight failure on a retry would be
+   * swallowed and the caller's turn id would never receive a terminal event.
+   *
+   * Registered for the life of a dispatch and released after, so this holds
+   * turns in flight rather than every session the daemon has served.
+   */
+  const watchedTurns = new Map<string, { reported: boolean }>();
+  const watchKey = (sessionId: string, turnId: string): string => `${sessionId}\u0000${turnId}`;
 
   const resolveAgentSessions = (agentId: string): Set<string> =>
     new Set(gateway.store.list(agentId).map((session) => session.id));
@@ -126,10 +140,18 @@ export const createEventStream = (gateway: Gateway) => {
         }
       }
     }
+    const turnId = gateway.activeTurnId(event.sessionId) ?? turnOverrides.get(event.sessionId);
+    if (turnId !== undefined && (event.type === 'session.failed' || event.type === 'session.completed')) {
+      // Noted before the no-clients shortcut below: whether a turn reported
+      // its own outcome is not a question about who is watching.
+      const watched = watchedTurns.get(watchKey(event.sessionId, turnId));
+      if (watched) {
+        watched.reported = true;
+      }
+    }
     if (clients.size === 0) {
       return;
     }
-    const turnId = gateway.activeTurnId(event.sessionId) ?? turnOverrides.get(event.sessionId);
     const envelope: EventEnvelope = {
       sessionId: event.sessionId,
       ...(turnId ? { turnId } : {}),
@@ -180,6 +202,26 @@ export const createEventStream = (gateway: Gateway) => {
       socket.on('error', drop);
 
       socket.send(JSON.stringify({ type: 'subscribed', filter: client.filter }));
+    },
+
+    /**
+     * Watch a turn for a terminal event of its own, until released.
+     *
+     * The caller dispatches, and on rejection asks `reported()` whether the
+     * runner already emitted `session.failed` or `session.completed` for
+     * *this* turn — the only honest way to tell a failure that reported
+     * itself from one that never reached the runner at all.
+     */
+    watchTurn(sessionId: string, turnId: string) {
+      const key = watchKey(sessionId, turnId);
+      const record = { reported: false };
+      watchedTurns.set(key, record);
+      return {
+        reported: (): boolean => record.reported,
+        release: (): void => {
+          watchedTurns.delete(key);
+        },
+      };
     },
 
     /**

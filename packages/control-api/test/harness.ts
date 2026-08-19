@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createGateway, type ApprovalTransport, type Gateway } from '@stratusagent/gateway';
+import type { StateEnvironment } from '@stratusagent/state';
 import { WebSocket } from 'ws';
 
 import { createControlApi, type ControlApiOptions } from '../src/index.ts';
@@ -41,10 +42,20 @@ export const writeSoul = async (home: string, file: string, contents: string): P
  * statement about the real daemon rather than about a mock of it.
  */
 export const startApi = async (
-  setup: { home?: string; options?: ControlApiOptions; approvals?: boolean } = {},
+  setup: {
+    home?: string;
+    options?: ControlApiOptions;
+    approvals?: boolean;
+    /**
+     * Extra environment for both the gateway and the API — an injected
+     * `fetch` above all, which is the only way to make a turn fail inside
+     * the runner rather than before it.
+     */
+    env?: Partial<StateEnvironment>;
+  } = {},
 ): Promise<Harness> => {
   const home = setup.home ?? await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const env: StateEnvironment = { homeDir: home, cwd: home, processEnv: {}, ...setup.env };
   let transport: ApprovalTransport | undefined;
   const gateway = createGateway({
     env,

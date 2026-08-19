@@ -66,6 +66,12 @@ export interface RouteContext {
    * attribute itself. See `createEventStream`.
    */
   withTurn: (sessionId: string, turnId: string, work: () => Promise<void>) => Promise<void>;
+  /**
+   * Watch a turn for a terminal event of its own. See `createEventStream`:
+   * this is how a rejected dispatch tells a failure the runner reported from
+   * one that never reached the runner.
+   */
+  watchTurn: (sessionId: string, turnId: string) => { reported: () => boolean; release: () => void };
   version: string;
 }
 
@@ -580,6 +586,9 @@ export const routes: Route[] = [
       }
 
       const turnId = randomUUID();
+      // Armed before the dispatch, so a failure that arrives while the runner
+      // is still unwinding is seen rather than missed.
+      const watch = context.watchTurn(sessionId, turnId);
       // Deliberately not awaited: a turn runs for as long as a model takes,
       // and the caller watches it on the event stream. The turn id returned
       // here is what lets them recognise it there.
@@ -601,8 +610,7 @@ export const routes: Route[] = [
           // and nothing else would ever tell the caller. Without this they
           // hold a turn id that produces silence forever.
           const message = error instanceof Error ? error.message : String(error);
-          const session = await context.gateway.store.get(sessionId).catch(() => undefined);
-          if (session?.status === 'failed') {
+          if (watch.reported()) {
             return;
           }
           // Stamped with the turn the caller was handed. The gateway cleared
@@ -614,7 +622,8 @@ export const routes: Route[] = [
               .emit({ type: 'session.failed', sessionId, error: message })
               .catch(() => undefined);
           });
-        });
+        })
+        .finally(() => watch.release());
 
       context.response.statusCode = 202;
       return { sessionId, turnId };
@@ -715,6 +724,21 @@ export const routes: Route[] = [
       const provider = parseProviderParam(requireString(body, 'provider'));
       const key = requireString(body, 'key');
       const baseUrl = optionalString(body, 'baseUrl');
+      const type = optionalString(body, 'type') ?? 'api_key';
+      if (type !== 'api_key' && type !== 'oauth_token') {
+        throw new ApiError(400, 'invalid_credential_type', 'type must be api_key or oauth_token.');
+      }
+      if (type === 'oauth_token') {
+        // A subscription token cannot call the models endpoint — the same
+        // reason the model catalog falls back to the known Claude lineup for
+        // one. Checked as an api_key it comes back `rejected`, condemning a
+        // credential that works perfectly well once saved, so this says what
+        // is true instead: it cannot be checked from here.
+        return {
+          status: 'unreachable',
+          detail: 'a Claude subscription token cannot be checked against the models endpoint; save it and run a turn',
+        };
+      }
       return verifyProviderKey(provider, key, baseUrl, context.env.fetch ?? globalThis.fetch);
     },
   },

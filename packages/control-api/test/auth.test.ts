@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { request as httpRequest } from 'node:http';
 
@@ -245,21 +245,6 @@ test('a wrong verb answers 405 and names what is allowed', async () => {
   }
 });
 
-test('two daemons starting on one fresh home agree on the token', async () => {
-  const home = await newHome();
-  // Both observe no token file and both generate one. Without an exclusive
-  // create, the loser goes on authenticating against a value no client can
-  // read — its API reachable by nobody, with nothing saying so.
-  const [first, second] = await Promise.all([
-    ensureGatewayToken({ homeDir: home }),
-    ensureGatewayToken({ homeDir: home }),
-  ]);
-
-  assert.equal(first, second);
-  assert.equal((await readFile(path.join(home, '.stratus', 'gateway-token'), 'utf8')).trim(), first);
-  assert.equal((await stat(path.join(home, '.stratus', 'gateway-token'))).mode & 0o777, 0o600);
-});
-
 test('an IPv6 bind is advertised and origin-checked with brackets', () => {
   // `http://::1:4123` is not a URL. The API parses every incoming path
   // against its own advertised origin, so an unbracketed one would fail every
@@ -274,21 +259,6 @@ test('an IPv6 bind is advertised and origin-checked with brackets', () => {
   // A non-loopback IPv6 bind gets exactly its own bracketed origin.
   const remote = allowedOrigins('fd00::1', 8080);
   assert.deepEqual([...remote], ['http://[fd00::1]:8080']);
-});
-
-test('an empty token file left by an interrupted start is replaced', async () => {
-  const home = await newHome();
-  const tokenPath = path.join(home, '.stratus', 'gateway-token');
-  await mkdir(path.dirname(tokenPath), { recursive: true });
-  // A process that created the file and died before writing to it. Returning
-  // that empty string would start an API no bearer header can satisfy, while
-  // every client reads the same nothing — locked out across restarts.
-  await writeFile(tokenPath, '');
-
-  const token = await ensureGatewayToken({ homeDir: home });
-  assert.ok(token.length > 0, 'a usable token was generated');
-  assert.equal((await readFile(tokenPath, 'utf8')).trim(), token);
-  assert.equal((await stat(tokenPath)).mode & 0o777, 0o600);
 });
 
 test('a wildcard bind accepts the address it was opened for', async () => {
@@ -332,44 +302,109 @@ test('a wildcard bind accepts the address it was opened for', async () => {
   }
 });
 
-test('a loopback bind does not trust a Host header', async () => {
-  // The other half of the rule: matching the request's own Host is a
-  // concession to a bind whose address is unknowable, not a general
-  // loosening. A daemon bound to 127.0.0.1 knows exactly what it answers to.
+test('an origin that does not match the request host is refused', async () => {
+  // The Host fallback is a same-origin check, not a loosening: it accepts an
+  // origin equal to the address the browser connected to, and nothing else.
+  // These are the two cases it must keep refusing — the ones `SameSite`
+  // cannot, because it ignores ports entirely.
   const harness = await startApi();
   try {
     const cookie = await signIn(harness);
     const port = Number(new URL(harness.url).port);
 
-    const spoofed = await rawPost(port, '/api/v1/roster/reload', {
+    // Same host, another port: a hostile page next door.
+    const otherPort = await rawPost(port, '/api/v1/roster/reload', {
       cookie,
-      host: `192.0.2.10:${port}`,
-      origin: `http://192.0.2.10:${port}`,
+      host: `127.0.0.1:${port}`,
+      origin: `http://127.0.0.1:${port + 1}`,
     });
-    assert.equal(spoofed.status, 403);
-    assert.equal(JSON.parse(spoofed.body).error.code, 'origin_not_allowed');
+    assert.equal(otherPort.status, 403);
+    assert.equal(JSON.parse(otherPort.body).error.code, 'origin_not_allowed');
+
+    // Another host entirely.
+    const otherHost = await rawPost(port, '/api/v1/roster/reload', {
+      cookie,
+      host: `127.0.0.1:${port}`,
+      origin: 'http://evil.example',
+    });
+    assert.equal(otherHost.status, 403);
   } finally {
     await harness.stop();
   }
 });
 
-test('two daemons recovering the same empty token file agree', async () => {
+test('a TLS-terminating tunnel is not locked out of its own dashboard', async () => {
+  // Remote access is documented as a tunnel's job, and a tunnel terminates
+  // TLS in front of a loopback daemon: the browser's origin is
+  // `https://gateway.example` while this server speaks plain HTTP, so an
+  // origin set that can only say `http://` loads the page and then refuses
+  // every write and the whole event stream.
+  const harness = await startApi();
+  try {
+    const cookie = await signIn(harness);
+    const port = Number(new URL(harness.url).port);
+    const publicHost = 'gateway.example';
+
+    const write = await rawPost(port, '/api/v1/roster/reload', {
+      cookie,
+      host: publicHost,
+      origin: `https://${publicHost}`,
+    });
+    assert.equal(write.status, 200);
+
+    const stream = await openSocket(`ws://127.0.0.1:${port}/api/v1/events`, {
+      headers: { cookie, host: publicHost, origin: `https://${publicHost}` },
+    });
+    assert.equal(stream.opened, true);
+    stream.socket.close();
+
+    // Still exactly the address it arrived on, and no more.
+    const elsewhere = await rawPost(port, '/api/v1/roster/reload', {
+      cookie,
+      host: publicHost,
+      origin: 'https://gateway.example.evil.test',
+    });
+    assert.equal(elsewhere.status, 403);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('an empty token file is refused rather than raced over', async () => {
   const home = await newHome();
   const tokenPath = path.join(home, '.stratus', 'gateway-token');
   await mkdir(path.dirname(tokenPath), { recursive: true });
   await writeFile(tokenPath, '');
 
-  // Recovery has to claim the file the same exclusive way a fresh start
-  // claims it. Overwriting it in place is what the exclusive create exists to
-  // prevent: both daemons write their own value, one wins the disk, and the
-  // loser authenticates against a secret no client can read.
+  // Repairing it cannot be made safe — two daemons both see the empty file,
+  // both replace it, and the loser authenticates against a secret no client
+  // can read. Refusing is one command to fix and locks nobody out.
+  await assert.rejects(
+    ensureGatewayToken({ homeDir: home }),
+    (error: Error) => error.message.includes(tokenPath) && /empty/i.test(error.message),
+  );
+  // And it is left alone for the operator to look at.
+  assert.equal(await readFile(tokenPath, 'utf8'), '');
+});
+
+test('a fresh claim publishes a complete file, never an empty one', async () => {
+  const home = await newHome();
+  const tokenPath = path.join(home, '.stratus', 'gateway-token');
+
+  // Two daemons starting together on one home: exactly one claim wins, and
+  // the loser adopts the winner's token rather than its own.
   const [first, second] = await Promise.all([
     ensureGatewayToken({ homeDir: home }),
     ensureGatewayToken({ homeDir: home }),
   ]);
-
   assert.ok(first.length > 0);
-  assert.equal(first, second, 'both daemons ended on the same token');
-  assert.equal((await readFile(tokenPath, 'utf8')).trim(), first, 'and it is the one on disk');
+  assert.equal(first, second);
+  assert.equal((await readFile(tokenPath, 'utf8')).trim(), first);
   assert.equal((await stat(tokenPath)).mode & 0o777, 0o600);
+
+  // The claim is published by linking an already-written file into place, so
+  // there is no window in which the token exists but is empty — and no
+  // staging file left behind either.
+  const strays = (await readdir(path.dirname(tokenPath))).filter((entry) => entry.startsWith('gateway-token.'));
+  assert.deepEqual(strays, [], `staging files were left behind: ${strays.join(', ')}`);
 });

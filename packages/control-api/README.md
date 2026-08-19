@@ -29,6 +29,14 @@ curl -H "Authorization: Bearer $(cat ~/.stratus/gateway-token)" \
   http://127.0.0.1:4123/api/v1/agents
 ```
 
+The file is claimed by linking an already-written file into place, so two
+daemons starting together on one home agree on a token instead of the loser
+authenticating against a value no client can read, and a process killed
+mid-write leaves no half-created file. A token file that *is* empty is
+refused with a message naming it rather than repaired: repair means replacing
+a file another daemon may have just claimed, and there is no conditional
+replace to do it safely. Delete it and start again.
+
 **Session cookie** — a browser can do neither half of that: page JavaScript
 cannot read the token file, and a WebSocket upgrade cannot carry an
 `Authorization` header. So `stratus dashboard` mints a **one-time token** and
@@ -56,6 +64,16 @@ checked against this gateway's exact origin, port included. Bearer requests
 are exempt: nothing attaches that header on a page's behalf, so there is no
 ambient authority to forge.
 
+"Exact origin" means the address the browser actually reached the daemon on,
+which is routinely not the one it bound to — a wildcard bind is reached over
+a LAN or Tailscale address, and a tunnel terminates TLS in front of a
+loopback one. So an origin equal to the request's own `Host` is accepted,
+under `http` or `https`. That is a same-origin check rather than a
+concession: a browser sets `Host` from the address it connected to, never
+from the page making the request, and cannot be made to send another one —
+`Host` is a forbidden header name for `fetch`, `XMLHttpRequest`, forms, and
+WebSockets alike. A page on another port, or another host, still fails.
+
 Localhost binding is the posture. Remote access is the operator's tunnel
 decision — Tailscale is the pattern we recommend for reaching a machine at
 home. There are no user accounts; that belongs to a hosted deployment.
@@ -81,10 +99,17 @@ log, and an address bar is one that gets noticed when it changes.
 | POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }` |
 | GET | `/catalog/models` | Models the stored sign-ins can actually reach, listed live |
 | GET | `/credentials` | Which sign-ins exist — presence and endpoint, never a value |
-| POST | `/credentials/verify` | Live-check a key before storing it |
+| POST | `/credentials/verify` | Live-check a key before storing it: `{ provider, key, type?, baseUrl? }` |
 | PUT | `/credentials/:provider` | Store an `api_key`, or an `oauth_token` for Anthropic |
 | PUT | `/credentials/channels/:channel` | Store a channel's tokens (today: `slack`) |
 | GET/PUT | `/config` | Settings, whitelisted to keys this API owns |
+
+`POST /credentials/verify` reports `ok`, `rejected`, or `unreachable`, and
+only an explicit 401/403 is `rejected` — a compatible endpoint with no models
+route says nothing about the key. Pass `type` with it: a `oauth_token` cannot
+call the models endpoint at all, so it answers `unreachable` rather than
+sending a Claude subscription token as an `x-api-key` and condemning a
+credential that works perfectly well once saved.
 
 `PUT /config` **replaces** the file rather than merging into it — `GET` hands
 you the whole document and `PUT` takes the whole document back, so a partial

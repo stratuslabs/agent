@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, link, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import type { IncomingMessage } from 'node:http';
 import path from 'node:path';
 
@@ -51,61 +51,69 @@ export const ensureGatewayToken = async (env: StateEnvironment): Promise<string>
     return value;
   };
 
-  // Claimed by exclusive create, never by overwriting.
-  //
-  // Two daemons can start together on one home, and a third case sits
-  // between "no file" and "a good file": a process interrupted between
-  // creating the file and writing to it leaves an empty one, which is not a
-  // token any bearer header can satisfy. Replacing that in place would
-  // reintroduce exactly what the exclusive create exists to prevent — both
-  // daemons write their own value, one wins the disk, and the loser goes on
-  // authenticating against a secret no client can read. So an empty file is
-  // unlinked and the claim is raced for again, and every path below returns
-  // what the FILE ended up holding rather than what this process generated:
-  // a daemon that loses adopts the winner's token instead of locking itself
-  // out.
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    try {
-      const existing = (await readFile(tokenPath, 'utf8')).trim();
-      if (existing.length > 0) {
-        return settle(existing);
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw error;
-      }
+  const existing = await readFile(tokenPath, 'utf8').then((raw) => raw.trim()).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') {
+      throw error;
     }
+    return undefined;
+  });
+  if (existing !== undefined) {
+    if (existing.length === 0) {
+      // A token file that holds nothing is corrupt, and this refuses it
+      // rather than racing to repair it.
+      //
+      // Repair is what cannot be made safe: two daemons both see the empty
+      // file, both replace it, one wins the disk, and the loser goes on
+      // authenticating against a secret no client can read — the exact
+      // lockout the exclusive claim below exists to prevent. Node exposes no
+      // conditional replace (no `flock`, no `renameat2`), so there is no
+      // unlink-and-retry that cannot delete the valid token another daemon
+      // wrote a microsecond earlier. A loud refusal naming the file is one
+      // command to fix and cannot lock anybody out.
+      //
+      // Nothing here produces this state any more: the claim below publishes
+      // a fully-written file in a single atomic step, so a process killed
+      // mid-write leaves a stray staging file rather than an empty token.
+      throw new Error(
+        `${tokenPath} is empty, which is not a usable gateway token. Delete it and start the daemon again.`,
+      );
+    }
+    return settle(existing);
+  }
 
-    // 32 bytes of CSPRNG output. base64url so it survives a URL, a header,
-    // and a shell argument without escaping. Minted per attempt, so a token
-    // that lost a race is never offered again.
-    const token = randomBytes(32).toString('base64url');
+  // 32 bytes of CSPRNG output. base64url so it survives a URL, a header, and
+  // a shell argument without escaping.
+  const token = randomBytes(32).toString('base64url');
+  // Written to a private staging file first, then published with `link`,
+  // which fails if the destination exists.
+  //
+  // Two things at once. `link` is the exclusive claim — of two daemons
+  // starting together on a fresh home exactly one wins, and the loser reads
+  // the winner's token instead of authenticating against a value no client
+  // can read. And it publishes a file that is already complete, where
+  // `writeFile` with `wx` creates an empty file and then fills it: a crash
+  // in that window is what left the corrupt file refused above.
+  const staging = `${tokenPath}.${randomBytes(8).toString('hex')}`;
+  try {
+    await writeFile(staging, `${token}\n`, { flag: 'wx', mode: 0o600 });
     try {
-      await writeFile(tokenPath, `${token}\n`, { flag: 'wx', mode: 0o600 });
-      // Read back rather than trusting the write: this claim was exclusive,
-      // but a concurrent recovery that observed the empty file before this
-      // one created it can still unlink and replace it. The file is the
-      // authority, and it is what every client reads.
-      const onDisk = (await readFile(tokenPath, 'utf8')).trim();
-      return settle(onDisk.length > 0 ? onDisk : token);
+      await link(staging, tokenPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         throw error;
       }
-    }
-
-    // Lost the claim, or found the corrupt file again. If it holds a real
-    // token the next pass adopts it; if it is still empty, clear the way.
-    const winner = await readFile(tokenPath, 'utf8').then((raw) => raw.trim()).catch(() => '');
-    if (winner.length > 0) {
+      const winner = (await readFile(tokenPath, 'utf8')).trim();
+      if (winner.length === 0) {
+        throw new Error(
+          `${tokenPath} is empty, which is not a usable gateway token. Delete it and start the daemon again.`,
+        );
+      }
       return settle(winner);
     }
-    await rm(tokenPath, { force: true });
+  } finally {
+    await rm(staging, { force: true });
   }
-
-  throw new Error(
-    `Could not claim ${tokenPath}: it keeps coming back empty. Remove it and start the daemon again.`,
-  );
+  return settle(token);
 };
 
 /**
@@ -266,8 +274,6 @@ export type Authenticator = ReturnType<typeof createAuthenticator>;
  * another origin. It reintroduces nothing: the port still has to match, so a
  * hostile page on another port of localhost is still rejected.
  */
-export const isWildcardHost = (host: string): boolean => host === '0.0.0.0' || host === '::';
-
 export const allowedOrigins = (host: string, port: number): Set<string> => {
   // Bracketed for IPv6, or the address's own colons run into the port and the
   // set contains a string no browser will ever send.
@@ -295,15 +301,28 @@ export const allowedOrigins = (host: string, port: number): Set<string> => {
  * on writes costs nothing real and closes the case where a client that omits
  * it would otherwise be trusted to change state.
  *
- * `sameOriginHost` is the request's own `Host` header, passed only for a
- * wildcard bind. `0.0.0.0` and `::` are not addresses a browser ever reaches
- * the daemon on, so the fixed set cannot name the LAN or Tailscale address
- * the operator opened the wildcard *for*: every write and every WebSocket
- * upgrade from it would be refused while the page itself loaded fine.
- * Matching the request's own `Host` is a true same-origin check and forges
- * nothing — a browser sets `Host` from the address it connected to, never
- * from the page making the request, so a page on another port or another
- * host still fails it, exactly as before.
+ * `sameOriginHost` is the request's own `Host` header, and an origin that
+ * matches it is accepted under either scheme. That is a true same-origin
+ * check rather than a loosening: a browser sets `Host` from the address it
+ * connected to, never from the page making the request, and cannot be made
+ * to send a different one — `Host` is a forbidden header name for `fetch`,
+ * `XMLHttpRequest`, forms, and WebSockets alike. A page on another port or
+ * another host still fails, which is the case `SameSite` cannot cover and
+ * the whole reason this check exists.
+ *
+ * It is needed because the fixed set can only name the address the daemon
+ * bound to, and that is routinely not the address a browser reaches it on:
+ *
+ * - a wildcard bind (`0.0.0.0`, `::`) is reached over a LAN or Tailscale
+ *   address the daemon cannot know when it binds;
+ * - a tunnel or reverse proxy — the documented way to reach a loopback
+ *   daemon remotely — terminates TLS in front of it, so the browser's origin
+ *   is `https://gateway.example` while this server speaks plain HTTP.
+ *
+ * In both, the page loads and then every write and every WebSocket upgrade
+ * is refused, which reads as a broken dashboard rather than as a policy.
+ * Accepting `https://` costs nothing: an attacker would have to serve TLS on
+ * this very host and port, which means already being this server.
  */
 export const originAllowed = (
   principal: Principal,
@@ -321,9 +340,12 @@ export const originAllowed = (
   if (origins.has(origin)) {
     return true;
   }
+  if (sameOriginHost === undefined || sameOriginHost.length === 0) {
+    return false;
+  }
   // Host names are case-insensitive; browsers send both headers lowercased,
   // but nothing guarantees it of the `Host` an operator's proxy rewrote.
-  return sameOriginHost !== undefined
-    && sameOriginHost.length > 0
-    && origin.toLowerCase() === `http://${sameOriginHost.toLowerCase()}`;
+  const host = sameOriginHost.toLowerCase();
+  const candidate = origin.toLowerCase();
+  return candidate === `http://${host}` || candidate === `https://${host}`;
 };

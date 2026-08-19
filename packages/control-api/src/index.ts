@@ -9,7 +9,6 @@ import { WebSocketServer } from 'ws';
 
 import {
   allowedOrigins,
-  isWildcardHost,
   createAuthenticator,
   ensureGatewayToken,
   originAllowed,
@@ -127,11 +126,11 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
   let url: string | undefined;
   let token: string | undefined;
   let origins = new Set<string>();
-  // Only for a wildcard bind: the address a browser reaches this daemon on is
-  // not knowable when it binds, so the request's own Host answers for it.
-  const wildcardBind = isWildcardHost(host);
-  const sameOriginHost = (request: IncomingMessage): string | undefined =>
-    (wildcardBind ? request.headers.host : undefined);
+  // The address a browser reaches this daemon on is routinely not the one it
+  // bound to — a wildcard bind, or a tunnel terminating TLS in front of a
+  // loopback one — so the request's own Host answers for it. See
+  // `originAllowed`, which is where that is safe rather than permissive.
+  const sameOriginHost = (request: IncomingMessage): string | undefined => request.headers.host;
   let startedAt = Date.now();
   let ui: DashboardAssets | undefined;
 
@@ -197,6 +196,8 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       redeemOneTimeToken: (ott) => auth?.redeemOneTimeToken(ott),
       sessionCookie: (sessionId) => auth?.sessionCookie(sessionId) ?? '',
       withTurn: (sessionId, turnId, work) => stream?.withTurn(sessionId, turnId, work) ?? work(),
+      watchTurn: (sessionId, turnId) => stream?.watchTurn(sessionId, turnId)
+        ?? { reported: () => false, release: () => {} },
       version: CONTROL_API_VERSION,
     };
 

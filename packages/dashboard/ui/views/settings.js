@@ -80,6 +80,11 @@ export const renderSettings = (section) => {
       try {
         const verdict = await api.verifyKey({
           provider: provider.value,
+          // The type decides how the value is checked at all: a subscription
+          // token cannot reach the models endpoint, and checked as an API
+          // key it comes back rejected — condemning a credential that works
+          // once saved.
+          type: type.value,
           key: value.value,
           ...(baseUrl.value.trim() ? { baseUrl: baseUrl.value.trim() } : {}),
         });
@@ -157,7 +162,14 @@ export const renderSettings = (section) => {
     const save = async () => {
       state.busy = true; update();
       try {
-        const config = state.config ?? {};
+        // Re-read rather than spreading the snapshot this page loaded with.
+        // PUT replaces the whole document, so a save built on a stale copy
+        // silently reverts anything another surface changed in the meantime
+        // — the CLI editing `approvals`, another tab picking a soul. This
+        // narrows that window to the round trip below; it does not close it,
+        // which would need a precondition the API does not offer yet.
+        const config = (await api.config()).config ?? {};
+        state.config = config;
         const [provider, model] = picker.value ? picker.value.split(/:(.*)/s) : [undefined, undefined];
         // A whole document, because PUT replaces rather than merges — sending
         // only the two changed keys would silently drop everything else in
