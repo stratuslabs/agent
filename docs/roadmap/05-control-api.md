@@ -42,6 +42,20 @@ Phase 1–2 made the fleet live and trustworthy, but the only ways in are Slack 
 - `stratus agents --gateway http://127.0.0.1:<port>` returns the same roster as local resolution.
 - API integration tests run against an in-process gateway with the demo provider — no network, no real Slack.
 
+## Known gap this step closes
+
+The WS envelope's turn id is not only for clients. `StratusEvent` carries no
+turn identifier today, and the Slack adapter already needs one: a renderer is
+queued at intake, *before* the gateway starts the turn it belongs to, so a
+message arriving while a recovery or the startup sweep is still ahead of it on
+the session chain leaves that turn's events looking rendered when they are not.
+Two consequences are live in `packages/channel-slack`: events from a turn the
+adapter never dispatched are delivered to whichever renderer heads the queue,
+and a `session.failed` from such a turn is suppressed rather than reported into
+its thread. Both are attribution problems, and `{ sessionId, turnId, event }`
+is what resolves them — worth landing the envelope before the dashboard needs
+it, since a surface already does.
+
 ## Open questions
 
 - Does the gateway serve the dashboard always, or behind a `--with-ui` flag for headless VM deployments? (Leaning: always; it's static files.)

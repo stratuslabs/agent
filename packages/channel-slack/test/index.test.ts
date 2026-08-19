@@ -1395,3 +1395,43 @@ test('a click that beats the post is not treated as an orphan', async () => {
   const buttons = buttonIds(web.posts.at(-1)?.blocks);
   assert.deepEqual(buttons, ['stratus_approve_once', 'stratus_approve_always', 'stratus_deny']);
 });
+
+test('a resolution Slack refused leaves the prompt repairable by the next click', async () => {
+  // The marker exists to stop a later click overwriting a real outcome. If
+  // the update that writes that outcome fails, there is no outcome on the
+  // message to protect — it still shows live buttons — and keeping the
+  // marker would make the stale prompt unrepairable for the life of the
+  // process.
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+
+  const realUpdate = web.chat.update;
+  let refuse = true;
+  web.chat.update = async (args) => {
+    if (refuse) {
+      refuse = false;
+      throw new Error('slack said no');
+    }
+    return realUpdate(args);
+  };
+
+  // Decided, but the message never got rewritten.
+  await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-DYLAN'));
+  // Length rather than deepEqual against []: under assert/strict that is an
+  // assertion signature, and it would narrow `web.updates` to never[] for
+  // the rest of the test — where the repair below is read back.
+  assert.equal(web.updates.length, 0, 'the outcome never reached the message');
+
+  // A later click on those still-live buttons must be able to clean it up.
+  await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-DYLAN'));
+  await adapter.stop();
+
+  const repaired = web.updates.at(-1);
+  assert.match(repaired?.text ?? '', /no longer running/);
+  assert.equal(buttonIds(repaired?.blocks).length, 0);
+});

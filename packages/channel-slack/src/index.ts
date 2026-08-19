@@ -795,6 +795,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * — so a message can never keep offering a decision that no longer has
    * anywhere to land.
    */
+  const forgetSettled = (requestId: string): void => {
+    settledHere.delete(requestId);
+    const at = settledOrder.indexOf(requestId);
+    if (at >= 0) {
+      settledOrder.splice(at, 1);
+    }
+  };
+
   const rememberSettled = (requestId: string): void => {
     if (settledHere.has(requestId)) {
       return;
@@ -870,6 +878,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
       });
     } catch (error) {
+      // The message still shows live buttons, so this request is not
+      // settled as far as anyone reading the thread can tell. Take the
+      // marker back off: it exists to stop a later click overwriting a
+      // real outcome, and there is no outcome on that message to protect.
+      // Leaving it set would make the stale prompt unrepairable until this
+      // process restarts.
+      forgetSettled(event.requestId);
       warn(`slack: could not update a resolved approval request: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
@@ -1167,6 +1182,21 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // A failure with no renderer is not a turn this process is
         // serving — it is one the startup sweep or a failed recovery
         // closed out. Nothing downstream would say anything about it.
+        //
+        // A non-empty queue is not proof the failure belongs to a turn
+        // this adapter dispatched, only that it has one for this session.
+        // A renderer is queued at intake, before the gateway starts the
+        // turn it belongs to, so a message arriving while a recovery is
+        // still ahead of it on the session chain leaves the recovery's
+        // failure looking rendered when it is not. Suppressing is the
+        // conservative half of that trade: the alternative reports every
+        // ordinary failure twice.
+        //
+        // Telling them apart needs a turn identifier, which `StratusEvent`
+        // does not carry — the same gap 05's WS envelope closes with
+        // `{ sessionId, turnId, event }`. The routing a line below has it
+        // too: recovery events are already delivered to whichever renderer
+        // is at the head of the queue, whether or not it is theirs.
         if (event.type === 'session.failed' && !renderers.get(event.sessionId)?.length) {
           track(reportUnrenderedFailure(event));
           return;
