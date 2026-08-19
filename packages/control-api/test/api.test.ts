@@ -840,3 +840,60 @@ test('a rejected key advertises no models at all', async () => {
     await harness.stop();
   }
 });
+
+test('one agent reads back with its whole persona, not the roster snippet', async () => {
+  const home = await newHome();
+  const instructions = [
+    'You are Ava, and this first line is deliberately long enough that the roster has to trim it away.',
+    '',
+    'You keep a second paragraph, which a one-line summary cannot carry at all.',
+  ].join('\n');
+  await writeSoul(home, 'ava.md', `---\nname: Ava\nid: ava\nprovider: anthropic\nmodel: claude-opus-5\n---\n\n${instructions}\n`);
+  const harness = await startApi({ home });
+  try {
+    // The roster's `persona` is a table row: first line, trimmed. Anything
+    // editing an agent that saved this value back would truncate the real
+    // instructions to a fragment of their first sentence.
+    const roster = await json<{ agents: Array<Record<string, unknown>> }>(await harness.call('/api/v1/agents'));
+    const listed = roster.agents.find((agent) => agent.id === 'ava');
+    assert.ok(listed);
+    assert.notEqual(listed.persona, instructions);
+
+    const response = await harness.call('/api/v1/agents/ava');
+    assert.equal(response.status, 200);
+    const single = await json<{
+      agent: { id: string; name: string; instructions: string };
+      soul: string;
+      soulPath: string;
+      provider?: string;
+      model?: string;
+    }>(response);
+
+    assert.equal(single.agent.id, 'ava');
+    assert.equal(single.agent.instructions, instructions);
+    assert.equal(single.provider, 'anthropic');
+    assert.equal(single.model, 'claude-opus-5');
+    assert.equal(single.soulPath, path.join(home, '.stratus', 'agents', 'ava.md'));
+    // The raw markdown is the same bytes PUT takes back as `soul`, so a
+    // source view edits the file rather than a rendering of it.
+    assert.equal(single.soul, await readFile(single.soulPath, 'utf8'));
+
+    // Editing what came back changes only what was edited.
+    const edited = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Ava II', instructions: single.agent.instructions }),
+    });
+    assert.equal(edited.status, 200);
+    const after = await json<{ agent: { instructions: string } }>(await harness.call('/api/v1/agents/ava'));
+    assert.equal(after.agent.instructions, instructions, 'a name change did not truncate the persona');
+
+    // The built-in has no soul file, and says so rather than 500ing.
+    const builtIn = await harness.call('/api/v1/agents/stratus');
+    assert.equal(builtIn.status, 409);
+    const missing = await harness.call('/api/v1/agents/nobody');
+    assert.equal(missing.status, 404);
+  } finally {
+    await harness.stop();
+  }
+});

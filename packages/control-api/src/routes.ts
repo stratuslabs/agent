@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 
 import { formatSoul, isValidAgentId, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import type { JsonObject } from '@stratusagent/core';
@@ -368,6 +368,27 @@ export const routes: Route[] = [
             ...(seen ? { lastActiveAt: seen.lastActiveAt, activeSessions: seen.activeSessions } : { activeSessions: 0 }),
           };
         }),
+      };
+    },
+  },
+  {
+    method: 'GET',
+    pattern: `${API_PREFIX}/agents/:id`,
+    async handler(context) {
+      // One agent in full, which the roster listing deliberately is not: it
+      // carries `persona`, a one-line snippet for a table row. An editor that
+      // saved that snippet back would truncate the real instructions to their
+      // first line — so anything editing an agent reads it here first.
+      const agentId = context.params.id ?? '';
+      const { soul, path: soulPath } = await soulForAgent(context, agentId);
+      return {
+        agent: soul.agent,
+        // The raw markdown, so a client offering a source view edits the same
+        // bytes `PUT /agents/:id` accepts back as `soul`.
+        soul: await readFile(soulPath, 'utf8'),
+        soulPath,
+        ...(soul.provider ? { provider: soul.provider } : {}),
+        ...(soul.model ? { model: soul.model } : {}),
       };
     },
   },

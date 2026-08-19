@@ -37,6 +37,7 @@ const request = async (method, path, body) => {
 export const api = {
   health: () => request('GET', '/health'),
   agents: () => request('GET', '/agents'),
+  agent: (id) => request('GET', `/agents/${encodeURIComponent(id)}`),
   createAgent: (body) => request('POST', '/agents', body),
   updateAgent: (id, body) => request('PUT', `/agents/${encodeURIComponent(id)}`, body),
   reloadRoster: () => request('POST', '/roster/reload'),

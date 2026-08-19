@@ -71,6 +71,7 @@ log, and an address bar is one that gets noticed when it changes.
 | GET | `/health` | Uptime, roster, session counts, pending approvals, resolved runtimes |
 | GET | `/agents` | The roster as data — soul metadata, avatar palette, resolved provider/model, memory counts, activity |
 | POST | `/agents` | Create an agent: writes a soul file and reloads the roster |
+| GET | `/agents/:id` | One agent in full: complete instructions, the raw soul markdown, its pins |
 | PUT | `/agents/:id` | Edit a soul, by field or as raw markdown |
 | POST | `/roster/reload` | Re-read the agents directory and the configured default soul |
 | GET | `/sessions?agent=&limit=` | Durable sessions, newest first. `limit` bounds the result — the table grows for the life of an install |
@@ -103,6 +104,18 @@ ignored for the same reason).
 `GET /catalog/tools` is deliberately absent until tool packs exist
 ([06](../../docs/roadmap/06-tool-packs.md)); today it could only list the
 three kernel tools.
+
+### The listing summarises; the single read does not
+
+`GET /agents` carries `persona`: the agent's first instruction line, trimmed
+to fit a table row. `GET /agents/:id` carries `agent.instructions` in full,
+plus `soul` — the file's own bytes, which is what `PUT /agents/:id` accepts
+back as its `soul` field.
+
+The distinction matters to anything that edits. An editor seeded from the
+roster's `persona` and saved would write that snippet back as the whole
+persona, permanently truncating the agent to a fragment of its first sentence
+the first time someone changed its name. Read the agent before editing it.
 
 ### Activity, for a roster that shows who is busy
 

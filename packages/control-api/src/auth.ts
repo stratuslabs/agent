@@ -246,6 +246,8 @@ export type Authenticator = ReturnType<typeof createAuthenticator>;
  * another origin. It reintroduces nothing: the port still has to match, so a
  * hostile page on another port of localhost is still rejected.
  */
+export const isWildcardHost = (host: string): boolean => host === '0.0.0.0' || host === '::';
+
 export const allowedOrigins = (host: string, port: number): Set<string> => {
   // Bracketed for IPv6, or the address's own colons run into the port and the
   // set contains a string no browser will ever send.
@@ -272,12 +274,23 @@ export const allowedOrigins = (host: string, port: number): Set<string> => {
  * cross-origin form post and WebSocket handshake sends one — so requiring it
  * on writes costs nothing real and closes the case where a client that omits
  * it would otherwise be trusted to change state.
+ *
+ * `sameOriginHost` is the request's own `Host` header, passed only for a
+ * wildcard bind. `0.0.0.0` and `::` are not addresses a browser ever reaches
+ * the daemon on, so the fixed set cannot name the LAN or Tailscale address
+ * the operator opened the wildcard *for*: every write and every WebSocket
+ * upgrade from it would be refused while the page itself loaded fine.
+ * Matching the request's own `Host` is a true same-origin check and forges
+ * nothing — a browser sets `Host` from the address it connected to, never
+ * from the page making the request, so a page on another port or another
+ * host still fails it, exactly as before.
  */
 export const originAllowed = (
   principal: Principal,
   origin: string | undefined,
   stateChanging: boolean,
   origins: Set<string>,
+  sameOriginHost?: string,
 ): boolean => {
   if (principal.kind === 'bearer') {
     return true;
@@ -285,5 +298,12 @@ export const originAllowed = (
   if (origin === undefined) {
     return !stateChanging;
   }
-  return origins.has(origin);
+  if (origins.has(origin)) {
+    return true;
+  }
+  // Host names are case-insensitive; browsers send both headers lowercased,
+  // but nothing guarantees it of the `Host` an operator's proxy rewrote.
+  return sameOriginHost !== undefined
+    && sameOriginHost.length > 0
+    && origin.toLowerCase() === `http://${sameOriginHost.toLowerCase()}`;
 };

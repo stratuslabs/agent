@@ -75,6 +75,16 @@ export const renderAgent = (agentId, initialSessionId) => {
     sending: false,
     error: undefined,
     saved: undefined,
+    /**
+     * The agent's full soul, fetched for editing.
+     *
+     * The roster carries `persona`: the first line of the instructions,
+     * trimmed to fit a table row. Seeding the editor from it and saving
+     * would write that snippet back as the whole persona, so the settings
+     * tab waits for the real thing.
+     */
+    soul: undefined,
+    soulError: undefined,
   };
 
   const node = el('div', { class: 'main' });
@@ -157,17 +167,50 @@ export const renderAgent = (agentId, initialSessionId) => {
       update();
       return;
     }
+    // Which conversation this fetch is for. Opening B while A is still in
+    // flight would otherwise land A's history under B's selector, and the
+    // next message typed would go to B while showing A — so a response that
+    // arrives after the selection moved on is dropped.
+    const requested = state.sessionId;
+    let messages;
     try {
-      const { session } = await api.session(state.sessionId);
-      state.messages = session.messages ?? [];
+      const { session } = await api.session(requested);
+      messages = session.messages ?? [];
     } catch {
       // Raced with a turn that has not saved yet, or a session removed out
       // from under the page. An empty transcript is the honest render.
-      state.messages = [];
+      messages = [];
     }
+    if (state.sessionId !== requested) {
+      return;
+    }
+    state.messages = messages;
     state.streaming = '';
     state.toolLines = [];
     paintTranscript();
+    update();
+  };
+
+  /**
+   * The full soul, read once and only when the settings tab needs it.
+   *
+   * Guarded rather than awaited from the render, because `update()` runs on
+   * every event from every agent and an unguarded fetch there would open one
+   * request per event.
+   */
+  let soulLoading = false;
+  const loadSoul = async () => {
+    if (soulLoading || state.soul) {
+      return;
+    }
+    soulLoading = true;
+    try {
+      state.soul = await api.agent(agentId);
+    } catch (error) {
+      state.soulError = `Could not read this agent's soul file: ${error.message}`;
+    } finally {
+      soulLoading = false;
+    }
     update();
   };
 
@@ -354,11 +397,12 @@ export const renderAgent = (agentId, initialSessionId) => {
    */
   let settingsForm;
 
-  const buildSettingsForm = (current) => {
-    const name = el('input', { value: current.name });
-    const instructions = el('textarea', { rows: 8, value: current.persona ?? '' });
-    const provider = el('input', { value: current.provider ?? '', placeholder: 'follows your setup' });
-    const model = el('input', { value: current.model ?? '', placeholder: 'follows your setup' });
+  const buildSettingsForm = (current, soul) => {
+    const name = el('input', { value: soul.agent?.name ?? current.name });
+    // The stored instructions in full, never the roster's one-line snippet.
+    const instructions = el('textarea', { rows: 8, value: soul.agent?.instructions ?? '' });
+    const provider = el('input', { value: soul.provider ?? '', placeholder: 'follows your setup' });
+    const model = el('input', { value: soul.model ?? '', placeholder: 'follows your setup' });
 
     const save = async () => {
       state.saved = undefined;
@@ -392,7 +436,7 @@ export const renderAgent = (agentId, initialSessionId) => {
       el('p', { class: 'field-note' }, 'An id keys sessions, memory, and credentials, so it cannot be changed in place.'),
       el('label', {}, 'Persona'),
       instructions,
-      el('p', { class: 'field-note' }, current.soulPath ? `Soul file: ${current.soulPath}` : ''),
+      el('p', { class: 'field-note' }, soul.soulPath ? `Soul file: ${soul.soulPath}` : ''),
       notice,
       el('div', { class: 'actions' }, el('button', { class: 'primary', onClick: () => void save() }, 'Save')),
     );
@@ -416,7 +460,14 @@ export const renderAgent = (agentId, initialSessionId) => {
     if (current.builtIn) {
       return el('p', { class: 'empty' }, 'The built-in agent has no soul file to edit. Create your own agent to customise one.');
     }
-    settingsForm ??= buildSettingsForm(current);
+    if (state.soulError) {
+      return el('p', { class: 'empty' }, state.soulError);
+    }
+    if (!state.soul) {
+      void loadSoul();
+      return el('p', { class: 'empty' }, 'Reading the soul file…');
+    }
+    settingsForm ??= buildSettingsForm(current, state.soul);
     settingsForm.refreshNotice();
     return settingsForm.node;
   };

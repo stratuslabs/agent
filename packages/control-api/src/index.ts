@@ -9,6 +9,7 @@ import { WebSocketServer } from 'ws';
 
 import {
   allowedOrigins,
+  isWildcardHost,
   createAuthenticator,
   ensureGatewayToken,
   originAllowed,
@@ -126,6 +127,11 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
   let url: string | undefined;
   let token: string | undefined;
   let origins = new Set<string>();
+  // Only for a wildcard bind: the address a browser reaches this daemon on is
+  // not knowable when it binds, so the request's own Host answers for it.
+  const wildcardBind = isWildcardHost(host);
+  const sameOriginHost = (request: IncomingMessage): string | undefined =>
+    (wildcardBind ? request.headers.host : undefined);
   let startedAt = Date.now();
   let ui: DashboardAssets | undefined;
 
@@ -163,7 +169,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
           'This endpoint needs the gateway token itself. A browser session cannot mint another session.',
         );
       }
-      if (!originAllowed(principal, request.headers.origin, isStateChanging(method), origins)) {
+      if (!originAllowed(principal, request.headers.origin, isStateChanging(method), origins, sameOriginHost(request))) {
         throw new ApiError(
           403,
           'origin_not_allowed',
@@ -253,7 +259,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
     // refused: WebSockets get no CORS protection at all, and every browser
     // sends an Origin on the handshake — so the only callers a missing one
     // can represent here are programmatic, and those use a bearer token.
-    if (!originAllowed(principal, request.headers.origin, true, origins)) {
+    if (!originAllowed(principal, request.headers.origin, true, origins, sameOriginHost(request))) {
       refuseUpgrade(socket, 403, 'Forbidden');
       return;
     }

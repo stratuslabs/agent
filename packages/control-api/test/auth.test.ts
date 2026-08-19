@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { request as httpRequest } from 'node:http';
 
 import { allowedOrigins, ensureGatewayToken } from '../src/auth.ts';
 import { authority } from '../src/index.ts';
@@ -26,6 +27,29 @@ const signIn = async (harness: Awaited<ReturnType<typeof startApi>>): Promise<st
   return setCookie.split(';')[0] ?? '';
 };
 
+/**
+ * A POST with headers `fetch` will not let a caller set — `Host` above all,
+ * which is exactly what the wildcard-bind rule turns on.
+ */
+const rawPost = (
+  port: number,
+  pathname: string,
+  headers: Record<string, string>,
+): Promise<{ status: number; body: string }> =>
+  new Promise((resolve, reject) => {
+    const request = httpRequest(
+      { host: '127.0.0.1', port, path: pathname, method: 'POST', headers: { ...headers, 'content-length': '0' } },
+      (response) => {
+        let body = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => { body += chunk; });
+        response.on('end', () => resolve({ status: response.statusCode ?? 0, body }));
+      },
+    );
+    request.on('error', reject);
+    request.end();
+  });
+
 test('every route and the WS upgrade reject a request with no credential', async () => {
   const harness = await startApi();
   try {
@@ -33,6 +57,7 @@ test('every route and the WS upgrade reject a request with no credential', async
       ['GET', '/api/v1/health'],
       ['GET', '/api/v1/agents'],
       ['POST', '/api/v1/agents'],
+      ['GET', '/api/v1/agents/ava'],
       ['PUT', '/api/v1/agents/ava'],
       ['GET', '/api/v1/sessions'],
       ['GET', '/api/v1/sessions/s-1'],
@@ -264,4 +289,66 @@ test('an empty token file left by an interrupted start is replaced', async () =>
   assert.ok(token.length > 0, 'a usable token was generated');
   assert.equal((await readFile(tokenPath, 'utf8')).trim(), token);
   assert.equal((await stat(tokenPath)).mode & 0o777, 0o600);
+});
+
+test('a wildcard bind accepts the address it was opened for', async () => {
+  // `--host 0.0.0.0` is the documented way to reach the dashboard from
+  // another machine, and `0.0.0.0` is not an address any browser sends: the
+  // page would load over the LAN or Tailscale address and then every write
+  // and the whole event stream would 403, because the fixed origin set can
+  // only name the wildcard literal and loopback.
+  const harness = await startApi({ options: { host: '0.0.0.0' } });
+  try {
+    const cookie = await signIn(harness);
+    const port = Number(new URL(harness.url).port);
+    const lan = `192.0.2.10:${port}`;
+
+    // A browser on the LAN address: `Host` is what it connected to, `Origin`
+    // is the page it connected from, and they agree.
+    const sameOrigin = await rawPost(port, '/api/v1/roster/reload', {
+      cookie,
+      host: lan,
+      origin: `http://${lan}`,
+    });
+    assert.equal(sameOrigin.status, 200);
+
+    // A page on another port of that same address is still refused: the
+    // check that `SameSite` cannot make survives the wildcard.
+    const otherPort = await rawPost(port, '/api/v1/roster/reload', {
+      cookie,
+      host: lan,
+      origin: 'http://192.0.2.10:9999',
+    });
+    assert.equal(otherPort.status, 403);
+    assert.equal(JSON.parse(otherPort.body).error.code, 'origin_not_allowed');
+
+    // And the event stream, which has no CORS to fall back on.
+    const wsUrl = `ws://127.0.0.1:${port}/api/v1/events`;
+    const stream = await openSocket(wsUrl, { headers: { cookie, host: lan, origin: `http://${lan}` } });
+    assert.equal(stream.opened, true);
+    stream.socket.close();
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('a loopback bind does not trust a Host header', async () => {
+  // The other half of the rule: matching the request's own Host is a
+  // concession to a bind whose address is unknowable, not a general
+  // loosening. A daemon bound to 127.0.0.1 knows exactly what it answers to.
+  const harness = await startApi();
+  try {
+    const cookie = await signIn(harness);
+    const port = Number(new URL(harness.url).port);
+
+    const spoofed = await rawPost(port, '/api/v1/roster/reload', {
+      cookie,
+      host: `192.0.2.10:${port}`,
+      origin: `http://192.0.2.10:${port}`,
+    });
+    assert.equal(spoofed.status, 403);
+    assert.equal(JSON.parse(spoofed.body).error.code, 'origin_not_allowed');
+  } finally {
+    await harness.stop();
+  }
 });
