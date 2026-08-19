@@ -36,6 +36,15 @@ it. Install it next to the CLI and `stratus serve` picks it up on its own:
 
 - `@stratusagent/channels` — the channel contract itself: inbound messages, streaming outbound connections, session keys. It arrives as a dependency of any channel package, and it is what you build a new transport against.
 
+- `@stratusagent/control-api` — the authenticated HTTP + WebSocket API over a running daemon: the roster, sessions, live events, pending approvals, and the management endpoints that create agents and store credentials. Every non-terminal surface talks to this and nothing else. Installing it is how you say you want a port open — `stratus serve` then binds `127.0.0.1:4123`.
+
+- `@stratusagent/dashboard` — the web UI on top of that API: roster, live chat with streaming replies and tool status, an approvals panel, and settings. Separate from the API because the API's other consumers — a management app, a headless VM — want it without a web page. No build step: what ships in `ui/` is hand-written HTML, CSS, and ES modules.
+
+  ```bash
+  npm install -g @stratusagent/control-api @stratusagent/dashboard
+  stratus dashboard
+  ```
+
 Without a channel installed, everything else works exactly as before: the
 daemon logs an install hint for any agent that has channel credentials stored
 and serves the rest of the roster normally.
@@ -54,7 +63,8 @@ Today it is useful for:
 - defining agents as soul files — markdown personas you run with `stratus run --soul ./ava.md "hi"`
 - gating tool execution with an approval policy — at a terminal (`--approvals always|ask|never`), or unattended in `stratus serve`, where a gated call is either refused (`--approvals headless`) or parked and asked in Slack with Allow / Always allow / Deny buttons (`--approvals remote`); see `packages/cli/README.md`
 - continuing an existing session with follow-up user messages via `runner.resume()`
-- opening a tiny local dashboard for browser-based smoke testing
+- driving the whole fleet over one authenticated API (`@stratusagent/control-api`) — the roster, durable sessions, a live event stream, pending approvals, and agent/credential/config management, over HTTP and WebSocket on loopback; `stratus agents --gateway <url>` is the first command that consumes it remotely
+- talking to your agents in a browser (`stratus dashboard`) — the roster with live activity, streaming chat with tool status lines, an approvals panel that resolves calls parked from anywhere, and settings for sign-ins, models, and Slack
 - seeing how provider output becomes session events
 
 It is not yet a full production agent platform. The v1 kernel deliberately left durable storage, remote executors, and retries/queues out of scope (see `docs/architecture/stratus-v1.md`); the gateway has since brought durable sessions in, and remote executors and retries/queues are still open.
@@ -338,7 +348,9 @@ packages/
   channel-slack/
   channels/
   cli/
+  control-api/
   core/
+  dashboard/
   executor-local/
   executors/
   gateway/
@@ -364,7 +376,7 @@ pnpm test
 
 ## Where this is headed
 
-The kernel stays small and understandable; capability grows as optional packages around it. The always-on runtime (`stratus serve`) is here — it hosts a roster of agents with durable sessions and speaks through channel packages, Slack first, each agent as its own bot identity. What is still ahead is one control API that every surface — CLI, web dashboard, macOS management app — consumes as a thin client, plus more channels behind the same contract.
+The kernel stays small and understandable; capability grows as optional packages around it. The always-on runtime (`stratus serve`) is here — it hosts a roster of agents with durable sessions and speaks through channel packages, Slack first, each agent as its own bot identity. So are the control API every surface consumes as a thin client and the web dashboard on top of it. What is still ahead is reusable tool packs, the macOS management app, and more channels behind the same contract.
 
 - **Vision:** [`docs/architecture/stratus-v2.md`](docs/architecture/stratus-v2.md) — the layered architecture, key decisions, and how the deployment targets (local machines, VMs, hosted) collapse into one runtime.
 - **Roadmap:** [`docs/roadmap/`](docs/roadmap/README.md) — ordered steps with a one-page spec each, from the gateway daemon to productization.

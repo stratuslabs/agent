@@ -4,6 +4,76 @@
 
 The gateway exposes one HTTP + WebSocket API — the only doorway any surface uses — and the placeholder dashboard becomes a real chat and monitoring UI on top of it.
 
+## Status
+
+**Shipped (#62).** One authenticated HTTP + WS surface, and a dashboard on top
+of it. The shape changed in three places worth stating, because each was a
+choice this spec left open or made differently.
+
+**Two optional packages, not a server inside the gateway.** The spec puts the
+HTTP + WS server in `@stratusagent/gateway`; it landed as
+`@stratusagent/control-api` and `@stratusagent/dashboard`, both optional peers
+of the CLI in the same way `@stratusagent/channel-slack` is. That is what lets
+the API take a real `ws` dependency without weighting the always-on core, and
+it settles the naming tension this spec creates: 07 is not a chat app and 08's
+headless profile wants the API with no UI at all, so "API without UI" is *not
+installing a package*, rather than a `--with-ui` flag on a server that always
+contains one. Installing `@stratusagent/control-api` is the opt-in; `--no-api`
+and `api.enabled: false` turn it off. `@stratusagent/control-api` holds
+everything both the dashboard and the macOS app need; `@stratusagent/dashboard`
+holds only assets.
+
+- `/api/v1/...`, deciding the open question in the design sketch in favour of a
+  path over a header: 07 pins against it, and a path is visible in a curl, a
+  proxy log, and an address bar.
+- **The shared rules moved to `@stratusagent/state` first**, in a behaviour-free
+  extraction whose proof is that the existing CLI tests pass untouched:
+  `applySoulPins` (out of the gateway, which re-exports it), `servedRuntimes`,
+  `listAgentSummaries`, `collectAvailableModels`, `verifyProviderKey`,
+  `claimSoulFile`, `declaredAgentIds`, `saveConfigFile`. The API answers the
+  same questions `stratus agents`, `stratus setup`, and `stratus serve` answer,
+  and this repository's most repeated defect is a second copy of a rule that
+  already has one implementation.
+- **Three gateway seams**, and no more: `dispatch` takes a `turnId` and
+  `activeTurnId(sessionId)` reads it (see the gap below), `pendingApprovals()`
+  lists the parked set as data rather than settlers, and `reloadRoster()` picks
+  up souls added or removed since start — with `AgentRegistry.unregister` in
+  the kernel to make removal real.
+
+**Health is computed, never probed.** The spec asks for "provider
+reachability"; `GET /health` reports uptime, the roster the daemon is actually
+serving, session counts from a grouped `COUNT(*)`, pending approvals, and the
+resolved runtimes with the *source* of each credential — all from what the
+daemon already knows. A monitoring view polls this endpoint, and a live
+provider call per poll would spend the operator's rate limit to report what
+resolution already knows. Live reachability, if it is ever wanted, goes behind
+`?probe=1`.
+
+**`GET /catalog/tools` is deferred to [06](./06-tool-packs.md)**, where it is
+now written into the scope and acceptance criteria rather than left as a
+sentence here. Today it could only list the three kernel tools, and it needs a
+`gateway.tools()` accessor — an endpoint shaped against no real tool packs
+would be shaped by guesses. Everything else in the management group shipped.
+
+**The Slack attribution gap is unblocked, not closed.** The envelope and the
+turn ids exist now, so the fix described below is buildable; `packages/channel-slack`
+has not been migrated onto them and still queues renderers at intake. That is a
+follow-up this step enables and does not own, and it is tracked in
+[04](./04-agent-sdk-bridge.md) § Follow-ups this step named but does not own,
+beside the adapter's other two.
+
+**Verified end to end** against a real daemon from a source checkout, on the
+demo provider: the roster renders, opening an agent lists its sessions, and
+sending a message streams deltas and tool status lines live in the browser.
+
+The single-event-stream criterion is proven in pieces rather than in one live
+run. `packages/control-api` tests that an approval parked through the gateway
+appears in `GET /approvals` and that resolving it there settles the turn;
+`packages/channel-slack` already tests that a request settled by something
+other than a Slack click has its buttons retracted. Nothing exercises the
+whole round trip against a real workspace, which would need a bound Slack app
+and so cannot run in CI.
+
 ## Why now
 
 Phase 1–2 made the fleet live and trustworthy, but the only ways in are Slack and a local TTY. The control API is what turns the gateway into a platform: the web dashboard consumes it now, the macOS app (07) consumes it next, and the hosted deployment profile (08) is largely *built* on it. Today's dashboard (`startDashboardServer` in `packages/cli/src/index.ts`) is an unconnected smoke-test page — good scaffolding, no runtime access.
@@ -56,7 +126,11 @@ its thread. Both are attribution problems, and `{ sessionId, turnId, event }`
 is what resolves them — worth landing the envelope before the dashboard needs
 it, since a surface already does.
 
-## Open questions
+## Open questions, as settled
 
-- Does the gateway serve the dashboard always, or behind a `--with-ui` flag for headless VM deployments? (Leaning: always; it's static files.)
-- Session write access from the dashboard vs. read-mostly monitoring in v1 — full chat is in scope above, but if it drags, monitoring + approvals alone still unblock 07.
+- *Does the gateway serve the dashboard always, or behind a `--with-ui` flag for
+  headless VM deployments?* Neither: the UI is a package. A daemon serves it if
+  `@stratusagent/dashboard` resolves, which makes the headless profile an
+  install list rather than a flag.
+- *Session write access from the dashboard vs. read-mostly monitoring in v1?*
+  Full chat shipped, so this did not have to be traded away.

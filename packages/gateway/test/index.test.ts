@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -3018,4 +3018,166 @@ test('a message that beats the sweep keeps its turn, and the stale failure with 
   after.close();
   assert.equal(session?.status, 'completed', 'the live turn owns the session, not the sweep');
   assert.equal(session?.lastError, undefined);
+});
+
+// ---- control-API seams ----------------------------------------------------
+
+test('a turn id names the turn that is actually running, not the one that queued', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  // Observed from inside the provider call, which runs within the turn: what
+  // the gateway reports there is exactly what an event stamped at that moment
+  // would carry.
+  const seen: Array<{ message: string; turnId: string | undefined }> = [];
+  let gateway: ReturnType<typeof createGateway> | undefined;
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+    const lastUser = [...body.messages].reverse().find((message) => message.role === 'user');
+    seen.push({ message: lastUser?.content ?? '', turnId: gateway?.activeTurnId('s-1') });
+    return openAiText('ok');
+  }) as typeof fetch;
+
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+
+  // Both queued before either is awaited: single-flight runs them in order,
+  // and the second must not claim the stream while the first is still going.
+  const first = gateway.dispatch({ sessionId: 's-1', agentId: 'ava', userMessage: 'first', turnId: 'turn-a' });
+  const second = gateway.dispatch({ sessionId: 's-1', agentId: 'ava', userMessage: 'second', turnId: 'turn-b' });
+  await settles(Promise.all([first, second]), 'both turns');
+
+  assert.deepEqual(seen, [
+    { message: 'first', turnId: 'turn-a' },
+    { message: 'second', turnId: 'turn-b' },
+  ]);
+  // Cleared once the turn is over: a later event for this session belongs to
+  // no turn, and saying otherwise would attribute it to whoever ran last.
+  assert.equal(gateway.activeTurnId('s-1'), undefined);
+
+  // A caller that named no turn leaves nothing behind either.
+  await gateway.dispatch({ sessionId: 's-2', agentId: 'ava', userMessage: 'anonymous' });
+  assert.equal(gateway.activeTurnId('s-2'), undefined);
+
+  await gateway.stop();
+});
+
+test('pending approvals are listable, and the listing agrees with the announcement', async () => {
+  const { gateway, transport } = await brokerHarness();
+
+  // Nothing parked yet: a surface that connects to an idle daemon sees an
+  // empty list, not a missing method.
+  assert.deepEqual(gateway.pendingApprovals(), []);
+
+  const requested = nextEvent(gateway.bus, 'tool.approval-requested');
+  const answer = transport.request(parkedCall('sess-list'));
+  const request = await settles(requested, 'the approval request');
+
+  const parked = gateway.pendingApprovals();
+  assert.equal(parked.length, 1);
+  const only = parked[0];
+  assert.equal(only?.requestId, request.requestId);
+  assert.equal(only?.sessionId, 'sess-list');
+  assert.equal(only?.agentId, 'ava');
+  assert.equal(only?.call.toolName, 'shell.run');
+  assert.equal(only?.risk, 'gated');
+  assert.equal(only?.metadata?.slackChannel, 'C1');
+  // The deadline is computed once and shared. A listing that disagreed with
+  // the announcing event about when a request expires would be worse than a
+  // listing that said nothing at all.
+  assert.equal(only?.expiresAt, request.expiresAt);
+  assert.ok(only?.parkedAt && Date.parse(only.parkedAt) > 0);
+
+  assert.equal(gateway.resolveApproval({ requestId: request.requestId, answer: 'once' }), true);
+  assert.equal(await settles(answer, 'the parked call'), 'once');
+
+  // Settled requests leave the list, so a panel rendered from it retracts
+  // buttons instead of showing a decision that was already made.
+  assert.deepEqual(gateway.pendingApprovals(), []);
+
+  await gateway.stop();
+});
+
+test('reloading the roster picks up a new soul and forgets a deleted one', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+  assert.deepEqual(gateway.agents().map((agent) => agent.id).sort(), ['ava', 'stratus']);
+
+  await writeSoul(home, 'bea.md', '---\nname: Bea\nid: bea\n---\n\nYou are Bea.\n');
+  await rm(path.join(home, '.stratus', 'agents', 'ava.md'));
+
+  const roster = await gateway.reloadRoster();
+
+  assert.deepEqual(roster.map((agent) => agent.id).sort(), ['bea', 'stratus']);
+  assert.deepEqual(gateway.agents().map((agent) => agent.id).sort(), ['bea', 'stratus']);
+
+  // Forgotten means undispatchable. Re-registering the survivors over a map
+  // nothing deletes from would leave Ava addressable — by id, and from every
+  // channel — for the rest of this daemon's life.
+  await assert.rejects(
+    gateway.dispatch({ sessionId: 'gone-1', agentId: 'ava', userMessage: 'still there?' }),
+    /Agent not found: ava/,
+  );
+
+  await gateway.stop();
+});
+
+test('per-agent activity counts a parked turn as live, and listings can be bounded', async () => {
+  const home = await newHome();
+  const store = new SqliteSessionStore(path.join(home, 'sessions.db'));
+  const session = (id: string, agentId: string, status: 'completed' | 'pending_approval') => ({
+    id,
+    agent: { id: agentId, name: agentId },
+    status,
+    messages: [],
+  });
+
+  await store.create(session('a-1', 'ava', 'completed'));
+  await store.create(session('a-2', 'ava', 'pending_approval'));
+  await store.create(session('b-1', 'bea', 'completed'));
+
+  const activity = store.lastActivityByAgent();
+  // A turn parked on a human has not saved since it parked, so a
+  // last-activity timestamp alone would read it as idle — which is exactly
+  // when someone wants to see the agent lit.
+  assert.equal(activity.ava?.activeSessions, 1);
+  assert.equal(activity.bea?.activeSessions, 0);
+  assert.ok(activity.ava?.lastActiveAt && Date.parse(activity.ava.lastActiveAt) > 0);
+  // A timestamp and a count, never a verdict: what counts as "recent" is the
+  // caller's decision, so nothing here is compared against a window.
+  assert.equal(activity.nobody, undefined);
+
+  assert.equal(store.list().length, 3);
+  assert.equal(store.list(undefined, 2).length, 2);
+  assert.equal(store.list('ava').length, 2);
+  assert.equal(store.list('ava', 1).length, 1);
+  // The table grows for the life of an install; an unbounded default is what
+  // the limit exists to opt out of, not a value to be clamped silently.
+  assert.equal(store.list(undefined, 0).length, 0);
+  store.close();
+});
+
+test('session counts come from the database, not from listing every session', async () => {
+  const home = await newHome();
+  const store = new SqliteSessionStore(path.join(home, 'sessions.db'));
+  for (const [id, status] of [
+    ['a', 'completed'], ['b', 'completed'], ['c', 'running'], ['d', 'pending_approval'],
+  ] as const) {
+    await store.create({ id, agent: { id: 'ava', name: 'Ava' }, status, messages: [] });
+  }
+
+  assert.deepEqual(store.countByStatus(), { completed: 2, running: 1, pending_approval: 1 });
+  // The point is that this does not deserialize a conversation body per row —
+  // a health endpoint is polled, and the table grows for the life of an
+  // install. An empty store answers with an empty map, not a zeroed one.
+  store.close();
+
+  const empty = new SqliteSessionStore(path.join(home, 'empty.db'));
+  assert.deepEqual(empty.countByStatus(), {});
+  empty.close();
 });

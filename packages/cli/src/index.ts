@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { appendFile, chmod, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,6 +13,7 @@ import {
   type AgentDefinition,
   type AgentMemoryStore,
   type ApprovalPolicy,
+  type AvatarTheme,
   type JsonObject,
   type JsonValue,
   type MemoryEntry,
@@ -28,7 +28,7 @@ import {
 // Type-only: the gateway itself is imported lazily (it pulls in node:sqlite
 // and the whole runner stack), and a serve-only policy seam must not make
 // `stratus run` pay for it.
-import type { ApprovalTransport } from '@stratusagent/gateway';
+import type { ApprovalTransport, GatewayChannelAdapter } from '@stratusagent/gateway';
 import { createPermissionPolicy, type PermissionDecision } from '@stratusagent/permissions';
 import {
   createOpenAICompatibleProvider,
@@ -57,10 +57,13 @@ import {
 import {
   agentsDirPath,
   apiKeyEnvNameFor,
+  claimSoulFile,
+  collectAvailableModels as collectModels,
   createDemoTool,
   createFileMemoryStore,
   createRuntimeProvider,
   credentialsPath,
+  defaultApiKeyEnvName,
   DEFAULT_ANTHROPIC_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
   DEFAULT_OPENAI_MODEL,
@@ -70,6 +73,7 @@ import {
   loadChannelCredentials,
   loadCredentials,
   loadRosterSouls,
+  listAgentSummaries,
   loadSoulFile,
   memoryFilePath,
   migrateLegacyMemory,
@@ -87,10 +91,18 @@ import {
   resolveConfigLocation,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
   saveChannelCredentials,
+  saveConfigFile,
   saveCredentials,
+  servedRuntimes,
+  verifyProviderKey,
   stratusHomePath,
   withLegacyDefaultMemories,
+  gatewayInfoPath,
+  gatewayTokenPath,
+  type AgentSummary,
+  type ApiConfig,
   type ApprovalsConfig,
+  type CatalogModel,
   type ChannelCredentials,
   type CredentialProviderName,
   type CredentialsFile,
@@ -208,7 +220,17 @@ export interface ParsedRunCommand {
 export interface ParsedDashboardCommand {
   command: 'dashboard';
   port?: number;
-  host: string;
+  /**
+   * Present only when `--host` was actually given.
+   *
+   * A defaulted string here would be indistinguishable from an explicit
+   * `--host 127.0.0.1`, and the two mean opposite things when a trusted
+   * config says `api.host: "0.0.0.0"`: absent means "let the config decide",
+   * while explicit means "bind loopback, whatever the config says". Collapsing
+   * them exposed the API on every interface to an operator who had just asked
+   * for the opposite.
+   */
+  host?: string;
   openBrowser: boolean;
 }
 
@@ -240,6 +262,14 @@ export interface ParsedChatCommand {
 export interface ParsedAgentsCommand {
   command: 'agents';
   format: 'text' | 'json';
+  /**
+   * Ask a running gateway instead of resolving locally. The first
+   * remote-consuming command: the same listing, rendered from the control
+   * API's answer rather than from this machine's files.
+   */
+  gateway?: string;
+  /** Bearer token override, for a gateway whose token file is not local. */
+  token?: string;
 }
 
 export interface ParsedDoctorCommand {
@@ -280,6 +310,12 @@ export interface ParsedServeCommand {
   events: boolean;
   /** Write the structured log to ~/.stratus/logs. Defaults to true. */
   logToFile?: boolean;
+  /** Serve the control API. Defaults to true when the package is installed. */
+  api?: boolean;
+  /** Overrides `api.port` in the config file. */
+  apiPort?: number;
+  /** Overrides `api.host` in the config file. */
+  apiHost?: string;
 }
 
 export interface ParsedHelpCommand {
@@ -301,18 +337,8 @@ export type ParsedCommand =
 
 type CliConfigFile = StratusConfigFile;
 
-export interface DashboardServerHandle {
-  url: string;
-  close: () => Promise<void>;
-}
+export const CLI_VERSION = '0.5.0';
 
-// Kept in step with this package's own version by a test, because it is a
-// second copy of a number nobody re-reads: it is drawn in the setup header
-// and served from the dashboard's /api/status, so drift here misreports the
-// running build rather than failing anything.
-export const CLI_VERSION = '0.4.0';
-
-const DEFAULT_DASHBOARD_HOST = '127.0.0.1';
 const DASHBOARD_TITLE = 'Stratus Agent Dashboard';
 
 /**
@@ -368,6 +394,7 @@ Usage:
   STRATUS_PROVIDER=openai OPENAI_API_KEY=... stratus run "Say hello"
   stratus run --config ./stratus.config.json --provider openai "Say hello"
   stratus agents
+  stratus agents --gateway http://127.0.0.1:4123
   stratus doctor
   stratus service install
   stratus service status
@@ -391,7 +418,10 @@ Commands:
                    (--idle-timeout <seconds>, --approvals <headless|remote>,
                    --no-events, --no-log-file, --config <path>); everything it
                    says is also written to ~/.stratus/logs, which
-                   "stratus logs" reads
+                   "stratus logs" reads. With @stratusagent/control-api
+                   installed it also serves the HTTP + WebSocket control API
+                   on 127.0.0.1:4123 (--no-api, --api-host, --api-port, or
+                   the config file's "api" block)
   service          Keep stratusd running under launchd (macOS) or systemd
                    (Linux): install, uninstall, status, start, stop.
                    Installing starts it now and at every login
@@ -402,11 +432,16 @@ Commands:
                    --format json for the raw records
   agent new        Create an agent identity (generates a human-ish name + avatar theme)
   agents           List your agents: who they are, where their souls live, what
-                   they run on, what they remember (also: stratus agent list)
+                   they run on, what they remember (also: stratus agent list).
+                   --gateway <url> asks a running daemon instead of resolving
+                   locally, authenticating with ~/.stratus/gateway-token
+                   (override with --token or STRATUS_GATEWAY_TOKEN)
   doctor           Show what a run would use right now — provider, model, soul —
                    and which file or environment variable decided each, then
                    flag anything that would surprise you (--format json)
-  dashboard        Start the local Stratus Agent dashboard and open it in your browser
+  dashboard        Open the web dashboard: finds a running daemon (or starts one),
+                   mints a single-use sign-in link, and opens your browser at it.
+                   Needs @stratusagent/control-api and @stratusagent/dashboard
   help             Show this help message
 
 Agent options:
@@ -429,9 +464,14 @@ Options:
                    gated call) or remote (ask in Slack). Default headless, or
                    the config file's "approvals.mode"
   --max-turns      Maximum provider turns per run (default: 8)
-  --port           Dashboard port, defaults to an open local port
-  --host           Dashboard host (default: 127.0.0.1)
+  --port           dashboard: port for a daemon it starts (default: 4123)
+  --host           dashboard: host for a daemon it starts (default: 127.0.0.1)
   --no-open        Do not open the browser automatically
+  --gateway        agents: read the roster from a running daemon's control API
+  --token          Bearer token for --gateway (default: ~/.stratus/gateway-token)
+  --no-api         serve: do not serve the control API
+  --api-host       serve: control API interface (default: 127.0.0.1)
+  --api-port       serve: control API port (default: 4123, 0 for any free port)
   --help, -h       Show this help message
 
 Config file:
@@ -488,7 +528,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
 
   if (command === 'dashboard') {
     let port: number | undefined;
-    let host = DEFAULT_DASHBOARD_HOST;
+    let host: string | undefined;
     let openBrowser = true;
 
     for (let index = 0; index < rest.length; index += 1) {
@@ -520,7 +560,12 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       throw new Error(`Unknown option: ${token}`);
     }
 
-    return { command: 'dashboard', ...(port !== undefined ? { port } : {}), host, openBrowser };
+    return {
+      command: 'dashboard',
+      ...(port !== undefined ? { port } : {}),
+      ...(host !== undefined ? { host } : {}),
+      openBrowser,
+    };
   }
 
   if (command === 'serve') {
@@ -562,6 +607,24 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       }
       if (token === '--no-log-file') {
         parsed.logToFile = false;
+        continue;
+      }
+      if (token === '--no-api') {
+        parsed.api = false;
+        continue;
+      }
+      if (token === '--api-port') {
+        const port = Number(readOptionValue(rest, index, '--api-port'));
+        if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+          throw new Error(`Invalid value for --api-port: ${rest[index + 1] ?? '(missing)'}`);
+        }
+        parsed.apiPort = port;
+        index += 1;
+        continue;
+      }
+      if (token === '--api-host') {
+        parsed.apiHost = readOptionValue(rest, index, '--api-host');
+        index += 1;
         continue;
       }
       throw new Error(`Unknown option: ${token}`);
@@ -634,15 +697,17 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
   if (command === 'agents' || (command === 'agent' && rest[0] === 'list')) {
     const agentsRest = command === 'agents' ? rest : rest.slice(1);
     let format: 'text' | 'json' = 'text';
+    let gateway: string | undefined;
+    let token: string | undefined;
     for (let index = 0; index < agentsRest.length; index += 1) {
-      const token = agentsRest[index];
-      if (!token) {
+      const argument = agentsRest[index];
+      if (!argument) {
         continue;
       }
-      if (token === '--help' || token === '-h') {
+      if (argument === '--help' || argument === '-h') {
         return { command: 'help' };
       }
-      if (token === '--format') {
+      if (argument === '--format') {
         const value = readOptionValue(agentsRest, index, '--format');
         if (value !== 'text' && value !== 'json') {
           throw new Error(`Unsupported format: ${value}`);
@@ -651,9 +716,27 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         index += 1;
         continue;
       }
-      throw new Error(`Unknown option: ${token}`);
+      if (argument === '--gateway') {
+        gateway = readOptionValue(agentsRest, index, '--gateway');
+        index += 1;
+        continue;
+      }
+      if (argument === '--token') {
+        token = readOptionValue(agentsRest, index, '--token');
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unknown option: ${argument}`);
     }
-    return { command: 'agents', format };
+    if (token !== undefined && gateway === undefined) {
+      throw new Error('--token only applies with --gateway.');
+    }
+    return {
+      command: 'agents',
+      format,
+      ...(gateway ? { gateway } : {}),
+      ...(token ? { token } : {}),
+    };
   }
 
   if (command === 'doctor') {
@@ -1549,123 +1632,6 @@ const formatRuntimeBanner = (runtime: RuntimeConfig): string => {
   return `Starting Stratus Agent local loop with provider=${runtime.provider} model=${runtime.model}${fallbackSuffix}${soulSuffix}`;
 };
 
-const escapeHtml = (value: string): string => value
-  .replaceAll('&', '&amp;')
-  .replaceAll('<', '&lt;')
-  .replaceAll('>', '&gt;')
-  .replaceAll('"', '&quot;');
-
-const renderDashboardHtml = (url: string): string => `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>${DASHBOARD_TITLE}</title>
-    <style>
-      :root { color-scheme: dark; }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-        background: radial-gradient(circle at top, #1f3a5f 0%, #0b1020 45%, #05070f 100%);
-        color: #f3f7ff;
-      }
-      main { max-width: 960px; margin: 0 auto; padding: 40px 20px 72px; }
-      .hero, .card { background: rgba(10, 16, 32, 0.74); border: 1px solid rgba(148, 163, 184, 0.2); border-radius: 20px; backdrop-filter: blur(12px); }
-      .hero { padding: 32px; margin-bottom: 20px; }
-      .eyebrow { display: inline-block; font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: #93c5fd; }
-      h1 { font-size: clamp(32px, 6vw, 56px); line-height: 1; margin: 14px 0 12px; }
-      p { color: #cbd5e1; line-height: 1.6; }
-      .grid { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
-      .card { padding: 24px; }
-      .stat { font-size: 28px; font-weight: 700; margin: 6px 0; }
-      code, pre, textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-      textarea {
-        width: 100%; min-height: 120px; border-radius: 14px; border: 1px solid rgba(148, 163, 184, 0.28);
-        background: rgba(15, 23, 42, 0.9); color: #e2e8f0; padding: 14px; resize: vertical;
-      }
-      button {
-        margin-top: 12px; border: 0; border-radius: 999px; padding: 12px 18px; font-weight: 700; cursor: pointer;
-        background: linear-gradient(135deg, #60a5fa, #22d3ee); color: #08111f;
-      }
-      pre {
-        margin: 14px 0 0; padding: 14px; border-radius: 14px; overflow: auto;
-        background: rgba(2, 6, 23, 0.9); border: 1px solid rgba(148, 163, 184, 0.2); color: #bfdbfe;
-      }
-      a { color: #7dd3fc; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <section class="hero">
-        <span class="eyebrow">Stratus Agent local dashboard</span>
-        <h1>Stratus Agent is up.</h1>
-        <p>A tiny dashboard for local testing. It confirms the CLI is reachable, gives you a quick action, and keeps the current repo intent visible.</p>
-        <p><strong>Local URL:</strong> <a href="${escapeHtml(url)}">${escapeHtml(url)}</a></p>
-      </section>
-      <section class="grid">
-        <article class="card">
-          <div class="eyebrow">Status</div>
-          <div class="stat">Ready</div>
-          <p>The local server is running with Node standard library primitives only.</p>
-        </article>
-        <article class="card">
-          <div class="eyebrow">About</div>
-          <div class="stat">Minimal by design</div>
-          <p>Use <code>stratus run</code> for the agent loop, or use the tester here to verify browser-to-local requests during development.</p>
-        </article>
-      </section>
-      <section class="card" style="margin-top:20px;">
-        <div class="eyebrow">Actionable test</div>
-        <h2 style="margin:12px 0 8px;">Echo tester</h2>
-        <p>Send a payload to the local dashboard API and inspect the response.</p>
-        <textarea id="payload">Hello from Stratus Agent dashboard</textarea>
-        <button id="send">POST /api/echo</button>
-        <pre id="result">Waiting for input…</pre>
-      </section>
-    </main>
-    <script>
-      const button = document.getElementById('send');
-      const payload = document.getElementById('payload');
-      const result = document.getElementById('result');
-      button.addEventListener('click', async () => {
-        result.textContent = 'Sending...';
-        try {
-          const response = await fetch('/api/echo', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ text: payload.value })
-          });
-          const data = await response.json();
-          result.textContent = JSON.stringify(data, null, 2);
-        } catch (error) {
-          result.textContent = String(error);
-        }
-      });
-    </script>
-  </body>
-</html>`;
-
-const readBody = async (request: IncomingMessage): Promise<string> => {
-  let data = '';
-  for await (const chunk of request) {
-    data += chunk.toString();
-  }
-  return data;
-};
-
-const sendJson = (response: ServerResponse, statusCode: number, payload: unknown): void => {
-  response.statusCode = statusCode;
-  response.setHeader('content-type', 'application/json; charset=utf-8');
-  response.end(JSON.stringify(payload, null, 2));
-};
-
-const sendHtml = (response: ServerResponse, html: string): void => {
-  response.statusCode = 200;
-  response.setHeader('content-type', 'text/html; charset=utf-8');
-  response.end(html);
-};
-
 export const openExternalUrl = async (url: string): Promise<void> => {
   const platform = process.platform;
   const command = platform === 'darwin' ? 'open' : platform === 'win32' ? 'cmd' : 'xdg-open';
@@ -1679,85 +1645,6 @@ export const openExternalUrl = async (url: string): Promise<void> => {
       resolve();
     });
   });
-};
-
-export const startDashboardServer = async (
-  options: { host: string; port?: number },
-): Promise<DashboardServerHandle> => {
-  const server = createServer(async (request, response) => {
-    const method = request.method ?? 'GET';
-    const requestUrl = new URL(request.url ?? '/', 'http://localhost');
-
-    if (method === 'GET' && requestUrl.pathname === '/') {
-      const address = server.address();
-      const port = typeof address === 'object' && address ? address.port : options.port ?? 0;
-      const host = typeof address === 'object' && address && address.address ? address.address : options.host;
-      sendHtml(response, renderDashboardHtml(`http://${host === '::' ? '127.0.0.1' : host}:${port}`));
-      return;
-    }
-
-    if (method === 'GET' && requestUrl.pathname === '/api/status') {
-      sendJson(response, 200, {
-        ok: true,
-        service: 'stratus-dashboard',
-        version: CLI_VERSION,
-        now: new Date().toISOString(),
-      });
-      return;
-    }
-
-    if (method === 'POST' && requestUrl.pathname === '/api/echo') {
-      const raw = await readBody(request);
-      let text = '';
-      if (raw.trim().length > 0) {
-        const payload = JSON.parse(raw) as { text?: unknown };
-        text = typeof payload.text === 'string' ? payload.text : '';
-      }
-      sendJson(response, 200, {
-        ok: true,
-        received: text,
-        uppercase: text.toUpperCase(),
-        length: text.length,
-      });
-      return;
-    }
-
-    sendJson(response, 404, { ok: false, error: 'Not found' });
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(options.port ?? 0, options.host, () => {
-      server.off('error', reject);
-      resolve();
-    });
-  });
-
-  const address = server.address();
-  if (!address || typeof address === 'string') {
-    throw new Error('Unable to determine dashboard server address.');
-  }
-
-  const host = address.address === '::' ? '127.0.0.1' : address.address;
-  const url = `http://${host}:${address.port}`;
-
-  return {
-    url,
-    close: async () => {
-      if (!server.listening) {
-        return;
-      }
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
-      });
-    },
-  };
 };
 
 // Printed commands must survive copy-paste into a shell, so anything outside
@@ -2139,41 +2026,6 @@ const createSetupPrompter = (
   };
 };
 
-// Live check that a pasted key actually works, so the user finds out inside
-// setup instead of on their first run.
-const verifyProviderKey = async (
-  provider: 'anthropic' | 'openai',
-  key: string,
-  baseUrl: string | undefined,
-  fetchImpl: typeof fetch | undefined,
-): Promise<{ status: 'ok' | 'rejected' | 'unreachable'; detail?: string }> => {
-  if (typeof fetchImpl !== 'function') {
-    return { status: 'unreachable', detail: 'fetch is unavailable' };
-  }
-
-  const root = (baseUrl ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_OPENAI_BASE_URL)).replace(/\/+$/, '');
-  const url = provider === 'anthropic' ? `${root}/v1/models` : `${root}/models`;
-  const headers = provider === 'anthropic'
-    ? { 'x-api-key': key, 'anthropic-version': '2023-06-01' }
-    : { authorization: `Bearer ${key}` };
-
-  try {
-    const response = await fetchImpl(url, { headers });
-    if (response.ok) {
-      return { status: 'ok' };
-    }
-    // Only an explicit auth failure condemns the key. Compatible endpoints
-    // (local models, proxies) often lack GET /models entirely — a 404/405
-    // there says nothing about the key, so it stays saveable.
-    if (response.status === 401 || response.status === 403) {
-      return { status: 'rejected', detail: `HTTP ${response.status}` };
-    }
-    return { status: 'unreachable', detail: `the endpoint did not support a key check (HTTP ${response.status})` };
-  } catch (error) {
-    return { status: 'unreachable', detail: error instanceof Error ? error.message : String(error) };
-  }
-};
-
 // Slack verification talks to the Web API over plain fetch rather than
 // through @stratusagent/channel-slack. Setup must stay usable before that
 // optional package is installed, and the CLI deliberately does not depend
@@ -2312,125 +2164,6 @@ interface SetupState {
   service: { install: boolean; runAtLogin: boolean };
 }
 
-// Shown when live model listing is unavailable (e.g. subscription tokens
-// cannot call the models endpoint, or the machine is offline).
-// Model ids that cannot serve /chat/completions and must not become the
-// default: embeddings, audio, images, moderation, and legacy completions.
-const NON_CHAT_MODEL_PATTERN = /embed|whisper|tts|audio|dall-e|image|moderation|realtime|transcribe|davinci|babbage|curie|(^|[-_])ada([-_]|$)/i;
-
-const KNOWN_CLAUDE_MODELS = [
-  'claude-opus-5',
-  'claude-sonnet-5',
-  'claude-haiku-4-5',
-  'claude-opus-4-6',
-  'claude-sonnet-4-6',
-];
-
-/**
- * The ids a newly created soul must not claim: every id the served roster
- * holds, which is three things and not one directory.
- *
- * - **What the roster files declare.** A filename is not an id: a soul at
- *   `renamed.md` may declare `id: ava`, so `ava.md` being free proves
- *   nothing — and since a duplicate refuses the whole roster, writing one
- *   would hand back an agent whose daemon cannot start.
- * - **The configured default soul**, which the daemon registers whether or
- *   not its file lives in the agents directory. It wins a same-id contest
- *   with a roster file — `defaultAgentId` replaces the source when the
- *   path differs — so a new agent sharing its id is not refused, it is
- *   shadowed: created, then undispatchable by id or from Slack, with
- *   nothing saying so.
- * - **The reserved `stratus`**, since a roster soul claiming it is skipped
- *   at load, so writing one creates an agent that silently never appears.
- *
- * The two readable sources fail **independently**, and what they return is
- * what they know rather than all-or-nothing. A configured soul that is
- * missing or mid-edit does not stop the daemon serving the roster, so it
- * must not discard the roster's claims either: collapsing both to unknown
- * would let this command write the very duplicate that refuses the roster
- * it could have read. `unread` names what could not be answered, so the
- * caller can say which check did not run instead of implying none did.
- */
-const declaredAgentIds = async (
-  env: CliEnvironment,
-): Promise<{ ids: Set<string>; unread: string[] }> => {
-  const [roster, configured] = await Promise.allSettled([
-    loadRosterSouls(env, () => {}),
-    // Empty selection: the soul a run started here would resolve, by the
-    // same precedence the daemon uses — never a second reading of it.
-    resolveConfiguredSoul({}, env),
-  ]);
-
-  const ids = new Set([DEFAULT_STRATUS_AGENT.id]);
-  const unread: string[] = [];
-  if (roster.status === 'fulfilled') {
-    for (const entry of roster.value) {
-      ids.add(entry.soul.agent.id);
-    }
-  } else {
-    unread.push('the roster');
-  }
-  if (configured.status === 'fulfilled') {
-    if (configured.value) {
-      ids.add(configured.value.soul.agent.id);
-    }
-  } else {
-    unread.push('the configured default soul');
-  }
-  return { ids, unread };
-};
-
-/**
- * Write a new soul under an id nothing else holds, and return the agent
- * that got written.
- *
- * The name stays theirs, but the id — the soul filename, the memory key,
- * the credential scope — must be unique: the suggestion pool is small, so
- * a repeat name would otherwise share an earlier agent's memory. Two
- * claims have to fail here, and only one of them is a filename:
- *
- * - An id another soul declares, whatever that soul is called on disk.
- *   Since a duplicate refuses the whole roster, writing one would leave a
- *   daemon that will not start — created by the command meant to help.
- * - The path itself, via `wx`, which makes the claim atomic against a
- *   concurrent writer that the roster read above cannot see.
- *
- * On either, the id takes a fresh suffix and we try again — through the
- * shared bound, since appending a suffix to a maxed-out base would build
- * an id the validator refuses, turning a collision into a crash.
- */
-const claimSoulFile = async (
-  env: CliEnvironment,
-  input: { name?: string; instructions: string },
-  render: (agent: AgentDefinition) => string,
-  note: (message: string) => void,
-): Promise<{ agent: AgentDefinition; soulPath: string }> => {
-  const { ids: taken, unread } = await declaredAgentIds(env);
-  if (unread.length > 0) {
-    note(`Note: could not read ${unread.join(' or ')}, so this id was not checked against the ids it declares.`);
-  }
-  let agent = defineAgent({ ...(input.name ? { name: input.name } : {}), instructions: input.instructions });
-  const baseId = agent.id;
-  for (;;) {
-    const soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
-    if (!taken.has(agent.id)) {
-      try {
-        await writeFile(soulPath, render(agent), { flag: 'wx' });
-        return { agent, soulPath };
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-          throw error;
-        }
-      }
-    }
-    agent = defineAgent({
-      id: agentIdWithSuffix(baseId, randomUUID().slice(0, 4)),
-      ...(input.name ? { name: input.name } : { name: agent.name }),
-      instructions: input.instructions,
-    });
-  }
-};
-
 export const runSetup = async (
   command: ParsedSetupCommand,
   streams: CliStreams,
@@ -2543,8 +2276,10 @@ export const runSetup = async (
 
   const defaultModelFor = (provider: CliProviderName): string =>
     provider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL;
+  // Widened to CliProviderName only so setup can ask about the provider it
+  // currently has selected, `demo` included; the rule itself is the shared one.
   const defaultKeyEnvFor = (provider: CliProviderName): string =>
-    provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+    defaultApiKeyEnvName(provider === 'openai' ? 'openai' : 'anthropic');
 
   const credentialLabel = (credential: StoredCredential): string =>
     credential.type === 'oauth_token' ? 'Claude subscription' : 'API key';
@@ -2826,87 +2561,19 @@ export const runSetup = async (
     }
   };
 
-  // Every model the current sign-ins can actually reach, fetched live where
-  // possible. Subscription tokens cannot call the models endpoint, so those
-  // fall back to the known Claude lineup.
-  const collectAvailableModels = async (): Promise<Array<{ provider: CredentialProviderName; id: string }>> => {
-    const fetchImpl = env.fetch ?? globalThis.fetch;
-    const models: Array<{ provider: CredentialProviderName; id: string }> = [];
-
-    for (const provider of ['anthropic', 'openai'] as const) {
-      // Discovery uses the credential a real run would use. STRATUS_API_KEY
-      // and a configured apiKeyEnv authenticate the DEFAULT provider only —
-      // a secondary provider relies on its own env var or stored sign-in,
-      // never the default provider's secret.
-      const envKey = (provider === state.provider
-        ? readNonEmptyString(processEnv.STRATUS_API_KEY)
-          ?? (state.apiKeyEnv ? readNonEmptyString(processEnv[state.apiKeyEnv]) : undefined)
-        : undefined)
-        ?? readNonEmptyString(processEnv[defaultKeyEnvFor(provider)]);
-      const credential = envKey ? undefined : state.credentials[provider];
-      const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);
-      if (!apiKey && !credential) {
-        continue;
-      }
-
-      if (provider === 'anthropic') {
-        if (!apiKey || typeof fetchImpl !== 'function') {
-          // Subscription tokens cannot call the models endpoint.
-          models.push(...KNOWN_CLAUDE_MODELS.map((id) => ({ provider, id })));
-          continue;
-        }
-        // The same endpoint a real run uses: the stored key's bound URL is
-        // authoritative, then a configured anthropic base URL (a proxy) —
-        // never the official endpoint by accident.
-        const anthropicRoot = ((credential?.type === 'api_key' ? credential.baseUrl : undefined)
-          ?? (state.provider === 'anthropic' ? state.baseUrl : undefined)
-          ?? DEFAULT_ANTHROPIC_BASE_URL).replace(/\/+$/, '');
-        try {
-          const response = await fetchImpl(`${anthropicRoot}/v1/models?limit=100`, {
-            headers: { 'x-api-key': String(apiKey), 'anthropic-version': '2023-06-01' },
-          });
-          const payload = await response.json() as { data?: Array<{ id?: string }> };
-          const ids = (payload.data ?? []).map((entry) => entry.id).filter((id): id is string => typeof id === 'string');
-          models.push(...(ids.length > 0 ? ids : KNOWN_CLAUDE_MODELS).map((id) => ({ provider, id })));
-        } catch {
-          models.push(...KNOWN_CLAUDE_MODELS.map((id) => ({ provider, id })));
-        }
-        continue;
-      }
-
-      if (!apiKey || typeof fetchImpl !== 'function') {
-        continue;
-      }
-      try {
-        // A stored key's bound endpoint is authoritative, exactly as at run
-        // time; only env-supplied keys follow the default provider's URL.
-        const root = ((credential?.type === 'api_key' ? credential.baseUrl : undefined)
-          ?? (state.provider === 'openai' ? state.baseUrl : undefined)
-          ?? DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '');
-        const response = await fetchImpl(`${root}/models`, {
-          headers: { authorization: `Bearer ${String(apiKey)}` },
-        });
-        const payload = await response.json() as { data?: Array<{ id?: string }> };
-        const allIds = (payload.data ?? [])
-          .map((entry) => entry.id)
-          .filter((id): id is string => typeof id === 'string');
-        // Runs always call /chat/completions, so embedding, audio, image,
-        // moderation, and legacy completion models would save a default
-        // that cannot execute. If filtering leaves nothing (an exotic local
-        // service), show everything rather than an empty menu.
-        const chatIds = allIds.filter((id) => !NON_CHAT_MODEL_PATTERN.test(id));
-        const ids = (chatIds.length > 0 ? chatIds : allIds).sort((a, b) => {
-          const rank = (id: string): number => (/^gpt/i.test(id) ? 0 : /^o\d/i.test(id) ? 1 : 2);
-          return rank(a) - rank(b) || a.localeCompare(b);
-        });
-        models.push(...ids.map((id) => ({ provider, id })));
-      } catch {
-        // No reachable model list for this provider; skip it.
-      }
-    }
-
-    return models;
-  };
+  // Every model the current sign-ins can actually reach. The rule lives in
+  // @stratusagent/state because the control API answers the same question —
+  // setup passes the selection it is *holding* rather than the saved one, so
+  // a key pasted a moment ago is already in play.
+  const collectAvailableModels = (): Promise<CatalogModel[]> => collectModels(
+    {
+      provider: state.provider,
+      ...(state.baseUrl !== undefined ? { baseUrl: state.baseUrl } : {}),
+      ...(state.apiKeyEnv !== undefined ? { apiKeyEnv: state.apiKeyEnv } : {}),
+      credentials: state.credentials,
+    },
+    env,
+  );
 
   const pickModel = async (kind: 'default' | 'fallback'): Promise<void> => {
     const available = await collectAvailableModels();
@@ -3063,7 +2730,6 @@ export const runSetup = async (
     const pin = state.provider !== 'demo'
       ? { provider: state.provider, model: state.model ?? defaultModelFor(state.provider) }
       : {};
-    await mkdir(agentsDirPath(env), { recursive: true });
     const claimed = await claimSoulFile(
       env,
       { ...(name ? { name } : {}), instructions: persona },
@@ -3568,8 +3234,7 @@ export const runSetup = async (
       }
     }
 
-    await mkdir(path.dirname(configPath), { recursive: true });
-    await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    await saveConfigFile(configPath, config);
 
     writeLine(streams.stdout);
     writeLine(streams.stdout, `Wrote ${configPath}`);
@@ -3755,12 +3420,66 @@ export const runSetup = async (
   }
 };
 
-const personaSnippet = (instructions: string | undefined): string | undefined => {
-  const firstLine = instructions?.split('\n').map((line) => line.trim()).find((line) => line.length > 0);
-  if (!firstLine) {
-    return undefined;
+/**
+ * The bearer token for a gateway: an explicit flag, the environment, or the
+ * token file this machine's daemon wrote.
+ *
+ * The file is the normal case and the reason `--gateway` needs no ceremony
+ * locally. It is not always right, though: a gateway reached through a tunnel
+ * has its own token, which is what the flag and the variable are for.
+ */
+const gatewayToken = async (
+  env: CliEnvironment,
+  explicit: string | undefined,
+): Promise<string> => {
+  const fromEnv = readNonEmptyString(readProcessEnv(env).STRATUS_GATEWAY_TOKEN);
+  if (explicit || fromEnv) {
+    return String(explicit ?? fromEnv);
   }
-  return firstLine.length > 78 ? `${firstLine.slice(0, 77)}…` : firstLine;
+  try {
+    return (await readFile(gatewayTokenPath(env), 'utf8')).trim();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+    throw new Error(
+      `No gateway token: ${gatewayTokenPath(env)} does not exist, and neither --token nor STRATUS_GATEWAY_TOKEN was set. `
+      + 'Start the daemon with `stratus serve` (or `stratus service install`) to create one, or pass the remote gateway\'s token.',
+    );
+  }
+};
+
+/** Ask a running gateway for its roster, as data. */
+const remoteAgentSummaries = async (
+  command: ParsedAgentsCommand,
+  env: CliEnvironment,
+): Promise<AgentSummary[]> => {
+  const token = await gatewayToken(env, command.token);
+  const base = String(command.gateway).replace(/\/+$/, '');
+  const fetchImpl = env.fetch ?? globalThis.fetch;
+  if (typeof fetchImpl !== 'function') {
+    throw new Error('fetch is unavailable, so --gateway cannot reach a daemon from this runtime.');
+  }
+
+  let response: Response;
+  try {
+    response = await fetchImpl(`${base}/api/v1/agents`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+  } catch (error) {
+    throw new Error(
+      `Could not reach the gateway at ${base} (${error instanceof Error ? error.message : String(error)}). `
+      + 'Is stratusd running, and does it have @stratusagent/control-api installed?',
+    );
+  }
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(`The gateway at ${base} rejected this token. Check --token, STRATUS_GATEWAY_TOKEN, or ~/.stratus/gateway-token.`);
+  }
+  if (!response.ok) {
+    throw new Error(`The gateway at ${base} answered HTTP ${response.status} for the roster.`);
+  }
+  const payload = await response.json() as { agents?: AgentSummary[] };
+  return payload.agents ?? [];
 };
 
 export const runAgents = async (
@@ -3768,135 +3487,35 @@ export const runAgents = async (
   streams: CliStreams,
   env: CliEnvironment = {},
 ): Promise<number> => {
-  // Fold any legacy per-directory memory in first so the counts below
-  // reflect everything each agent actually remembers.
-  await migrateLegacyMemory(env);
-  const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
-
-  const processEnv = readProcessEnv(env);
-  // Listing must never be blocked by a broken config — it only feeds the
-  // default marker and the "runs on" lines.
-  const { config: activeConfig } = await discoverActiveConfig(env, (message) => {
-    writeLine(streams.stderr, `Warning: ${message}.`);
-  });
-
-  const envProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'));
-  const envModel = readNonEmptyString(processEnv.STRATUS_MODEL)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL);
-
-  // What a run as this soul would actually use right now — the same
-  // precedence as resolveRuntimeConfig (env vars, soul hints, config,
-  // demo), so a model-only or provider-only pin still resolves honestly.
-  const runsOnFor = (soulProvider?: string, soulModel?: string): { provider: string; model?: string } => {
-    const provider = envProvider ?? soulProvider ?? activeConfig.provider ?? 'demo';
-    if (provider === 'demo') {
-      return { provider };
-    }
-    const soulModelApplies = soulProvider === undefined || soulProvider === provider;
-    const configModelApplies = (activeConfig.provider ?? 'openai') === provider;
-    const model = envModel
-      ?? (soulModelApplies ? soulModel : undefined)
-      ?? (configModelApplies ? activeConfig.model : undefined)
-      ?? (provider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
-    return { provider, model };
-  };
-
-  const defaultSoulPath = readNonEmptyString(processEnv.STRATUS_SOUL)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_SOUL)
-    ?? activeConfig.soul;
-  const resolvedDefaultSoul = defaultSoulPath
-    ? path.resolve(readWorkingDirectory(env), defaultSoulPath)
-    : undefined;
-
-  interface AgentListing {
-    id: string;
-    name: string;
-    isDefault: boolean;
-    builtIn: boolean;
-    soulPath?: string;
-    /** The soul's own frontmatter pin, verbatim. */
-    provider?: string;
-    model?: string;
-    /** What a run as this agent resolves to right now. */
-    runsOn: { provider: string; model?: string };
-    memories: number;
-    persona?: string;
-    avatar?: string;
-  }
-
-  const listings: AgentListing[] = [];
-
-  const addSoul = async (soulPath: string): Promise<void> => {
-    let parsed: ParsedSoul;
-    try {
-      parsed = parseSoul(await readFile(soulPath, 'utf8'), { seed: soulPath });
-    } catch (error) {
-      writeLine(streams.stderr, `Warning: skipping ${soulPath}: ${error instanceof Error ? error.message : String(error)}`);
-      return;
-    }
-    const { agent } = parsed;
-    const persona = personaSnippet(agent.instructions);
-    listings.push({
-      id: agent.id,
-      name: agent.name,
-      isDefault: soulPath === resolvedDefaultSoul,
-      builtIn: false,
-      soulPath,
-      ...(parsed.provider ? { provider: parsed.provider } : {}),
-      ...(parsed.model ? { model: parsed.model } : {}),
-      runsOn: runsOnFor(parsed.provider, parsed.model),
-      memories: (await memory.list(agent.id)).length,
-      ...(persona ? { persona } : {}),
-      ...(agent.avatar ? { avatar: `${agent.avatar.style} theme, hue ${agent.avatar.hue}, palette ${agent.avatar.palette.join(' ')}` } : {}),
+  // The same listing either way — the shared builder produces it locally, and
+  // the control API serves exactly what that builder produced. Rendering is
+  // the only thing this command does with it.
+  let listings: AgentSummary[];
+  if (command.gateway) {
+    listings = await remoteAgentSummaries(command, env);
+  } else {
+    // Fold any legacy per-directory memory in first so the counts below
+    // reflect everything each agent actually remembers.
+    await migrateLegacyMemory(env);
+    listings = await listAgentSummaries(env, (message) => {
+      writeLine(streams.stderr, `Warning: ${message}.`);
     });
-  };
-
-  let rosterFiles: string[] = [];
-  try {
-    rosterFiles = (await readdir(agentsDirPath(env)))
-      .filter((file) => file.endsWith('.md'))
-      .sort()
-      .map((file) => path.join(agentsDirPath(env), file));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw error;
-    }
-  }
-  for (const soulPath of rosterFiles) {
-    await addSoul(soulPath);
-  }
-  // A default soul can live outside ~/.stratus/agents (a project soul, a
-  // hand-written file) — the roster would be lying without it.
-  if (resolvedDefaultSoul && !rosterFiles.includes(resolvedDefaultSoul)) {
-    await addSoul(resolvedDefaultSoul);
   }
 
-  // The built-in Stratus persona serves every run that has no soul.
-  const builtInPersona = personaSnippet(DEFAULT_STRATUS_AGENT.instructions);
-  listings.push({
-    id: DEFAULT_STRATUS_AGENT.id,
-    name: DEFAULT_STRATUS_AGENT.name,
-    isDefault: resolvedDefaultSoul === undefined,
-    builtIn: true,
-    runsOn: runsOnFor(),
-    memories: (await memory.list(DEFAULT_STRATUS_AGENT.id)).length,
-    ...(builtInPersona ? { persona: builtInPersona } : {}),
-  });
-
-  listings.sort((a, b) => {
-    if (a.isDefault !== b.isDefault) {
-      return a.isDefault ? -1 : 1;
-    }
-    if (a.builtIn !== b.builtIn) {
-      return a.builtIn ? 1 : -1;
-    }
-    return a.name.localeCompare(b.name);
-  });
+  // The palette travels structurally now, because a web or macOS surface has
+  // to draw it. This output has always been one prose line, and a shape
+  // change here would break every script reading it — so the rendering, not
+  // the data, stays where it was.
+  const describeAvatar = (avatar: AvatarTheme): string =>
+    `${avatar.style} theme, hue ${avatar.hue}, palette ${avatar.palette.join(' ')}`;
 
   if (command.format === 'json') {
     writeLine(streams.stdout, JSON.stringify({
-      agents: listings.map(({ isDefault, ...rest }) => ({ ...rest, default: isDefault })),
+      agents: listings.map(({ default: isDefault, avatar, ...rest }) => ({
+        ...rest,
+        ...(avatar ? { avatar: describeAvatar(avatar) } : {}),
+        default: isDefault,
+      })),
     }, null, 2));
     return 0;
   }
@@ -3904,10 +3523,10 @@ export const runAgents = async (
   const describeRunsOn = (runsOn: { provider: string; model?: string }): string =>
     (runsOn.provider === 'demo' ? 'demo (offline)' : `${runsOn.provider}${runsOn.model ? ` · ${runsOn.model}` : ''}`);
 
-  writeLine(streams.stdout, 'Agents');
+  writeLine(streams.stdout, command.gateway ? `Agents on ${command.gateway}` : 'Agents');
   for (const agent of listings) {
     const labels = [
-      ...(agent.isDefault ? ['default'] : []),
+      ...(agent.default ? ['default'] : []),
       ...(agent.builtIn ? ['built-in'] : []),
     ];
     writeLine(streams.stdout);
@@ -3922,7 +3541,7 @@ export const runAgents = async (
       writeLine(streams.stdout, `    persona   ${agent.persona}`);
     }
     if (agent.avatar) {
-      writeLine(streams.stdout, `    avatar    ${agent.avatar}`);
+      writeLine(streams.stdout, `    avatar    ${describeAvatar(agent.avatar)}`);
     }
   }
   writeLine(streams.stdout);
@@ -4416,48 +4035,6 @@ const serviceEnvFor = (env: CliEnvironment): ServiceEnvironment => ({
  * reported everything ready. Returns the variable to name, if so.
  */
 /**
- * Every runtime the daemon would resolve: the config-wide default plus one
- * per roster soul, normalized the way a dispatch normalizes it. A soul that
- * pins its own provider resolves to different credentials entirely, so any
- * check that looks only at the default misses exactly the agent that is
- * misconfigured.
- */
-const servedRuntimes = async (
-  env: CliEnvironment,
-  configPath?: string,
-): Promise<Array<{ runtime: RuntimeConfig; env: CliEnvironment }>> => {
-  const { applySoulPins } = await import('@stratusagent/gateway');
-  const { config: activeConfig, location } = await discoverActiveConfig(env, () => {});
-  const context = {
-    ...(activeConfig.provider !== undefined ? { configProvider: activeConfig.provider } : {}),
-    configPresent: location !== undefined,
-  };
-  const passes: Array<{ selection: RuntimeSelection; env: CliEnvironment }> = [{ selection: {}, env }];
-  // A roster that will not load is the gateway's to refuse, with a better
-  // message than this preflight could give — so it checks what it can and
-  // leaves the failing to start().
-  const rosterForRuntimes = await loadRosterSouls(env, () => {}).catch(() => []);
-  for (const entry of rosterForRuntimes) {
-    const normalized = applySoulPins(entry.soul, {}, env, context);
-    passes.push({ selection: normalized.selection, env: normalized.env as CliEnvironment });
-  }
-
-  const resolved: Array<{ runtime: RuntimeConfig; env: CliEnvironment }> = [];
-  for (const pass of passes) {
-    // A runtime that cannot resolve is the gateway's to report, per
-    // dispatch and with far better context than a startup pass has.
-    const runtime = await resolveStateRuntimeConfig(
-      { ...pass.selection, ...(configPath ? { configPath } : {}) },
-      pass.env,
-    ).catch(() => undefined);
-    if (runtime) {
-      resolved.push({ runtime, env: pass.env });
-    }
-  }
-  return resolved;
-};
-
-/**
  * The daemon's `approvals` block, from the config file the daemon itself
  * would load. Discovery goes through the shared resolver rather than
  * reading ~/.stratus/config.json directly: `--config` and STRATUS_CONFIG
@@ -4690,7 +4267,6 @@ export const runAgentNew = async (
         ?? (soulProvider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
       const soulPin = soulProvider !== 'demo' ? { provider: soulProvider, model: soulModel } : {};
 
-      await mkdir(agentsDirPath(env), { recursive: true });
       const claimed = await claimSoulFile(
         env,
         { name, instructions: persona },
@@ -4719,9 +4295,16 @@ export const runAgentNew = async (
           }
         }
         if (globalConfig !== undefined) {
-          const config: Record<string, unknown> = { ...globalConfig, provider: globalConfig.provider ?? soulProvider, soul: soulPath };
-          await mkdir(path.dirname(globalConfigPath(env)), { recursive: true });
-          await writeFile(globalConfigPath(env), `${JSON.stringify(config, null, 2)}\n`);
+          // Re-validated rather than cast: `readNonEmptyString` widens to
+          // `string`, and the shared parser is what says which strings are
+          // provider names. Every source feeding soulProvider is already one,
+          // so this narrows without being able to throw.
+          const config: CliConfigFile = {
+            ...globalConfig,
+            provider: globalConfig.provider ?? parseProviderName(soulProvider, 'provider'),
+            soul: soulPath,
+          };
+          await saveConfigFile(globalConfigPath(env), config);
           madeDefault = true;
           if (configLocation && configLocation.path !== globalConfigPath(env)) {
             writeLine(streams.stdout, `Note: ${configLocation.path} takes precedence over the global config for runs started in this directory.`);
@@ -4777,37 +4360,201 @@ export const runAgentNew = async (
   return 0;
 };
 
+/** What a running daemon published about itself, if one is running. */
+interface GatewayInfo {
+  url: string;
+  pid?: number;
+}
+
+const readGatewayInfo = async (env: CliEnvironment): Promise<GatewayInfo | undefined> => {
+  try {
+    const parsed = JSON.parse(await readFile(gatewayInfoPath(env), 'utf8')) as Partial<GatewayInfo>;
+    return typeof parsed.url === 'string' ? { url: parsed.url, ...(parsed.pid ? { pid: parsed.pid } : {}) } : undefined;
+  } catch {
+    // No file, or one left behind by a daemon that died without cleaning up.
+    // Either way there is nothing to talk to until the health check says so.
+    return undefined;
+  }
+};
+
+/**
+ * A one-time URL for the browser.
+ *
+ * This is the whole reason the exchange exists: the CLI can read the token
+ * file and a page cannot, so the CLI lends its authority for exactly one
+ * short-lived trip.
+ */
+const mintDashboardUrl = async (
+  env: CliEnvironment,
+  base: string,
+  fetchImpl: typeof fetch,
+): Promise<string> => {
+  const token = await gatewayToken(env, undefined);
+  const response = await fetchImpl(`${base}/api/v1/auth/ott`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`The gateway at ${base} refused to open a dashboard session (HTTP ${response.status}).`);
+  }
+  const payload = await response.json() as { url?: string; path?: string };
+  // The relative form joined to the base we already reached, in preference to
+  // the absolute one: this command knows exactly which address answered, and
+  // the daemon can only infer it from headers.
+  if (payload.path) {
+    return `${base.replace(/\/+$/, '')}${payload.path}`;
+  }
+  if (!payload.url) {
+    throw new Error(`The gateway at ${base} did not return a dashboard URL.`);
+  }
+  return payload.url;
+};
+
+/** Whether something is actually answering there, as opposed to a stale file. */
+const gatewayAnswering = async (
+  env: CliEnvironment,
+  base: string,
+  fetchImpl: typeof fetch,
+): Promise<boolean> => {
+  try {
+    const token = await gatewayToken(env, undefined);
+    const response = await fetchImpl(`${base}/api/v1/health`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * `stratus dashboard` — open the web UI against a running daemon, starting
+ * one in the foreground when there is none.
+ *
+ * The daemon is started by calling `runServe`, not by rebuilding its wiring:
+ * channels, approvals, the credential preflight, and the log writer are all
+ * decisions `serve` already makes, and a second copy of them here would drift
+ * the first time either side gained a rule.
+ */
 export const runDashboard = async (
   command: ParsedDashboardCommand,
   streams: CliStreams,
   env: CliEnvironment = {},
 ): Promise<number> => {
-  const handle = await startDashboardServer({
-    host: command.host,
-    ...(command.port !== undefined ? { port: command.port } : {}),
-  });
+  const fetchImpl = env.fetch ?? globalThis.fetch;
+  if (typeof fetchImpl !== 'function') {
+    writeLine(streams.stderr, 'Error: fetch is unavailable, so the dashboard cannot reach a gateway.');
+    return 1;
+  }
 
-  writeLine(streams.stdout, `${DASHBOARD_TITLE} ready at ${handle.url}`);
-  writeLine(streams.stdout, 'Press Ctrl+C to stop.');
+  const existing = await readGatewayInfo(env);
+  let base = existing && await gatewayAnswering(env, existing.url, fetchImpl) ? existing.url : undefined;
 
-  if (command.openBrowser) {
-    try {
-      await (env.openExternal ?? openExternalUrl)(handle.url);
-      writeLine(streams.stdout, 'Opened your default browser.');
-    } catch (error) {
-      writeLine(streams.stderr, `Warning: Could not open the browser automatically: ${error instanceof Error ? error.message : String(error)}`);
+  const ownDaemon = new AbortController();
+  let serving: Promise<number> | undefined;
+
+  if (!base) {
+    writeLine(streams.stdout, 'No daemon is running — starting one. It stops when you do.');
+    writeLine(streams.stdout, 'Run `stratus service install` to keep one running instead.');
+    serving = runServe(
+      {
+        command: 'serve',
+        events: false,
+        // Explicitly on. A trusted config may set `api.enabled: false` — a
+        // reasonable thing for a headless box — but this command exists to
+        // open the dashboard, and honouring it here would start a daemon
+        // with no API and then time out waiting for the one it promised.
+        api: true,
+        ...(command.port !== undefined ? { apiPort: command.port } : {}),
+        // Passed whenever it was asked for, including when it is the default.
+        // `--host 127.0.0.1` against a config saying `0.0.0.0` is an operator
+        // narrowing the bind, and dropping it because it matched the default
+        // did the reverse of what they typed.
+        ...(command.host !== undefined ? { apiHost: command.host } : {}),
+      },
+      // The daemon's own chatter belongs on stderr here: stdout is where this
+      // command says where to point a browser, and interleaving the two makes
+      // the one line that matters hard to find.
+      { stdout: streams.stderr, stderr: streams.stderr },
+      { ...env, shutdownSignal: ownDaemon.signal },
+    );
+
+    // Attached now, not at the end. `runServe` can reject before it publishes
+    // anything — an unreadable roster, a session store that will not open —
+    // and a rejected promise nobody is watching for fifteen seconds is an
+    // unhandled rejection, which terminates the process instead of reaching
+    // the message below. Captured rather than swallowed, so the reason the
+    // daemon gave is the reason this command reports.
+    let daemonFailure: unknown;
+    const daemonExit = serving.then(
+      () => undefined,
+      (error: unknown) => { daemonFailure = error; },
+    );
+
+    // Gated on the daemon actually answering, not on a delay: it publishes
+    // where it bound the moment it binds, and anything less would be a race
+    // dressed up as a timeout. It also stops the moment the daemon gives up,
+    // rather than waiting out a timeout for a process that is already gone.
+    const startedBy = Date.now() + 15_000;
+    let daemonStopped = false;
+    void daemonExit.then(() => { daemonStopped = true; });
+    while (!base && !daemonStopped && Date.now() < startedBy) {
+      const info = await readGatewayInfo(env);
+      if (info && await gatewayAnswering(env, info.url, fetchImpl)) {
+        base = info.url;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+    if (!base) {
+      ownDaemon.abort();
+      await daemonExit;
+      writeLine(
+        streams.stderr,
+        daemonFailure
+          ? `Error: the daemon could not start: ${daemonFailure instanceof Error ? daemonFailure.message : String(daemonFailure)}`
+          : 'Error: the daemon did not start serving its control API. Is @stratusagent/control-api installed?',
+      );
+      return 1;
     }
   }
 
-  if (env.dashboardAutoShutdownMs !== undefined) {
-    await new Promise((resolve) => setTimeout(resolve, env.dashboardAutoShutdownMs));
-    await handle.close();
+  let url: string;
+  try {
+    url = await mintDashboardUrl(env, base, fetchImpl);
+  } catch (error) {
+    ownDaemon.abort();
+    await serving?.catch(() => 0);
+    writeLine(streams.stderr, `Error: ${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
+
+  writeLine(streams.stdout, `${DASHBOARD_TITLE} ready at ${base}`);
+  writeLine(streams.stdout, 'That link signs one browser in and can only be used once.');
+
+  if (command.openBrowser) {
+    try {
+      await (env.openExternal ?? openExternalUrl)(url);
+      writeLine(streams.stdout, 'Opened your default browser.');
+    } catch (error) {
+      writeLine(streams.stderr, `Warning: Could not open the browser automatically: ${error instanceof Error ? error.message : String(error)}`);
+      writeLine(streams.stdout, `Open this yourself: ${url}`);
+    }
+  } else {
+    writeLine(streams.stdout, `Open this to sign in: ${url}`);
+  }
+
+  if (!serving) {
+    // Someone else owns the daemon; this command's job is done.
     return 0;
   }
 
-  await once(process, 'SIGINT');
-  await handle.close();
-  return 0;
+  writeLine(streams.stdout, 'Press Ctrl+C to stop the daemon.');
+  if (env.dashboardAutoShutdownMs !== undefined) {
+    await new Promise((resolve) => setTimeout(resolve, env.dashboardAutoShutdownMs));
+    ownDaemon.abort();
+  }
+  return serving;
 };
 
 type SlackAdapterFactory = typeof import('@stratusagent/channel-slack').createSlackChannelAdapter;
@@ -4835,6 +4582,63 @@ const loadSlackAdapter = async (): Promise<SlackAdapterFactory | undefined> => {
   // Resolvable: any failure from here is a real problem with the
   // installed package, and surfaces.
   return (await import('@stratusagent/channel-slack')).createSlackChannelAdapter;
+};
+
+type ControlApiFactory = typeof import('@stratusagent/control-api').createControlApi;
+
+/**
+ * Loads the optional control-API package, or undefined when it is not
+ * installed. Same two-step as the Slack adapter, and for the same reason:
+ * only the package being absent means "not installed". A package that IS
+ * installed but is missing one of its own dependencies throws
+ * ERR_MODULE_NOT_FOUND naming that dependency, so inspecting the message
+ * would read a broken install as an absent one — silently leaving a daemon
+ * without the API an operator installed it to have.
+ */
+const loadControlApi = async (): Promise<ControlApiFactory | undefined> => {
+  try {
+    import.meta.resolve('@stratusagent/control-api');
+  } catch {
+    return undefined;
+  }
+  return (await import('@stratusagent/control-api')).createControlApi;
+};
+
+/**
+ * The daemon's `api` block, from the config file the daemon itself would
+ * load — and only from a trusted location.
+ *
+ * An auto-discovered project-local `stratus.config.json` outranks the global
+ * one and can be checked into any repository. Which interface a daemon binds
+ * is exactly the kind of decision a cloned repo must not get to make, so an
+ * untrusted config's block is ignored loudly rather than obeyed.
+ */
+const loadServeApi = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<ApiConfig> => {
+  try {
+    const location = await resolveConfigLocation(configPath ? { configPath } : {}, env);
+    if (!location) {
+      return {};
+    }
+    const api = (await loadConfigFile(location.path)).api;
+    if (!api) {
+      return {};
+    }
+    if (!location.trusted) {
+      warn(
+        `ignoring the api config in ${location.path}: a project-local config cannot decide which interface this `
+        + 'daemon binds. Move it to ~/.stratus/config.json, or pass it with --config.',
+      );
+      return {};
+    }
+    return api;
+  } catch (error) {
+    warn(`ignoring the api config (${error instanceof Error ? error.message : String(error)}); using the defaults`);
+    return {};
+  }
 };
 
 /**
@@ -4891,9 +4695,51 @@ export const runServe = async (
   const approvalsConfig = await loadServeApprovals(env, command.configPath, warn);
   const approvalMode = command.approvals ?? approvalsConfig.mode ?? 'headless';
 
+  // The control API is a channel adapter like any other: started after the
+  // roster loads, stopped before the store drains. It is optional because
+  // installing it is how an operator says they want a port open.
+  const apiConfig = await loadServeApi(env, command.configPath, warn);
+  const apiWanted = command.api ?? apiConfig.enabled ?? true;
+  // Typed as the seam, not as whatever the first push happens to be: the
+  // list holds the control API and the Slack adapter alike.
+  const controlApiChannels: GatewayChannelAdapter[] = [];
+  if (apiWanted) {
+    const createControlApi = await loadControlApi();
+    // Resolved into locals first. Inlined, `a ?? b !== undefined` parses as
+    // `a ?? (b !== undefined)` — so an explicit `--api-port 0`, which is how
+    // you ask for any free port, was falsy and fell through to the default.
+    // Everything still bound and every test still passed, on whichever port
+    // nobody happened to be using.
+    const apiHost = command.apiHost ?? apiConfig.host;
+    const apiPort = command.apiPort ?? apiConfig.port;
+    if (createControlApi) {
+      controlApiChannels.push(createControlApi({
+        env,
+        ...(apiHost !== undefined ? { host: apiHost } : {}),
+        ...(apiPort !== undefined ? { port: apiPort } : {}),
+        ...(command.configPath ? { configPath: command.configPath } : {}),
+        log,
+        warn,
+      }));
+    } else if (command.api === true || apiConfig.enabled === true) {
+      // Only when someone asked for it explicitly. A daemon that was never
+      // told to serve an API should not complain about not having one.
+      warn(
+        'the control API was requested, but @stratusagent/control-api is not installed. '
+        + 'Run `npm install -g @stratusagent/control-api` to bring it online; starting without it.',
+      );
+    }
+  }
+
   const channelCredentials = await loadChannelCredentials(env);
   const slackAgents = Object.entries(channelCredentials.slack ?? {});
-  const channels = [];
+  const channels = [...controlApiChannels];
+  // Tracked on its own, never as `channels.length`: the list now holds the
+  // control API too, and "can anyone be asked for an approval" is a question
+  // about the Slack adapter specifically. Reading it off the list length
+  // would tell a daemon with an API and no Slack app that every agent is
+  // reachable, and its gated calls would park with nobody rendering them.
+  let slackAdapterUp = false;
   if (slackAgents.length > 0) {
     // Channel packages are optional peers: the CLI never bundles a
     // transport nobody asked for (the Slack SDKs alone are ~9 MB). A
@@ -4902,6 +4748,7 @@ export const runServe = async (
     // module-not-found stack.
     const adapter = await loadSlackAdapter();
     if (adapter) {
+      slackAdapterUp = true;
       channels.push(adapter({
         agents: slackAgents.map(([agentId, tokens]) => {
           const route = resolveAgentApprovals(approvalsConfig, agentId);
@@ -4989,7 +4836,7 @@ export const runServe = async (
     // Only agents whose channel actually came up can be asked: tokens on
     // disk with the Slack package missing means nothing renders the
     // request, and the turn discovers that by hanging.
-    const askable = channels.length > 0 ? slackAgents.map(([agentId]) => agentId) : [];
+    const askable = slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : [];
     log(`approvals: remote — gated calls are parked and asked in Slack (${describeApprovers(approvalsConfig, askable)})`);
   }
 
@@ -5074,7 +4921,7 @@ export const runServe = async (
   // another one is about to answer — so it is reported here, where the
   // roster and the channel list are both in view.
   if (approvalMode === 'remote') {
-    const askable = new Set(channels.length > 0 ? slackAgents.map(([agentId]) => agentId) : []);
+    const askable = new Set(slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : []);
     const unreachable = gateway.agents().map((agent) => agent.id).filter((id) => !askable.has(id));
     if (unreachable.length > 0) {
       warn(
