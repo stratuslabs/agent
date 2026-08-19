@@ -810,6 +810,21 @@ export const routes: Route[] = [
       return { models };
     },
   },
+  {
+    method: 'GET',
+    pattern: `${API_PREFIX}/catalog/tools`,
+    async handler(context) {
+      // Both halves, because either alone misleads. The tool list says what
+      // an agent can be granted and at what risk; the plugin list says what
+      // this daemon was *asked* to load — including a plugin that failed,
+      // which is invisible in a list of tools and is exactly what someone
+      // looking at this screen needs to see.
+      return {
+        tools: context.gateway.tools(),
+        plugins: context.gateway.plugins(),
+      };
+    },
+  },
 
   // ---- credentials ---------------------------------------------------------
   {

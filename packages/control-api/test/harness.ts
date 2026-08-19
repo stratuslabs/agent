@@ -4,7 +4,7 @@ import os from 'node:os';
 import { request as httpRequest } from 'node:http';
 import path from 'node:path';
 
-import { createGateway, type ApprovalTransport, type Gateway } from '@stratusagent/gateway';
+import { createGateway, type ApprovalTransport, type Gateway, type GatewayOptions } from '@stratusagent/gateway';
 import type { StateEnvironment } from '@stratusagent/state';
 import { WebSocket } from 'ws';
 
@@ -95,6 +95,8 @@ export const startApi = async (
      * the runner rather than before it.
      */
     env?: Partial<StateEnvironment>;
+    /** Extra gateway options — plugins, above all, which nothing else can inject. */
+    gateway?: Partial<GatewayOptions>;
   } = {},
 ): Promise<Harness> => {
   const home = setup.home ?? await newHome();
@@ -103,6 +105,7 @@ export const startApi = async (
   const gateway = createGateway({
     env,
     idleTimeoutMs: 0,
+    ...setup.gateway,
     ...(setup.approvals
       ? {
           approvals: (given: ApprovalTransport) => {

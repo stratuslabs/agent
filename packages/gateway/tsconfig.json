@@ -6,11 +6,27 @@
     "composite": true
   },
   "references": [
-    { "path": "../core" },
-    { "path": "../agents" },
-    { "path": "../executor-local" },
-    { "path": "../state" }
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../agents"
+    },
+    {
+      "path": "../executor-local"
+    },
+    {
+      "path": "../state"
+    },
+    {
+      "path": "../plugins"
+    }
   ],
-  "include": ["src/**/*.ts"],
-  "exclude": ["dist", "test"]
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "dist",
+    "test"
+  ]
 }

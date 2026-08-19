@@ -1520,3 +1520,86 @@ test('health drops the runtime of a soul that now belongs to another agent', asy
     await harness.stop();
   }
 });
+
+test('the tool catalog lists what is installed, at the risk a call will face', async () => {
+  const home = await newHome();
+  // A plugin package that exists as far as the loader needs it to: a
+  // package.json to read the manifest from, and a module to import. The
+  // manifest is validated without importing anything, which is why these
+  // are two separate things here as well as in production.
+  const packageDir = path.join(home, 'fake-plugin');
+  await mkdir(path.join(packageDir, 'dist'), { recursive: true });
+  await writeFile(
+    path.join(packageDir, 'package.json'),
+    JSON.stringify({
+      name: 'stratus-plugin-notes',
+      stratus: {
+        pluginVersion: 1,
+        contributes: { tools: [{ name: 'notes.read', risk: 'safe' }, { name: 'notes.write', risk: 'gated' }] },
+      },
+    }),
+  );
+
+  const harness = await startApi({
+    home,
+    gateway: {
+      plugins: {
+        'stratus-plugin-notes': { enabled: true },
+        'stratus-plugin-absent': { enabled: true },
+      },
+      pluginHost: {
+        resolve: (specifier: string) => {
+          if (specifier !== 'stratus-plugin-notes') {
+            throw new Error(`Cannot find package '${specifier}'`);
+          }
+          return new URL(`file://${path.join(packageDir, 'dist', 'index.js')}`).href;
+        },
+        import: async () => ({
+          createPlugin: () => ({
+            name: 'notes',
+            setup(context: { tools: { register(tool: unknown): void } }) {
+              for (const name of ['notes.read', 'notes.write']) {
+                context.tools.register({
+                  name,
+                  risk: 'safe',
+                  async execute() {
+                    return null;
+                  },
+                });
+              }
+            },
+          }),
+        }),
+      },
+    },
+  });
+
+  try {
+    const { tools, plugins } = await json<{
+      tools: Array<{ name: string; risk: string; package?: string; trusted?: boolean }>;
+      plugins: Array<{ package: string; error?: string; tools?: Array<{ name: string }> }>;
+    }>(await harness.call('/api/v1/catalog/tools'));
+
+    // Kernel tools are listed with no package, which is the honest answer
+    // for them rather than an omission.
+    const kernel = tools.find((tool) => tool.name === 'demo.echo');
+    assert.ok(kernel, 'the kernel tools are in the catalog');
+    assert.equal(kernel.package, undefined);
+
+    const read = tools.find((tool) => tool.name === 'notes.read');
+    assert.equal(read?.package, 'stratus-plugin-notes');
+    assert.equal(read?.trusted, false);
+    // The risk a call will actually face: the plugin's own object said
+    // `safe` for both, and a third-party package cannot make that claim.
+    assert.equal(read?.risk, 'gated');
+    assert.equal(tools.find((tool) => tool.name === 'notes.write')?.risk, 'gated');
+
+    // A plugin an operator enabled that did not load is invisible in a list
+    // of tools, and is exactly what they opened this screen to find out.
+    const failed = plugins.find((plugin) => plugin.package === 'stratus-plugin-absent');
+    assert.match(failed?.error ?? '', /Cannot find package/);
+    assert.equal(plugins.find((plugin) => plugin.package === 'stratus-plugin-notes')?.tools?.length, 2);
+  } finally {
+    await harness.stop();
+  }
+});

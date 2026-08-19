@@ -29,7 +29,14 @@ import {
 // and the whole runner stack), and a serve-only policy seam must not make
 // `stratus run` pay for it.
 import type { ApprovalTransport, GatewayChannelAdapter } from '@stratusagent/gateway';
-import { createPermissionPolicy, type PermissionDecision } from '@stratusagent/permissions';
+import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
+import {
+  createFileCommandWhitelist,
+  createPermissionPolicy,
+  describeCommandScope,
+  type CommandScope,
+  type PermissionDecision,
+} from '@stratusagent/permissions';
 import {
   createOpenAICompatibleProvider,
   createProviderResponseBuilder,
@@ -98,6 +105,7 @@ import {
   verifyProviderKey,
   stratusHomePath,
   withLegacyDefaultMemories,
+  workspacesDirPath,
   gatewayInfoPath,
   gatewayTokenPath,
   type AgentSummary,
@@ -1275,6 +1283,8 @@ const createAgentRuntime = async (
     approvals?: CliApprovalMode;
     maxTurns?: number;
     env?: CliEnvironment;
+    /** The config this command was pinned to, for reading its `plugins` block. */
+    configPath?: string;
   },
 ) => {
   const runEnv = options.env ?? {};
@@ -1302,6 +1312,31 @@ const createAgentRuntime = async (
         writeLine(streams.stdout, line);
       }
     });
+  }
+
+  // The same plugins the daemon would load, from the same trusted config,
+  // so a tool that works in `stratus run` works in `stratus serve` and a
+  // tool that is missing is missing in both. A local test that silently ran
+  // a different toolset than the daemon would be worse than no local test.
+  const pluginsConfig = await loadServePlugins(runEnv, options.configPath, (line) => {
+    writeLine(streams.stderr, `Warning: ${line}`);
+  });
+  const loadedPlugins: LoadedPlugin[] = [];
+  if (Object.keys(pluginsConfig).length > 0) {
+    const result = await loadPlugins({
+      config: pluginsConfig,
+      host: {
+        resolve: (specifier) => import.meta.resolve(specifier),
+        import: (specifier) => import(specifier),
+      },
+      tools,
+      bus,
+      workspaceRoot: workspacesDirPath(runEnv),
+    });
+    loadedPlugins.push(...result.loaded);
+    for (const failure of result.failures) {
+      writeLine(streams.stderr, `Warning: plugin ${failure.package} did not load: ${failure.reason}`);
+    }
   }
 
   // The Claude Code runtime executes kernel tools by calling back into the
@@ -1351,7 +1386,23 @@ const createAgentRuntime = async (
         ...(options.runtime.provider === 'openai' ? { baseUrl: options.runtime.baseUrl } : {}),
       };
 
-  return { runner, agent, metadata };
+  // Handed back so a command can release what a plugin acquired — a browser
+  // above all. A one-shot `stratus run` that left a Chromium behind would
+  // be a leak per invocation.
+  const disposePlugins = async (): Promise<void> => {
+    for (const plugin of loadedPlugins) {
+      try {
+        await plugin.instance.dispose?.();
+      } catch (error) {
+        writeLine(
+          streams.stderr,
+          `Warning: plugin ${plugin.package} failed to shut down: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  };
+
+  return { runner, agent, metadata, disposePlugins };
 };
 
 export const runSingleLoop = async (
@@ -1363,15 +1414,22 @@ export const runSingleLoop = async (
     approvals?: CliApprovalMode;
     maxTurns?: number;
     env?: CliEnvironment;
+    configPath?: string;
   },
 ): Promise<Session> => {
-  const { runner, agent, metadata } = await createAgentRuntime(streams, options);
-  return runner.run({
-    sessionId: randomUUID(),
-    agent,
-    userMessage: prompt,
-    metadata,
-  });
+  const { runner, agent, metadata, disposePlugins } = await createAgentRuntime(streams, options);
+  try {
+    return await runner.run({
+      sessionId: randomUUID(),
+      agent,
+      userMessage: prompt,
+      metadata,
+    });
+  } finally {
+    // Even when the run failed: a plugin that started a browser started it
+    // before the turn could fail.
+    await disposePlugins();
+  }
 };
 
 export const printSessionSummary = (session: Session, streams: CliStreams): void => {
@@ -1508,11 +1566,12 @@ export const runChat = async (
     });
   };
 
-  const { runner, agent, metadata } = await createAgentRuntime(streams, {
+  const { runner, agent, metadata, disposePlugins } = await createAgentRuntime(streams, {
     runtime,
     approvals: command.approvals,
     askApproval,
     ...(command.maxTurns !== undefined ? { maxTurns: command.maxTurns } : {}),
+    ...(command.configPath ? { configPath: command.configPath } : {}),
     env,
     onEvent: (event) => {
       if (command.events) {
@@ -1616,6 +1675,8 @@ export const runChat = async (
     }
   }
   rl.close();
+  // A chat that held a browser open for an hour still has to put it down.
+  await disposePlugins();
 
   if (interactive) {
     writeLine(streams.stdout, dim(`Bye — ${agent.name} keeps what they remembered.`));
@@ -4707,6 +4768,11 @@ export const runServe = async (
   const approvalsConfig = await loadServeApprovals(env, command.configPath, warn);
   const approvalMode = command.approvals ?? approvalsConfig.mode ?? 'headless';
 
+  // Read here rather than inside the gateway for the same reason as the two
+  // blocks above: the trust boundary is a property of *which file* said it,
+  // and this is where the file precedence is already understood.
+  const pluginsConfig = await loadServePlugins(env, command.configPath, warn);
+
   // The control API is a channel adapter like any other: started after the
   // roster loads, stopped before the store drains. It is optional because
   // installing it is how an operator says they want a port open.
@@ -4838,10 +4904,23 @@ export const runServe = async (
   // A factory, not a policy: remote mode parks turns on a transport the
   // gateway owns, so the policy cannot exist until the gateway is building
   // it. Headless takes the same path so there is one construction site.
+  // The command-scope engine, which only has a caller once a shell pack is
+  // installed. Wired unconditionally because it costs nothing without one:
+  // a tool that carries no command string is judged by its risk exactly as
+  // before. The whitelist lives beside the agent's soul, per agent.
+  const commands = {
+    whitelist: createFileCommandWhitelist({ directory: agentsDirPath(env) }),
+    onScopeRemembered: ({ agentId, scope }: { agentId: string; scope: CommandScope }) => {
+      // An approval that widens what runs unattended, for every future
+      // session, is precisely the decision that must not be the one leaving
+      // no trace.
+      log(`${agentId}: "${describeCommandScope(scope)}" now runs without asking`);
+    },
+  };
   const approvals = (transport: ApprovalTransport): ApprovalPolicy => createPermissionPolicy(
     approvalMode === 'remote'
-      ? { mode: 'remote', request: transport.request, onDecision }
-      : { mode: 'headless', onDecision },
+      ? { mode: 'remote', request: transport.request, onDecision, commands }
+      : { mode: 'headless', onDecision, commands },
   );
 
   if (approvalMode === 'remote') {
@@ -4855,6 +4934,7 @@ export const runServe = async (
   const gateway = createGateway({
     env,
     approvals,
+    ...(Object.keys(pluginsConfig).length > 0 ? { plugins: pluginsConfig } : {}),
     ...(approvalsConfig.timeoutMs !== undefined ? { approvalTimeoutMs: approvalsConfig.timeoutMs } : {}),
     ...(command.configPath ? { selection: { configPath: command.configPath } } : {}),
     ...(command.idleTimeoutMs !== undefined ? { idleTimeoutMs: command.idleTimeoutMs } : {}),
@@ -5068,6 +5148,7 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
       runtime,
       approvals: command.approvals,
       ...(command.maxTurns !== undefined ? { maxTurns: command.maxTurns } : {}),
+      ...(command.configPath ? { configPath: command.configPath } : {}),
       env: resolvedEnv,
     });
 

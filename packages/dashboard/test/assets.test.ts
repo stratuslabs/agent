@@ -116,3 +116,24 @@ test('the page declares a policy that keeps it talking to its own origin', async
     await host.close();
   }
 });
+
+test('the plugins screen reads the catalog rather than describing a roadmap', async () => {
+  const host = await serving();
+  try {
+    const view = await fetch(`${host.url}/views/plugins.js`);
+    assert.equal(view.status, 200);
+    const source = await view.text();
+
+    // It binds to the endpoint that now exists.
+    assert.match(source, /api\.tools\(\)/);
+    // And no longer explains that tools are coming: the placeholder was
+    // honest while `/catalog/tools` was deliberately absent, and is a false
+    // statement the moment it is not.
+    assert.doesNotMatch(source, /next step of the roadmap/);
+
+    const client = await fetch(`${host.url}/lib/api.js`);
+    assert.match(await client.text(), /\/catalog\/tools/);
+  } finally {
+    await host.close();
+  }
+});

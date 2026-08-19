@@ -73,6 +73,9 @@ importers:
       '@stratusagent/permissions':
         specifier: workspace:*
         version: link:../permissions
+      '@stratusagent/plugins':
+        specifier: workspace:*
+        version: link:../plugins
       '@stratusagent/provider-anthropic':
         specifier: workspace:*
         version: link:../provider-anthropic
@@ -200,6 +203,9 @@ importers:
       '@stratusagent/executor-local':
         specifier: workspace:*
         version: link:../executor-local
+      '@stratusagent/plugins':
+        specifier: workspace:*
+        version: link:../plugins
       '@stratusagent/state':
         specifier: workspace:*
         version: link:../state

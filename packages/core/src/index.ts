@@ -704,6 +704,18 @@ export interface PluginContext {
 export interface Plugin {
   name: string;
   setup(context: PluginContext): Promise<void> | void;
+  /**
+   * Release whatever `setup` acquired. Optional, and most plugins have
+   * nothing to release — a plugin that registers pure functions is done
+   * when the process is.
+   *
+   * It exists because some do: a browser plugin holds a Chromium and a
+   * listening socket, and a daemon that stopped without telling it would
+   * leak both. The host calls this on shutdown, after channels have
+   * stopped, and a plugin that throws here is logged rather than allowed to
+   * hold up the drain.
+   */
+  dispose?(): Promise<void> | void;
 }
 
 export class PluginRegistry {
@@ -717,6 +729,17 @@ export class PluginRegistry {
     for (const plugin of this.plugins) {
       await plugin.setup(context);
     }
+  }
+
+  /**
+   * Dispose every plugin that has something to dispose, in reverse load
+   * order. Settled rather than awaited in sequence-with-throw: one
+   * plugin's failed cleanup must not strand the next plugin's.
+   */
+  async disposeAll(): Promise<void> {
+    await Promise.allSettled(
+      [...this.plugins].reverse().map(async (plugin) => plugin.dispose?.()),
+    );
   }
 }
 

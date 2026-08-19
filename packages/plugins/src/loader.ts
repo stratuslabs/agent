@@ -100,6 +100,12 @@ export interface LoadedPlugin {
   manifest: PluginManifest;
   trusted: boolean;
   tools: PluginToolRecord[];
+  /**
+   * The plugin itself, so the host can shut it down. A browser plugin holds
+   * a Chromium and a listening socket; a daemon that stopped without
+   * telling it would leak both.
+   */
+  instance: Plugin;
 }
 
 /** A plugin an operator asked for that did not load, and why. */
@@ -212,6 +218,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
         manifest,
         trusted: isTrusted,
         tools,
+        instance: plugin,
       });
     } catch (error) {
       failures.push({

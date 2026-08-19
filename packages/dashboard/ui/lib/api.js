@@ -53,6 +53,7 @@ export const api = {
   approvals: () => request('GET', '/approvals'),
   resolveApproval: (body) => request('POST', '/approvals', body),
   models: () => request('GET', '/catalog/models'),
+  tools: () => request('GET', '/catalog/tools'),
   credentials: () => request('GET', '/credentials'),
   verifyKey: (body) => request('POST', '/credentials/verify', body),
   storeKey: (provider, body) => request('PUT', `/credentials/${encodeURIComponent(provider)}`, body),
