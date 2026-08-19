@@ -600,3 +600,45 @@ test('a failed resume discards its streamed fragments before replaying', async (
     { type: 'text', text: 'fresh answer' },
   ]);
 });
+
+test('a slow delta consumer is not counted as SDK silence', async () => {
+  // The sink is awaited per fragment on purpose — that is the backpressure
+  // contract. Counting the wait as provider idleness would abort a healthy
+  // query for honouring it.
+  const IDLE_MS = 60;
+  // The fake honours the controller the provider hands it, as a real query
+  // does — otherwise an abort has no visible effect and this test would
+  // pass whether the timer fired or not.
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    const signal = (params.options as { abortController?: AbortController }).abortController?.signal;
+    return (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
+      for (const message of [
+        { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'one' } } },
+        { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'two' } } },
+        { type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: 'sdk-1' },
+      ] as ClaudeCodeStreamMessage[]) {
+        if (signal?.aborted) {
+          throw new Error('aborted');
+        }
+        yield message;
+      }
+    })();
+  };
+
+  const provider = createClaudeCodeProvider({
+    authToken: 'sk-ant-oat-test',
+    queryFn,
+    idleTimeoutMs: IDLE_MS,
+  });
+
+  const response = await provider.generate({
+    session: createSession(),
+    memory: [],
+    // A throttled channel edit, slower than the idle timeout.
+    onDelta: async () => {
+      await new Promise((resolve) => setTimeout(resolve, IDLE_MS * 2));
+    },
+  });
+
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'done' }]);
+});

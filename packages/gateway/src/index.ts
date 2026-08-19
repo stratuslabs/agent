@@ -694,7 +694,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     ? {
         async approve(context) {
           openToolPhase(context.session.id, context.call.id);
-          return configuredApprovals.approve(context);
+          try {
+            return await configuredApprovals.approve(context);
+          } catch (error) {
+            // A policy that throws settles nothing: the runner propagates
+            // without emitting tool.denied or tool.completed, so the phase
+            // this opened would stay open for the life of the session —
+            // and a later streaming turn on it would find the watchdog
+            // suppressed before it started. Worse than the turn that
+            // failed, and silent.
+            settleToolPhase(context.session.id, context.call.id);
+            throw error;
+          }
         },
       }
     : undefined;

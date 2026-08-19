@@ -588,7 +588,18 @@ export const createClaudeCodeProvider = ({
           // AWAIT the sink per fragment, the same backpressure the API
           // provider gives it: a throttled consumer pauses this loop
           // rather than queueing the rest of the turn behind itself.
-          await forwardDelta(message, request.onDelta, toolNamesByIndex, kernelNameFor);
+          //
+          // With the clock stopped, because that pause is the consumer's
+          // time and not the SDK's silence. Counting it as idleness would
+          // abort a healthy query for honouring the contract this await
+          // exists to keep — the same distinction the gateway watchdog
+          // draws when it excludes subscriber time.
+          suspendIdleTimer();
+          try {
+            await forwardDelta(message, request.onDelta, toolNamesByIndex, kernelNameFor);
+          } finally {
+            resetIdleTimer();
+          }
           continue;
         }
         if (message.type !== 'result') {

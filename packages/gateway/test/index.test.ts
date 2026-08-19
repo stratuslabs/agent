@@ -2604,3 +2604,83 @@ test('a slow approval holds the watchdog even when the policy emits nothing', as
   assert.equal(session.status, 'completed', `session failed: ${session.lastError ?? ''}`);
   assert.match(session.messages.at(-1)?.content ?? '', /all done/);
 });
+
+test('a policy that throws does not leave the next turn without a watchdog', async () => {
+  // A throwing policy settles nothing — the runner propagates without
+  // emitting tool.denied or tool.completed — so the phase it opened stays
+  // open. On a *non-streaming* turn nothing else cleans it up either:
+  // withWatchdog returns before its cleanup exists. The bill then lands on
+  // a later streaming turn for the same session, which starts with its
+  // watchdog already suppressed. Two turns, two runtimes, and the failure
+  // is on neither the turn nor the path that caused it.
+  const home = await newHome();
+  const soul = path.join(home, '.stratus', 'agents', 'ava.md');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\ntools:\n  - demo.echo\n---\n\nYou are Ava.\n');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({
+      openai: { type: 'api_key', value: 'sk-o' },
+      anthropic: { type: 'oauth_token', value: 'sk-ant-oat' },
+    }),
+  );
+
+  const IDLE_MS = 300;
+  const fetchImpl = (async () => openAiToolCall('demo_echo', { text: 'hi' })) as typeof fetch;
+  const queryFn = ((params: { options?: unknown }) => {
+    const signal = (params.options as { abortController?: AbortController }).abortController?.signal;
+    return (async function* () {
+      yield { type: 'system', subtype: 'init', session_id: 'sdk-1' };
+      yield {
+        type: 'stream_event',
+        session_id: 'sdk-1',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'working' } },
+      };
+      await new Promise<void>((resolve) => {
+        if (!signal || signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    })();
+  }) as never;
+
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {}, fetch: fetchImpl, queryFn },
+    idleTimeoutMs: IDLE_MS,
+    approvals: {
+      async approve() {
+        throw new Error('the policy could not decide');
+      },
+    },
+    warn: () => {},
+  });
+  await gateway.start();
+
+  // Turn one, non-streaming: the policy throws while a phase is open.
+  await gateway.dispatch({ sessionId: 'leak-1', agentId: 'ava', userMessage: 'first' })
+    .catch(() => undefined);
+
+  // The same agent switches to the subscription runtime, which streams —
+  // the gateway re-reads the soul per dispatch, so this takes effect on
+  // the next turn of the same session.
+  await writeFile(soul, '---\nname: Ava\nprovider: anthropic\ntools:\n  - demo.echo\n---\n\nYou are Ava.\n');
+
+  const rescue = new AbortController();
+  const timer = setTimeout(() => rescue.abort(), 10_000);
+  const second = gateway.dispatch({ sessionId: 'leak-1', agentId: 'ava', userMessage: 'second', signal: rescue.signal })
+    .then((session) => session.lastError ?? 'completed', (error: unknown) => String(error));
+
+  try {
+    const outcome = await second;
+    assert.ok(
+      !rescue.signal.aborted,
+      'the next turn ran without a watchdog — the phase opened by the throwing policy was never settled',
+    );
+    assert.match(outcome, /no activity/);
+  } finally {
+    clearTimeout(timer);
+    await gateway.stop();
+  }
+});
