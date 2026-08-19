@@ -449,6 +449,23 @@ The whitelist file is `0600` and per agent: it decides what runs with nobody
 watching, so neither another account on the machine nor another agent inherits
 it. Delete an entry to withdraw the permission.
 
+### What the log records about a command
+
+The scope, never the command:
+
+```text
+09:14:36  —  warning: ava: shell.run was called outside every approved scope (git) and nobody is available to approve it
+09:16:02  —  ava: "git push" now runs without asking
+```
+
+The daemon log is a trace, not a second transcript — it records that a tool
+ran, never what it was called with. A command an agent composed can carry a
+URL, a filename, or something a person pasted into a chat, and this file is
+one `stratus logs` prints and people paste into issues. The command itself
+goes to whoever is being asked to approve it: the terminal prompt and the
+Slack message both show it in full, because approving a bare tool name is
+approving something you cannot see.
+
 The safe list is deliberately short, and `cat`, `ls`, and `grep` are the
 tempting entries that cannot be on it — they read whatever path they are given,
 so safe-listing them would safe-list reading your credentials file. Approve

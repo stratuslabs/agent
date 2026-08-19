@@ -104,8 +104,26 @@ export interface PermissionDecision {
   toolName: string;
   sessionId: string;
   agentId: string;
-  /** One line, written for a person reading a daemon log at 3am. */
+  /**
+   * One line, written for a person reading a daemon log at 3am — and
+   * deliberately free of the tool's input.
+   *
+   * The daemon log is a trace, not a second transcript: it records that a
+   * tool ran, never what it was called with. A refusal that quoted the
+   * command would put an agent-composed string — a URL, a token somebody
+   * pasted into a prompt — into a file this project documents as safe to
+   * read and to share. What the reason names instead is the *scope*: the
+   * base command and its subcommand, which is the actionable half and is a
+   * classification rather than the arguments.
+   */
   reason: string;
+  /**
+   * The command this decision was about, for a surface that is showing a
+   * person the thing they are approving — a Slack prompt, a live console.
+   * Carried separately precisely so it is not in `reason`, and a consumer
+   * that logs it is making that choice knowingly.
+   */
+  command?: string;
 }
 
 export interface PermissionPolicyOptions {
@@ -302,7 +320,12 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
   // the session, which is what `always` means at a terminal.
   const sessionScopes = new Map<string, CommandScope[]>();
 
-  const report = (context: ApprovalContext, allowed: boolean, reason: string): boolean => {
+  const report = (
+    context: ApprovalContext,
+    allowed: boolean,
+    reason: string,
+    command?: string,
+  ): boolean => {
     onDecision?.({
       allowed,
       mode,
@@ -311,6 +334,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       sessionId: context.session.id,
       agentId: context.session.agent.id,
       reason,
+      ...(command === undefined ? {} : { command }),
     });
     return allowed;
   };
@@ -338,7 +362,8 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             return report(
               context,
               false,
-              `${call.toolName} cannot run unattended (${analysis.disqualifiedBy}): ${command}`,
+              `${call.toolName} cannot run unattended: ${analysis.disqualifiedBy}`,
+              command,
             );
           }
         } else {
@@ -353,7 +378,8 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             return report(
               context,
               true,
-              `${command} is inside the approved scope "${describeCommandScope(scope)}"`,
+              `${call.toolName} ran inside the approved scope "${describeCommandScope(scope)}"`,
+              command,
             );
           }
         }
@@ -367,7 +393,9 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           false,
           command === undefined
             ? `${call.toolName} is ${risk} and nobody is available to approve it`
-            : `${command} is outside every approved scope and nobody is available to approve it`,
+            : `${call.toolName} was called outside every approved scope`
+              + `${analysis?.base ? ` (${analysis.base})` : ''} and nobody is available to approve it`,
+          command,
         );
       }
 
@@ -398,11 +426,25 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           mode === 'remote'
             ? `${call.toolName} was not approved`
             : `${call.toolName} was refused at the prompt`,
+          command,
         );
       }
 
       if (answer === 'always') {
         const scope = analysis ? normalizeCommandScope(analysis) : undefined;
+        if (analysis && !scope) {
+          // A command this parser could not reduce to a scope — a pipe, a
+          // subshell, an unbalanced quote. "Always" must not fall back to
+          // the tool-wide grant here: the approver widened one command they
+          // read, and remembering `shell.run` instead would hand the agent
+          // every command for the rest of the session.
+          return report(
+            context,
+            true,
+            `${call.toolName} was approved once; it cannot be reduced to a scope, so it will ask again`,
+            command,
+          );
+        }
         if (scope) {
           // A scope, never the command string (useless next time) and never
           // the bare executable (a shell). `git push origin main` persists
@@ -416,18 +458,15 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           return report(
             context,
             true,
-            `${command} was approved, and "${describeCommandScope(scope)}" now runs without asking`,
+            `${call.toolName} was approved, and "${describeCommandScope(scope)}" now runs without asking`,
+            command,
           );
         }
         alwaysAllowed.add(sessionKey(session.id, call.toolName));
         return report(context, true, `${call.toolName} was approved for the rest of this session`);
       }
 
-      return report(
-        context,
-        true,
-        command === undefined ? `${call.toolName} was approved once` : `${command} was approved once`,
-      );
+      return report(context, true, `${call.toolName} was approved once`, command);
     },
   };
 };

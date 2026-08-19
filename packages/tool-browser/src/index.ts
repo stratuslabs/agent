@@ -39,14 +39,17 @@ export interface BrowserPluginConfig extends JsonObject {
 const asNumber = (value: JsonValue | undefined, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 
+/** The address policy a block describes, per-agent or top-level. */
+const policyFrom = (resolved: JsonObject): EgressPolicy => ({
+  ...(resolved.allowPrivateAddresses === true ? { allowPrivateAddresses: true } : {}),
+  ...(Array.isArray(resolved.allowedHosts)
+    ? { allowedHosts: resolved.allowedHosts.filter((entry): entry is string => typeof entry === 'string') }
+    : {}),
+});
+
 const settingsFor = (config: JsonObject, session: Session) => {
   const resolved = resolvePluginAgentConfig(config, session.agent.id);
-  const policy: EgressPolicy = {
-    ...(resolved.allowPrivateAddresses === true ? { allowPrivateAddresses: true } : {}),
-    ...(Array.isArray(resolved.allowedHosts)
-      ? { allowedHosts: resolved.allowedHosts.filter((entry): entry is string => typeof entry === 'string') }
-      : {}),
-  };
+  const policy = policyFrom(resolved);
   return {
     policy,
     maxTextBytes: asNumber(resolved.maxTextBytes, DEFAULT_MAX_TEXT_BYTES),
@@ -286,16 +289,13 @@ export const createBrowserPlugin = (
   // The policy the *pool* is built with is the top-level one: a browser is
   // one process shared by every session, so its proxy cannot be per-agent.
   // Per-agent settings still narrow what a call may request, and an
-  // operator who needs two different network postures runs two agents on
-  // two daemons rather than believing one browser enforces both.
-  const basePolicy = settingsFor(config, {
-    id: 'default',
-    agent: { id: 'default', name: 'default' },
-    status: 'idle',
-    messages: [],
-    createdAt: '',
-    updatedAt: '',
-  } as Session).policy;
+  // operator who needs two genuinely different network postures runs two
+  // daemons rather than believing one browser enforces both.
+  //
+  // Read from the block directly rather than resolved for some stand-in
+  // agent id: `resolvePluginAgentConfig(config, 'default')` would quietly
+  // pick up the settings of an agent that happened to be called `default`.
+  const basePolicy = policyFrom(config);
 
   const resolved = config;
   const pool = new BrowserSessionPool({

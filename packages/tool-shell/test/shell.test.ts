@@ -154,11 +154,14 @@ test('headless: a safe scope runs through a real pack, a control-operator chain 
   // whole point of the operator rule.
   assert.equal(results[1]?.toolResult?.ok, false);
   assert.match(results[1]?.toolResult?.error ?? '', /denied by approval policy/);
-  assert.match(decisions[1]?.reason ?? '', /cannot run unattended \(it contains a pipe/);
+  assert.match(decisions[1]?.reason ?? '', /cannot run unattended: it contains a pipe/);
   // And a `git` subcommand outside the safe scopes, which listing the
   // executable would have covered.
   assert.equal(results[2]?.toolResult?.ok, false);
-  assert.match(decisions[2]?.reason ?? '', /git clean -fdx is outside every approved scope/);
+  assert.match(decisions[2]?.reason ?? '', /outside every approved scope \(git\)/);
+  // The command reaches a surface that shows it to a person; it does not
+  // reach the reason, which is what the daemon writes to its log.
+  assert.equal(decisions[2]?.command, 'git clean -fdx');
 });
 
 test('the pack hands the engine the command and nothing else', () => {
