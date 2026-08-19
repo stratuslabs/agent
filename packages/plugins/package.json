@@ -1,0 +1,49 @@
+{
+  "name": "@stratusagent/plugins",
+  "version": "0.5.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types"
+  },
+  "engines": {
+    "node": ">=22.13 <23 || >=23.4"
+  },
+  "dependencies": {
+    "@stratusagent/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/plugins"
+  },
+  "description": "The Stratus Agent plugin host: manifest validation, the manifest-bound registration view, and the loader that turns a config block into running capability",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "plugins"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

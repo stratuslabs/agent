@@ -215,6 +215,19 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  packages/plugins:
+    dependencies:
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/provider-anthropic:
     dependencies:
       '@anthropic-ai/sdk':

@@ -40,7 +40,11 @@ export interface AvatarTheme {
  */
 export interface AgentDefinition extends AgentDescriptor {
   avatar?: AvatarTheme;
-  /** Tool names this agent may call. Omitted = every registered tool. */
+  /**
+   * What this agent may call: exact tool names (`fs.read`), toolset globs
+   * (`fs.*`), or `*`. Omitted = every registered tool. See
+   * `matchesToolAllowlist`, which is the only reading of these entries.
+   */
   tools?: string[];
   /** Credential names this agent may resolve. Omitted = none. */
   credentials?: string[];
@@ -202,6 +206,54 @@ export const DEFAULT_TOOL_RISK: ToolRisk = 'gated';
 export const resolveToolRisk = (tool: Pick<Tool, 'risk'> | undefined): ToolRisk =>
   tool?.risk ?? DEFAULT_TOOL_RISK;
 
+const RISK_ORDER: Record<ToolRisk, number> = { safe: 0, gated: 1, dangerous: 2 };
+
+/**
+ * Whether `risk` is at least as risky as `floor`. The ordering lives here,
+ * with the type, because two things compare against it — the permission
+ * engine deciding what needs a human, and the plugin loader holding a
+ * third-party tool to a floor — and a second ordering is a second answer
+ * to "is `safe` above or below `gated`".
+ */
+export const atLeastAsRisky = (risk: ToolRisk, floor: ToolRisk): boolean =>
+  RISK_ORDER[risk] >= RISK_ORDER[floor];
+
+/** `risk`, raised to `floor` when it sits below it. Never lowers anything. */
+export const raiseRiskTo = (risk: ToolRisk, floor: ToolRisk): ToolRisk =>
+  atLeastAsRisky(risk, floor) ? risk : floor;
+
+/**
+ * Whether an agent's `tools:` allowlist permits a tool name.
+ *
+ * Two entry forms, and the glob is why this is a function rather than a
+ * `Set.has`: a toolset is the unit an operator thinks in — an agent is
+ * given "the filesystem", not four names that must be edited whenever the
+ * pack gains a fifth — so `fs.*` selects the whole namespace.
+ *
+ * - `fs.read` — that tool, exactly.
+ * - `fs.*` — every tool in the `fs` toolset, nested names included, so
+ *   `mcp.*` covers `mcp.linear.create_issue` (which is the only form the
+ *   MCP bridge can be granted, since its names exist only at runtime).
+ *
+ * The prefix carries its dot deliberately: `fs.*` matches `fs.read` and
+ * does **not** match `fsx.read`, so a namespace cannot be widened by a
+ * package that named itself to look like a prefix of another. A bare `*`
+ * is every registered tool, which is the same thing as omitting the
+ * allowlist and is accepted because a soul saying so explicitly is
+ * clearer than one saying nothing.
+ *
+ * Exported because both gates use it — the descriptors a provider is shown
+ * and the check before execution — and because a second reading of `fs.*`
+ * is a second answer to "what may this agent do".
+ */
+export const matchesToolAllowlist = (toolName: string, allowlist: readonly string[]): boolean =>
+  allowlist.some((entry) => {
+    if (entry === '*' || entry === toolName) {
+      return true;
+    }
+    return entry.endsWith('.*') && toolName.startsWith(entry.slice(0, -1));
+  });
+
 export interface ToolDescriptor {
   name: string;
   description?: string;
@@ -340,6 +392,24 @@ export interface Tool {
   parameters?: JsonObject;
   /** See ToolRisk. Omitted means `gated`, never `safe`. */
   risk?: ToolRisk;
+  /**
+   * The shell command this invocation would run, for a tool whose danger
+   * lives in its arguments rather than in its identity.
+   *
+   * `risk` classifies a tool; this classifies a *call*. `shell.run` is one
+   * tool whose invocations range from `git status` to `curl … | sh`, and a
+   * single risk level for all of them is either too coarse to be safe or
+   * too coarse to be usable. A policy that wanted to judge the difference
+   * would have to know which input field a particular shell tool keeps its
+   * command in — so the tool says, and the policy stays free of any
+   * knowledge of which pack it is talking to.
+   *
+   * Returning a string is a request to be judged by the command, not a
+   * claim about it: the scope engine in `@stratusagent/permissions` decides
+   * what the string means, and a tool that returns nothing (or is not
+   * asked) is judged by `risk` alone.
+   */
+  commandFor?(input: JsonObject): string | undefined;
   execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue>;
 }
 
@@ -904,12 +974,15 @@ export class AgentRunner {
     }
   }
 
-  /** Tool names this session's agent may use, or undefined for no limit. */
-  private allowedToolsFor(session: Session): Set<string> | undefined {
+  /**
+   * The allowlist entries this session's agent is held to, or undefined for
+   * no limit. Entries, not a name set: `fs.*` is an entry, and matching is
+   * `matchesToolAllowlist`'s job rather than each caller's.
+   */
+  private allowedToolsFor(session: Session): readonly string[] | undefined {
     // The definition handed to run()/resume() travels with the session, so an
     // agent's own allowlist applies even when it was never registered.
-    const tools = session.agent.tools ?? this.agents.get(session.agent.id)?.tools;
-    return tools ? new Set(tools) : undefined;
+    return session.agent.tools ?? this.agents.get(session.agent.id)?.tools;
   }
 
   private async executeTurns(
@@ -930,7 +1003,7 @@ export class AgentRunner {
       const allowedTools = this.allowedToolsFor(session);
       const tools = this.tools
         .describe()
-        .filter((tool) => allowedTools === undefined || allowedTools.has(tool.name));
+        .filter((tool) => allowedTools === undefined || matchesToolAllowlist(tool.name, allowedTools));
 
       // Resumed, not restarted: a recovered turn spends the budget it was
       // already on. Starting at 1 would let a call parked on the last
@@ -1307,7 +1380,7 @@ export class AgentRunner {
     };
 
     const allowedTools = this.allowedToolsFor(session);
-    if (allowedTools !== undefined && !allowedTools.has(call.toolName)) {
+    if (allowedTools !== undefined && !matchesToolAllowlist(call.toolName, allowedTools)) {
       return rejected(`Tool not permitted for agent ${session.agent.id}: ${call.toolName}`);
     }
 

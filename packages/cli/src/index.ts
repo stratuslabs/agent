@@ -92,6 +92,7 @@ import {
   resolveRuntimeConfig as resolveStateRuntimeConfig,
   saveChannelCredentials,
   saveConfigFile,
+  readTrustedConfigBlock,
   saveCredentials,
   servedRuntimes,
   verifyProviderKey,
@@ -106,6 +107,7 @@ import {
   type ChannelCredentials,
   type CredentialProviderName,
   type CredentialsFile,
+  type PluginsConfig,
   type RosterEntry,
   type RuntimeSelection,
   type FallbackRuntime,
@@ -4060,27 +4062,19 @@ const loadServeApprovals = async (
   configPath: string | undefined,
   warn: (line: string) => void,
 ): Promise<ApprovalsConfig> => {
-  try {
-    const location = await resolveConfigLocation(configPath ? { configPath } : {}, env);
-    if (!location) {
-      return {};
-    }
-    const approvals = (await loadConfigFile(location.path)).approvals;
-    if (!approvals) {
-      return {};
-    }
-    if (!location.trusted) {
-      warn(
-        `ignoring the approvals config in ${location.path}: a project-local config cannot decide who may approve `
-        + 'this daemon\'s tool calls. Move it to ~/.stratus/config.json, or pass it with --config.',
-      );
-      return {};
-    }
-    return approvals;
-  } catch (error) {
-    warn(`ignoring the approvals config (${error instanceof Error ? error.message : String(error)}); refusing gated calls`);
+  const block = await readTrustedConfigBlock('approvals', env, configPath);
+  if (block.status === 'untrusted') {
+    warn(
+      `ignoring the approvals config in ${block.path}: a project-local config cannot decide who may approve `
+      + 'this daemon\'s tool calls. Move it to ~/.stratus/config.json, or pass it with --config.',
+    );
     return {};
   }
+  if (block.status === 'unreadable') {
+    warn(`ignoring the approvals config (${block.error instanceof Error ? block.error.message : String(block.error)}); refusing gated calls`);
+    return {};
+  }
+  return block.status === 'present' ? block.value : {};
 };
 
 /**
@@ -4618,27 +4612,45 @@ const loadServeApi = async (
   configPath: string | undefined,
   warn: (line: string) => void,
 ): Promise<ApiConfig> => {
-  try {
-    const location = await resolveConfigLocation(configPath ? { configPath } : {}, env);
-    if (!location) {
-      return {};
-    }
-    const api = (await loadConfigFile(location.path)).api;
-    if (!api) {
-      return {};
-    }
-    if (!location.trusted) {
-      warn(
-        `ignoring the api config in ${location.path}: a project-local config cannot decide which interface this `
-        + 'daemon binds. Move it to ~/.stratus/config.json, or pass it with --config.',
-      );
-      return {};
-    }
-    return api;
-  } catch (error) {
-    warn(`ignoring the api config (${error instanceof Error ? error.message : String(error)}); using the defaults`);
+  const block = await readTrustedConfigBlock('api', env, configPath);
+  if (block.status === 'untrusted') {
+    warn(
+      `ignoring the api config in ${block.path}: a project-local config cannot decide which interface this `
+      + 'daemon binds. Move it to ~/.stratus/config.json, or pass it with --config.',
+    );
     return {};
   }
+  if (block.status === 'unreadable') {
+    warn(`ignoring the api config (${block.error instanceof Error ? block.error.message : String(block.error)}); using the defaults`);
+    return {};
+  }
+  return block.status === 'present' ? block.value : {};
+};
+
+/**
+ * The daemon's `plugins` block — the same trust boundary as the two above,
+ * and the one it was written for. A plugin runs in-process with the daemon,
+ * so a list of them is a list of code; a `stratus.config.json` that ships
+ * in a cloned repository must not be able to write it.
+ */
+const loadServePlugins = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<PluginsConfig> => {
+  const block = await readTrustedConfigBlock('plugins', env, configPath);
+  if (block.status === 'untrusted') {
+    warn(
+      `ignoring the plugins config in ${block.path}: a project-local config cannot decide which code runs inside `
+      + 'this daemon. Move it to ~/.stratus/config.json, or pass it with --config.',
+    );
+    return {};
+  }
+  if (block.status === 'unreadable') {
+    warn(`ignoring the plugins config (${block.error instanceof Error ? block.error.message : String(block.error)}); loading no plugins`);
+    return {};
+  }
+  return block.status === 'present' ? block.value : {};
 };
 
 /**

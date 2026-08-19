@@ -9,6 +9,13 @@ import type {
 } from '@stratusagent/core';
 
 /**
+ * Re-exported, not re-implemented: the risk ordering moved to the kernel
+ * when the plugin loader became its second consumer, and this package
+ * published the name first.
+ */
+export { atLeastAsRisky } from '@stratusagent/core';
+
+/**
  * How a policy reaches a human — or admits that it cannot.
  *
  * - `interactive` — there is a terminal. Ask, and remember the answer for
@@ -89,12 +96,6 @@ export interface PermissionPolicyOptions {
    */
   onDecision?: (decision: PermissionDecision) => void;
 }
-
-const RISK_ORDER: Record<ToolRisk, number> = { safe: 0, gated: 1, dangerous: 2 };
-
-/** Whether `risk` is at least as risky as `floor`. */
-export const atLeastAsRisky = (risk: ToolRisk, floor: ToolRisk): boolean =>
-  RISK_ORDER[risk] >= RISK_ORDER[floor];
 
 const YES = new Set(['y', 'yes', 'always', 'a']);
 const ALWAYS = new Set(['always', 'a']);
