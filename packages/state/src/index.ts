@@ -4,14 +4,21 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type {
+  AgentDefinition,
   AgentMemoryStore,
+  AvatarTheme,
   JsonObject,
   JsonValue,
   MemoryEntry,
   ModelProvider,
   Session,
 } from '@stratusagent/core';
-import { parseSoul, type ParsedSoul } from '@stratusagent/agents';
+import {
+  agentIdWithSuffix,
+  defineAgent,
+  parseSoul,
+  type ParsedSoul,
+} from '@stratusagent/agents';
 import { defineLocalCommandTool } from '@stratusagent/executor-local';
 import {
   createOpenAICompatibleProvider,
@@ -1494,4 +1501,618 @@ export const createRuntimeProvider = (
     ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
     ...(config.fetch ? { fetch: config.fetch } : {}),
   });
+};
+
+// ---------------------------------------------------------------------------
+// What a served agent actually resolves to
+//
+// Everything from here down used to live as private helpers inside the CLI's
+// `runSetup` / `runAgents` / `runServe`, or — for `applySoulPins` — inside the
+// gateway. The control API answers the same questions those commands answer,
+// and this repository's most repeated defect is a second hand-rolled copy of a
+// rule that already has exactly one implementation. So they moved here, beside
+// `resolveRuntimeConfig`, and their old homes import them.
+// ---------------------------------------------------------------------------
+
+/** Where the daemon-wide provider default could have come from. */
+export interface SoulPinContext {
+  /** A provider fixed by the caller (the gateway's own selection). */
+  selectionProvider?: string;
+  /** The provider named by the active config file. */
+  configProvider?: string;
+  /** Whether a config file was found at all. */
+  configPresent: boolean;
+}
+
+/**
+ * Apply a soul's provider/model pins to a selection, demoting the
+ * daemon-wide defaults the pins outrank.
+ *
+ * Exported because this is not only dispatch logic: anything that wants to
+ * know what a served agent will actually resolve to — a startup billing
+ * check, a diagnostic, the control API's health report — has to normalize
+ * the same way, and a second copy of these rules drifts from this one.
+ *
+ * Lives here rather than in the gateway (which re-exports it, so the
+ * documented import path still works) because it has no gateway dependency
+ * at all: it is a rule about selections, environments, and souls, and it
+ * belongs beside the resolver whose precedence it is manipulating.
+ */
+export const applySoulPins = (
+  pins: ParsedSoul,
+  selection: RuntimeSelection,
+  env: StateEnvironment,
+  context: SoulPinContext,
+): { selection: RuntimeSelection; env: StateEnvironment } => {
+  selection.presetSoul = pins;
+  if (!pins.provider && !pins.model) {
+    return { selection, env };
+  }
+  const processEnv = { ...(env.processEnv ?? process.env) };
+  // The daemon-wide default can come from the selection, the environment,
+  // or the config file. A config with no provider key predates the
+  // anthropic option and is openai-specific (the resolver treats it that
+  // way), so a real file without the key still names openai as the
+  // default. Env values normalize exactly as the resolver normalizes
+  // them: an empty or whitespace-padded STRATUS_PROVIDER is no default at
+  // all, not a mismatching one.
+  const defaultProvider: string | undefined = context.selectionProvider
+    ?? readNonEmptyString(processEnv.STRATUS_PROVIDER)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER)
+    ?? context.configProvider
+    ?? (context.configPresent ? 'openai' : undefined);
+  if (pins.provider) {
+    delete selection.provider;
+    delete processEnv.STRATUS_PROVIDER;
+    delete processEnv.STRATUSCLAW_PROVIDER;
+    if (defaultProvider !== undefined && defaultProvider !== 'demo' && pins.provider !== defaultProvider) {
+      // The default model, endpoint, and generic credentials were all
+      // chosen for the default provider — none may ride along to the
+      // soul's: a base URL would point the pinned provider at the wrong
+      // service, and a generic API key would be sent to it. With NO
+      // default selected anywhere — or the credential-less demo provider
+      // as the default — there is nothing those values could have been
+      // chosen for except whatever provider the soul selects — exactly
+      // the resolver's own reading of a generic credential — so they stay.
+      delete selection.model;
+      delete processEnv.STRATUS_MODEL;
+      delete processEnv.STRATUSCLAW_MODEL;
+      delete selection.baseUrl;
+      delete processEnv.STRATUS_BASE_URL;
+      delete processEnv.STRATUSCLAW_BASE_URL;
+      delete processEnv.STRATUS_API_KEY;
+      delete processEnv.STRATUSCLAW_API_KEY;
+      delete processEnv.STRATUS_API_KEY_ENV;
+      delete processEnv.STRATUSCLAW_API_KEY_ENV;
+    }
+  }
+  if (pins.model) {
+    delete selection.model;
+    delete processEnv.STRATUS_MODEL;
+    delete processEnv.STRATUSCLAW_MODEL;
+  }
+  return { selection, env: { ...env, processEnv } };
+};
+
+/** One resolved runtime, with the environment it resolved under. */
+export interface ServedRuntime {
+  runtime: RuntimeConfig;
+  env: StateEnvironment;
+}
+
+/**
+ * Every runtime the daemon would resolve: the config-wide default plus one
+ * per roster soul, normalized the way a dispatch normalizes it. A soul that
+ * pins its own provider resolves to different credentials entirely, so any
+ * check that looks only at the default misses exactly the agent that is
+ * misconfigured.
+ */
+export const servedRuntimes = async (
+  env: StateEnvironment,
+  configPath?: string,
+): Promise<ServedRuntime[]> => {
+  const { config: activeConfig, location } = await discoverActiveConfig(env, () => {});
+  const context: SoulPinContext = {
+    ...(activeConfig.provider !== undefined ? { configProvider: activeConfig.provider } : {}),
+    configPresent: location !== undefined,
+  };
+  const passes: Array<{ selection: RuntimeSelection; env: StateEnvironment }> = [{ selection: {}, env }];
+  // A roster that will not load is the gateway's to refuse, with a better
+  // message than this preflight could give — so it checks what it can and
+  // leaves the failing to start().
+  const rosterForRuntimes = await loadRosterSouls(env, () => {}).catch(() => []);
+  for (const entry of rosterForRuntimes) {
+    const normalized = applySoulPins(entry.soul, {}, env, context);
+    passes.push(normalized);
+  }
+
+  const resolved: ServedRuntime[] = [];
+  for (const pass of passes) {
+    // A runtime that cannot resolve is the gateway's to report, per
+    // dispatch and with far better context than a startup pass has.
+    const runtime = await resolveRuntimeConfig(
+      { ...pass.selection, ...(configPath ? { configPath } : {}) },
+      pass.env,
+    ).catch(() => undefined);
+    if (runtime) {
+      resolved.push({ runtime, env: pass.env });
+    }
+  }
+  return resolved;
+};
+
+// ---------------------------------------------------------------------------
+// Provider catalogs and key verification
+// ---------------------------------------------------------------------------
+
+/**
+ * The provider-specific variable a key is read from when nothing else names
+ * one. `apiKeyEnvNameFor` is the full rule — config file and generic
+ * overrides included; this is only the last term of it, which callers
+ * enumerating providers (a catalog sweep, a sign-in status line) need on its
+ * own for a provider that is *not* the configured default.
+ */
+export const defaultApiKeyEnvName = (provider: CredentialProviderName): string =>
+  provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+
+/**
+ * Shown when live model listing is unavailable: a Claude subscription token
+ * cannot call the models endpoint, and neither can an offline machine.
+ */
+export const KNOWN_CLAUDE_MODELS = [
+  'claude-opus-5',
+  'claude-sonnet-5',
+  'claude-haiku-4-5',
+  'claude-opus-4-6',
+  'claude-sonnet-4-6',
+];
+
+// Model ids that cannot serve /chat/completions and must not become the
+// default: embeddings, audio, images, moderation, and legacy completions.
+const NON_CHAT_MODEL_PATTERN = /embed|whisper|tts|audio|dall-e|image|moderation|realtime|transcribe|davinci|babbage|curie|(^|[-_])ada([-_]|$)/i;
+
+/**
+ * What a live key check concluded. `unreachable` is deliberately distinct
+ * from `rejected`: only an explicit auth failure condemns a key.
+ */
+export interface ProviderKeyVerdict {
+  status: 'ok' | 'rejected' | 'unreachable';
+  detail?: string;
+}
+
+/**
+ * Live check that a key actually works, so the user finds out while they are
+ * entering it instead of on their first run.
+ */
+export const verifyProviderKey = async (
+  provider: CredentialProviderName,
+  key: string,
+  baseUrl: string | undefined,
+  fetchImpl: typeof fetch | undefined,
+): Promise<ProviderKeyVerdict> => {
+  if (typeof fetchImpl !== 'function') {
+    return { status: 'unreachable', detail: 'fetch is unavailable' };
+  }
+
+  const root = (baseUrl ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_OPENAI_BASE_URL)).replace(/\/+$/, '');
+  const url = provider === 'anthropic' ? `${root}/v1/models` : `${root}/models`;
+  const headers = provider === 'anthropic'
+    ? { 'x-api-key': key, 'anthropic-version': '2023-06-01' }
+    : { authorization: `Bearer ${key}` };
+
+  try {
+    const response = await fetchImpl(url, { headers });
+    if (response.ok) {
+      return { status: 'ok' };
+    }
+    // Only an explicit auth failure condemns the key. Compatible endpoints
+    // (local models, proxies) often lack GET /models entirely — a 404/405
+    // there says nothing about the key, so it stays saveable.
+    if (response.status === 401 || response.status === 403) {
+      return { status: 'rejected', detail: `HTTP ${response.status}` };
+    }
+    return { status: 'unreachable', detail: `the endpoint did not support a key check (HTTP ${response.status})` };
+  } catch (error) {
+    return { status: 'unreachable', detail: error instanceof Error ? error.message : String(error) };
+  }
+};
+
+/** One model a stored sign-in can actually reach. */
+export interface CatalogModel {
+  provider: CredentialProviderName;
+  id: string;
+}
+
+/**
+ * The current default selection, as far as model discovery cares. Passed
+ * explicitly rather than re-resolved because the caller may be holding an
+ * unsaved edit — setup's in-progress state, or a config body being validated
+ * before it is written.
+ */
+export interface ModelCatalogSelection {
+  /**
+   * The default provider. Only it may use the generic `STRATUS_API_KEY` and
+   * the configured `apiKeyEnv`; a secondary provider relies on its own
+   * variable or stored sign-in, never the default provider's secret.
+   */
+  provider?: StratusProviderName;
+  baseUrl?: string;
+  apiKeyEnv?: string;
+  credentials: CredentialsFile;
+}
+
+/**
+ * Every model the current sign-ins can actually reach, fetched live where
+ * possible. Subscription tokens cannot call the models endpoint, so those
+ * fall back to the known Claude lineup.
+ */
+export const collectAvailableModels = async (
+  selection: ModelCatalogSelection,
+  env: StateEnvironment = {},
+): Promise<CatalogModel[]> => {
+  const processEnv = readProcessEnv(env);
+  const fetchImpl = env.fetch ?? globalThis.fetch;
+  const models: CatalogModel[] = [];
+
+  for (const provider of ['anthropic', 'openai'] as const) {
+    // Discovery uses the credential a real run would use. STRATUS_API_KEY
+    // and a configured apiKeyEnv authenticate the DEFAULT provider only —
+    // a secondary provider relies on its own env var or stored sign-in,
+    // never the default provider's secret.
+    const envKey = (provider === selection.provider
+      ? readNonEmptyString(processEnv.STRATUS_API_KEY)
+        ?? (selection.apiKeyEnv ? readNonEmptyString(processEnv[selection.apiKeyEnv]) : undefined)
+      : undefined)
+      ?? readNonEmptyString(processEnv[defaultApiKeyEnvName(provider)]);
+    const credential = envKey ? undefined : selection.credentials[provider];
+    const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);
+    if (!apiKey && !credential) {
+      continue;
+    }
+
+    if (provider === 'anthropic') {
+      if (!apiKey || typeof fetchImpl !== 'function') {
+        // Subscription tokens cannot call the models endpoint.
+        models.push(...KNOWN_CLAUDE_MODELS.map((id) => ({ provider, id })));
+        continue;
+      }
+      // The same endpoint a real run uses: the stored key's bound URL is
+      // authoritative, then a configured anthropic base URL (a proxy) —
+      // never the official endpoint by accident.
+      const anthropicRoot = ((credential?.type === 'api_key' ? credential.baseUrl : undefined)
+        ?? (selection.provider === 'anthropic' ? selection.baseUrl : undefined)
+        ?? DEFAULT_ANTHROPIC_BASE_URL).replace(/\/+$/, '');
+      try {
+        const response = await fetchImpl(`${anthropicRoot}/v1/models?limit=100`, {
+          headers: { 'x-api-key': String(apiKey), 'anthropic-version': '2023-06-01' },
+        });
+        const payload = await response.json() as { data?: Array<{ id?: string }> };
+        const ids = (payload.data ?? []).map((entry) => entry.id).filter((id): id is string => typeof id === 'string');
+        models.push(...(ids.length > 0 ? ids : KNOWN_CLAUDE_MODELS).map((id) => ({ provider, id })));
+      } catch {
+        models.push(...KNOWN_CLAUDE_MODELS.map((id) => ({ provider, id })));
+      }
+      continue;
+    }
+
+    if (!apiKey || typeof fetchImpl !== 'function') {
+      continue;
+    }
+    try {
+      // A stored key's bound endpoint is authoritative, exactly as at run
+      // time; only env-supplied keys follow the default provider's URL.
+      const root = ((credential?.type === 'api_key' ? credential.baseUrl : undefined)
+        ?? (selection.provider === 'openai' ? selection.baseUrl : undefined)
+        ?? DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '');
+      const response = await fetchImpl(`${root}/models`, {
+        headers: { authorization: `Bearer ${String(apiKey)}` },
+      });
+      const payload = await response.json() as { data?: Array<{ id?: string }> };
+      const allIds = (payload.data ?? [])
+        .map((entry) => entry.id)
+        .filter((id): id is string => typeof id === 'string');
+      // Runs always call /chat/completions, so embedding, audio, image,
+      // moderation, and legacy completion models would save a default
+      // that cannot execute. If filtering leaves nothing (an exotic local
+      // service), show everything rather than an empty menu.
+      const chatIds = allIds.filter((id) => !NON_CHAT_MODEL_PATTERN.test(id));
+      const ids = (chatIds.length > 0 ? chatIds : allIds).sort((a, b) => {
+        const rank = (id: string): number => (/^gpt/i.test(id) ? 0 : /^o\d/i.test(id) ? 1 : 2);
+        return rank(a) - rank(b) || a.localeCompare(b);
+      });
+      models.push(...ids.map((id) => ({ provider, id })));
+    } catch {
+      // No reachable model list for this provider; skip it.
+    }
+  }
+
+  return models;
+};
+
+// ---------------------------------------------------------------------------
+// Creating a soul under an id nothing else holds
+// ---------------------------------------------------------------------------
+
+/**
+ * The ids a newly created soul must not claim: every id the served roster
+ * holds, which is three things and not one directory.
+ *
+ * - **What the roster files declare.** A filename is not an id: a soul at
+ *   `renamed.md` may declare `id: ava`, so `ava.md` being free proves
+ *   nothing — and since a duplicate refuses the whole roster, writing one
+ *   would hand back an agent whose daemon cannot start.
+ * - **The configured default soul**, which the daemon registers whether or
+ *   not its file lives in the agents directory. It wins a same-id contest
+ *   with a roster file — `defaultAgentId` replaces the source when the
+ *   path differs — so a new agent sharing its id is not refused, it is
+ *   shadowed: created, then undispatchable by id or from Slack, with
+ *   nothing saying so.
+ * - **The reserved `stratus`**, since a roster soul claiming it is skipped
+ *   at load, so writing one creates an agent that silently never appears.
+ *
+ * The two readable sources fail **independently**, and what they return is
+ * what they know rather than all-or-nothing. A configured soul that is
+ * missing or mid-edit does not stop the daemon serving the roster, so it
+ * must not discard the roster's claims either: collapsing both to unknown
+ * would let a caller write the very duplicate that refuses the roster it
+ * could have read. `unread` names what could not be answered, so the
+ * caller can say which check did not run instead of implying none did.
+ */
+export const declaredAgentIds = async (
+  env: StateEnvironment,
+): Promise<{ ids: Set<string>; unread: string[] }> => {
+  const [roster, configured] = await Promise.allSettled([
+    loadRosterSouls(env, () => {}),
+    // Empty selection: the soul a run started here would resolve, by the
+    // same precedence the daemon uses — never a second reading of it.
+    resolveConfiguredSoul({}, env),
+  ]);
+
+  const ids = new Set([DEFAULT_STRATUS_AGENT.id]);
+  const unread: string[] = [];
+  if (roster.status === 'fulfilled') {
+    for (const entry of roster.value) {
+      ids.add(entry.soul.agent.id);
+    }
+  } else {
+    unread.push('the roster');
+  }
+  if (configured.status === 'fulfilled') {
+    if (configured.value) {
+      ids.add(configured.value.soul.agent.id);
+    }
+  } else {
+    unread.push('the configured default soul');
+  }
+  return { ids, unread };
+};
+
+/**
+ * Write a new soul under an id nothing else holds, and return the agent
+ * that got written.
+ *
+ * The name stays theirs, but the id — the soul filename, the memory key,
+ * the credential scope — must be unique: the suggestion pool is small, so
+ * a repeat name would otherwise share an earlier agent's memory. Two
+ * claims have to fail here, and only one of them is a filename:
+ *
+ * - An id another soul declares, whatever that soul is called on disk.
+ *   Since a duplicate refuses the whole roster, writing one would leave a
+ *   daemon that will not start — created by the command meant to help.
+ * - The path itself, via `wx`, which makes the claim atomic against a
+ *   concurrent writer that the roster read above cannot see.
+ *
+ * On either, the id takes a fresh suffix and we try again — through the
+ * shared bound, since appending a suffix to a maxed-out base would build
+ * an id the validator refuses, turning a collision into a crash.
+ */
+export const claimSoulFile = async (
+  env: StateEnvironment,
+  input: { name?: string; instructions: string },
+  render: (agent: AgentDefinition) => string,
+  note: (message: string) => void,
+): Promise<{ agent: AgentDefinition; soulPath: string }> => {
+  const { ids: taken, unread } = await declaredAgentIds(env);
+  if (unread.length > 0) {
+    note(`Note: could not read ${unread.join(' or ')}, so this id was not checked against the ids it declares.`);
+  }
+  await mkdir(agentsDirPath(env), { recursive: true });
+  let agent = defineAgent({ ...(input.name ? { name: input.name } : {}), instructions: input.instructions });
+  const baseId = agent.id;
+  for (;;) {
+    const soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
+    if (!taken.has(agent.id)) {
+      try {
+        await writeFile(soulPath, render(agent), { flag: 'wx' });
+        return { agent, soulPath };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw error;
+        }
+      }
+    }
+    agent = defineAgent({
+      id: agentIdWithSuffix(baseId, randomUUID().slice(0, 4)),
+      ...(input.name ? { name: input.name } : { name: agent.name }),
+      instructions: input.instructions,
+    });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// The roster as data
+// ---------------------------------------------------------------------------
+
+/** The first non-empty line of a persona, trimmed to fit one terminal row. */
+export const personaSnippet = (instructions: string | undefined): string | undefined => {
+  const firstLine = instructions?.split('\n').map((line) => line.trim()).find((line) => line.length > 0);
+  if (!firstLine) {
+    return undefined;
+  }
+  return firstLine.length > 78 ? `${firstLine.slice(0, 77)}…` : firstLine;
+};
+
+/** One agent as `stratus agents` and `GET /api/v1/agents` both describe it. */
+export interface AgentSummary {
+  id: string;
+  name: string;
+  /** The agent an agentId-less run or dispatch answers as. */
+  default: boolean;
+  /** The built-in Stratus persona, which has no soul file. */
+  builtIn: boolean;
+  soulPath?: string;
+  /** The soul's own frontmatter pin, verbatim. Absent when it pins nothing. */
+  provider?: string;
+  model?: string;
+  /** What a run as this agent resolves to right now. */
+  runsOn: { provider: string; model?: string };
+  memories: number;
+  persona?: string;
+  /**
+   * The deterministic palette the kernel computed for this agent. Carried
+   * structurally rather than as prose so every surface — a terminal line, a
+   * web avatar, a macOS view — renders it its own way from one source.
+   */
+  avatar?: AvatarTheme;
+}
+
+/**
+ * The whole roster, resolved: who the agents are, where their souls live,
+ * what each would run on right now, and what each remembers.
+ *
+ * Reads the agents directory directly rather than through `loadRosterSouls`,
+ * and the difference is deliberate: listing must survive a roster the daemon
+ * would refuse. A duplicate id or an unparseable file degrades to a warning
+ * and one missing row, because a person running this is usually running it
+ * *because* something is wrong.
+ */
+export const listAgentSummaries = async (
+  env: StateEnvironment,
+  warn: (message: string) => void = () => {},
+): Promise<AgentSummary[]> => {
+  const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
+  const processEnv = readProcessEnv(env);
+  // Listing must never be blocked by a broken config — it only feeds the
+  // default marker and the "runs on" lines.
+  const { config: activeConfig } = await discoverActiveConfig(env, warn);
+
+  const envProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'));
+  const envModel = readNonEmptyString(processEnv.STRATUS_MODEL)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL);
+
+  // What a run as this soul would actually use right now — the same
+  // precedence as resolveRuntimeConfig (env vars, soul hints, config,
+  // demo), so a model-only or provider-only pin still resolves honestly.
+  const runsOnFor = (soulProvider?: string, soulModel?: string): { provider: string; model?: string } => {
+    const provider = envProvider ?? soulProvider ?? activeConfig.provider ?? 'demo';
+    if (provider === 'demo') {
+      return { provider };
+    }
+    const soulModelApplies = soulProvider === undefined || soulProvider === provider;
+    const configModelApplies = (activeConfig.provider ?? 'openai') === provider;
+    const model = envModel
+      ?? (soulModelApplies ? soulModel : undefined)
+      ?? (configModelApplies ? activeConfig.model : undefined)
+      ?? (provider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
+    return { provider, model };
+  };
+
+  const defaultSoulPath = readNonEmptyString(processEnv.STRATUS_SOUL)
+    ?? readNonEmptyString(processEnv.STRATUSCLAW_SOUL)
+    ?? activeConfig.soul;
+  const resolvedDefaultSoul = defaultSoulPath
+    ? path.resolve(readWorkingDirectory(env), defaultSoulPath)
+    : undefined;
+
+  const summaries: AgentSummary[] = [];
+
+  const addSoul = async (soulPath: string): Promise<void> => {
+    let parsed: ParsedSoul;
+    try {
+      parsed = parseSoul(await readFile(soulPath, 'utf8'), { seed: soulPath });
+    } catch (error) {
+      warn(`skipping ${soulPath}: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    const { agent } = parsed;
+    const persona = personaSnippet(agent.instructions);
+    summaries.push({
+      id: agent.id,
+      name: agent.name,
+      default: soulPath === resolvedDefaultSoul,
+      builtIn: false,
+      soulPath,
+      ...(parsed.provider ? { provider: parsed.provider } : {}),
+      ...(parsed.model ? { model: parsed.model } : {}),
+      runsOn: runsOnFor(parsed.provider, parsed.model),
+      memories: (await memory.list(agent.id)).length,
+      ...(persona ? { persona } : {}),
+      ...(agent.avatar ? { avatar: agent.avatar } : {}),
+    });
+  };
+
+  let rosterFiles: string[] = [];
+  try {
+    rosterFiles = (await readdir(agentsDirPath(env)))
+      .filter((file) => file.endsWith('.md'))
+      .sort()
+      .map((file) => path.join(agentsDirPath(env), file));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  for (const soulPath of rosterFiles) {
+    await addSoul(soulPath);
+  }
+  // A default soul can live outside ~/.stratus/agents (a project soul, a
+  // hand-written file) — the roster would be lying without it.
+  if (resolvedDefaultSoul && !rosterFiles.includes(resolvedDefaultSoul)) {
+    await addSoul(resolvedDefaultSoul);
+  }
+
+  // The built-in Stratus persona serves every run that has no soul.
+  const builtInPersona = personaSnippet(DEFAULT_STRATUS_AGENT.instructions);
+  summaries.push({
+    id: DEFAULT_STRATUS_AGENT.id,
+    name: DEFAULT_STRATUS_AGENT.name,
+    default: resolvedDefaultSoul === undefined,
+    builtIn: true,
+    runsOn: runsOnFor(),
+    memories: (await memory.list(DEFAULT_STRATUS_AGENT.id)).length,
+    ...(builtInPersona ? { persona: builtInPersona } : {}),
+  });
+
+  summaries.sort((a, b) => {
+    if (a.default !== b.default) {
+      return a.default ? -1 : 1;
+    }
+    if (a.builtIn !== b.builtIn) {
+      return a.builtIn ? 1 : -1;
+    }
+    return a.name.localeCompare(b.name);
+  });
+
+  return summaries;
+};
+
+// ---------------------------------------------------------------------------
+// Writing the config file
+// ---------------------------------------------------------------------------
+
+/**
+ * Persist settings, creating the directory if it is not there yet.
+ *
+ * Deliberately NOT 0600: `config.json` holds no secrets (those live in
+ * `credentials.json`, which has its own posture), and tightening it here
+ * would be a security theatre that also breaks a shared-machine setup where
+ * the daemon runs as another user.
+ */
+export const saveConfigFile = async (
+  configPath: string,
+  config: StratusConfigFile,
+): Promise<void> => {
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 };

@@ -14,6 +14,7 @@ import {
   type AgentDefinition,
   type AgentMemoryStore,
   type ApprovalPolicy,
+  type AvatarTheme,
   type JsonObject,
   type JsonValue,
   type MemoryEntry,
@@ -57,10 +58,13 @@ import {
 import {
   agentsDirPath,
   apiKeyEnvNameFor,
+  claimSoulFile,
+  collectAvailableModels as collectModels,
   createDemoTool,
   createFileMemoryStore,
   createRuntimeProvider,
   credentialsPath,
+  defaultApiKeyEnvName,
   DEFAULT_ANTHROPIC_BASE_URL,
   DEFAULT_OPENAI_BASE_URL,
   DEFAULT_OPENAI_MODEL,
@@ -70,6 +74,7 @@ import {
   loadChannelCredentials,
   loadCredentials,
   loadRosterSouls,
+  listAgentSummaries,
   loadSoulFile,
   memoryFilePath,
   migrateLegacyMemory,
@@ -87,10 +92,14 @@ import {
   resolveConfigLocation,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
   saveChannelCredentials,
+  saveConfigFile,
   saveCredentials,
+  servedRuntimes,
+  verifyProviderKey,
   stratusHomePath,
   withLegacyDefaultMemories,
   type ApprovalsConfig,
+  type CatalogModel,
   type ChannelCredentials,
   type CredentialProviderName,
   type CredentialsFile,
@@ -2139,41 +2148,6 @@ const createSetupPrompter = (
   };
 };
 
-// Live check that a pasted key actually works, so the user finds out inside
-// setup instead of on their first run.
-const verifyProviderKey = async (
-  provider: 'anthropic' | 'openai',
-  key: string,
-  baseUrl: string | undefined,
-  fetchImpl: typeof fetch | undefined,
-): Promise<{ status: 'ok' | 'rejected' | 'unreachable'; detail?: string }> => {
-  if (typeof fetchImpl !== 'function') {
-    return { status: 'unreachable', detail: 'fetch is unavailable' };
-  }
-
-  const root = (baseUrl ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_OPENAI_BASE_URL)).replace(/\/+$/, '');
-  const url = provider === 'anthropic' ? `${root}/v1/models` : `${root}/models`;
-  const headers = provider === 'anthropic'
-    ? { 'x-api-key': key, 'anthropic-version': '2023-06-01' }
-    : { authorization: `Bearer ${key}` };
-
-  try {
-    const response = await fetchImpl(url, { headers });
-    if (response.ok) {
-      return { status: 'ok' };
-    }
-    // Only an explicit auth failure condemns the key. Compatible endpoints
-    // (local models, proxies) often lack GET /models entirely — a 404/405
-    // there says nothing about the key, so it stays saveable.
-    if (response.status === 401 || response.status === 403) {
-      return { status: 'rejected', detail: `HTTP ${response.status}` };
-    }
-    return { status: 'unreachable', detail: `the endpoint did not support a key check (HTTP ${response.status})` };
-  } catch (error) {
-    return { status: 'unreachable', detail: error instanceof Error ? error.message : String(error) };
-  }
-};
-
 // Slack verification talks to the Web API over plain fetch rather than
 // through @stratusagent/channel-slack. Setup must stay usable before that
 // optional package is installed, and the CLI deliberately does not depend
@@ -2312,125 +2286,6 @@ interface SetupState {
   service: { install: boolean; runAtLogin: boolean };
 }
 
-// Shown when live model listing is unavailable (e.g. subscription tokens
-// cannot call the models endpoint, or the machine is offline).
-// Model ids that cannot serve /chat/completions and must not become the
-// default: embeddings, audio, images, moderation, and legacy completions.
-const NON_CHAT_MODEL_PATTERN = /embed|whisper|tts|audio|dall-e|image|moderation|realtime|transcribe|davinci|babbage|curie|(^|[-_])ada([-_]|$)/i;
-
-const KNOWN_CLAUDE_MODELS = [
-  'claude-opus-5',
-  'claude-sonnet-5',
-  'claude-haiku-4-5',
-  'claude-opus-4-6',
-  'claude-sonnet-4-6',
-];
-
-/**
- * The ids a newly created soul must not claim: every id the served roster
- * holds, which is three things and not one directory.
- *
- * - **What the roster files declare.** A filename is not an id: a soul at
- *   `renamed.md` may declare `id: ava`, so `ava.md` being free proves
- *   nothing — and since a duplicate refuses the whole roster, writing one
- *   would hand back an agent whose daemon cannot start.
- * - **The configured default soul**, which the daemon registers whether or
- *   not its file lives in the agents directory. It wins a same-id contest
- *   with a roster file — `defaultAgentId` replaces the source when the
- *   path differs — so a new agent sharing its id is not refused, it is
- *   shadowed: created, then undispatchable by id or from Slack, with
- *   nothing saying so.
- * - **The reserved `stratus`**, since a roster soul claiming it is skipped
- *   at load, so writing one creates an agent that silently never appears.
- *
- * The two readable sources fail **independently**, and what they return is
- * what they know rather than all-or-nothing. A configured soul that is
- * missing or mid-edit does not stop the daemon serving the roster, so it
- * must not discard the roster's claims either: collapsing both to unknown
- * would let this command write the very duplicate that refuses the roster
- * it could have read. `unread` names what could not be answered, so the
- * caller can say which check did not run instead of implying none did.
- */
-const declaredAgentIds = async (
-  env: CliEnvironment,
-): Promise<{ ids: Set<string>; unread: string[] }> => {
-  const [roster, configured] = await Promise.allSettled([
-    loadRosterSouls(env, () => {}),
-    // Empty selection: the soul a run started here would resolve, by the
-    // same precedence the daemon uses — never a second reading of it.
-    resolveConfiguredSoul({}, env),
-  ]);
-
-  const ids = new Set([DEFAULT_STRATUS_AGENT.id]);
-  const unread: string[] = [];
-  if (roster.status === 'fulfilled') {
-    for (const entry of roster.value) {
-      ids.add(entry.soul.agent.id);
-    }
-  } else {
-    unread.push('the roster');
-  }
-  if (configured.status === 'fulfilled') {
-    if (configured.value) {
-      ids.add(configured.value.soul.agent.id);
-    }
-  } else {
-    unread.push('the configured default soul');
-  }
-  return { ids, unread };
-};
-
-/**
- * Write a new soul under an id nothing else holds, and return the agent
- * that got written.
- *
- * The name stays theirs, but the id — the soul filename, the memory key,
- * the credential scope — must be unique: the suggestion pool is small, so
- * a repeat name would otherwise share an earlier agent's memory. Two
- * claims have to fail here, and only one of them is a filename:
- *
- * - An id another soul declares, whatever that soul is called on disk.
- *   Since a duplicate refuses the whole roster, writing one would leave a
- *   daemon that will not start — created by the command meant to help.
- * - The path itself, via `wx`, which makes the claim atomic against a
- *   concurrent writer that the roster read above cannot see.
- *
- * On either, the id takes a fresh suffix and we try again — through the
- * shared bound, since appending a suffix to a maxed-out base would build
- * an id the validator refuses, turning a collision into a crash.
- */
-const claimSoulFile = async (
-  env: CliEnvironment,
-  input: { name?: string; instructions: string },
-  render: (agent: AgentDefinition) => string,
-  note: (message: string) => void,
-): Promise<{ agent: AgentDefinition; soulPath: string }> => {
-  const { ids: taken, unread } = await declaredAgentIds(env);
-  if (unread.length > 0) {
-    note(`Note: could not read ${unread.join(' or ')}, so this id was not checked against the ids it declares.`);
-  }
-  let agent = defineAgent({ ...(input.name ? { name: input.name } : {}), instructions: input.instructions });
-  const baseId = agent.id;
-  for (;;) {
-    const soulPath = path.join(agentsDirPath(env), `${agent.id}.md`);
-    if (!taken.has(agent.id)) {
-      try {
-        await writeFile(soulPath, render(agent), { flag: 'wx' });
-        return { agent, soulPath };
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-          throw error;
-        }
-      }
-    }
-    agent = defineAgent({
-      id: agentIdWithSuffix(baseId, randomUUID().slice(0, 4)),
-      ...(input.name ? { name: input.name } : { name: agent.name }),
-      instructions: input.instructions,
-    });
-  }
-};
-
 export const runSetup = async (
   command: ParsedSetupCommand,
   streams: CliStreams,
@@ -2543,8 +2398,10 @@ export const runSetup = async (
 
   const defaultModelFor = (provider: CliProviderName): string =>
     provider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL;
+  // Widened to CliProviderName only so setup can ask about the provider it
+  // currently has selected, `demo` included; the rule itself is the shared one.
   const defaultKeyEnvFor = (provider: CliProviderName): string =>
-    provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+    defaultApiKeyEnvName(provider === 'openai' ? 'openai' : 'anthropic');
 
   const credentialLabel = (credential: StoredCredential): string =>
     credential.type === 'oauth_token' ? 'Claude subscription' : 'API key';
@@ -2826,87 +2683,19 @@ export const runSetup = async (
     }
   };
 
-  // Every model the current sign-ins can actually reach, fetched live where
-  // possible. Subscription tokens cannot call the models endpoint, so those
-  // fall back to the known Claude lineup.
-  const collectAvailableModels = async (): Promise<Array<{ provider: CredentialProviderName; id: string }>> => {
-    const fetchImpl = env.fetch ?? globalThis.fetch;
-    const models: Array<{ provider: CredentialProviderName; id: string }> = [];
-
-    for (const provider of ['anthropic', 'openai'] as const) {
-      // Discovery uses the credential a real run would use. STRATUS_API_KEY
-      // and a configured apiKeyEnv authenticate the DEFAULT provider only —
-      // a secondary provider relies on its own env var or stored sign-in,
-      // never the default provider's secret.
-      const envKey = (provider === state.provider
-        ? readNonEmptyString(processEnv.STRATUS_API_KEY)
-          ?? (state.apiKeyEnv ? readNonEmptyString(processEnv[state.apiKeyEnv]) : undefined)
-        : undefined)
-        ?? readNonEmptyString(processEnv[defaultKeyEnvFor(provider)]);
-      const credential = envKey ? undefined : state.credentials[provider];
-      const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);
-      if (!apiKey && !credential) {
-        continue;
-      }
-
-      if (provider === 'anthropic') {
-        if (!apiKey || typeof fetchImpl !== 'function') {
-          // Subscription tokens cannot call the models endpoint.
-          models.push(...KNOWN_CLAUDE_MODELS.map((id) => ({ provider, id })));
-          continue;
-        }
-        // The same endpoint a real run uses: the stored key's bound URL is
-        // authoritative, then a configured anthropic base URL (a proxy) —
-        // never the official endpoint by accident.
-        const anthropicRoot = ((credential?.type === 'api_key' ? credential.baseUrl : undefined)
-          ?? (state.provider === 'anthropic' ? state.baseUrl : undefined)
-          ?? DEFAULT_ANTHROPIC_BASE_URL).replace(/\/+$/, '');
-        try {
-          const response = await fetchImpl(`${anthropicRoot}/v1/models?limit=100`, {
-            headers: { 'x-api-key': String(apiKey), 'anthropic-version': '2023-06-01' },
-          });
-          const payload = await response.json() as { data?: Array<{ id?: string }> };
-          const ids = (payload.data ?? []).map((entry) => entry.id).filter((id): id is string => typeof id === 'string');
-          models.push(...(ids.length > 0 ? ids : KNOWN_CLAUDE_MODELS).map((id) => ({ provider, id })));
-        } catch {
-          models.push(...KNOWN_CLAUDE_MODELS.map((id) => ({ provider, id })));
-        }
-        continue;
-      }
-
-      if (!apiKey || typeof fetchImpl !== 'function') {
-        continue;
-      }
-      try {
-        // A stored key's bound endpoint is authoritative, exactly as at run
-        // time; only env-supplied keys follow the default provider's URL.
-        const root = ((credential?.type === 'api_key' ? credential.baseUrl : undefined)
-          ?? (state.provider === 'openai' ? state.baseUrl : undefined)
-          ?? DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '');
-        const response = await fetchImpl(`${root}/models`, {
-          headers: { authorization: `Bearer ${String(apiKey)}` },
-        });
-        const payload = await response.json() as { data?: Array<{ id?: string }> };
-        const allIds = (payload.data ?? [])
-          .map((entry) => entry.id)
-          .filter((id): id is string => typeof id === 'string');
-        // Runs always call /chat/completions, so embedding, audio, image,
-        // moderation, and legacy completion models would save a default
-        // that cannot execute. If filtering leaves nothing (an exotic local
-        // service), show everything rather than an empty menu.
-        const chatIds = allIds.filter((id) => !NON_CHAT_MODEL_PATTERN.test(id));
-        const ids = (chatIds.length > 0 ? chatIds : allIds).sort((a, b) => {
-          const rank = (id: string): number => (/^gpt/i.test(id) ? 0 : /^o\d/i.test(id) ? 1 : 2);
-          return rank(a) - rank(b) || a.localeCompare(b);
-        });
-        models.push(...ids.map((id) => ({ provider, id })));
-      } catch {
-        // No reachable model list for this provider; skip it.
-      }
-    }
-
-    return models;
-  };
+  // Every model the current sign-ins can actually reach. The rule lives in
+  // @stratusagent/state because the control API answers the same question —
+  // setup passes the selection it is *holding* rather than the saved one, so
+  // a key pasted a moment ago is already in play.
+  const collectAvailableModels = (): Promise<CatalogModel[]> => collectModels(
+    {
+      provider: state.provider,
+      ...(state.baseUrl !== undefined ? { baseUrl: state.baseUrl } : {}),
+      ...(state.apiKeyEnv !== undefined ? { apiKeyEnv: state.apiKeyEnv } : {}),
+      credentials: state.credentials,
+    },
+    env,
+  );
 
   const pickModel = async (kind: 'default' | 'fallback'): Promise<void> => {
     const available = await collectAvailableModels();
@@ -3063,7 +2852,6 @@ export const runSetup = async (
     const pin = state.provider !== 'demo'
       ? { provider: state.provider, model: state.model ?? defaultModelFor(state.provider) }
       : {};
-    await mkdir(agentsDirPath(env), { recursive: true });
     const claimed = await claimSoulFile(
       env,
       { ...(name ? { name } : {}), instructions: persona },
@@ -3568,8 +3356,7 @@ export const runSetup = async (
       }
     }
 
-    await mkdir(path.dirname(configPath), { recursive: true });
-    await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    await saveConfigFile(configPath, config);
 
     writeLine(streams.stdout);
     writeLine(streams.stdout, `Wrote ${configPath}`);
@@ -3755,14 +3542,6 @@ export const runSetup = async (
   }
 };
 
-const personaSnippet = (instructions: string | undefined): string | undefined => {
-  const firstLine = instructions?.split('\n').map((line) => line.trim()).find((line) => line.length > 0);
-  if (!firstLine) {
-    return undefined;
-  }
-  return firstLine.length > 78 ? `${firstLine.slice(0, 77)}…` : firstLine;
-};
-
 export const runAgents = async (
   command: ParsedAgentsCommand,
   streams: CliStreams,
@@ -3771,132 +3550,24 @@ export const runAgents = async (
   // Fold any legacy per-directory memory in first so the counts below
   // reflect everything each agent actually remembers.
   await migrateLegacyMemory(env);
-  const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
-
-  const processEnv = readProcessEnv(env);
-  // Listing must never be blocked by a broken config — it only feeds the
-  // default marker and the "runs on" lines.
-  const { config: activeConfig } = await discoverActiveConfig(env, (message) => {
+  const listings = await listAgentSummaries(env, (message) => {
     writeLine(streams.stderr, `Warning: ${message}.`);
   });
 
-  const envProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'));
-  const envModel = readNonEmptyString(processEnv.STRATUS_MODEL)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL);
-
-  // What a run as this soul would actually use right now — the same
-  // precedence as resolveRuntimeConfig (env vars, soul hints, config,
-  // demo), so a model-only or provider-only pin still resolves honestly.
-  const runsOnFor = (soulProvider?: string, soulModel?: string): { provider: string; model?: string } => {
-    const provider = envProvider ?? soulProvider ?? activeConfig.provider ?? 'demo';
-    if (provider === 'demo') {
-      return { provider };
-    }
-    const soulModelApplies = soulProvider === undefined || soulProvider === provider;
-    const configModelApplies = (activeConfig.provider ?? 'openai') === provider;
-    const model = envModel
-      ?? (soulModelApplies ? soulModel : undefined)
-      ?? (configModelApplies ? activeConfig.model : undefined)
-      ?? (provider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
-    return { provider, model };
-  };
-
-  const defaultSoulPath = readNonEmptyString(processEnv.STRATUS_SOUL)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_SOUL)
-    ?? activeConfig.soul;
-  const resolvedDefaultSoul = defaultSoulPath
-    ? path.resolve(readWorkingDirectory(env), defaultSoulPath)
-    : undefined;
-
-  interface AgentListing {
-    id: string;
-    name: string;
-    isDefault: boolean;
-    builtIn: boolean;
-    soulPath?: string;
-    /** The soul's own frontmatter pin, verbatim. */
-    provider?: string;
-    model?: string;
-    /** What a run as this agent resolves to right now. */
-    runsOn: { provider: string; model?: string };
-    memories: number;
-    persona?: string;
-    avatar?: string;
-  }
-
-  const listings: AgentListing[] = [];
-
-  const addSoul = async (soulPath: string): Promise<void> => {
-    let parsed: ParsedSoul;
-    try {
-      parsed = parseSoul(await readFile(soulPath, 'utf8'), { seed: soulPath });
-    } catch (error) {
-      writeLine(streams.stderr, `Warning: skipping ${soulPath}: ${error instanceof Error ? error.message : String(error)}`);
-      return;
-    }
-    const { agent } = parsed;
-    const persona = personaSnippet(agent.instructions);
-    listings.push({
-      id: agent.id,
-      name: agent.name,
-      isDefault: soulPath === resolvedDefaultSoul,
-      builtIn: false,
-      soulPath,
-      ...(parsed.provider ? { provider: parsed.provider } : {}),
-      ...(parsed.model ? { model: parsed.model } : {}),
-      runsOn: runsOnFor(parsed.provider, parsed.model),
-      memories: (await memory.list(agent.id)).length,
-      ...(persona ? { persona } : {}),
-      ...(agent.avatar ? { avatar: `${agent.avatar.style} theme, hue ${agent.avatar.hue}, palette ${agent.avatar.palette.join(' ')}` } : {}),
-    });
-  };
-
-  let rosterFiles: string[] = [];
-  try {
-    rosterFiles = (await readdir(agentsDirPath(env)))
-      .filter((file) => file.endsWith('.md'))
-      .sort()
-      .map((file) => path.join(agentsDirPath(env), file));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw error;
-    }
-  }
-  for (const soulPath of rosterFiles) {
-    await addSoul(soulPath);
-  }
-  // A default soul can live outside ~/.stratus/agents (a project soul, a
-  // hand-written file) — the roster would be lying without it.
-  if (resolvedDefaultSoul && !rosterFiles.includes(resolvedDefaultSoul)) {
-    await addSoul(resolvedDefaultSoul);
-  }
-
-  // The built-in Stratus persona serves every run that has no soul.
-  const builtInPersona = personaSnippet(DEFAULT_STRATUS_AGENT.instructions);
-  listings.push({
-    id: DEFAULT_STRATUS_AGENT.id,
-    name: DEFAULT_STRATUS_AGENT.name,
-    isDefault: resolvedDefaultSoul === undefined,
-    builtIn: true,
-    runsOn: runsOnFor(),
-    memories: (await memory.list(DEFAULT_STRATUS_AGENT.id)).length,
-    ...(builtInPersona ? { persona: builtInPersona } : {}),
-  });
-
-  listings.sort((a, b) => {
-    if (a.isDefault !== b.isDefault) {
-      return a.isDefault ? -1 : 1;
-    }
-    if (a.builtIn !== b.builtIn) {
-      return a.builtIn ? 1 : -1;
-    }
-    return a.name.localeCompare(b.name);
-  });
+  // The palette travels structurally now, because a web or macOS surface has
+  // to draw it. This output has always been one prose line, and a shape
+  // change here would break every script reading it — so the rendering, not
+  // the data, stays where it was.
+  const describeAvatar = (avatar: AvatarTheme): string =>
+    `${avatar.style} theme, hue ${avatar.hue}, palette ${avatar.palette.join(' ')}`;
 
   if (command.format === 'json') {
     writeLine(streams.stdout, JSON.stringify({
-      agents: listings.map(({ isDefault, ...rest }) => ({ ...rest, default: isDefault })),
+      agents: listings.map(({ default: isDefault, avatar, ...rest }) => ({
+        ...rest,
+        ...(avatar ? { avatar: describeAvatar(avatar) } : {}),
+        default: isDefault,
+      })),
     }, null, 2));
     return 0;
   }
@@ -3907,7 +3578,7 @@ export const runAgents = async (
   writeLine(streams.stdout, 'Agents');
   for (const agent of listings) {
     const labels = [
-      ...(agent.isDefault ? ['default'] : []),
+      ...(agent.default ? ['default'] : []),
       ...(agent.builtIn ? ['built-in'] : []),
     ];
     writeLine(streams.stdout);
@@ -3922,7 +3593,7 @@ export const runAgents = async (
       writeLine(streams.stdout, `    persona   ${agent.persona}`);
     }
     if (agent.avatar) {
-      writeLine(streams.stdout, `    avatar    ${agent.avatar}`);
+      writeLine(streams.stdout, `    avatar    ${describeAvatar(agent.avatar)}`);
     }
   }
   writeLine(streams.stdout);
@@ -4416,48 +4087,6 @@ const serviceEnvFor = (env: CliEnvironment): ServiceEnvironment => ({
  * reported everything ready. Returns the variable to name, if so.
  */
 /**
- * Every runtime the daemon would resolve: the config-wide default plus one
- * per roster soul, normalized the way a dispatch normalizes it. A soul that
- * pins its own provider resolves to different credentials entirely, so any
- * check that looks only at the default misses exactly the agent that is
- * misconfigured.
- */
-const servedRuntimes = async (
-  env: CliEnvironment,
-  configPath?: string,
-): Promise<Array<{ runtime: RuntimeConfig; env: CliEnvironment }>> => {
-  const { applySoulPins } = await import('@stratusagent/gateway');
-  const { config: activeConfig, location } = await discoverActiveConfig(env, () => {});
-  const context = {
-    ...(activeConfig.provider !== undefined ? { configProvider: activeConfig.provider } : {}),
-    configPresent: location !== undefined,
-  };
-  const passes: Array<{ selection: RuntimeSelection; env: CliEnvironment }> = [{ selection: {}, env }];
-  // A roster that will not load is the gateway's to refuse, with a better
-  // message than this preflight could give — so it checks what it can and
-  // leaves the failing to start().
-  const rosterForRuntimes = await loadRosterSouls(env, () => {}).catch(() => []);
-  for (const entry of rosterForRuntimes) {
-    const normalized = applySoulPins(entry.soul, {}, env, context);
-    passes.push({ selection: normalized.selection, env: normalized.env as CliEnvironment });
-  }
-
-  const resolved: Array<{ runtime: RuntimeConfig; env: CliEnvironment }> = [];
-  for (const pass of passes) {
-    // A runtime that cannot resolve is the gateway's to report, per
-    // dispatch and with far better context than a startup pass has.
-    const runtime = await resolveStateRuntimeConfig(
-      { ...pass.selection, ...(configPath ? { configPath } : {}) },
-      pass.env,
-    ).catch(() => undefined);
-    if (runtime) {
-      resolved.push({ runtime, env: pass.env });
-    }
-  }
-  return resolved;
-};
-
-/**
  * The daemon's `approvals` block, from the config file the daemon itself
  * would load. Discovery goes through the shared resolver rather than
  * reading ~/.stratus/config.json directly: `--config` and STRATUS_CONFIG
@@ -4690,7 +4319,6 @@ export const runAgentNew = async (
         ?? (soulProvider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
       const soulPin = soulProvider !== 'demo' ? { provider: soulProvider, model: soulModel } : {};
 
-      await mkdir(agentsDirPath(env), { recursive: true });
       const claimed = await claimSoulFile(
         env,
         { name, instructions: persona },
@@ -4719,9 +4347,16 @@ export const runAgentNew = async (
           }
         }
         if (globalConfig !== undefined) {
-          const config: Record<string, unknown> = { ...globalConfig, provider: globalConfig.provider ?? soulProvider, soul: soulPath };
-          await mkdir(path.dirname(globalConfigPath(env)), { recursive: true });
-          await writeFile(globalConfigPath(env), `${JSON.stringify(config, null, 2)}\n`);
+          // Re-validated rather than cast: `readNonEmptyString` widens to
+          // `string`, and the shared parser is what says which strings are
+          // provider names. Every source feeding soulProvider is already one,
+          // so this narrows without being able to throw.
+          const config: CliConfigFile = {
+            ...globalConfig,
+            provider: globalConfig.provider ?? parseProviderName(soulProvider, 'provider'),
+            soul: soulPath,
+          };
+          await saveConfigFile(globalConfigPath(env), config);
           madeDefault = true;
           if (configLocation && configLocation.path !== globalConfigPath(env)) {
             writeLine(streams.stdout, `Note: ${configLocation.path} takes precedence over the global config for runs started in this directory.`);
