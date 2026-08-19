@@ -95,8 +95,16 @@ workspace through the prompt itself, and long ones are truncated with a
 notice saying so.
 
 Requests are also denied, visibly, when they expire, when the turn is
-cancelled, and when the daemon shuts down. Every ending retracts the buttons,
-so a message never keeps offering a decision that has nowhere to land.
+cancelled, and when the daemon shuts down. Every ending the daemon is alive
+for retracts the buttons, so a message does not keep offering a decision that
+has nowhere to land.
+
+A crash is the ending it cannot be alive for, and the record of what was
+posted lives only in memory — so a new process cannot find its predecessor's
+prompts to retract them. Those correct themselves on the next click: it
+answers that the request is no longer pending and rewrites the message, since
+the click is the one thing that carries the message's location back. A prompt
+nobody clicks stays as it was until someone does.
 
 **Interactivity must be enabled on the app** or Slack delivers no clicks at
 all. The shipped manifest turns it on; an app created before this shipped

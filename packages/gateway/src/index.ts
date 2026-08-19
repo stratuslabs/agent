@@ -203,12 +203,6 @@ export class SqliteSessionStore implements SessionStore {
   }
 }
 
-/**
- * A channel adapter as the gateway sees it: started after the roster
- * loads, stopped before the store drains. Structurally identical to
- * @stratusagent/channels' ChannelAdapter — kept structural here so the
- * gateway does not depend on the channels package.
- */
 /** Where the daemon-wide provider default could have come from. */
 export interface SoulPinContext {
   /** A provider fixed by the caller (the gateway's own selection). */
@@ -284,10 +278,29 @@ export const applySoulPins = (
   return { selection, env: { ...env, processEnv } };
 };
 
+/**
+ * A channel adapter as the gateway sees it: started after the roster
+ * loads, stopped before the store drains. Structurally identical to
+ * @stratusagent/channels' ChannelAdapter — kept structural here so the
+ * gateway does not depend on the channels package.
+ */
 export interface GatewayChannelAdapter {
   name: string;
   start(gateway: Gateway): Promise<void>;
   stop(): Promise<void>;
+}
+
+/**
+ * Where a session came from, as the gateway reports it. Structural for the
+ * same reason as the adapter above — @stratusagent/channels declares the
+ * matching shape for adapters to consume, and neither package imports the
+ * other to agree on it.
+ */
+export interface SessionRouting {
+  /** Whose app must do the talking. */
+  agentId: string;
+  /** The metadata the dispatching surface attached to the session. */
+  metadata: JsonObject;
 }
 
 /**
@@ -399,6 +412,15 @@ export interface Gateway {
   readonly store: SqliteSessionStore;
   /** The current roster, default agent included. */
   agents(): AgentDefinition[];
+  /**
+   * Where a durable session came from — its agent, and the metadata the
+   * dispatching surface attached to it.
+   *
+   * A projection rather than an accessor: the session's messages are not
+   * a channel's business, and handing back the whole record to save a few
+   * lines would make them one.
+   */
+  sessionRouting(sessionId: string): Promise<SessionRouting | undefined>;
   /**
    * Settles a parked call. Returns false when the request is not pending —
    * already decided, expired, or belonging to a turn that was cancelled —
@@ -1573,6 +1595,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
 
     dispatch,
+
+    async sessionRouting(sessionId: string) {
+      const session = await store.get(sessionId);
+      return session
+        ? { agentId: session.agent.id, metadata: session.metadata ?? {} }
+        : undefined;
+    },
 
     agents() {
       return registry.list();

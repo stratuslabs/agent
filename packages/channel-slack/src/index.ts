@@ -584,6 +584,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // outstanding.
   const rendering = new Set<string>();
   const resolvedWhileRendering = new Map<string, Extract<StratusEvent, { type: 'tool.approval-resolved' }>>();
+  // Requests this process answered, and whose message therefore already
+  // shows the outcome. A click can still arrive for one of them from a
+  // client rendering the message as it was before the retraction, and
+  // rewriting it then would replace a real decision with "no longer
+  // pending". Bounded like the event dedupe, and for the same reason: it
+  // must not grow for the life of a long-running daemon.
+  const settledHere = new Set<string>();
+  const settledOrder: string[] = [];
   let unsubscribe: (() => void) | undefined;
   let gatewayRef: GatewayLike | undefined;
 
@@ -777,6 +785,55 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * — so a message can never keep offering a decision that no longer has
    * anywhere to land.
    */
+  const rememberSettled = (requestId: string): void => {
+    if (settledHere.has(requestId)) {
+      return;
+    }
+    settledHere.add(requestId);
+    settledOrder.push(requestId);
+    if (settledOrder.length > DEDUPE_CAPACITY) {
+      const evicted = settledOrder.shift();
+      if (evicted) {
+        settledHere.delete(evicted);
+      }
+    }
+  };
+
+  /**
+   * Rewrites a prompt left behind by a daemon that is gone, using the
+   * click's own coordinates.
+   *
+   * The index of posted requests is in-memory and keyed by request id, so
+   * a new process starts empty and has no way to find the messages its
+   * predecessor posted. An interaction payload carries the channel and
+   * timestamp of the message it came from, which is the one handle on such
+   * a message that survives — so the click that discovers the prompt is
+   * dead is also what retires it. Unclicked orphans stay as they are;
+   * clearing those needs the posts to be durable, which is a larger change
+   * than this and belongs to both billing paths equally.
+   */
+  const retireOrphanedPrompt = async (
+    connection: AgentConnection,
+    args: SlackSocketEventArgs,
+  ): Promise<void> => {
+    const channel = args.body?.channel?.id;
+    const ts = args.body?.message?.ts;
+    if (!channel || !ts) {
+      return;
+    }
+    const text = 'This request is no longer pending — the daemon that asked it is no longer running.';
+    try {
+      await connection.web.chat.update({
+        channel,
+        ts,
+        text,
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
+      });
+    } catch (error) {
+      warn(`slack: could not retire an orphaned approval request: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   const retractApprovalRequest = async (
     event: Extract<StratusEvent, { type: 'tool.approval-resolved' }>,
   ): Promise<void> => {
@@ -790,6 +847,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return;
     }
     approvalPosts.delete(event.requestId);
+    rememberSettled(event.requestId);
 
     const outcome = OUTCOME_TEXT[`${event.reason}:${event.answer}`] ?? 'Resolved';
     const by = event.actor ? ` by <@${event.actor}>` : '';
@@ -803,6 +861,49 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       });
     } catch (error) {
       warn(`slack: could not update a resolved approval request: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  /**
+   * Says so in the thread when a turn fails with nobody rendering it.
+   *
+   * The intake path reports a failure through the renderer it opened, so a
+   * turn this process started is always answered. A turn it did NOT start
+   * has no renderer: one the startup sweep failed because the last daemon
+   * died mid-turn, or one whose recovery could not be finished. Those are
+   * exactly the cases where the person is still looking at the thread,
+   * and silence there reads as an agent that simply never replied.
+   *
+   * The routing has to come from the durable session, because the only
+   * in-memory copy died with the process that had it.
+   */
+  const reportUnrenderedFailure = async (
+    event: Extract<StratusEvent, { type: 'session.failed' }>,
+  ): Promise<void> => {
+    const gateway = gatewayRef;
+    if (!gateway?.sessionRouting) {
+      return;
+    }
+    const routing = await gateway.sessionRouting(event.sessionId);
+    const metadata = routing?.metadata;
+    // Another surface's session, or one with no conversation to speak
+    // into. Not this adapter's to answer either way.
+    if (!routing || metadata?.channel !== 'slack' || typeof metadata.slackChannel !== 'string') {
+      return;
+    }
+    const connection = connectionFor(routing.agentId);
+    if (!connection) {
+      return;
+    }
+    const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
+    try {
+      await connection.web.chat.postMessage({
+        channel: metadata.slackChannel,
+        text: `Something went wrong: ${event.error}`,
+        ...(thread ? { thread_ts: thread } : {}),
+      });
+    } catch (error) {
+      warn(`slack: could not report a failed turn: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
@@ -826,6 +927,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // click is answered where it was made, not silently dropped.
     if (!post) {
       await tellClicker(connection, args, 'That approval request is no longer pending.');
+      // And the message itself is corrected, so the next person to read it
+      // is not offered a decision nothing is waiting for. Only for a
+      // request this process never settled: one it did has already been
+      // rewritten with its real outcome, and this click is a stale render
+      // of that message rather than a live question.
+      if (!settledHere.has(requestId)) {
+        await retireOrphanedPrompt(connection, args);
+      }
       return;
     }
     // A different agent's app relaying a click would bypass the approver
@@ -1024,6 +1133,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         }
         if (event.type === 'tool.approval-resolved') {
           track(retractApprovalRequest(event));
+          return;
+        }
+        // A failure with no renderer is not a turn this process is
+        // serving — it is one the startup sweep or a failed recovery
+        // closed out. Nothing downstream would say anything about it.
+        if (event.type === 'session.failed' && !renderers.get(event.sessionId)?.length) {
+          track(reportUnrenderedFailure(event));
           return;
         }
         if ('sessionId' in event) {

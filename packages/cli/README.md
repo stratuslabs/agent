@@ -182,7 +182,16 @@ Three things are worth knowing before you turn it on:
   reason saying stratusd stopped while they were running and to send the
   message again, rather than claiming to still be running forever. This is
   only for an ungraceful stop: a normal restart denies what is parked and
-  finishes the turns those denials release before it exits.
+  finishes the turns those denials release before it exits. The thread hears
+  about it too: a turn that fails with nobody rendering it is reported where
+  it was asked, rather than going quiet and reading as an agent that never
+  replied.
+- **A button left behind by a dead daemon corrects itself when clicked.** A
+  normal shutdown retracts its buttons; a crash cannot, and the new process
+  has no record of what the old one posted. Clicking such a prompt tells you
+  it is no longer pending *and* rewrites the message so the next reader is
+  not offered a decision nothing is waiting for. A prompt nobody clicks
+  stays as it is.
 - **Always allow lasts for the session**, not forever. It stops the same tool
   asking again in the same conversation, and it is forgotten when the daemon
   restarts. A durable per-agent whitelist is a narrower promise (a normalized
