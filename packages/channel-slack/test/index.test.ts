@@ -590,7 +590,9 @@ test('inbound order per session survives slow user lookups', async () => {
     event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-AVA> second', ts: '800.2', thread_ts: '800.0', channel: 'C1' },
   });
   await Promise.all([one, two]);
-  await new Promise((resolve) => setTimeout(resolve, 80));
+  // stop() drains what the adapter still owes Slack, so it is the gate —
+  // a sleep in front of it was guessing at the same thing, and losing that
+  // guess on a loaded runner would fail an assertion about ordering.
   await adapter.stop();
 
   assert.deepEqual(gateway.dispatches.map((d) => d.userMessage), ['Dylan: first', 'Dylan: second']);
@@ -1418,11 +1420,15 @@ test('a click that beats the post is not treated as an orphan', async () => {
   await posting;
 
   await socket.deliver('interactive', click('stratus_approve_once', 'req-1', 'U-DYLAN'));
-  assert.deepEqual(web.updates, [], 'a live request keeps its buttons');
-
   releasePost();
+  // Asserted after the drain, not straight after deliver(): the retirement
+  // this checks does NOT happen is an awaited API call, so checking before
+  // the adapter has finished would pass whether or not the guard works.
+  // deliver() waits a fixed 20ms for handlers to settle, which is a guess;
+  // stop() drains them, which is not.
   await adapter.stop();
 
+  assert.equal(web.updates.length, 0, 'a live request keeps its buttons');
   // Still answerable, which is the thing that was at stake.
   assert.equal(gateway.pendingApprovals.has('req-1'), true);
   const buttons = buttonIds(web.posts.at(-1)?.blocks);

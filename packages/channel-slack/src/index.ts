@@ -1223,9 +1223,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     },
 
     async stop() {
-      // Stop intake first: with the sockets down no new event can slip
-      // into `inflight` after the drain snapshot below, so nothing posts
-      // to Slack after stop() returns.
+      // Stop intake first, so no new INBOUND event can slip into
+      // `inflight` after the drain snapshot below.
+      //
+      // That is narrower than it used to claim. The snapshot is taken
+      // once, and this unsubscribes from the bus only after it, so a turn
+      // still finishing can emit an event whose subscriber tracks work
+      // this drain never waits for — a retraction posted after stop()
+      // returns, or dropped with the process. Draining until `inflight`
+      // stays empty would close it, and would make stop() wait on turns
+      // the gateway drains after this call rather than before; worth doing
+      // deliberately, not as a side effect.
       await Promise.allSettled(connections.map((connection) => connection.socket.disconnect()));
       await Promise.allSettled([...inflight]);
       unsubscribe?.();
