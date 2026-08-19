@@ -124,6 +124,17 @@ export const requestThroughPolicy = async (
   const maxBytes = options.maxBytes ?? 2_000_000;
 
   return new Promise<PolicyResponse>((resolve, reject) => {
+    let deadline: NodeJS.Timeout | undefined;
+    const settle = <T>(finish: (value: T) => void) => (value: T): void => {
+      if (deadline) {
+        clearTimeout(deadline);
+        deadline = undefined;
+      }
+      finish(value);
+    };
+    const succeed = settle(resolve);
+    const fail = settle(reject);
+
     const request = transport.request(
       url,
       {
@@ -159,28 +170,38 @@ export const requestThroughPolicy = async (
         });
         response.on('error', (error) => {
           if (truncated) {
-            resolve({ status: response.statusCode ?? 0, headers: response.headers, body, truncated });
+            succeed({ status: response.statusCode ?? 0, headers: response.headers, body, truncated });
             return;
           }
-          reject(error);
+          fail(error);
         });
         response.on('end', () => {
-          resolve({ status: response.statusCode ?? 0, headers: response.headers, body, truncated });
+          succeed({ status: response.statusCode ?? 0, headers: response.headers, body, truncated });
         });
         response.on('close', () => {
           if (truncated) {
-            resolve({ status: response.statusCode ?? 0, headers: response.headers, body, truncated });
+            succeed({ status: response.statusCode ?? 0, headers: response.headers, body, truncated });
           }
         });
       },
     );
 
     if (options.timeoutMs) {
-      request.setTimeout(options.timeoutMs, () => {
+      // A deadline for the whole exchange, not for a quiet socket.
+      // `setTimeout` on a request fires on *inactivity*, so a server that
+      // sends one byte before each interval keeps a fetch alive forever —
+      // which for a one-shot `stratus run` is a command that never returns.
+      // Both are armed: the wall clock bounds the exchange, and the
+      // inactivity timer still ends a connection that has simply stalled.
+      deadline = setTimeout(() => {
         request.destroy(new Error(`Timed out after ${options.timeoutMs}ms: ${url.href}`));
+      }, options.timeoutMs);
+      deadline.unref?.();
+      request.setTimeout(options.timeoutMs, () => {
+        request.destroy(new Error(`Timed out after ${options.timeoutMs}ms of silence: ${url.href}`));
       });
     }
-    request.on('error', reject);
+    request.on('error', fail);
     request.end();
   });
 };

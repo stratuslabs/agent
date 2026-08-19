@@ -178,6 +178,17 @@ const classifyIPv6 = (groups: number[], address: string): AddressVerdict => {
     reason: `${address} is ${what}, which is not a public address`,
   });
 
+  // RFC 8215's local-use NAT64 prefix. The well-known `64:ff9b::/96` above
+  // embeds its IPv4 at a fixed offset, so that one is extracted and judged
+  // on the address it carries — which is what lets an IPv6-only network
+  // reach the public IPv4 internet. This one may embed at any of RFC 6052's
+  // lengths, chosen by whoever runs the translator, so there is no offset
+  // to read it from. It is called local-use for a reason: refused whole,
+  // rather than guessed at and let through as public.
+  if (g0 === 0x0064 && groups[1] === 0xff9b && groups[2] === 0x0001) {
+    return refuse('the local-use NAT64 prefix (64:ff9b:1::/48), which can translate to any address');
+  }
+
   if (groups.every((group) => group === 0)) return refuse('the unspecified address (::)');
   if (groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1) return refuse('loopback (::1)');
   if ((g0 & 0xfe00) === 0xfc00) return refuse('a unique-local address (fc00::/7)');

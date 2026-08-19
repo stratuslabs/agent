@@ -25,6 +25,7 @@ export const HOSTILE_URLS: HostileUrl[] = [
   { url: 'http://[::ffff:169.254.169.254]/', what: 'metadata again, as an IPv4-mapped IPv6 address' },
   { url: 'http://[::ffff:127.0.0.1]/', what: 'loopback, as an IPv4-mapped IPv6 address' },
   { url: 'http://[64:ff9b::a9fe:a9fe]/', what: 'metadata again, through NAT64' },
+  { url: 'http://[64:ff9b:1::a9fe:a9fe]/', what: 'metadata again, through the local-use NAT64 prefix' },
   { url: 'http://[2002:a9fe:a9fe::]/', what: 'metadata again, through 6to4' },
   { url: 'http://127.0.0.1:4123/api/v1/credentials', what: 'the daemon’s own control API' },
   { url: 'http://[::1]:4123/api/v1/credentials', what: 'the control API over IPv6 loopback' },

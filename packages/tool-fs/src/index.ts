@@ -221,6 +221,29 @@ interface SearchMatch extends JsonObject {
 
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+/**
+ * The matcher for one search.
+ *
+ * Built from an **escaped literal**, always. `fs.search` is `safe` — it
+ * runs unattended, on the process's only thread, with a pattern a model
+ * wrote — and V8's regex engine backtracks: `(a+)+$` against a long line of
+ * `a`s does not return in any time worth waiting for, and while it runs
+ * every session in the daemon is stopped. There is no timeout to give it
+ * and no way to interrupt it on this thread.
+ *
+ * So the expressive form is gone rather than bounded. `wholeWord` covers
+ * the case it was mostly wanted for; anything genuinely regex-shaped is a
+ * `shell.run` away, where a human approves the command and the executor
+ * can kill it.
+ */
+const matcherFor = (query: string, options: { caseSensitive?: boolean; wholeWord?: boolean }): RegExp => {
+  const literal = escapeRegExp(query);
+  return new RegExp(
+    options.wholeWord ? `\\b${literal}\\b` : literal,
+    options.caseSensitive ? '' : 'i',
+  );
+};
+
 const walkFiles = async function* (directory: string, depth = 0): AsyncGenerator<string> {
   if (depth > 12) {
     return;
@@ -253,14 +276,14 @@ const walkFiles = async function* (directory: string, depth = 0): AsyncGenerator
 
 const createSearchTool = (config: JsonObject): Tool => ({
   name: 'fs.search',
-  description: 'Search file contents under one of this agent’s roots.',
+  description: 'Search file contents for literal text under one of this agent’s roots.',
   risk: 'safe',
   parameters: {
     type: 'object',
     properties: {
-      query: { type: 'string' },
+      query: { type: 'string', description: 'Literal text to find. Not a regular expression.' },
       path: { type: 'string', description: 'Where to search. Defaults to the agent’s first root.' },
-      regex: { type: 'boolean', description: 'Read the query as a regular expression.' },
+      wholeWord: { type: 'boolean', description: 'Match only whole words.' },
       caseSensitive: { type: 'boolean' },
       maxMatches: { type: 'number' },
     },
@@ -272,10 +295,10 @@ const createSearchTool = (config: JsonObject): Tool => ({
     const requested = typeof input.path === 'string' && input.path.length > 0 ? input.path : '.';
     const resolved = await resolveWithinRoots(settings.roots, requested, { home: settings.home });
     const limit = asNumber(input.maxMatches, settings.maxMatches);
-    const pattern = new RegExp(
-      input.regex === true ? query : escapeRegExp(query),
-      input.caseSensitive === true ? '' : 'i',
-    );
+    const pattern = matcherFor(query, {
+      caseSensitive: input.caseSensitive === true,
+      wholeWord: input.wholeWord === true,
+    });
 
     const matches: SearchMatch[] = [];
     let truncated = false;

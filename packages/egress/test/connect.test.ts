@@ -163,3 +163,41 @@ test('a permitted connection is never reused by a policy that would have refused
   assert.equal(await through(open), 200);
   assert.equal(await through(strict), 403);
 });
+
+test('the timeout bounds the whole exchange, not just a quiet socket', async (t) => {
+  // A server that dribbles: one byte at a time, often enough that an
+  // inactivity timer never fires. Without a wall-clock deadline this
+  // request runs until the server tires of it.
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    const dribble = setInterval(() => response.write('x'), 20);
+    response.on('close', () => clearInterval(dribble));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => {
+    // Connections first: this server never stops writing on its own, so
+    // waiting for it to drain is waiting forever — and a cleanup that
+    // hangs would turn a failed assertion back into a hung suite.
+    server.closeAllConnections();
+    server.close(() => resolve());
+  }));
+  const port = (server.address() as AddressInfo).port;
+
+  // Given a way to lose: without the deadline this never settles, and a
+  // suite with no timeout would hang rather than report the regression.
+  const attempt = requestThroughPolicy(`http://localhost:${port}/slow`, {
+    policy: { allowedHosts: ['localhost'] },
+    timeoutMs: 300,
+  }).then(() => 'completed', (error: Error) => error.message);
+
+  const outcome = await Promise.race([
+    attempt,
+    new Promise<string>((resolve) => {
+      const timer = setTimeout(() => resolve('still running'), 5_000);
+      timer.unref?.();
+    }),
+  ]);
+
+  assert.notEqual(outcome, 'still running', 'the request outlived its own timeout');
+  assert.match(outcome, /Timed out after 300ms/);
+});

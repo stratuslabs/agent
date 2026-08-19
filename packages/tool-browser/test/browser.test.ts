@@ -376,3 +376,52 @@ test('the context cap holds when a burst of conversations starts at once', async
   assert.equal(recorder.closedContexts, 3);
   assert.equal(recorder.contexts - recorder.closedContexts, 2);
 });
+
+test('a context that never got a page is closed, and a browser nobody holds goes with it', async (t) => {
+  const recorder = emptyRecorder();
+  // Chromium dying during page initialization: `newContext` succeeded,
+  // `newPage` did not.
+  const driver: BrowserDriver = {
+    async launch() {
+      recorder.launches += 1;
+      return {
+        async newContext() {
+          recorder.contexts += 1;
+          return {
+            async newPage() {
+              throw new Error('Target page, context or browser has been closed');
+            },
+            async close() {
+              recorder.closedContexts += 1;
+            },
+          };
+        },
+        async close() {
+          recorder.closedBrowsers += 1;
+        },
+      };
+    },
+  };
+
+  const tools = new ToolRegistry();
+  const plugin = createBrowserPlugin({ allowedHosts: ['example.com'] }, { driver });
+  await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
+  t.after(() => plugin.dispose());
+
+  await assert.rejects(
+    () => (tools.get('browser.goto') as Tool).execute({ url: 'https://example.com/' }, sessionFor('s')),
+    /has been closed/,
+  );
+
+  // Neither is tracked anywhere the idle sweep or shutdown would find, so
+  // this is the only place they can be released.
+  assert.equal(recorder.closedContexts, 1);
+  assert.equal(recorder.closedBrowsers, 1);
+
+  // And the dead browser is not handed to the next caller.
+  await assert.rejects(
+    () => (tools.get('browser.goto') as Tool).execute({ url: 'https://example.com/' }, sessionFor('t')),
+    /has been closed/,
+  );
+  assert.equal(recorder.launches, 2);
+});

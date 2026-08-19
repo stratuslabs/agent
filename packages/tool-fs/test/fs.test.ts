@@ -279,3 +279,25 @@ test('searching one file searches that file, not its neighbours', async () => {
   const wide = await run(tools, 'fs.search', { query: 'kettle', path: 'notes' }, session) as JsonObject;
   assert.equal((wide.matches as unknown[]).length, 2);
 });
+
+test('a search pattern is literal text, so no query can stall the process', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-redos-'));
+  await writeFile(path.join(root, 'notes.md'), `a(b)c ${'a'.repeat(4_000)}\n`);
+  const tools = await registryFor({ roots: [root] });
+  const session = sessionFor('ava');
+
+  // Regex metacharacters are matched as themselves rather than compiled.
+  const literal = await run(tools, 'fs.search', { query: 'a(b)c' }, session) as JsonObject;
+  assert.equal((literal.matches as unknown[]).length, 1);
+
+  // The pattern that would have hung the daemon: catastrophic backtracking
+  // on the long line above, on the only thread there is, with no way to
+  // interrupt it. As literal text it simply matches nothing.
+  const hostile = await run(tools, 'fs.search', { query: '(a+)+$' }, session) as JsonObject;
+  assert.deepEqual(hostile.matches, []);
+
+  // And the case the expressive form was mostly wanted for is still here.
+  await writeFile(path.join(root, 'words.md'), 'cupboard\ncup\n');
+  const words = await run(tools, 'fs.search', { query: 'cup', wholeWord: true, path: 'words.md' }, session) as JsonObject;
+  assert.deepEqual((words.matches as Array<{ text: string }>).map((match) => match.text), ['cup']);
+});

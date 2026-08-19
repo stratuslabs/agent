@@ -28,6 +28,15 @@ export interface CommandScope {
   /** Literal arguments that disqualify a match anywhere after `args`. */
   deniedArgs?: string[];
   /**
+   * Refuse *any* argument that is not a flag.
+   *
+   * The listing forms of `git branch` and `git tag` are the safe ones, and
+   * what separates them from the creating forms is a positional: `git
+   * branch` lists, `git branch release` creates. Excluding flags is not
+   * enough there, because creation needs none.
+   */
+  listOnly?: boolean;
+  /**
    * Refuse `:branch` and `+branch` arguments. Git's refspec syntax makes
    * those a delete and a forced update *without any flag*, so a scope that
    * only excluded flags would let `git push origin :main` through as an
@@ -54,6 +63,10 @@ const ALWAYS_DENIED_FLAGS = [
   '--no-index',
   '--output',
   '--open-files-in-pager',
+  // Reads a path the scope never mentioned. `date --file=…/credentials.json`
+  // is not a date lookup; it is a file read whose contents come back in the
+  // error text, from a command whose name says otherwise.
+  '--file',
 ];
 
 /**
@@ -86,6 +99,13 @@ const DESTRUCTIVE_FLAGS = [
  * given, and `cat ~/.stratus/credentials.json` is a safe-listed credential
  * read. An operator who wants those adds them deliberately, or approves
  * them once and keeps the scope.
+ *
+ * The test is *what an argument can make the command do*, not what the
+ * command is called. `date` was on this list until someone pointed out
+ * `date --file=~/.stratus/credentials.json`, which is not a date lookup:
+ * GNU `date` reads that file and echoes each unparseable line back in its
+ * error text, which the shell tool returns. A command that can be handed a
+ * path is a file reader wearing another name.
  */
 export const SAFE_COMMAND_SCOPES: CommandScope[] = [
   { command: 'git', args: ['status'] },
@@ -97,19 +117,25 @@ export const SAFE_COMMAND_SCOPES: CommandScope[] = [
   { command: 'git', args: ['rev-parse'] },
   { command: 'git', args: ['ls-files'] },
   { command: 'git', args: ['shortlog'] },
-  // Listing branches and tags is read-only; deleting, renaming, and forcing
-  // them is the same command with a letter after it.
-  { command: 'git', args: ['branch'], deniedFlags: ['--delete', '--move', '--copy', '--force', 'd', 'D', 'm', 'M', 'C'] },
-  { command: 'git', args: ['tag'], deniedFlags: ['--delete', '--force', 'd', 'f'] },
+  // Listing branches, tags, and remotes is read-only. Creating one needs no
+  // flag at all — `git branch release` is a mutation and `git branch` is
+  // not — so these are list-only, and every other form asks.
+  {
+    command: 'git',
+    args: ['branch'],
+    listOnly: true,
+    deniedFlags: ['--delete', '--move', '--copy', '--force', 'd', 'D', 'm', 'M', 'C'],
+  },
+  { command: 'git', args: ['tag'], listOnly: true, deniedFlags: ['--delete', '--force', 'd', 'f'] },
   {
     command: 'git',
     args: ['remote'],
+    listOnly: true,
     deniedArgs: ['add', 'remove', 'rm', 'rename', 'set-url', 'set-head', 'set-branches', 'prune', 'update'],
   },
   { command: 'pwd' },
   { command: 'whoami' },
   { command: 'uname' },
-  { command: 'date' },
 ];
 
 /**
@@ -265,6 +291,9 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
       }
       continue;
     }
+    if (scope.listOnly) {
+      return false;
+    }
     if (scope.deniedArgs?.includes(token)) {
       return false;
     }
@@ -297,18 +326,20 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
   }
   const first = analysis.tokens.slice(1).find((token) => !token.startsWith('-'));
   const args = first === undefined ? [] : [first];
-  const inherited = SAFE_COMMAND_SCOPES
-    .filter((scope) => scope.command === analysis.base && (scope.args ?? []).join(' ') === args.join(' '))
-    .flatMap((scope) => scope.deniedFlags ?? []);
-  const deniedArgs = SAFE_COMMAND_SCOPES
-    .filter((scope) => scope.command === analysis.base && (scope.args ?? []).join(' ') === args.join(' '))
-    .flatMap((scope) => scope.deniedArgs ?? []);
+  const sameScope = SAFE_COMMAND_SCOPES
+    .filter((scope) => scope.command === analysis.base && (scope.args ?? []).join(' ') === args.join(' '));
+  const inherited = sameScope.flatMap((scope) => scope.deniedFlags ?? []);
+  const deniedArgs = sameScope.flatMap((scope) => scope.deniedArgs ?? []);
 
   return {
     command: analysis.base,
     ...(args.length > 0 ? { args } : {}),
     deniedFlags: [...new Set([...DESTRUCTIVE_FLAGS, ...inherited])],
     ...(deniedArgs.length > 0 ? { deniedArgs: [...new Set(deniedArgs)] } : {}),
+    // A persisted scope cannot be wider than the safe list's own for the
+    // same command: approving `git branch` once must not turn creating a
+    // branch into something that runs unattended forever after.
+    ...(sameScope.some((scope) => scope.listOnly) ? { listOnly: true } : {}),
     // Git's syntax, so git's rule: elsewhere a leading `+` is an ordinary
     // argument (`chmod +x`) and refusing it would only cost a prompt for no
     // safety.
@@ -330,6 +361,7 @@ const normalizeForCompare = (scope: CommandScope) => ({
   deniedFlags: [...(scope.deniedFlags ?? [])].sort(),
   deniedArgs: [...(scope.deniedArgs ?? [])].sort(),
   denyRefspecForms: scope.denyRefspecForms ?? false,
+  listOnly: scope.listOnly ?? false,
 });
 
 /** Read one scope out of a whitelist file, or refuse it. */
@@ -353,5 +385,6 @@ export const parseCommandScope = (raw: unknown): CommandScope | undefined => {
     ...(deniedFlags ? { deniedFlags } : {}),
     ...(deniedArgs ? { deniedArgs } : {}),
     ...(source.denyRefspecForms === true ? { denyRefspecForms: true } : {}),
+    ...(source.listOnly === true ? { listOnly: true } : {}),
   };
 };

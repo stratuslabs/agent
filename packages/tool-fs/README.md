@@ -49,7 +49,7 @@ tools: [fs.read, fs.search]     # or fs.* for the whole toolset
 | --- | --- | --- |
 | `fs.read` | `safe` | Runs unattended. Nothing outside the agent's roots is readable, which is what makes reading safe rather than merely convenient. |
 | `fs.list` | `safe` | Runs unattended. Symlinks are listed as symlinks and never followed. |
-| `fs.search` | `safe` | Runs unattended. Given a directory it walks it without following symlinks, skipping `.git`, `node_modules`, and files over 1 MB; given a file it searches that file and no others. |
+| `fs.search` | `safe` | Runs unattended. Matches **literal text** (optionally `wholeWord`), never a regular expression — see below. Given a directory it walks it without following symlinks, skipping `.git`, `node_modules`, and files over 1 MB; given a file it searches that file and no others. |
 | `fs.write` | `gated` | `interactive` asks at the terminal, `remote` asks in Slack, `headless` refuses. Writing where other people read is the thing worth a person's attention. |
 
 ## Settings
@@ -65,6 +65,21 @@ Every key can be set per agent in the `agents` sub-block, over the defaults
 above it, and `roots` is why the sub-block exists: a flat list would give
 every agent enabling `fs.*` the same roots, which is one agent reading
 another's files.
+
+## `fs.search` takes literal text, not a pattern
+
+A regular expression written by a model is untrusted input compiled into
+V8's backtracking engine and run on the process's only thread. `(a+)+$`
+against a long line does not return in any time worth waiting for, and while
+it runs every session in the daemon is stopped — for a tool classified
+`safe`, which means nobody is watching.
+
+There is no timeout to give a running regex and no way to interrupt one from
+the thread it is on, so the expressive form is gone rather than bounded.
+`wholeWord` covers what it was mostly wanted for. Anything genuinely
+regex-shaped is a `grep` away through
+[`@stratusagent/tool-shell`](../tool-shell), where a human approves the
+command and the executor can kill it.
 
 ## The containment rule
 

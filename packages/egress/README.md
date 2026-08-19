@@ -18,7 +18,12 @@ blacklist that stops at RFC 1918 still leaves:
 - `127.0.0.1` and `::1` — the daemon's own control API, among other things
 - `fc00::/7` and `fe80::/10` — the same internal services over IPv6
 - `::ffff:169.254.169.254`, `64:ff9b::a9fe:a9fe`, `2002:a9fe:a9fe::` — the
-  same IPv4 addresses again, written the ways an IPv4 check does not see
+  same IPv4 addresses again, written the ways an IPv4 check does not see.
+  The well-known NAT64 prefix is judged on the IPv4 it carries, so an
+  IPv6-only network still reaches the public internet through it; RFC 8215's
+  **local-use** prefix `64:ff9b:1::/48` is refused whole, because the
+  translator chooses the embedding length and there is no offset to read the
+  address from
 
 Schemes are `http:` and `https:`. `file:`, `data:`, and `javascript:` are
 refused before anything is fetched: the process doing the fetching runs as the

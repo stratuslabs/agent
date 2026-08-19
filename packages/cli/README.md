@@ -422,8 +422,11 @@ too coarse to be usable. The permission engine judges the command instead:
 2. **the agent's whitelist** — `~/.stratus/agents/<id>.whitelist.json`, written
    by **Always allow** — then
 3. **the built-in safe list**: `git status`, `git log`, `git diff`, `git show`,
-   `git blame`, `git branch`, `git tag`, `git remote`, and a few more, each
-   without its destructive forms (`git branch -D` is not `git branch`).
+   `git blame`, `git rev-parse`, `git ls-files`, plus `git branch`, `git tag`,
+   and `git remote` **in their listing forms only** — creating a branch or a
+   tag needs no flag at all (`git branch release` is a mutation), so those
+   scopes refuse any positional argument, not just the destructive flags.
+   `pwd`, `whoami`, and `uname` round it out.
 
 Anything else asks, and in `headless` mode anything else is refused with the
 command in the log.
@@ -470,6 +473,13 @@ The safe list is deliberately short, and `cat`, `ls`, and `grep` are the
 tempting entries that cannot be on it — they read whatever path they are given,
 so safe-listing them would safe-list reading your credentials file. Approve
 them once for a scope you actually want instead.
+
+The test is **what an argument can make the command do**, not what the command
+is called. `date` was on this list until it turned out that
+`date --file=~/.stratus/credentials.json` makes GNU `date` read that file and
+echo every unparseable line back in its error text — which the tool returns.
+A command that can be handed a path is a file reader wearing another name, so
+`--file` is now refused in every scope, including ones you add.
 
 ## Always on
 

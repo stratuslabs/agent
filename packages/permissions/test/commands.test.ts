@@ -263,3 +263,56 @@ test('“always” on a command that has no scope says so, rather than claiming 
   assert.match(decisions[0]?.reason ?? '', /cannot be reduced to a scope, so it will ask again/);
   assert.doesNotMatch(decisions[0]?.reason ?? '', /rest of this session/);
 });
+
+test('a safe scope covers the listing form and not the creating one', async () => {
+  const decisions: PermissionDecision[] = [];
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    onDecision: (decision) => decisions.push(decision),
+    commands: {},
+  });
+
+  // Listing, in every flag-shaped form.
+  assert.equal(await policy.approve(contextFor('git branch')), true);
+  assert.equal(await policy.approve(contextFor('git branch --list')), true);
+  assert.equal(await policy.approve(contextFor('git branch -a')), true);
+  assert.equal(await policy.approve(contextFor('git tag')), true);
+  assert.equal(await policy.approve(contextFor('git remote -v')), true);
+
+  // Creating needs no flag at all, which is exactly why excluding flags is
+  // not enough: a positional argument is the whole difference between
+  // reading the repository and changing it.
+  assert.equal(await policy.approve(contextFor('git branch release')), false);
+  assert.equal(await policy.approve(contextFor('git tag v1.0.0')), false);
+  assert.equal(await policy.approve(contextFor('git remote show origin')), false);
+
+  // And the persisted form inherits the same distinction, so approving
+  // `git branch` once never makes creating one unattended.
+  const scope = normalizeCommandScope(analyzeCommand('git branch --list'));
+  assert.equal(scope?.listOnly, true);
+});
+
+test('a command that can be handed a path is not safe, whatever it is called', async () => {
+  const decisions: PermissionDecision[] = [];
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    onDecision: (decision) => decisions.push(decision),
+    commands: {},
+  });
+
+  // GNU `date` reads `--file` and echoes each unparseable line back in its
+  // error text, which the shell tool returns — so a safe-listed `date` was
+  // an unattended read of any file the daemon can open.
+  assert.equal(await policy.approve(contextFor('date')), false);
+  assert.equal(await policy.approve(contextFor('date --file=/home/ada/.stratus/credentials.json')), false);
+
+  // The flag is refused in every scope, so a scope somebody adds later
+  // cannot reintroduce the same hole by accident.
+  const withDate = createPermissionPolicy({
+    mode: 'headless',
+    commands: { safeScopes: [{ command: 'date' }] },
+  });
+  assert.equal(await withDate.approve(contextFor('date')), true);
+  assert.equal(await withDate.approve(contextFor('date --file=/etc/passwd')), false);
+  assert.equal(await withDate.approve(contextFor('date -f /etc/passwd')), true, 'short -f is not the same flag');
+});

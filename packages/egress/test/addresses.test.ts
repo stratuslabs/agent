@@ -35,6 +35,12 @@ test('every non-global address is refused, in both families and every disguise',
     '::ffff:169.254.169.254',
     '64:ff9b::a9fe:a9fe',
     '2002:a9fe:a9fe::',
+    // The local-use NAT64 prefix embeds its IPv4 at a length the local
+    // translator chooses, so there is no offset to read — and every one of
+    // these could be 169.254.169.254 on the network that configured it.
+    '64:ff9b:1::a9fe:a9fe',
+    '64:ff9b:1::1',
+    '64:ff9b:1:0:a9fe:a9fe::',
   ];
   for (const address of refused) {
     assert.equal(classifyAddress(address).allowed, false, `should refuse ${address}`);
@@ -49,6 +55,10 @@ test('a refusal names the range, because the agent has to be told something true
   assert.match(classifyAddress('169.254.169.254').reason ?? '', /link-local.*instance metadata/);
   assert.match(classifyAddress('::ffff:10.0.0.1').reason ?? '', /embeds .*private address/);
   assert.match(classifyAddress('fd00::1').reason ?? '', /unique-local/);
+  assert.match(classifyAddress('64:ff9b:1::1').reason ?? '', /local-use NAT64 prefix/);
+  // The well-known prefix is still judged on the address it carries, so an
+  // IPv6-only network can still reach the public IPv4 internet through it.
+  assert.equal(classifyAddress('64:ff9b::5db8:d822').allowed, true);
   assert.match(classifyAddress('not-an-address').reason ?? '', /not an IP address/);
 });
 

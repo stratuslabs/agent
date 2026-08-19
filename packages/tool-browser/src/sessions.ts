@@ -185,7 +185,26 @@ export class BrowserSessionPool {
     }
 
     const context = await entry.browser.newContext();
-    const page = await context.newPage();
+    let page: PageLike;
+    try {
+      page = await context.newPage();
+    } catch (error) {
+      // A context that never got a page is not in `contexts`, so the idle
+      // sweep will never look at it — and neither will shutdown, which
+      // walks the same map. Closed here or not at all, and the browser
+      // goes too when it turns out nothing is using it (which is also how
+      // a Chromium that died during page creation stops being handed to
+      // the next caller).
+      try {
+        await context.close();
+      } catch {
+        // Already gone with the browser that owned it.
+      }
+      if (entry.sessions.size === 0) {
+        await this.closeBrowser(entry);
+      }
+      throw error;
+    }
     this.contexts.set(sessionId, { sessionId, context, page, lastUsedAt: now, browserKey: key });
     entry.sessions.add(sessionId);
     return page;
