@@ -3,15 +3,34 @@
   "compilerOptions": {
     "rootDir": "./src",
     "outDir": "./dist",
-    "composite": true
+    "composite": true,
+    "rewriteRelativeImportExtensions": true,
+    "types": [
+      "node"
+    ]
   },
   "references": [
-    { "path": "../core" },
-    { "path": "../agents" },
-    { "path": "../state" },
-    { "path": "../gateway" },
-    { "path": "../provider-anthropic" }
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../agents"
+    },
+    {
+      "path": "../state"
+    },
+    {
+      "path": "../gateway"
+    },
+    {
+      "path": "../provider-anthropic"
+    }
   ],
-  "include": ["src/**/*.ts"],
-  "exclude": ["dist", "test"]
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "dist",
+    "test"
+  ]
 }

@@ -36,6 +36,12 @@ it. Install it next to the CLI and `stratus serve` picks it up on its own:
 
 - `@stratusagent/channels` — the channel contract itself: inbound messages, streaming outbound connections, session keys. It arrives as a dependency of any channel package, and it is what you build a new transport against.
 
+- `@stratusagent/control-api` — the authenticated HTTP + WebSocket API over a running daemon: the roster, sessions, live events, pending approvals, and the management endpoints that create agents and store credentials. Every non-terminal surface talks to this and nothing else. Installing it is how you say you want a port open — `stratus serve` then binds `127.0.0.1:4123`.
+
+  ```bash
+  npm install -g @stratusagent/control-api
+  ```
+
 Without a channel installed, everything else works exactly as before: the
 daemon logs an install hint for any agent that has channel credentials stored
 and serves the rest of the roster normally.
@@ -54,6 +60,7 @@ Today it is useful for:
 - defining agents as soul files — markdown personas you run with `stratus run --soul ./ava.md "hi"`
 - gating tool execution with an approval policy — at a terminal (`--approvals always|ask|never`), or unattended in `stratus serve`, where a gated call is either refused (`--approvals headless`) or parked and asked in Slack with Allow / Always allow / Deny buttons (`--approvals remote`); see `packages/cli/README.md`
 - continuing an existing session with follow-up user messages via `runner.resume()`
+- driving the whole fleet over one authenticated API (`@stratusagent/control-api`) — the roster, durable sessions, a live event stream, pending approvals, and agent/credential/config management, over HTTP and WebSocket on loopback; `stratus agents --gateway <url>` is the first command that consumes it remotely
 - opening a tiny local dashboard for browser-based smoke testing
 - seeing how provider output becomes session events
 
@@ -338,6 +345,7 @@ packages/
   channel-slack/
   channels/
   cli/
+  control-api/
   core/
   executor-local/
   executors/
@@ -364,7 +372,7 @@ pnpm test
 
 ## Where this is headed
 
-The kernel stays small and understandable; capability grows as optional packages around it. The always-on runtime (`stratus serve`) is here — it hosts a roster of agents with durable sessions and speaks through channel packages, Slack first, each agent as its own bot identity. What is still ahead is one control API that every surface — CLI, web dashboard, macOS management app — consumes as a thin client, plus more channels behind the same contract.
+The kernel stays small and understandable; capability grows as optional packages around it. The always-on runtime (`stratus serve`) is here — it hosts a roster of agents with durable sessions and speaks through channel packages, Slack first, each agent as its own bot identity. The control API every surface consumes as a thin client is here too. What is still ahead is the web dashboard on top of it, the macOS management app, reusable tool packs, and more channels behind the same contract.
 
 - **Vision:** [`docs/architecture/stratus-v2.md`](docs/architecture/stratus-v2.md) — the layered architecture, key decisions, and how the deployment targets (local machines, VMs, hosted) collapse into one runtime.
 - **Roadmap:** [`docs/roadmap/`](docs/roadmap/README.md) — ordered steps with a one-page spec each, from the gateway daemon to productization.

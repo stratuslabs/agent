@@ -100,6 +100,24 @@ export interface ApprovalsConfig extends AgentApprovalConfig {
   agents?: Record<string, AgentApprovalConfig>;
 }
 
+/**
+ * The `api` block of ~/.stratus/config.json — whether `stratus serve` also
+ * serves the control API, and where.
+ *
+ * Read only from a **trusted** config, for the same reason the approvals
+ * block is: an auto-discovered project-local `stratus.config.json` can be
+ * checked into any repository, and a cloned repo must not be able to decide
+ * which interface a daemon binds.
+ */
+export interface ApiConfig {
+  /** Default true when @stratusagent/control-api is installed. */
+  enabled?: boolean;
+  /** Interface to bind. Default 127.0.0.1 — loopback is the posture. */
+  host?: string;
+  /** Port to bind. Default 4123. */
+  port?: number;
+}
+
 export interface StratusConfigFile {
   provider?: StratusProviderName;
   model?: string;
@@ -116,6 +134,8 @@ export interface StratusConfigFile {
   fallbackBaseUrl?: string;
   /** Unattended-approval policy for `stratus serve`. */
   approvals?: ApprovalsConfig;
+  /** Control API binding for `stratus serve`. */
+  api?: ApiConfig;
 }
 
 /** A resolved, ready-to-run fallback model (always a real provider). */
@@ -693,8 +713,50 @@ const loadConfigFileInner = async (configPath: string): Promise<StratusConfigFil
   if (approvals) {
     resolved.approvals = approvals;
   }
+  const api = parseApiConfig(config.api, configPath);
+  if (api) {
+    resolved.api = api;
+  }
 
   return resolved;
+};
+
+const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined => {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return undefined;
+  }
+  const source = raw as Record<string, unknown>;
+  const api: ApiConfig = {};
+
+  if (source.enabled !== undefined) {
+    if (typeof source.enabled !== 'boolean') {
+      throw new Error(`Invalid api.enabled in config ${configPath}: ${String(source.enabled)}. Use true or false.`);
+    }
+    api.enabled = source.enabled;
+  }
+  if (source.host !== undefined) {
+    if (typeof source.host !== 'string' || source.host.trim().length === 0) {
+      throw new Error(`Invalid api.host in config ${configPath}: ${String(source.host)}. Use a hostname or address.`);
+    }
+    api.host = source.host.trim();
+  }
+  if (source.port !== undefined) {
+    // Refused rather than coerced: a port that is not a port would fail at
+    // bind time, deep inside a daemon start, with an error naming a value
+    // nobody wrote.
+    if (
+      typeof source.port !== 'number'
+      || !Number.isInteger(source.port)
+      || source.port < 0
+      || source.port > 65_535
+    ) {
+      throw new Error(
+        `Invalid api.port in config ${configPath}: ${String(source.port)}. Use a whole number between 0 and 65535.`,
+      );
+    }
+    api.port = source.port;
+  }
+  return api;
 };
 
 const parseApprovalRoute = (raw: unknown): AgentApprovalConfig | undefined => {

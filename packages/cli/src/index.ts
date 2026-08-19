@@ -29,7 +29,7 @@ import {
 // Type-only: the gateway itself is imported lazily (it pulls in node:sqlite
 // and the whole runner stack), and a serve-only policy seam must not make
 // `stratus run` pay for it.
-import type { ApprovalTransport } from '@stratusagent/gateway';
+import type { ApprovalTransport, GatewayChannelAdapter } from '@stratusagent/gateway';
 import { createPermissionPolicy, type PermissionDecision } from '@stratusagent/permissions';
 import {
   createOpenAICompatibleProvider,
@@ -98,6 +98,9 @@ import {
   verifyProviderKey,
   stratusHomePath,
   withLegacyDefaultMemories,
+  gatewayTokenPath,
+  type AgentSummary,
+  type ApiConfig,
   type ApprovalsConfig,
   type CatalogModel,
   type ChannelCredentials,
@@ -249,6 +252,14 @@ export interface ParsedChatCommand {
 export interface ParsedAgentsCommand {
   command: 'agents';
   format: 'text' | 'json';
+  /**
+   * Ask a running gateway instead of resolving locally. The first
+   * remote-consuming command: the same listing, rendered from the control
+   * API's answer rather than from this machine's files.
+   */
+  gateway?: string;
+  /** Bearer token override, for a gateway whose token file is not local. */
+  token?: string;
 }
 
 export interface ParsedDoctorCommand {
@@ -289,6 +300,12 @@ export interface ParsedServeCommand {
   events: boolean;
   /** Write the structured log to ~/.stratus/logs. Defaults to true. */
   logToFile?: boolean;
+  /** Serve the control API. Defaults to true when the package is installed. */
+  api?: boolean;
+  /** Overrides `api.port` in the config file. */
+  apiPort?: number;
+  /** Overrides `api.host` in the config file. */
+  apiHost?: string;
 }
 
 export interface ParsedHelpCommand {
@@ -377,6 +394,7 @@ Usage:
   STRATUS_PROVIDER=openai OPENAI_API_KEY=... stratus run "Say hello"
   stratus run --config ./stratus.config.json --provider openai "Say hello"
   stratus agents
+  stratus agents --gateway http://127.0.0.1:4123
   stratus doctor
   stratus service install
   stratus service status
@@ -400,7 +418,10 @@ Commands:
                    (--idle-timeout <seconds>, --approvals <headless|remote>,
                    --no-events, --no-log-file, --config <path>); everything it
                    says is also written to ~/.stratus/logs, which
-                   "stratus logs" reads
+                   "stratus logs" reads. With @stratusagent/control-api
+                   installed it also serves the HTTP + WebSocket control API
+                   on 127.0.0.1:4123 (--no-api, --api-host, --api-port, or
+                   the config file's "api" block)
   service          Keep stratusd running under launchd (macOS) or systemd
                    (Linux): install, uninstall, status, start, stop.
                    Installing starts it now and at every login
@@ -411,7 +432,10 @@ Commands:
                    --format json for the raw records
   agent new        Create an agent identity (generates a human-ish name + avatar theme)
   agents           List your agents: who they are, where their souls live, what
-                   they run on, what they remember (also: stratus agent list)
+                   they run on, what they remember (also: stratus agent list).
+                   --gateway <url> asks a running daemon instead of resolving
+                   locally, authenticating with ~/.stratus/gateway-token
+                   (override with --token or STRATUS_GATEWAY_TOKEN)
   doctor           Show what a run would use right now — provider, model, soul —
                    and which file or environment variable decided each, then
                    flag anything that would surprise you (--format json)
@@ -441,6 +465,11 @@ Options:
   --port           Dashboard port, defaults to an open local port
   --host           Dashboard host (default: 127.0.0.1)
   --no-open        Do not open the browser automatically
+  --gateway        agents: read the roster from a running daemon's control API
+  --token          Bearer token for --gateway (default: ~/.stratus/gateway-token)
+  --no-api         serve: do not serve the control API
+  --api-host       serve: control API interface (default: 127.0.0.1)
+  --api-port       serve: control API port (default: 4123, 0 for any free port)
   --help, -h       Show this help message
 
 Config file:
@@ -573,6 +602,24 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         parsed.logToFile = false;
         continue;
       }
+      if (token === '--no-api') {
+        parsed.api = false;
+        continue;
+      }
+      if (token === '--api-port') {
+        const port = Number(readOptionValue(rest, index, '--api-port'));
+        if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+          throw new Error(`Invalid value for --api-port: ${rest[index + 1] ?? '(missing)'}`);
+        }
+        parsed.apiPort = port;
+        index += 1;
+        continue;
+      }
+      if (token === '--api-host') {
+        parsed.apiHost = readOptionValue(rest, index, '--api-host');
+        index += 1;
+        continue;
+      }
       throw new Error(`Unknown option: ${token}`);
     }
     return parsed;
@@ -643,15 +690,17 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
   if (command === 'agents' || (command === 'agent' && rest[0] === 'list')) {
     const agentsRest = command === 'agents' ? rest : rest.slice(1);
     let format: 'text' | 'json' = 'text';
+    let gateway: string | undefined;
+    let token: string | undefined;
     for (let index = 0; index < agentsRest.length; index += 1) {
-      const token = agentsRest[index];
-      if (!token) {
+      const argument = agentsRest[index];
+      if (!argument) {
         continue;
       }
-      if (token === '--help' || token === '-h') {
+      if (argument === '--help' || argument === '-h') {
         return { command: 'help' };
       }
-      if (token === '--format') {
+      if (argument === '--format') {
         const value = readOptionValue(agentsRest, index, '--format');
         if (value !== 'text' && value !== 'json') {
           throw new Error(`Unsupported format: ${value}`);
@@ -660,9 +709,27 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         index += 1;
         continue;
       }
-      throw new Error(`Unknown option: ${token}`);
+      if (argument === '--gateway') {
+        gateway = readOptionValue(agentsRest, index, '--gateway');
+        index += 1;
+        continue;
+      }
+      if (argument === '--token') {
+        token = readOptionValue(agentsRest, index, '--token');
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unknown option: ${argument}`);
     }
-    return { command: 'agents', format };
+    if (token !== undefined && gateway === undefined) {
+      throw new Error('--token only applies with --gateway.');
+    }
+    return {
+      command: 'agents',
+      format,
+      ...(gateway ? { gateway } : {}),
+      ...(token ? { token } : {}),
+    };
   }
 
   if (command === 'doctor') {
@@ -3542,17 +3609,87 @@ export const runSetup = async (
   }
 };
 
+/**
+ * The bearer token for a gateway: an explicit flag, the environment, or the
+ * token file this machine's daemon wrote.
+ *
+ * The file is the normal case and the reason `--gateway` needs no ceremony
+ * locally. It is not always right, though: a gateway reached through a tunnel
+ * has its own token, which is what the flag and the variable are for.
+ */
+const gatewayToken = async (
+  env: CliEnvironment,
+  explicit: string | undefined,
+): Promise<string> => {
+  const fromEnv = readNonEmptyString(readProcessEnv(env).STRATUS_GATEWAY_TOKEN);
+  if (explicit || fromEnv) {
+    return String(explicit ?? fromEnv);
+  }
+  try {
+    return (await readFile(gatewayTokenPath(env), 'utf8')).trim();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+    throw new Error(
+      `No gateway token: ${gatewayTokenPath(env)} does not exist, and neither --token nor STRATUS_GATEWAY_TOKEN was set. `
+      + 'Start the daemon with `stratus serve` (or `stratus service install`) to create one, or pass the remote gateway\'s token.',
+    );
+  }
+};
+
+/** Ask a running gateway for its roster, as data. */
+const remoteAgentSummaries = async (
+  command: ParsedAgentsCommand,
+  env: CliEnvironment,
+): Promise<AgentSummary[]> => {
+  const token = await gatewayToken(env, command.token);
+  const base = String(command.gateway).replace(/\/+$/, '');
+  const fetchImpl = env.fetch ?? globalThis.fetch;
+  if (typeof fetchImpl !== 'function') {
+    throw new Error('fetch is unavailable, so --gateway cannot reach a daemon from this runtime.');
+  }
+
+  let response: Response;
+  try {
+    response = await fetchImpl(`${base}/api/v1/agents`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+  } catch (error) {
+    throw new Error(
+      `Could not reach the gateway at ${base} (${error instanceof Error ? error.message : String(error)}). `
+      + 'Is stratusd running, and does it have @stratusagent/control-api installed?',
+    );
+  }
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(`The gateway at ${base} rejected this token. Check --token, STRATUS_GATEWAY_TOKEN, or ~/.stratus/gateway-token.`);
+  }
+  if (!response.ok) {
+    throw new Error(`The gateway at ${base} answered HTTP ${response.status} for the roster.`);
+  }
+  const payload = await response.json() as { agents?: AgentSummary[] };
+  return payload.agents ?? [];
+};
+
 export const runAgents = async (
   command: ParsedAgentsCommand,
   streams: CliStreams,
   env: CliEnvironment = {},
 ): Promise<number> => {
-  // Fold any legacy per-directory memory in first so the counts below
-  // reflect everything each agent actually remembers.
-  await migrateLegacyMemory(env);
-  const listings = await listAgentSummaries(env, (message) => {
-    writeLine(streams.stderr, `Warning: ${message}.`);
-  });
+  // The same listing either way — the shared builder produces it locally, and
+  // the control API serves exactly what that builder produced. Rendering is
+  // the only thing this command does with it.
+  let listings: AgentSummary[];
+  if (command.gateway) {
+    listings = await remoteAgentSummaries(command, env);
+  } else {
+    // Fold any legacy per-directory memory in first so the counts below
+    // reflect everything each agent actually remembers.
+    await migrateLegacyMemory(env);
+    listings = await listAgentSummaries(env, (message) => {
+      writeLine(streams.stderr, `Warning: ${message}.`);
+    });
+  }
 
   // The palette travels structurally now, because a web or macOS surface has
   // to draw it. This output has always been one prose line, and a shape
@@ -3575,7 +3712,7 @@ export const runAgents = async (
   const describeRunsOn = (runsOn: { provider: string; model?: string }): string =>
     (runsOn.provider === 'demo' ? 'demo (offline)' : `${runsOn.provider}${runsOn.model ? ` · ${runsOn.model}` : ''}`);
 
-  writeLine(streams.stdout, 'Agents');
+  writeLine(streams.stdout, command.gateway ? `Agents on ${command.gateway}` : 'Agents');
   for (const agent of listings) {
     const labels = [
       ...(agent.default ? ['default'] : []),
@@ -4472,6 +4609,63 @@ const loadSlackAdapter = async (): Promise<SlackAdapterFactory | undefined> => {
   return (await import('@stratusagent/channel-slack')).createSlackChannelAdapter;
 };
 
+type ControlApiFactory = typeof import('@stratusagent/control-api').createControlApi;
+
+/**
+ * Loads the optional control-API package, or undefined when it is not
+ * installed. Same two-step as the Slack adapter, and for the same reason:
+ * only the package being absent means "not installed". A package that IS
+ * installed but is missing one of its own dependencies throws
+ * ERR_MODULE_NOT_FOUND naming that dependency, so inspecting the message
+ * would read a broken install as an absent one — silently leaving a daemon
+ * without the API an operator installed it to have.
+ */
+const loadControlApi = async (): Promise<ControlApiFactory | undefined> => {
+  try {
+    import.meta.resolve('@stratusagent/control-api');
+  } catch {
+    return undefined;
+  }
+  return (await import('@stratusagent/control-api')).createControlApi;
+};
+
+/**
+ * The daemon's `api` block, from the config file the daemon itself would
+ * load — and only from a trusted location.
+ *
+ * An auto-discovered project-local `stratus.config.json` outranks the global
+ * one and can be checked into any repository. Which interface a daemon binds
+ * is exactly the kind of decision a cloned repo must not get to make, so an
+ * untrusted config's block is ignored loudly rather than obeyed.
+ */
+const loadServeApi = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<ApiConfig> => {
+  try {
+    const location = await resolveConfigLocation(configPath ? { configPath } : {}, env);
+    if (!location) {
+      return {};
+    }
+    const api = (await loadConfigFile(location.path)).api;
+    if (!api) {
+      return {};
+    }
+    if (!location.trusted) {
+      warn(
+        `ignoring the api config in ${location.path}: a project-local config cannot decide which interface this `
+        + 'daemon binds. Move it to ~/.stratus/config.json, or pass it with --config.',
+      );
+      return {};
+    }
+    return api;
+  } catch (error) {
+    warn(`ignoring the api config (${error instanceof Error ? error.message : String(error)}); using the defaults`);
+    return {};
+  }
+};
+
 /**
  * `stratus serve` — run the gateway (stratusd) in the foreground: load the
  * roster, accept dispatches, print events, and drain cleanly on SIGTERM,
@@ -4526,9 +4720,46 @@ export const runServe = async (
   const approvalsConfig = await loadServeApprovals(env, command.configPath, warn);
   const approvalMode = command.approvals ?? approvalsConfig.mode ?? 'headless';
 
+  // The control API is a channel adapter like any other: started after the
+  // roster loads, stopped before the store drains. It is optional because
+  // installing it is how an operator says they want a port open.
+  const apiConfig = await loadServeApi(env, command.configPath, warn);
+  const apiWanted = command.api ?? apiConfig.enabled ?? true;
+  // Typed as the seam, not as whatever the first push happens to be: the
+  // list holds the control API and the Slack adapter alike.
+  const controlApiChannels: GatewayChannelAdapter[] = [];
+  if (apiWanted) {
+    const createControlApi = await loadControlApi();
+    if (createControlApi) {
+      controlApiChannels.push(createControlApi({
+        env,
+        ...(command.apiHost ?? apiConfig.host ? { host: (command.apiHost ?? apiConfig.host) as string } : {}),
+        ...(command.apiPort ?? apiConfig.port !== undefined
+          ? { port: (command.apiPort ?? apiConfig.port) as number }
+          : {}),
+        ...(command.configPath ? { configPath: command.configPath } : {}),
+        log,
+        warn,
+      }));
+    } else if (command.api === true || apiConfig.enabled === true) {
+      // Only when someone asked for it explicitly. A daemon that was never
+      // told to serve an API should not complain about not having one.
+      warn(
+        'the control API was requested, but @stratusagent/control-api is not installed. '
+        + 'Run `npm install -g @stratusagent/control-api` to bring it online; starting without it.',
+      );
+    }
+  }
+
   const channelCredentials = await loadChannelCredentials(env);
   const slackAgents = Object.entries(channelCredentials.slack ?? {});
-  const channels = [];
+  const channels = [...controlApiChannels];
+  // Tracked on its own, never as `channels.length`: the list now holds the
+  // control API too, and "can anyone be asked for an approval" is a question
+  // about the Slack adapter specifically. Reading it off the list length
+  // would tell a daemon with an API and no Slack app that every agent is
+  // reachable, and its gated calls would park with nobody rendering them.
+  let slackAdapterUp = false;
   if (slackAgents.length > 0) {
     // Channel packages are optional peers: the CLI never bundles a
     // transport nobody asked for (the Slack SDKs alone are ~9 MB). A
@@ -4537,6 +4768,7 @@ export const runServe = async (
     // module-not-found stack.
     const adapter = await loadSlackAdapter();
     if (adapter) {
+      slackAdapterUp = true;
       channels.push(adapter({
         agents: slackAgents.map(([agentId, tokens]) => {
           const route = resolveAgentApprovals(approvalsConfig, agentId);
@@ -4624,7 +4856,7 @@ export const runServe = async (
     // Only agents whose channel actually came up can be asked: tokens on
     // disk with the Slack package missing means nothing renders the
     // request, and the turn discovers that by hanging.
-    const askable = channels.length > 0 ? slackAgents.map(([agentId]) => agentId) : [];
+    const askable = slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : [];
     log(`approvals: remote — gated calls are parked and asked in Slack (${describeApprovers(approvalsConfig, askable)})`);
   }
 
@@ -4709,7 +4941,7 @@ export const runServe = async (
   // another one is about to answer — so it is reported here, where the
   // roster and the channel list are both in view.
   if (approvalMode === 'remote') {
-    const askable = new Set(channels.length > 0 ? slackAgents.map(([agentId]) => agentId) : []);
+    const askable = new Set(slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : []);
     const unreachable = gateway.agents().map((agent) => agent.id).filter((id) => !askable.has(id));
     if (unreachable.length > 0) {
       warn(

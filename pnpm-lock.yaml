@@ -89,6 +89,9 @@ importers:
       '@stratusagent/channel-slack':
         specifier: workspace:*
         version: link:../channel-slack
+      '@stratusagent/control-api':
+        specifier: workspace:*
+        version: link:../control-api
       '@types/node':
         specifier: ^24.6.0
         version: 24.12.2

@@ -38,6 +38,7 @@
   },
   "devDependencies": {
     "@stratusagent/channel-slack": "workspace:*",
+    "@stratusagent/control-api": "workspace:*",
     "@types/node": "^24.6.0",
     "typescript": "^5.9.3"
   },
@@ -58,10 +59,14 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@stratusagent/channel-slack": "workspace:*"
+    "@stratusagent/channel-slack": "workspace:*",
+    "@stratusagent/control-api": "workspace:*"
   },
   "peerDependenciesMeta": {
     "@stratusagent/channel-slack": {
+      "optional": true
+    },
+    "@stratusagent/control-api": {
       "optional": true
     }
   }

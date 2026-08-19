@@ -5930,3 +5930,215 @@ test('doctor does not advise clearing tokens it cannot prove are orphaned', asyn
   assert.match(output.stdout, /Two soul files declare the agent id twin/);
   assert.doesNotMatch(output.stdout, /Slack tokens are stored for ava/);
 });
+
+// ---- control API ----------------------------------------------------------
+
+test('parseCommand accepts the control-API and remote-gateway flags', () => {
+  assert.deepEqual(parseCommand(['serve', '--no-api']), {
+    command: 'serve',
+    events: true,
+    api: false,
+  });
+  assert.deepEqual(parseCommand(['serve', '--api-host', '0.0.0.0', '--api-port', '4200']), {
+    command: 'serve',
+    events: true,
+    apiHost: '0.0.0.0',
+    apiPort: 4200,
+  });
+  assert.throws(() => parseCommand(['serve', '--api-port', 'nope']), /Invalid value for --api-port/);
+  assert.throws(() => parseCommand(['serve', '--api-port', '70000']), /Invalid value for --api-port/);
+
+  assert.deepEqual(parseCommand(['agents', '--gateway', 'http://127.0.0.1:4123']), {
+    command: 'agents',
+    format: 'text',
+    gateway: 'http://127.0.0.1:4123',
+  });
+  assert.deepEqual(parseCommand(['agents', '--gateway', 'http://h:1', '--token', 'abc', '--format', 'json']), {
+    command: 'agents',
+    format: 'json',
+    gateway: 'http://h:1',
+    token: 'abc',
+  });
+  // A token with nothing to send it to is a mistake worth naming.
+  assert.throws(() => parseCommand(['agents', '--token', 'abc']), /--token only applies with --gateway/);
+});
+
+/**
+ * Runs `stratus serve` until its control API announces itself, hands the URL
+ * to `work`, then drains.
+ *
+ * Gated on the announcement rather than on a delay or a poll: the line is
+ * written the moment the socket is bound, so there is nothing to race and
+ * nothing to tune. Port 0 keeps the suite off a developer's real daemon.
+ */
+const withServedApi = async (
+  home: string,
+  work: (context: { url: string; token: string }) => Promise<void>,
+  argv: string[] = [],
+): Promise<{ stdout: string; stderr: string }> => {
+  let announce: (url: string) => void = () => {};
+  const ready = new Promise<string>((resolve) => {
+    announce = resolve;
+  });
+  let stdout = '';
+  let stderr = '';
+  const controller = new AbortController();
+
+  const streams = {
+    stdout: {
+      write(chunk: string) {
+        stdout += chunk;
+        const found = /control API on (http:\/\/\S+?)\s/.exec(chunk);
+        if (found?.[1]) {
+          announce(found[1]);
+        }
+        return true;
+      },
+    },
+    stderr: { write(chunk: string) { stderr += chunk; return true; } },
+  };
+
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0', ...argv],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  // A losing path, so a regression fails an assertion instead of hanging a
+  // suite that has no timeout of its own.
+  const hung = Symbol('hung');
+  const gaveUp = new Promise<typeof hung>((resolve) => {
+    const timer = setTimeout(() => resolve(hung), 5_000);
+    timer.unref?.();
+  });
+  const url = await Promise.race([ready, gaveUp]);
+  assert.notEqual(url, hung, `the control API never announced itself; stderr: ${stderr}`);
+
+  try {
+    const token = (await readFile(path.join(home, '.stratus', 'gateway-token'), 'utf8')).trim();
+    await work({ url: url as string, token });
+  } finally {
+    controller.abort();
+    assert.equal(await serving, 0);
+  }
+  return { stdout, stderr };
+};
+
+test('serve brings the control API up and publishes where to reach it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-api-serve-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'ava.md'),
+    '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n',
+  );
+
+  await withServedApi(home, async ({ url, token }) => {
+    // The discovery file is what makes --gateway need no arguments locally.
+    const info = JSON.parse(await readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8')) as {
+      url: string;
+      pid: number;
+    };
+    assert.equal(info.url, url);
+    assert.equal(info.pid, process.pid);
+
+    const roster = await fetch(`${url}/api/v1/agents`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(roster.status, 200);
+    const { agents } = await roster.json() as { agents: Array<{ id: string }> };
+    assert.ok(agents.some((agent) => agent.id === 'ava'));
+
+    assert.equal((await fetch(`${url}/api/v1/agents`)).status, 401);
+  });
+
+  // Removed on a clean stop, so nothing points at a daemon that has gone.
+  await assert.rejects(readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8'));
+});
+
+test('stratus agents --gateway renders the same roster a running daemon serves', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-api-remote-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'ava.md'),
+    '---\nname: Ava\nid: ava\nprovider: anthropic\nmodel: claude-opus-5\n---\n\nYou are Ava.\n',
+  );
+
+  await withServedApi(home, async ({ url }) => {
+    // A second home with no souls at all: whatever this prints came from the
+    // daemon, not from local resolution.
+    const clientHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-api-client-'));
+    const token = await readFile(path.join(home, '.stratus', 'gateway-token'), 'utf8');
+
+    const remote = createStreams();
+    const code = await runCli({
+      argv: ['agents', '--gateway', url, '--token', token.trim()],
+      streams: remote.streams,
+      env: { homeDir: clientHome, cwd: clientHome, processEnv: {} },
+    });
+    assert.equal(code, 0);
+    assert.match(remote.output.stdout, new RegExp(`Agents on ${url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.match(remote.output.stdout, /Ava/);
+    assert.match(remote.output.stdout, /anthropic · claude-opus-5/);
+
+    // A local listing in that same empty home has nothing but the built-in,
+    // which is what makes the assertions above about the remote.
+    const local = createStreams();
+    await runCli({
+      argv: ['agents'],
+      streams: local.streams,
+      env: { homeDir: clientHome, cwd: clientHome, processEnv: {} },
+    });
+    assert.ok(!local.output.stdout.includes('Ava'));
+
+    const rejected = createStreams();
+    const badCode = await runCli({
+      argv: ['agents', '--gateway', url, '--token', 'wrong-token'],
+      streams: rejected.streams,
+      env: { homeDir: clientHome, cwd: clientHome, processEnv: {} },
+    });
+    assert.equal(badCode, 1);
+    assert.match(rejected.output.stderr, /rejected this token/);
+  });
+});
+
+test('serve --no-api leaves the port closed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-api-off-'));
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 200);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events', '--no-api'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  assert.equal(code, 0);
+  assert.ok(!output.stdout.includes('control API on'), output.stdout);
+  // Nothing was published, because nothing is listening.
+  await assert.rejects(readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8'));
+});
+
+test('a project-local config cannot decide which interface the daemon binds', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-api-untrusted-'));
+  // Auto-discovered, and checkable into any repository. Which interface a
+  // daemon binds is exactly the decision a cloned repo must not get to make.
+  await writeFile(
+    path.join(home, 'stratus.config.json'),
+    `${JSON.stringify({ api: { host: '0.0.0.0', port: 4321 } })}\n`,
+  );
+
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 400);
+
+  await runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  assert.match(output.stderr, /ignoring the api config/);
+  assert.ok(!output.stdout.includes('0.0.0.0'), output.stdout);
+  assert.match(output.stdout, /control API on http:\/\/127\.0\.0\.1:/);
+});
