@@ -12,6 +12,15 @@
   "references": [
     {
       "path": "../core"
+    },
+    {
+      "path": "../executor-local"
+    },
+    {
+      "path": "../plugins"
+    },
+    {
+      "path": "../permissions"
     }
   ],
   "include": [
