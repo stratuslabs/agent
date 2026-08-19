@@ -60,6 +60,11 @@ export interface RouteContext {
   /** Spend one, yielding a session id. */
   redeemOneTimeToken: (ott: string | undefined) => string | undefined;
   sessionCookie: (sessionId: string) => string;
+  /**
+   * Emit within a turn's identity, for events the gateway can no longer
+   * attribute itself. See `createEventStream`.
+   */
+  withTurn: (sessionId: string, turnId: string, work: () => Promise<void>) => Promise<void>;
   version: string;
 }
 
@@ -93,36 +98,55 @@ interface Route {
 
 // ---- helpers ---------------------------------------------------------------
 
-const CONFIG_KEYS = [
-  'provider',
-  'model',
-  'baseUrl',
-  'apiKeyEnv',
-  'systemPrompt',
-  'soul',
-  'fallbackModel',
-  'fallbackProvider',
-  'fallbackBaseUrl',
-  'approvals',
-] as const;
+/**
+ * Every setting this endpoint will write, and what shape it has to be.
+ *
+ * `api` is here because GET returns it: leaving it out made the documented
+ * whole-document round trip impossible for any daemon configured through an
+ * `api` block — send it back and the write is rejected, drop it and the write
+ * deletes the binding, because PUT replaces.
+ *
+ * The types are checked because `loadConfigFile` silently ignores values of
+ * the wrong shape. Without this, `{ "provider": 42 }` is written, echoed in a
+ * 200, and then read back as absent — the file, the response, and the running
+ * daemon all disagreeing about what was just saved.
+ */
+const CONFIG_KEYS = {
+  provider: 'string',
+  model: 'string',
+  baseUrl: 'string',
+  apiKeyEnv: 'string',
+  systemPrompt: 'string',
+  soul: 'string',
+  fallbackModel: 'string',
+  fallbackProvider: 'string',
+  fallbackBaseUrl: 'string',
+  approvals: 'object',
+  api: 'object',
+} as const;
 
 /**
- * Where the daemon's settings live, for this API's purposes: the file it was
- * pinned to with `--config`, or the global `~/.stratus/config.json`.
+ * Where the daemon's settings live, for this API's purposes.
  *
- * Deliberately NOT the full discovery chain. That chain prefers an
- * auto-discovered project-local `stratus.config.json`, which is a file that
- * ships in a repository — writing settings into somebody's checked-out repo
- * because the daemon happened to start there would surprise everyone, and the
- * `api` and `approvals` blocks in such a file are ignored anyway. So this
- * endpoint edits a config the operator actually chose.
+ * Resolved through the shared chain, then filtered to *trusted* locations —
+ * which is exactly the set the operator chose: `--config`, `STRATUS_CONFIG`
+ * (and its legacy spelling), or the global `~/.stratus/config.json`. An
+ * auto-discovered project-local `stratus.config.json` is untrusted and skipped:
+ * that file ships in a repository, and writing settings into somebody's
+ * checkout because the daemon happened to start there would surprise
+ * everyone — its `api` and `approvals` blocks are ignored anyway.
+ *
+ * Re-deriving the environment half of that precedence here is what the first
+ * version did, and it meant this endpoint read and wrote a different file from
+ * the one the daemon was actually running on whenever STRATUS_CONFIG was set:
+ * every save appeared to succeed and changed nothing.
  */
 const activeConfigPath = async (context: RouteContext): Promise<string> => {
-  if (!context.configPath) {
-    return globalConfigPath(context.env);
-  }
-  const location = await resolveConfigLocation({ configPath: context.configPath }, context.env);
-  return location?.path ?? globalConfigPath(context.env);
+  const location = await resolveConfigLocation(
+    context.configPath ? { configPath: context.configPath } : {},
+    context.env,
+  ).catch(() => undefined);
+  return location?.trusted ? location.path : globalConfigPath(context.env);
 };
 
 /** Validate a provider name, reporting a bad one as the client's error. */
@@ -168,6 +192,40 @@ const soulForAgent = async (
     );
   }
   return { soul: await loadSoulFile(summary.soulPath), path: summary.soulPath };
+};
+
+/**
+ * Serializes every read-modify-write of the credentials file.
+ *
+ * A promise chain rather than a lock file: this guards one daemon's own
+ * concurrent requests, which is the race the API introduces by being reachable
+ * from several surfaces at once. Two daemons sharing a home directory is
+ * already unsupported for the session store, and would need a different
+ * mechanism than this one.
+ */
+let credentialWrites: Promise<unknown> = Promise.resolve();
+const withCredentialLock = async <T>(work: () => Promise<T>): Promise<T> => {
+  const next = credentialWrites.then(work, work);
+  // Swallowed for the chain only: the caller still sees the rejection, but a
+  // failed write must not poison every write after it.
+  credentialWrites = next.catch(() => undefined);
+  return next;
+};
+
+/**
+ * An allowlist field, or a 400.
+ *
+ * Applied only when it happened to be an array, `{ "tools": "shell.run" }` —
+ * an edit meant to *restrict* an unrestricted agent — returned 200 while
+ * silently leaving every tool reachable. A permission edit that does not take
+ * effect must never report success, and coercing arbitrary values with
+ * `String` would write allowlist entries that match no tool at all.
+ */
+const allowlist = (value: unknown, field: string): string[] => {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+    throw new ApiError(400, 'invalid_allowlist', `"${field}" must be an array of strings.`);
+  }
+  return value as string[];
 };
 
 const parseProviderParam = (value: string): CredentialProviderName => {
@@ -223,11 +281,12 @@ export const routes: Route[] = [
     pattern: `${API_PREFIX}/health`,
     async handler(context) {
       const summaries = await listAgentSummaries(context.env);
-      const sessions = context.gateway.store.list();
-      const byStatus: Record<string, number> = {};
-      for (const session of sessions) {
-        byStatus[session.status] = (byStatus[session.status] ?? 0) + 1;
-      }
+      // Counted in the database. Listing every session to add them up made
+      // the cost of a health poll grow with everything the install had ever
+      // stored — steadily slower at exactly the endpoint that exists to say
+      // the daemon is fine.
+      const byStatus = context.gateway.store.countByStatus();
+      const storedSessions = Object.values(byStatus).reduce((sum, count) => sum + count, 0);
 
       // Every distinct runtime the daemon would serve, deduped. Deliberately
       // NOT probed: a monitoring view polls this, and a live call per poll
@@ -256,7 +315,7 @@ export const routes: Route[] = [
           builtIn: summary.builtIn,
           runsOn: summary.runsOn,
         })),
-        sessions: { total: sessions.length, byStatus },
+        sessions: { total: storedSessions, byStatus },
         approvals: { pending: context.gateway.pendingApprovals().length },
         runtimes: [...runtimes.values()],
       };
@@ -359,8 +418,8 @@ export const routes: Route[] = [
             ...(optionalString(body, 'instructions') !== undefined
               ? { instructions: optionalString(body, 'instructions') as string }
               : {}),
-            ...(Array.isArray(body.tools) ? { tools: body.tools.map(String) } : {}),
-            ...(Array.isArray(body.credentials) ? { credentials: body.credentials.map(String) } : {}),
+            ...(body.tools !== undefined ? { tools: allowlist(body.tools, 'tools') } : {}),
+            ...(body.credentials !== undefined ? { credentials: allowlist(body.credentials, 'credentials') } : {}),
           },
           // An empty string clears a pin; an absent key leaves it alone.
           ...(provider === undefined ? (current.provider ? { provider: current.provider } : {}) : (provider ? { provider } : {})),
@@ -494,9 +553,15 @@ export const routes: Route[] = [
           if (session?.status === 'failed') {
             return;
           }
-          await context.gateway.bus
-            .emit({ type: 'session.failed', sessionId, error: message })
-            .catch(() => undefined);
+          // Stamped with the turn the caller was handed. The gateway cleared
+          // its own record when the chained work unwound, so without this the
+          // failure arrives unattributed and the client that queued this
+          // message shows it as running indefinitely.
+          await context.withTurn(sessionId, turnId, async () => {
+            await context.gateway.bus
+              .emit({ type: 'session.failed', sessionId, error: message })
+              .catch(() => undefined);
+          });
         });
 
       context.response.statusCode = 202;
@@ -608,18 +673,36 @@ export const routes: Route[] = [
       if (type !== 'api_key' && type !== 'oauth_token') {
         throw new ApiError(400, 'invalid_credential_type', 'type must be api_key or oauth_token.');
       }
+      if (type === 'oauth_token' && provider !== 'anthropic') {
+        // Runtime resolution only turns an OAuth credential into an auth
+        // token for Anthropic. Stored anywhere else it is a sign-in that
+        // reports as present and then fails every run with "missing API key".
+        throw new ApiError(
+          400,
+          'unsupported_credential_type',
+          'A subscription token is an Anthropic credential; other providers need an api_key.',
+        );
+      }
       const value = requireString(body, 'value');
       const baseUrl = optionalString(body, 'baseUrl');
 
-      const credentials = await loadCredentials(context.env);
-      credentials[provider] = {
-        type,
-        value,
-        // Endpoint-bound: a key saved for one endpoint is never sent to
-        // another, whatever a project-local config later selects.
-        ...(baseUrl ? { baseUrl } : {}),
-      };
-      await saveCredentials(context.env, credentials);
+      // The whole read-modify-write under one lock. `saveCredentials` treats
+      // what it is given as the complete provider set and drops anything
+      // absent from it, so two clients storing different providers at once
+      // would each write a snapshot taken before the other's — and the last
+      // one would erase a sign-in that had just reported success. This API is
+      // explicitly shared by several surfaces, so that race is reachable.
+      await withCredentialLock(async () => {
+        const credentials = await loadCredentials(context.env);
+        credentials[provider] = {
+          type,
+          value,
+          // Endpoint-bound: a key saved for one endpoint is never sent to
+          // another, whatever a project-local config later selects.
+          ...(baseUrl ? { baseUrl } : {}),
+        };
+        await saveCredentials(context.env, credentials);
+      });
       return { provider, stored: true, type, ...(baseUrl ? { baseUrl } : {}) };
     },
   },
@@ -640,10 +723,14 @@ export const routes: Route[] = [
       // own namespace: this is the only route that writes them, and the
       // provider-credential and config routes deliberately cannot. An agent
       // must not be able to read the tokens of the transport carrying it.
-      const channels = await loadChannelCredentials(context.env);
-      await saveChannelCredentials(context.env, {
-        ...channels,
-        slack: { ...(channels.slack ?? {}), [agentId]: { appToken, botToken } },
+      // Same lock as the provider credentials: both halves live in one file,
+      // and both are read-modify-write.
+      await withCredentialLock(async () => {
+        const channels = await loadChannelCredentials(context.env);
+        await saveChannelCredentials(context.env, {
+          ...channels,
+          slack: { ...(channels.slack ?? {}), [agentId]: { appToken, botToken } },
+        });
       });
       return { channel, agentId, stored: true };
     },
@@ -681,12 +768,28 @@ export const routes: Route[] = [
       // must not become a way to write into a namespace it does not own.
       const next: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(incoming)) {
-        if (!(CONFIG_KEYS as readonly string[]).includes(key)) {
-          throw new ApiError(400, 'unknown_config_key', `${key} is not a setting this API writes. Known keys: ${CONFIG_KEYS.join(', ')}.`);
+        const expected = (CONFIG_KEYS as Record<string, string>)[key];
+        if (!expected) {
+          throw new ApiError(
+            400,
+            'unknown_config_key',
+            `${key} is not a setting this API writes. Known keys: ${Object.keys(CONFIG_KEYS).join(', ')}.`,
+          );
         }
-        if (value !== undefined && value !== null) {
-          next[key] = value;
+        if (value === undefined || value === null) {
+          continue;
         }
+        const shaped = expected === 'object'
+          ? typeof value === 'object' && !Array.isArray(value)
+          : typeof value === expected;
+        if (!shaped) {
+          throw new ApiError(
+            400,
+            'invalid_config_value',
+            `"${key}" must be ${expected === 'object' ? 'an object' : `a ${expected}`}; received ${Array.isArray(value) ? 'an array' : typeof value}.`,
+          );
+        }
+        next[key] = value;
       }
       if (typeof next.provider === 'string') {
         validateProvider(next.provider, 'provider');

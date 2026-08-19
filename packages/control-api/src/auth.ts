@@ -56,7 +56,20 @@ export const ensureGatewayToken = async (env: StateEnvironment): Promise<string>
   // a shell argument without escaping.
   const token = randomBytes(32).toString('base64url');
   await mkdir(path.dirname(tokenPath), { recursive: true, mode: 0o700 });
-  await writeFile(tokenPath, `${token}\n`, { mode: 0o600 });
+  try {
+    // Exclusive create, so of two daemons starting together on a fresh home
+    // exactly one wins. Without it both observe ENOENT, both generate a
+    // token, and the loser goes on authenticating against a value no client
+    // can read — its API reachable by nobody, with nothing saying so.
+    await writeFile(tokenPath, `${token}\n`, { flag: 'wx', mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw error;
+    }
+    const winner = (await readFile(tokenPath, 'utf8')).trim();
+    await chmod(tokenPath, 0o600);
+    return winner;
+  }
   await chmod(tokenPath, 0o600);
   // The home directory holds credentials and sessions too; an install that
   // predates this tightening must not leave the new token world-readable
@@ -224,8 +237,11 @@ export type Authenticator = ReturnType<typeof createAuthenticator>;
  * hostile page on another port of localhost is still rejected.
  */
 export const allowedOrigins = (host: string, port: number): Set<string> => {
-  const origins = new Set([`http://${host}:${port}`]);
-  if (host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '0.0.0.0') {
+  // Bracketed for IPv6, or the address's own colons run into the port and the
+  // set contains a string no browser will ever send.
+  const authority = host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`;
+  const origins = new Set([`http://${authority}`]);
+  if (host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '::' || host === '0.0.0.0') {
     origins.add(`http://127.0.0.1:${port}`);
     origins.add(`http://localhost:${port}`);
     origins.add(`http://[::1]:${port}`);

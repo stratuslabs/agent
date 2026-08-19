@@ -3155,3 +3155,23 @@ test('per-agent activity counts a parked turn as live, and listings can be bound
   assert.equal(store.list(undefined, 0).length, 0);
   store.close();
 });
+
+test('session counts come from the database, not from listing every session', async () => {
+  const home = await newHome();
+  const store = new SqliteSessionStore(path.join(home, 'sessions.db'));
+  for (const [id, status] of [
+    ['a', 'completed'], ['b', 'completed'], ['c', 'running'], ['d', 'pending_approval'],
+  ] as const) {
+    await store.create({ id, agent: { id: 'ava', name: 'Ava' }, status, messages: [] });
+  }
+
+  assert.deepEqual(store.countByStatus(), { completed: 2, running: 1, pending_approval: 1 });
+  // The point is that this does not deserialize a conversation body per row —
+  // a health endpoint is polled, and the table grows for the life of an
+  // install. An empty store answers with an empty map, not a zeroed one.
+  store.close();
+
+  const empty = new SqliteSessionStore(path.join(home, 'empty.db'));
+  assert.deepEqual(empty.countByStatus(), {});
+  empty.close();
+});

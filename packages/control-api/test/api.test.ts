@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { newHome, settles, startApi, writeSoul } from './harness.ts';
+import { newHome, openSocket, settles, startApi, writeSoul } from './harness.ts';
 
 const json = async <T>(response: Response): Promise<T> => response.json() as Promise<T>;
 
@@ -500,6 +500,216 @@ test('session listings can be bounded, and a bad bound is refused', async () => 
     const bad = await harness.call('/api/v1/sessions?limit=lots');
     assert.equal(bad.status, 400);
     assert.equal((await json<{ error: { code: string } }>(bad)).error.code, 'invalid_limit');
+  } finally {
+    await harness.stop();
+  }
+});
+
+// ---- review findings ------------------------------------------------------
+
+test('a dispatch that fails before the runner still names the turn it failed', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
+  const client = await openSocket(`${harness.url.replace('http', 'ws')}/api/v1/events`, {
+    headers: { authorization: `Bearer ${harness.token}` },
+  });
+  try {
+    await client.waitFor((frame) => frame.type === 'subscribed', 'the subscribe ack');
+
+    // The soul now declares a different agent, so the gateway refuses before
+    // the runner touches durable state — after it has already cleared its
+    // record of which turn was running.
+    await writeSoul(home, 'ava.md', '---\nname: Someone Else\nid: someone-else\n---\n\nNot Ava.\n');
+    const accepted = await harness.call('/api/v1/sessions/doomed/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hello', agentId: 'ava' }),
+    });
+    const { turnId } = await json<{ turnId: string }>(accepted);
+
+    const envelope = await client.waitFor<{ turnId?: string }>(
+      (frame) => (frame.event as { type?: string } | undefined)?.type === 'session.failed',
+      'the failure frame',
+    );
+    // Without this the failure arrives unattributed, and the client that
+    // queued the message shows it running forever.
+    assert.equal(envelope.turnId, turnId);
+  } finally {
+    client.close();
+    await harness.stop();
+  }
+});
+
+test('config reads and writes the file the daemon was actually started on', async () => {
+  const home = await newHome();
+  const chosen = path.join(home, 'chosen.json');
+  await writeFile(chosen, `${JSON.stringify({ provider: 'demo' })}\n`);
+  // A project-local config in the working directory: auto-discovered, so the
+  // daemon distrusts it, and this endpoint must not write into it either.
+  await writeFile(path.join(home, 'stratus.config.json'), `${JSON.stringify({ provider: 'demo' })}\n`);
+
+  const harness = await startApi({
+    home,
+    // Selected the way an operator selects one, through the environment.
+    options: { env: { homeDir: home, cwd: home, processEnv: { STRATUS_CONFIG: chosen } } },
+  });
+  try {
+    const read = await json<{ path: string }>(await harness.call('/api/v1/config'));
+    assert.equal(read.path, chosen);
+
+    await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { provider: 'anthropic', model: 'claude-opus-5' } }),
+    });
+
+    // Written where the daemon will read it, not into the global file it is
+    // not using and not into the repo-shaped one it distrusts.
+    assert.equal(JSON.parse(await readFile(chosen, 'utf8')).model, 'claude-opus-5');
+    assert.equal(JSON.parse(await readFile(path.join(home, 'stratus.config.json'), 'utf8')).provider, 'demo');
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('the config document round-trips, and bad value types are refused', async () => {
+  const harness = await startApi();
+  try {
+    await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { provider: 'anthropic', api: { port: 4200 } } }),
+    });
+
+    // GET hands back the whole document and PUT takes it back unchanged. With
+    // `api` missing from the whitelist this was impossible: send it and the
+    // write is rejected, drop it and the write deletes the binding.
+    const read = await json<{ config: Record<string, unknown> }>(await harness.call('/api/v1/config'));
+    assert.deepEqual(read.config.api, { port: 4200 });
+
+    const roundTrip = await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: read.config }),
+    });
+    assert.equal(roundTrip.status, 200);
+    assert.deepEqual(
+      (await json<{ config: Record<string, unknown> }>(await harness.call('/api/v1/config'))).config,
+      read.config,
+    );
+
+    // A value of the wrong shape is silently ignored by the config loader, so
+    // writing it would leave the file, the response, and the running daemon
+    // disagreeing about what was just saved.
+    const wrongType = await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { provider: 42 } }),
+    });
+    assert.equal(wrongType.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(wrongType)).error.code, 'invalid_config_value');
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('a malformed allowlist edit is refused rather than silently ignored', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
+  try {
+    // An edit meant to *restrict* an unrestricted agent. Applied only when it
+    // happened to be an array, this returned 200 while leaving every tool
+    // reachable — a permission change that reported success and did nothing.
+    const singular = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tools: 'demo.echo' }),
+    });
+    assert.equal(singular.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(singular)).error.code, 'invalid_allowlist');
+
+    const nonStrings = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ credentials: [{ nope: true }] }),
+    });
+    assert.equal(nonStrings.status, 400);
+
+    const good = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tools: ['demo.echo'] }),
+    });
+    assert.equal(good.status, 200);
+    assert.match(await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8'), /- demo\.echo/);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('a subscription token is refused for a provider that cannot use one', async () => {
+  const harness = await startApi();
+  try {
+    // Runtime resolution only turns an OAuth credential into an auth token
+    // for Anthropic. Stored for OpenAI it reports as a sign-in and then fails
+    // every run with "missing API key".
+    const wrong = await harness.call('/api/v1/credentials/openai', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'oauth_token', value: 'sub-token' }),
+    });
+    assert.equal(wrong.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(wrong)).error.code, 'unsupported_credential_type');
+
+    const right = await harness.call('/api/v1/credentials/anthropic', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'oauth_token', value: 'sub-token' }),
+    });
+    assert.equal(right.status, 200);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('concurrent credential writes do not erase each other', async () => {
+  const harness = await startApi();
+  try {
+    // saveCredentials treats what it is given as the complete provider set,
+    // so two unserialized read-modify-writes each save a snapshot taken
+    // before the other — and the loser's sign-in vanishes after reporting
+    // success. This API is shared by several surfaces, so that is reachable.
+    const writes = [
+      harness.call('/api/v1/credentials/anthropic', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ type: 'api_key', value: 'sk-ant' }),
+      }),
+      harness.call('/api/v1/credentials/openai', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ type: 'api_key', value: 'sk-openai' }),
+      }),
+      harness.call('/api/v1/credentials/channels/slack', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }),
+      }),
+    ];
+    for (const response of await Promise.all(writes)) {
+      assert.equal(response.status, 200);
+    }
+
+    const stored = JSON.parse(await readFile(path.join(harness.home, '.stratus', 'credentials.json'), 'utf8')) as {
+      anthropic?: unknown;
+      openai?: unknown;
+      channels?: { slack?: Record<string, unknown> };
+    };
+    assert.ok(stored.anthropic, 'the anthropic sign-in survived');
+    assert.ok(stored.openai, 'the openai sign-in survived');
+    assert.ok(stored.channels?.slack?.ava, 'the channel tokens survived');
   } finally {
     await harness.stop();
   }

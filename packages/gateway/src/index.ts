@@ -196,6 +196,25 @@ export class SqliteSessionStore implements SessionStore {
    * ago. The caller decides what window counts as "recent"; a daemon that
    * baked one in would need upgrading to change it.
    */
+  /**
+   * How many sessions are in each state.
+   *
+   * A grouped count, not a listing that gets counted. The table grows for the
+   * life of an install and a health endpoint is polled, so materialising one
+   * object per historical session to produce five numbers gets steadily
+   * slower at exactly the thing meant to report that the daemon is fine.
+   */
+  countByStatus(): Record<string, number> {
+    const rows = this.db
+      .prepare('SELECT status, COUNT(*) AS total FROM sessions GROUP BY status')
+      .all() as Array<{ status: string; total: number }>;
+    const counts: Record<string, number> = {};
+    for (const row of rows) {
+      counts[row.status] = Number(row.total);
+    }
+    return counts;
+  }
+
   lastActivityByAgent(): Record<string, { lastActiveAt: string; activeSessions: number }> {
     const rows = this.db
       .prepare(`

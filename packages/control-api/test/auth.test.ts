@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 
-import { openSocket, startApi } from './harness.ts';
+import { allowedOrigins, ensureGatewayToken } from '../src/auth.ts';
+import { authority } from '../src/index.ts';
+import { newHome, openSocket, startApi } from './harness.ts';
 
 /**
  * A cookie, extracted from the one-time-token exchange the way a browser
@@ -216,4 +218,35 @@ test('a wrong verb answers 405 and names what is allowed', async () => {
   } finally {
     await harness.stop();
   }
+});
+
+test('two daemons starting on one fresh home agree on the token', async () => {
+  const home = await newHome();
+  // Both observe no token file and both generate one. Without an exclusive
+  // create, the loser goes on authenticating against a value no client can
+  // read — its API reachable by nobody, with nothing saying so.
+  const [first, second] = await Promise.all([
+    ensureGatewayToken({ homeDir: home }),
+    ensureGatewayToken({ homeDir: home }),
+  ]);
+
+  assert.equal(first, second);
+  assert.equal((await readFile(path.join(home, '.stratus', 'gateway-token'), 'utf8')).trim(), first);
+  assert.equal((await stat(path.join(home, '.stratus', 'gateway-token'))).mode & 0o777, 0o600);
+});
+
+test('an IPv6 bind is advertised and origin-checked with brackets', () => {
+  // `http://::1:4123` is not a URL. The API parses every incoming path
+  // against its own advertised origin, so an unbracketed one would fail every
+  // request to a server that bound perfectly well.
+  assert.equal(authority('::1', 4123), '[::1]:4123');
+  assert.equal(authority('127.0.0.1', 4123), '127.0.0.1:4123');
+
+  const origins = allowedOrigins('::1', 4123);
+  assert.ok(origins.has('http://[::1]:4123'));
+  assert.ok(!origins.has('http://::1:4123'));
+
+  // A non-loopback IPv6 bind gets exactly its own bracketed origin.
+  const remote = allowedOrigins('fd00::1', 8080);
+  assert.deepEqual([...remote], ['http://[fd00::1]:8080']);
 });

@@ -57,6 +57,16 @@ interface Client {
 
 export const createEventStream = (gateway: Gateway) => {
   const clients = new Set<Client>();
+  /**
+   * Turn ids for events emitted *outside* the turn they belong to.
+   *
+   * The gateway clears its active turn in a `finally` inside the chained
+   * work, so a dispatch that rejects has already lost it by the time anything
+   * can react to the rejection. A failure reported without the turn id the
+   * caller was handed is a turn they cannot recognise — and so one their UI
+   * shows as running forever.
+   */
+  const turnOverrides = new Map<string, string>();
 
   const resolveAgentSessions = (agentId: string): Set<string> =>
     new Set(gateway.store.list(agentId).map((session) => session.id));
@@ -119,7 +129,7 @@ export const createEventStream = (gateway: Gateway) => {
     if (clients.size === 0) {
       return;
     }
-    const turnId = gateway.activeTurnId(event.sessionId);
+    const turnId = gateway.activeTurnId(event.sessionId) ?? turnOverrides.get(event.sessionId);
     const envelope: EventEnvelope = {
       sessionId: event.sessionId,
       ...(turnId ? { turnId } : {}),
@@ -170,6 +180,19 @@ export const createEventStream = (gateway: Gateway) => {
       socket.on('error', drop);
 
       socket.send(JSON.stringify({ type: 'subscribed', filter: client.filter }));
+    },
+
+    /**
+     * Run `work` with events for this session stamped as belonging to this
+     * turn. Scoped to the call, so nothing can leak onto a later turn.
+     */
+    async withTurn(sessionId: string, turnId: string, work: () => Promise<void>): Promise<void> {
+      turnOverrides.set(sessionId, turnId);
+      try {
+        await work();
+      } finally {
+        turnOverrides.delete(sessionId);
+      }
     },
 
     /** Test seam: how many sockets are being served. */

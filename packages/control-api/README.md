@@ -81,18 +81,23 @@ log, and an address bar is one that gets noticed when it changes.
 | GET | `/catalog/models` | Models the stored sign-ins can actually reach, listed live |
 | GET | `/credentials` | Which sign-ins exist — presence and endpoint, never a value |
 | POST | `/credentials/verify` | Live-check a key before storing it |
-| PUT | `/credentials/:provider` | Store an `api_key` or `oauth_token` |
+| PUT | `/credentials/:provider` | Store an `api_key`, or an `oauth_token` for Anthropic |
 | PUT | `/credentials/channels/:channel` | Store a channel's tokens (today: `slack`) |
 | GET/PUT | `/config` | Settings, whitelisted to keys this API owns |
 
 `PUT /config` **replaces** the file rather than merging into it — `GET` hands
 you the whole document and `PUT` takes the whole document back, so a partial
-body silently drops the keys it omits. It edits the config the operator chose:
-the file the daemon was pinned to with `--config`, or the global
-`~/.stratus/config.json`. Never an auto-discovered project-local
-`stratus.config.json` — that file ships in a repository, and writing settings
-into somebody's checkout because the daemon started there would surprise
-everyone.
+body silently drops the keys it omits. Every accepted key is type-checked
+first: the config loader ignores values of the wrong shape, so writing one
+would leave the file, the response, and the running daemon disagreeing about
+what was just saved.
+
+It edits the config the *operator* chose — the file named by `--config` or
+`STRATUS_CONFIG`, or the global `~/.stratus/config.json`. Never an
+auto-discovered project-local `stratus.config.json`: that file ships in a
+repository, and writing settings into somebody's checkout because the daemon
+started there would surprise everyone (its `api` and `approvals` blocks are
+ignored for the same reason).
 | WS | `/events` | The live event stream |
 
 `GET /catalog/tools` is deliberately absent until tool packs exist

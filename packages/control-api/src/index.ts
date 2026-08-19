@@ -88,6 +88,17 @@ export interface ControlApi extends GatewayChannelAdapter {
   readonly token: string | undefined;
 }
 
+/**
+ * A host and port as a URL authority.
+ *
+ * IPv6 literals have to be bracketed or the colons in the address run into
+ * the port: `http://::1:4123` is not a URL, and an API that advertised it
+ * would also fail every request, since that string is the base `new URL`
+ * parses each incoming path against.
+ */
+export const authority = (host: string, port: number): string =>
+  host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`;
+
 /** Refuse an upgrade without pretending it was ever a WebSocket. */
 const refuseUpgrade = (socket: Duplex, status: number, reason: string): void => {
   socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\n\r\n`);
@@ -179,6 +190,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       },
       redeemOneTimeToken: (ott) => auth?.redeemOneTimeToken(ott),
       sessionCookie: (sessionId) => auth?.sessionCookie(sessionId) ?? '',
+      withTurn: (sessionId, turnId, work) => stream?.withTurn(sessionId, turnId, work) ?? work(),
       version: CONTROL_API_VERSION,
     };
 
@@ -195,7 +207,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
     request: IncomingMessage,
     response: ServerResponse,
   ): Promise<void> => {
-    const requestUrl = new URL(request.url ?? '/', url ?? `http://${host}`);
+    const requestUrl = new URL(request.url ?? '/', url ?? `http://${authority(host, 0)}`);
 
     if (requestUrl.pathname.startsWith('/api/')) {
       await handleApiRequest(gateway, request, response, requestUrl);
@@ -227,7 +239,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
   };
 
   const handleUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
-    const requestUrl = new URL(request.url ?? '/', url ?? `http://${host}`);
+    const requestUrl = new URL(request.url ?? '/', url ?? `http://${authority(host, 0)}`);
     if (requestUrl.pathname !== `${API_PREFIX}/events`) {
       refuseUpgrade(socket, 404, 'Not Found');
       return;
@@ -260,7 +272,14 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
     await mkdir(path.dirname(infoPath), { recursive: true, mode: 0o700 });
     await writeFile(
       infoPath,
-      `${JSON.stringify({ url, host, port: server ? (server.address() as { port: number }).port : undefined, pid: process.pid, version: CONTROL_API_VERSION, startedAt: new Date(startedAt).toISOString() }, null, 2)}\n`,
+      `${JSON.stringify({
+        url,
+        host,
+        port: server ? (server.address() as { port: number }).port : undefined,
+        pid: process.pid,
+        version: CONTROL_API_VERSION,
+        startedAt: new Date(startedAt).toISOString(),
+      }, null, 2)}\n`,
       { mode: 0o600 },
     );
     // As with the token: writeFile's mode only applies on create, so an
@@ -330,7 +349,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       if (!address || typeof address === 'string') {
         throw new Error('The control API could not determine the address it bound.');
       }
-      url = `http://${host}:${address.port}`;
+      url = `http://${authority(host, address.port)}`;
       origins = allowedOrigins(host, address.port);
       await writeGatewayInfo();
       log(ui
