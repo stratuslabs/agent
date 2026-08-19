@@ -43,6 +43,7 @@ import {
   resolveConfigLocation,
   resolveConfiguredSoul,
   resolveRuntimeConfig,
+  applySoulPins,
   stratusHomePath,
   withLegacyDefaultMemories,
   type FallbackRuntime,
@@ -209,80 +210,16 @@ export class SqliteSessionStore implements SessionStore {
  * @stratusagent/channels' ChannelAdapter — kept structural here so the
  * gateway does not depend on the channels package.
  */
-/** Where the daemon-wide provider default could have come from. */
-export interface SoulPinContext {
-  /** A provider fixed by the caller (the gateway's own selection). */
-  selectionProvider?: string;
-  /** The provider named by the active config file. */
-  configProvider?: string;
-  /** Whether a config file was found at all. */
-  configPresent: boolean;
-}
-
 /**
- * Apply a soul's provider/model pins to a selection, demoting the
- * daemon-wide defaults the pins outrank.
+ * A soul's provider/model pins, and the daemon-wide defaults they demote.
  *
- * Exported because this is not only dispatch logic: anything that wants to
- * know what a served agent will actually resolve to — a startup billing
- * check, a diagnostic — has to normalize the same way, and a second copy
- * of these rules drifts from this one.
+ * The implementation lives in `@stratusagent/state`, beside the resolver
+ * whose precedence it manipulates — it never had a gateway dependency. It is
+ * re-exported here because this is where callers were told to import it from,
+ * and because "what will a served agent actually resolve to" is a gateway
+ * question even when the rule answering it is not gateway code.
  */
-export const applySoulPins = (
-  pins: ParsedSoul,
-  selection: RuntimeSelection,
-  env: StateEnvironment,
-  context: SoulPinContext,
-): { selection: RuntimeSelection; env: StateEnvironment } => {
-  selection.presetSoul = pins;
-  if (!pins.provider && !pins.model) {
-    return { selection, env };
-  }
-  const processEnv = { ...(env.processEnv ?? process.env) };
-  // The daemon-wide default can come from the selection, the environment,
-  // or the config file. A config with no provider key predates the
-  // anthropic option and is openai-specific (the resolver treats it that
-  // way), so a real file without the key still names openai as the
-  // default. Env values normalize exactly as the resolver normalizes
-  // them: an empty or whitespace-padded STRATUS_PROVIDER is no default at
-  // all, not a mismatching one.
-  const defaultProvider: string | undefined = context.selectionProvider
-    ?? readNonEmptyString(processEnv.STRATUS_PROVIDER)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER)
-    ?? context.configProvider
-    ?? (context.configPresent ? 'openai' : undefined);
-  if (pins.provider) {
-    delete selection.provider;
-    delete processEnv.STRATUS_PROVIDER;
-    delete processEnv.STRATUSCLAW_PROVIDER;
-    if (defaultProvider !== undefined && defaultProvider !== 'demo' && pins.provider !== defaultProvider) {
-      // The default model, endpoint, and generic credentials were all
-      // chosen for the default provider — none may ride along to the
-      // soul's: a base URL would point the pinned provider at the wrong
-      // service, and a generic API key would be sent to it. With NO
-      // default selected anywhere — or the credential-less demo provider
-      // as the default — there is nothing those values could have been
-      // chosen for except whatever provider the soul selects — exactly
-      // the resolver's own reading of a generic credential — so they stay.
-      delete selection.model;
-      delete processEnv.STRATUS_MODEL;
-      delete processEnv.STRATUSCLAW_MODEL;
-      delete selection.baseUrl;
-      delete processEnv.STRATUS_BASE_URL;
-      delete processEnv.STRATUSCLAW_BASE_URL;
-      delete processEnv.STRATUS_API_KEY;
-      delete processEnv.STRATUSCLAW_API_KEY;
-      delete processEnv.STRATUS_API_KEY_ENV;
-      delete processEnv.STRATUSCLAW_API_KEY_ENV;
-    }
-  }
-  if (pins.model) {
-    delete selection.model;
-    delete processEnv.STRATUS_MODEL;
-    delete processEnv.STRATUSCLAW_MODEL;
-  }
-  return { selection, env: { ...env, processEnv } };
-};
+export { applySoulPins, type SoulPinContext } from '@stratusagent/state';
 
 export interface GatewayChannelAdapter {
   name: string;
@@ -323,6 +260,33 @@ export interface GatewayApprovalRequest {
 }
 
 export type ApprovalRequester = (request: GatewayApprovalRequest) => Promise<ApprovalAnswer>;
+
+/**
+ * A parked call as an observer sees it — everything `tool.approval-requested`
+ * announced, still outstanding.
+ *
+ * Listable because an event stream only tells you what happened while you
+ * were listening. A surface that connects while a turn is already parked
+ * would otherwise show no pending request at all until the next one, and
+ * rebuilding the set from the bus means keeping a second copy of state the
+ * gateway already holds.
+ */
+export interface PendingApproval {
+  requestId: string;
+  sessionId: string;
+  agentId: string;
+  call: { id: string; toolName: string; input: JsonObject };
+  risk: ToolRisk;
+  /** When this call parked, ISO-8601. */
+  parkedAt: string;
+  /**
+   * When it denies itself, ISO-8601. Absent when it never will — the same
+   * distinction the announcing event draws.
+   */
+  expiresAt?: string;
+  /** The session's metadata: where the turn is happening. */
+  metadata?: JsonObject;
+}
 
 export interface ResolveApprovalInput {
   requestId: string;
@@ -386,6 +350,16 @@ export interface DispatchInput {
   userMessage: string;
   metadata?: JsonObject;
   signal?: AbortSignal;
+  /**
+   * Caller-chosen id for this turn, so events emitted while it runs can be
+   * attributed to it. A session processes several turns in sequence and
+   * `StratusEvent` carries no turn identifier, so a surface that queued a
+   * message has no other way to tell its own deltas from the next caller's.
+   *
+   * Optional because most callers do not need one: a channel renders
+   * whatever arrives for the conversation it is watching.
+   */
+  turnId?: string;
 }
 
 export interface Gateway {
@@ -399,6 +373,22 @@ export interface Gateway {
   readonly store: SqliteSessionStore;
   /** The current roster, default agent included. */
   agents(): AgentDefinition[];
+  /**
+   * Re-read the agents directory and the configured default soul, returning
+   * the roster that results. Souls are already re-read on every dispatch, so
+   * this is for files that appeared or disappeared since start — an agent
+   * created by another surface, or one whose soul was deleted.
+   */
+  reloadRoster(): Promise<AgentDefinition[]>;
+  /**
+   * The turn currently running on a session, if the caller that started it
+   * named one. Single-flight per session is what makes this exact: at most
+   * one turn is ever running on a session, so an event emitted for it
+   * belongs to this turn and no other.
+   */
+  activeTurnId(sessionId: string): string | undefined;
+  /** Every call parked on a human right now, oldest first. */
+  pendingApprovals(): PendingApproval[];
   /**
    * Settles a parked call. Returns false when the request is not pending —
    * already decided, expired, or belonging to a turn that was cancelled —
@@ -483,7 +473,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     actor?: string,
   ) => void;
 
-  const pendingApprovals = new Map<string, SettleApproval>();
+  /**
+   * One parked call: how to settle it, and what it is. The summary is kept
+   * alongside the settler because a listing needs the request itself, and
+   * the map is the only place that knows a request is still outstanding.
+   */
+  interface ParkedCall {
+    settle: SettleApproval;
+    pending: PendingApproval;
+  }
+
+  const pendingApprovals = new Map<string, ParkedCall>();
   /**
    * In-flight `tool.approval-resolved` emissions. `EventBus.emit` awaits its
    * subscribers in order, so one async handler ahead of a channel adapter
@@ -553,7 +553,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Identity, not presence: a request that already settled is gone from
       // the registry, and comparing against this exact function is what
       // makes every ending — click, timeout, abort, shutdown — idempotent.
-      if (pendingApprovals.get(requestId) !== settle) {
+      if (pendingApprovals.get(requestId)?.settle !== settle) {
         return;
       }
       pendingApprovals.delete(requestId);
@@ -574,14 +574,32 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       void emitted.finally(() => approvalEmissions.delete(emitted));
     };
 
-    pendingApprovals.set(requestId, settle);
-
     // What is left of the window, not a fresh one: a re-asked request
     // carries when it originally parked, and the elapsed time counts.
+    // Computed before registration because the summary below quotes the
+    // deadline, and a listing that disagreed with the announcing event about
+    // when a request expires would be worse than one that said nothing.
     const alreadyWaitedMs = request.parkedAt ? Date.now() - Date.parse(request.parkedAt) : 0;
     const remainingTimeoutMs = effectiveApprovalTimeoutMs > 0
       ? effectiveApprovalTimeoutMs - (Number.isFinite(alreadyWaitedMs) ? Math.max(0, alreadyWaitedMs) : 0)
       : 0;
+    const expiresAt = remainingTimeoutMs > 0
+      ? new Date(Date.now() + remainingTimeoutMs).toISOString()
+      : undefined;
+
+    pendingApprovals.set(requestId, {
+      settle,
+      pending: {
+        requestId,
+        sessionId: request.session.id,
+        agentId: request.session.agent.id,
+        call: request.call,
+        risk: request.risk,
+        parkedAt: request.parkedAt ?? new Date().toISOString(),
+        ...(expiresAt ? { expiresAt } : {}),
+        ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
+      },
+    });
 
     if (effectiveApprovalTimeoutMs > 0 && remainingTimeoutMs <= 0) {
       // Nothing left to wait with. Settled here rather than armed with a
@@ -627,9 +645,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       call: request.call,
       risk: request.risk,
       ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
-      ...(remainingTimeoutMs > 0
-        ? { expiresAt: new Date(Date.now() + remainingTimeoutMs).toISOString() }
-        : {}),
+      ...(expiresAt ? { expiresAt } : {}),
     });
     // Drained at shutdown alongside the resolutions: a channel that has not
     // yet been told a request exists cannot be told it was denied either.
@@ -641,11 +657,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   });
 
   const resolveApproval = (input: ResolveApprovalInput): boolean => {
-    const settle = pendingApprovals.get(input.requestId);
-    if (!settle) {
+    const parked = pendingApprovals.get(input.requestId);
+    if (!parked) {
       return false;
     }
-    settle(input.answer, input.reason ?? 'decided', input.actor);
+    parked.settle(input.answer, input.reason ?? 'decided', input.actor);
     return true;
   };
 
@@ -792,20 +808,38 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return id;
   };
 
+  /**
+   * Build the roster from what is on disk right now.
+   *
+   * Runs at start and again on every `reloadRoster()`, which is why it
+   * tracks what it registered rather than only adding: a soul file deleted
+   * since the last pass has to stop being dispatchable, and re-registering
+   * the survivors over a map nothing removes from would leave it addressable
+   * — by id, and from every channel — for the rest of the daemon's life.
+   */
   const loadRoster = async (): Promise<void> => {
+    const seen = new Set<string>();
+    const registerFresh = (source: AgentSource): void => {
+      registerSource(source);
+      seen.add(source.definition.id);
+    };
+
     // The built-in id is reserved BEFORE ordinary roster entries load: a
     // roster file that happens to declare id "stratus" must not hijack
     // the documented built-in fallback for agentId-less dispatches — the
     // guard below skips it with a warning. Only the explicitly
     // configured default soul may take the id over (defaultAgentId
     // replaces a pathless source).
-    registerSource({ definition: { ...DEFAULT_STRATUS_AGENT } });
+    registerFresh({ definition: { ...DEFAULT_STRATUS_AGENT } });
     // Throws on two roster files claiming one id: that is a collision with
     // no correct winner, and refusing to serve beats letting sort order
     // decide whose sessions, memory, and credentials an agent inherits.
     const entries: RosterEntry[] = await loadRosterSouls(env, warn);
     for (const entry of entries) {
-      if (sources.has(entry.soul.agent.id)) {
+      // Against ids claimed by THIS pass, not by any earlier one: a reload
+      // must be free to re-register the agent it just re-read, and only the
+      // built-in above can legitimately block a roster file.
+      if (seen.has(entry.soul.agent.id)) {
         // Only reachable for the reserved built-in id now — roster-vs-
         // roster duplicates never get this far. Reserved is not the same
         // failure as duplicated: a soul may not take the fallback over,
@@ -813,11 +847,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         warn(`agent id ${entry.soul.agent.id} is reserved for the built-in agent; ignoring ${entry.path}`);
         continue;
       }
-      registerSource({ definition: entry.soul.agent, soulPath: entry.path, soul: entry.soul });
+      registerFresh({ definition: entry.soul.agent, soulPath: entry.path, soul: entry.soul });
     }
     // The configured default soul is part of the roster too — it is what
-    // an agentId-less dispatch answers as.
-    await defaultAgentId();
+    // an agentId-less dispatch answers as. It may live outside the agents
+    // directory, and it survives a read failure by name, so what it
+    // resolves to is kept whether or not this pass re-registered it.
+    seen.add(await defaultAgentId());
+
+    for (const id of [...sources.keys()]) {
+      if (!seen.has(id)) {
+        sources.delete(id);
+        registry.unregister(id);
+      }
+    }
   };
 
   /**
@@ -1145,6 +1188,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const sessionChains = new Map<string, Promise<unknown>>();
   const inflight = new Set<Promise<unknown>>();
   let stopping = false;
+
+  /**
+   * The turn id running on each session, for callers that named one.
+   *
+   * Set when the chained work actually starts — not when the dispatch was
+   * queued — because a message waiting behind another turn has not begun,
+   * and stamping events with it would attribute the running turn's output to
+   * the queued one. Single-flight per session is what makes one entry per
+   * session sufficient.
+   */
+  const activeTurns = new Map<string, string>();
 
   /**
    * The runtime one agent would run on right now — config snapshot, soul
@@ -1489,7 +1543,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       throw new Error('The gateway is stopping and no longer accepts new work.');
     }
 
-    return onSessionChain(input.sessionId, () => dispatchInternal(input));
+    const { turnId } = input;
+    if (turnId === undefined) {
+      return onSessionChain(input.sessionId, () => dispatchInternal(input));
+    }
+
+    return onSessionChain(input.sessionId, async () => {
+      activeTurns.set(input.sessionId, turnId);
+      try {
+        return await dispatchInternal(input);
+      } finally {
+        // Unconditional, and safe to be: the chain guarantees no other turn
+        // for this session ran between the set above and here, so this can
+        // only ever be clearing its own entry.
+        activeTurns.delete(input.sessionId);
+      }
+    });
   };
 
   const startedChannels: GatewayChannelAdapter[] = [];
@@ -1558,8 +1627,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // outstanding approval timeout — a shutdown would hang for as long as
       // the longest request had left. Each denial is a real decision the
       // turn continues from, so the drain below still finishes those turns.
-      for (const settle of [...pendingApprovals.values()]) {
-        settle('deny', 'cancelled');
+      for (const parked of [...pendingApprovals.values()]) {
+        parked.settle('deny', 'cancelled');
       }
       // Let those resolutions reach their subscribers before the channels
       // go down, or a channel that renders approvals never learns to
@@ -1576,6 +1645,23 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     agents() {
       return registry.list();
+    },
+
+    async reloadRoster() {
+      await loadRoster();
+      const roster = registry.list();
+      log(`roster reloaded — ${roster.length} agent(s): ${roster.map((agent) => agent.name).join(', ')}`);
+      return roster;
+    },
+
+    activeTurnId(sessionId) {
+      return activeTurns.get(sessionId);
+    },
+
+    pendingApprovals() {
+      return [...pendingApprovals.values()]
+        .map((parked) => parked.pending)
+        .sort((a, b) => a.parkedAt.localeCompare(b.parkedAt));
     },
 
     resolveApproval,
