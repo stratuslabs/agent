@@ -22,11 +22,14 @@ them individually:
 - `@stratusagent/executors`, helpers for execution behavior
 - `@stratusagent/executor-local`, a concrete local child-process executor adapter
 
-### Optional packages
+### Plugins
 
-Channels are **not** part of that install. A transport you don't use is weight
-you shouldn't carry, so each one is a separate package you add only if you want
-it. Install it next to the CLI and `stratus serve` picks it up on its own:
+Everything optional is a **plugin**: one package that contributes tools, skills,
+providers, channels, memory stores, executors, or hooks. A transport you don't
+use is weight you shouldn't carry, so each one is separate and you add only what
+you want. Install it next to the CLI and `stratus serve` picks it up on its own.
+
+Channels are the plugins that exist today:
 
 - `@stratusagent/channel-slack` — talk to your agents in Slack: one Slack app per agent (its own avatar, presence, and DMs), Socket Mode so no public ingress is needed, resumable threads, and replies that stream via message edits. Adds roughly 9 MB of Slack SDKs.
 
@@ -39,6 +42,11 @@ it. Install it next to the CLI and `stratus serve` picks it up on its own:
 Without a channel installed, everything else works exactly as before: the
 daemon logs an install hint for any agent that has channel credentials stored
 and serves the rest of the roster normally.
+
+Tool plugins (`fs`, `shell`, `browser`, `web`) and skills are next — see
+[`docs/architecture/plugins.md`](./docs/architecture/plugins.md) for the plugin
+contract, the trust model for third-party code, and what we build as core
+versus what the ecosystem builds.
 
 ## Current status
 

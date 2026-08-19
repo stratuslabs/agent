@@ -24,6 +24,26 @@ Deferring is allowed when a PR is already large. Say so in the PR body
 and say when it lands — three commands shipped undocumented across #39,
 #40, and #41 because each PR deferred it and nothing tracked the debt.
 
+## Vocabulary
+
+One word per thing, because the ecosystem reads these docs before it reads the
+code. Specified in `docs/architecture/plugins.md`; do not coin a synonym.
+
+- **Plugin** — one package, the unit of distribution and installation. It
+  *contributes* tools, skills, providers, channels, memory stores, executors,
+  or hooks. This is what `Plugin` in `packages/core` already means.
+- **Tool** — a callable action, named `namespace.verb` (`fs.read`).
+- **Toolset** — the namespace a group of tools shares (`fs`), and what
+  `tools: [fs.*]` globs over.
+- **Skill** — markdown that teaches an agent a procedure. Not code; a skill
+  that needs to *do* something is a plugin contributing a tool.
+- **Soul** — the markdown file defining an agent: persona plus the `tools`,
+  `skills`, and `credentials` it may use.
+
+"Tool pack" is retired — it was 06's word and has no extension to providers,
+channels, or memory. `@stratusagent/tool-fs` is a plugin contributing the `fs`
+toolset.
+
 ## Do not re-derive rules that live somewhere else
 
 The single most repeated defect in this codebase's review history. Config
