@@ -30,7 +30,7 @@ That work lands here, with `@stratusagent/tool-shell`, where each rule can be te
 ## Design sketch
 
 - These plugins depend on `core` (and `executor-local` where relevant) only — never on the gateway — so they work identically in CLI one-shots, the daemon, and future embedded uses.
-- `PluginContext` today exposes `{ bus, tools }`; plugin configuration therefore flows through the factory (`createFsPlugin(config)`) rather than through the context — no kernel change needed for this step. The context's growth is authorized in [`stratus-v2.md`](../architecture/stratus-v2.md) and lands with the steps that need it.
+- `PluginContext` today exposes `{ bus, tools }`; plugin configuration therefore flows through the package's `createPlugin(config)` factory (the module ABI in [`plugins.md`](../architecture/plugins.md)) rather than through the context — no kernel change needed for this step. The context's growth is authorized in [`stratus-v2.md`](../architecture/stratus-v2.md) and lands with the steps that need it.
 - Browser lifecycle is the risky bit operationally: one Chromium per gateway, contexts per agent-session, hard cap on concurrent contexts, watchdog kills leaked pages. The plugin owns all of that; the kernel just sees tools.
 - Each plugin README documents its risk model in one table (tool → risk → what approval mode does).
 

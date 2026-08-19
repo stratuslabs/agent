@@ -59,6 +59,36 @@ and the way it reaches the runtime is that the CLI constructs it and hands it to
 same is true of providers (`createRuntimeProvider`) and memory stores (passed to
 the runner).
 
+### What the module exports
+
+`Plugin` describes the object the registry receives. It does not say how the
+loader gets one, and a generic loader cannot import a package that answers that
+question differently from the next package. So the ABI is one line:
+
+```ts
+export const createPlugin = (config: JsonObject): Plugin | Promise<Plugin> => { … };
+```
+
+- **A named `createPlugin` export**, not a default. Every optional package in
+  this repo is already loaded by named factory —
+  `createSlackChannelAdapter`, `createGateway`, `createLocalCommandExecutor` —
+  and a default export makes the failure mode "imported something, called it,
+  got `undefined`" instead of a resolvable name.
+- **A factory, never a class.** The loader never uses `new`, so a plugin's
+  construction cost is the author's business and its instance is not part of
+  the contract.
+- **`config` is the plugin's own block** from the `plugins` config below, minus
+  `enabled`, already validated against the manifest's `config` schema. A plugin
+  that takes no configuration ignores the argument; it is always passed, so
+  there is no second signature.
+- **Async is allowed** — a plugin that must read a file or open a connection to
+  know what it contributes returns a promise, and `loadAll` awaits it.
+
+A package may export additional, more specific factories for direct import
+(`createFsPlugin` for a test or an embedding host that skips the loader
+entirely). Those are conveniences; `createPlugin` is the one the loader knows,
+and a package without it is not loadable however well it is written.
+
 That gap is deliberate to state and not deliberate to keep. Naming the kinds
 before the seams exist is the point of this document — a third-party developer
 should be able to see what is contractual today and what is coming — but a
@@ -88,10 +118,18 @@ The tool shape is already what the repo does (`memory.remember`,
 mean something. Toolset is the noun that glob names.
 
 Two plugins may contribute the same skill id — a `pr-review` from a vendor and
-one from your own team. The qualified form is `<plugin>:<skill>`
-(`stratus-plugin-github:pr-review`), following Hermes. Tools have no qualified
-form: a tool name is unique per install, and a collision is a load-time error
-(below).
+one from your own team. The qualified form is `<package>:<skill>`
+(`stratus-plugin-github:pr-review`), following Hermes. The qualifier is the
+**package name verbatim**, which is verbose on purpose: a normalized short id
+would be a second identifier keying access, and `@acme/stratus-plugin-github`
+and `stratus-plugin-github` would normalize to the same `github` while being two
+different packages from two different authors. One name per thing, and the one
+that is already unique. Globs match the qualified id, so
+`stratus-plugin-github:*` is the form that selects a package's skills — not
+`github:*`, which matches nothing.
+
+Tools have no qualified form: a tool name is unique per install, and a collision
+is a load-time error (below).
 
 The third-party package name is a **discovery convention, not a requirement**.
 What makes a package a plugin is its manifest. The convention exists so that
