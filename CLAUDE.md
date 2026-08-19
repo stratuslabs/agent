@@ -65,11 +65,20 @@ If you need a rule that is not exported, export it. Do not copy it.
   of hanging a suite that has no timeout.
 
   Two real gates already exist, and a sleep in front of either is only
-  guessing at what it already guarantees: `adapter.stop()` drains
-  everything the Slack adapter still owes Slack, and `gateway.stop()`
-  drains its in-flight turns and the sweeps `start()` left running. Prove
-  a gate is the gate by removing it — the assertion should fail, not pass
-  more slowly.
+  guessing at what it already guarantees: `adapter.stop()` and
+  `gateway.stop()` each await the work they had in flight when they were
+  called. Gate on one for work your test has *already caused* — the whole
+  point is that the action is complete before the gate, so the gate has
+  something to wait for. Prove a gate is the gate by removing it: the
+  assertion should fail, not pass more slowly.
+
+  Neither is a general quiescence barrier, and do not write one up as
+  though it were. Both drain a **one-time snapshot** of their in-flight
+  set, and the Slack adapter unsubscribes from the bus only *after* that
+  drain — so a turn still finishing can emit an event whose subscriber
+  tracks new work the snapshot never saw. That is a real gap on shutdown,
+  not only in tests: the work at risk is exactly the approval retraction
+  the drain exists to deliver.
 
   A wall-clock number that *must* stay a wall-clock number — the watchdog
   tests, where the point is that a phase outlasts the idle timeout —
