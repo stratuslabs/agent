@@ -1,0 +1,335 @@
+import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { Duplex } from 'node:stream';
+import path from 'node:path';
+
+import type { Gateway, GatewayChannelAdapter } from '@stratusagent/gateway';
+import { gatewayInfoPath, type StateEnvironment } from '@stratusagent/state';
+import { WebSocketServer } from 'ws';
+
+import {
+  allowedOrigins,
+  createAuthenticator,
+  ensureGatewayToken,
+  originAllowed,
+  type Authenticator,
+} from './auth.ts';
+import { createEventStream, type EventFilter } from './events.ts';
+import { API_PREFIX, ApiError, isStateChanging, sendError, sendJson } from './http.ts';
+import { allowedMethodsFor, resolveRoute, type RouteContext } from './routes.ts';
+
+export { API_PREFIX } from './http.ts';
+export type { EventEnvelope, EventFilter } from './events.ts';
+
+/** Kept in step with package.json, the way the CLI keeps its own version. */
+export const CONTROL_API_VERSION = '0.4.0';
+
+/** The default port `stratusd` serves its API on. Loopback only. */
+export const DEFAULT_CONTROL_API_PORT = 4123;
+export const DEFAULT_CONTROL_API_HOST = '127.0.0.1';
+
+/**
+ * The web dashboard, when it is installed.
+ *
+ * The UI is a separate optional package because the two other consumers of
+ * this API — the macOS app and a headless VM deployment — want the API and
+ * not a web page. This package therefore serves `/api/v1` and nothing else
+ * on its own; assets are something handed to it.
+ */
+export interface DashboardAssets {
+  /** Serve this path, or report that there is no asset for it. */
+  serve(pathname: string, response: ServerResponse): Promise<boolean>;
+}
+
+export interface ControlApiOptions {
+  env?: StateEnvironment;
+  /**
+   * Interface to bind. Loopback is the posture: remote access is an
+   * operator's tunnel decision, not a default this daemon makes for them.
+   */
+  host?: string;
+  /** Port to bind. 0 picks a free one, which is what tests want. */
+  port?: number;
+  /** The config file the daemon was pinned to, if any. */
+  configPath?: string;
+  /** The web UI, when @stratusagent/dashboard is installed. */
+  ui?: DashboardAssets;
+  log?: (line: string) => void;
+  warn?: (line: string) => void;
+}
+
+export interface ControlApi extends GatewayChannelAdapter {
+  /** Where it is listening, once started. */
+  readonly url: string | undefined;
+  /** The bearer token clients authenticate with, once started. */
+  readonly token: string | undefined;
+}
+
+/** Refuse an upgrade without pretending it was ever a WebSocket. */
+const refuseUpgrade = (socket: Duplex, status: number, reason: string): void => {
+  socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\n\r\n`);
+  socket.destroy();
+};
+
+/**
+ * The HTTP + WebSocket face of a running gateway.
+ *
+ * Shaped as a channel adapter because that is exactly what it is: something
+ * started after the roster loads and stopped before the store drains, which
+ * turns inbound requests into dispatches. `stratus serve` runs it through the
+ * same list it runs Slack through, so it needs no lifecycle of its own.
+ */
+export const createControlApi = (options: ControlApiOptions = {}): ControlApi => {
+  const env = options.env ?? {};
+  const log = options.log ?? (() => {});
+  const warn = options.warn ?? (() => {});
+  const host = options.host ?? DEFAULT_CONTROL_API_HOST;
+
+  let server: Server | undefined;
+  let wss: WebSocketServer | undefined;
+  let auth: Authenticator | undefined;
+  let stream: ReturnType<typeof createEventStream> | undefined;
+  let url: string | undefined;
+  let token: string | undefined;
+  let origins = new Set<string>();
+  let startedAt = Date.now();
+
+  const handleApiRequest = async (
+    gateway: Gateway,
+    request: IncomingMessage,
+    response: ServerResponse,
+    requestUrl: URL,
+  ): Promise<void> => {
+    const method = request.method ?? 'GET';
+    const resolved = resolveRoute(method, requestUrl.pathname);
+    if (!resolved) {
+      const allowed = allowedMethodsFor(requestUrl.pathname);
+      if (allowed.length > 0) {
+        response.setHeader('allow', allowed.join(', '));
+        throw new ApiError(405, 'method_not_allowed', `${method} is not supported here. Try: ${allowed.join(', ')}.`);
+      }
+      throw new ApiError(404, 'not_found', `No route for ${method} ${requestUrl.pathname}.`);
+    }
+
+    const principal = auth?.authenticate(request);
+    if (!resolved.route.selfAuthenticating) {
+      if (!principal) {
+        response.setHeader('www-authenticate', 'Bearer realm="stratus"');
+        throw new ApiError(
+          401,
+          'unauthorized',
+          'Send the token from ~/.stratus/gateway-token as an Authorization header, or open the dashboard with `stratus dashboard`.',
+        );
+      }
+      if (resolved.route.bearerOnly && principal.kind !== 'bearer') {
+        throw new ApiError(
+          403,
+          'bearer_required',
+          'This endpoint needs the gateway token itself. A browser session cannot mint another session.',
+        );
+      }
+      if (!originAllowed(principal, request.headers.origin, isStateChanging(method), origins)) {
+        throw new ApiError(
+          403,
+          'origin_not_allowed',
+          'A cookie-authenticated request must come from this gateway\'s own origin.',
+        );
+      }
+    }
+
+    const context: RouteContext = {
+      gateway,
+      env,
+      configPath: options.configPath,
+      principal,
+      params: resolved.params,
+      url: requestUrl,
+      request,
+      response,
+      startedAt,
+      mintOneTimeToken: () => {
+        if (!auth) {
+          throw new ApiError(503, 'not_ready', 'The control API is not serving yet.');
+        }
+        return auth.mintOneTimeToken();
+      },
+      redeemOneTimeToken: (ott) => auth?.redeemOneTimeToken(ott),
+      sessionCookie: (sessionId) => auth?.sessionCookie(sessionId) ?? '',
+      version: CONTROL_API_VERSION,
+    };
+
+    const payload = await resolved.route.handler(context);
+    if (payload === null) {
+      // The handler wrote its own response (a redirect).
+      return;
+    }
+    sendJson(response, response.statusCode, payload);
+  };
+
+  const handleRequest = async (
+    gateway: Gateway,
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> => {
+    const requestUrl = new URL(request.url ?? '/', url ?? `http://${host}`);
+
+    if (requestUrl.pathname.startsWith('/api/')) {
+      await handleApiRequest(gateway, request, response, requestUrl);
+      return;
+    }
+
+    // Everything outside /api is the dashboard's, and it is authenticated
+    // too: the shell carries no data, but serving it to an unauthenticated
+    // caller only invites confusion about what this port is.
+    if (!auth?.authenticate(request)) {
+      response.statusCode = 401;
+      response.setHeader('content-type', 'text/html; charset=utf-8');
+      response.setHeader('cache-control', 'no-store');
+      response.end(
+        '<!doctype html><meta charset="utf-8"><title>Stratus</title>'
+        + '<body style="font-family:system-ui;background:#05070f;color:#f3f7ff;padding:3rem">'
+        + '<h1>Not signed in</h1><p>Run <code>stratus dashboard</code> to open an authenticated session.</p>',
+      );
+      return;
+    }
+    if (options.ui && (await options.ui.serve(requestUrl.pathname, response))) {
+      return;
+    }
+    throw new ApiError(
+      404,
+      'no_dashboard',
+      'This gateway serves the control API only. Install @stratusagent/dashboard for the web UI.',
+    );
+  };
+
+  const handleUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
+    const requestUrl = new URL(request.url ?? '/', url ?? `http://${host}`);
+    if (requestUrl.pathname !== `${API_PREFIX}/events`) {
+      refuseUpgrade(socket, 404, 'Not Found');
+      return;
+    }
+    const principal = auth?.authenticate(request);
+    if (!principal) {
+      refuseUpgrade(socket, 401, 'Unauthorized');
+      return;
+    }
+    // Treated as state-changing so a cookie upgrade with no Origin is
+    // refused: WebSockets get no CORS protection at all, and every browser
+    // sends an Origin on the handshake — so the only callers a missing one
+    // can represent here are programmatic, and those use a bearer token.
+    if (!originAllowed(principal, request.headers.origin, true, origins)) {
+      refuseUpgrade(socket, 403, 'Forbidden');
+      return;
+    }
+
+    const filter: EventFilter = {
+      ...(requestUrl.searchParams.get('session') ? { sessionId: requestUrl.searchParams.get('session') as string } : {}),
+      ...(requestUrl.searchParams.get('agent') ? { agentId: requestUrl.searchParams.get('agent') as string } : {}),
+    };
+    wss?.handleUpgrade(request, socket, head, (socket_) => {
+      stream?.attach(socket_, filter);
+    });
+  };
+
+  const writeGatewayInfo = async (): Promise<void> => {
+    const infoPath = gatewayInfoPath(env);
+    await mkdir(path.dirname(infoPath), { recursive: true, mode: 0o700 });
+    await writeFile(
+      infoPath,
+      `${JSON.stringify({ url, host, port: server ? (server.address() as { port: number }).port : undefined, pid: process.pid, version: CONTROL_API_VERSION, startedAt: new Date(startedAt).toISOString() }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    // As with the token: writeFile's mode only applies on create, so an
+    // existing file from a looser umask would keep its permissions.
+    await chmod(infoPath, 0o600);
+  };
+
+  const removeGatewayInfo = async (): Promise<void> => {
+    const infoPath = gatewayInfoPath(env);
+    try {
+      // Only ours. A second daemon that took the file over owns it now, and
+      // deleting it would leave every client unable to find the live one.
+      const existing = JSON.parse(await readFile(infoPath, 'utf8')) as { pid?: number };
+      if (existing.pid !== process.pid) {
+        return;
+      }
+    } catch {
+      return;
+    }
+    await rm(infoPath, { force: true });
+  };
+
+  return {
+    name: 'control-api',
+
+    get url() {
+      return url;
+    },
+
+    get token() {
+      return token;
+    },
+
+    async start(gateway: Gateway) {
+      startedAt = Date.now();
+      token = await ensureGatewayToken(env);
+      auth = createAuthenticator({ token });
+      stream = createEventStream(gateway);
+      wss = new WebSocketServer({ noServer: true });
+
+      server = createServer((request, response) => {
+        void handleRequest(gateway, request, response).catch((error: unknown) => {
+          if (!response.headersSent) {
+            sendError(response, error);
+            return;
+          }
+          warn(`control API failed after responding: ${error instanceof Error ? error.message : String(error)}`);
+          response.end();
+        });
+      });
+      server.on('upgrade', handleUpgrade);
+
+      const listening = server;
+      await new Promise<void>((resolve, reject) => {
+        const onError = (error: Error): void => reject(error);
+        listening.once('error', onError);
+        listening.listen(options.port ?? DEFAULT_CONTROL_API_PORT, host, () => {
+          listening.off('error', onError);
+          resolve();
+        });
+      });
+
+      const address = listening.address();
+      if (!address || typeof address === 'string') {
+        throw new Error('The control API could not determine the address it bound.');
+      }
+      url = `http://${host}:${address.port}`;
+      origins = allowedOrigins(host, address.port);
+      await writeGatewayInfo();
+      log(`control API on ${url} — token in ~/.stratus/gateway-token`);
+    },
+
+    async stop() {
+      stream?.close();
+      stream = undefined;
+      // Sockets first: an open WebSocket keeps `server.close()` waiting
+      // forever, and a drain that never finishes is a daemon that will not
+      // shut down.
+      wss?.clients.forEach((socket) => socket.terminate());
+      wss?.close();
+      wss = undefined;
+      const closing = server;
+      server = undefined;
+      if (closing) {
+        await new Promise<void>((resolve) => {
+          closing.close(() => resolve());
+          closing.closeAllConnections?.();
+        });
+      }
+      await removeGatewayInfo().catch(() => undefined);
+      auth = undefined;
+      url = undefined;
+      token = undefined;
+    },
+  };
+};
