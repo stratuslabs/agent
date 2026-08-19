@@ -62,6 +62,16 @@ export const renderAgent = (agentId, initialSessionId) => {
     /** Tool status lines for the turn in flight. */
     toolLines: [],
     turnId: undefined,
+    /**
+     * Envelopes that arrived before the POST said which turn is ours.
+     *
+     * The dispatch starts before the response is read, so its first events
+     * can beat the turn id here. Dropping them would lose the opening tokens
+     * of every reply; accepting them blind would mix in another client's
+     * turn on the same conversation. So they wait, and are replayed once the
+     * id lands.
+     */
+    pending: [],
     sending: false,
     error: undefined,
     saved: undefined,
@@ -164,6 +174,9 @@ export const renderAgent = (agentId, initialSessionId) => {
   const openSession = (sessionId) => {
     state.sessionId = sessionId;
     state.unsent = false;
+    state.pending = [];
+    state.turnId = undefined;
+    state.sending = false;
     state.tab = 'chat';
     void loadTranscript();
   };
@@ -171,6 +184,9 @@ export const renderAgent = (agentId, initialSessionId) => {
   const startSession = () => {
     state.sessionId = newSessionId(agentId);
     state.unsent = true;
+    state.pending = [];
+    state.turnId = undefined;
+    state.sending = false;
     state.messages = [];
     state.streaming = '';
     state.toolLines = [];
@@ -203,6 +219,11 @@ export const renderAgent = (agentId, initialSessionId) => {
       // its turns in sequence, and without the id there is no telling our
       // reply from the next one.
       state.turnId = turnId;
+      const queued = state.pending;
+      state.pending = [];
+      for (const envelope of queued) {
+        applyEnvelope(envelope);
+      }
     } catch (error) {
       state.error = error.message;
       state.sending = false;
@@ -212,11 +233,29 @@ export const renderAgent = (agentId, initialSessionId) => {
 
   // ---- live --------------------------------------------------------------
 
-  const detach = onEnvelope((envelope) => {
-    if (envelope.sessionId !== state.sessionId) {
+  /**
+   * Whether this envelope belongs to the turn this page started.
+   *
+   * A conversation is shared: another browser, a Slack thread, or the CLI can
+   * be mid-turn on the same session. Without this check their completion
+   * clears our composer and reloads the transcript while our message is still
+   * queued, and their tokens land in the reply we are rendering.
+   */
+  const isOurTurn = (envelope) => envelope.turnId !== undefined && envelope.turnId === state.turnId;
+
+  const applyEnvelope = (envelope) => {
+    const event = envelope.event;
+
+    // Anything that changes the stored conversation is worth re-reading even
+    // when somebody else caused it — it is the same conversation. Only the
+    // in-flight rendering below is ours alone.
+    if (!isOurTurn(envelope)) {
+      if (event.type === 'session.completed' || event.type === 'session.failed') {
+        void loadTranscript();
+        void loadSessions();
+      }
       return;
     }
-    const event = envelope.event;
 
     switch (event.type) {
       case 'provider.delta':
@@ -265,6 +304,18 @@ export const renderAgent = (agentId, initialSessionId) => {
       default:
         break;
     }
+  };
+
+  const detach = onEnvelope((envelope) => {
+    if (envelope.sessionId !== state.sessionId) {
+      return;
+    }
+    if (state.sending && state.turnId === undefined) {
+      // Our own dispatch is in flight and has not told us its id yet.
+      state.pending.push(envelope);
+      return;
+    }
+    applyEnvelope(envelope);
   });
 
   // ---- tabs --------------------------------------------------------------
@@ -292,15 +343,18 @@ export const renderAgent = (agentId, initialSessionId) => {
         )));
   };
 
-  const settingsTab = () => {
-    const current = agent();
-    if (!current) {
-      return el('p', { class: 'empty' }, 'This agent is no longer on the roster.');
-    }
-    if (current.builtIn) {
-      return el('p', { class: 'empty' }, 'The built-in agent has no soul file to edit. Create your own agent to customise one.');
-    }
+  /**
+   * The settings form, built once and kept.
+   *
+   * `update()` runs on every event from every agent, and rebuilding these
+   * inputs from the last server values would erase whatever someone had
+   * typed the moment anything anywhere emitted an event. Text people are
+   * editing is state, not a projection — so the nodes outlive the render
+   * that created them, exactly as the composer does.
+   */
+  let settingsForm;
 
+  const buildSettingsForm = (current) => {
     const name = el('input', { value: current.name });
     const instructions = el('textarea', { rows: 8, value: current.persona ?? '' });
     const provider = el('input', { value: current.provider ?? '', placeholder: 'follows your setup' });
@@ -322,10 +376,13 @@ export const renderAgent = (agentId, initialSessionId) => {
       } catch (error) {
         state.error = error.message;
       }
-      update();
+      settingsForm?.refreshNotice();
     };
 
-    return el('div', {},
+    // The one part that does change per render: whether the last save
+    // succeeded. Kept as its own node so the fields above are never touched.
+    const notice = el('div', {});
+    const node = el('div', {},
       el('div', { class: 'form-grid' },
         el('div', {}, el('label', {}, 'Name'), name),
         el('div', {}, el('label', {}, 'Agent id'), el('input', { value: current.id, disabled: true })),
@@ -336,10 +393,32 @@ export const renderAgent = (agentId, initialSessionId) => {
       el('label', {}, 'Persona'),
       instructions,
       el('p', { class: 'field-note' }, current.soulPath ? `Soul file: ${current.soulPath}` : ''),
-      state.saved ? el('div', { class: 'notice ok' }, state.saved) : null,
-      state.error ? el('div', { class: 'notice bad' }, state.error) : null,
+      notice,
       el('div', { class: 'actions' }, el('button', { class: 'primary', onClick: () => void save() }, 'Save')),
     );
+
+    return {
+      node,
+      refreshNotice() {
+        notice.replaceChildren(
+          ...(state.saved ? [el('div', { class: 'notice ok' }, state.saved)] : []),
+          ...(state.error ? [el('div', { class: 'notice bad' }, state.error)] : []),
+        );
+      },
+    };
+  };
+
+  const settingsTab = () => {
+    const current = agent();
+    if (!current) {
+      return el('p', { class: 'empty' }, 'This agent is no longer on the roster.');
+    }
+    if (current.builtIn) {
+      return el('p', { class: 'empty' }, 'The built-in agent has no soul file to edit. Create your own agent to customise one.');
+    }
+    settingsForm ??= buildSettingsForm(current);
+    settingsForm.refreshNotice();
+    return settingsForm.node;
   };
 
   // ---- shell -------------------------------------------------------------

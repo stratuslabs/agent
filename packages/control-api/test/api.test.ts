@@ -714,3 +714,35 @@ test('concurrent credential writes do not erase each other', async () => {
     await harness.stop();
   }
 });
+
+test('the roster lists only agents the daemon can actually be asked about', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
+  try {
+    // Written behind the daemon's back, with no reload. Listing from the
+    // filesystem would advertise Rex while this same API refuses to dispatch
+    // to him, because the gateway has never registered the id.
+    await writeSoul(home, 'rex.md', '---\nname: Rex\nid: rex\n---\n\nYou research things.\n');
+
+    const before = await json<{ agents: Array<{ id: string }> }>(await harness.call('/api/v1/agents'));
+    assert.ok(before.agents.some((agent) => agent.id === 'ava'));
+    assert.ok(!before.agents.some((agent) => agent.id === 'rex'), 'an unregistered soul is not advertised');
+
+    // And the two answers agree: anything listed can be talked to.
+    for (const agent of before.agents) {
+      const accepted = await harness.call(`/api/v1/sessions/probe-${agent.id}/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: 'hello', agentId: agent.id }),
+      });
+      assert.equal(accepted.status, 202, `${agent.id} was listed but not dispatchable`);
+    }
+
+    await harness.call('/api/v1/roster/reload', { method: 'POST' });
+    const after = await json<{ agents: Array<{ id: string; name: string }> }>(await harness.call('/api/v1/agents'));
+    assert.ok(after.agents.some((agent) => agent.id === 'rex'), 'a reload brings it in');
+  } finally {
+    await harness.stop();
+  }
+});

@@ -327,18 +327,40 @@ export const routes: Route[] = [
     method: 'GET',
     pattern: `${API_PREFIX}/agents`,
     async handler(context) {
+      // The roster the daemon is *serving*, enriched with what the files
+      // say — not the other way round.
+      //
+      // `listAgentSummaries` reads the agents directory, so a soul dropped on
+      // disk since the last reload appears in it immediately. Listing from
+      // there would advertise an agent that this same API then refuses to
+      // dispatch to, because the gateway has never registered the id; a
+      // duplicate or unparseable file produces the same mismatch. Anything
+      // this endpoint lists can be talked to.
       const summaries = await listAgentSummaries(context.env);
-      // Merged here rather than inside `listAgentSummaries`, which answers
-      // from files alone: activity is a property of a running daemon's
-      // session store, and the shared builder has no store to ask. The CLI's
-      // local listing is about identity and configuration; this one is about
-      // a daemon that is actually serving.
+      const byId = new Map(summaries.map((summary) => [summary.id, summary]));
+      // Activity comes from the running daemon's session store, which the
+      // shared builder has no access to: the CLI's listing is about identity
+      // and configuration, this one is about a daemon that is serving.
       const activity = context.gateway.store.lastActivityByAgent();
+
       return {
-        agents: summaries.map((summary) => {
-          const seen = activity[summary.id];
+        agents: context.gateway.agents().map((agent) => {
+          const summary = byId.get(agent.id);
+          const seen = activity[agent.id];
           return {
-            ...summary,
+            // A registered agent whose file has since moved or broken still
+            // lists, from the definition the daemon is actually running.
+            id: agent.id,
+            name: agent.name,
+            default: summary?.default ?? false,
+            builtIn: summary?.builtIn ?? agent.id === DEFAULT_STRATUS_AGENT.id,
+            runsOn: summary?.runsOn ?? { provider: 'demo' },
+            memories: summary?.memories ?? 0,
+            ...(summary?.soulPath ? { soulPath: summary.soulPath } : {}),
+            ...(summary?.provider ? { provider: summary.provider } : {}),
+            ...(summary?.model ? { model: summary.model } : {}),
+            ...(summary?.persona ? { persona: summary.persona } : {}),
+            ...(agent.avatar ? { avatar: agent.avatar } : summary?.avatar ? { avatar: summary.avatar } : {}),
             // A timestamp and a count, never a verdict. What counts as
             // "recently active" is a rendering decision, and a daemon that
             // baked a window in would need upgrading to change it.
