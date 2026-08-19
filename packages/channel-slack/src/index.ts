@@ -51,7 +51,13 @@ export interface SlackSocketEventArgs {
     user?: { id?: string };
     actions?: SlackBlockAction[];
     channel?: { id?: string };
-    message?: { ts?: string; thread_ts?: string };
+    /**
+     * block_actions only: the message the click came from, as Slack holds
+     * it at the moment it processes the interaction — so `blocks` is the
+     * message's real current state, not what the clicking client had
+     * rendered.
+     */
+    message?: { ts?: string; thread_ts?: string; blocks?: SlackBlock[] };
   };
   event?: SlackInboundEvent;
   retry_num?: number;
@@ -584,14 +590,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // outstanding.
   const rendering = new Set<string>();
   const resolvedWhileRendering = new Map<string, Extract<StratusEvent, { type: 'tool.approval-resolved' }>>();
-  // Requests this process answered, and whose message therefore already
-  // shows the outcome. A click can still arrive for one of them from a
-  // client rendering the message as it was before the retraction, and
-  // rewriting it then would replace a real decision with "no longer
-  // pending". Bounded like the event dedupe, and for the same reason: it
-  // must not grow for the life of a long-running daemon.
-  const settledHere = new Set<string>();
-  const settledOrder: string[] = [];
   let unsubscribe: (() => void) | undefined;
   let gatewayRef: GatewayLike | undefined;
 
@@ -795,28 +793,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * — so a message can never keep offering a decision that no longer has
    * anywhere to land.
    */
-  const forgetSettled = (requestId: string): void => {
-    settledHere.delete(requestId);
-    const at = settledOrder.indexOf(requestId);
-    if (at >= 0) {
-      settledOrder.splice(at, 1);
-    }
-  };
-
-  const rememberSettled = (requestId: string): void => {
-    if (settledHere.has(requestId)) {
-      return;
-    }
-    settledHere.add(requestId);
-    settledOrder.push(requestId);
-    if (settledOrder.length > DEDUPE_CAPACITY) {
-      const evicted = settledOrder.shift();
-      if (evicted) {
-        settledHere.delete(evicted);
-      }
-    }
-  };
-
   /**
    * Rewrites a prompt left behind by a daemon that is gone, using the
    * click's own coordinates.
@@ -830,6 +806,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * clearing those needs the posts to be durable, which is a larger change
    * than this and belongs to both billing paths equally.
    */
+  const offersDecision = (blocks: SlackBlock[] | undefined): boolean =>
+    (blocks ?? []).some((block) => block.type === 'actions');
+
   const retireOrphanedPrompt = async (
     connection: AgentConnection,
     args: SlackSocketEventArgs,
@@ -837,6 +816,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const channel = args.body?.channel?.id;
     const ts = args.body?.message?.ts;
     if (!channel || !ts) {
+      return;
+    }
+    // The message decides, not a memory of it. Every ending rewrites this
+    // message into a plain section, so buttons still on it mean nothing
+    // has been written there yet — and no buttons means something has, and
+    // overwriting it would replace a real outcome and the person who made
+    // it. Reading the click's own copy answers that with no bookkeeping to
+    // disagree with, and no second API call to ask.
+    if (!offersDecision(args.body?.message?.blocks)) {
       return;
     }
     const text = 'This request is no longer pending — the daemon that asked it is no longer running.';
@@ -865,7 +853,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return;
     }
     approvalPosts.delete(event.requestId);
-    rememberSettled(event.requestId);
 
     const outcome = OUTCOME_TEXT[`${event.reason}:${event.answer}`] ?? 'Resolved';
     const by = event.actor ? ` by <@${event.actor}>` : '';
@@ -878,13 +865,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
       });
     } catch (error) {
-      // The message still shows live buttons, so this request is not
-      // settled as far as anyone reading the thread can tell. Take the
-      // marker back off: it exists to stop a later click overwriting a
-      // real outcome, and there is no outcome on that message to protect.
-      // Leaving it set would make the stale prompt unrepairable until this
-      // process restarts.
-      forgetSettled(event.requestId);
       warn(`slack: could not update a resolved approval request: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
@@ -962,21 +942,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (!post) {
       await tellClicker(connection, args, 'That approval request is no longer pending.');
       // And the message itself is corrected, so the next person to read it
-      // is not offered a decision nothing is waiting for. Two requests are
-      // absent from the index without being orphans, and both keep their
-      // buttons:
-      //
-      // one this process settled has already been rewritten with its real
-      // outcome, so this click is a stale render of that message rather
-      // than a live question;
-      //
-      // and one still being posted is live, with the index simply not
-      // caught up yet — Slack can show a message before postMessage
-      // resolves here, so a fast click lands inside that window. Stripping
-      // its buttons would strand the turn until the approval times out,
-      // because the record written when the post lands does not put them
-      // back.
-      if (!settledHere.has(requestId) && !rendering.has(requestId)) {
+      // is not offered a decision nothing is waiting for — unless it is
+      // one still being posted, which is live with the index simply not
+      // caught up yet. Slack can show a message before postMessage
+      // resolves here, so a fast click lands inside that window, and
+      // stripping its buttons would strand the turn until the approval
+      // times out: the record written when the post lands does not put
+      // them back. Whether anything has already been written on the
+      // message is `retireOrphanedPrompt`'s own question, answered from
+      // the message rather than from a memory of it.
+      if (!rendering.has(requestId)) {
         await retireOrphanedPrompt(connection, args);
       }
       return;
