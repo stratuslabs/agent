@@ -51,6 +51,9 @@ Contract extensions owned by later steps:
 5. A callable tool-dispatch seam on `ProviderRequest`, so providers that host an inner loop execute tools through the kernel chain — and have them recorded in session history — instead of around it (step 04).
 6. Glob support in per-agent tool allowlists (step 06).
 7. A `usage` field on `ProviderResponse`, accumulated by the runner and emitted with `session.completed` (step 08).
+8. `Skill` and `SkillRegistry` contracts, shaped like `Tool` and `ToolRegistry`, with the body loaded lazily rather than held (step 09).
+9. `PluginContext` grows past `{ bus, tools }`. Two distinct reasons, and both are needed before the plugin contract means what [`plugins.md`](./plugins.md) says it means. **Registration handles** for providers, channels, memory stores, and executors: their interfaces exist, but `loadAll({ bus, tools })` gives `setup` no way to register one, so four of the seven advertised contribution kinds are today wired by the host rather than by the plugin. **A scoped `CredentialResolver` plus the plugin's own config block**, so an honest plugin declares what it needs by name instead of reaching into ambient environment — an interface that makes the manifest auditable, not an isolation boundary (in-process code can always read `process.env`; see decision 6). And **a manifest-bound registration view in place of the raw `ToolRegistry`**: `register` is a bare `Map.set` retaining no provenance, so a plugin handed it directly can register a tool it never declared and mark it `safe`, which makes the third-party risk floor unenforceable. The view rejects undeclared names, keeps the package for risk resolution, and applies the floor at registration (steps 06, 09).
+10. `AgentDefinition.skills?: string[]`, and `skills` added to the soul frontmatter list keys — the same allowlist shape `tools` already has (step 09).
 
 Anything beyond this list gets decided in this document first, not in an implementation PR. One cleanup rides along: persona + memory system-prompt rendering is currently duplicated in all three provider packages and becomes a single shared contract.
 
@@ -60,9 +63,12 @@ Everything optional is a package, installed only where needed:
 
 - **Providers** (exist): `provider-anthropic`, `provider-claude-code`, the OpenAI-compatible adapter in `providers`.
 - **Channels** (new): `@stratusagent/channels` defines the contract — inbound message → router → session mapping, outbound post/edit/typing, per-agent bot identity. `@stratusagent/channel-slack` is the first adapter; others (Discord, Telegram, email) follow the same shape.
-- **Tool packs** (new): `tool-fs`, `tool-shell`, `tool-browser`, folding in the existing `stratuslabs/tool-browser` and `tool-screenshot` work. A pack is a `Plugin` that registers tools; an agent opts in via its soul's tool allowlist.
+- **Tools** (new): `tool-fs`, `tool-shell`, `tool-browser`, `tool-web`, folding in the existing `stratuslabs/tool-browser` and `tool-screenshot` work. Each is a `Plugin` contributing a *toolset*; an agent opts in via its soul's tool allowlist.
+- **Skills** (new): markdown procedures — `SKILL.md` with frontmatter — enabled per agent and loaded into context only when the agent reaches for one. Tools are what an agent *can* do; skills are how it does them well.
 - **Permissions** (new): a policy engine behind the existing `ApprovalPolicy` seam — safe-command allowlist, per-agent persistent whitelist, shell control-operator detection, headless mode, remote approval.
 - **Memory** (later): stays markdown/JSONL-first. A SQLite store with budget-aware retrieval is a future optional package behind the same `AgentMemoryStore` interface, not a prerequisite for anything.
+
+All of these are **plugins** — one word for one distribution unit, whatever it contributes. [`plugins.md`](./plugins.md) specifies the contract: the contribution kinds and the seams they map to, naming, the `package.json` manifest, the `plugins` config block, the trust model for code that runs in-process with the daemon, and the rule for which packages live in this monorepo and which live in their own repositories. It is the document a third-party developer reads, and the vocabulary landed before the packages on purpose — naming is cheap now and expensive once things exist.
 
 ### L2 — The gateway
 
@@ -102,7 +108,7 @@ The runtime is one persistent Node process everywhere; only the recipe changes:
 3. **Surfaces are clients of one API.** Adding a surface must be cheap forever. The control API is the only doorway; the loop is never duplicated.
 4. **Persistent process, not serverless.** See L4.
 5. **Markdown-first memory.** Soul files and JSONL memory are the source of truth users can read and edit. Smarter stores come later behind the existing seam; they never replace the files as the interface.
-6. **Policy before isolation.** The permission engine (allowlists + approvals + metacharacter detection) is the near-term safety layer. Container/VM isolation becomes real work only when a deployment's threat model demands it.
+6. **Policy before isolation.** The permission engine (allowlists + approvals + metacharacter detection) is the near-term safety layer. Container/VM isolation becomes real work only when a deployment's threat model demands it. This is also what an *enabled plugin* is trusted under: plugin code runs in the daemon's process, so scoping its credentials is an interface rather than a boundary, and the controls carrying the weight are that nothing auto-loads and that enablement is readable only from a trusted config. Worker or process isolation with a scrubbed environment is what would make it a boundary, and it is not built.
 
 ## Standing invariants
 
@@ -119,7 +125,7 @@ Rules every step of the roadmap honors:
 
 - iOS app
 - Serverless agent runtime
-- Marketplace (agents/tools/skills distribution)
+- Marketplace infrastructure. The *vocabulary* is settled now (see [`plugins.md`](./plugins.md)) because renaming after packages exist is expensive; discovery and distribution are step 12, and nothing before it depends on them.
 - Layered SQL memory, vector search, and model-routing heuristics
 - Container isolation as a default
 

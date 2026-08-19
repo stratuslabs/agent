@@ -22,11 +22,27 @@ them individually:
 - `@stratusagent/executors`, helpers for execution behavior
 - `@stratusagent/executor-local`, a concrete local child-process executor adapter
 
-### Optional packages
+### Plugins
 
-Channels are **not** part of that install. A transport you don't use is weight
-you shouldn't carry, so each one is a separate package you add only if you want
-it. Install it next to the CLI and `stratus serve` picks it up on its own:
+Everything optional is a **plugin**: one package that contributes tools, skills,
+providers, channels, memory stores, executors, or hooks. A transport you don't
+use is weight you shouldn't carry, so each one is separate and you add only what
+you want.
+
+The rule for anything you add later is that **installing a plugin does not run
+it**: a plugin is code in the daemon's own process, so it runs only once it is
+named and enabled in a trusted config, never by being present on disk.
+
+Today's optional packages predate that rule and each keeps its own path, so be
+precise about which is which. A **channel** starts when *its credentials are
+stored* — a decision you already made when you connected the app. The
+**control API** starts whenever it is *installed*, and binds a port; installing
+it is how you say you want one open, and `--no-api` or `api.enabled: false` is
+how you say you don't. The **dashboard** follows the control API. None of those
+is the enablement gate above, and none of them is a precedent for a plugin that
+wants one.
+
+The packages that exist today:
 
 - `@stratusagent/channel-slack` — talk to your agents in Slack: one Slack app per agent (its own avatar, presence, and DMs), Socket Mode so no public ingress is needed, resumable threads, and replies that stream via message edits. Adds roughly 9 MB of Slack SDKs.
 
@@ -48,6 +64,11 @@ it. Install it next to the CLI and `stratus serve` picks it up on its own:
 Without a channel installed, everything else works exactly as before: the
 daemon logs an install hint for any agent that has channel credentials stored
 and serves the rest of the roster normally.
+
+Tool plugins (`fs`, `shell`, `browser`, `web`) and skills are next — see
+[`docs/architecture/plugins.md`](./docs/architecture/plugins.md) for the plugin
+contract, the trust model for third-party code, and what we build as core
+versus what the ecosystem builds.
 
 ## Current status
 
@@ -131,7 +152,7 @@ npm install -g @stratusagent/cli
 stratus setup
 ```
 
-That is the whole install for the runtime. If you want Slack, add the channel package too — see [Optional packages](#optional-packages):
+That is the whole install for the runtime. If you want Slack, add the channel package too — see [Plugins](#plugins):
 
 ```bash
 npm install -g @stratusagent/channel-slack
