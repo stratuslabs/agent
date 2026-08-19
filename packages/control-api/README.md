@@ -84,6 +84,15 @@ log, and an address bar is one that gets noticed when it changes.
 | PUT | `/credentials/:provider` | Store an `api_key` or `oauth_token` |
 | PUT | `/credentials/channels/:channel` | Store a channel's tokens (today: `slack`) |
 | GET/PUT | `/config` | Settings, whitelisted to keys this API owns |
+
+`PUT /config` **replaces** the file rather than merging into it — `GET` hands
+you the whole document and `PUT` takes the whole document back, so a partial
+body silently drops the keys it omits. It edits the config the operator chose:
+the file the daemon was pinned to with `--config`, or the global
+`~/.stratus/config.json`. Never an auto-discovered project-local
+`stratus.config.json` — that file ships in a repository, and writing settings
+into somebody's checkout because the daemon started there would surprise
+everyone.
 | WS | `/events` | The live event stream |
 
 `GET /catalog/tools` is deliberately absent until tool packs exist

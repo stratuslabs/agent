@@ -386,12 +386,14 @@ test('config round-trips, and an unknown key is refused rather than quietly kept
     assert.equal(unknown.status, 400);
     assert.equal((await json<{ error: { code: string } }>(unknown)).error.code, 'unknown_config_key');
 
+    // A value the caller typed is their error, not the server's.
     const badProvider = await harness.call('/api/v1/config', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ config: { provider: 'not-a-provider' } }),
     });
-    assert.equal(badProvider.status, 500);
+    assert.equal(badProvider.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(badProvider)).error.code, 'invalid_provider');
   } finally {
     await harness.stop();
   }

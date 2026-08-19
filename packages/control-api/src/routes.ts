@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { writeFile } from 'node:fs/promises';
 
 import { formatSoul, isValidAgentId, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import type { JsonObject } from '@stratusagent/core';
@@ -105,13 +106,34 @@ const CONFIG_KEYS = [
   'approvals',
 ] as const;
 
-/** Where the daemon's settings live: the file it was pinned to, or the global one. */
+/**
+ * Where the daemon's settings live, for this API's purposes: the file it was
+ * pinned to with `--config`, or the global `~/.stratus/config.json`.
+ *
+ * Deliberately NOT the full discovery chain. That chain prefers an
+ * auto-discovered project-local `stratus.config.json`, which is a file that
+ * ships in a repository — writing settings into somebody's checked-out repo
+ * because the daemon happened to start there would surprise everyone, and the
+ * `api` and `approvals` blocks in such a file are ignored anyway. So this
+ * endpoint edits a config the operator actually chose.
+ */
 const activeConfigPath = async (context: RouteContext): Promise<string> => {
-  const location = await resolveConfigLocation(
-    context.configPath ? { configPath: context.configPath } : {},
-    context.env,
-  );
+  if (!context.configPath) {
+    return globalConfigPath(context.env);
+  }
+  const location = await resolveConfigLocation({ configPath: context.configPath }, context.env);
   return location?.path ?? globalConfigPath(context.env);
+};
+
+/** Validate a provider name, reporting a bad one as the client's error. */
+const validateProvider = (value: string, field: string): void => {
+  try {
+    parseProviderName(value, field);
+  } catch (error) {
+    // The shared parser throws a plain Error, which would surface as a 500 —
+    // a value the caller typed is not a server fault.
+    throw new ApiError(400, 'invalid_provider', error instanceof Error ? error.message : String(error));
+  }
 };
 
 /**
@@ -261,7 +283,7 @@ export const routes: Route[] = [
       if (provider !== undefined) {
         // Validated through the shared parser, so the API cannot write a soul
         // the resolver would later refuse.
-        parseProviderName(provider, 'provider');
+        validateProvider(provider, 'provider');
       }
 
       const notes: string[] = [];
@@ -310,7 +332,7 @@ export const routes: Route[] = [
         const provider = optionalString(body, 'provider');
         const model = optionalString(body, 'model');
         if (provider !== undefined && provider.length > 0) {
-          parseProviderName(provider, 'provider');
+          validateProvider(provider, 'provider');
         }
         next = {
           agent: {
@@ -353,7 +375,6 @@ export const routes: Route[] = [
         throw new ApiError(500, 'soul_round_trip_failed', `Refusing to write a soul that will not parse back: ${error instanceof Error ? error.message : String(error)}`);
       }
 
-      const { writeFile } = await import('node:fs/promises');
       await writeFile(soulPath, rendered);
       await context.gateway.reloadRoster();
       return { agent: next.agent, soulPath };
@@ -644,10 +665,10 @@ export const routes: Route[] = [
         }
       }
       if (typeof next.provider === 'string') {
-        parseProviderName(next.provider, 'provider');
+        validateProvider(next.provider, 'provider');
       }
       if (typeof next.fallbackProvider === 'string') {
-        parseProviderName(next.fallbackProvider, 'fallbackProvider');
+        validateProvider(next.fallbackProvider, 'fallbackProvider');
       }
 
       const path = await activeConfigPath(context);
