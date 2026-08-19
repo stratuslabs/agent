@@ -74,6 +74,18 @@ export class BrowserSessionPool {
 
   private sweepTimer: NodeJS.Timeout | undefined;
 
+  /**
+   * Admission runs one at a time.
+   *
+   * The cap is checked and then a context is created, and creating one
+   * yields — so without this, every call in a burst sees room, and a pool
+   * capped at four opens as many browsers' worth of contexts as there were
+   * simultaneous first calls. A queue is enough: admission is short, and
+   * the alternative (reserving a slot and unwinding it on failure) is the
+   * same serialization with more ways to leak a reservation.
+   */
+  private admission: Promise<unknown> = Promise.resolve();
+
   private closed = false;
 
   constructor(options: SessionPoolOptions) {
@@ -123,6 +135,33 @@ export class BrowserSessionPool {
    */
   async pageFor(sessionId: string, now: number, policy: EgressPolicy = {}): Promise<PageLike> {
     const key = policyKeyFor(policy);
+    const existing = this.contexts.get(sessionId);
+    if (existing && existing.browserKey === key) {
+      // The common path, and the only one that does not queue: a
+      // conversation coming back to its own page competes with nobody.
+      existing.lastUsedAt = now;
+      return existing.page;
+    }
+
+    const admitted = this.admission.then(
+      () => this.admit(sessionId, now, policy, key),
+      () => this.admit(sessionId, now, policy, key),
+    );
+    // The queue advances whether or not this admission succeeded; a failed
+    // launch must not block every later call behind it.
+    this.admission = admitted.catch(() => undefined);
+    return admitted;
+  }
+
+  private async admit(
+    sessionId: string,
+    now: number,
+    policy: EgressPolicy,
+    key: string,
+  ): Promise<PageLike> {
+    // Re-read inside the queue: another admission may have created this
+    // session's context, or changed what is in the pool, while this one
+    // waited its turn.
     const existing = this.contexts.get(sessionId);
     if (existing) {
       if (existing.browserKey === key) {

@@ -1,3 +1,4 @@
+import { mkdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { JsonObject, JsonValue, Plugin, Session } from '@stratusagent/core';
@@ -54,9 +55,8 @@ const truncate = (value: string, maxBytes: number): { text: string; truncated: b
 const settingsFor = (config: JsonObject, session: Session, env: NodeJS.ProcessEnv) => {
   const resolved = resolvePluginAgentConfig(config, session.agent.id);
   const workspaceRoot = typeof resolved.workspaceRoot === 'string' ? resolved.workspaceRoot : undefined;
-  const cwd = typeof resolved.cwd === 'string' && resolved.cwd.length > 0
-    ? resolved.cwd
-    : (workspaceRoot ? path.join(workspaceRoot, session.agent.id) : undefined);
+  const configuredCwd = typeof resolved.cwd === 'string' && resolved.cwd.length > 0 ? resolved.cwd : undefined;
+  const cwd = configuredCwd ?? (workspaceRoot ? path.join(workspaceRoot, session.agent.id) : undefined);
 
   const granted: NodeJS.ProcessEnv = {};
   for (const name of asStrings(resolved.passEnv, DEFAULT_PASS_ENV)) {
@@ -76,6 +76,10 @@ const settingsFor = (config: JsonObject, session: Session, env: NodeJS.ProcessEn
 
   return {
     ...(cwd ? { cwd } : {}),
+    // Whether this agent's directory is ours to create. The workspace is —
+    // it is a path this repository chose, and nobody has been asked to make
+    // it. A directory an operator named is not.
+    ownsCwd: configuredCwd === undefined && cwd !== undefined,
     env: granted,
     timeoutMs: asNumber(resolved.timeoutMs, DEFAULT_TIMEOUT_MS),
     maxOutputBytes: asNumber(resolved.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES),
@@ -105,12 +109,30 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
       },
       required: ['command'],
     },
-    createCommand(input, session): LocalCommandInvocation {
+    async createCommand(input, session): Promise<LocalCommandInvocation> {
       const command = typeof input.command === 'string' ? input.command.trim() : '';
       if (!command) {
         throw new Error('command is required.');
       }
       const settings = settingsFor(config, session, options.processEnv ?? process.env);
+      if (settings.cwd) {
+        // `spawn` fails with a bare `ENOENT` naming the *shell* when its
+        // working directory does not exist — which on a fresh install is
+        // every call, and reads as a broken interpreter rather than a
+        // missing directory. So the agent's workspace is created here, and
+        // a directory somebody else chose is reported by name instead.
+        if (settings.ownsCwd) {
+          await mkdir(settings.cwd, { recursive: true });
+        } else {
+          const usable = await stat(settings.cwd).then((info) => info.isDirectory(), () => false);
+          if (!usable) {
+            throw new Error(
+              `The configured working directory does not exist: ${settings.cwd}. `
+              + 'Create it, or change cwd for @stratusagent/tool-shell.',
+            );
+          }
+        }
+      }
       return {
         command: settings.shell,
         args: ['-c', command],

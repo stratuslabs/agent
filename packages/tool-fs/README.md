@@ -49,7 +49,7 @@ tools: [fs.read, fs.search]     # or fs.* for the whole toolset
 | --- | --- | --- |
 | `fs.read` | `safe` | Runs unattended. Nothing outside the agent's roots is readable, which is what makes reading safe rather than merely convenient. |
 | `fs.list` | `safe` | Runs unattended. Symlinks are listed as symlinks and never followed. |
-| `fs.search` | `safe` | Runs unattended. Walks the root without following symlinks; skips `.git` and `node_modules`, and files over 1 MB. |
+| `fs.search` | `safe` | Runs unattended. Given a directory it walks it without following symlinks, skipping `.git`, `node_modules`, and files over 1 MB; given a file it searches that file and no others. |
 | `fs.write` | `gated` | `interactive` asks at the terminal, `remote` asks in Slack, `headless` refuses. Writing where other people read is the thing worth a person's attention. |
 
 ## Settings

@@ -258,3 +258,24 @@ test('a fifo inside a root is refused rather than opened', async () => {
   assert.notEqual(outcome, 'blocked', 'fs.read blocked on a fifo instead of refusing it');
   assert.match(outcome, /is not a regular file/);
 });
+
+test('searching one file searches that file, not its neighbours', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-scope-'));
+  await mkdir(path.join(root, 'notes'), { recursive: true });
+  await writeFile(path.join(root, 'notes', 'today.md'), 'kettle in the cupboard\n');
+  await writeFile(path.join(root, 'notes', 'private.md'), 'kettle, and a password\n');
+
+  const tools = await registryFor({ roots: [root] });
+  const session = sessionFor('ava');
+
+  const scoped = await run(tools, 'fs.search', { query: 'kettle', path: 'notes/today.md' }, session) as JsonObject;
+  assert.deepEqual(
+    (scoped.matches as Array<{ path: string }>).map((match) => match.path),
+    [path.join('notes', 'today.md')],
+  );
+
+  // The directory form still walks, so scoping a file is a narrowing rather
+  // than a lost capability.
+  const wide = await run(tools, 'fs.search', { query: 'kettle', path: 'notes' }, session) as JsonObject;
+  assert.equal((wide.matches as unknown[]).length, 2);
+});

@@ -279,9 +279,16 @@ const createSearchTool = (config: JsonObject): Tool => ({
 
     const matches: SearchMatch[] = [];
     let truncated = false;
-    const start = (await isRealDirectory(resolved.path)) ? resolved.path : path.dirname(resolved.path);
+    // A file is searched as itself. Falling back to its parent would answer
+    // a question nobody asked — `{ path: 'notes/today.md' }` coming back
+    // with hits from every other note is a wrong answer, not a generous one.
+    const files = (await isRealDirectory(resolved.path))
+      ? walkFiles(resolved.path)
+      : (async function* single() {
+          yield resolved.path;
+        })();
 
-    for await (const file of walkFiles(start)) {
+    for await (const file of files) {
       if (matches.length >= limit) {
         truncated = true;
         break;

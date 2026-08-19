@@ -188,6 +188,12 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
     if (block.enabled === false) {
       continue;
     }
+    // Held outside the try so a plugin that was *constructed* and then
+    // failed can still be told to let go. A plugin acquires its resources
+    // in `createPlugin` and `setup` — a subscription on the bus, a socket,
+    // a child process — and a load that fails after that point leaves them
+    // held for the life of a daemon that goes on running without it.
+    let instance: Plugin | undefined;
     try {
       const resolved = options.host.resolve(specifier);
       const manifest = parsePluginManifest(await packageJsonFor(resolved, specifier), specifier);
@@ -207,6 +213,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
           `Plugin ${manifest.packageName}: createPlugin did not return a plugin with a setup(context).`,
         );
       }
+      instance = plugin;
 
       const view = new ManifestBoundToolRegistry({ manifest, target: options.tools, trusted: isTrusted });
       await plugin.setup({ bus: options.bus, tools: view });
@@ -221,6 +228,14 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
         instance: plugin,
       });
     } catch (error) {
+      // Refused, and then released. A plugin whose `dispose` also throws is
+      // ignored: it is already being reported as failed, and the second
+      // failure would replace the reason that says why.
+      try {
+        await instance?.dispose?.();
+      } catch {
+        // Nothing more to do for a plugin that cannot even let go.
+      }
       failures.push({
         package: specifier,
         reason: error instanceof Error ? error.message : String(error),

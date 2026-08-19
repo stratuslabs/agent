@@ -355,3 +355,24 @@ test('the idle sweep runs on its own timer, not only when a caller asks for it',
   assert.equal(recorder.closedContexts, 1, 'the idle context was closed by the timer');
   assert.equal(recorder.closedBrowsers, 1, 'and the browser went with its last conversation');
 });
+
+test('the context cap holds when a burst of conversations starts at once', async (t) => {
+  const recorder = emptyRecorder();
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'], maxContexts: 2 }, recorder);
+  t.after(() => plugin.dispose());
+
+  // Creating a context yields — a real driver talks to a browser — which is
+  // what makes an unserialized check-then-create wrong: every call in the
+  // burst sees room before any of them has taken it.
+
+  await Promise.all(
+    ['one', 'two', 'three', 'four', 'five'].map((name) =>
+      tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor(name))),
+  );
+
+  // Five conversations, a cap of two: three contexts were evicted as they
+  // went, and at no point were more than two open.
+  assert.equal(recorder.contexts, 5);
+  assert.equal(recorder.closedContexts, 3);
+  assert.equal(recorder.contexts - recorder.closedContexts, 2);
+});

@@ -183,3 +183,27 @@ test('every tool this plugin registers is one its manifest declares', async () =
     manifest.stratus.contributes.tools.map((entry) => [entry.name, entry.risk]),
   );
 });
+
+test('the agent’s workspace is created before the first command runs', async () => {
+  const workspaceRoot = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-shell-ws-')), 'workspaces');
+  // Nothing has created this yet — which on a fresh install is the state of
+  // every agent's workspace, and `spawn` reports a missing cwd as `ENOENT`
+  // naming the *shell*, so it reads as a broken interpreter.
+  const tools = await registryFor({ workspaceRoot });
+
+  const result = await runCommand(tools, 'pwd');
+  assert.equal(String(result.stdout).trim(), path.join(workspaceRoot, 'ava'));
+
+  // One directory per agent, so a second agent's first command does not run
+  // in the first agent's.
+  const juno = await runCommand(tools, 'pwd', 'juno');
+  assert.equal(String(juno.stdout).trim(), path.join(workspaceRoot, 'juno'));
+});
+
+test('a working directory the operator named is reported by name when it is missing', async () => {
+  const tools = await registryFor({ cwd: '/tmp/stratus-shell-does-not-exist' });
+  await assert.rejects(
+    () => runCommand(tools, 'pwd'),
+    /configured working directory does not exist/,
+  );
+});

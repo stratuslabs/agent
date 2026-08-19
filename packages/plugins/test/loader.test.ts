@@ -320,3 +320,58 @@ test('loadOptionalModule tells "not installed" from "installed and broken"', asy
   // operator installed is the failure this split buys off.
   await assert.rejects(() => loadOptionalModule('broken', host), /left-pad/);
 });
+
+test('a plugin that fails after it was constructed is still told to let go', async () => {
+  const released: string[] = [];
+  const host = await fakeHost({
+    'stratus-plugin-throws-in-setup': {
+      manifest: { stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'notes.read' }] } } },
+      module: {
+        createPlugin: (): Plugin => ({
+          name: 'throws-in-setup',
+          setup() {
+            // Whatever it acquired in createPlugin or before this line is
+            // held right now: a bus subscription, a socket, a child process.
+            throw new Error('could not reach the notes service');
+          },
+          dispose() {
+            released.push('throws-in-setup');
+          },
+        }),
+      },
+    },
+    'stratus-plugin-collides': {
+      manifest: { stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'demo.echo' }] } } },
+      module: {
+        createPlugin: (): Plugin => ({
+          name: 'collides',
+          setup(context) {
+            context.tools.register(tool('demo.echo'));
+          },
+          dispose() {
+            released.push('collides');
+          },
+        }),
+      },
+    },
+  });
+
+  const tools = new ToolRegistry();
+  tools.register(tool('demo.echo', 'safe'));
+  const result = await loadPlugins({
+    config: { 'stratus-plugin-throws-in-setup': {}, 'stratus-plugin-collides': {} },
+    host,
+    tools,
+    bus: new EventBus(),
+  });
+
+  assert.equal(result.loaded.length, 0);
+  assert.equal(result.failures.length, 2);
+  // Both failed *after* construction — one inside setup, one at the commit
+  // that refused its collision — so both were disposed rather than left
+  // holding whatever they had opened for the life of the daemon.
+  assert.deepEqual(released.sort(), ['collides', 'throws-in-setup']);
+  // And the reason is still the load failure, not something dispose said.
+  assert.match(result.failures[0]?.reason ?? '', /could not reach the notes service/);
+  assert.match(result.failures[1]?.reason ?? '', /already registered by the kernel/);
+});
