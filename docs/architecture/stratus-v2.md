@@ -52,7 +52,7 @@ Contract extensions owned by later steps:
 6. Glob support in per-agent tool allowlists (step 06).
 7. A `usage` field on `ProviderResponse`, accumulated by the runner and emitted with `session.completed` (step 08).
 8. `Skill` and `SkillRegistry` contracts, shaped like `Tool` and `ToolRegistry`, with the body loaded lazily rather than held (step 09).
-9. `PluginContext` grows past `{ bus, tools }` to carry the skill registry, a scoped `CredentialResolver`, and the plugin's own config block — a plugin that reaches `process.env` for its key has the daemon's whole environment, which the trust model in [`plugins.md`](./plugins.md) rules out (steps 06, 09).
+9. `PluginContext` grows past `{ bus, tools }`. Two distinct reasons, and both are needed before the plugin contract means what [`plugins.md`](./plugins.md) says it means. **Registration handles** for providers, channels, memory stores, and executors: their interfaces exist, but `loadAll({ bus, tools })` gives `setup` no way to register one, so four of the seven advertised contribution kinds are today wired by the host rather than by the plugin. And **a scoped `CredentialResolver` plus the plugin's own config block**, so an honest plugin declares what it needs by name instead of reaching into ambient environment — an interface that makes the manifest auditable, not an isolation boundary (in-process code can always read `process.env`; see decision 6) (steps 06, 09).
 10. `AgentDefinition.skills?: string[]`, and `skills` added to the soul frontmatter list keys — the same allowlist shape `tools` already has (step 09).
 
 Anything beyond this list gets decided in this document first, not in an implementation PR. One cleanup rides along: persona + memory system-prompt rendering is currently duplicated in all three provider packages and becomes a single shared contract.
@@ -108,7 +108,7 @@ The runtime is one persistent Node process everywhere; only the recipe changes:
 3. **Surfaces are clients of one API.** Adding a surface must be cheap forever. The control API is the only doorway; the loop is never duplicated.
 4. **Persistent process, not serverless.** See L4.
 5. **Markdown-first memory.** Soul files and JSONL memory are the source of truth users can read and edit. Smarter stores come later behind the existing seam; they never replace the files as the interface.
-6. **Policy before isolation.** The permission engine (allowlists + approvals + metacharacter detection) is the near-term safety layer. Container/VM isolation becomes real work only when a deployment's threat model demands it.
+6. **Policy before isolation.** The permission engine (allowlists + approvals + metacharacter detection) is the near-term safety layer. Container/VM isolation becomes real work only when a deployment's threat model demands it. This is also what an *enabled plugin* is trusted under: plugin code runs in the daemon's process, so scoping its credentials is an interface rather than a boundary, and the controls carrying the weight are that nothing auto-loads and that enablement is readable only from a trusted config. Worker or process isolation with a scrubbed environment is what would make it a boundary, and it is not built.
 
 ## Standing invariants
 

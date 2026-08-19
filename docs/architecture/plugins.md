@@ -28,18 +28,18 @@ the `fs` *toolset*.
 
 ## What a plugin contributes
 
-Every contribution kind is an existing kernel seam. A plugin is a package that
-registers against them — it is not a new extension surface:
+Every contribution kind has an interface already. What differs is whether a
+plugin can *register* one through the entrypoint, and today most cannot:
 
-| Contributes | Seam | Where |
+| Contributes | Interface | Registers through `setup()` |
 | --- | --- | --- |
-| tools | `Tool` → `ToolRegistry` | `@stratusagent/core` |
-| providers | `ModelProvider` | `@stratusagent/core` |
-| channels | `ChannelAdapter` | `@stratusagent/channels` |
-| memory | `AgentMemoryStore` | `@stratusagent/core` |
-| executors | `Executor` | `@stratusagent/executors` |
-| hooks | `EventBus.subscribe`, via `PluginContext.bus` | `@stratusagent/core` |
-| skills | `SkillRegistry` | **new in [09](../roadmap/09-skills.md)** |
+| tools | `Tool` → `ToolRegistry` | **yes**, `context.tools` |
+| hooks | `EventBus.subscribe` | **yes**, `context.bus` |
+| skills | `SkillRegistry` | not yet — [09](../roadmap/09-skills.md) |
+| providers | `ModelProvider` | **not yet** |
+| channels | `ChannelAdapter` | **not yet** |
+| memory | `AgentMemoryStore` | **not yet** |
+| executors | `Executor` | **not yet** |
 
 The entrypoint is the `Plugin` interface the kernel has had since v1:
 
@@ -50,11 +50,28 @@ export interface Plugin {
 }
 ```
 
-`PluginContext` is `{ bus, tools }` today and grows in 06/09 to carry the
-skill registry, a scoped credential resolver, and the plugin's own config
-block. A plugin depends on `core` (and on `channels` or `executors` where
-relevant) — **never on the gateway** — so it behaves identically in a CLI
-one-shot, in the daemon, and in whatever embeds the runtime next.
+`PluginContext` is `{ bus, tools }` — that is the whole of it, and
+`AgentRunner.initialize` calls `plugins.loadAll({ bus, tools })` with nothing
+else. **So four of the seven kinds have an interface but no registration path.**
+An implementation of `ChannelAdapter` exists (`@stratusagent/channel-slack`),
+and the way it reaches the runtime is that the CLI constructs it and hands it to
+`createGateway({ channels: [...] })` — the host wires it, not the plugin. The
+same is true of providers (`createRuntimeProvider`) and memory stores (passed to
+the runner).
+
+That gap is deliberate to state and not deliberate to keep. Naming the kinds
+before the seams exist is the point of this document — a third-party developer
+should be able to see what is contractual today and what is coming — but a
+table that read "exists" for all seven would be a promise the entrypoint cannot
+keep. The registration handles for providers, channels, memory, and executors
+are enumerated as kernel-budget item 9 in
+[`stratus-v2.md`](./stratus-v2.md) and land with the plugin loader; until they
+do, **a plugin contributing one of those four kinds is configuration the host
+reads, not code the plugin registers.**
+
+A plugin depends on `core` (and on `channels` or `executors` where relevant) —
+**never on the gateway** — so it behaves identically in a CLI one-shot, in the
+daemon, and in whatever embeds the runtime next.
 
 ## Naming
 
@@ -134,17 +151,26 @@ Keyed by package because a plugin's identity *is* its package, and because a
 plugin may contribute more than tools — a block keyed by toolset has nowhere to
 put a plugin that adds a channel and a memory store.
 
-Loading uses the `import.meta.resolve` + dynamic-import pattern the CLI already
-uses for `channel-slack`, `control-api`, and `dashboard`. It is the one seam in
-this repo that tells "not installed" apart from "installed and broken", and per
-`CLAUDE.md` it does not get re-derived — a plugin loader calls it.
+Loading uses the `import.meta.resolve` + dynamic-import pattern of
+`loadSlackAdapter` in `packages/cli/src/index.ts`, which is today the repo's
+only instance of it. It resolves first and imports second on purpose: a package
+that is installed but missing one of *its* dependencies throws
+`ERR_MODULE_NOT_FOUND` too, so inspecting the import error cannot tell "not
+installed" from "installed and broken" — and silently disabling a channel whose
+stored tokens say it should be running is the failure that split buys off.
+
+A plugin loader needs exactly that distinction, so it calls the same pattern
+rather than a second copy of it. With more than one consumer, extracting a
+shared optional-package loader is the move — and that is the moment to do it,
+rather than letting a third caller re-derive the split.
 
 ## Trust model
 
-A plugin runs **in-process with the daemon**. It is not sandboxed, it shares the
-event loop, and without the rules below it would share the daemon's environment
-— which holds every credential on the machine. These are invariants, not
-defaults:
+A plugin runs **in-process with the daemon**: same Node process, same event
+loop, same environment. Nothing below changes that, so say the consequence
+first — **an enabled plugin is trusted code, and enablement is the security
+boundary.** The rules exist to make that boundary deliberate, auditable, and
+narrow. They are not a sandbox, and this document does not claim one:
 
 - **Nothing auto-loads.** A plugin runs only when it is listed and enabled, and
   that list is read only from a **trusted** config. This is the rule already
@@ -161,11 +187,28 @@ defaults:
   risk. This is the direction `DEFAULT_TOOL_RISK` and `resolveToolRisk` already
   fail in — a tool that forgot to think about risk is held back, not waved
   through.
-- **A plugin gets a scoped credential resolver and its own config block, never
-  `process.env`.** It declares the credentials it needs by name in the manifest,
-  and receives those. This extends the invariant that Slack channel tokens are
-  gateway infrastructure secrets: a plugin must not be able to read the tokens
-  of the transport carrying the agent, or another plugin's key.
+- **A plugin gets a scoped credential resolver and its own config block, so it
+  never needs `process.env`** — it declares what it needs by name in the
+  manifest and receives exactly that. Read what this does and does not buy.
+  It does not *prevent* a plugin from reading `process.env`: in-process code
+  can, and no interface we hand it changes that. What it buys is that an honest
+  plugin never has to, so its manifest is a true statement of what it uses and
+  an operator can audit against it — and that a plugin reaching for ambient env
+  is doing something its manifest did not declare, which is a reviewable act
+  rather than the normal way to get a key.
+
+  This is a weaker guarantee than the agent-scoped `CredentialResolver`, and
+  the asymmetry is worth understanding: an agent is a model, not code, so
+  scoping is a real boundary there — an agent genuinely cannot read a credential
+  it was not granted. A plugin is code, so scoping is an interface. The
+  invariant that Slack channel tokens are gateway infrastructure secrets holds
+  fully against agents and only conventionally against plugins.
+
+  A real boundary needs process or worker isolation with a scrubbed
+  environment. That is future work and consistent with this project's stated
+  order — "policy before isolation" in [`stratus-v2.md`](./stratus-v2.md) —
+  which is exactly why enablement is trusted-config-only and why nothing
+  auto-loads: those are the controls actually carrying the weight here.
 - **Installing a plugin grants no agent anything.** The soul's `tools:`
   allowlist still decides, per agent, which of the registered tools that agent
   may call. Two independent gates, and the second one is per-identity.
@@ -183,8 +226,9 @@ defaults:
 
 **In the monorepo.** The kernel and everything CI must gate: `core`, `agents`,
 `state`, `gateway`, `permissions`, `providers`, `channels`, `executors`,
-`executor-local`, `cli`, `control-api`, `dashboard`, `provider-anthropic`,
-`provider-claude-code`, `channel-slack` — plus the capability plugins that each
+`executor-local`, `cli`, `provider-anthropic`, `provider-claude-code`,
+`channel-slack` — joined by `control-api` and `dashboard` when
+[05](../roadmap/05-control-api.md) lands — plus the capability plugins that each
 carry a security invariant the kernel's promises rest on:
 
 | Plugin | The invariant it owns |
