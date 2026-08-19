@@ -622,6 +622,13 @@ export const createClaudeCodeProvider = ({
           throw error;
         }
         onResumeFailed?.(error);
+        // The abandoned attempt may already have streamed fragments, and
+        // the replay is a different answer to the same question — without
+        // a reset an aggregator concatenates the two into one garbled
+        // reply. This is precisely what reset is for: a partial attempt
+        // the provider gave up on.
+        await request.onDelta?.({ type: 'reset' });
+        toolNamesByIndex.clear();
         await attempt(undefined);
       }
     } catch (error) {

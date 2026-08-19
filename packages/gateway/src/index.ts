@@ -662,7 +662,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     suspendWatchdog.get(sessionId)?.();
   };
   const settleToolPhase = (sessionId: string, callId: string): void => {
-    openToolCalls.get(sessionId)?.delete(callId);
+    const open = openToolCalls.get(sessionId);
+    if (!open) {
+      return;
+    }
+    open.delete(callId);
+    // Dropped as soon as it empties, not only when a turn ends: a gateway
+    // with no idle timeout returns from withWatchdog before its cleanup
+    // exists, so on the ordinary non-streaming path the entry would be the
+    // one thing a long-running daemon accumulated per tool-using session.
+    if (open.size === 0) {
+      openToolCalls.delete(sessionId);
+    }
   };
 
   const configuredApprovals = typeof options.approvals === 'function'

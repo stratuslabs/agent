@@ -565,3 +565,38 @@ test('partial messages are not requested when nothing consumes them', async () =
 
   assert.equal((calls[0]!.options as { includePartialMessages?: boolean }).includePartialMessages, undefined);
 });
+
+test('a failed resume discards its streamed fragments before replaying', async () => {
+  // The abandoned attempt may already have streamed text, and the replay
+  // is a different answer to the same question. Without a reset an
+  // aggregator concatenates them into one garbled reply — which is the
+  // exact case the reset delta exists for.
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    const resume = (params.options as { resume?: string }).resume;
+    return (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
+      if (resume) {
+        yield { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'stale half-' } } };
+        throw new Error(`No conversation found with session ID: ${resume}`);
+      }
+      yield { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'fresh answer' } } };
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'fresh answer', session_id: 'sdk-new' };
+    })();
+  };
+
+  const deltas: unknown[] = [];
+  const provider = createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn });
+
+  await provider.generate({
+    session: createSession({ metadata: { [SDK_SESSION_METADATA_KEY]: 'sdk-gone' } }),
+    memory: [],
+    onDelta: (delta) => {
+      deltas.push(delta);
+    },
+  });
+
+  assert.deepEqual(deltas, [
+    { type: 'text', text: 'stale half-' },
+    { type: 'reset' },
+    { type: 'text', text: 'fresh answer' },
+  ]);
+});
