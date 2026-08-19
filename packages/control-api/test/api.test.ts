@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { CONTROL_API_VERSION } from '../src/index.ts';
@@ -1322,6 +1322,39 @@ test('the roster describes the soul the daemon serves, not the one it shadows', 
 
     const health = await json<{ agents: Array<{ id: string; builtIn: boolean }> }>(await harness.call('/api/v1/health'));
     assert.equal(health.agents.find((agent) => agent.id === 'stratus')?.builtIn, true);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('an agent whose soul file vanished reports no runtime rather than a wrong one', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: anthropic\nmodel: claude-opus-5\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
+  try {
+    const before = await json<{ agents: Array<{ id: string; runsOn?: { provider: string } }> }>(
+      await harness.call('/api/v1/agents'),
+    );
+    assert.equal(before.agents.find((agent) => agent.id === 'ava')?.runsOn?.provider, 'anthropic');
+
+    // The file goes, but the gateway keeps dispatching from its cached soul —
+    // which still pins anthropic. The roster reads the filesystem, so it has
+    // nothing to say about this agent any more.
+    await rm(path.join(home, '.stratus', 'agents', 'ava.md'));
+
+    const after = await json<{ agents: Array<{ id: string; runsOn?: { provider: string } }> }>(
+      await harness.call('/api/v1/agents'),
+    );
+    const ava = after.agents.find((agent) => agent.id === 'ava');
+    assert.ok(ava, 'the daemon is still serving it, so it is still listed');
+    // `demo` would be a false claim about where turns are billing, made at
+    // the moment someone is looking to find out.
+    assert.equal(ava.runsOn, undefined, `claimed a runtime it cannot know: ${JSON.stringify(ava.runsOn)}`);
+
+    const health = await json<{ agents: Array<{ id: string; runsOn?: { provider: string } }> }>(
+      await harness.call('/api/v1/health'),
+    );
+    assert.equal(health.agents.find((agent) => agent.id === 'ava')?.runsOn, undefined);
   } finally {
     await harness.stop();
   }

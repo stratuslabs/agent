@@ -372,7 +372,13 @@ export const routes: Route[] = [
             name: agent.name,
             default: summary?.default ?? false,
             builtIn: summary?.builtIn ?? agent.id === DEFAULT_STRATUS_AGENT.id,
-            runsOn: summary?.runsOn ?? { provider: 'demo' },
+            // Omitted rather than guessed when no file backs this agent.
+            // The gateway keeps dispatching from a cached soul when its file
+            // is deleted or momentarily unparseable, and that soul may pin a
+            // provider — so claiming `demo` here would report the wrong
+            // billing for turns that are really running, at exactly the
+            // moment someone is looking to find out why.
+            ...(summary?.runsOn ? { runsOn: summary.runsOn } : {}),
           };
         }),
         sessions: { total: storedSessions, byStatus },
@@ -414,7 +420,13 @@ export const routes: Route[] = [
             name: agent.name,
             default: summary?.default ?? false,
             builtIn: summary?.builtIn ?? agent.id === DEFAULT_STRATUS_AGENT.id,
-            runsOn: summary?.runsOn ?? { provider: 'demo' },
+            // Omitted rather than guessed when no file backs this agent.
+            // The gateway keeps dispatching from a cached soul when its file
+            // is deleted or momentarily unparseable, and that soul may pin a
+            // provider — so claiming `demo` here would report the wrong
+            // billing for turns that are really running, at exactly the
+            // moment someone is looking to find out why.
+            ...(summary?.runsOn ? { runsOn: summary.runsOn } : {}),
             memories: summary?.memories ?? 0,
             ...(summary?.soulPath ? { soulPath: summary.soulPath } : {}),
             ...(summary?.provider ? { provider: summary.provider } : {}),

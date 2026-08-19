@@ -188,10 +188,23 @@ export const renderSettings = (section) => {
         // the file, approvals and soul included. Which makes the *removals*
         // below load-bearing rather than tidying.
         const next = { ...config };
-        if (provider) {
-          next.provider = provider;
-          next.model = model;
-          if (provider !== config.provider) {
+        if (picker.dataset.touched !== 'yes') {
+          // Nobody chose anything here, so this save has no opinion about the
+          // model. Deriving one from the picker's displayed value would let
+          // opening the page and pressing Save rewrite a pin — which is how a
+          // configuration the catalog could not express got deleted.
+        } else if (provider || model) {
+          if (provider) {
+            next.provider = provider;
+          } else {
+            delete next.provider;
+          }
+          if (model) {
+            next.model = model;
+          } else {
+            delete next.model;
+          }
+          if (provider && provider !== config.provider) {
             // An endpoint and a key-selector are chosen for one provider.
             // Carried across, they point the new provider at the old one's
             // service, or hand it the wrong credential — the same
@@ -229,19 +242,30 @@ export const renderSettings = (section) => {
       ),
       refresh() {
         const config = state.config ?? {};
-        const pinned = config.provider && config.model ? `${config.provider}:${config.model}` : '';
+        // Either half counts as a pin. A config naming only a provider takes
+        // that provider's default model, and one naming only a model keeps
+        // the provider from elsewhere — both are configurations someone
+        // chose, and reading only the pair called them unpinned.
+        const pinned = config.provider || config.model
+          ? `${config.provider ?? ''}:${config.model ?? ''}`
+          : '';
         const listed = (state.models ?? []).map((model) => ({
           value: `${model.provider}:${model.id}`,
           label: `${model.id} — ${model.provider}`,
         }));
-        // The configured model, even when the live catalog does not list it —
-        // an endpoint that omits it, or a sign-in the provider is currently
-        // refusing. Without an option to select, the browser leaves the picker
-        // on "follow the default", and the next Save deletes a pin nobody
-        // touched. Marked, because a model the catalog cannot see is worth
-        // knowing about rather than presenting as a normal choice.
+        // The configured pin, even when the live catalog does not list it —
+        // an endpoint that omits the model, a sign-in the provider is
+        // currently refusing, or a partial pin the catalog cannot express.
+        // Without an option to select, the browser leaves the picker on
+        // "follow the default", which is a claim about the config that is not
+        // true. Labelled for what it is rather than shown as a normal choice.
         if (pinned && !listed.some((option) => option.value === pinned)) {
-          listed.unshift({ value: pinned, label: `${config.model} — ${config.provider} (not listed right now)` });
+          const label = config.provider && config.model
+            ? `${config.model} — ${config.provider} (not listed right now)`
+            : config.provider
+              ? `${config.provider} — its default model`
+              : `${config.model} — whichever provider is default`;
+          listed.unshift({ value: pinned, label });
         }
         syncOptions(picker, [{ value: '', label: 'follow the default' }, ...listed], pinned);
         empty.hidden = (state.models ?? []).length > 0;

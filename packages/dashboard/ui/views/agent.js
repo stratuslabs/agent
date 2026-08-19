@@ -74,7 +74,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     pending: [],
     sending: false,
     /**
-     * True while our own POST is unanswered.
+     * Conversations whose POST is unanswered, by session id.
      *
      * Distinct from `sending`, which stays true for the whole turn: this is
      * the window in which the store cannot answer for the turn at all — a new
@@ -82,8 +82,14 @@ export const renderAgent = (agentId, initialSessionId) => {
      * *previous* turn's terminal status until the dispatch saves. Anything
      * that reconciles against the store during it would be reading about a
      * turn that has not started.
+     *
+     * Keyed rather than a flag, because sends overlap across conversations: a
+     * message to A, then a switch to B and a message there, leaves two in
+     * flight — and A's response clearing a shared flag would tell this view
+     * that B has nothing pending, which is exactly when clearing B's turn
+     * does damage.
      */
-    awaitingSend: false,
+    awaitingSend: new Set(),
     error: undefined,
     saved: undefined,
     /**
@@ -262,7 +268,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     // events against a turn it never sent, and a brand-new conversation would
     // be marked as stored when nothing had been written for it.
     const sentTo = state.sessionId;
-    state.awaitingSend = true;
+    state.awaitingSend.add(sentTo);
     // Shown immediately rather than waiting for the round trip: the daemon
     // will persist exactly this, and a message that vanishes for a second
     // reads as a dropped one.
@@ -275,7 +281,7 @@ export const renderAgent = (agentId, initialSessionId) => {
 
     try {
       const { turnId } = await api.send(sentTo, { message: text, agentId });
-      state.awaitingSend = false;
+      state.awaitingSend.delete(sentTo);
       if (state.sessionId !== sentTo) {
         return;
       }
@@ -291,7 +297,7 @@ export const renderAgent = (agentId, initialSessionId) => {
         applyEnvelope(envelope);
       }
     } catch (error) {
-      state.awaitingSend = false;
+      state.awaitingSend.delete(sentTo);
       if (state.sessionId !== sentTo) {
         return;
       }
@@ -534,7 +540,11 @@ export const renderAgent = (agentId, initialSessionId) => {
         el('div', { class: 'grow' },
           el('div', { class: 'title' }, current?.name ?? agentId),
           el('div', { class: 'sub' }, current
-            ? `${current.runsOn?.provider ?? 'demo'}${current.runsOn?.model ? ` · ${current.runsOn.model}` : ''} · ${current.memories ?? 0} remembered`
+            // An absent `runsOn` means the daemon is serving a soul whose
+            // file it can no longer read, so it cannot say what this runs on.
+            // "demo" would be a guess, and a billing claim is not a good
+            // place to guess.
+            ? `${current.runsOn?.provider ?? 'unknown'}${current.runsOn?.model ? ` · ${current.runsOn.model}` : ''} · ${current.memories ?? 0} remembered`
             : agentId),
         ),
       ),
@@ -598,7 +608,7 @@ export const renderAgent = (agentId, initialSessionId) => {
    * session says it has ended.
    */
   const reconcile = async () => {
-    if (state.awaitingSend) {
+    if (state.sessionId && state.awaitingSend.has(state.sessionId)) {
       // Our own POST is about to say how this turn went — including its id,
       // which lands *after* this would have cleared `sending`, re-enabling
       // the composer on a turn that had only just started. The store cannot

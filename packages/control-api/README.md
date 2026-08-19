@@ -137,6 +137,19 @@ ignored for the same reason).
 ([06](../../docs/roadmap/06-tool-packs.md)); today it could only list the
 three kernel tools.
 
+### `runsOn` is absent when the daemon cannot say
+
+Each agent in `GET /agents` and `GET /health` carries `runsOn` — the provider
+and model a turn as that agent would actually resolve to, normalized through
+the same soul-pin rules dispatch applies.
+
+It is **omitted** rather than defaulted when the agent's soul file cannot be
+read. The gateway keeps dispatching from a cached soul when its file is
+deleted or momentarily unparseable, and that soul may pin a provider, so the
+daemon is still billing somewhere it can no longer name. A default of `demo`
+there would be a false statement about money, made exactly when someone is
+looking to find out what is running.
+
 ### The listing summarises; the single read does not
 
 `GET /agents` carries `persona`: the agent's first instruction line, trimmed
