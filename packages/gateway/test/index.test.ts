@@ -2540,3 +2540,67 @@ test('a stalled subscription fallback is cut loose by the gateway idle timeout',
     await gateway.stop();
   }
 });
+
+test('a slow approval holds the watchdog even when the policy emits nothing', async () => {
+  // tool.approval-requested is the broker's event, so it exists only for
+  // the remote path. A policy handed straight to the gateway emits
+  // nothing, and tool.called comes only after the answer — so on a
+  // streaming provider that hosts its own loop, a slow policy was
+  // indistinguishable from a stalled turn. The same bug this watchdog work
+  // exists to stop, arriving through a different door.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', [
+    '---', 'name: Ava', 'provider: anthropic',
+    'tools:', '  - demo.echo', '---', '', 'You are Ava.', '',
+  ].join('\n'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat' } }),
+  );
+
+  const IDLE_MS = 300;
+  const queryFn = ((params: { options?: unknown }) => {
+    const options = params.options as {
+      mcpServers?: Record<string, {
+        instance?: { _registeredTools?: Record<string, { handler: (a: unknown, b: unknown) => Promise<unknown> }> };
+      }>;
+    };
+    return (async function* () {
+      yield { type: 'system', subtype: 'init', session_id: 'sdk-1' };
+      yield {
+        type: 'stream_event',
+        session_id: 'sdk-1',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'checking' } },
+      };
+      const handler = options.mcpServers?.stratus?.instance?._registeredTools?.demo_echo?.handler;
+      if (!handler) {
+        throw new Error('the tool was not bridged');
+      }
+      await handler({ text: 'hi' }, {});
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'all done', session_id: 'sdk-1' };
+    })();
+  }) as never;
+
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {}, queryFn },
+    idleTimeoutMs: IDLE_MS,
+    // A direct policy, not the factory: no transport, no events, and it
+    // deliberates for longer than the idle timeout — which a policy
+    // consulting anything outside the process legitimately might.
+    approvals: {
+      async approve() {
+        await new Promise((resolve) => setTimeout(resolve, IDLE_MS * 3));
+        return true;
+      },
+    },
+    warn: () => {},
+  });
+  await gateway.start();
+
+  const session = await gateway.dispatch({ sessionId: 'slow-policy-1', agentId: 'ava', userMessage: 'echo please' });
+  await gateway.stop();
+
+  assert.equal(session.status, 'completed', `session failed: ${session.lastError ?? ''}`);
+  assert.match(session.messages.at(-1)?.content ?? '', /all done/);
+});

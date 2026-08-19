@@ -208,6 +208,12 @@ class ReplyRenderer {
       return;
     }
     if (event.type === 'tool.called') {
+      // Also a turn boundary. On the kernel path `provider.response` has
+      // already marked one, and marking it twice costs nothing; on a
+      // provider that hosts its own loop there is no provider.response at
+      // all, so this is the only thing between the text before a tool and
+      // the text after it — without it they fuse in the live message.
+      this.turnBreakPending = true;
       this.toolLine = `⚙ ${event.call.toolName}…`;
       this.scheduleEdit();
       return;

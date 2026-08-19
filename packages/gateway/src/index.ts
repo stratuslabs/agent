@@ -637,9 +637,56 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return true;
   };
 
-  const approvals = typeof options.approvals === 'function'
+  /**
+   * Tool calls whose phase is open, per session.
+   *
+   * Gateway-level rather than per-turn because two different things open a
+   * phase and only one of them has a turn in scope: the watchdog's event
+   * observer, and the approval policy below — which is asked before any
+   * event announces the call, and knows only its `ApprovalContext`.
+   */
+  const openToolCalls = new Map<string, Set<string>>();
+  /**
+   * How a turn's watchdog stops its own clock, registered while it runs.
+   *
+   * Recording the phase is not enough on its own: the timer is only ever
+   * re-evaluated when an event arrives, so a phase opened by something
+   * that emits nothing — an approval policy handed straight to the gateway
+   * — would leave an already-armed timer running to fire mid-wait.
+   */
+  const suspendWatchdog = new Map<string, () => void>();
+  const openToolPhase = (sessionId: string, callId: string): void => {
+    const open = openToolCalls.get(sessionId) ?? new Set<string>();
+    open.add(callId);
+    openToolCalls.set(sessionId, open);
+    suspendWatchdog.get(sessionId)?.();
+  };
+  const settleToolPhase = (sessionId: string, callId: string): void => {
+    openToolCalls.get(sessionId)?.delete(callId);
+  };
+
+  const configuredApprovals = typeof options.approvals === 'function'
     ? options.approvals({ request: requestApproval })
     : options.approvals;
+
+  /**
+   * Every approval opens a tool phase, whatever policy answers it.
+   *
+   * `tool.approval-requested` is the broker's event, so it exists only for
+   * the remote path; a policy handed straight to the gateway emits nothing
+   * at all, and `tool.called` comes only *after* the answer. Without this,
+   * a slow custom policy on a streaming provider that hosts its own loop
+   * would be indistinguishable from a stalled turn — the case this
+   * watchdog work exists to stop, arriving through a different door.
+   */
+  const approvals: ApprovalPolicy | undefined = configuredApprovals
+    ? {
+        async approve(context) {
+          openToolPhase(context.session.id, context.call.id);
+          return configuredApprovals.approve(context);
+        },
+      }
+    : undefined;
   const registry = new AgentRegistry();
   const sources = new Map<string, AgentSource>();
 
@@ -919,17 +966,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     let streamingActive = idleEnabled;
     let pendingTools = 0;
     /**
-     * Tool calls that have opened a phase and not yet settled, by id.
-     *
      * `pendingTools` above reads a count off `provider.response`, which
      * only a provider that hands its calls back to the kernel loop emits.
      * A provider hosting its own loop dispatches inside `generate`, so that
      * count is zero for the whole of a hosted tool — approval wait,
-     * executor, and all. This set is the signal both shapes produce: the
-     * kernel's own tool events, which every path emits because every path
-     * runs its tools through the same executor.
+     * executor, and all. The open-phase set is the signal both shapes
+     * produce, opened by the approval or by `tool.called` and settled when
+     * the call does.
      */
-    const openToolCalls = new Set<string>();
+    const openHere = (): number => openToolCalls.get(sessionId)?.size ?? 0;
     // Set at a text-only provider.response: the turn is wrapping up
     // (saves, completion events); nothing left for the timer to guard.
     let turnSettling = false;
@@ -987,21 +1032,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           }
           break;
         case 'tool.approval-requested':
-          // The phase opens here, not at tool.called: the wait for a human
-          // is the longest part of it and comes first.
-          openToolCalls.add(event.call.id);
+          // Redundant with the policy wrapper for a gateway-owned
+          // transport, and not redundant for a recovered turn, whose
+          // request is re-announced without going through a policy again.
+          openToolPhase(sessionId, event.call.id);
           break;
         case 'tool.called':
-          openToolCalls.add(event.call.id);
+          openToolPhase(sessionId, event.call.id);
           break;
         case 'tool.completed':
           // Completion names the call through its result; denial carries
           // the call itself. Both settle the phase.
-          openToolCalls.delete(event.result.callId);
+          settleToolPhase(sessionId, event.result.callId);
           pendingTools = Math.max(0, pendingTools - 1);
           break;
         case 'tool.denied':
-          openToolCalls.delete(event.call.id);
+          settleToolPhase(sessionId, event.call.id);
           pendingTools = Math.max(0, pendingTools - 1);
           break;
         default:
@@ -1014,10 +1060,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (!('sessionId' in event) || event.sessionId !== sessionId) {
         return;
       }
-      if (streamingActive && pendingTools === 0 && openToolCalls.size === 0 && !turnSettling) {
+      if (streamingActive && pendingTools === 0 && openHere() === 0 && !turnSettling) {
         armTimer();
       }
     });
+
+    suspendWatchdog.set(sessionId, suspendTimer);
 
     if (streamingActive) {
       armTimer();
@@ -1034,6 +1082,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       suspendTimer();
       unsubscribeObserver();
       unsubscribeDrain();
+      // A turn aborted mid-phase would otherwise leave its call ids behind
+      // and hold the next turn's timer down forever.
+      openToolCalls.delete(sessionId);
+      suspendWatchdog.delete(sessionId);
       external?.removeEventListener('abort', onExternalAbort);
     }
   };
