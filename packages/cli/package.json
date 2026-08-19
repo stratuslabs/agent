@@ -40,6 +40,10 @@
   "devDependencies": {
     "@stratusagent/channel-slack": "workspace:*",
     "@stratusagent/control-api": "workspace:*",
+    "@stratusagent/tool-browser": "workspace:*",
+    "@stratusagent/tool-fs": "workspace:*",
+    "@stratusagent/tool-shell": "workspace:*",
+    "@stratusagent/tool-web": "workspace:*",
     "@types/node": "^24.6.0",
     "typescript": "^5.9.3"
   },

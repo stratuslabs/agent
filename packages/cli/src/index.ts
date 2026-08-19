@@ -490,9 +490,28 @@ Config file:
   A "soul" key (or STRATUS_SOUL) points at a soul file so every run uses that agent.
   Legacy STRATUSCLAW_* env vars and stratusclaw.config.json are still supported for compatibility.
 
+Plugins (tools):
+  Capability is optional: install a package, then list it under "plugins" in a
+  TRUSTED config (--config, STRATUS_CONFIG, or ~/.stratus/config.json), keyed by
+  package name. A plugin runs inside this process, so an auto-discovered
+  project-local stratus.config.json may not enable one.
+
+    "plugins": {
+      "@stratusagent/tool-fs": { "enabled": true, "roots": ["~/notes"],
+                                 "agents": { "ava": { "roots": ["~/work/ava"] } } },
+      "@stratusagent/tool-web": { "enabled": true }
+    }
+
+  Available: @stratusagent/tool-fs (fs.read/list/search/write),
+  @stratusagent/tool-shell (shell.run), @stratusagent/tool-web (web.fetch),
+  @stratusagent/tool-browser (browser.goto/read/screenshot/act).
+  Installing one grants no agent anything — each soul lists what it may call.
+
 Soul files:
   A soul file is markdown with frontmatter (name, provider, model, tools, credentials)
   followed by the agent's persona in prose. See examples/souls/ava.md.
+  "tools" takes exact names or a whole toolset: tools: [fs.read, fs.search] or
+  tools: [fs.*]. Omitted means every registered tool.
 `;
 
 const writeLine = (stream: Pick<typeof process.stdout, 'write'>, line = ''): void => {
@@ -4934,7 +4953,20 @@ export const runServe = async (
   const gateway = createGateway({
     env,
     approvals,
-    ...(Object.keys(pluginsConfig).length > 0 ? { plugins: pluginsConfig } : {}),
+    ...(Object.keys(pluginsConfig).length > 0
+      ? {
+          plugins: pluginsConfig,
+          // Resolved from *here*, not from inside the gateway.
+          // `import.meta.resolve` answers relative to the module that calls
+          // it, and a plugin is installed alongside the thing the operator
+          // installed — this CLI. Letting the gateway resolve from its own
+          // location works only where the layout happens to be flat.
+          pluginHost: {
+            resolve: (specifier: string) => import.meta.resolve(specifier),
+            import: (specifier: string) => import(specifier),
+          },
+        }
+      : {}),
     ...(approvalsConfig.timeoutMs !== undefined ? { approvalTimeoutMs: approvalsConfig.timeoutMs } : {}),
     ...(command.configPath ? { selection: { configPath: command.configPath } } : {}),
     ...(command.idleTimeoutMs !== undefined ? { idleTimeoutMs: command.idleTimeoutMs } : {}),

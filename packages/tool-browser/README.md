@@ -44,7 +44,7 @@ fails that one call with a message naming the fix.
 | --- | --- | --- |
 | `browser.goto` | `gated` | `interactive` asks, `remote` asks in Slack, `headless` refuses. |
 | `browser.read` | `gated` | Same. Navigating and reading reach a service outside Stratus. |
-| `browser.screenshot` | `gated` | Same. Writes a PNG into the agent's workspace. |
+| `browser.screenshot` | `gated` | Same. Writes a PNG into the agent's workspace and returns it as `file`, which a channel delivers as an attachment. |
 | `browser.act` | `dangerous` | Always a human, in every mode. A click submits, buys, and deletes — navigating somewhere else undoes a `goto`, and nothing undoes a click. |
 
 ## Settings
@@ -91,6 +91,15 @@ The address policy itself is [`@stratusagent/egress`](../egress) — the same
 module `tool-web` uses, tested against the same table of hostile URLs. A
 second copy would not drift into a style difference; the stale one would be
 an SSRF hole.
+
+## Screenshots come back as files, not bytes
+
+`browser.screenshot` writes to `<workspaceRoot>/<agent-id>/screenshots/` and
+returns `{ file, url, title }`. The `file` key is the channel contract's
+convention for a result that refers to a local file, so a Slack thread that
+asked for a screenshot gets the image posted into it rather than a path nobody
+can open. Base64 in a tool result would be a transcript no human can read and
+a provider bill nobody wanted.
 
 ## Lifecycle
 

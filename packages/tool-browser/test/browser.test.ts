@@ -215,7 +215,10 @@ test('a screenshot lands in the agent’s own workspace and comes back as a path
     sessionFor('s', 'ava'),
   ) as JsonObject;
 
-  assert.match(String(result.path), new RegExp(`${path.sep}ava${path.sep}screenshots${path.sep}`));
+  // `file` is the key a channel acts on: an ok result carrying one is
+  // delivered as an attachment, which is what makes "screenshot example.com
+  // and show me" end in a picture rather than a path.
+  assert.match(String(result.file), new RegExp(`${path.sep}ava${path.sep}screenshots${path.sep}`));
   const written = await readdir(path.join(workspaceRoot, 'ava', 'screenshots'));
   assert.equal(written.length, 1);
 

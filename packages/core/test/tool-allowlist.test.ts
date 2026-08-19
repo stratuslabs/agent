@@ -8,6 +8,7 @@ import {
   ToolRegistry,
   type ModelProvider,
   type ProviderRequest,
+  type ProviderResponse,
   type Tool,
   type ToolDescriptor,
 } from '../src/index.ts';
@@ -48,14 +49,14 @@ test('an agent allowed a toolset can call every tool in it, and nothing outside 
   let turn = 0;
   const provider: ModelProvider = {
     name: 'scripted',
-    async generate(request: ProviderRequest) {
+    async generate(request: ProviderRequest): Promise<ProviderResponse> {
       advertised.push(request.tools ?? []);
       turn += 1;
       if (turn === 1) {
-        return { parts: [{ type: 'tool_call', call: { id: 'c1', toolName: 'fs.search', input: {} } }] };
+        return { parts: [{ type: 'tool-call', call: { id: 'c1', toolName: 'fs.search', input: {} } }] };
       }
       if (turn === 2) {
-        return { parts: [{ type: 'tool_call', call: { id: 'c2', toolName: 'shell.run', input: {} } }] };
+        return { parts: [{ type: 'tool-call', call: { id: 'c2', toolName: 'shell.run', input: {} } }] };
       }
       return { parts: [{ type: 'text', text: 'done' }] };
     },

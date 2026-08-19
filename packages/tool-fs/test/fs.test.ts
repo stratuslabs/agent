@@ -186,12 +186,12 @@ test('an agent allowed only reads cannot write, whatever the tool would have don
     async generate() {
       turn += 1;
       if (turn === 1) {
-        return { parts: [{ type: 'tool_call', call: { id: 'c1', toolName: 'fs.read', input: { path: 'notes.md' } } }] };
+        return { parts: [{ type: 'tool-call', call: { id: 'c1', toolName: 'fs.read', input: { path: 'notes.md' } } }] };
       }
       if (turn === 2) {
         return {
           parts: [{
-            type: 'tool_call',
+            type: 'tool-call',
             call: { id: 'c2', toolName: 'fs.write', input: { path: 'notes.md', content: 'no' } },
           }],
         };

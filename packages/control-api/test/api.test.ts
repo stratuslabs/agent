@@ -1603,3 +1603,37 @@ test('the tool catalog lists what is installed, at the risk a call will face', a
     await harness.stop();
   }
 });
+
+test('saving settings does not delete the plugins somebody is running', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const configPath = path.join(home, '.stratus', 'config.json');
+  await writeFile(
+    configPath,
+    JSON.stringify({ model: 'claude-opus-5', plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } } }),
+  );
+
+  const harness = await startApi({ home });
+  try {
+    const read = await json<{ config: Record<string, unknown> }>(await harness.call('/api/v1/config'));
+    assert.deepEqual(read.config.plugins, { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } });
+
+    // The round trip a settings screen makes: read the document, change one
+    // field, send the whole thing back. `plugins` comes along, and must
+    // neither 400 nor be written from the request.
+    const saved = await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { ...read.config, model: 'claude-sonnet-5', plugins: { evil: { enabled: true } } } }),
+    });
+    assert.equal(saved.status, 200);
+
+    const after = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+    assert.equal(after.model, 'claude-sonnet-5');
+    // Preserved from the file, not taken from the request: enabling a plugin
+    // runs somebody's code inside the daemon, and that is not a settings save.
+    assert.deepEqual(after.plugins, { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } });
+  } finally {
+    await harness.stop();
+  }
+});

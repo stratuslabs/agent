@@ -105,6 +105,7 @@ log, and an address bar is one that gets noticed when it changes.
 | GET | `/approvals` | Calls parked on a human right now |
 | POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }` |
 | GET | `/catalog/models` | Models the stored sign-ins can actually reach, listed live |
+| GET | `/catalog/tools` | Every registered tool with the risk a call will face, and the plugins that contributed them |
 | GET | `/credentials` | Which sign-ins exist — presence and endpoint, never a value |
 | POST | `/credentials/verify` | Live-check a key before storing it: `{ provider, key, type?, baseUrl? }` |
 | PUT | `/credentials/:provider` | Store an `api_key`, or an `oauth_token` for Anthropic |
@@ -117,6 +118,13 @@ route says nothing about the key. Pass `type` with it: a `oauth_token` cannot
 call the models endpoint at all, so it answers `unreachable` rather than
 sending a Claude subscription token as an `x-api-key` and condemning a
 credential that works perfectly well once saved.
+
+`PUT /config` does not write the `plugins` block. `GET` returns it, and a
+`PUT` carrying it back is accepted (the round trip has to work) but the value
+is ignored and the file's existing block is preserved rather than deleted by
+the replace. Enabling a plugin runs somebody else's code inside the daemon —
+that is the boundary the whole trust model rests on, and it stays a
+deliberate edit to a file rather than a settings save.
 
 `PUT /config` **replaces** the file rather than merging into it — `GET` hands
 you the whole document and `PUT` takes the whole document back, so a partial
@@ -133,9 +141,36 @@ started there would surprise everyone (its `api` and `approvals` blocks are
 ignored for the same reason).
 | WS | `/events` | The live event stream |
 
-`GET /catalog/tools` is deliberately absent until tool packs exist
-([06](../../docs/roadmap/06-tool-packs.md)); today it could only list the
-three kernel tools.
+### `GET /catalog/tools` answers two questions, not one
+
+```jsonc
+{
+  "tools": [
+    { "name": "demo.echo", "risk": "safe" },
+    { "name": "fs.read", "risk": "safe", "package": "@stratusagent/tool-fs", "trusted": true },
+    { "name": "notes.read", "risk": "gated", "package": "stratus-plugin-notes", "trusted": false }
+  ],
+  "plugins": [
+    { "package": "@stratusagent/tool-fs", "name": "@stratusagent/tool-fs", "trusted": true,
+      "tools": [{ "name": "fs.read", "risk": "safe", "package": "@stratusagent/tool-fs", "trusted": true }] },
+    { "package": "stratus-plugin-typo", "error": "Cannot find package 'stratus-plugin-typo'" }
+  ]
+}
+```
+
+Both halves, because either alone misleads. The **tools** say what an agent
+can be granted and at what risk; the **plugins** say what this daemon was
+*asked* to load — including one that failed, which is invisible in a list of
+tools and is usually why somebody opened the screen.
+
+A tool with no `package` is the kernel's, which is the honest answer for it
+rather than an omission. `risk` is read from the live registry, so it is the
+risk a call will actually face: a third-party package cannot declare its own
+tool `safe`, and this reports the floored value rather than the manifest's
+claim.
+
+Nothing here says which *agent* may call what — that is the soul's allowlist,
+and it is per identity. `GET /agents/:id` carries it.
 
 ### `runsOn` is absent when the daemon cannot say
 

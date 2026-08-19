@@ -95,6 +95,18 @@ importers:
       '@stratusagent/control-api':
         specifier: workspace:*
         version: link:../control-api
+      '@stratusagent/tool-browser':
+        specifier: workspace:*
+        version: link:../tool-browser
+      '@stratusagent/tool-fs':
+        specifier: workspace:*
+        version: link:../tool-fs
+      '@stratusagent/tool-shell':
+        specifier: workspace:*
+        version: link:../tool-shell
+      '@stratusagent/tool-web':
+        specifier: workspace:*
+        version: link:../tool-web
       '@types/node':
         specifier: ^24.6.0
         version: 24.12.2

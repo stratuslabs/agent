@@ -215,10 +215,13 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       }
       const target = await screenshotPathFor(settings.workspaceRoot, session, Date.now());
       await page.screenshot({ path: target, fullPage: input.fullPage === true });
-      // A path, not bytes: a channel uploads the file through the channel
-      // contract's file operation, and a base64 image in a tool result is a
-      // transcript nobody can read and a provider bill nobody wanted.
-      return { path: target, url: page.url(), title: await page.title() };
+      // `file`, because that is the key a channel already acts on: an ok
+      // result carrying `file` (or `files`) is delivered as an attachment,
+      // which is how "screenshot example.com and show me" ends with a
+      // picture in Slack rather than a path nobody can open. One key rather
+      // than a `path` alias beside it — two words for one thing is how a
+      // convention stops being one.
+      return { file: target, url: page.url(), title: await page.title() };
     },
   };
 

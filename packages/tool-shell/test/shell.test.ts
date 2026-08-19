@@ -121,7 +121,7 @@ test('headless: a safe scope runs through a real pack, a control-operator chain 
         return { parts: [{ type: 'text', text: 'done' }] };
       }
       return {
-        parts: [{ type: 'tool_call', call: { id: `c${turn}`, toolName: 'shell.run', input: { command } } }],
+        parts: [{ type: 'tool-call', call: { id: `c${turn}`, toolName: 'shell.run', input: { command } } }],
       };
     },
   };

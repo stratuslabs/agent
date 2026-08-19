@@ -450,9 +450,15 @@ export interface GatewayOptions {
    */
   plugins?: PluginsConfig;
   /**
-   * How plugin packages are resolved and imported. Defaults to this
-   * module's own resolver, which is what a daemon started from an install
-   * that has the plugins as siblings wants. Tests pass their own.
+   * How plugin packages are resolved and imported.
+   *
+   * Worth passing, and `stratus serve` does. `import.meta.resolve` answers
+   * relative to the module that calls it, so the default here asks "is this
+   * plugin visible from the gateway package" when the question is "is it
+   * visible from the thing the operator installed". Those differ under any
+   * layout that is not flat — a pnpm install being the obvious one — and the
+   * failure is a plugin reported as not installed while sitting right next
+   * to the CLI.
    */
   pluginHost?: OptionalModuleHost;
   log?: (line: string) => void;
