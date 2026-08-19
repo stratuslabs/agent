@@ -119,6 +119,31 @@ const zodShapeFor = (parameters: JsonObject | undefined): Record<string, z.ZodTy
  * createClaudeCodeProvider wires this automatically; exported for hosts
  * with their own loops and for tests.
  */
+/**
+ * The MCP name each kernel tool is bridged under, keyed by the kernel's
+ * own dotted name.
+ *
+ * Exported because the mapping is needed in two directions and must not be
+ * derived twice: the bridge registers tools under these names, and streamed
+ * deltas arrive carrying them and have to be reported back to the kernel in
+ * its own naming. A second copy of the dedup rule would drift the first
+ * time two tools sanitize alike.
+ */
+export const bridgedToolNames = (descriptors: readonly ToolDescriptor[]): Map<string, string> => {
+  const used = new Set<string>();
+  const byKernelName = new Map<string, string>();
+  for (const descriptor of descriptors) {
+    const base = sanitizeToolName(descriptor.name);
+    let name = base;
+    for (let suffix = 2; used.has(name); suffix += 1) {
+      name = `${base.slice(0, 60)}_${suffix}`;
+    }
+    used.add(name);
+    byKernelName.set(descriptor.name, name);
+  }
+  return byKernelName;
+};
+
 export const bridgeKernelTools = (
   descriptors: readonly ToolDescriptor[],
   session: Session,
@@ -138,14 +163,9 @@ export const bridgeKernelTools = (
     return run;
   };
 
-  const used = new Set<string>();
+  const wireNames = bridgedToolNames(descriptors);
   return descriptors.map((descriptor) => {
-    const base = sanitizeToolName(descriptor.name);
-    let name = base;
-    for (let suffix = 2; used.has(name); suffix += 1) {
-      name = `${base.slice(0, 60)}_${suffix}`;
-    }
-    used.add(name);
+    const name = wireNames.get(descriptor.name) ?? sanitizeToolName(descriptor.name);
     return sdkTool(
       name,
       descriptor.description ?? `Stratus tool ${descriptor.name}`,
@@ -185,6 +205,18 @@ export interface ClaudeCodeStreamMessage {
    * needs no handshake; the first message that arrives has it.
    */
   session_id?: string;
+  /**
+   * On a `stream_event` message, the raw Anthropic stream event the SDK
+   * saw. Same shape the Messages API emits, so it maps to kernel deltas
+   * the same way the API provider maps its own — deliberately typed
+   * loosely here rather than re-exporting the SDK's beta types.
+   */
+  event?: {
+    type?: string;
+    index?: number;
+    delta?: { type?: string; text?: string; partial_json?: string };
+    content_block?: { type?: string; name?: string };
+  };
 }
 
 export type ClaudeCodeQueryFn = (params: {
@@ -358,6 +390,53 @@ const createPrompt = (request: ProviderRequest): string => {
  * SDK) and either a setup token (`authToken`) or an existing `claude`
  * sign-in.
  */
+/**
+ * One SDK `stream_event` as kernel deltas.
+ *
+ * The SDK forwards the provider's own stream events, so this is the same
+ * mapping the API provider performs on the same shapes — kept here rather
+ * than shared because the two consume different transports to reach it,
+ * and a shared helper would have to be generic over both.
+ */
+const forwardDelta = async (
+  message: ClaudeCodeStreamMessage,
+  onDelta: ProviderRequest['onDelta'],
+  toolNamesByIndex: Map<number, string>,
+  kernelNameFor: (wireName: string) => string,
+): Promise<void> => {
+  const event = message.event;
+  if (!onDelta || !event) {
+    return;
+  }
+  if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
+    const toolName = kernelNameFor(event.content_block.name ?? '');
+    if (typeof event.index === 'number') {
+      toolNamesByIndex.set(event.index, toolName);
+    }
+    await onDelta({ type: 'tool-call', toolName });
+    return;
+  }
+  if (event.type !== 'content_block_delta' || !event.delta) {
+    return;
+  }
+  if (event.delta.type === 'text_delta' && typeof event.delta.text === 'string') {
+    await onDelta({ type: 'text', text: event.delta.text });
+    return;
+  }
+  if (event.delta.type === 'thinking_delta' || event.delta.type === 'signature_delta') {
+    // Content-free on purpose: a watchdog needs to see a long thinking
+    // stretch as progress, and the reasoning itself is never carried.
+    await onDelta({ type: 'thinking' });
+    return;
+  }
+  if (event.delta.type === 'input_json_delta' && typeof event.delta.partial_json === 'string') {
+    const toolName = typeof event.index === 'number' ? toolNamesByIndex.get(event.index) : undefined;
+    if (toolName !== undefined) {
+      await onDelta({ type: 'tool-call', toolName, inputFragment: event.delta.partial_json });
+    }
+  }
+};
+
 export const createClaudeCodeProvider = ({
   authToken,
   model = DEFAULT_CLAUDE_CODE_MODEL,
@@ -437,6 +516,10 @@ export const createClaudeCodeProvider = ({
       // No built-in Claude Code tools: Stratus owns the tool surface.
       tools: [],
       maxTurns: maxTurns ?? (bridgedTools ? DEFAULT_TOOL_MAX_TURNS : 1),
+      // Only when someone is listening: partial messages are pure overhead
+      // for a caller that discards them, and the kernel only supplies a
+      // sink when a consumer wants deltas.
+      ...(request.onDelta ? { includePartialMessages: true } : {}),
       ...(bridgedTools
         ? {
             mcpServers: {
@@ -468,6 +551,19 @@ export const createClaudeCodeProvider = ({
     };
 
     let resultText: string | undefined;
+    // Tool input arrives as JSON fragments after the block's start event,
+    // so the name has to be remembered from the start to label them.
+    const toolNamesByIndex = new Map<number, string>();
+    // Deltas name tools the way the SDK sees them; consumers are the
+    // kernel's, so they are translated back. The SDK prefixes an MCP tool
+    // with its server, and a bare name still resolves for anything that
+    // does not.
+    const wireToKernel = new Map<string, string>();
+    for (const [kernelName, wireName] of bridgedToolNames(request.tools ?? [])) {
+      wireToKernel.set(wireName, kernelName);
+      wireToKernel.set(`mcp__${MCP_SERVER_NAME}__${wireName}`, kernelName);
+    }
+    const kernelNameFor = (wireName: string): string => wireToKernel.get(wireName) ?? wireName;
 
     // Resume the SDK's own session when this conversation already has one.
     // The alternative — replaying a flattened transcript every turn — re-
@@ -487,6 +583,13 @@ export const createClaudeCodeProvider = ({
         // session the next turn should continue.
         if (message.session_id) {
           rememberSdkSessionId(request.session, message.session_id);
+        }
+        if (message.type === 'stream_event') {
+          // AWAIT the sink per fragment, the same backpressure the API
+          // provider gives it: a throttled consumer pauses this loop
+          // rather than queueing the rest of the turn behind itself.
+          await forwardDelta(message, request.onDelta, toolNamesByIndex, kernelNameFor);
+          continue;
         }
         if (message.type !== 'result') {
           continue;

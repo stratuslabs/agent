@@ -871,7 +871,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     fallback.provider === 'anthropic' && Boolean(fallback.apiKey);
 
   const streamsDeltas = (config: RuntimeConfig): boolean =>
-    config.provider === 'anthropic' && Boolean(config.apiKey);
+    // Both Anthropic modes stream now: an API key through the Messages
+    // API, a subscription token through the Agent SDK's partial messages.
+    config.provider === 'anthropic' && Boolean(config.apiKey || config.authToken);
 
   /**
    * Progress-based abort, armed only while the turn is actually awaiting a
@@ -912,6 +914,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // the primary until a reset delta announces the sticky fallback switch.
     let streamingActive = idleEnabled;
     let pendingTools = 0;
+    /**
+     * Tool calls that have opened a phase and not yet settled, by id.
+     *
+     * `pendingTools` above reads a count off `provider.response`, which
+     * only a provider that hands its calls back to the kernel loop emits.
+     * A provider hosting its own loop dispatches inside `generate`, so that
+     * count is zero for the whole of a hosted tool — approval wait,
+     * executor, and all. This set is the signal both shapes produce: the
+     * kernel's own tool events, which every path emits because every path
+     * runs its tools through the same executor.
+     */
+    const openToolCalls = new Set<string>();
     // Set at a text-only provider.response: the turn is wrapping up
     // (saves, completion events); nothing left for the timer to guard.
     let turnSettling = false;
@@ -968,8 +982,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
             turnSettling = true;
           }
           break;
+        case 'tool.approval-requested':
+          // The phase opens here, not at tool.called: the wait for a human
+          // is the longest part of it and comes first.
+          openToolCalls.add(event.call.id);
+          break;
+        case 'tool.called':
+          openToolCalls.add(event.call.id);
+          break;
         case 'tool.completed':
+          // Completion names the call through its result; denial carries
+          // the call itself. Both settle the phase.
+          openToolCalls.delete(event.result.callId);
+          pendingTools = Math.max(0, pendingTools - 1);
+          break;
         case 'tool.denied':
+          openToolCalls.delete(event.call.id);
           pendingTools = Math.max(0, pendingTools - 1);
           break;
         default:
@@ -982,7 +1010,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (!('sessionId' in event) || event.sessionId !== sessionId) {
         return;
       }
-      if (streamingActive && pendingTools === 0 && !turnSettling) {
+      if (streamingActive && pendingTools === 0 && openToolCalls.size === 0 && !turnSettling) {
         armTimer();
       }
     });

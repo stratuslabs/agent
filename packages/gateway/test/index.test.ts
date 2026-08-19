@@ -2390,3 +2390,76 @@ test('a soul claiming the built-in id is still skipped, not treated as a collisi
   assert.ok(warnings.some((line) => line.includes('reserved')), JSON.stringify(warnings));
   await gateway.stop();
 });
+
+test('a hosted tool phase holds the watchdog, on a provider that never announces its calls', async () => {
+  // The subscription path streams now, so the watchdog is armed for it —
+  // and this provider dispatches tools *inside* generate, so no
+  // provider.response ever announces them. The count the watchdog used to
+  // read stays zero for the whole hosted phase; only the kernel's own tool
+  // events say a tool is running. A turn whose tool legitimately outlives
+  // the idle timeout has to survive, or a remote approval on this path
+  // dies long before its own window does.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', [
+    '---', 'name: Ava', 'provider: anthropic',
+    'tools:', '  - agent.delegate', '---', '', 'You are Ava.', '',
+  ].join('\n'));
+  await writeSoul(home, 'bea.md', '---\nname: Bea\nprovider: openai\nmodel: model-b\n---\n\nYou are Bea.\n');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ anthropic: { type: 'oauth_token', value: 'sk-ant-oat-test' } }),
+  );
+
+  const IDLE_MS = 300;
+
+  // Bea is the slow phase: a delegated turn that takes longer than the
+  // outer turn's idle timeout, the way a real tool waiting on a human or
+  // a long command does.
+  const fetchImpl = (async () => {
+    await new Promise((resolve) => setTimeout(resolve, IDLE_MS * 3));
+    return openAiText('bea done');
+  }) as typeof fetch;
+
+  const queryFn = ((params: { options?: unknown }) => {
+    const options = params.options as {
+      mcpServers?: Record<string, {
+        instance?: { _registeredTools?: Record<string, { handler: (a: unknown, b: unknown) => Promise<unknown> }> };
+      }>;
+    };
+    return (async function* () {
+      yield { type: 'system', subtype: 'init', session_id: 'sdk-1' };
+      // A delta first — this is what arms the timer on a streaming turn.
+      yield {
+        type: 'stream_event',
+        session_id: 'sdk-1',
+        event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'working' } },
+      };
+      const handler = options.mcpServers?.stratus?.instance?._registeredTools?.agent_delegate?.handler;
+      if (!handler) {
+        throw new Error('the delegate tool was not bridged');
+      }
+      await handler({ agent: 'bea', prompt: 'take your time' }, {});
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'all done', session_id: 'sdk-1' };
+    })();
+  }) as never;
+
+  const gateway = createGateway({
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: { OPENAI_API_KEY: 'sk-o' },
+      fetch: fetchImpl,
+      queryFn,
+    },
+    idleTimeoutMs: IDLE_MS,
+    warn: () => {},
+  });
+  await gateway.start();
+
+  const session = await gateway.dispatch({ sessionId: 'hosted-1', agentId: 'ava', userMessage: 'delegate it' });
+  await gateway.stop();
+
+  assert.equal(session.status, 'completed', `session failed: ${session.lastError ?? ''}`);
+  assert.match(session.messages.at(-1)?.content ?? '', /all done/);
+});

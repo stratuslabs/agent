@@ -41,6 +41,13 @@ export interface StateEnvironment {
   /** Home directory override (tests). Defaults to os.homedir(). */
   homeDir?: string;
   fetch?: typeof fetch;
+  /**
+   * The Agent SDK transport, for the same reason `fetch` is here: an
+   * environment can pin how a run reaches the outside world. Without it
+   * the subscription path is the one runtime nothing can drive except by
+   * launching Claude Code for real.
+   */
+  queryFn?: ClaudeCodeQueryFn;
 }
 
 export type StratusProviderName = 'demo' | 'openai' | 'anthropic';
@@ -1192,6 +1199,10 @@ export const resolveRuntimeConfig = async (
 
   if (env.fetch) {
     resolved.fetch = env.fetch;
+  }
+
+  if (env.queryFn && resolved.provider === 'anthropic') {
+    resolved.queryFn = env.queryFn;
   }
 
   if (soul) {

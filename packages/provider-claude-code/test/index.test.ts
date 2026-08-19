@@ -516,3 +516,52 @@ test('a failed resume is not replayed once a hosted tool has run', async () => {
   assert.deepEqual(attempts, ['sdk-gone'], 'the turn must not be replayed after a tool ran');
   assert.deepEqual(executed, ['demo.echo']);
 });
+
+test('SDK partial messages become kernel deltas, in the kernel\'s own tool naming', async () => {
+  const { queryFn, calls } = createFakeQuery([
+    { type: 'system', subtype: 'init', session_id: 'sdk-1' },
+    { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hel' } } },
+    { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta' } } },
+    // The SDK names the tool the way MCP does; consumers are the kernel's.
+    { type: 'stream_event', event: { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', name: 'mcp__stratus__demo_echo' } } },
+    { type: 'stream_event', event: { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"a":' } } },
+    { type: 'result', subtype: 'success', is_error: false, result: 'Hello.', session_id: 'sdk-1' },
+  ]);
+
+  const deltas: unknown[] = [];
+  const provider = createClaudeCodeProvider({
+    authToken: 'sk-ant-oat-test',
+    queryFn,
+    executeTool: async (_session, call) => ({ callId: call.id, toolName: call.toolName, ok: true, output: {} }),
+  });
+
+  await provider.generate({
+    session: createSession(),
+    memory: [],
+    tools: [{ name: 'demo.echo', description: 'echo', parameters: { type: 'object', properties: {} } }],
+    onDelta: (delta) => {
+      deltas.push(delta);
+    },
+  });
+
+  assert.deepEqual(deltas, [
+    { type: 'text', text: 'Hel' },
+    { type: 'thinking' },
+    { type: 'tool-call', toolName: 'demo.echo' },
+    { type: 'tool-call', toolName: 'demo.echo', inputFragment: '{"a":' },
+  ]);
+
+  // Partial messages are only requested when someone is listening.
+  assert.equal((calls[0]!.options as { includePartialMessages?: boolean }).includePartialMessages, true);
+});
+
+test('partial messages are not requested when nothing consumes them', async () => {
+  const { queryFn, calls } = createFakeQuery([
+    { type: 'result', subtype: 'success', is_error: false, result: 'Hi.', session_id: 'sdk-1' },
+  ]);
+  const provider = createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn });
+
+  await provider.generate({ session: createSession(), memory: [] });
+
+  assert.equal((calls[0]!.options as { includePartialMessages?: boolean }).includePartialMessages, undefined);
+});
