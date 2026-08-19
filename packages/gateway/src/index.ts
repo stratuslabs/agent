@@ -418,6 +418,18 @@ interface AgentSource {
 }
 
 /**
+ * Recorded on a turn the previous process was still running when it died.
+ *
+ * Exported because "distinguishable" is the whole point: a surface, a
+ * test, or an operator reading `lastError` has to be able to tell a turn
+ * nobody finished apart from one a provider or a tool actually failed, and
+ * matching on prose that lives in one place beats each caller inventing
+ * its own guess at the wording.
+ */
+export const ABANDONED_TURN_ERROR =
+  'stratusd stopped while this turn was still running; it was not resumed. Send the message again.';
+
+/**
  * The always-on Stratus process. One gateway holds the roster, the durable
  * session store, the shared event bus, and a pool of runners keyed by
  * resolved provider configuration — each agent runs on its own provider,
@@ -1361,6 +1373,88 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     });
 
   /**
+   * Turns the last process was still running when it stopped being able to
+   * finish them.
+   *
+   * `pending_approval` is the one window a turn can be picked up from, and
+   * it has its own sweep above. Everything else a turn does is saved as
+   * `running`: the provider call, the executor, and — on a provider that
+   * hosts its own loop — the approval wait too, since a hosted call is
+   * deliberately not checkpointed (`executeHostedToolCall` passes
+   * `recoverable: false`, because the SDK's inner loop is not something a
+   * restart can rebuild). None of those can be resumed, and nothing else
+   * sweeps them, so the record goes on claiming the turn is running for as
+   * long as the session exists.
+   *
+   * Note what this is *not* for. A graceful stop denies everything parked
+   * and drains the turns those denials release, so an operator restarting
+   * the daemon normally has nothing here. These are the turns a crash, a
+   * SIGKILL, or a lost machine left behind.
+   */
+  const listAbandonedTurns = async (): Promise<string[]> => {
+    if (!store.listIdsByStatus) {
+      return [];
+    }
+    return store.listIdsByStatus('running');
+  };
+
+  /**
+   * Marks each of them failed, with a reason that says what happened.
+   *
+   * Read BEFORE the channels start and applied after, which is the only
+   * ordering that is both honest and safe. Reading first means the list is
+   * exactly what the last process left, with no chance of a turn this
+   * process started being in it. Applying after means the failure is
+   * emitted into a gateway whose surfaces are listening, rather than into
+   * one where nothing is.
+   *
+   * The gap between the two is real, though: an inbound message for one of
+   * these sessions can arrive as soon as the channels are up. What makes
+   * that safe is single-flight — every writer of a session goes through
+   * `onSessionChain`, so this runs either wholly before that turn (it
+   * fails, and `resume()` then clears `lastError` and starts fresh) or
+   * wholly after it (the status has moved off `running`, and the re-read
+   * below leaves it alone). There is no interleaving in which this
+   * overwrites a live turn.
+   *
+   * What that invariant does NOT cover is a second daemon on the same
+   * database, whose turns are running with no chain of ours in front of
+   * them. Two processes sharing a session store is already unsupported —
+   * the parked sweep above would re-ask that daemon's approvals for the
+   * same reason — and no check here would make it supported.
+   */
+  const failAbandonedTurns = async (abandoned: string[]): Promise<void> => {
+    if (abandoned.length === 0) {
+      return;
+    }
+    log(`failing ${abandoned.length} turn(s) left running by the last stratusd`);
+    await Promise.allSettled(abandoned.map((id) => failAbandonedTurn(id)));
+  };
+
+  const failAbandonedTurn = (id: string): Promise<void> =>
+    onSessionChain(id, async () => {
+      if (stopping) {
+        return;
+      }
+      try {
+        const session = await store.get(id);
+        // Re-read on the chain, because the snapshot is from before the
+        // channels came up: a message that arrived since has already taken
+        // this session somewhere else, and that turn owns it now.
+        if (!session || session.status !== 'running') {
+          return;
+        }
+        session.status = 'failed';
+        session.lastError = ABANDONED_TURN_ERROR;
+        await store.save(session);
+        await bus.emit({ type: 'session.updated', sessionId: id, status: 'failed' });
+        await bus.emit({ type: 'session.failed', sessionId: id, error: ABANDONED_TURN_ERROR });
+      } catch (error) {
+        warn(`could not fail abandoned turn ${id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+
+  /**
    * Runs `work` as the session's next turn: queued behind whatever that
    * session is already doing, and tracked so shutdown drains it.
    *
@@ -1409,6 +1503,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       await loadRoster();
       const named = registry.list().map((agent) => agent.name).join(', ');
       log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
+
+      // Read before anything can dispatch, so this is exactly what the
+      // last process left running and not a turn of ours caught in flight.
+      // Applied further down, once there is somewhere for the failure to
+      // be heard.
+      const abandoned = await listAbandonedTurns();
+
       // Channels come up after the roster so their first inbound message
       // already has agents to dispatch to. One failing adapter must not
       // keep the rest (or the gateway) down.
@@ -1435,6 +1536,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // would refuse to finish booting.
       void recoverParkedTurns().catch((error) => {
         warn(`recovering parked turns failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+
+      // Not awaited for the same reason, and independent of the sweep
+      // above: these sessions are not parked, so the two never touch the
+      // same one.
+      void failAbandonedTurns(abandoned).catch((error) => {
+        warn(`failing abandoned turns failed: ${error instanceof Error ? error.message : String(error)}`);
       });
     },
 

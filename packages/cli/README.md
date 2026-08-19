@@ -174,6 +174,15 @@ Three things are worth knowing before you turn it on:
   keeps the window it started with rather than getting a fresh one, and a
   wait that has already used up its `timeoutMs` is denied instead of
   re-asked: downtime is not a reason to extend a security decision.
+- **A turn that was mid-flight is failed, not left hanging.** Parking is the
+  one state a restart can resume from — a turn that stopped anywhere else
+  (waiting on the provider, inside a tool, or on an approval asked by an
+  agent billed through a Claude subscription, which is deliberately not
+  checkpointed) cannot be. Those sessions come back marked `failed`, with a
+  reason saying stratusd stopped while they were running and to send the
+  message again, rather than claiming to still be running forever. This is
+  only for an ungraceful stop: a normal restart denies what is parked and
+  finishes the turns those denials release before it exits.
 - **Always allow lasts for the session**, not forever. It stops the same tool
   asking again in the same conversation, and it is forgotten when the daemon
   restarts. A durable per-agent whitelist is a narrower promise (a normalized

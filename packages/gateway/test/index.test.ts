@@ -11,6 +11,7 @@ import {
   type StratusEvent,
 } from '@stratusagent/core';
 import {
+  ABANDONED_TURN_ERROR,
   createGateway,
   SqliteSessionStore,
   type ApprovalTransport,
@@ -2850,4 +2851,165 @@ test('an approved tool on a turn with no watchdog leaves nothing behind', async 
     clearTimeout(timer);
     await gateway.stop();
   }
+});
+
+/**
+ * Resolves when `predicate` first sees a matching event, and rejects if
+ * the gateway stops without one.
+ *
+ * A gate on the event itself rather than a sleep, because both sweeps in
+ * `start()` are deliberately not awaited — the daemon must finish booting
+ * with a slow approver outstanding — so there is nothing to await but the
+ * outcome. The losing path has to reject rather than simply never resolve,
+ * or a regression hangs the suite instead of failing the assertion.
+ */
+const eventGate = (
+  gateway: { bus: { subscribe: (listener: (event: StratusEvent) => void) => () => void } },
+  predicate: (event: StratusEvent) => boolean,
+): { seen: Promise<StratusEvent>; give_up: (reason: string) => void } => {
+  let settle: (event: StratusEvent) => void = () => {};
+  let give_up: (reason: string) => void = () => {};
+  const seen = new Promise<StratusEvent>((resolve, reject) => {
+    settle = resolve;
+    give_up = (reason: string) => reject(new Error(reason));
+  });
+  const unsubscribe = gateway.bus.subscribe((event) => {
+    if (predicate(event)) {
+      settle(event);
+      unsubscribe();
+    }
+  });
+  return { seen, give_up };
+};
+
+test('a turn the last stratusd left running is failed, with a reason that says so', async () => {
+  // A crash mid-turn saves nothing: the session keeps the `running` it was
+  // given when the turn started. Nothing picks that up — the parked sweep
+  // only looks at `pending_approval`, and a hosted tool call is
+  // deliberately never checkpointed — so without this the record claims
+  // that turn is still running for as long as the session exists.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const dbPath = path.join(home, 'sessions.db');
+
+  const before = new SqliteSessionStore(dbPath);
+  await before.create({
+    id: 'abandoned-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'do the thing', createdAt: new Date().toISOString() }],
+  });
+  before.close();
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('unused')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, warn: () => {} });
+  const failed = eventGate(
+    gateway,
+    (event) => event.type === 'session.failed' && event.sessionId === 'abandoned-1',
+  );
+  await gateway.start();
+  // stop() drains what start() left running, so a sweep that never ran
+  // loses here instead of hanging the suite.
+  await gateway.stop().then(() => failed.give_up('the abandoned turn was never failed'));
+
+  const event = await failed.seen;
+  assert.equal(event.type === 'session.failed' ? event.error : '', ABANDONED_TURN_ERROR);
+
+  const after = new SqliteSessionStore(dbPath);
+  const session = await after.get('abandoned-1');
+  after.close();
+  assert.equal(session?.status, 'failed');
+  assert.equal(session?.lastError, ABANDONED_TURN_ERROR);
+});
+
+test('a parked turn is left to the approval sweep, not failed as abandoned', async () => {
+  // The two sweeps must not both claim a session. A parked turn is the one
+  // state a restart CAN pick up, and failing it here would throw away the
+  // checkpoint that makes that possible.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const dbPath = path.join(home, 'sessions.db');
+
+  const before = new SqliteSessionStore(dbPath);
+  await before.create({
+    id: 'parked-not-abandoned-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [{ id: 'u1', role: 'user', content: 'gated work', createdAt: new Date().toISOString() }],
+  });
+  before.close();
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('unused')) as typeof fetch,
+  };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, warn: () => {} });
+  await gateway.start();
+  await gateway.stop();
+
+  const after = new SqliteSessionStore(dbPath);
+  const session = await after.get('parked-not-abandoned-1');
+  after.close();
+  assert.notEqual(session?.lastError, ABANDONED_TURN_ERROR);
+});
+
+test('a message that beats the sweep keeps its turn, and the stale failure with it', async () => {
+  // The list is read before the channels come up and applied after, so an
+  // inbound message can land in between. Single-flight is what makes that
+  // safe, and this is the interleaving it has to survive: the channel
+  // dispatches from start(), which queues on the session chain ahead of
+  // the sweep.
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const dbPath = path.join(home, 'sessions.db');
+
+  const before = new SqliteSessionStore(dbPath);
+  await before.create({
+    id: 'raced-1',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [{ id: 'u1', role: 'user', content: 'the turn that died', createdAt: new Date().toISOString() }],
+  });
+  before.close();
+
+  let resumed = '';
+  const adapter: GatewayChannelAdapter = {
+    name: 'fake',
+    async start(gw) {
+      const session = await gw.dispatch({ sessionId: 'raced-1', agentId: 'ava', userMessage: 'try again' });
+      resumed = session.messages.at(-1)?.content ?? '';
+    },
+    async stop() {},
+  };
+
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'sk-o' },
+    fetch: (async () => openAiText('answered on the retry')) as typeof fetch,
+  };
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    sessionDbPath: dbPath,
+    channels: [adapter],
+    warn: () => {},
+  });
+  await gateway.start();
+  await gateway.stop();
+
+  assert.match(resumed, /answered on the retry/);
+
+  const after = new SqliteSessionStore(dbPath);
+  const session = await after.get('raced-1');
+  after.close();
+  assert.equal(session?.status, 'completed', 'the live turn owns the session, not the sweep');
+  assert.equal(session?.lastError, undefined);
 });
