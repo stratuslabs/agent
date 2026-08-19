@@ -27,9 +27,16 @@ them individually:
 Everything optional is a **plugin**: one package that contributes tools, skills,
 providers, channels, memory stores, executors, or hooks. A transport you don't
 use is weight you shouldn't carry, so each one is separate and you add only what
-you want. Install it next to the CLI and `stratus serve` picks it up on its own.
+you want.
 
-Channels are the plugins that exist today:
+Installing a plugin does not run it. A plugin is code in the daemon's own
+process, so it runs only once it is named and enabled in a trusted config —
+never by being present on disk. Channels are the exception that predates the
+rule and keeps its own path: a channel starts when *its credentials are stored*,
+which is a decision you already made when you connected the app.
+
+Channels are the plugins that exist today, and `stratus serve` picks one up on
+its own once its tokens are saved:
 
 - `@stratusagent/channel-slack` — talk to your agents in Slack: one Slack app per agent (its own avatar, presence, and DMs), Socket Mode so no public ingress is needed, resumable threads, and replies that stream via message edits. Adds roughly 9 MB of Slack SDKs.
 

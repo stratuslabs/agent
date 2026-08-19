@@ -189,6 +189,33 @@ Keyed by package because a plugin's identity *is* its package, and because a
 plugin may contribute more than tools — a block keyed by toolset has nowhere to
 put a plugin that adds a channel and a memory store.
 
+**Per-agent settings live in an `agents` sub-block**, defaults above it:
+
+```jsonc
+"@stratusagent/tool-fs": {
+  "enabled": true,
+  "roots": ["~/notes"],
+  "agents": {
+    "ava":  { "roots": ["~/work/ava"] },
+    "juno": { "roots": ["~/work/juno", "~/shared"] }
+  }
+}
+```
+
+This shape is not new — `approvals` already carries exactly it (defaults, then
+`agents` keyed by agent id), and copying it beats inventing a second convention
+for the same idea. It matters more here than there, because for a plugin like
+`tool-fs` these values *are* an access-control boundary: a flat `roots` array
+would give every agent enabling `fs.*` the same roots, which is one agent
+reading another's files.
+
+A plugin is still constructed once, not once per agent. It resolves the caller's
+settings **at execution time**, from `session.agent.id` — `Tool.execute(input,
+session, context)` already carries the session, so no new seam is required, and
+an agent with no entry gets the defaults. A plugin whose settings are an access
+boundary must resolve per call rather than closing over one value at setup, and
+that is a requirement on the plugin, not a courtesy.
+
 Loading uses the `import.meta.resolve` + dynamic-import pattern of
 `loadSlackAdapter` in `packages/cli/src/index.ts`, which is today the repo's
 only instance of it. It resolves first and imports second on purpose: a package
@@ -218,6 +245,18 @@ narrow. They are not a sandbox, and this document does not claim one:
   running without your explicit consent."
 - **The manifest is validated before the module is imported.** Reading what a
   plugin claims must never require running what it does.
+- **`setup()` registers through a manifest-bound view, never the raw
+  registry.** Validating `package.json` before import says what a plugin
+  *claims*; it does nothing about what `setup()` then does, and `ToolRegistry.
+  register` is a bare `Map.set` that records neither the originating package
+  nor anything to check a claim against. A plugin handed that registry directly
+  could register a tool it never declared, mark it `safe`, and run unattended —
+  the floor below would be decoration. So `context.tools` is a per-plugin view
+  that **rejects a name the manifest does not declare**, **retains the package
+  as provenance** so risk resolution can ask whose code a tool is, and
+  **applies the risk floor at registration** rather than trusting the `risk`
+  field on the object it is handed. The manifest becomes enforceable rather
+  than advisory, which is the only way the two rules around it mean anything.
 - **A third-party tool may not declare itself `safe`.** `safe` means "run this
   unattended, with nobody watching," and it is not a claim the code being
   judged gets to make about itself. Risk floors at `gated` for tools from
