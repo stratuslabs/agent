@@ -53,6 +53,10 @@ interface FakeWeb extends SlackWebLike {
   ephemerals: Array<{ channel: string; user: string; text: string }>;
   uploads: Array<{ channel_id: string; filename?: string; contents: string; wasBuffer: boolean }>;
   userInfoDelayMs?: (callIndex: number) => number;
+  /** Called as chat.postMessage is entered, before it awaits `postGate`. */
+  onPostEnter?: () => void;
+  /** Held by chat.postMessage, so a test can act while a post is in flight. */
+  postGate?: Promise<void>;
 }
 
 const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
@@ -72,7 +76,12 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
       async postMessage(args) {
         web.posts.push(args);
         counter += 1;
-        return { ts: `bot-ts-${counter}`, channel: args.channel };
+        const ts = `bot-ts-${counter}`;
+        web.onPostEnter?.();
+        if (web.postGate) {
+          await web.postGate;
+        }
+        return { ts, channel: args.channel };
       },
       async update(args) {
         web.updates.push(args);
@@ -1349,4 +1358,40 @@ test('a store that cannot answer does not take the daemon down with it', async (
     warnings.some((line) => /could not read the routing/.test(line)),
     `the failure is reported as a warning, not a crash: ${JSON.stringify(warnings)}`,
   );
+});
+
+test('a click that beats the post is not treated as an orphan', async () => {
+  // Slack can show a message before postMessage resolves here, so a fast
+  // click lands while the request is mid-post: absent from the index of
+  // posts, but very much alive. Retiring it there would take the buttons
+  // off a live question, and the record written when the post lands does
+  // not put them back — the turn would wait out its whole approval window
+  // with no way to answer.
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  let reachedPost = (): void => {};
+  const posting = new Promise<void>((resolve) => { reachedPost = resolve; });
+  let releasePost = (): void => {};
+  web.onPostEnter = () => reachedPost();
+  web.postGate = new Promise<void>((resolve) => { releasePost = resolve; });
+
+  gateway.pendingApprovals.add('req-1');
+  void gateway.bus.emit(approvalRequest());
+  // Gated on the post being entered, not on a delay: the window opens when
+  // postMessage is reached and closes when it returns.
+  await posting;
+
+  await socket.deliver('interactive', click('stratus_approve_once', 'req-1', 'U-DYLAN'));
+  assert.deepEqual(web.updates, [], 'a live request keeps its buttons');
+
+  releasePost();
+  await adapter.stop();
+
+  // Still answerable, which is the thing that was at stake.
+  assert.equal(gateway.pendingApprovals.has('req-1'), true);
+  const buttons = buttonIds(web.posts.at(-1)?.blocks);
+  assert.deepEqual(buttons, ['stratus_approve_once', 'stratus_approve_always', 'stratus_deny']);
 });

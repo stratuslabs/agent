@@ -947,11 +947,21 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (!post) {
       await tellClicker(connection, args, 'That approval request is no longer pending.');
       // And the message itself is corrected, so the next person to read it
-      // is not offered a decision nothing is waiting for. Only for a
-      // request this process never settled: one it did has already been
-      // rewritten with its real outcome, and this click is a stale render
-      // of that message rather than a live question.
-      if (!settledHere.has(requestId)) {
+      // is not offered a decision nothing is waiting for. Two requests are
+      // absent from the index without being orphans, and both keep their
+      // buttons:
+      //
+      // one this process settled has already been rewritten with its real
+      // outcome, so this click is a stale render of that message rather
+      // than a live question;
+      //
+      // and one still being posted is live, with the index simply not
+      // caught up yet — Slack can show a message before postMessage
+      // resolves here, so a fast click lands inside that window. Stripping
+      // its buttons would strand the turn until the approval times out,
+      // because the record written when the post lands does not put them
+      // back.
+      if (!settledHere.has(requestId) && !rendering.has(requestId)) {
         await retireOrphanedPrompt(connection, args);
       }
       return;
