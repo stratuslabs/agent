@@ -151,6 +151,10 @@ A `"stratus"` field in `package.json`:
         { "name": "github.pr.comment", "risk": "gated" },
         { "name": "github.pr.read", "risk": "safe" }
       ],
+      "//": "or, for a plugin whose tool names exist only at runtime:",
+      "toolsDiscovered": [
+        { "namespace": "mcp.*", "risk": "gated" }
+      ],
       "skills": [
         { "id": "pr-review", "path": "./skills/pr-review/SKILL.md" }
       ]
@@ -170,6 +174,41 @@ the same property with one fewer file to drift.
 
 `contributes.tools[].risk` is a **declaration, not a decision** — see the trust
 model.
+
+### Declaring a namespace instead of names
+
+Some plugins cannot list their tools. The [MCP bridge](../roadmap/11-mcp.md)
+learns its tool names by asking a server at connect time, and the set changes
+when the server changes — so a static list of names is not merely inconvenient
+for it, it is impossible. For those, a manifest declares a **namespace it owns**
+rather than the names inside it:
+
+```jsonc
+"toolsDiscovered": [{ "namespace": "mcp.*", "risk": "gated" }]
+```
+
+This is a smaller loophole than it looks, and the constraints are what keep it
+from being a wildcard:
+
+- **A namespace is not everything.** `mcp.*` authorizes
+  `mcp.linear.create_issue` and authorizes nothing named `fs.write`. Anything
+  outside the declared namespace is rejected exactly as an undeclared literal
+  name is — at first load, and identically on every reconnect.
+- **The declared risk is a ceiling on trust, not a floor the plugin picks.**
+  A discovered tool is registered at the namespace's declared risk, never below
+  it, and the third-party floor still applies on top. A bridge cannot mark a
+  server's tool `safe` by discovering it, which is the same conclusion 11
+  reaches from its own direction: the risk assignment is ours, not the
+  server's.
+- **Provenance is unchanged.** The package is still recorded, so risk
+  resolution can still ask whose code a tool is.
+
+The cost is real and belongs in the open: a namespace tells an operator
+strictly less than a list. They learn *where* a plugin may register and under
+what risk, not *what*. That is why [12](../roadmap/12-plugin-registry.md) has
+`stratus plugin install` render such a declaration as what it is — "registers
+tools under `mcp.*`, discovered at runtime, all `gated`" — rather than showing
+an empty tool list and implying the plugin contributes nothing.
 
 ## Configuration
 
@@ -252,11 +291,14 @@ narrow. They are not a sandbox, and this document does not claim one:
   nor anything to check a claim against. A plugin handed that registry directly
   could register a tool it never declared, mark it `safe`, and run unattended —
   the floor below would be decoration. So `context.tools` is a per-plugin view
-  that **rejects a name the manifest does not declare**, **retains the package
-  as provenance** so risk resolution can ask whose code a tool is, and
-  **applies the risk floor at registration** rather than trusting the `risk`
-  field on the object it is handed. The manifest becomes enforceable rather
-  than advisory, which is the only way the two rules around it mean anything.
+  that **rejects a name the manifest does not declare** — as a literal name or
+  as falling inside a declared namespace — **retains the package as provenance**
+  so risk resolution can ask whose code a tool is, and **applies the declared
+  risk and the floor at registration** rather than trusting the `risk` field on
+  the object it is handed. The manifest becomes enforceable rather than
+  advisory, which is the only way the two rules around it mean anything. A
+  namespace declaration widens what a plugin may name; it never widens what it
+  may claim about risk, and it never reaches outside itself.
 - **A third-party tool may not declare itself `safe`.** `safe` means "run this
   unattended, with nobody watching," and it is not a claim the code being
   judged gets to make about itself. Risk floors at `gated` for tools from

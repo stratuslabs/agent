@@ -31,6 +31,12 @@ exist.
   and requires confirmation before writing it into the `plugins` block. The
   confirmation is the point: the trust model says nothing auto-loads, and an
   install command that silently enables would defeat it.
+
+  A plugin declaring a **namespace** rather than names is rendered as what it
+  is — "registers tools under `mcp.*`, discovered at runtime, all `gated`" —
+  never as an empty tool list. A namespace tells an operator less than a list
+  does, and the confirmation screen is exactly the wrong place to disguise
+  that.
 - **`stratus plugin list` / `remove`**, and the same over the control API so the
   dashboard and macOS app can show installed plugins with their contributions.
 - **A curated index repo** (`stratuslabs/plugins`) once there are enough

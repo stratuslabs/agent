@@ -28,10 +28,22 @@ exists. Nothing else on the roadmap has that ratio.
   tools at load and registers them namespaced by server:
   `mcp.<server>.<tool>`, so a soul allowlists `mcp.linear.*` and an operator
   can see at a glance which tools are foreign.
+- **The manifest declares a namespace, not names.** This is the one plugin that
+  cannot enumerate its contributions: names arrive from the server at connect
+  and change when the server changes. So the package declares
+  `toolsDiscovered: [{ "namespace": "mcp.*", "risk": "gated" }]` and the
+  manifest-bound registration view in
+  [`plugins.md`](../architecture/plugins.md) accepts discovered names inside
+  that namespace — on first connect and identically on reconnect — while still
+  rejecting anything outside it. Without the namespace form the bridge would be
+  refused by its own contract; with it, the bridge still cannot register
+  `fs.write`.
 - **Risk assignment is ours, not the server's.** MCP has no risk vocabulary,
   and a remote server's self-description is exactly the input the trust model
-  says not to take at face value. Every bridged tool floors at `gated`, with
-  per-tool overrides in config for an operator who has read the server.
+  says not to take at face value. Every bridged tool floors at `gated` — the
+  namespace's declared risk is a ceiling on what discovery may claim, never a
+  floor the bridge lowers — with per-tool overrides in config for an operator
+  who has read the server.
 - **Schema translation** both ways, and result normalization into `JsonValue`,
   including MCP's content blocks (text, images, resources) — images land in the
   per-agent workspace directory 06 introduces, so channels can upload them.
@@ -67,6 +79,9 @@ first-class concepts beyond what tool results need; sampling.
   not.
 - A bridged tool defaults to `gated` even when the server describes it as
   read-only; the override is explicit and per tool.
+- A tool discovered only on reconnect registers successfully, and a server
+  advertising a tool named outside `mcp.*` is refused — the pair that proves the
+  namespace declaration is a boundary rather than a formality.
 - A stdio server cannot read `ANTHROPIC_API_KEY` from its environment.
 - A server that is unreachable at startup leaves the daemon serving every other
   agent normally, with an install-hint-style log line.

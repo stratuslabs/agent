@@ -136,7 +136,7 @@ npm install -g @stratusagent/cli
 stratus setup
 ```
 
-That is the whole install for the runtime. If you want Slack, add the channel package too — see [Optional packages](#optional-packages):
+That is the whole install for the runtime. If you want Slack, add the channel package too — see [Plugins](#plugins):
 
 ```bash
 npm install -g @stratusagent/channel-slack
