@@ -194,7 +194,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
         return auth.mintOneTimeToken();
       },
       redeemOneTimeToken: (ott) => auth?.redeemOneTimeToken(ott),
-      sessionCookie: (sessionId) => auth?.sessionCookie(sessionId) ?? '',
+      sessionCookie: (sessionId, secure) => auth?.sessionCookie(sessionId, secure) ?? '',
       withTurn: (sessionId, turnId, work) => stream?.withTurn(sessionId, turnId, work) ?? work(),
       watchTurn: (sessionId, turnId) => stream?.watchTurn(sessionId, turnId)
         ?? { reported: () => false, release: () => {} },

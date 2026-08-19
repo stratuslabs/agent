@@ -26,13 +26,14 @@ import {
   validateConfigFile,
   servedRuntimes,
   verifyProviderKey,
+  type AgentSummary,
   type CredentialProviderName,
   type RuntimeConfig,
   type StateEnvironment,
   type StratusConfigFile,
 } from '@stratusagent/state';
 
-import type { Principal } from './auth.ts';
+import { requestScheme, type Principal } from './auth.ts';
 import {
   API_PREFIX,
   ApiError,
@@ -61,7 +62,7 @@ export interface RouteContext {
   mintOneTimeToken: () => string;
   /** Spend one, yielding a session id. */
   redeemOneTimeToken: (ott: string | undefined) => string | undefined;
-  sessionCookie: (sessionId: string) => string;
+  sessionCookie: (sessionId: string, secure?: boolean) => string;
   /**
    * Emit within a turn's identity, for events the gateway can no longer
    * attribute itself. See `createEventStream`.
@@ -182,6 +183,29 @@ const credentialSource = (runtime: RuntimeConfig): string => {
   return runtime.apiKeyEnvVar ? `environment (${runtime.apiKeyEnvVar})` : 'stored';
 };
 
+/**
+ * Summaries keyed by id, keeping the one the daemon is actually serving.
+ *
+ * `listAgentSummaries` describes *files*, and two files can name one id: a
+ * configured default soul shadowing a roster file, or a roster file claiming
+ * the reserved built-in id. The daemon serves exactly one of each pair — the
+ * configured soul in the first case (it replaces the roster source), the
+ * built-in in the second (a soul claiming `stratus` is skipped at load) — so
+ * a last-write-wins map enriches a live agent with the persona, soul path,
+ * resolved runtime, and flags of the file it is *not* running.
+ */
+const summariesById = (summaries: AgentSummary[]): Map<string, AgentSummary> => {
+  const byId = new Map<string, AgentSummary>();
+  for (const summary of summaries) {
+    const existing = byId.get(summary.id);
+    const wins = summary.id === DEFAULT_STRATUS_AGENT.id ? summary.builtIn : summary.default;
+    if (!existing || wins) {
+      byId.set(summary.id, summary);
+    }
+  }
+  return byId;
+};
+
 /** The soul file backing an agent, or a 404 naming the id. */
 const soulForAgent = async (
   context: RouteContext,
@@ -263,9 +287,8 @@ export const routes: Route[] = [
       // browser cannot forge it; `x-forwarded-proto` is the proxy's own word
       // for the scheme it terminated, and it is read for nothing else.
       const host = context.request.headers.host;
-      const forwarded = context.request.headers['x-forwarded-proto'];
-      const scheme = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0]?.trim();
-      const origin = host ? `${scheme === 'https' ? 'https' : 'http'}://${host}` : context.url.origin;
+      const scheme = requestScheme(context.request.headers['x-forwarded-proto']);
+      const origin = host ? `${scheme}://${host}` : context.url.origin;
       return {
         ott,
         // Absolute, so the caller opens exactly the origin this token is
@@ -291,7 +314,12 @@ export const routes: Route[] = [
         );
       }
       context.response.statusCode = 302;
-      context.response.setHeader('set-cookie', context.sessionCookie(sessionId));
+      context.response.setHeader(
+        'set-cookie',
+        // Flagged when this exchange came through TLS, so a session minted on
+        // a public hostname is never sent back over plain HTTP to it.
+        context.sessionCookie(sessionId, requestScheme(context.request.headers['x-forwarded-proto']) === 'https'),
+      );
       context.response.setHeader('location', '/');
       context.response.setHeader('cache-control', 'no-store');
       context.response.end();
@@ -309,7 +337,7 @@ export const routes: Route[] = [
       // broken since the last reload would otherwise make health report
       // agents that dispatch refuses, or omit ones it is still serving.
       const summaries = await listAgentSummaries(context.env, () => {}, context.configPath);
-      const byId = new Map(summaries.map((summary) => [summary.id, summary]));
+      const byId = summariesById(summaries);
       // Counted in the database. Listing every session to add them up made
       // the cost of a health poll grow with everything the install had ever
       // stored — steadily slower at exactly the endpoint that exists to say
@@ -369,7 +397,7 @@ export const routes: Route[] = [
       // duplicate or unparseable file produces the same mismatch. Anything
       // this endpoint lists can be talked to.
       const summaries = await listAgentSummaries(context.env, () => {}, context.configPath);
-      const byId = new Map(summaries.map((summary) => [summary.id, summary]));
+      const byId = summariesById(summaries);
       // Activity comes from the running daemon's session store, which the
       // shared builder has no access to: the CLI's listing is about identity
       // and configuration, this one is about a daemon that is serving.

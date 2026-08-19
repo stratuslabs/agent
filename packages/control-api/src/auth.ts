@@ -226,12 +226,23 @@ export const createAuthenticator = (options: AuthenticatorOptions) => {
       return sessionId;
     },
 
-    sessionCookie(sessionId: string): string {
-      // No `Secure`: the gateway serves plain HTTP on loopback, and a Secure
-      // cookie would simply never be sent back — the flag would read as
-      // hardening while silently breaking every request. Remote access is a
-      // tunnel's job, and a tunnel terminates TLS in front of this.
-      return `${SESSION_COOKIE}=${sessionId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`;
+    /**
+     * The cookie to set, `Secure` exactly when the exchange arrived over TLS.
+     *
+     * Not unconditional: the gateway serves plain HTTP on loopback, and a
+     * `Secure` cookie would never be sent back there — the flag would read as
+     * hardening while silently breaking every request. Not unconditionally
+     * absent either, which is what this was: cookies are scoped by host, not
+     * by scheme or port, so a session minted through a TLS-terminating tunnel
+     * and left flagless rides any later plain-HTTP request to that same public
+     * hostname — the redirect-to-HTTPS request above all — in cleartext.
+     *
+     * So it follows the exchange. `secure` comes from the proxy's own
+     * `x-forwarded-proto`, which is safe to read here because this exchange is
+     * a top-level browser navigation: a page cannot attach that header to one.
+     */
+    sessionCookie(sessionId: string, secure = false): string {
+      return `${SESSION_COOKIE}=${sessionId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}${secure ? '; Secure' : ''}`;
     },
 
     /** How a request identified itself, or undefined if it did not. */
@@ -324,6 +335,18 @@ export const allowedOrigins = (host: string, port: number): Set<string> => {
  * Accepting `https://` costs nothing: an attacker would have to serve TLS on
  * this very host and port, which means already being this server.
  */
+/**
+ * The scheme a request arrived on, as far as this daemon can tell.
+ *
+ * The socket is always plain HTTP, so this is the proxy's word for what it
+ * terminated in front of us — read for the cookie's `Secure` flag and the
+ * sign-in link's origin, and nothing that grants access.
+ */
+export const requestScheme = (forwardedProto: string | string[] | undefined): 'http' | 'https' => {
+  const first = (Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto)?.split(',')[0]?.trim();
+  return first?.toLowerCase() === 'https' ? 'https' : 'http';
+};
+
 export const originAllowed = (
   principal: Principal,
   origin: string | undefined,

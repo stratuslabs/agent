@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { allowedOrigins, ensureGatewayToken } from '../src/auth.ts';
 import { authority } from '../src/index.ts';
-import { newHome, openSocket, rawPost, startApi } from './harness.ts';
+import { newHome, openSocket, rawGet, rawPost, startApi } from './harness.ts';
 
 /**
  * A cookie, extracted from the one-time-token exchange the way a browser
@@ -383,4 +383,34 @@ test('a fresh claim publishes a complete file, never an empty one', async () => 
   // staging file left behind either.
   const strays = (await readdir(path.dirname(tokenPath))).filter((entry) => entry.startsWith('gateway-token.'));
   assert.deepEqual(strays, [], `staging files were left behind: ${strays.join(', ')}`);
+});
+
+test('a session minted through TLS is Secure; a loopback one is not', async () => {
+  const harness = await startApi();
+  try {
+    const port = Number(new URL(harness.url).port);
+    const minted = await rawPost(port, '/api/v1/auth/ott', { authorization: `Bearer ${harness.token}` });
+    const { path } = JSON.parse(minted.body) as { path: string };
+
+    // The same exchange, arriving as a tunnel would forward it. Cookies are
+    // scoped by host and not by scheme, so a flagless one minted on a public
+    // hostname rides any later plain-HTTP request to it — the redirect to
+    // HTTPS above all — in cleartext.
+    const throughTls = await rawGet(port, path, {
+      host: 'gateway.example',
+      'x-forwarded-proto': 'https',
+    });
+    assert.equal(throughTls.status, 302);
+    assert.match(throughTls.setCookie ?? '', /Secure/);
+    assert.match(throughTls.setCookie ?? '', /HttpOnly/);
+
+    const second = await rawPost(port, '/api/v1/auth/ott', { authorization: `Bearer ${harness.token}` });
+    const direct = await rawGet(port, (JSON.parse(second.body) as { path: string }).path, {});
+    assert.equal(direct.status, 302);
+    // And not on loopback, where a Secure cookie would never come back and
+    // the flag would break every request while reading as hardening.
+    assert.doesNotMatch(direct.setCookie ?? '', /Secure/);
+  } finally {
+    await harness.stop();
+  }
 });

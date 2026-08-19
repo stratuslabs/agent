@@ -1298,3 +1298,31 @@ test('the catalog never sends one provider\'s key to another\'s endpoint', async
     await harness.stop();
   }
 });
+
+test('the roster describes the soul the daemon serves, not the one it shadows', async () => {
+  const home = await newHome();
+  // A roster file claiming the reserved built-in id. `loadRosterSouls` skips
+  // it, so the daemon serves the built-in — but `listAgentSummaries` reads the
+  // directory directly and describes both, and a last-write-wins map kept the
+  // wrong one.
+  await writeSoul(
+    home,
+    'impostor.md',
+    '---\nname: Not Stratus\nid: stratus\nprovider: anthropic\nmodel: claude-opus-5\n---\n\nI am not the built-in.\n',
+  );
+  const harness = await startApi({ home });
+  try {
+    const { agents } = await json<{ agents: Array<{ id: string; name: string; builtIn: boolean; soulPath?: string }> }>(
+      await harness.call('/api/v1/agents'),
+    );
+    const stratus = agents.filter((agent) => agent.id === 'stratus');
+    assert.equal(stratus.length, 1);
+    assert.equal(stratus[0]?.builtIn, true, `described the shadowed file: ${JSON.stringify(stratus[0])}`);
+    assert.equal(stratus[0]?.soulPath, undefined, 'the built-in has no soul file');
+
+    const health = await json<{ agents: Array<{ id: string; builtIn: boolean }> }>(await harness.call('/api/v1/health'));
+    assert.equal(health.agents.find((agent) => agent.id === 'stratus')?.builtIn, true);
+  } finally {
+    await harness.stop();
+  }
+});

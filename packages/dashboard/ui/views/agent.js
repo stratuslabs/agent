@@ -73,6 +73,17 @@ export const renderAgent = (agentId, initialSessionId) => {
      */
     pending: [],
     sending: false,
+    /**
+     * True while our own POST is unanswered.
+     *
+     * Distinct from `sending`, which stays true for the whole turn: this is
+     * the window in which the store cannot answer for the turn at all — a new
+     * conversation has nothing stored, and an existing one still carries the
+     * *previous* turn's terminal status until the dispatch saves. Anything
+     * that reconciles against the store during it would be reading about a
+     * turn that has not started.
+     */
+    awaitingSend: false,
     error: undefined,
     saved: undefined,
     /**
@@ -251,6 +262,7 @@ export const renderAgent = (agentId, initialSessionId) => {
     // events against a turn it never sent, and a brand-new conversation would
     // be marked as stored when nothing had been written for it.
     const sentTo = state.sessionId;
+    state.awaitingSend = true;
     // Shown immediately rather than waiting for the round trip: the daemon
     // will persist exactly this, and a message that vanishes for a second
     // reads as a dropped one.
@@ -263,6 +275,7 @@ export const renderAgent = (agentId, initialSessionId) => {
 
     try {
       const { turnId } = await api.send(sentTo, { message: text, agentId });
+      state.awaitingSend = false;
       if (state.sessionId !== sentTo) {
         return;
       }
@@ -278,6 +291,7 @@ export const renderAgent = (agentId, initialSessionId) => {
         applyEnvelope(envelope);
       }
     } catch (error) {
+      state.awaitingSend = false;
       if (state.sessionId !== sentTo) {
         return;
       }
@@ -584,6 +598,18 @@ export const renderAgent = (agentId, initialSessionId) => {
    * session says it has ended.
    */
   const reconcile = async () => {
+    if (state.awaitingSend) {
+      // Our own POST is about to say how this turn went — including its id,
+      // which lands *after* this would have cleared `sending`, re-enabling
+      // the composer on a turn that had only just started. The store cannot
+      // help here: a new conversation has nothing in it yet, and an existing
+      // one still reads as the previous turn.
+      void loadSessions();
+      return;
+    }
+    // Past that, `unsent` can no longer hide a live turn: a conversation with
+    // one has either an outstanding POST, caught above, or a response that
+    // already marked it stored.
     if (state.sending && state.sessionId && !state.unsent) {
       const stored = await api.session(state.sessionId).then((read) => read.session).catch(() => undefined);
       // Unreadable, or still going: leave the turn alone. A session saved a

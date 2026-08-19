@@ -951,6 +951,29 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   /**
+   * Roster rebuilds, one at a time.
+   *
+   * `loadRoster` prunes by comparing the registry against the ids *this pass*
+   * saw, so two overlapping passes destroy each other's work: the older one
+   * snapshots a roster without agent B, the newer one registers B and
+   * finishes, and then the older one reaches its prune and unregisters B —
+   * which two clients creating agents at once will do, each having been told
+   * 201 for an agent that is no longer dispatchable.
+   *
+   * A chain rather than a lock: a reload is idempotent, so a caller arriving
+   * mid-rebuild wants the *next* complete one, and waiting for it is exactly
+   * what this gives them.
+   */
+  let reloads: Promise<unknown> = Promise.resolve();
+  const reloadsInOrder = async (): Promise<void> => {
+    const next = reloads.then(loadRoster, loadRoster);
+    // Swallowed for the chain only — the caller still sees the rejection, but
+    // a roster that failed to load must not block every reload after it.
+    reloads = next.catch(() => undefined);
+    await next;
+  };
+
+  /**
    * A session pins its agent id, never a snapshot of the agent: the soul
    * file is re-read on every dispatch, so an edited persona (or tool
    * allowlist) reaches existing conversations on their next turn.
@@ -1742,7 +1765,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
 
     async reloadRoster() {
-      await loadRoster();
+      await reloadsInOrder();
       const roster = registry.list();
       log(`roster reloaded — ${roster.length} agent(s): ${roster.map((agent) => agent.name).join(', ')}`);
       return roster;

@@ -50,6 +50,25 @@ export const rawPost = (
     request.end();
   });
 
+/** A GET with headers `fetch` will not set, reporting the cookie it was handed. */
+export const rawGet = (
+  port: number,
+  pathname: string,
+  headers: Record<string, string>,
+): Promise<{ status: number; setCookie: string | undefined }> =>
+  new Promise((resolve, reject) => {
+    const request = httpRequest(
+      { host: '127.0.0.1', port, path: pathname, method: 'GET', headers },
+      (response) => {
+        response.resume();
+        const raw = response.headers['set-cookie'];
+        resolve({ status: response.statusCode ?? 0, setCookie: Array.isArray(raw) ? raw[0] : raw });
+      },
+    );
+    request.on('error', reject);
+    request.end();
+  });
+
 export const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-api-'));
 
 export const writeSoul = async (home: string, file: string, contents: string): Promise<void> => {
