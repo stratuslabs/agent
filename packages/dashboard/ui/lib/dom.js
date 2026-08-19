@@ -65,3 +65,19 @@ export const duration = (ms) => {
   if (hours < 24) return `${hours}h ${minutes % 60}m`;
   return `${Math.floor(hours / 24)}d ${hours % 24}h`;
 };
+
+/**
+ * How long is left before a deadline.
+ *
+ * `ago` is the wrong formatter for one and reads as nonsense: it clamps a
+ * future timestamp's negative elapsed time to zero, so an approval half an
+ * hour from lapsing renders as "just now". A deadline is the thing an
+ * operator is deciding against, so it gets a countdown of its own.
+ */
+export const until = (iso) => {
+  if (!iso) {
+    return 'no expiry';
+  }
+  const ms = Date.parse(iso) - Date.now();
+  return ms > 0 ? `in ${duration(ms)}` : 'now';
+};

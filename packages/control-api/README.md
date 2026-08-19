@@ -197,7 +197,10 @@ and a live call per poll would spend the operator's rate limit to say
 something resolution can answer for free.
 
 Both the roster and the runtimes come from the roster the gateway is
-**serving**, not from the agents directory. The two diverge in ordinary use: a
+**serving**, with each soul re-read the way `refreshAgent` re-reads it before
+every dispatch — so a pin edited on disk is reported by the same poll that the
+next turn will bill it on, and an unreadable file falls back to the pins the
+gateway is still dispatching from. It is the roster, not the agents directory. The two diverge in ordinary use: a
 soul dropped on disk is not dispatchable until a reload, and a soul deleted or
 left momentarily unparseable is still dispatched from the copy the gateway
 loaded. Reading the directory would name a provider and model for turns the

@@ -1432,3 +1432,58 @@ test('health bills the roster the gateway serves, not the directory it was built
     await harness.stop();
   }
 });
+
+test('health re-reads a soul edited on disk, as the next dispatch would', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'rex.md', '---\nname: Rex\nid: rex\nprovider: openai\nmodel: gpt-4.1-mini\n---\n\nYou are Rex.\n');
+  const harness = await startApi({
+    home,
+    options: { env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' } } },
+    env: { processEnv: { OPENAI_API_KEY: 'sk-test' } },
+  });
+  try {
+    const before = await json<{ runtimes: Array<{ model?: string }> }>(await harness.call('/api/v1/health'));
+    assert.ok(before.runtimes.some((runtime) => runtime.model === 'gpt-4.1-mini'), 'the pin it started with');
+
+    // Edited in place, with no reload. `refreshAgent` re-reads the file
+    // before every dispatch, so this pin is what the very next turn bills —
+    // and answering from the load-time snapshot named the old one.
+    await writeSoul(home, 'rex.md', '---\nname: Rex\nid: rex\nprovider: openai\nmodel: gpt-4.1\n---\n\nYou are Rex.\n');
+
+    const after = await json<{ runtimes: Array<{ model?: string }> }>(await harness.call('/api/v1/health'));
+    assert.ok(
+      after.runtimes.some((runtime) => runtime.model === 'gpt-4.1'),
+      `reported a pin the next turn will not use: ${JSON.stringify(after.runtimes)}`,
+    );
+    assert.ok(
+      !after.runtimes.some((runtime) => runtime.model === 'gpt-4.1-mini'),
+      `still reporting the superseded pin: ${JSON.stringify(after.runtimes)}`,
+    );
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('health keeps the cached pin when a served soul becomes unreadable', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'rex.md', '---\nname: Rex\nid: rex\nprovider: openai\nmodel: gpt-4.1-mini\n---\n\nYou are Rex.\n');
+  const harness = await startApi({
+    home,
+    options: { env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' } } },
+    env: { processEnv: { OPENAI_API_KEY: 'sk-test' } },
+  });
+  try {
+    // The gateway goes on dispatching from the soul it loaded, so health has
+    // to name the runtime those turns really bill — re-reading must not turn
+    // an unreadable file into a silent fallback to the daemon-wide default.
+    await rm(path.join(home, '.stratus', 'agents', 'rex.md'));
+
+    const health = await json<{ runtimes: Array<{ model?: string }> }>(await harness.call('/api/v1/health'));
+    assert.ok(
+      health.runtimes.some((runtime) => runtime.model === 'gpt-4.1-mini'),
+      `lost the runtime it is still dispatching: ${JSON.stringify(health.runtimes)}`,
+    );
+  } finally {
+    await harness.stop();
+  }
+});

@@ -477,8 +477,15 @@ export interface Gateway {
    * caller that has to answer "what would a turn as this agent run on" needs
    * the pins that answer it, so this hands back the parsed soul rather than a
    * path a second reader would have to re-read (and now read differently).
+   *
+   * Async because it re-reads each soul file, exactly as `refreshAgent` does
+   * before every dispatch: a pin edited on disk is live on the next turn, so
+   * a caller answering from the load-time snapshot would name the provider
+   * the daemon has already stopped billing. Falls back to the cached soul
+   * when the file is unreadable or has been given away to another agent id —
+   * which is what that next dispatch falls back to, or refuses over.
    */
-  servedSouls(): Array<{ id: string; soul?: ParsedSoul }>;
+  servedSouls(): Promise<Array<{ id: string; soul?: ParsedSoul }>>;
   /**
    * Where a durable session came from — its agent, and the metadata the
    * dispatching surface attached to it.
@@ -1793,14 +1800,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         .sort((a, b) => a.parkedAt.localeCompare(b.parkedAt));
     },
 
-    servedSouls() {
+    async servedSouls() {
       // From the registry rather than `sources` directly, so the order and
       // the membership are the roster's own — one entry per agent `agents()`
       // reports, and no entry for a source the registry no longer serves.
-      return registry.list().map((agent) => {
-        const soul = sources.get(agent.id)?.soul;
+      return Promise.all(registry.list().map(async (agent) => {
+        const source = sources.get(agent.id);
+        // Re-read, not re-registered: this is a read, and a caller asking
+        // what the daemon would bill must not reshape the roster as a side
+        // effect. `refreshAgent` still owns that on the dispatch path.
+        const fresh = source?.soulPath
+          ? await loadSoulFile(source.soulPath).catch(() => undefined)
+          : undefined;
+        // A file that now declares someone else is one `refreshAgent` refuses
+        // to dispatch on, so the cached pins remain the honest answer for
+        // this agent — the alternative is reporting another identity's
+        // billing under this one's name.
+        const soul = fresh?.agent.id === agent.id ? fresh : source?.soul;
         return { id: agent.id, ...(soul ? { soul } : {}) };
-      });
+      }));
     },
 
     resolveApproval,

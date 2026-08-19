@@ -1,4 +1,4 @@
-import { ago, duration, el } from '../lib/dom.js';
+import { ago, duration, el, until } from '../lib/dom.js';
 import { api } from '../lib/api.js';
 import { avatar } from '../lib/avatar.js';
 import { isActive, navigate, refreshCore, store } from '../app.js';
@@ -52,7 +52,7 @@ const approvalCard = () => {
           el('div', { class: 'grow' },
             el('div', { class: 'title' }, `${agent?.name ?? request.agentId} wants to run ${request.call.toolName}`),
             el('div', { class: 'sub' },
-              request.expiresAt ? `expires ${ago(request.expiresAt)} from now` : 'no expiry',
+              request.expiresAt ? `expires ${until(request.expiresAt)}` : 'no expiry',
               ` · parked ${ago(request.parkedAt)}`),
           ),
           el('span', { class: `pill risk-${request.risk}` }, request.risk),

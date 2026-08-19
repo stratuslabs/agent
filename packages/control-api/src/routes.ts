@@ -369,7 +369,7 @@ export const routes: Route[] = [
       // yet, and a loaded soul that was deleted or broken since still is —
       // either way a directory scan bills the wrong set. `servedSouls` hands
       // over the pins the gateway itself would apply.
-      const roster = context.gateway.servedSouls().map((entry) => entry.soul);
+      const roster = (await context.gateway.servedSouls()).map((entry) => entry.soul);
       for (const served of await servedRuntimes(context.env, context.configPath, roster)) {
         const model = served.runtime.provider === 'demo' ? undefined : served.runtime.model;
         const entry = {

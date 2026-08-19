@@ -90,6 +90,17 @@ export const renderAgent = (agentId, initialSessionId) => {
      * does damage.
      */
     awaitingSend: new Set(),
+    /**
+     * Conversations that owe a reconciliation once their POST settles.
+     *
+     * `reconcile` cannot decide anything while a send is outstanding — the
+     * store still reads as the previous turn — so it returns. But nothing
+     * replays what the stream missed, and no second reconnect is coming, so
+     * a turn that finished during the outage would leave the composer on
+     * "Working…" for good. The debt is recorded here and paid the moment the
+     * response lands, which is the earliest point anything can decide.
+     */
+    reconcileAfterSend: new Set(),
     error: undefined,
     saved: undefined,
     /**
@@ -289,6 +300,9 @@ export const renderAgent = (agentId, initialSessionId) => {
       const { turnId } = await api.send(sentTo, { message: text, agentId });
       state.awaitingSend.delete(sentTo);
       if (state.sessionId !== sentTo) {
+        // The view moved on, and `openSession`/`startSession` already reset
+        // the in-flight state it would have reconciled.
+        state.reconcileAfterSend.delete(sentTo);
         return;
       }
       // It exists in the store now, so later reads are real reads.
@@ -302,8 +316,16 @@ export const renderAgent = (agentId, initialSessionId) => {
       for (const envelope of queued) {
         applyEnvelope(envelope);
       }
+      if (state.reconcileAfterSend.delete(sentTo)) {
+        // The stream came back while this POST was in flight. Now there is a
+        // turn id and a stored session, so the store can finally say whether
+        // the turn we are waiting on already ended during the outage.
+        await reconcile();
+      }
     } catch (error) {
       state.awaitingSend.delete(sentTo);
+      // Nothing ran, so there is nothing to reconcile against.
+      state.reconcileAfterSend.delete(sentTo);
       if (state.sessionId !== sentTo) {
         return;
       }
@@ -619,7 +641,10 @@ export const renderAgent = (agentId, initialSessionId) => {
       // which lands *after* this would have cleared `sending`, re-enabling
       // the composer on a turn that had only just started. The store cannot
       // help here: a new conversation has nothing in it yet, and an existing
-      // one still reads as the previous turn.
+      // one still reads as the previous turn. So the reconciliation is owed
+      // rather than skipped: the terminal event is not replayed, and this may
+      // be the only reconnect there is.
+      state.reconcileAfterSend.add(state.sessionId);
       void loadSessions();
       return;
     }
