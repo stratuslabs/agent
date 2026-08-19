@@ -86,6 +86,12 @@ Containment is decided between **real** paths, not strings:
   by inode after opening, so a name repointed in between fails instead of
   being followed.
 
+A path inside a root that is not a regular file — a fifo, a socket, a device
+— is refused rather than opened. Opening one of those does not fail, it
+*blocks*, and a tool call that never returns is worse than one that says no.
+The opens carry `O_NONBLOCK` as well, so missing that check would be a
+returned error rather than a turn that never ends.
+
 What this does not do is walk the path one directory at a time holding each
 open — that needs `openat`, which Node does not expose — so a swap of an
 intermediate directory remains possible in principle. The roots you choose

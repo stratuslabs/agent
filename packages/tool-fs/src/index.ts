@@ -85,7 +85,19 @@ const readContained = async (
   resolved: ResolvedPath,
   maxBytes: number,
 ): Promise<{ content: string; truncated: boolean; bytes: number; size: number; binary: boolean }> => {
-  const handle = await openContained(resolved, constants.O_RDONLY);
+  if (resolved.kind === 'directory') {
+    throw new Error(`${resolved.path} is a directory; use fs.list.`);
+  }
+  if (resolved.kind === 'other') {
+    // A FIFO, a socket, a device. Opening one does not fail — it *blocks*,
+    // and a tool call that never returns is worse than one that refuses.
+    throw new Error(`${resolved.path} is not a regular file.`);
+  }
+  // `O_NONBLOCK` alongside the check above, and not instead of it: the check
+  // gives a refusal an agent can read, and this makes the failure mode of
+  // *missing* one a returned error rather than a turn that never ends. It
+  // has no effect on a regular file.
+  const handle = await openContained(resolved, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
   try {
     const info = await handle.stat();
     if (info.isDirectory()) {
@@ -337,6 +349,14 @@ const createWriteTool = (config: JsonObject): Tool => ({
       // a root — `root/link/notes/x.md` through a symlinked `link` never
       // gets this far, so nothing is created outside the boundary either.
       await mkdir(path.dirname(resolved.path), { recursive: true });
+    } else if (resolved.kind !== 'file') {
+      // Same reason as the read path: writing into a directory is a mistake
+      // worth naming, and writing into a fifo or a device blocks forever.
+      throw new Error(
+        resolved.kind === 'directory'
+          ? `${resolved.path} is a directory.`
+          : `${resolved.path} is not a regular file.`,
+      );
     }
 
     const flags = input.append === true
@@ -345,7 +365,7 @@ const createWriteTool = (config: JsonObject): Tool => ({
     // O_NOFOLLOW is applied by openContained: a symlink sitting at the
     // destination must fail rather than write through to its target, which
     // is the write half of the escape a read-only check would miss.
-    const handle = await openContained(resolved, flags, 0o644);
+    const handle = await openContained(resolved, flags | (constants.O_NONBLOCK ?? 0), 0o644);
     try {
       await handle.writeFile(content, 'utf8');
     } finally {

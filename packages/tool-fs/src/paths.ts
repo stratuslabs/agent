@@ -61,6 +61,8 @@ export interface ResolvedPath {
    * than by name — see `openContained`.
    */
   identity?: { dev: number; ino: number };
+  /** What is actually there: a regular file, a directory, or something else. */
+  kind?: 'file' | 'directory' | 'other';
 }
 
 /**
@@ -145,7 +147,14 @@ export const resolveWithinRoots = async (
   const resolved = real;
 
   const info = await lstat(resolved);
-  return { path: resolved, root, exists: true, identity: { dev: info.dev, ino: info.ino } };
+  return {
+    path: resolved,
+    root,
+    exists: true,
+    identity: { dev: info.dev, ino: info.ino },
+    // A realpath never ends at a symlink, so this is what the file is.
+    kind: info.isFile() ? 'file' : info.isDirectory() ? 'directory' : 'other',
+  };
 };
 
 const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0;

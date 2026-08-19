@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -229,4 +230,31 @@ test('every tool this plugin registers is one its manifest declares', async () =
     assert.equal(declared.get(tool.name), tool.risk, `${tool.name} risk disagrees with the manifest`);
   }
   assert.equal(tools.list().length, declared.size);
+});
+
+test('a fifo inside a root is refused rather than opened', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-fifo-'));
+  const fifo = path.join(root, 'pipe');
+  // A named pipe with no writer: `open` on one blocks rather than failing,
+  // so a tool that did not check would hang the turn forever.
+  await new Promise<void>((resolve, reject) => {
+    execFile('mkfifo', [fifo], (error) => (error ? reject(error) : resolve()));
+  });
+
+  const tools = await registryFor({ roots: [root] });
+  // Given a way to lose: without the check this call never settles, and a
+  // suite with no timeout would hang rather than report the regression.
+  const outcome = await Promise.race([
+    run(tools, 'fs.read', { path: 'pipe' }, sessionFor('ava')).then(
+      () => 'read the pipe',
+      (error: Error) => error.message,
+    ),
+    new Promise<string>((resolve) => {
+      const timer = setTimeout(() => resolve('blocked'), 5_000);
+      timer.unref?.();
+    }),
+  ]);
+
+  assert.notEqual(outcome, 'blocked', 'fs.read blocked on a fifo instead of refusing it');
+  assert.match(outcome, /is not a regular file/);
 });
