@@ -124,11 +124,28 @@ export const renderSettings = (section) => {
         const [provider, model] = picker.value ? picker.value.split(/:(.*)/s) : [undefined, undefined];
         // A whole document, because PUT replaces rather than merges — sending
         // only the two changed keys would silently drop everything else in
-        // the file, approvals and soul included.
-        await api.saveConfig({
-          ...config,
-          ...(provider ? { provider, model } : {}),
-        });
+        // the file, approvals and soul included. Which makes the *removals*
+        // below load-bearing rather than tidying.
+        const next = { ...config };
+        if (provider) {
+          next.provider = provider;
+          next.model = model;
+          if (provider !== config.provider) {
+            // An endpoint and a key-selector are chosen for one provider.
+            // Carried across, they point the new provider at the old one's
+            // service, or hand it the wrong credential — the same
+            // normalization the CLI setup flow performs on a switch.
+            delete next.baseUrl;
+            delete next.apiKeyEnv;
+          }
+        } else {
+          // "Follow the default" has to actually clear the pin. Leaving the
+          // old provider and model in place would report success and change
+          // nothing, with the previous model still there on reload.
+          delete next.provider;
+          delete next.model;
+        }
+        await api.saveConfig(next);
         state.config = (await api.config()).config ?? {};
         await refreshCore();
         say('Saved. Every agent that does not pin its own follows this.');

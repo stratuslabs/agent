@@ -386,14 +386,18 @@ test('config round-trips, and an unknown key is refused rather than quietly kept
     assert.equal(unknown.status, 400);
     assert.equal((await json<{ error: { code: string } }>(unknown)).error.code, 'unknown_config_key');
 
-    // A value the caller typed is their error, not the server's.
+    // A value the caller typed is their error, not the server's. The shared
+    // validator owns this check now, so the code is the generic one and the
+    // message carries which value it objected to.
     const badProvider = await harness.call('/api/v1/config', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ config: { provider: 'not-a-provider' } }),
     });
     assert.equal(badProvider.status, 400);
-    assert.equal((await json<{ error: { code: string } }>(badProvider)).error.code, 'invalid_provider');
+    const rejected = await json<{ error: { code: string; message: string } }>(badProvider);
+    assert.equal(rejected.error.code, 'invalid_config_value');
+    assert.match(rejected.error.message, /not-a-provider/);
   } finally {
     await harness.stop();
   }
@@ -742,6 +746,96 @@ test('the roster lists only agents the daemon can actually be asked about', asyn
     await harness.call('/api/v1/roster/reload', { method: 'POST' });
     const after = await json<{ agents: Array<{ id: string; name: string }> }>(await harness.call('/api/v1/agents'));
     assert.ok(after.agents.some((agent) => agent.id === 'rex'), 'a reload brings it in');
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('the API answers from the config the daemon was pinned to', async () => {
+  const home = await newHome();
+  const pinned = path.join(home, 'pinned.json');
+  await writeFile(pinned, `${JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5' })}\n`);
+  // A different config in the working directory, which discovery would
+  // otherwise prefer — describing a configuration the daemon is not running.
+  await writeFile(path.join(home, 'stratus.config.json'), `${JSON.stringify({ provider: 'openai', model: 'gpt-4.1-mini' })}\n`);
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+
+  const harness = await startApi({
+    home,
+    options: {
+      configPath: pinned,
+      env: { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-ant-test' } },
+    },
+  });
+  try {
+    const { agents } = await json<{ agents: Array<{ id: string; runsOn: { provider: string; model?: string } }> }>(
+      await harness.call('/api/v1/agents'),
+    );
+    const ava = agents.find((agent) => agent.id === 'ava');
+    // What a dispatch would actually use, which is the pinned file.
+    assert.deepEqual(ava?.runsOn, { provider: 'anthropic', model: 'claude-opus-5' });
+
+    const read = await json<{ path: string }>(await harness.call('/api/v1/config'));
+    assert.equal(read.path, pinned);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('a config whose nested block is malformed is refused, not written', async () => {
+  const harness = await startApi();
+  try {
+    // The outer shape is an object, so a check that stops there accepts it —
+    // and then the loader rejects the file on every later read, leaving a
+    // successful save behind a daemon that cannot read its own config.
+    const bad = await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { api: { enabled: 'false' } } }),
+    });
+    assert.equal(bad.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(bad)).error.code, 'invalid_config_value');
+
+    const badApprovals = await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { approvals: { mode: 'sometimes' } } }),
+    });
+    assert.equal(badApprovals.status, 400);
+
+    // Nothing was written, so the file still reads cleanly.
+    const read = await harness.call('/api/v1/config');
+    assert.equal(read.status, 200);
+
+    const good = await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { api: { enabled: false, port: 4200 } } }),
+    });
+    assert.equal(good.status, 200);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('a rejected key advertises no models at all', async () => {
+  const home = await newHome();
+  const harness = await startApi({
+    home,
+    options: {
+      env: {
+        homeDir: home,
+        cwd: home,
+        processEnv: { ANTHROPIC_API_KEY: 'sk-ant-revoked', OPENAI_API_KEY: 'sk-revoked' },
+        // A revoked key. Falling back to the known Claude lineup here would
+        // offer a menu where every entry fails the moment it is used.
+        fetch: (async () => new Response('{"error":"invalid x-api-key"}', { status: 401 })) as typeof fetch,
+      },
+    },
+  });
+  try {
+    const { models } = await json<{ models: unknown[] }>(await harness.call('/api/v1/catalog/models'));
+    assert.deepEqual(models, []);
   } finally {
     await harness.stop();
   }

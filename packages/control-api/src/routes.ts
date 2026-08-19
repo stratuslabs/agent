@@ -22,6 +22,7 @@ import {
   saveChannelCredentials,
   saveConfigFile,
   saveCredentials,
+  validateConfigFile,
   servedRuntimes,
   verifyProviderKey,
   type CredentialProviderName,
@@ -179,7 +180,7 @@ const soulForAgent = async (
   context: RouteContext,
   agentId: string,
 ): Promise<{ soul: ParsedSoul; path: string }> => {
-  const summaries = await listAgentSummaries(context.env);
+  const summaries = await listAgentSummaries(context.env, () => {}, context.configPath);
   const summary = summaries.find((entry) => entry.id === agentId);
   if (!summary) {
     throw new ApiError(404, 'agent_not_found', `No agent with id ${agentId}.`);
@@ -280,7 +281,7 @@ export const routes: Route[] = [
     method: 'GET',
     pattern: `${API_PREFIX}/health`,
     async handler(context) {
-      const summaries = await listAgentSummaries(context.env);
+      const summaries = await listAgentSummaries(context.env, () => {}, context.configPath);
       // Counted in the database. Listing every session to add them up made
       // the cost of a health poll grow with everything the install had ever
       // stored — steadily slower at exactly the endpoint that exists to say
@@ -336,7 +337,7 @@ export const routes: Route[] = [
       // dispatch to, because the gateway has never registered the id; a
       // duplicate or unparseable file produces the same mismatch. Anything
       // this endpoint lists can be talked to.
-      const summaries = await listAgentSummaries(context.env);
+      const summaries = await listAgentSummaries(context.env, () => {}, context.configPath);
       const byId = new Map(summaries.map((summary) => [summary.id, summary]));
       // Activity comes from the running daemon's session store, which the
       // shared builder has no access to: the CLI's listing is about identity
@@ -634,7 +635,10 @@ export const routes: Route[] = [
     method: 'GET',
     pattern: `${API_PREFIX}/catalog/models`,
     async handler(context) {
-      const { config } = await discoverActiveConfig(context.env, () => {});
+      // The daemon's own config, not whatever the working directory holds:
+      // otherwise the catalog probes a different provider or base URL than
+      // the one dispatches actually resolve to.
+      const { config } = await discoverActiveConfig(context.env, () => {}, context.configPath);
       const credentials = await loadCredentials(context.env);
       const models = await collectAvailableModels(
         {
@@ -763,16 +767,16 @@ export const routes: Route[] = [
     method: 'GET',
     pattern: `${API_PREFIX}/config`,
     async handler(context) {
-      const path = await activeConfigPath(context);
+      const configPath = await activeConfigPath(context);
       let config: StratusConfigFile = {};
       try {
-        config = await loadConfigFile(path);
+        config = await loadConfigFile(configPath);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
           throw new ApiError(500, 'config_unreadable', error instanceof Error ? error.message : String(error));
         }
       }
-      return { path, config };
+      return { path: configPath, config };
     },
   },
   {
@@ -813,20 +817,26 @@ export const routes: Route[] = [
         }
         next[key] = value;
       }
-      if (typeof next.provider === 'string') {
-        validateProvider(next.provider, 'provider');
-      }
-      if (typeof next.fallbackProvider === 'string') {
-        validateProvider(next.fallbackProvider, 'fallbackProvider');
+
+      // Through the loader's own validator before anything is written. The
+      // shape check above only knows `api` and `approvals` are objects; what
+      // is *inside* them is a rule those blocks' parsers own, and an
+      // `enabled` of `"false"` would otherwise be written, reported as saved,
+      // and then make every later read of the file fail.
+      const configPath = await activeConfigPath(context);
+      let validated: StratusConfigFile;
+      try {
+        validated = validateConfigFile(next, configPath);
+      } catch (error) {
+        throw new ApiError(400, 'invalid_config_value', error instanceof Error ? error.message : String(error));
       }
 
-      const path = await activeConfigPath(context);
-      await saveConfigFile(path, next as StratusConfigFile);
+      await saveConfigFile(configPath, validated);
       // Settings feed provider resolution, which the gateway re-reads per
       // dispatch — but the default *soul* is roster identity, so a changed
       // one only reaches dispatches after a reload.
       await context.gateway.reloadRoster();
-      return { path, config: next };
+      return { path: configPath, config: validated };
     },
   },
 ];

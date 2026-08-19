@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, stat } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { allowedOrigins, ensureGatewayToken } from '../src/auth.ts';
@@ -249,4 +249,19 @@ test('an IPv6 bind is advertised and origin-checked with brackets', () => {
   // A non-loopback IPv6 bind gets exactly its own bracketed origin.
   const remote = allowedOrigins('fd00::1', 8080);
   assert.deepEqual([...remote], ['http://[fd00::1]:8080']);
+});
+
+test('an empty token file left by an interrupted start is replaced', async () => {
+  const home = await newHome();
+  const tokenPath = path.join(home, '.stratus', 'gateway-token');
+  await mkdir(path.dirname(tokenPath), { recursive: true });
+  // A process that created the file and died before writing to it. Returning
+  // that empty string would start an API no bearer header can satisfy, while
+  // every client reads the same nothing — locked out across restarts.
+  await writeFile(tokenPath, '');
+
+  const token = await ensureGatewayToken({ homeDir: home });
+  assert.ok(token.length > 0, 'a usable token was generated');
+  assert.equal((await readFile(tokenPath, 'utf8')).trim(), token);
+  assert.equal((await stat(tokenPath)).mode & 0o777, 0o600);
 });

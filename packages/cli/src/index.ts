@@ -4440,6 +4440,11 @@ export const runDashboard = async (
       {
         command: 'serve',
         events: false,
+        // Explicitly on. A trusted config may set `api.enabled: false` — a
+        // reasonable thing for a headless box — but this command exists to
+        // open the dashboard, and honouring it here would start a daemon
+        // with no API and then time out waiting for the one it promised.
+        api: true,
         ...(command.port !== undefined ? { apiPort: command.port } : {}),
         ...(command.host !== DEFAULT_DASHBOARD_HOST ? { apiHost: command.host } : {}),
       },

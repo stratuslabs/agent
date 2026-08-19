@@ -673,12 +673,25 @@ export const loadConfigFile = async (configPath: string): Promise<StratusConfigF
 
 const loadConfigFileInner = async (configPath: string): Promise<StratusConfigFile> => {
   const raw = await readFile(configPath, 'utf8');
-  const parsed = JSON.parse(raw) as unknown;
+  return validateConfigFile(JSON.parse(raw) as unknown, configPath);
+};
 
+/**
+ * Validate and normalize a config document, without reading a file.
+ *
+ * Exported because anything that *writes* a config has to answer the same
+ * question the loader answers, and answering it any other way means writing
+ * a file the loader will later reject — a save that reports success and then
+ * breaks the next read. The nested `approvals` and `api` blocks are the ones
+ * this matters for: their own parsers are the only thing that knows an
+ * `enabled` of `"false"` is not a boolean.
+ */
+export const validateConfigFile = (parsed: unknown, label: string): StratusConfigFile => {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error(`Config file must contain a JSON object: ${configPath}`);
+    throw new Error(`Config file must contain a JSON object: ${label}`);
   }
 
+  const configPath = label;
   const config = parsed as Record<string, unknown>;
   const resolved: StratusConfigFile = {};
 
@@ -915,10 +928,17 @@ export const resolveConfigLocation = async (
 export const discoverActiveConfig = async (
   env: StateEnvironment,
   warn: (message: string) => void,
+  /**
+   * The file the caller was pinned to, if any. Without it a daemon started
+   * with `--config custom.json` would have its roster, health, and model
+   * catalog answered from the cwd or global config instead — describing a
+   * configuration it is not running on.
+   */
+  configPath?: string,
 ): Promise<{ location?: ResolvedConfigLocation; config: StratusConfigFile }> => {
   let location: ResolvedConfigLocation | undefined;
   try {
-    location = await resolveConfigLocation({}, env);
+    location = await resolveConfigLocation(configPath ? { configPath } : {}, env);
   } catch (error) {
     warn(`ignoring unreadable config (${error instanceof Error ? error.message : String(error)})`);
     return { config: {} };
@@ -1865,6 +1885,15 @@ export const collectAvailableModels = async (
         const response = await fetchImpl(`${anthropicRoot}/v1/models?limit=100`, {
           headers: { 'x-api-key': String(apiKey), 'anthropic-version': '2023-06-01' },
         });
+        // An explicit auth failure is the one answer that condemns the key —
+        // the same rule `verifyProviderKey` applies. Falling back here would
+        // offer a menu of Claude models to a revoked or mistyped key, every
+        // one of which fails the moment it is used. Any other unhappy status
+        // says the listing endpoint is unavailable, not that the key is bad,
+        // so the known lineup still stands in for it.
+        if (response.status === 401 || response.status === 403) {
+          continue;
+        }
         const payload = await response.json() as { data?: Array<{ id?: string }> };
         const ids = (payload.data ?? []).map((entry) => entry.id).filter((id): id is string => typeof id === 'string');
         models.push(...(ids.length > 0 ? ids : KNOWN_CLAUDE_MODELS).map((id) => ({ provider, id })));
@@ -1886,6 +1915,10 @@ export const collectAvailableModels = async (
       const response = await fetchImpl(`${root}/models`, {
         headers: { authorization: `Bearer ${String(apiKey)}` },
       });
+      // Same rule on this side: a rejected key offers nothing.
+      if (response.status === 401 || response.status === 403) {
+        continue;
+      }
       const payload = await response.json() as { data?: Array<{ id?: string }> };
       const allIds = (payload.data ?? [])
         .map((entry) => entry.id)
@@ -2068,12 +2101,14 @@ export interface AgentSummary {
 export const listAgentSummaries = async (
   env: StateEnvironment,
   warn: (message: string) => void = () => {},
+  /** The config the caller is pinned to; see `discoverActiveConfig`. */
+  configPath?: string,
 ): Promise<AgentSummary[]> => {
   const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
   const processEnv = readProcessEnv(env);
   // Listing must never be blocked by a broken config — it only feeds the
   // default marker and the "runs on" lines.
-  const { config: activeConfig } = await discoverActiveConfig(env, warn);
+  const { config: activeConfig } = await discoverActiveConfig(env, warn, configPath);
 
   const envProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
     ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'));

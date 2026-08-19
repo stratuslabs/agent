@@ -68,7 +68,17 @@ export const ensureGatewayToken = async (env: StateEnvironment): Promise<string>
     }
     const winner = (await readFile(tokenPath, 'utf8')).trim();
     await chmod(tokenPath, 0o600);
-    return winner;
+    if (winner.length > 0) {
+      return winner;
+    }
+    // The file exists but holds nothing — a process interrupted between
+    // creating it and writing to it. Returning that would start an API whose
+    // secret no bearer header can satisfy, while every client reads the same
+    // empty string: authenticated by nobody, across restarts, with nothing
+    // saying why. A plain write replaces it, since there is no valid token to
+    // race against.
+    await writeFile(tokenPath, `${token}\n`, { mode: 0o600 });
+    await chmod(tokenPath, 0o600);
   }
   await chmod(tokenPath, 0o600);
   // The home directory holds credentials and sessions too; an install that

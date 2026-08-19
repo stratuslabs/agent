@@ -164,6 +164,14 @@ export const onEnvelope = (fn) => {
   return () => envelopeHandlers.delete(fn);
 };
 
+/**
+ * How many screens are listening. Exposed so a leak is observable: a view
+ * that is replaced without being torn down keeps updating detached DOM and
+ * re-fetching on every completed turn, and the only symptom is a page that
+ * gets slower the more of it you have used.
+ */
+export const envelopeHandlerCount = () => envelopeHandlers.size;
+
 const handleEnvelope = (envelope) => {
   for (const handler of envelopeHandlers) {
     handler(envelope);
@@ -308,6 +316,7 @@ const paint = () => {
   const root = document.getElementById('app');
 
   if (store.route.name === 'signed-out') {
+    current.view?.destroy?.();
     current = { key: undefined, view: undefined };
     root.replaceChildren(signedOut());
     return;
@@ -315,6 +324,11 @@ const paint = () => {
 
   const key = routeKey(store.route);
   if (key !== current.key || !current.view) {
+    // Torn down before it is dropped. The agent view subscribes to the event
+    // stream; without this, every agent ever visited keeps a live handler
+    // updating detached DOM and re-fetching transcripts on every completed
+    // turn — work that multiplies with each screen someone opens.
+    current.view?.destroy?.();
     current = { key, view: buildView(store.route) };
   } else {
     current.view.update?.();
