@@ -18,6 +18,7 @@ export {
 
 export {
   chromiumProxyArgs,
+  chromiumProxyOptions,
   createEgressProxy,
   createPinnedLookup,
   requestThroughPolicy,

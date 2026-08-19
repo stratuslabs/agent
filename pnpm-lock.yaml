@@ -313,6 +313,31 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  packages/tool-browser:
+    dependencies:
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+      '@stratusagent/egress':
+        specifier: workspace:*
+        version: link:../egress
+      '@stratusagent/plugins':
+        specifier: workspace:*
+        version: link:../plugins
+      playwright-core:
+        specifier: ^1.49.0
+        version: 1.62.1
+    devDependencies:
+      '@stratusagent/tool-web':
+        specifier: workspace:*
+        version: link:../tool-web
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/tool-fs:
     dependencies:
       '@stratusagent/core':
@@ -819,6 +844,11 @@ packages:
   pkce-challenge@5.0.1:
     resolution: {integrity: sha512-wQ0b/W4Fr01qtpHlqSqspcj3EhBvimsdh0KlHhH8HRZnMsEa0ea2fTULOXOS9ccQr3om+GcGRk4e+isrZWV8qQ==}
     engines: {node: '>=16.20.0'}
+
+  playwright-core@1.62.1:
+    resolution: {integrity: sha512-wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw==}
+    engines: {node: '>=20'}
+    hasBin: true
 
   proxy-addr@2.0.7:
     resolution: {integrity: sha512-llQsMLSUDUPT44jdrU/O37qlnifitDP+ZwrmmZcoSKyLKvtZxpyV0n2/bD/N4tBAAZ/gJEdZU7KMraoK1+XYAg==}
@@ -1417,6 +1447,8 @@ snapshots:
   path-to-regexp@8.4.2: {}
 
   pkce-challenge@5.0.1: {}
+
+  playwright-core@1.62.1: {}
 
   proxy-addr@2.0.7:
     dependencies:

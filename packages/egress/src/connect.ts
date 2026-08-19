@@ -296,6 +296,12 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
  * this proxy would still reach `http://127.0.0.1:8080` directly — which is
  * one of the exact destinations the proxy exists to refuse.
  */
+export const chromiumProxyOptions = (proxy: Pick<EgressProxy, 'url'>): { server: string; bypass: string } => ({
+  server: proxy.url,
+  // Same reason as the flag below, in the form Playwright takes.
+  bypass: '<-loopback>',
+});
+
 export const chromiumProxyArgs = (proxy: Pick<EgressProxy, 'url'>): string[] => [
   `--proxy-server=${proxy.url}`,
   '--proxy-bypass-list=<-loopback>',
