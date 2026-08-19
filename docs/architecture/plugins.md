@@ -256,17 +256,20 @@ boundary must resolve per call rather than closing over one value at setup, and
 that is a requirement on the plugin, not a courtesy.
 
 Loading uses the `import.meta.resolve` + dynamic-import pattern of
-`loadSlackAdapter` in `packages/cli/src/index.ts`, which is today the repo's
-only instance of it. It resolves first and imports second on purpose: a package
-that is installed but missing one of *its* dependencies throws
-`ERR_MODULE_NOT_FOUND` too, so inspecting the import error cannot tell "not
-installed" from "installed and broken" — and silently disabling a channel whose
-stored tokens say it should be running is the failure that split buys off.
+`loadSlackAdapter` in `packages/cli/src/index.ts`. It resolves first and imports
+second on purpose: a package that is installed but missing one of *its*
+dependencies throws `ERR_MODULE_NOT_FOUND` too, so inspecting the import error
+cannot tell "not installed" from "installed and broken" — and silently
+disabling a channel whose stored tokens say it should be running is the failure
+that split buys off.
 
-A plugin loader needs exactly that distinction, so it calls the same pattern
-rather than a second copy of it. With more than one consumer, extracting a
-shared optional-package loader is the move — and that is the moment to do it,
-rather than letting a third caller re-derive the split.
+**Extract it before writing the plugin loader.** [05](../roadmap/05-control-api.md)
+took the count from one caller to three — the Slack adapter, the control API,
+and the dashboard resolved from inside the control API — each carrying its own
+copy of the same twelve lines. A plugin loader would be the fourth, and by this
+repo's own first rule a rule with four hand-rolled implementations has already
+drifted. So the loader does not re-derive the split; it calls a shared helper,
+and creating that helper is part of whichever step builds it first.
 
 ## Trust model
 
@@ -345,9 +348,8 @@ narrow. They are not a sandbox, and this document does not claim one:
 
 **In the monorepo.** The kernel and everything CI must gate: `core`, `agents`,
 `state`, `gateway`, `permissions`, `providers`, `channels`, `executors`,
-`executor-local`, `cli`, `provider-anthropic`, `provider-claude-code`,
-`channel-slack` — joined by `control-api` and `dashboard` when
-[05](../roadmap/05-control-api.md) lands — plus the capability plugins that each
+`executor-local`, `cli`, `control-api`, `dashboard`, `provider-anthropic`,
+`provider-claude-code`, `channel-slack` — plus the capability plugins that each
 carry a security invariant the kernel's promises rest on:
 
 | Plugin | The invariant it owns |

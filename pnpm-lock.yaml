@@ -89,6 +89,9 @@ importers:
       '@stratusagent/channel-slack':
         specifier: workspace:*
         version: link:../channel-slack
+      '@stratusagent/control-api':
+        specifier: workspace:*
+        version: link:../control-api
       '@types/node':
         specifier: ^24.6.0
         version: 24.12.2
@@ -96,7 +99,50 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  packages/control-api:
+    dependencies:
+      '@stratusagent/agents':
+        specifier: workspace:*
+        version: link:../agents
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+      '@stratusagent/gateway':
+        specifier: workspace:*
+        version: link:../gateway
+      '@stratusagent/provider-anthropic':
+        specifier: workspace:*
+        version: link:../provider-anthropic
+      '@stratusagent/state':
+        specifier: workspace:*
+        version: link:../state
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.3
+    devDependencies:
+      '@stratusagent/dashboard':
+        specifier: workspace:*
+        version: link:../dashboard
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
+      '@types/ws':
+        specifier: ^8.5.13
+        version: 8.18.1
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/core:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/dashboard:
     devDependencies:
       '@types/node':
         specifier: ^24.6.0

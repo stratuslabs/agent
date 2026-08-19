@@ -19,6 +19,10 @@ Where things are documented:
   duplicating it.
 - `HELP_TEXT` in `packages/cli/src/index.ts` — every command and flag.
 - `packages/channel-slack/README.md` — the Slack app setup.
+- `packages/control-api/README.md` — the HTTP + WS surface: every endpoint,
+  the auth model, the event envelope, the `api` config block. Both other
+  surfaces (the macOS app, a hosted deployment) are written against this
+  document, so an endpoint that changes shape changes here first.
 
 Deferring is allowed when a PR is already large. Say so in the PR body
 and say when it lands — three commands shipped undocumented across #39,
@@ -55,7 +59,13 @@ immediately:
   Never re-implement the precedence chain.
 - Which env var holds the key → `apiKeyEnvNameFor` / `resolveEnvApiKey`.
 - What a pinned soul demotes → `applySoulPins`, exported from
-  `@stratusagent/gateway`.
+  `@stratusagent/state` (and re-exported by `@stratusagent/gateway`, which is
+  where it used to live).
+- What a run as an agent resolves to → `servedRuntimes`; the roster as data →
+  `listAgentSummaries`; which models a sign-in can reach →
+  `collectAvailableModels`; whether a key works → `verifyProviderKey`. All in
+  `@stratusagent/state`, all previously private to the CLI, all now with two
+  consumers.
 
 If you need a rule that is not exported, export it. Do not copy it.
 
@@ -135,6 +145,24 @@ These are deliberate. Changing one is a decision, not a refactor.
   log as safe to share without qualifying that.
 - A stored sign-in is endpoint-bound: a credential saved for one endpoint
   is never sent to an endpoint a project-local config selects.
+- **The control API's token file is `0600`, and so is `~/.stratus/gateway.json`.**
+  Same reason as the credentials file, same explicit `chmod` after every
+  write — `writeFile`'s mode only applies when it creates the file, so an
+  upgrade over a looser install would keep the old permissions.
+- **Cookie-authenticated API requests are origin-bound; bearer ones are not.**
+  `SameSite` matching ignores ports, so a page on another port of the same
+  host is "same site" and its requests carry the cookie automatically, and a
+  WebSocket upgrade gets no CORS protection at all. A bearer token is never
+  attached by a browser on a page's behalf, so there is no ambient authority
+  to forge and an origin check there would only reject honest clients.
+- **The `api` and `approvals` config blocks are read only from a trusted
+  config.** An auto-discovered project-local `stratus.config.json` ships in
+  any repository; which interface a daemon binds, and who may approve its
+  tool calls, are not decisions a cloned repo gets to make.
+- **No endpoint returns a secret.** Credential reads report presence, type,
+  and bound endpoint. Session reads strip the Anthropic raw-turn cache
+  (`redactAnthropicRawTurns`), which exists for replay and carries raw model
+  turns.
 
 ## Two asymmetries that documentation keeps getting wrong
 

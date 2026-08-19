@@ -29,6 +29,82 @@ npm install -g @stratusagent/channel-slack
 If tokens are stored for an agent but the package isn't installed, `stratus
 serve` says so and starts anyway, serving every other channel.
 
+### Optional control API and dashboard
+
+Same idea, and the same reason: installing it is how you say you want a port
+open. With it present, `stratus serve` also serves an authenticated HTTP +
+WebSocket API on `127.0.0.1:4123`.
+
+```bash
+npm install -g @stratusagent/control-api @stratusagent/dashboard
+```
+
+Two packages, because the API has three consumers and only one of them is a
+web page — the macOS app and a headless VM want the API without a UI. Install
+`@stratusagent/control-api` alone for those; add `@stratusagent/dashboard` and
+the API serves the web UI at `/` as well.
+
+That API is what every non-terminal surface talks to — the web dashboard and
+the macOS app alike. Its full reference (endpoints, auth, the event envelope)
+lives in [its own README](https://github.com/stratuslabs/agent/tree/main/packages/control-api).
+
+Two files appear while it is serving, both `0600`:
+
+| File | What |
+| --- | --- |
+| `~/.stratus/gateway-token` | The bearer token clients authenticate with |
+| `~/.stratus/gateway.json` | Where the daemon is reachable — url, host, port, pid — removed on a clean stop |
+
+Turn it off with `stratus serve --no-api`, or in `~/.stratus/config.json`:
+
+```jsonc
+{
+  "api": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 4123
+  }
+}
+```
+
+Like `approvals`, this block is read **only** from a config you chose
+yourself — the global `~/.stratus/config.json` or one passed with `--config`.
+An auto-discovered project-local `stratus.config.json` ships in any
+repository, and which interface a daemon binds is not a decision a cloned repo
+gets to make; one that tries is ignored, loudly.
+
+Localhost is the posture. To reach a machine at home, put it behind a tunnel
+(Tailscale is the pattern we recommend) rather than binding a public
+interface.
+
+### The dashboard
+
+```bash
+stratus dashboard
+```
+
+It finds a running daemon through `~/.stratus/gateway.json`, or starts one in
+the foreground when there is none (and says which it did). Then it mints a
+**single-use, short-lived sign-in link** and opens your browser at it — the
+one thing a browser cannot do for itself, since page JavaScript cannot read
+`~/.stratus/gateway-token` and a WebSocket upgrade cannot carry a header.
+
+The link works once. Run the command again for another. A daemon restart signs
+the browser out too, because its sessions live in memory.
+
+### Talking to a daemon from another machine
+
+`stratus agents --gateway <url>` reads the roster from a running daemon
+instead of resolving it locally — the same listing, answered by the API:
+
+```bash
+stratus agents --gateway http://127.0.0.1:4123
+```
+
+Locally that needs nothing else: the token comes from
+`~/.stratus/gateway-token`. A daemon reached through a tunnel has its own
+token, so pass it with `--token` or `STRATUS_GATEWAY_TOKEN`.
+
 ## Setup
 
 `stratus setup` is the whole onboarding, as a small navigable menu:
@@ -446,6 +522,12 @@ to refuse over.
 | `--idle-timeout` | `stratus serve`: seconds of provider silence before the watchdog aborts a turn (default 120) |
 | `--no-events` | Hide the event log |
 | `--no-log-file` | `stratus serve`: do not write `~/.stratus/logs/stratusd.jsonl` |
+| `--no-api` | `stratus serve`: do not serve the control API |
+| `--api-host` | `stratus serve`: control API interface (default `127.0.0.1`) |
+| `--api-port` | `stratus serve`: control API port (default `4123`; `0` picks any free port) |
+| `--gateway <url>` | `stratus agents`: read the roster from a running daemon's control API |
+| `--port`, `--host` | `stratus dashboard`: where a daemon it starts should bind |
+| `--token` | Bearer token for `--gateway` (default: `~/.stratus/gateway-token`, or `STRATUS_GATEWAY_TOKEN`) |
 | `--no-login` | `stratus service install`: install without the start-at-login trigger |
 | `-f`, `--follow` | `stratus logs`: follow the log, across rotations |
 | `-n <count>` | `stratus logs`: how much backlog to print (default 50) |
@@ -453,6 +535,6 @@ to refuse over.
 
 Precedence: flags → `STRATUS_*` env vars → soul file hints → config file. Project-local `stratus.config.json` outranks the global `~/.stratus/config.json`; stored sign-ins are endpoint-bound and never sent to endpoints a project config selects.
 
-Today the CLI covers setup, chat, one-shot runs, agent creation, the always-on gateway and its service integration, logs, diagnostics, Slack, and the local dashboard. More channels — and one control API that every surface talks to — are next.
+Today the CLI covers setup, chat, one-shot runs, agent creation, the always-on gateway and its service integration, logs, diagnostics, Slack, the control API, and the web dashboard.
 
 Part of [Stratus Agent](https://github.com/stratuslabs/agent) — a tiny TypeScript agent runtime.

@@ -74,6 +74,18 @@ export class AgentRegistry {
     return matches[0];
   }
 
+  /**
+   * Forget an agent, reporting whether one was registered under that id.
+   *
+   * A roster reload has to be able to *remove*. Re-registering the survivors
+   * over a map nothing ever deletes from leaves an agent whose soul file was
+   * deleted addressable — by id, and from every channel — for the rest of the
+   * daemon's life.
+   */
+  unregister(id: string): boolean {
+    return this.agents.delete(id);
+  }
+
   require(id: string): AgentDefinition {
     const agent = this.agents.get(id);
     if (!agent) {
