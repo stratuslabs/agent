@@ -49,15 +49,18 @@ provider call per poll would spend the operator's rate limit to report what
 resolution already knows. Live reachability, if it is ever wanted, goes behind
 `?probe=1`.
 
-**`GET /catalog/tools` is deferred to [06](./06-tool-packs.md).** Today it
-could only list the three kernel tools, and it needs a `gateway.tools()`
-accessor — an endpoint shaped against no real tool packs would be shaped by
-guesses. Everything else in the management group shipped.
+**`GET /catalog/tools` is deferred to [06](./06-tool-packs.md)**, where it is
+now written into the scope and acceptance criteria rather than left as a
+sentence here. Today it could only list the three kernel tools, and it needs a
+`gateway.tools()` accessor — an endpoint shaped against no real tool packs
+would be shaped by guesses. Everything else in the management group shipped.
 
 **The Slack attribution gap is unblocked, not closed.** The envelope and the
 turn ids exist now, so the fix described below is buildable; `packages/channel-slack`
 has not been migrated onto them and still queues renderers at intake. That is a
-follow-up this step enables and does not own.
+follow-up this step enables and does not own, and it is tracked in
+[04](./04-agent-sdk-bridge.md) § Follow-ups this step named but does not own,
+beside the adapter's other two.
 
 **Verified end to end** against a real daemon from a source checkout, on the
 demo provider: the roster renders, opening an agent lists its sessions, and
