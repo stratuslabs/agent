@@ -361,7 +361,7 @@ connectEvents({
       // completion that arrived during the outage is never replayed, so a
       // chat view would sit disabled on "Working…" for a turn that finished
       // minutes ago.
-      current.view?.reconcile?.();
+      void current.view?.reconcile?.();
     }
     render();
   },

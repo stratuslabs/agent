@@ -247,6 +247,33 @@ test('a summary reports the runtime a pinned soul dispatches on, not the environ
   assert.deepEqual(builtIn.runsOn, { provider: 'openai', model: 'gpt-4o' });
 });
 
+test('servedRuntimes applies the configured default soul\'s pins, wherever it lives', async () => {
+  const home = await newHome();
+  // A default soul named by the config from outside the agents directory —
+  // the roster scan never sees it, so this pass is the only one that can.
+  const soulPath = path.join(home, 'project.md');
+  await writeFile(soulPath, '---\nname: Ava\nid: ava\nprovider: anthropic\nmodel: claude-opus-5\n---\n\nYou are Ava.\n');
+  await saveConfigFile(globalConfigPath({ homeDir: home }), { provider: 'openai', soul: soulPath });
+
+  const runtimes = await servedRuntimes({
+    homeDir: home,
+    cwd: home,
+    // The environment names a different provider than the soul pins, and
+    // holds a key only for the one the soul actually uses.
+    processEnv: { STRATUS_PROVIDER: 'openai', ANTHROPIC_API_KEY: 'sk-ant-test' },
+  });
+
+  // Dispatch runs `applySoulPins`, which demotes the environment for this
+  // soul; `resolveRuntimeConfig` on its own ranks the environment higher. So
+  // without the pins this pass reports openai — and, with no openai key,
+  // drops the agent from the served set entirely, which is what the startup
+  // credential check reads.
+  assert.ok(
+    runtimes.some((served) => served.runtime.provider === 'anthropic'),
+    `the configured default soul's runtime is missing: ${JSON.stringify(runtimes.map((served) => served.runtime.provider))}`,
+  );
+});
+
 test('applySoulPins drops a default model chosen for a different provider', async () => {
   const soul = {
     agent: { id: 'ava', name: 'Ava', instructions: 'You are Ava.' },

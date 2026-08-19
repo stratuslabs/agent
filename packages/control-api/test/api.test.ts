@@ -1261,3 +1261,40 @@ test('a Slack binding must name an agent the daemon serves', async () => {
     await harness.stop();
   }
 });
+
+test('the catalog never sends one provider\'s key to another\'s endpoint', async () => {
+  const home = await newHome();
+  // A project-local config for openai, with its own endpoint.
+  await writeFile(
+    path.join(home, 'stratus.config.json'),
+    `${JSON.stringify({ provider: 'openai', baseUrl: 'https://openai.invalid/v1' })}\n`,
+  );
+  const reached: string[] = [];
+  const harness = await startApi({
+    home,
+    // And an environment override selecting a different provider entirely.
+    env: {
+      processEnv: { STRATUS_PROVIDER: 'anthropic', ANTHROPIC_API_KEY: 'sk-ant-test' },
+      fetch: (async (input: string | URL | Request) => {
+        reached.push(String(input));
+        return new Response(
+          JSON.stringify({ data: [{ id: 'claude-opus-5' }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }) as typeof fetch,
+    },
+  });
+  try {
+    await harness.call('/api/v1/catalog/models');
+    // The config's endpoint was chosen for openai. Handed to the resolved
+    // anthropic runtime it would send that key somewhere it was never bound
+    // to — the endpoint-binding rule, broken by a fallback.
+    assert.ok(
+      !reached.some((url) => url.includes('openai.invalid')),
+      `the anthropic key was sent to the openai endpoint: ${JSON.stringify(reached)}`,
+    );
+    assert.ok(reached.some((url) => url.includes('api.anthropic.com')), JSON.stringify(reached));
+  } finally {
+    await harness.stop();
+  }
+});

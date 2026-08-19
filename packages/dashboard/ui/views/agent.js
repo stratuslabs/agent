@@ -575,10 +575,25 @@ export const renderAgent = (agentId, initialSessionId) => {
    *
    * Nothing replays what was missed, so a turn that finished during the
    * outage leaves this view waiting on a completion that already happened —
-   * the composer disabled on "Working…" forever. The stored transcript is the
-   * authority, so this drops the in-flight rendering and reads it again.
+   * the composer disabled on "Working…" forever.
+   *
+   * The store decides, not the reconnect: a socket can also come back while
+   * the turn is genuinely still running, and clearing then would re-enable
+   * the composer mid-turn and make that turn's remaining events look like
+   * somebody else's. So the in-flight state is dropped only once the stored
+   * session says it has ended.
    */
-  const reconcile = () => {
+  const reconcile = async () => {
+    if (state.sending && state.sessionId && !state.unsent) {
+      const stored = await api.session(state.sessionId).then((read) => read.session).catch(() => undefined);
+      // Unreadable, or still going: leave the turn alone. A session saved a
+      // moment behind the turn it is running reads as `running` here, and
+      // the next event or check-in settles it.
+      if (!stored || stored.status === 'running' || stored.status === 'pending_approval') {
+        void loadSessions();
+        return;
+      }
+    }
     state.sending = false;
     state.turnId = undefined;
     state.pending = [];

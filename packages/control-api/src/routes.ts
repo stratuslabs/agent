@@ -723,9 +723,20 @@ export const routes: Route[] = [
         context.configPath ? { configPath: context.configPath } : {},
         context.env,
       ).catch(() => undefined);
-      const provider = runtime && runtime.provider !== 'demo' ? runtime.provider : config.provider;
-      const baseUrl = (runtime && runtime.provider !== 'demo' ? runtime.baseUrl : undefined) ?? config.baseUrl;
-      const apiKeyEnv = (runtime && runtime.provider !== 'demo' ? runtime.apiKeyEnvVar : undefined) ?? config.apiKeyEnv;
+      const resolved = runtime && runtime.provider !== 'demo' ? runtime : undefined;
+      const provider = resolved?.provider ?? config.provider;
+      // A config file's endpoint and key-selector were written for the
+      // provider named in that file, so they only stand in when that is the
+      // provider we resolved — the resolver's own `fileConfigApplies` rule,
+      // and a file with no provider key is openai-specific for the same
+      // reason it is there. Falling back unconditionally sent one provider's
+      // key to another provider's endpoint: an openai config with a custom
+      // `baseUrl`, overridden by `STRATUS_PROVIDER=anthropic`, resolves
+      // anthropic with no base URL of its own, and the fallback handed the
+      // Anthropic key to the OpenAI URL.
+      const configApplies = provider !== undefined && (config.provider ?? 'openai') === provider;
+      const baseUrl = resolved?.baseUrl ?? (configApplies ? config.baseUrl : undefined);
+      const apiKeyEnv = resolved?.apiKeyEnvVar ?? (configApplies ? config.apiKeyEnv : undefined);
       const credentials = await loadCredentials(context.env);
       const models = await collectAvailableModels(
         {

@@ -1720,7 +1720,22 @@ export const servedRuntimes = async (
     ...(activeConfig.provider !== undefined ? { configProvider: activeConfig.provider } : {}),
     configPresent: location !== undefined,
   };
-  const passes: Array<{ selection: RuntimeSelection; env: StateEnvironment }> = [{ selection: {}, env }];
+  // The daemon-wide default pass, carrying the configured default soul's
+  // pins when there is one.
+  //
+  // `loadRosterSouls` scans only the agents directory, so a `soul` named by
+  // the config from anywhere else is seen by this pass alone — and
+  // `resolveRuntimeConfig` ranks the environment *above* a soul's provider,
+  // while dispatch runs `applySoulPins` first and demotes it. Without this
+  // the default agent's runtime is reported as whatever `STRATUS_PROVIDER`
+  // says while its turns run somewhere else, and the startup credential
+  // check looks for the wrong provider's key.
+  const configuredSoul = await resolveConfiguredSoul(configPath ? { configPath } : {}, env)
+    .catch(() => undefined);
+  const basePass = configuredSoul
+    ? applySoulPins(configuredSoul.soul, {}, env, context)
+    : { selection: {} as RuntimeSelection, env };
+  const passes: Array<{ selection: RuntimeSelection; env: StateEnvironment }> = [basePass];
   // A roster that will not load is the gateway's to refuse, with a better
   // message than this preflight could give — so it checks what it can and
   // leaves the failing to start().
