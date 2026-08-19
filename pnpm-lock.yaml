@@ -329,6 +329,25 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  packages/tool-web:
+    dependencies:
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+      '@stratusagent/egress':
+        specifier: workspace:*
+        version: link:../egress
+      '@stratusagent/plugins':
+        specifier: workspace:*
+        version: link:../plugins
+    devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
 packages:
 
   '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.233':
