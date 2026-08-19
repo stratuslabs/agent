@@ -752,12 +752,42 @@ const approvalRequest = (
   ...overrides,
 });
 
-const click = (actionId: string, requestId: string, user: string) => ({
+/**
+ * A click, carrying the message it came from the way Slack does.
+ *
+ * `blocks` is not decoration: a block_actions payload includes the message
+ * as Slack holds it when it processes the interaction, and that is how the
+ * adapter tells a prompt still offering a decision from one already
+ * rewritten with an outcome. `settled: true` is the second kind — what a
+ * message looks like after any ending has been written onto it.
+ */
+const click = (
+  actionId: string,
+  requestId: string,
+  user: string,
+  options: { settled?: boolean } = {},
+) => ({
   body: {
     team_id: 'T1',
     user: { id: user },
     channel: { id: 'C1' },
-    message: { ts: 'bot-ts-1', thread_ts: '100.1' },
+    message: {
+      ts: 'bot-ts-1',
+      thread_ts: '100.1',
+      blocks: options.settled
+        ? [{ type: 'section', text: { type: 'mrkdwn', text: 'already decided' } }]
+        : [
+            { type: 'section', text: { type: 'mrkdwn', text: 'Ava wants to run shell.run (gated).' } },
+            {
+              type: 'actions',
+              elements: [
+                { type: 'button', action_id: 'stratus_approve_once', value: requestId },
+                { type: 'button', action_id: 'stratus_approve_always', value: requestId },
+                { type: 'button', action_id: 'stratus_deny', value: requestId },
+              ],
+            },
+          ],
+    },
     actions: [{ action_id: actionId, value: requestId }],
   },
 });
@@ -1229,11 +1259,14 @@ test('a click on a prompt left by a dead daemon retires it, using the click\'s o
   await adapter.stop();
 });
 
-test('a stale click on a request this process settled does not overwrite its outcome', async () => {
-  // A client rendering the message as it was before the retraction can
-  // still deliver a click. Treating that as an orphan would replace a real
-  // decision with "no longer pending" — losing the record of who decided
-  // what, which is the whole point of rewriting the message.
+test('a click on a message that already carries its outcome does not overwrite it', async () => {
+  // A click can still arrive for a request that is already decided — from
+  // a stale render, or from a message whose outcome this process never
+  // wrote. Treating either as an orphan would replace a real decision with
+  // "no longer pending", losing the record of who decided what, which is
+  // the whole point of rewriting the message. The message itself says
+  // which it is: an ending has been written onto it, so it no longer
+  // offers a decision.
   const { socket, web, gateway, adapter } = approvalAdapter([
     { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
   ]);
@@ -1247,8 +1280,8 @@ test('a stale click on a request this process settled does not overwrite its out
   assert.match(settled?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
   const updatesAfterDecision = web.updates.length;
 
-  // The same button, clicked again from a stale render.
-  await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
+  // The same button, clicked again — the message now carries the outcome.
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN', { settled: true }));
 
   assert.equal(web.updates.length, updatesAfterDecision, 'the settled message is left exactly as it was');
   assert.match(web.updates.at(-1)?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
@@ -1394,4 +1427,80 @@ test('a click that beats the post is not treated as an orphan', async () => {
   assert.equal(gateway.pendingApprovals.has('req-1'), true);
   const buttons = buttonIds(web.posts.at(-1)?.blocks);
   assert.deepEqual(buttons, ['stratus_approve_once', 'stratus_approve_always', 'stratus_deny']);
+});
+
+test('a resolution Slack refused leaves the prompt repairable by the next click', async () => {
+  // Slack rejected the update, so the outcome never reached the message and
+  // it still shows live buttons. There is nothing on it to protect, and a
+  // later click has to be able to clean it up.
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+
+  const realUpdate = web.chat.update;
+  let refuse = true;
+  web.chat.update = async (args) => {
+    if (refuse) {
+      refuse = false;
+      throw new Error('slack said no');
+    }
+    return realUpdate(args);
+  };
+
+  // Decided, but the message never got rewritten.
+  await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-DYLAN'));
+  // Length rather than deepEqual against []: under assert/strict that is an
+  // assertion signature, and it would narrow `web.updates` to never[] for
+  // the rest of the test — where the repair below is read back.
+  assert.equal(web.updates.length, 0, 'the outcome never reached the message');
+
+  // A later click on those still-live buttons must be able to clean it up.
+  await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-DYLAN'));
+  await adapter.stop();
+
+  const repaired = web.updates.at(-1);
+  assert.match(repaired?.text ?? '', /no longer running/);
+  assert.equal(buttonIds(repaired?.blocks).length, 0);
+});
+
+test('an update Slack applied but never confirmed does not lose its outcome', async () => {
+  // The ambiguous half of a failed update: Slack commits the edit and the
+  // response is lost, so the promise rejects over a message that now
+  // carries the real decision. Deciding from the error would have to guess
+  // which half this was; deciding from the message does not have to,
+  // because the message is the thing at stake.
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest());
+
+  const realUpdate = web.chat.update;
+  let swallowResponse = true;
+  web.chat.update = async (args) => {
+    await realUpdate(args);
+    if (swallowResponse) {
+      swallowResponse = false;
+      throw new Error('connection reset after Slack committed the edit');
+    }
+    return {};
+  };
+
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
+  const outcome = web.updates.at(-1);
+  assert.match(outcome?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+  const updatesAfterOutcome = web.updates.length;
+
+  // A later click on that message, which now carries the decision.
+  await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-DYLAN', { settled: true }));
+  await adapter.stop();
+
+  assert.equal(web.updates.length, updatesAfterOutcome, 'the decision is left exactly as Slack stored it');
+  assert.match(web.updates.at(-1)?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
 });
