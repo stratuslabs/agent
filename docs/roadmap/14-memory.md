@@ -57,12 +57,52 @@ goes stale, and a memory that is never curated goes noisy.
   hand-edits the file the way decision 5 promises they can gets a store that
   agrees with what they wrote. A version stamp on the index that does not match
   the current schema is a rebuild trigger, not an error.
+
+  **Being derived is a claim that has to be checked, not just declared.** A
+  schema stamp catches a change to the index's shape and nothing about its
+  contents, which leaves two ordinary situations producing an index that is
+  current-version and permanently wrong: a crash between the JSONL append and
+  the index write, and an operator editing the file — the thing decision 5
+  explicitly promises they may do. Either one makes `recall` quietly disagree
+  with `list`, omitting entries that are in the record or returning ones that
+  are not.
+
+  So the index carries a **watermark**: the byte offset it has consumed and
+  the id of the last entry it indexed. On open, and cheaply before a query:
+
+  - File longer than the watermark, and the recorded last id still sits where
+    the watermark says → index the tail. This is the crash case, and it costs
+    the new bytes rather than the file.
+  - File shorter, or that id is not where it should be → the record was
+    rewritten underneath the index. Full rebuild.
+
+  Two properties matter more than the mechanism. The check is **O(1) against
+  the file's size and one line**, so it can run on every open without turning
+  startup into a scan. And its failure direction is **rebuild, never trust**:
+  an ambiguous result costs one rebuild, where the opposite default costs
+  correctness silently and indefinitely.
 - **Retrieval by FTS5, not embeddings.** No provider, no key, no network, no
   per-query cost, deterministic output, and genuinely good at *what do I know
   about X*. Embeddings are an obvious later plugin behind the same seam, and
   starting there would make the first version of memory depend on a second
   vendor relationship. It also keeps the index derived: an embedding index that
   cost money to build is one nobody will agree to throw away and rebuild.
+- **`query` is literal text, never FTS5 syntax.** This needs saying because the
+  obvious implementation gets it wrong: passing the string straight into
+  `MATCH ?` makes FTS5 interpret its own operators, so `C++` is a syntax error,
+  an unmatched quote is a syntax error, and `AND` in the middle of a sentence
+  silently changes the search. The caller here is a *model*, writing whatever
+  the conversation suggests — so the common case is exactly the one that
+  breaks, and `memory.recall` starts returning tool errors for ordinary
+  questions.
+
+  The store therefore tokenizes and quotes each term itself rather than
+  forwarding the string, and **no input is a syntax error**: a query that
+  matches nothing returns nothing. This is the same rule
+  [13](./13-search.md) states for `web.search` — the query is passed through,
+  not reinterpreted — and it is worth the two specs agreeing, because a skill
+  that searches the web and then searches memory should not have to know that
+  one of them silently speaks a query language.
 - **`withLegacyDefaultMemories` learns the new methods, alias-aware.** The
   wrapper in `packages/state` today special-cases `list` only: for the built-in
   `stratus` agent it merges entries stored under `demo-agent`,
@@ -146,6 +186,14 @@ goes stale, and a memory that is never curated goes noisy.
   only *claimed* to be derived is a store that has quietly become the record.
 - **An entry appended to the JSONL by hand is recallable**, which is what
   decision 5's promise that the files are the interface actually costs.
+- **An entry appended while the daemon was stopped is recallable on the next
+  start, and an edit that rewrites the file rebuilds rather than being
+  half-believed** — the watermark doing its job in both directions. The first
+  is the crash case in disguise, which is why one test covers both.
+- **`recall` on `C++`, on an unmatched quote, and on a sentence containing
+  `AND` all return results or nothing, never a tool error** — the queries a
+  model actually writes, against a store whose obvious implementation rejects
+  them.
 - **The built-in `stratus` agent can recall and forget a memory stored under a
   legacy default id** — an upgraded unsouled install, which every per-agent
   test passes right over.

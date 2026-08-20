@@ -47,13 +47,24 @@ one of them will be written assuming search exists.
   | `query` | `string`, required, non-empty | Passed through verbatim. A backend may **not** reinterpret operators inside it. |
   | `count` | `integer`, 1–50, default 10 | A *maximum*. Returning fewer is normal; returning more is a contract violation. |
   | `site` | `string?` — one registrable domain, no scheme, no path | `example.com` includes subdomains; `docs.example.com` does not widen to the parent. Not a query operator, so a backend without native support filters after the fact rather than splicing `site:` into the query. |
-  | `freshness` | `string?` — an ISO 8601 duration (`P7D`, `P1Y`) | An age, not a cutoff timestamp and not an enum: a duration is unambiguous across time zones and needs no shared vocabulary of `day`/`week`/`month`. Results older than it are excluded. |
+  | `freshness` | `string?` — an ISO 8601 duration (`P7D`, `P1Y`) | An age, not a cutoff timestamp and not an enum: a duration is unambiguous across time zones and needs no shared vocabulary of `day`/`week`/`month`. Results older than it are excluded, **and so are results with no known date** — see below. |
 
   And the result: `title` and `url` required (`url` absolute, `http`/`https`
   only, already validated by the address policy), `snippet` a plain string with
   markup stripped, `publishedAt` an **ISO 8601 instant in UTC** when the
   backend supplies one and absent when it does not — never a guess, never a
   locale-formatted date.
+
+  **An undated result does not survive a `freshness` filter.** Backends omit
+  dates for some hits routinely, so leaving this unsaid lets two conforming
+  adapters return different sets for identical calls — which is the
+  interchangeability criterion failing on the most ordinary input there is.
+  Exclusion is the right side to land on for the same reason the rest of this
+  table is strict: the agent asked for recent results and will say the answer
+  is recent, and "we could not determine a date" is not evidence that it is.
+  The cost is real and worth stating rather than hiding — a good undated page
+  is dropped — which is why the exclusion applies *only* when `freshness` is
+  set, and a call that does not ask about time sees every result.
 
   Anything a backend cannot honor it must **refuse rather than approximate**.
   A backend that silently ignores `freshness` is worse than one that fails,
@@ -220,9 +231,11 @@ one of them will be written assuming search exists.
   first-party.
 - **One option suite runs against both backends and gets answers meaning the
   same thing**: `count` respected as a maximum, `site` excluding a
-  lookalike parent domain, `freshness` excluding an older result, and
-  `publishedAt` parsing as a UTC instant from both. This is where
-  interchangeability is actually won or lost.
+  lookalike parent domain, `freshness` excluding an older result **and an
+  undated one**, and `publishedAt` parsing as a UTC instant from both. This is
+  where interchangeability is actually won or lost, and the undated case
+  belongs in it because it is the one every backend produces without being
+  asked.
 - **A backend that cannot honor an option fails the call naming it**, rather
   than returning results that silently ignore it.
 - **A key stored in the credential store is resolvable by an allowlisted agent
