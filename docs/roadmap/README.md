@@ -22,14 +22,14 @@ Steps are ordered by dependency, not by calendar. Numbers are stable identifiers
 | 10 | [Proactive agents: schedules and outbound messages](./10-proactive.md) | Not started | Agents that act without being spoken to first |
 | 11 | [MCP bridge: mount any MCP server as Stratus tools](./11-mcp.md) | Not started | Every existing MCP server, under kernel policy |
 | 12 | [Plugin discovery and distribution](./12-plugin-registry.md) | Not started | Finding, installing, and trusting third-party plugins |
-| 13 | [Web search: finding a page, not only reading one](./13-search.md) | Not started | Agents that can find a source instead of guessing a URL |
+| 13 | [Web search: the contract the ecosystem implements](./13-search.md) | Not started | One `web.search` shape every backend obeys, so swapping vendors changes no soul |
 | 14 | [Memory: recall the agent performs, not recall that happens to it](./14-memory.md) | Not started | Durable, searchable memory an agent writes and reads deliberately |
 
 ## Phases
 
 - **Phase 1 — the fleet is live (steps 01–02).** After the gateway and the Slack channel, agents run always-on on your own hardware and answer in Slack. This is the milestone everything else builds on.
 - **Phase 2 — trusted and on subscription (steps 03–04).** The permission engine makes unattended tool use safe; the SDK bridge makes the Claude-subscription billing path a full citizen.
-- **Phase 3 — surfaces and capabilities (steps 05–06, 09–10, 13–14).** The control API turns the gateway into a platform; the dashboard replaces the smoke-test page; tool plugins give agents real capabilities to opt into, skills give them procedures for using those capabilities well, and schedules plus outbound messages make an always-on daemon into agents that act on their own. Search closes the gap under `web.fetch` — an agent that can read a page but not find one — and memory makes "gets smarter over time" something the agent does rather than something done to it.
+- **Phase 3 — surfaces and capabilities (steps 05–06, 09–10, 13–14).** The control API turns the gateway into a platform; the dashboard replaces the smoke-test page; tool plugins give agents real capabilities to opt into, skills give them procedures for using those capabilities well, and schedules plus outbound messages make an always-on daemon into agents that act on their own. Search specifies the contract under the gap in `web.fetch` — an agent that can read a page but not find one — while the backends stay in the ecosystem where `plugins.md` puts them, and memory makes "gets smarter over time" something the agent does rather than something done to it.
 - **Phase 4 — the management app (step 07).** The macOS app makes agent creation and settings a visual experience instead of a CLI one.
 - **Phase 5 — deployment profiles (step 08).** The single-tenant VM and hosted multi-tenant deployments, both as configurations.
 - **Phase 6 — the ecosystem (steps 11–12).** The MCP bridge makes every server anyone has already written available to a Stratus agent; discovery and distribution let third parties ship plugins of their own.

@@ -1,10 +1,21 @@
-# 13 — Web search: finding a page, not only reading one
+# 13 — Web search: the contract the ecosystem implements
 
 ## Goal
 
-A `search` toolset that returns ranked results for a query, behind a provider
-the operator chooses and pays for — so an agent can find the page it needs
-instead of being handed the URL.
+Specify `web.search` — its name, its result shape, and the rules any backend
+obeys — so an agent can find the page it needs instead of being handed the URL,
+and so two independently written search plugins are interchangeable behind one
+soul allowlist.
+
+**The backends stay outside this repository.**
+[`plugins.md`](../architecture/plugins.md) calls search "the deliberate example
+of something that stays outside" — every backend needs a vendor key and a
+commercial relationship, so core ships `web.fetch` and the ecosystem ships
+`web.search` — and [06](./06-tool-packs.md) lists web search under **Out** for
+the same reason. That boundary is not revisited here. What this step supplies
+is the half that has to be first-party for the ecosystem half to be worth
+anything: a fixed tool name and a fixed result shape, so a soul or a skill
+written against search keeps working when the operator changes vendor.
 
 ## Why now
 
@@ -25,42 +36,55 @@ one of them will be written assuming search exists.
 
 **In:**
 
-- **`@stratusagent/tool-search`**, one plugin contributing one toolset, on the
-  contract in [`plugins.md`](../architecture/plugins.md).
-- **`search.web(query, count?, site?, freshness?)`** → a ranked array of
-  `{ title, url, snippet, publishedAt? }`. `risk: 'safe'` — see the open
-  question; the short version is that reading a public index acts on nothing.
-- **A `SearchProvider` seam** — `{ search(query, options): Promise<SearchResult[]> }` —
-  with adapters for Brave, Tavily, Exa, Google CSE, and **SearXNG**. The
-  operator picks one per agent; there is no default, because a default provider
-  is a default bill.
-
-  SearXNG is in the list rather than assumed: it has its own request and
-  response contract, so allowing its address through egress does not by itself
-  make any other adapter able to talk to it. It earns the fifth slot because it
-  is the only one that needs no key and no vendor, which matches a product
-  whose agents already run on the operator's own hardware.
-- **Keys through the `CredentialResolver`**, resolved per call from
-  `session.agent.id` the way `tool-fs` resolves its roots. Not through the
-  plugin's config block: a literal key in the `plugins` block would put an API
-  key in `stratus.config.json`, and project-local config files get committed.
-- **Every request through `@stratusagent/egress`.** A self-hosted SearXNG is a
-  legitimate configuration, and an operator pointing a provider at
-  `http://localhost:8888` must be doing it deliberately rather than by
-  accident — which is precisely what the shared address policy already
-  decides.
-- **Normalized results only.** The provider's raw payload does not reach the
-  agent. A provider that reshapes its JSON must not reshape what every soul
-  and skill in the fleet was written against.
+- **`web.search(query, count?, site?, freshness?)`** → a ranked array of
+  `{ title, url, snippet, publishedAt? }`. The name is `web.search`, as both
+  governing documents already say — not `search.web`. This is not cosmetic:
+  souls and skills allowlist by name, so the two spellings are two different
+  capabilities, and a fleet written against one silently loses search when a
+  plugin ships the other.
+- **The name sits in the `web` namespace on purpose.** A soul that already says
+  `tools: [web.*]` picks up search when the operator installs a backend, with
+  no soul edit — which is the behaviour an operator expects and the reason the
+  glob exists. The risk floor is what keeps that safe rather than surprising:
+  `web.*` is first-party today, but an ecosystem search plugin is third-party
+  and floors at `gated` no matter what its manifest claims, so the glob widens
+  what an agent *can reach* and never what it can do unapproved.
+- **A published `SearchProvider` shape** —
+  `{ search(query, options): Promise<SearchResult[]> }` — so Brave, Tavily,
+  Exa, Google CSE, and SearXNG adapters are written against something rather
+  than each inventing a result type. Published *from* this repo, implemented
+  *outside* it.
+- **Normalized results are part of the contract, not an implementation
+  detail.** A backend's raw payload never reaches the agent. This is the whole
+  value of specifying the step: a provider that reshapes its JSON must not
+  reshape what every soul and skill in the fleet was written against.
+- **The rules a backend inherits rather than re-deriving**: keys through the
+  scoped `CredentialResolver`, resolved per call from `session.agent.id` the
+  way `tool-fs` resolves its roots; and every request through
+  `@stratusagent/egress`. Both are available to third-party plugins — the
+  resolver through `PluginContext` (kernel change 9), the address policy as a
+  published package — so "it needs the credential resolver" is not an argument
+  for shipping the backend here. It is an argument for saying so in the
+  contract, which is what this bullet is.
+- **Two rules stated once, because a backend author will otherwise guess.** A
+  key belongs in the credential store, never as a literal in the plugin's
+  config block — a key in `stratus.config.json` is a key in a file people
+  commit. And a self-hosted backend on `http://localhost:8888` is a legitimate
+  configuration that must be a deliberate allowance rather than an accident,
+  which is exactly the decision the shared address policy already makes.
 
 **Out:**
 
+- **No first-party backend, and no `@stratusagent/tool-search`.** This is the
+  governing boundary, not a scoping preference: vendor keys and commercial
+  relationships stay in the ecosystem. See the open question for the one case
+  that argues against it.
 - **No first-party index.** There is nothing here worth building and a great
   deal worth buying.
-- **No fetching.** `search.web` returns URLs; reading one is `web.fetch`, which
+- **No fetching.** `web.search` returns URLs; reading one is `web.fetch`, which
   already exists and already validates redirects hop by hop. Composition is the
-  point, and a `search.fetch` that did both would be a second, worse copy of a
-  policy 06 owns.
+  point, and a tool that did both would be a second, worse copy of a policy 06
+  owns.
 - **No embeddings or semantic retrieval.** That is a different problem with a
   different store; see [14](./14-memory.md).
 - **No cross-agent result cache.** Two agents sharing a cache share a record of
@@ -70,9 +94,12 @@ one of them will be written assuming search exists.
 
 ## Design sketch
 
-- The provider is named in config (`provider: 'brave'`); an unknown name is a
-  load-time failure that lists the valid set, not a runtime failure on the
-  first search.
+- **Which backend is installed is the operator's choice, expressed by
+  installing it** — the `plugins` block already keys on package name, so there
+  is no second `provider:` selector to invent and no registry of valid names to
+  keep current. Two search plugins enabled at once is a name collision on
+  `web.search` and therefore a load-time error, which is the right answer: the
+  operator picks one.
 - A missing or rejected key fails **that call**, with the install-hint shape
   the other packs use — naming the credential to add — and leaves the daemon
   serving every other agent. A search key is the kind of thing that expires on
@@ -90,9 +117,16 @@ one of them will be written assuming search exists.
 
 ## Acceptance criteria
 
-- An agent whose soul allowlists `search.*` gets results; one that does not is
-  refused at both gates.
-- Two agents configured with different providers each get their own, from their
+- An agent whose soul allowlists `web.search` — or `web.*` — gets results; one
+  that does not is refused at both gates.
+- **Two backends from different authors are interchangeable**: swapping the
+  installed search plugin changes no soul, no skill, and no result shape. This
+  is the criterion the whole step exists for, and a version that ships one
+  backend and never proves the second has not met it.
+- **A third-party search plugin registers `gated` even if its manifest says
+  `safe`** — the floor holding across a namespace whose other tools are
+  first-party.
+- Two agents configured with different backends each get their own, from their
   own credential — the test that proves the per-call agent resolution is real
   and not a startup-time capture.
 - A provider endpoint on a loopback address is refused unless the operator
@@ -104,7 +138,20 @@ one of them will be written assuming search exists.
 
 ## Open questions
 
-- **Is `search.web` `safe` or `gated`?** Leaning `safe`: the risk model grades
+- **Does SearXNG earn a first-party exception?** The reason `plugins.md` keeps
+  search outside is stated precisely — "every backend needs a vendor key and a
+  commercial relationship" — and SearXNG is the one backend for which that
+  sentence is false. It is self-hosted, needs no key, and involves no vendor,
+  for a product whose agents already run on the operator's own hardware. That
+  is a narrow, principled exception rather than an erosion of the boundary, and
+  it would give the contract a reference implementation that CI can actually
+  run. It is also a change to a governing document, so it is a decision to
+  make deliberately in `plugins.md` and not a scope call inside this step.
+  Everything else here is written to be true either way.
+- **Is `web.search` `safe` or `gated`?** Leaning `safe` as a contract
+  statement, while noting that the third-party floor makes it `gated` in
+  practice for any ecosystem backend — a gap worth stating rather than
+  discovering. The reasoning for `safe`: the risk model grades
   *acting on the world*, and a query acts on nothing. The counter-argument is
   real but different in kind — a metered API costs money, and an agent in a
   loop can spend it. That is a budget control, not a permission, and the
