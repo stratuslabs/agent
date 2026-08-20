@@ -68,15 +68,28 @@ goes stale, and a memory that is never curated goes noisy.
   are not.
 
   So the index carries a **watermark** with two layers, because one is not
-  enough. It records `(inode, size, mtime)` of the file as it stood when the
-  index was written, the byte offset consumed, and a **digest of that consumed
-  prefix**.
+  enough. It records the byte offset consumed, a **digest of that consumed
+  prefix**, and the file's `inode` and `mtime`.
 
-  - `(inode, size, mtime)` all match → the file has not been written to since.
-    Trust the index; do no work.
-  - Anything differs → recompute the digest of the prefix. If it matches, this
-    was a pure append: index the tail. If it does not, the record was edited
-    underneath the index: full rebuild.
+  **The recorded size is the consumed offset itself — never a fresh `stat`
+  after indexing.** That distinction is the whole defence against a concurrent
+  append, and the version that stats afterwards is both the obvious one and
+  broken: `createFileMemoryStore` appends with `appendFile`, and the CLI and
+  the daemon each build a store over the same `~/.stratus/memory.jsonl`, so a
+  second process can append while the first is indexing. An indexer that
+  consumed through offset A and then recorded the size it found — A plus
+  whatever arrived meanwhile — would claim to have indexed bytes it never
+  read, and every later open would see a matching tuple and trust it. The
+  entry would be in the record, absent from `recall`, and never reconsidered.
+
+  With size ≡ consumed offset, the checks are:
+
+  - `inode` and `mtime` match **and** the file's actual size equals the
+    recorded offset → nothing has happened since; trust the index, do no work.
+  - Actual size is larger → recompute the digest of the prefix. Matches → a
+    pure append (whoever wrote it), index the tail. Differs → the record was
+    edited underneath the index; full rebuild.
+  - Actual size is smaller, or the inode changed → full rebuild.
 
   The digest is what makes the check honest, and the reason is worth writing
   down because the cheaper version looks sufficient and is not. An offset plus
@@ -114,11 +127,15 @@ goes stale, and a memory that is never curated goes noisy.
 
   The store therefore tokenizes and quotes each term itself rather than
   forwarding the string, and **no input is a syntax error**: a query that
-  matches nothing returns nothing. This is the same rule
-  [13](./13-search.md) states for `web.search` — the query is passed through,
-  not reinterpreted — and it is worth the two specs agreeing, because a skill
-  that searches the web and then searches memory should not have to know that
-  one of them silently speaks a query language.
+  matches nothing returns nothing, and an unbalanced quote is a search for a
+  quote character.
+
+  This is the same rule [13](./13-search.md) states for `web.search`, and
+  deliberately the same *shape* of rule: not "pass the string through" — which
+  is exactly what lets a downstream parser reinterpret it — but "the query
+  means its literal text, and whoever owns the search does the escaping needed
+  to make that true". A skill that searches the web and then searches memory
+  should not have to know that one of them silently speaks a query language.
 - **`withLegacyDefaultMemories` learns the new methods, alias-aware.** The
   wrapper in `packages/state` today special-cases `list` only: for the built-in
   `stratus` agent it merges entries stored under `demo-agent`,
@@ -218,6 +235,10 @@ goes stale, and a memory that is never curated goes noisy.
   start, and an edit that rewrites the file rebuilds rather than being
   half-believed** — the watermark doing its job in both directions. The first
   is the crash case in disguise, which is why one test covers both.
+- **An entry appended by a second process *while indexing is in progress* is
+  recallable afterwards.** The CLI and the daemon both append to the same file,
+  so this is a normal Tuesday rather than a stress test, and it is the case a
+  watermark that stats the file after indexing loses permanently.
 - **`recall` on `C++`, on an unmatched quote, and on a sentence containing
   `AND` all return results or nothing, never a tool error** — the queries a
   model actually writes, against a store whose obvious implementation rejects

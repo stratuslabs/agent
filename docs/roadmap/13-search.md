@@ -44,10 +44,26 @@ one of them will be written assuming search exists.
 
   | Field | Type | Meaning |
   | --- | --- | --- |
-  | `query` | `string`, required, non-empty | Passed through verbatim. A backend may **not** reinterpret operators inside it. |
+  | `query` | `string`, required, non-empty | **Literal text.** The backend must do whatever its provider requires — escaping, quoting, a literal-search parameter — so the upstream searches for the characters given rather than parsing operators out of them. |
   | `count` | `integer`, 1–50, default 10 | A *maximum*. Returning fewer is normal; returning more is a contract violation. |
   | `site` | `string?` — one registrable domain, no scheme, no path | `example.com` includes subdomains; `docs.example.com` does not widen to the parent. Not a query operator, so a backend without native support filters after the fact rather than splicing `site:` into the query. |
-  | `freshness` | `string?` — an ISO 8601 duration of **fixed length only**: days, hours, minutes, seconds (`P7D`, `P30D`, `PT12H`). `Y` and `M` designators are rejected. | An age, not a cutoff timestamp and not an enum. Measured back from the instant the request is made, in UTC. Results older than it are excluded, **and so are results with no known date** — see below. |
+  | `freshness` | `string?` — an ISO 8601 duration of **fixed length only**. Accepted: `W`, `D` in the date portion and `H`, `M`, `S` after the `T` (`P7D`, `P4W`, `PT12H`, `PT30M`). Rejected: `Y` and `M` **in the date portion** (`P1Y`, `P1M`). | An age, not a cutoff timestamp and not an enum. Measured back from the instant the request is made, in UTC. Results older than it are excluded, **and so are results with no known date** — see below. |
+
+  **"Verbatim" was the wrong word for `query`, and the two halves of it could
+  not both be true.** Most search APIs parse their own operators out of the
+  query field, so handing the string over untouched is precisely what lets the
+  upstream reinterpret `site:`, `OR`, a minus sign, or a quote — while a
+  backend that escapes them is no longer passing anything verbatim. Two
+  conforming adapters would then answer the same call differently, which is
+  the failure this table exists to prevent.
+
+  What is actually required is the *meaning*: the query is literal, and each
+  backend does whatever its provider needs to make that true. An unbalanced
+  quote is a search for a quote character, not a syntax error. This is the
+  same rule [14](./14-memory.md) states for `memory.recall` against FTS5, and
+  for the same reason — the caller is a model writing prose, and the moment a
+  search field parses operators, ordinary sentences start meaning something
+  nobody typed.
 
   And the result: `title` and `url` required (`url` absolute, `http`/`https`
   only, already validated by the address policy), `snippet` a plain string with
@@ -64,6 +80,13 @@ one of them will be written assuming search exists.
   nothing a caller wants: `P30D` and `P365D` say what someone asking for "a
   month" or "a year" of search results actually means, and say it identically
   everywhere.
+
+  **`M` means two things and only one of them is rejected.** ISO 8601 uses the
+  same letter for months in the date portion and minutes after the `T`, so
+  "reject `M`" would throw out `PT30M`, which is fixed-length and perfectly
+  well defined. The rejection is positional: `P1M` is refused, `PT30M` is
+  accepted. `W` is accepted for the same reason `D` is — a week is exactly
+  seven days with no calendar dependency.
 
   **An undated result does not survive a `freshness` filter.** Backends omit
   dates for some hits routinely, so leaving this unsaid lets two conforming
@@ -246,9 +269,14 @@ one of them will be written assuming search exists.
   where interchangeability is actually won or lost, and the undated case
   belongs in it because it is the one every backend produces without being
   asked.
-- **`P1M` and `P1Y` are rejected by both backends, with the same error** —
-  proving the ambiguous designators are refused at the contract rather than
-  each adapter quietly picking a length.
+- **`P1M` and `P1Y` are rejected by both backends with the same error, while
+  `PT30M` is accepted by both** — proving the rejection is positional rather
+  than a blanket ban on the letter, which would throw out a fixed-length
+  duration the table explicitly permits.
+- **An operator-bearing query returns results about the operators.**
+  `site:example.com`, `a OR b`, `-foo`, and a string with an unbalanced quote
+  each search for their literal text on both backends, rather than being
+  interpreted by one provider and not the other.
 - **A backend that cannot honor an option fails the call naming it**, rather
   than returning results that silently ignore it.
 - **A key stored in the credential store is resolvable by an allowlisted agent
