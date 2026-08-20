@@ -94,12 +94,20 @@ one of them will be written assuming search exists.
 
 ## Design sketch
 
-- **Which backend is installed is the operator's choice, expressed by
-  installing it** — the `plugins` block already keys on package name, so there
-  is no second `provider:` selector to invent and no registry of valid names to
-  keep current. Two search plugins enabled at once is a name collision on
-  `web.search` and therefore a load-time error, which is the right answer: the
-  operator picks one.
+- **The selection scope is per install; the credential scope is per agent.**
+  Which backend runs is the operator's choice, expressed by installing it — the
+  `plugins` block already keys on package name, so there is no second
+  `provider:` selector to invent and no registry of valid names to keep
+  current. Two search plugins enabled at once is a name collision on
+  `web.search` and therefore a load-time error, which is the right answer
+  rather than an awkward one: a tool name is unique per install, and that rule
+  is load-bearing everywhere else in the contract.
+
+  So a fleet does not mix backends, and it does not need to: what differs
+  between agents is *whose account pays and whose instance answers*, which is
+  the credential, resolved per call. A deployment that genuinely needs two
+  backends wants two daemons — the same conclusion 06 reached about the
+  browser's address policy, for the same reason.
 - A missing or rejected key fails **that call**, with the install-hint shape
   the other packs use — naming the credential to add — and leaves the daemon
   serving every other agent. A search key is the kind of thing that expires on
@@ -126,9 +134,10 @@ one of them will be written assuming search exists.
 - **A third-party search plugin registers `gated` even if its manifest says
   `safe`** — the floor holding across a namespace whose other tools are
   first-party.
-- Two agents configured with different backends each get their own, from their
-  own credential — the test that proves the per-call agent resolution is real
-  and not a startup-time capture.
+- **Two agents searching the one installed backend use their own credentials**,
+  resolved per call — the test that proves the agent resolution is real and not
+  a startup-time capture. Different *backends* per agent is not a criterion,
+  because it is not a thing the design permits; see the selection scope below.
 - A provider endpoint on a loopback address is refused unless the operator
   allowed it, proving the egress policy applies here as it does to `web.fetch`.
 - A missing key produces a named, actionable failure on that call only.
