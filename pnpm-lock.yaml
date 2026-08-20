@@ -73,6 +73,9 @@ importers:
       '@stratusagent/permissions':
         specifier: workspace:*
         version: link:../permissions
+      '@stratusagent/plugins':
+        specifier: workspace:*
+        version: link:../plugins
       '@stratusagent/provider-anthropic':
         specifier: workspace:*
         version: link:../provider-anthropic
@@ -92,6 +95,18 @@ importers:
       '@stratusagent/control-api':
         specifier: workspace:*
         version: link:../control-api
+      '@stratusagent/tool-browser':
+        specifier: workspace:*
+        version: link:../tool-browser
+      '@stratusagent/tool-fs':
+        specifier: workspace:*
+        version: link:../tool-fs
+      '@stratusagent/tool-shell':
+        specifier: workspace:*
+        version: link:../tool-shell
+      '@stratusagent/tool-web':
+        specifier: workspace:*
+        version: link:../tool-web
       '@types/node':
         specifier: ^24.6.0
         version: 24.12.2
@@ -151,6 +166,15 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  packages/egress:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/executor-local:
     dependencies:
       '@stratusagent/core':
@@ -191,6 +215,9 @@ importers:
       '@stratusagent/executor-local':
         specifier: workspace:*
         version: link:../executor-local
+      '@stratusagent/plugins':
+        specifier: workspace:*
+        version: link:../plugins
       '@stratusagent/state':
         specifier: workspace:*
         version: link:../state
@@ -203,6 +230,19 @@ importers:
         version: 5.9.3
 
   packages/permissions:
+    dependencies:
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/plugins:
     dependencies:
       '@stratusagent/core':
         specifier: workspace:*
@@ -283,6 +323,88 @@ importers:
       '@stratusagent/providers':
         specifier: workspace:*
         version: link:../providers
+    devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/tool-browser:
+    dependencies:
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+      '@stratusagent/egress':
+        specifier: workspace:*
+        version: link:../egress
+      '@stratusagent/plugins':
+        specifier: workspace:*
+        version: link:../plugins
+      playwright-core:
+        specifier: ^1.49.0
+        version: 1.62.1
+    devDependencies:
+      '@stratusagent/tool-web':
+        specifier: workspace:*
+        version: link:../tool-web
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/tool-fs:
+    dependencies:
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+      '@stratusagent/plugins':
+        specifier: workspace:*
+        version: link:../plugins
+    devDependencies:
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/tool-shell:
+    dependencies:
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+      '@stratusagent/executor-local':
+        specifier: workspace:*
+        version: link:../executor-local
+      '@stratusagent/plugins':
+        specifier: workspace:*
+        version: link:../plugins
+    devDependencies:
+      '@stratusagent/permissions':
+        specifier: workspace:*
+        version: link:../permissions
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/tool-web:
+    dependencies:
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+      '@stratusagent/egress':
+        specifier: workspace:*
+        version: link:../egress
+      '@stratusagent/plugins':
+        specifier: workspace:*
+        version: link:../plugins
     devDependencies:
       '@types/node':
         specifier: ^24.6.0
@@ -740,6 +862,11 @@ packages:
   pkce-challenge@5.0.1:
     resolution: {integrity: sha512-wQ0b/W4Fr01qtpHlqSqspcj3EhBvimsdh0KlHhH8HRZnMsEa0ea2fTULOXOS9ccQr3om+GcGRk4e+isrZWV8qQ==}
     engines: {node: '>=16.20.0'}
+
+  playwright-core@1.62.1:
+    resolution: {integrity: sha512-wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw==}
+    engines: {node: '>=20'}
+    hasBin: true
 
   proxy-addr@2.0.7:
     resolution: {integrity: sha512-llQsMLSUDUPT44jdrU/O37qlnifitDP+ZwrmmZcoSKyLKvtZxpyV0n2/bD/N4tBAAZ/gJEdZU7KMraoK1+XYAg==}
@@ -1338,6 +1465,8 @@ snapshots:
   path-to-regexp@8.4.2: {}
 
   pkce-challenge@5.0.1: {}
+
+  playwright-core@1.62.1: {}
 
   proxy-addr@2.0.7:
     dependencies:

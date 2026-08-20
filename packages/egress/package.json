@@ -1,0 +1,48 @@
+{
+  "name": "@stratusagent/egress",
+  "version": "0.5.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types"
+  },
+  "engines": {
+    "node": ">=22.13 <23 || >=23.4"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/egress"
+  },
+  "description": "The Stratus Agent egress policy: which addresses a tool may reach, enforced on the connection rather than on the name it was asked for",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "ssrf",
+    "security"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

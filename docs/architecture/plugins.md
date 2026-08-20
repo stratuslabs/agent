@@ -41,12 +41,15 @@ plugin can *register* one through the entrypoint, and today most cannot:
 | memory | `AgentMemoryStore` | **not yet** |
 | executors | `Executor` | **not yet** |
 
-The entrypoint is the `Plugin` interface the kernel has had since v1:
+The entrypoint is the `Plugin` interface the kernel has had since v1, plus the
+teardown hook [06](../roadmap/06-tool-packs.md) added for plugins that hold
+something:
 
 ```ts
 export interface Plugin {
   name: string;
   setup(context: PluginContext): Promise<void> | void;
+  dispose?(): Promise<void> | void;
 }
 ```
 
@@ -69,6 +72,8 @@ question differently from the next package. So the ABI is one line:
 export const createPlugin = (config: JsonObject): Plugin | Promise<Plugin> => { … };
 ```
 
+The host that implements all of this is `@stratusagent/plugins`.
+
 - **A named `createPlugin` export**, not a default. Every optional package in
   this repo is already loaded by named factory —
   `createSlackChannelAdapter`, `createGateway`, `createLocalCommandExecutor` —
@@ -83,6 +88,19 @@ export const createPlugin = (config: JsonObject): Plugin | Promise<Plugin> => { 
   there is no second signature.
 - **Async is allowed** — a plugin that must read a file or open a connection to
   know what it contributes returns a promise, and `loadAll` awaits it.
+- **`dispose()` is optional and the host calls it.** Most plugins have nothing
+  to release and omit it. Some do: a browser plugin holds a Chromium and a
+  listening socket, and a daemon that stopped without telling it would leak
+  both. It is called on shutdown, after channels have stopped and in-flight
+  turns have drained, and a plugin that throws there is logged rather than
+  allowed to hold up the drain.
+
+**One key in the config block is the host's, not the plugin's.** A plugin whose
+manifest schema declares `workspaceRoot` is given the platform's answer
+(`~/.stratus/workspaces`) when the operator did not set one, because the
+`~/.stratus` layout is this repository's to own and a plugin deriving it would
+be a second copy of a path that can drift. A plugin that never declares it is
+never handed it.
 
 A package may export additional, more specific factories for direct import
 (`createFsPlugin` for a test or an embedding host that skips the loader
@@ -263,13 +281,17 @@ cannot tell "not installed" from "installed and broken" — and silently
 disabling a channel whose stored tokens say it should be running is the failure
 that split buys off.
 
-**Extract it before writing the plugin loader.** [05](../roadmap/05-control-api.md)
-took the count from one caller to three — the Slack adapter, the control API,
-and the dashboard resolved from inside the control API — each carrying its own
-copy of the same twelve lines. A plugin loader would be the fourth, and by this
-repo's own first rule a rule with four hand-rolled implementations has already
-drifted. So the loader does not re-derive the split; it calls a shared helper,
-and creating that helper is part of whichever step builds it first.
+**Extracted before the plugin loader was written**, in
+[06](../roadmap/06-tool-packs.md). [05](../roadmap/05-control-api.md) had taken
+the count from one caller to three — the Slack adapter, the control API, and
+the dashboard resolved from inside the control API — each carrying its own copy
+of the same twelve lines, and the loader would have been the fourth. It is now
+`loadOptionalModule` in `@stratusagent/plugins`. The two capabilities it needs
+come from the caller (`{ resolve: (id) => import.meta.resolve(id), import: (id)
+=> import(id) }`) rather than being used inside the helper, because
+`import.meta.resolve` answers relative to the module that calls it: resolvable
+*from the daemon* and resolvable *from the helper's package* are different
+questions, and only the first is the one being asked.
 
 ## Trust model
 
@@ -309,6 +331,24 @@ narrow. They are not a sandbox, and this document does not claim one:
   risk. This is the direction `DEFAULT_TOOL_RISK` and `resolveToolRisk` already
   fail in — a tool that forgot to think about risk is held back, not waved
   through.
+
+  The trusted set is the first-party scope (`@stratusagent/*`), which ships
+  from this repository and is gated by its CI; a host may widen it
+  deliberately, and doing so is the same kind of act as enabling the plugin at
+  all. The effective risk is the riskiest of three claims — the manifest's
+  declaration, that floor, and whatever the registered object says about
+  itself — so a tool can raise itself above its manifest and can never talk
+  its way below it.
+
+- **A plugin's configuration is validated against its own schema before the
+  module is imported.** The subset understood is deliberately small — `type`,
+  `properties`, `required`, `items`, `enum`, and `additionalProperties: false`
+  — so that a daemon can answer "is this well-formed" without carrying a
+  validator into every install. Keywords outside the subset are ignored rather
+  than refused, which buys fewer checks and never a false pass. Per-agent
+  entries under `agents` are checked with `required` relaxed: an override says
+  what differs for one agent, so holding it to the schema's required list would
+  make the defaults above it unusable.
 - **A plugin gets a scoped credential resolver and its own config block, so it
   never needs `process.env`** — it declares what it needs by name in the
   manifest and receives exactly that. Read what this does and does not buy.
@@ -358,6 +398,17 @@ carry a security invariant the kernel's promises rest on:
 | `tool-shell` | command scoping, control-operator defeat, environment scrubbing |
 | `tool-browser` | request-level address validation against SSRF and DNS rebinding |
 | `tool-web` | the same address policy, shared with `tool-browser`, not re-derived |
+
+Two of those invariants turned out to belong outside the packs that own them,
+and both live in the monorepo for the same reason the packs do. The **address
+policy** is one module, `@stratusagent/egress`, imported by `tool-browser` and
+`tool-web` — a second copy would not drift into a style difference, it would be
+an SSRF hole in whichever copy went stale — and both packs are tested against
+one shared table of hostile URLs, which is what fails if it is ever forked. The
+**command scope engine** is in `@stratusagent/permissions` rather than in
+`tool-shell`: a pack that classified its own invocations would be a second
+policy, disagreeing with the first the day either changed. The shell pack
+contributes the command string (`Tool.commandFor`) and nothing else.
 
 **First-party, outside.** Same authors, separate repositories:
 

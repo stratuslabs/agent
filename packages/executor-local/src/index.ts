@@ -26,7 +26,30 @@ export interface LocalCommandInvocation {
   command: string;
   args?: string[];
   cwd?: string;
+  /**
+   * Environment for the child. What this *means* depends on `envMode`:
+   * added to the daemon's environment by default, or the whole of it when
+   * the invocation asks for a replacement.
+   */
   env?: NodeJS.ProcessEnv;
+  /**
+   * How `env` combines with the daemon's own environment.
+   *
+   * - `inherit` (default) — `{ ...process.env, ...env }`, which is what a
+   *   fixed-argv tool wants: it was written by us, its arguments are not
+   *   attacker-chosen, and it may need PATH, HOME, and the rest.
+   * - `replace` — the child receives **only** `env`. Nothing from the
+   *   daemon's environment reaches it, and the daemon's environment is
+   *   where `ANTHROPIC_API_KEY` and every other key an operator exported
+   *   lives. A tool that runs a command an agent composed must use this:
+   *   otherwise `sh -c 'echo $ANTHROPIC_API_KEY'` is a credential read
+   *   that no approval prompt would describe as one, because the command
+   *   string the approver saw is not where the secret is named.
+   *
+   * Pack discipline cannot buy this — a plugin cannot unset what it was
+   * not the one to spawn with — so the seam is here.
+   */
+  envMode?: 'inherit' | 'replace';
   stdin?: string;
   shell?: boolean;
   timeoutMs?: number;
@@ -252,7 +275,12 @@ const runLocalCommand = async (
 
   const child = options.spawn(invocation.command, args, {
     cwd: invocation.cwd,
-    env: invocation.env ? { ...process.env, ...invocation.env } : process.env,
+    // `replace` hands over exactly what was granted — an empty object when
+    // nothing was, which is a child with no environment rather than a child
+    // with the daemon's.
+    env: invocation.envMode === 'replace'
+      ? { ...invocation.env }
+      : (invocation.env ? { ...process.env, ...invocation.env } : process.env),
     shell: invocation.shell ?? false,
     // Own process group (POSIX), so cancellation and timeouts can kill the
     // whole tree — a shell's or tool's own children included — rather than

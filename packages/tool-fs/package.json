@@ -1,0 +1,96 @@
+{
+  "name": "@stratusagent/tool-fs",
+  "version": "0.5.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types"
+  },
+  "engines": {
+    "node": ">=22.13 <23 || >=23.4"
+  },
+  "dependencies": {
+    "@stratusagent/core": "workspace:*",
+    "@stratusagent/plugins": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/tool-fs"
+  },
+  "description": "Filesystem tools for Stratus agents: read, list, search, and write inside per-agent roots, with symlink-safe containment",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "stratus-plugin",
+    "tools",
+    "filesystem"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "tools": [
+        {
+          "name": "fs.read",
+          "risk": "safe"
+        },
+        {
+          "name": "fs.list",
+          "risk": "safe"
+        },
+        {
+          "name": "fs.search",
+          "risk": "safe"
+        },
+        {
+          "name": "fs.write",
+          "risk": "gated"
+        }
+      ]
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "roots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maxBytes": {
+          "type": "integer"
+        },
+        "maxMatches": {
+          "type": "integer"
+        },
+        "maxEntries": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

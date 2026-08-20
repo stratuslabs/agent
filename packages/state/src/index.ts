@@ -118,6 +118,42 @@ export interface ApiConfig {
   port?: number;
 }
 
+/**
+ * One plugin's settings: whether it runs, its own configuration, and the
+ * per-agent overrides beneath it.
+ *
+ * Typed as an open object because the keys belong to the plugin, not to
+ * this file — the daemon validates them against the manifest's own schema
+ * at load time, which is the only place that knows what `roots` means.
+ * What this package owns is the two keys the *host* reads.
+ */
+export interface PluginConfigBlock extends JsonObject {
+  /** Default true: a listed plugin runs unless it says otherwise. */
+  enabled?: boolean;
+  /**
+   * Per-agent settings, keyed by agent id, over the defaults above them.
+   * The same shape `approvals` already carries — and it matters more here,
+   * because for a plugin like `tool-fs` these values are an access boundary
+   * between agents rather than a preference.
+   */
+  agents?: JsonObject;
+}
+
+/**
+ * The `plugins` block of ~/.stratus/config.json, keyed by **package name**.
+ *
+ * By package because a plugin's identity is its package, and because a
+ * plugin may contribute more than tools — a block keyed by toolset has
+ * nowhere to put one that adds a channel and a memory store.
+ *
+ * Read only from a **trusted** config, and this is the sharpest case of
+ * that rule rather than another instance of it: a plugin runs in-process
+ * with the daemon, so a list an auto-discovered project-local
+ * `stratus.config.json` could write is a list of code a cloned repository
+ * gets to execute.
+ */
+export type PluginsConfig = Record<string, PluginConfigBlock>;
+
 export interface StratusConfigFile {
   provider?: StratusProviderName;
   model?: string;
@@ -136,6 +172,8 @@ export interface StratusConfigFile {
   approvals?: ApprovalsConfig;
   /** Control API binding for `stratus serve`. */
   api?: ApiConfig;
+  /** Plugins to load, keyed by package name. Trusted configs only. */
+  plugins?: PluginsConfig;
 }
 
 /** A resolved, ready-to-run fallback model (always a real provider). */
@@ -278,6 +316,7 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
 export const DEFAULT_CONFIG_FILENAME = 'stratus.config.json';
 export const LEGACY_CONFIG_FILENAME = 'stratusclaw.config.json';
 const STRATUS_HOME_DIRNAME = '.stratus';
+const WORKSPACES_DIRNAME = 'workspaces';
 const GLOBAL_CONFIG_FILENAME = 'config.json';
 const CREDENTIALS_FILENAME = 'credentials.json';
 const AGENTS_DIRNAME = 'agents';
@@ -306,6 +345,21 @@ export const agentsDirPath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), AGENTS_DIRNAME);
 export const memoryFilePath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), MEMORY_FILENAME);
+/**
+ * Where tools put files they produce — a screenshot a channel then uploads,
+ * a report an agent wrote. One directory per agent, for the same reason
+ * sessions, memory, and credentials are keyed that way: an agent's output
+ * is that agent's, and a shared scratch directory is two agents reading
+ * each other's work.
+ *
+ * The layout lives here because this package owns `~/.stratus`. Plugins do
+ * not derive it — the host passes the resolved path in, so a plugin has no
+ * copy of this repository's directory conventions to drift from.
+ */
+export const workspacesDirPath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), WORKSPACES_DIRNAME);
+export const agentWorkspacePath = (env: StateEnvironment, agentId: string): string =>
+  path.join(workspacesDirPath(env), agentId);
 /**
  * The control API's bearer token (0600). Programmatic clients — the CLI's
  * `--gateway` mode, the macOS app — read it from here rather than being told
@@ -730,8 +784,70 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   if (api) {
     resolved.api = api;
   }
+  const plugins = parsePluginsConfig(config.plugins, configPath);
+  if (plugins) {
+    resolved.plugins = plugins;
+  }
 
   return resolved;
+};
+
+const isPlainObject = (value: unknown): value is JsonObject =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * Shape-check the `plugins` block, and no more than that.
+ *
+ * What a plugin's own keys mean is the manifest's business, and this loader
+ * has not read one — it cannot, without importing the package, which is the
+ * thing the manifest exists to avoid. So the line drawn here is exactly the
+ * host's half: a package name maps to an object, `enabled` is a boolean,
+ * and `agents` maps agent ids to objects. A wrong `roots` is caught at load
+ * time by the plugin host, with the manifest in hand and the plugin's name
+ * in the message.
+ *
+ * Refused rather than dropped, unlike most of this file: a plugin block
+ * silently ignored for being misshapen is a capability an operator believes
+ * they granted and an agent does not have, discovered as a tool that is
+ * mysteriously absent mid-turn.
+ */
+const parsePluginsConfig = (raw: unknown, configPath: string): PluginsConfig | undefined => {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!isPlainObject(raw)) {
+    throw new Error(`Invalid plugins in config ${configPath}: expected an object keyed by package name.`);
+  }
+
+  const plugins: PluginsConfig = {};
+  for (const [packageName, entry] of Object.entries(raw)) {
+    if (!isPlainObject(entry)) {
+      throw new Error(
+        `Invalid plugins["${packageName}"] in config ${configPath}: expected an object of settings.`,
+      );
+    }
+    if (entry.enabled !== undefined && typeof entry.enabled !== 'boolean') {
+      throw new Error(
+        `Invalid plugins["${packageName}"].enabled in config ${configPath}: ${String(entry.enabled)}. Use true or false.`,
+      );
+    }
+    if (entry.agents !== undefined) {
+      if (!isPlainObject(entry.agents)) {
+        throw new Error(
+          `Invalid plugins["${packageName}"].agents in config ${configPath}: expected an object keyed by agent id.`,
+        );
+      }
+      for (const [agentId, agentEntry] of Object.entries(entry.agents)) {
+        if (!isPlainObject(agentEntry)) {
+          throw new Error(
+            `Invalid plugins["${packageName}"].agents.${agentId} in config ${configPath}: expected an object of settings.`,
+          );
+        }
+      }
+    }
+    plugins[packageName] = entry as PluginConfigBlock;
+  }
+  return plugins;
 };
 
 const parseApiConfig = (raw: unknown, configPath: string): ApiConfig | undefined => {
@@ -951,6 +1067,59 @@ export const discoverActiveConfig = async (
   } catch (error) {
     warn(`ignoring unreadable config ${location.path} (${error instanceof Error ? error.message : String(error)})`);
     return { location, config: {} };
+  }
+};
+
+/**
+ * What reading a trusted-config-only block found. Four outcomes because
+ * they mean four different things to an operator, and collapsing any two
+ * of them loses the one thing they need to know: nothing was configured, it
+ * was configured somewhere that may not decide this, it could not be read,
+ * or here it is.
+ */
+export type TrustedConfigBlock<T> =
+  | { status: 'absent' }
+  | { status: 'present'; value: T; path: string }
+  | { status: 'untrusted'; path: string }
+  | { status: 'unreadable'; error: unknown };
+
+/**
+ * Read one block of the daemon's own config, honouring the trust boundary.
+ *
+ * `api`, `approvals`, and `plugins` are all read this way: which interface
+ * a daemon binds, who may approve its tool calls, and whose code runs
+ * in-process with it are not decisions an auto-discovered project-local
+ * `stratus.config.json` gets to make, because that file ships in any
+ * repository somebody clones.
+ *
+ * The precedence is `resolveConfigLocation`'s, not a second copy of it —
+ * `--config` and STRATUS_CONFIG both move the file, and a caller reading
+ * `~/.stratus/config.json` directly would answer from a config the daemon
+ * is not running on. Callers phrase their own warning: an ignored approver
+ * list and an ignored plugin list are the same rule and very different
+ * sentences.
+ */
+export const readTrustedConfigBlock = async <K extends keyof StratusConfigFile>(
+  key: K,
+  env: StateEnvironment,
+  configPath?: string,
+): Promise<TrustedConfigBlock<NonNullable<StratusConfigFile[K]>>> => {
+  let location: ResolvedConfigLocation | undefined;
+  try {
+    location = await resolveConfigLocation(configPath ? { configPath } : {}, env);
+    if (!location) {
+      return { status: 'absent' };
+    }
+    const value = (await loadConfigFile(location.path))[key];
+    if (value === undefined) {
+      return { status: 'absent' };
+    }
+    if (!location.trusted) {
+      return { status: 'untrusted', path: location.path };
+    }
+    return { status: 'present', value: value as NonNullable<StratusConfigFile[K]>, path: location.path };
+  } catch (error) {
+    return { status: 'unreadable', error };
   }
 };
 

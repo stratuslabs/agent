@@ -810,6 +810,21 @@ export const routes: Route[] = [
       return { models };
     },
   },
+  {
+    method: 'GET',
+    pattern: `${API_PREFIX}/catalog/tools`,
+    async handler(context) {
+      // Both halves, because either alone misleads. The tool list says what
+      // an agent can be granted and at what risk; the plugin list says what
+      // this daemon was *asked* to load — including a plugin that failed,
+      // which is invisible in a list of tools and is exactly what someone
+      // looking at this screen needs to see.
+      return {
+        tools: context.gateway.tools(),
+        plugins: context.gateway.plugins(),
+      };
+    },
+  },
 
   // ---- credentials ---------------------------------------------------------
   {
@@ -973,6 +988,17 @@ export const routes: Route[] = [
       // must not become a way to write into a namespace it does not own.
       const next: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(incoming)) {
+        // `plugins` is the one key this endpoint reads but does not write.
+        // A plugin runs in the daemon's own process, so enabling one is not
+        // a settings change; it is the security boundary the whole trust
+        // model rests on, and it stays a deliberate edit to a file. Ignored
+        // rather than rejected because `GET` hands the whole document back
+        // and `PUT` takes the whole document — a 400 here would break the
+        // round trip for everyone who has the block, and the value is
+        // preserved below rather than dropped by the replace.
+        if (key === 'plugins') {
+          continue;
+        }
         const expected = (CONFIG_KEYS as Record<string, string>)[key];
         if (!expected) {
           throw new ApiError(
@@ -1003,6 +1029,20 @@ export const routes: Route[] = [
       // `enabled` of `"false"` would otherwise be written, reported as saved,
       // and then make every later read of the file fail.
       const configPath = await activeConfigPath(context);
+      // PUT replaces, so anything this endpoint does not write has to be
+      // carried across explicitly or it is deleted by omission — and
+      // deleting somebody's plugin list because they saved a model change
+      // would silently take capability away from every agent.
+      try {
+        const current = await loadConfigFile(configPath);
+        if (current.plugins) {
+          next.plugins = current.plugins;
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw new ApiError(500, 'config_unreadable', error instanceof Error ? error.message : String(error));
+        }
+      }
       let validated: StratusConfigFile;
       try {
         validated = validateConfigFile(next, configPath);

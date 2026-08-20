@@ -1,0 +1,91 @@
+{
+  "name": "@stratusagent/tool-web",
+  "version": "0.5.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types"
+  },
+  "engines": {
+    "node": ">=22.13 <23 || >=23.4"
+  },
+  "dependencies": {
+    "@stratusagent/core": "workspace:*",
+    "@stratusagent/egress": "workspace:*",
+    "@stratusagent/plugins": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/tool-web"
+  },
+  "description": "Web fetching for Stratus agents: retrieve a URL as readable text, with no browser and a shared address policy",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "stratus-plugin",
+    "tools",
+    "web"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "tools": [
+        {
+          "name": "web.fetch",
+          "risk": "gated"
+        }
+      ]
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "allowPrivateAddresses": {
+          "type": "boolean"
+        },
+        "allowedHosts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maxBytes": {
+          "type": "integer"
+        },
+        "timeoutMs": {
+          "type": "integer"
+        },
+        "maxRedirects": {
+          "type": "integer"
+        },
+        "userAgent": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

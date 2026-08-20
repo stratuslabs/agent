@@ -6214,3 +6214,81 @@ test('stratus dashboard opens against a daemon that is already running', async (
     assert.ok(openedUrl.startsWith(`${url}/api/v1/auth/session?ott=`), openedUrl);
   });
 });
+
+test('a project-local config cannot decide which code runs inside the daemon', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-plugins-untrusted-'));
+  // The sharpest case of the trust boundary the api and approvals blocks
+  // already have: a plugin runs in-process with the daemon, so this list is
+  // a list of code, and this file ships with a clone.
+  await writeFile(
+    path.join(home, 'stratus.config.json'),
+    `${JSON.stringify({ plugins: { 'stratus-plugin-anything': { enabled: true } } })}\n`,
+  );
+
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 400);
+
+  await runCli({
+    argv: ['serve', '--no-events', '--no-api'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  assert.match(output.stderr, /ignoring the plugins config/);
+  // Ignored, so nothing was even attempted — the loader never ran.
+  assert.ok(!output.stderr.includes('stratus-plugin-anything did not load'), output.stderr);
+});
+
+test('the daemon loads the plugins its trusted config lists, and says which did not', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-plugins-trusted-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({ plugins: { '@stratusagent/tool-nowhere': { enabled: true } } })}\n`,
+  );
+
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 400);
+
+  await runCli({
+    argv: ['serve', '--no-events', '--no-api'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  // The block was read and acted on — a plugin an operator enabled that is
+  // not installed is a warning naming it, never silence.
+  assert.match(output.stderr, /@stratusagent\/tool-nowhere did not load/);
+  assert.ok(!output.stderr.includes('ignoring the plugins config'), output.stderr);
+});
+
+test('a real plugin loads through the real loader, with the risks its manifest declares', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-plugin-real-'));
+  const notes = path.join(home, 'notes');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await mkdir(notes, { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({ plugins: { '@stratusagent/tool-fs': { enabled: true, roots: [notes] } } })}\n`,
+  );
+
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 600);
+
+  await runCli({
+    argv: ['serve', '--no-events', '--no-api'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  // Resolved, its package.json read, its manifest enforced, and its tools
+  // registered — through the same path a global install takes, rather than
+  // through a fake module host.
+  assert.match(output.stdout, /plugin @stratusagent\/tool-fs loaded/);
+  assert.match(output.stdout, /fs\.read \(safe\)/);
+  assert.match(output.stdout, /fs\.write \(gated\)/);
+  assert.ok(!output.stderr.includes('did not load'), output.stderr);
+});

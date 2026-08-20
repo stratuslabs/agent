@@ -6,6 +6,100 @@ Real capabilities as optional plugins — filesystem, shell, browser, and web-fe
 
 The plugin contract this step implements against — what a plugin is, what it may contribute, how it is configured, and the trust model for third-party ones — is specified in [`plugins.md`](../architecture/plugins.md) and is not re-derived here.
 
+## Status
+
+**Shipped.** Four plugins, the host that loads them, and the two invariants
+that turned out to belong outside the packs that own them.
+
+- **The plugin contract, enforced.** `@stratusagent/plugins` reads a manifest
+  without importing the package it describes, and `setup()` registers through a
+  manifest-bound view that rejects an undeclared name, applies the declared
+  risk and the third-party floor rather than trusting the object it is handed,
+  and keeps the package as provenance. Registrations are staged and committed
+  as a unit, so a plugin that over-reaches on its fourth tool leaves none of
+  the first three behind in a registry every agent shares. A name collision is
+  a load-time error naming both packages. `loadOptionalModule` — the
+  resolve-then-import split that had three hand-rolled copies — was extracted
+  first, as [`plugins.md`](../architecture/plugins.md) required.
+- **Souls can name a toolset.** `tools: [fs.*]` globs, in the descriptors a
+  provider is shown and in the gate before execution, through one
+  `matchesToolAllowlist`. The prefix keeps its dot, so `fs.*` cannot be widened
+  into by a package named to look like a prefix of another.
+- **`@stratusagent/tool-fs`** — `fs.read`, `fs.list`, `fs.search` (`safe`),
+  `fs.write` (`gated`), with roots resolved per call from `session.agent.id`
+  and containment decided between real paths, so a symlink inside a root and a
+  write *through* a symlinked parent are both refusals.
+- **`@stratusagent/tool-shell`** — `shell.run` on the local-command executor,
+  which gained the **replacement-environment mode** the pack is required to
+  use: the child gets exactly what was granted, and the daemon's keys are not
+  there to read. The pack contributes the command string and no opinions.
+- **The command-scope engine inherited from [03](./03-permissions.md).** Safe
+  scopes with flag and destructive-refspec constraints, control-operator
+  defeat as a rejection set rather than a blacklist, three-tier resolution
+  (session → the agent's `~/.stratus/agents/<id>.whitelist.json` → ask), and
+  "always allow" persisting a normalized scope. It lives in
+  `@stratusagent/permissions`, reached through `Tool.commandFor`, because a
+  pack that classified its own invocations would be a second policy.
+- **`@stratusagent/tool-web`** — `web.fetch`, following redirects one
+  validated hop at a time.
+- **`@stratusagent/tool-browser`** — `browser.goto`/`.read`/`.screenshot`
+  (`gated`) and `.act` (`dangerous`) on `playwright-core`, loaded lazily, with
+  one browser **per address policy** (a proxy is chosen at launch, so an agent
+  whose config narrows the policy needs its own), a context per conversation,
+  an LRU cap, and an idle sweep on the plugin's own unref'd timer that also
+  takes the clock as an argument so it stays testable. Screenshots land in
+  `~/.stratus/workspaces/<agent-id>/screenshots`, supplied by the host rather
+  than derived by the plugin.
+- **The address policy is one module**, `@stratusagent/egress`: scheme
+  allowlist, every non-global address in both families including the
+  IPv4-mapped, NAT64, and 6to4 spellings, validated **on the connection** —
+  Node sockets take its `lookup`, and Chromium is routed through a proxy the
+  pack owns, since a browser resolves names for itself whatever an
+  interception handler decides. Both packs are tested against one shared table
+  of hostile URLs.
+- **`GET /api/v1/catalog/tools`**, with `gateway.tools()` and
+  `gateway.plugins()` behind it, and the dashboard's Plugins screen rendering
+  it instead of its placeholder. A plugin that failed to load is listed as
+  such: invisible in a list of tools, and usually why someone opened the page.
+- **Wiring.** The `plugins` config block (keyed by package, with the `agents`
+  sub-block) is read only from a trusted config, through the shared
+  `readTrustedConfigBlock` that `api` and `approvals` now use too. `stratus
+  run`/`chat` load the same plugins as the daemon. The kernel's `Plugin` gained
+  an optional `dispose`, because a plugin holding a Chromium has to be told
+  when the process is going down.
+
+**Decided here, as the open questions asked.**
+
+- **Per-agent workspaces**, introduced minimally: `~/.stratus/workspaces/<agent-id>/`,
+  resolved by the host and handed to any plugin whose manifest declares
+  `workspaceRoot`. A plugin deriving `~/.stratus` for itself would be a second
+  copy of a layout this repository owns.
+- **Playwright's install weight**: the dependency is `playwright-core`
+  (~14 MB installed, no browser download), not `playwright` (~150 MB+ per
+  install and per CI run once Chromium lands). The pack resolves a browser from
+  `executablePath`, a `channel` like `chrome`, or a Chromium the operator
+  installed deliberately, and says which to do when it finds none. Nothing
+  else in the repo depends on `tool-browser`, so an install that never wants a
+  browser never carries one.
+- **Is `web.fetch` enough without search** — still open, and still the right
+  thing to decide with a real research agent rather than in advance. `web.search`
+  stays the ecosystem's.
+
+**What the tests do not cover, said plainly.** Two things in this step cannot
+be exercised in CI, and both are the last mile rather than the mechanism:
+
+- **A real browser.** The lifecycle, the scheme guard, the proxy, and the
+  refusals are tested against a driver stub — including one that makes its
+  requests through the proxy the way Chromium does, so a name like `localhost`
+  is proven refused at the connection rather than assumed. What is untested is
+  Playwright's own behaviour against a real Chromium, which is a 150 MB
+  download per CI run for what would be a smoke test.
+- **A real Slack workspace.** `browser.screenshot` returns `file`, the key the
+  Slack adapter already turns into an attachment (`files.uploadV2`), and the
+  adapter's own test covers that path with a fake Web client. The end-to-end
+  "screenshot example.com and show me" therefore rests on two tested halves
+  meeting, not on one tested whole.
+
 ## Why now
 
 The permission engine (03) exists precisely so agents can be trusted with these, and an agent's usefulness is bounded by its tools. Existing work to fold in: `stratuslabs/tool-browser` and `stratuslabs/tool-screenshot`.

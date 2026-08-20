@@ -28,6 +28,12 @@ import {
 } from '@stratusagent/agents';
 import { createLocalCommandExecutor } from '@stratusagent/executor-local';
 import {
+  loadPlugins,
+  type LoadedPlugin,
+  type OptionalModuleHost,
+  type PluginLoadFailure,
+} from '@stratusagent/plugins';
+import {
   createDemoTool,
   createFileMemoryStore,
   createRuntimeProvider,
@@ -45,10 +51,12 @@ import {
   resolveRuntimeConfig,
   applySoulPins,
   stratusHomePath,
+  workspacesDirPath,
   withLegacyDefaultMemories,
   type FallbackRuntime,
   type RosterEntry,
   type RuntimeConfig,
+  type PluginsConfig,
   type RuntimeSelection,
   type StateEnvironment,
 } from '@stratusagent/state';
@@ -385,6 +393,27 @@ export interface ResolveApprovalInput {
   reason?: 'decided' | 'undeliverable';
 }
 
+/** One registered tool, as an operator's surfaces need to see it. */
+export interface GatewayTool {
+  name: string;
+  description?: string;
+  risk: ToolRisk;
+  /** The plugin package that contributed it; absent for kernel tools. */
+  package?: string;
+  /** Whether that package is trusted to declare a tool `safe`. */
+  trusted?: boolean;
+}
+
+/** A plugin this daemon was asked to load, and what came of it. */
+export interface GatewayPluginStatus {
+  package: string;
+  name?: string;
+  trusted?: boolean;
+  tools?: GatewayTool[];
+  /** Present when the plugin did not load, and the only field that is. */
+  error?: string;
+}
+
 export interface GatewayOptions {
   env?: StateEnvironment;
   /** Gateway-wide provider/model overrides applied beneath per-soul pins. */
@@ -412,6 +441,26 @@ export interface GatewayOptions {
   idleTimeoutMs?: number;
   /** Session database path. Default ~/.stratus/sessions.db. */
   sessionDbPath?: string;
+  /**
+   * Plugins to load, keyed by package name — the `plugins` block, which the
+   * caller has already read from a **trusted** config. The gateway does not
+   * go looking for one: a plugin runs in-process with the daemon, and which
+   * file may say so is a decision that belongs where the config precedence
+   * is already understood.
+   */
+  plugins?: PluginsConfig;
+  /**
+   * How plugin packages are resolved and imported.
+   *
+   * Worth passing, and `stratus serve` does. `import.meta.resolve` answers
+   * relative to the module that calls it, so the default here asks "is this
+   * plugin visible from the gateway package" when the question is "is it
+   * visible from the thing the operator installed". Those differ under any
+   * layout that is not flat — a pnpm install being the obvious one — and the
+   * failure is a plugin reported as not installed while sitting right next
+   * to the CLI.
+   */
+  pluginHost?: OptionalModuleHost;
   log?: (line: string) => void;
   warn?: (line: string) => void;
 }
@@ -467,6 +516,23 @@ export interface Gateway {
   activeTurnId(sessionId: string): string | undefined;
   /** Every call parked on a human right now, oldest first. */
   pendingApprovals(): PendingApproval[];
+  /**
+   * Every registered tool, with the risk it will actually be judged at and
+   * the package it came from.
+   *
+   * Provenance is the reason this is not `tools.describe()`: "which of
+   * these can this daemon run, and whose code is it" is the question the
+   * catalog endpoint and 07's tool screens are asking, and a descriptor
+   * list answers only half of it. Kernel tools have no package, which is
+   * itself the answer for them.
+   */
+  tools(): GatewayTool[];
+  /**
+   * The plugins this daemon loaded, and the ones it could not — a plugin an
+   * operator enabled that failed to load is exactly what they need to see,
+   * and an empty list would say the opposite.
+   */
+  plugins(): GatewayPluginStatus[];
   /**
    * The soul behind each agent in the current roster, built-in included
    * (which has none).
@@ -1040,6 +1106,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // ---- runner pool --------------------------------------------------------
 
   const tools = new ToolRegistry();
+  // Which package each tool came from. Kernel tools are absent from this
+  // map, which is how `tools()` reports them as the kernel's.
+  const toolProvenance = new Map<string, { package: string; trusted: boolean }>();
+  let loadedPlugins: LoadedPlugin[] = [];
+  let pluginFailures: PluginLoadFailure[] = [];
   tools.register(createDemoTool());
   tools.register(createRememberTool(memory));
   // Delegation is dispatcher-backed, not runner-capturing: the target agent
@@ -1695,6 +1766,110 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     });
   };
 
+  /**
+   * Load what the config asked for, and say what did not load.
+   *
+   * A plugin that fails is a warning rather than a refusal to start: a
+   * daemon that will not boot because of a mistyped package name takes the
+   * whole fleet down over one line of config, and the agents whose tools
+   * did load are still worth serving. What is never degraded is the
+   * security half — an undeclared name or a collision refuses that plugin
+   * whole, inside the loader.
+   */
+  const startPlugins = async (): Promise<void> => {
+    const configured = options.plugins ?? {};
+    if (Object.keys(configured).length === 0) {
+      return;
+    }
+    const result = await loadPlugins({
+      config: configured,
+      host: options.pluginHost ?? {
+        resolve: (specifier) => import.meta.resolve(specifier),
+        import: (specifier) => import(specifier),
+      },
+      tools,
+      bus,
+      workspaceRoot: workspacesDirPath(env),
+    });
+    loadedPlugins = result.loaded;
+    pluginFailures = result.failures;
+
+    for (const plugin of result.loaded) {
+      for (const tool of plugin.tools) {
+        toolProvenance.set(tool.name, { package: plugin.package, trusted: plugin.trusted });
+      }
+      log(`plugin ${plugin.package} loaded — ${plugin.tools.map((tool) => `${tool.name} (${tool.risk})`).join(', ') || 'no tools'}`);
+    }
+    for (const failure of result.failures) {
+      warn(`plugin ${failure.package} did not load: ${failure.reason}`);
+    }
+  };
+
+  /**
+   * Everything after the plugins: the roster, the channels, and the sweeps
+   * that need both. Split out so `start()` can wrap it in the cleanup a
+   * failure here requires — see the call site.
+   */
+  const startServing = async (): Promise<void> => {
+    await loadRoster();
+    const named = registry.list().map((agent) => agent.name).join(', ');
+    log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
+
+    // Read before anything can dispatch, so this is exactly what the
+    // last process left running and not a turn of ours caught in flight.
+    // Applied further down, once there is somewhere for the failure to
+    // be heard.
+    const abandoned = await listAbandonedTurns();
+
+    // Channels come up after the roster so their first inbound message
+    // already has agents to dispatch to. One failing adapter must not
+    // keep the rest (or the gateway) down.
+    for (const adapter of options.channels ?? []) {
+      try {
+        await adapter.start(gateway);
+        startedChannels.push(adapter);
+      } catch (error) {
+        warn(`channel ${adapter.name} failed to start: ${error instanceof Error ? error.message : String(error)}`);
+        // A start() that rejected may still hold sockets or listeners it
+        // acquired before failing; it never reaches startedChannels, so
+        // this is its only cleanup.
+        try {
+          await adapter.stop();
+        } catch (stopError) {
+          warn(`channel ${adapter.name} cleanup after failed start also failed: ${stopError instanceof Error ? stopError.message : String(stopError)}`);
+        }
+      }
+    }
+
+    // Last, and not awaited: recovery re-asks, so it needs the channels
+    // above already listening — but a turn parked behind a slow approver
+    // must not hold up start(), or a daemon with one outstanding request
+    // would refuse to finish booting.
+    void recoverParkedTurns().catch((error) => {
+      warn(`recovering parked turns failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+
+    // Not awaited for the same reason, and independent of the sweep
+    // above: these sessions are not parked, so the two never touch the
+    // same one.
+    void failAbandonedTurns(abandoned).catch((error) => {
+      warn(`failing abandoned turns failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    
+  };
+
+  /** Release what the plugins acquired, reporting rather than throwing. */
+  const disposePlugins = async (): Promise<void> => {
+    await Promise.allSettled(loadedPlugins.map(async (plugin) => {
+      try {
+        await plugin.instance.dispose?.();
+      } catch (error) {
+        warn(`plugin ${plugin.package} failed to shut down: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }));
+    loadedPlugins = [];
+  };
+
   const startedChannels: GatewayChannelAdapter[] = [];
 
   const gateway: Gateway = {
@@ -1703,50 +1878,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     async start() {
       await migrateLegacyMemory(env);
-      await loadRoster();
-      const named = registry.list().map((agent) => agent.name).join(', ');
-      log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
-
-      // Read before anything can dispatch, so this is exactly what the
-      // last process left running and not a turn of ours caught in flight.
-      // Applied further down, once there is somewhere for the failure to
-      // be heard.
-      const abandoned = await listAbandonedTurns();
-
-      // Channels come up after the roster so their first inbound message
-      // already has agents to dispatch to. One failing adapter must not
-      // keep the rest (or the gateway) down.
-      for (const adapter of options.channels ?? []) {
-        try {
-          await adapter.start(gateway);
-          startedChannels.push(adapter);
-        } catch (error) {
-          warn(`channel ${adapter.name} failed to start: ${error instanceof Error ? error.message : String(error)}`);
-          // A start() that rejected may still hold sockets or listeners it
-          // acquired before failing; it never reaches startedChannels, so
-          // this is its only cleanup.
-          try {
-            await adapter.stop();
-          } catch (stopError) {
-            warn(`channel ${adapter.name} cleanup after failed start also failed: ${stopError instanceof Error ? stopError.message : String(stopError)}`);
-          }
-        }
+      // Before the roster and before channels: a turn must never arrive for
+      // an agent whose soul lists a tool the daemon has not registered yet,
+      // which would refuse the call as "not permitted" and blame the soul.
+      await startPlugins();
+      try {
+        await startServing();
+      } catch (error) {
+        // Everything after the plugins loaded is inside that try for one
+        // reason: a `start()` that rejects never reaches its caller's
+        // shutdown path — `stratus serve` awaits it *before* the try/finally
+        // that calls `stop()` — so a duplicate agent id in the roster would
+        // leave a plugin's browser, socket, or subscription held for the
+        // life of a process that is on its way out.
+        await disposePlugins();
+        throw error;
       }
-
-      // Last, and not awaited: recovery re-asks, so it needs the channels
-      // above already listening — but a turn parked behind a slow approver
-      // must not hold up start(), or a daemon with one outstanding request
-      // would refuse to finish booting.
-      void recoverParkedTurns().catch((error) => {
-        warn(`recovering parked turns failed: ${error instanceof Error ? error.message : String(error)}`);
-      });
-
-      // Not awaited for the same reason, and independent of the sweep
-      // above: these sessions are not parked, so the two never touch the
-      // same one.
-      void failAbandonedTurns(abandoned).catch((error) => {
-        warn(`failing abandoned turns failed: ${error instanceof Error ? error.message : String(error)}`);
-      });
     },
 
     // Drain: channels stop taking messages, in-flight turns finish, new
@@ -1771,6 +1918,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       await Promise.allSettled(startedChannels.map((adapter) => adapter.stop()));
       startedChannels.length = 0;
       await Promise.allSettled([...inflight]);
+      // After the turns that might still be using them. A plugin holding a
+      // browser is the reason this exists, and closing it out from under a
+      // running screenshot would fail that turn rather than tidy up.
+      await disposePlugins();
       store.close();
       log('stratusd stopped');
     },
@@ -1803,6 +1954,42 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return [...pendingApprovals.values()]
         .map((parked) => parked.pending)
         .sort((a, b) => a.parkedAt.localeCompare(b.parkedAt));
+    },
+
+    tools() {
+      // From the registry, not from the load records: the risk reported is
+      // the one a call will actually be judged at, floor applied, and a
+      // second list assembled from manifests would drift from it the first
+      // time a floor was raised.
+      return tools.describe().map((descriptor) => {
+        const provenance = toolProvenance.get(descriptor.name);
+        return {
+          name: descriptor.name,
+          ...(descriptor.description ? { description: descriptor.description } : {}),
+          risk: descriptor.risk ?? 'gated',
+          ...(provenance ? { package: provenance.package, trusted: provenance.trusted } : {}),
+        };
+      });
+    },
+
+    plugins() {
+      const loaded: GatewayPluginStatus[] = loadedPlugins.map((plugin) => ({
+        package: plugin.package,
+        name: plugin.name,
+        trusted: plugin.trusted,
+        tools: plugin.tools.map((tool) => ({
+          name: tool.name,
+          ...(tool.description ? { description: tool.description } : {}),
+          risk: tool.risk,
+          package: plugin.package,
+          trusted: plugin.trusted,
+        })),
+      }));
+      const failed: GatewayPluginStatus[] = pluginFailures.map((failure) => ({
+        package: failure.package,
+        error: failure.reason,
+      }));
+      return [...loaded, ...failed];
     },
 
     async servedSouls() {

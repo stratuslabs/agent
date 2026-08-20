@@ -1,0 +1,118 @@
+{
+  "name": "@stratusagent/tool-browser",
+  "version": "0.5.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types"
+  },
+  "engines": {
+    "node": ">=22.13 <23 || >=23.4"
+  },
+  "dependencies": {
+    "@stratusagent/core": "workspace:*",
+    "@stratusagent/egress": "workspace:*",
+    "@stratusagent/plugins": "workspace:*",
+    "playwright-core": "^1.49.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3",
+    "@stratusagent/tool-web": "workspace:*"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/tool-browser"
+  },
+  "description": "Browser tools for Stratus agents: navigate, read, screenshot, and act, with every request pinned through a policy-owned proxy",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "stratus-plugin",
+    "tools",
+    "browser",
+    "playwright"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "tools": [
+        {
+          "name": "browser.goto",
+          "risk": "gated"
+        },
+        {
+          "name": "browser.read",
+          "risk": "gated"
+        },
+        {
+          "name": "browser.screenshot",
+          "risk": "gated"
+        },
+        {
+          "name": "browser.act",
+          "risk": "dangerous"
+        }
+      ]
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "allowPrivateAddresses": {
+          "type": "boolean"
+        },
+        "allowedHosts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "headless": {
+          "type": "boolean"
+        },
+        "executablePath": {
+          "type": "string"
+        },
+        "channel": {
+          "type": "string"
+        },
+        "idleMs": {
+          "type": "integer"
+        },
+        "maxContexts": {
+          "type": "integer"
+        },
+        "maxTextBytes": {
+          "type": "integer"
+        },
+        "navigationTimeoutMs": {
+          "type": "integer"
+        },
+        "workspaceRoot": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

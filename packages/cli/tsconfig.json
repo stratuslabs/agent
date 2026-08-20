@@ -52,6 +52,9 @@
     },
     {
       "path": "../control-api"
+    },
+    {
+      "path": "../plugins"
     }
   ]
 }
