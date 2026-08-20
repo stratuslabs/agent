@@ -290,7 +290,7 @@ ended. A `{ "type": "dropped", "deltas": n }` frame says when it happened.
 While it is serving, `~/.stratus/gateway.json` (0600) says where:
 
 ```json
-{ "url": "http://127.0.0.1:4123", "host": "127.0.0.1", "port": 4123, "pid": 4242, "version": "0.5.0" }
+{ "url": "http://127.0.0.1:4123", "host": "127.0.0.1", "port": 4123, "pid": 4242, "version": "0.6.0" }
 ```
 
 Clients read it instead of guessing at a default the operator may have
