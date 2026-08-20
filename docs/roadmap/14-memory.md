@@ -44,6 +44,30 @@ goes stale, and a memory that is never curated goes noisy.
   `forget(agentId, entryId)`**, and `list` grows a bounded form. The in-memory
   implementation in `packages/core` implements all three, because it is what
   every test uses.
+- **What `search` matches, and which entries win when more match than `limit`.**
+  Two implementations are required — in-memory and FTS5-backed — so anything
+  left to the implementation is a guaranteed divergence rather than a possible
+  one:
+
+  - **Matching**: every term in the query must be present. Comparison is
+    case-insensitive and Unicode-normalized (NFC), on the same word boundaries
+    the tokenizer uses, so `Postgres` finds `postgres` and `postgres` does not
+    find `postgresql`.
+  - **Ordering: newest first.** Not relevance — and that is a deliberate
+    choice, not a simplification. FTS5 ranking (BM25) cannot be reproduced by
+    the in-memory store without reimplementing it, so requiring relevance would
+    build the divergence into the contract. Recency is also the better answer
+    for memory in particular: when an agent has learned two things about the
+    same subject, the later one usually supersedes the earlier.
+  - **Tie-break: entry id**, ascending, when two entries share a `createdAt`.
+    `toISOString()` gives milliseconds, so a collision needs two facts written
+    inside the same millisecond and is uncommon — but the tie-break is not
+    really about frequency. Without one, two implementations ordering equal
+    keys differently are both conforming, and the alias merge in
+    `withLegacyDefaultMemories` has no defined order at all. A rule that only
+    holds when inputs are distinct is not a rule.
+  - **Merged legacy aliases sort with everything else**, after the merge, by
+    the same rule — not by alias and not by which store answered first.
 - **A derived FTS index, not a replacement store.** `~/.stratus/memory.jsonl`
   remains the record: it is what an append writes, what an operator can read in
   a terminal, and what survives if everything else is deleted. Alongside it
@@ -149,6 +173,23 @@ goes stale, and a memory that is never curated goes noisy.
   alias-aware, and **the limit applies after the merge, never per alias**, or
   a busy legacy id crowds out the others. The same test that covers `list`
   today covers all three.
+- **Size is bounded in bytes, not only in entries.** An entry count says
+  nothing about what reaches a prompt while `memory.remember` accepts any
+  non-empty string: one pathological fact overflows every injected prompt and
+  every recall result afterwards, at a limit of one. So two caps, and they are
+  requirements rather than the open question this was until now.
+
+  - **Per entry, at write.** `memory.remember` refuses a fact over the cap and
+    says so, rather than truncating it. Truncating a fact silently changes what
+    the agent believes it recorded — a half-stored fact is worse than a refused
+    one, because nothing tells the agent it is holding half.
+  - **Per read, in aggregate.** `list` and `recall` stop at a byte budget as
+    well as an entry count, whichever binds first, and mark the result
+    `truncated` — the same shape `fs.read` already uses for output caps, so
+    there is one convention rather than a second one.
+
+  Both caps are the store's, not the caller's: a `limit` argument the model
+  chooses cannot be a safety property.
 - **`memory.recall(query, limit?)`** — `risk: 'safe'`. Reading what this agent
   already knows.
 - **`memory.remember` keeps `risk: 'safe'`, and this step does not touch it.**
@@ -264,6 +305,16 @@ goes stale, and a memory that is never curated goes noisy.
   bounded tokens — stated as a criterion because it is the exact failure the
   current `list` has, and a version of this step that keeps that failure has
   not done anything.
+- **A single entry at the per-entry cap cannot overflow a prompt**: `list` and
+  `recall` over a store of maximum-size entries still return within the byte
+  budget, marked `truncated`. The entry-count bound alone passes this test
+  while failing the property, which is why the byte budget is asserted
+  separately.
+- **`memory.remember` refuses an over-cap fact and stores nothing** — not a
+  truncated version of it.
+- **Both store implementations return the same entries, in the same order, for
+  the same bounded `search`** — including a tie on `createdAt`, which is the
+  case that separates a specified ordering from an incidental one.
 - The structured log names the entry id and never its content.
 
 ## Open questions
@@ -278,8 +329,12 @@ goes stale, and a memory that is never curated goes noisy.
   for this step: automatic relevance is a tuning problem that will churn for
   months, and the explicit call is the one that can be tested. Worth revisiting
   once there is real usage to tune against.
-- **Does `remember` need a size cap per entry, or per agent?** Unbounded growth
-  is the failure mode nobody notices until the disk does.
+- **Does a *fleet* need a per-agent total cap, on top of the per-entry and
+  per-read caps now in scope?** Those two bound what reaches a prompt; neither
+  bounds what reaches the disk over a year of running. Leaning towards leaving
+  it out of this step — the honest answer is probably consolidation, which is
+  explicitly out of scope, and a hard total that starts refusing writes is a
+  worse failure than a large file.
 - **Should the risk taxonomy treat memory writes as their own category?** The
   spec keeps `memory.remember` at `safe` because that is what core's taxonomy
   says and what ships today, and reclassifying it in a roadmap page would both

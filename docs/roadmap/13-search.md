@@ -46,7 +46,7 @@ one of them will be written assuming search exists.
   | --- | --- | --- |
   | `query` | `string`, required, non-empty | **Literal text.** The backend must do whatever its provider requires — escaping, quoting, a literal-search parameter — so the upstream searches for the characters given rather than parsing operators out of them. |
   | `count` | `integer`, 1–50, default 10 | A *maximum*. Returning fewer is normal; returning more is a contract violation. |
-  | `site` | `string?` — one registrable domain, no scheme, no path | `example.com` includes subdomains; `docs.example.com` does not widen to the parent. Not a query operator, so a backend without native support filters after the fact rather than splicing `site:` into the query. |
+  | `site` | `string?` — one **hostname**, at least two labels, no scheme, no port, no path | Matches that host and anything under it, on label boundaries: `example.com` matches `docs.example.com` and **not** `notexample.com`; `docs.example.com` matches only itself and its own subdomains. Normalized before comparison — lowercased, any trailing dot removed, IDN converted to its A-label form. Not a query operator, so a backend without native support filters after the fact rather than splicing `site:` into the query. |
   | `freshness` | `string?` — an ISO 8601 duration of **fixed length only**. Accepted: `W`, `D` in the date portion and `H`, `M`, `S` after the `T` (`P7D`, `P4W`, `PT12H`, `PT30M`). Rejected: `Y` and `M` **in the date portion** (`P1Y`, `P1M`). | An age, not a cutoff timestamp and not an enum. Measured back from the instant the request is made, in UTC. Results older than it are excluded, **and so are results with no known date** — see below. |
 
   **"Verbatim" was the wrong word for `query`, and the two halves of it could
@@ -80,6 +80,14 @@ one of them will be written assuming search exists.
   nothing a caller wants: `P30D` and `P365D` say what someone asking for "a
   month" or "a year" of search results actually means, and say it identically
   everywhere.
+
+  **"Registrable domain" was the wrong term and it fought its own example.**
+  A registrable domain is the public-suffix-plus-one form, so `docs.example.com`
+  is not one — an adapter enforcing the term would reject or normalize it up to
+  `example.com`, silently widening a search another adapter would keep narrow.
+  Hostname with label-boundary suffix matching says what was actually meant and
+  needs no public-suffix list to implement, which is a dependency worth not
+  acquiring. The two-label minimum is what stops `site: com`.
 
   **`M` means two things and only one of them is rejected.** ISO 8601 uses the
   same letter for months in the date portion and minutes after the `T`, so
