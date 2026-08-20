@@ -47,13 +47,23 @@ one of them will be written assuming search exists.
   | `query` | `string`, required, non-empty | Passed through verbatim. A backend may **not** reinterpret operators inside it. |
   | `count` | `integer`, 1–50, default 10 | A *maximum*. Returning fewer is normal; returning more is a contract violation. |
   | `site` | `string?` — one registrable domain, no scheme, no path | `example.com` includes subdomains; `docs.example.com` does not widen to the parent. Not a query operator, so a backend without native support filters after the fact rather than splicing `site:` into the query. |
-  | `freshness` | `string?` — an ISO 8601 duration (`P7D`, `P1Y`) | An age, not a cutoff timestamp and not an enum: a duration is unambiguous across time zones and needs no shared vocabulary of `day`/`week`/`month`. Results older than it are excluded, **and so are results with no known date** — see below. |
+  | `freshness` | `string?` — an ISO 8601 duration of **fixed length only**: days, hours, minutes, seconds (`P7D`, `P30D`, `PT12H`). `Y` and `M` designators are rejected. | An age, not a cutoff timestamp and not an enum. Measured back from the instant the request is made, in UTC. Results older than it are excluded, **and so are results with no known date** — see below. |
 
   And the result: `title` and `url` required (`url` absolute, `http`/`https`
   only, already validated by the address policy), `snippet` a plain string with
   markup stripped, `publishedAt` an **ISO 8601 instant in UTC** when the
   backend supplies one and absent when it does not — never a guess, never a
   locale-formatted date.
+
+  **Fixed-length only, because `P1M` and `P1Y` are not one length.** Calendar
+  arithmetic is where two conforming adapters part company: subtracting a month
+  from 31 March, or a year from 29 February, has more than one defensible
+  answer, and an adapter that converts to 30 or 365 days instead disagrees with
+  one that does not — at boundaries, intermittently, which is the worst way for
+  a difference to show up. Rejecting the two ambiguous designators costs
+  nothing a caller wants: `P30D` and `P365D` say what someone asking for "a
+  month" or "a year" of search results actually means, and say it identically
+  everywhere.
 
   **An undated result does not survive a `freshness` filter.** Backends omit
   dates for some hits routinely, so leaving this unsaid lets two conforming
@@ -236,6 +246,9 @@ one of them will be written assuming search exists.
   where interchangeability is actually won or lost, and the undated case
   belongs in it because it is the one every backend produces without being
   asked.
+- **`P1M` and `P1Y` are rejected by both backends, with the same error** —
+  proving the ambiguous designators are refused at the contract rather than
+  each adapter quietly picking a length.
 - **A backend that cannot honor an option fails the call naming it**, rather
   than returning results that silently ignore it.
 - **A key stored in the credential store is resolvable by an allowlisted agent
