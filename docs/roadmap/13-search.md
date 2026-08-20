@@ -69,18 +69,50 @@ one of them will be written assuming search exists.
   `web.*` is first-party today, but an ecosystem search plugin is third-party
   and floors at `gated` no matter what its manifest claims, so the glob widens
   what an agent *can reach* and never what it can do unapproved.
-- **A published `SearchProvider` shape** —
-  `{ search(query, options): Promise<SearchResult[]> }` — so Brave, Tavily,
-  Exa, Google CSE, and SearXNG adapters are written against something rather
-  than each inventing a result type. Published *from* this repo, implemented
-  *outside* it.
+- **A published `SearchProvider` shape that carries the call's context** —
+  `{ search(query, options, context): Promise<SearchResult[]> }`, where
+  `context` is `{ credentials: ScopedCredentials; signal?: AbortSignal }`.
+  Published *from* this repo, implemented *outside* it, so Brave, Tavily, Exa,
+  Google CSE, and SearXNG adapters are written against something rather than
+  each inventing a result type.
+
+  **The third parameter is what makes per-agent keys possible at all.**
+  `CredentialResolver.resolve` takes an `AgentDefinition`, so a `search(query,
+  options)` seam leaves one shared adapter instance no way to reach the calling
+  agent's key except a factory outside the contract or mutable global state —
+  and the per-call credential criterion would not be implementable from the
+  published interface.
+
+  It passes `ScopedCredentials` rather than the agent, and that choice is the
+  security half: `scopeCredentials(agent, resolver)` is already bound to one
+  agent, and its `get(name)` is the whole surface. An adapter therefore has no
+  way to *name* another agent, so it has no way to reach another agent's key —
+  where handing it an `AgentDefinition` and a resolver would make agent
+  isolation a thing every third-party backend author has to not get wrong.
+
+  The `signal` is the turn's, for the same reason every other long-running
+  contract in this repository carries one: a cancelled turn must stop the HTTP
+  request, not merely stop waiting on it.
 - **Normalized results are part of the contract, not an implementation
   detail.** A backend's raw payload never reaches the agent. This is the whole
   value of specifying the step: a provider that reshapes its JSON must not
   reshape what every soul and skill in the fleet was written against.
-- **The rules a backend inherits rather than re-deriving**: keys through the
-  scoped `CredentialResolver`, resolved per call from `session.agent.id` the
-  way `tool-fs` resolves its roots; and every request through
+- **One backend-neutral credential name: `search.apiKey`.** Every backend that
+  needs a key asks for that name and no other. This is not tidiness — without
+  it the step's central criterion is false. A soul's `credentials` list is
+  enforced by `CredentialResolver`, so a Brave adapter asking for
+  `BRAVE_API_KEY` and a Tavily adapter asking for `TAVILY_API_KEY` means
+  swapping backends edits **every soul in the fleet**, even though the
+  `web.search` tool allowlist never moved.
+
+  Two corollaries keep the single name honest. A backend needing something
+  that is *not* secret — Google CSE's engine id, SearXNG's base URL — puts it
+  in the plugin's config block, which is not soul-scoped and therefore does
+  not drag souls into a swap. And a backend needing **no** credential at all
+  is legitimate and must not be forced to invent one: SearXNG is the case, and
+  an adapter that never calls `get` is conforming, not broken.
+- **The rules a backend inherits rather than re-deriving**: the key through
+  the `ScopedCredentials` it is handed per call, and every request through
   `@stratusagent/egress`. Both are available to third-party plugins — the
   resolver through `PluginContext` (kernel change 9), the address policy as a
   published package — so "it needs the credential resolver" is not an argument
@@ -175,9 +207,14 @@ one of them will be written assuming search exists.
 - An agent whose soul allowlists `web.search` — or `web.*` — gets results; one
   that does not is refused at both gates.
 - **Two backends from different authors are interchangeable**: swapping the
-  installed search plugin changes no soul, no skill, and no result shape. This
-  is the criterion the whole step exists for, and a version that ships one
-  backend and never proves the second has not met it.
+  installed search plugin changes no soul, no skill, and no result shape —
+  including no edit to any soul's `credentials` list, which the single
+  `search.apiKey` name is what buys. This is the criterion the whole step
+  exists for, and a version that ships one backend and never proves the second
+  has not met it.
+- **A backend that needs no credential works unchanged**, with no placeholder
+  key invented to satisfy a contract — the SearXNG case, and the proof the
+  single name did not become a single requirement.
 - **A third-party search plugin registers `gated` even if its manifest says
   `safe`** — the floor holding across a namespace whose other tools are
   first-party.
