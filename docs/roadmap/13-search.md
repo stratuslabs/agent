@@ -36,12 +36,32 @@ one of them will be written assuming search exists.
 
 **In:**
 
-- **`web.search(query, count?, site?, freshness?)`** → a ranked array of
-  `{ title, url, snippet, publishedAt? }`. The name is `web.search`, as both
-  governing documents already say — not `search.web`. This is not cosmetic:
-  souls and skills allowlist by name, so the two spellings are two different
-  capabilities, and a fleet written against one silently loses search when a
-  plugin ships the other.
+- **`web.search`, with every option pinned to a meaning.** Naming the options
+  is not specifying them: two adapters can both satisfy
+  `{ search(query, options) }` while accepting incompatible calls, which
+  defeats the one criterion this step exists for. So the schema is the
+  deliverable, not an implementation detail of it:
+
+  | Field | Type | Meaning |
+  | --- | --- | --- |
+  | `query` | `string`, required, non-empty | Passed through verbatim. A backend may **not** reinterpret operators inside it. |
+  | `count` | `integer`, 1–50, default 10 | A *maximum*. Returning fewer is normal; returning more is a contract violation. |
+  | `site` | `string?` — one registrable domain, no scheme, no path | `example.com` includes subdomains; `docs.example.com` does not widen to the parent. Not a query operator, so a backend without native support filters after the fact rather than splicing `site:` into the query. |
+  | `freshness` | `string?` — an ISO 8601 duration (`P7D`, `P1Y`) | An age, not a cutoff timestamp and not an enum: a duration is unambiguous across time zones and needs no shared vocabulary of `day`/`week`/`month`. Results older than it are excluded. |
+
+  And the result: `title` and `url` required (`url` absolute, `http`/`https`
+  only, already validated by the address policy), `snippet` a plain string with
+  markup stripped, `publishedAt` an **ISO 8601 instant in UTC** when the
+  backend supplies one and absent when it does not — never a guess, never a
+  locale-formatted date.
+
+  Anything a backend cannot honor it must **refuse rather than approximate**.
+  A backend that silently ignores `freshness` is worse than one that fails,
+  because the agent's next sentence will state the result is recent.
+- **The name is `web.search`**, as both governing documents already say — not
+  `search.web`. This is not cosmetic: souls and skills allowlist by name, so
+  the two spellings are two different capabilities, and a fleet written against
+  one silently loses search when a plugin ships the other.
 - **The name sits in the `web` namespace on purpose.** A soul that already says
   `tools: [web.*]` picks up search when the operator installs a backend, with
   no soul edit — which is the behaviour an operator expects and the reason the
@@ -72,6 +92,33 @@ one of them will be written assuming search exists.
   commit. And a self-hosted backend on `http://localhost:8888` is a legitimate
   configuration that must be a deliberate allowance rather than an accident,
   which is exactly the decision the shared address policy already makes.
+- **A place to put that key, which does not exist yet.** This is a prerequisite
+  of the step and not an aside: `CredentialsFile` in `packages/state` is
+  `Partial<Record<'anthropic' | 'openai', StoredCredential>>` — a closed union
+  with no room for a Brave or Tavily key — and `EnvCredentialResolver` is the
+  only `CredentialResolver` in the repository. It checks the agent's allowlist
+  and then returns `this.env[name]`, one process-wide value per name. So an
+  operator told to keep a search key in the credential store today has nowhere
+  to put it, and the backend reports the missing-key failure on every call.
+
+  Three parts, all small, all in `state`:
+
+  1. **A named-credential namespace** in the credentials file, beside the
+     provider entries, keyed by credential name.
+  2. **A file-backed `CredentialResolver`** that reads it, keeps
+     `EnvCredentialResolver`'s allowlist check exactly, and falls back to the
+     environment so existing setups keep working. Per-agent keys are a lookup
+     order rather than an interface change — the agent's own entry, then the
+     shared one — because `CredentialResolver.resolve` already takes the agent.
+  3. **A way to provision one** from the CLI, since a credential nobody can
+     add is a credential nobody has.
+
+  The existing invariants carry over unchanged and are worth restating because
+  this is the code that could quietly break them: the file stays `0600` with an
+  explicit `chmod`, no endpoint returns a secret, and **channel tokens stay out
+  of this path** — they live under `channels.slack.<agentId>` precisely so an
+  agent cannot read the tokens of the transport carrying it, and a named
+  namespace next door must not become a way in.
 
 **Out:**
 
@@ -134,6 +181,18 @@ one of them will be written assuming search exists.
 - **A third-party search plugin registers `gated` even if its manifest says
   `safe`** — the floor holding across a namespace whose other tools are
   first-party.
+- **One option suite runs against both backends and gets answers meaning the
+  same thing**: `count` respected as a maximum, `site` excluding a
+  lookalike parent domain, `freshness` excluding an older result, and
+  `publishedAt` parsing as a UTC instant from both. This is where
+  interchangeability is actually won or lost.
+- **A backend that cannot honor an option fails the call naming it**, rather
+  than returning results that silently ignore it.
+- **A key stored in the credential store is resolvable by an allowlisted agent
+  and refused for one whose soul does not list it** — the existing
+  `EnvCredentialResolver` check surviving the move to a file-backed store.
+- **A named credential is never returned by any endpoint**, and the credentials
+  file is still `0600` after the new namespace is written to it.
 - **Two agents searching the one installed backend use their own credentials**,
   resolved per call — the test that proves the agent resolution is real and not
   a startup-time capture. Different *backends* per agent is not a criterion,

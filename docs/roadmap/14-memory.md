@@ -63,6 +63,19 @@ goes stale, and a memory that is never curated goes noisy.
   starting there would make the first version of memory depend on a second
   vendor relationship. It also keeps the index derived: an embedding index that
   cost money to build is one nobody will agree to throw away and rebuild.
+- **`withLegacyDefaultMemories` learns the new methods, alias-aware.** The
+  wrapper in `packages/state` today special-cases `list` only: for the built-in
+  `stratus` agent it merges entries stored under `demo-agent`,
+  `anthropic-agent`, and `openai-agent`, so an unsouled install that predates
+  the rename keeps its memory. `append` passes straight through and there is
+  nothing else to pass.
+
+  A `search` and `forget` that delegate on `agentId` alone would compile,
+  satisfy the interface, and quietly make every inherited entry unfindable and
+  unforgettable — visible in `list`, absent from `recall`. So both are
+  alias-aware, and **the limit applies after the merge, never per alias**, or
+  a busy legacy id crowds out the others. The same test that covers `list`
+  today covers all three.
 - **`memory.recall(query, limit?)`** — `risk: 'safe'`. Reading what this agent
   already knows.
 - **`memory.remember(content, tags?)`** — `risk: 'gated'`. Argued below.
@@ -133,6 +146,9 @@ goes stale, and a memory that is never curated goes noisy.
   only *claimed* to be derived is a store that has quietly become the record.
 - **An entry appended to the JSONL by hand is recallable**, which is what
   decision 5's promise that the files are the interface actually costs.
+- **The built-in `stratus` agent can recall and forget a memory stored under a
+  legacy default id** — an upgraded unsouled install, which every per-agent
+  test passes right over.
 - Agent A cannot recall agent B's entries, and the test names both agents
   rather than asserting an empty result that an unrelated bug would also
   produce.
