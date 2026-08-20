@@ -61,7 +61,7 @@ Anything beyond this list gets decided in this document first, not in an impleme
 
 Everything optional is a package, installed only where needed:
 
-- **Providers** (exist): `provider-anthropic`, `provider-claude-code`, the OpenAI-compatible adapter in `providers`.
+- **Providers** (exist): `provider-anthropic`, `provider-claude-code`, the OpenAI-compatible adapter in `providers`. A Codex provider is specified below and unbuilt.
 - **Channels** (new): `@stratusagent/channels` defines the contract — inbound message → router → session mapping, outbound post/edit/typing, per-agent bot identity. `@stratusagent/channel-slack` is the first adapter; others (Discord, Telegram, email) follow the same shape.
 - **Tools** (new): `tool-fs`, `tool-shell`, `tool-browser`, `tool-web`, folding in the existing `stratuslabs/tool-browser` and `tool-screenshot` work. Each is a `Plugin` contributing a *toolset*; an agent opts in via its soul's tool allowlist.
 - **Skills** (new): markdown procedures — `SKILL.md` with frontmatter — enabled per agent and loaded into context only when the agent reaches for one. Tools are what an agent *can* do; skills are how it does them well.
@@ -69,6 +69,26 @@ Everything optional is a package, installed only where needed:
 - **Memory** (later): stays markdown/JSONL-first. A SQLite store with budget-aware retrieval is a future optional package behind the same `AgentMemoryStore` interface, not a prerequisite for anything.
 
 All of these are **plugins** — one word for one distribution unit, whatever it contributes. [`plugins.md`](./plugins.md) specifies the contract: the contribution kinds and the seams they map to, naming, the `package.json` manifest, the `plugins` config block, the trust model for code that runs in-process with the daemon, and the rule for which packages live in this monorepo and which live in their own repositories. It is the document a third-party developer reads, and the vocabulary landed before the packages on purpose — naming is cheap now and expensive once things exist.
+
+#### Codex — a third provider shape (not built, not scheduled)
+
+Codex is not another OpenAI model reachable through the existing adapter. It is a *harness* with its own agent loop, standing in the same relation to a ChatGPT subscription that Claude Code stands in to Pro/Max — so supporting it means the stack carries three provider shapes, not two:
+
+| Shape | Transport | Who owns the loop | Today |
+| --- | --- | --- | --- |
+| Stateless chat completions | `fetch` → `/v1/chat/completions` | the kernel runner | the OpenAI-compatible adapter in `providers` |
+| Vendor SDK, one request per turn | `@anthropic-ai/sdk`, Messages API | the kernel runner | `provider-anthropic` |
+| Harness with an inner loop | `@anthropic-ai/claude-agent-sdk` | the provider, calling back into the kernel | `provider-claude-code` |
+
+A `provider-codex` — a plugin contributing a provider, wrapping `@openai/codex-sdk` — is a second instance of the third shape, and that shape is the expensive one. Decision 1 is what makes it expensive: an SDK that owns the loop is admitted only if its tool calls come back through `ToolRegistry` → `ApprovalPolicy` → `Executor`. `bridgeKernelTools` is how `provider-claude-code` pays that price today, and a Codex provider pays it again or does not ship.
+
+**The mechanical cost is small, but it is not confined to the CLI.** `StratusProviderName` and `CredentialProviderName` are closed unions in `state`, and a third name has to reach every surface that hard-codes the pair instead of deriving it: the five `['anthropic', 'openai'] as const` sweeps and the two value predicates across `state` and `cli`, `defaultApiKeyEnvName`, the setup menu's provider list, `parseProviderParam` and the credentials response in `packages/control-api/src/routes.ts`, and `PROVIDERS` in `packages/dashboard/ui/views/settings.js`. Miss the last two and an implemented Codex provider is simply unreachable through the control API and the dashboard. The `verifyProviderKey` carve-out that already exists — a Claude subscription token cannot be checked against a models endpoint — extends to a ChatGPT one unchanged.
+
+**One question is genuinely open, and it gets answered in this document rather than in an implementation PR**, because it can invalidate the approach rather than merely complicate it. **Which transport carries kernel tools into the Codex loop?** The Claude Agent SDK accepts an in-process MCP server, which is why `bridgeKernelTools` costs no transport and exposes no environment. Codex declares MCP servers in configuration as either a spawned command or a streamable HTTP URL (`codex mcp add --url`, with a bearer token read from a named variable), so the daemon can host a loopback endpoint rather than spawn anything — on that path the scrubbed-environment invariant is not what is at stake. What replaces it is a listening socket carrying every kernel tool call: what authenticates it, and what stops any other process on the machine from driving an agent's tools through it. If neither transport can carry them, Codex is a delegated *tool*, not a provider — a different design that should not reuse this name.
+
+**One thing is not open: Stratus stays authoritative over tool execution.** Codex ships its own sandbox (`read-only` / `workspace-write` / `danger-full-access`) and approval policy (`untrusted` through `never`), and those govern model-generated shell commands *inside its harness* — commands that never traverse `ToolRegistry` → `ApprovalPolicy` → `Executor`. Letting the Codex policy decide is precisely the side door decision 1 rules out, so the only shippable configuration is its policy pinned to pass-through **and** its native shell and file tools disabled, leaving the kernel's chain the sole gate. If they cannot be disabled, this is the delegated-tool design above and not a provider.
+
+No roadmap step claims this work. It belongs after the plugin contract can register a provider (kernel change 9 above): until then a provider is wired by the host, and a third one is a third special case inside `createRuntimeProvider` rather than a package a user installs.
 
 ### L2 — The gateway
 
@@ -103,7 +123,7 @@ The runtime is one persistent Node process everywhere; only the recipe changes:
 
 ## Key decisions
 
-1. **The kernel owns the loop; providers are model clients.** The Claude Agent SDK is bridged into the kernel's contracts (tools exposed to it via in-process MCP, calling back through `ToolRegistry` → `ApprovalPolicy` → `Executor`), never the other way around. An SDK that owns the loop becomes a side door around permissions and memory; that is ruled out by design. Both billing paths (Anthropic API key, Claude subscription) are provider concerns; nothing else in the stack knows the difference.
+1. **The kernel owns the loop; providers are model clients.** The Claude Agent SDK is bridged into the kernel's contracts (tools exposed to it via in-process MCP, calling back through `ToolRegistry` → `ApprovalPolicy` → `Executor`), never the other way around. An SDK that owns the loop becomes a side door around permissions and memory; that is ruled out by design. Both billing paths (Anthropic API key, Claude subscription) are provider concerns; nothing else in the stack knows the difference. A ChatGPT subscription through Codex would be a third instance of this rule rather than an exception to it — see the Codex subsection under L1.
 2. **Each agent is a real Slack app.** Slack offers no way to give one bot multiple identities with presence and DMs, so per-agent avatars and presence mean one Slack app (one bot token) per agent, generated from a manifest template. The Slack adapter holds a token → agent map; the session key is `(agent, team, channel, thread_ts)` so threads are resumable conversations and a session never crosses agent identities, even when two agents share a thread.
 3. **Surfaces are clients of one API.** Adding a surface must be cheap forever. The control API is the only doorway; the loop is never duplicated.
 4. **Persistent process, not serverless.** See L4.
