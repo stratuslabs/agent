@@ -2,10 +2,16 @@
 
 ## Goal
 
-Search and forget on the memory store, a durable default behind it, and three
-tools that let an agent decide what is worth remembering and go looking for it
-later — so "gets smarter over time" is something an agent does rather than
-something the runtime does to it.
+Search and forget on the memory store, a rebuildable index behind them, and
+three tools that let an agent decide what is worth remembering and go looking
+for it later — so "gets smarter over time" is something an agent does rather
+than something the runtime does to it.
+
+JSONL stays the source of truth. [`stratus-v2.md`](../architecture/stratus-v2.md)
+decision 5 says the files users can read and edit are the interface and that
+smarter stores never replace them, and that decision is not up for revision
+here: what this step adds is an *index over* those files, not a store in front
+of them.
 
 ## Why now
 
@@ -38,16 +44,25 @@ goes stale, and a memory that is never curated goes noisy.
   `forget(agentId, entryId)`**, and `list` grows a bounded form. The in-memory
   implementation in `packages/core` implements all three, because it is what
   every test uses.
-- **A durable default.** The gateway already runs `node:sqlite` for its session
-  store; memory uses the same, not a second storage technology to operate. An
-  always-on agent whose memory dies with the process is not the product being
-  described. Alternative stores stay a plugin contribution, as
-  [`plugins.md`](../architecture/plugins.md) already says they are.
+- **A derived FTS index, not a replacement store.** `~/.stratus/memory.jsonl`
+  remains the record: it is what an append writes, what an operator can read in
+  a terminal, and what survives if everything else is deleted. Alongside it
+  sits a `node:sqlite` FTS5 index — the same storage technology the session
+  store already uses, so there is no second database to operate — holding what
+  `search` needs and nothing that cannot be reconstructed.
+
+  The index is **rebuildable from the JSONL by definition**, and that property
+  is the design rather than a nicety. It means an upgrade has no data migration
+  to get wrong, a corrupt index is repaired by deleting it, and a user who
+  hand-edits the file the way decision 5 promises they can gets a store that
+  agrees with what they wrote. A version stamp on the index that does not match
+  the current schema is a rebuild trigger, not an error.
 - **Retrieval by FTS5, not embeddings.** No provider, no key, no network, no
   per-query cost, deterministic output, and genuinely good at *what do I know
   about X*. Embeddings are an obvious later plugin behind the same seam, and
   starting there would make the first version of memory depend on a second
-  vendor relationship.
+  vendor relationship. It also keeps the index derived: an embedding index that
+  cost money to build is one nobody will agree to throw away and rebuild.
 - **`memory.recall(query, limit?)`** — `risk: 'safe'`. Reading what this agent
   already knows.
 - **`memory.remember(content, tags?)`** — `risk: 'gated'`. Argued below.
@@ -75,9 +90,20 @@ goes stale, and a memory that is never curated goes noisy.
 
 ## Design sketch
 
-- The schema change goes through `migrateLegacyMemory` in the gateway, which
-  already exists for exactly this and is the only place that should know how an
-  older layout is read.
+- **`migrateLegacyMemory` is not the hook for this, and assuming it was is the
+  mistake this bullet exists to prevent.** It lives in
+  `packages/state/src/index.ts`, not the gateway, and what it does is relocate a
+  *project-local* `.stratus/memory.jsonl` into the global JSONL file — JSONL to
+  JSONL, one directory to another. It has no knowledge of an index and would
+  not acquire any.
+
+  The reason this matters is that a spec which quietly assumed otherwise would
+  ship an upgrade that loses every existing memory while its acceptance tests
+  passed: "remember in one session, recall in the next" is satisfied by a fresh
+  install, and every install in the field is not one. Keeping the JSONL as the
+  record removes the failure rather than handling it — there is no import step
+  to write, because the file the upgrade must not forget is the file the new
+  code already reads. The index is built from it on first start.
 - `memory.remember` is `gated` for a reason worth writing down. Memory content
   is model-authored text that is replayed into a later system prompt, which
   makes it the one channel in the system that carries instructions *across the
@@ -98,6 +124,15 @@ goes stale, and a memory that is never curated goes noisy.
 - An agent remembers a fact in one session and recalls it in a **new session
   after a daemon restart** — the test that proves durability rather than
   process-lifetime caching.
+- **An installation that already has a populated `~/.stratus/memory.jsonl`
+  recalls every one of those entries after upgrading, with no import step.**
+  This is the criterion a fresh-install test cannot reach, and the one that
+  fails loudly if anyone later reintroduces a store that shadows the file.
+- **Deleting the index and restarting reproduces it exactly**, and a stale
+  schema stamp triggers the same rebuild rather than an error. A store that is
+  only *claimed* to be derived is a store that has quietly become the record.
+- **An entry appended to the JSONL by hand is recallable**, which is what
+  decision 5's promise that the files are the interface actually costs.
 - Agent A cannot recall agent B's entries, and the test names both agents
   rather than asserting an empty result that an unrelated bug would also
   produce.

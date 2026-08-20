@@ -31,9 +31,15 @@ one of them will be written assuming search exists.
   `{ title, url, snippet, publishedAt? }`. `risk: 'safe'` — see the open
   question; the short version is that reading a public index acts on nothing.
 - **A `SearchProvider` seam** — `{ search(query, options): Promise<SearchResult[]> }` —
-  with adapters for Brave, Tavily, Exa, and Google CSE. The operator picks one
-  per agent; there is no default, because a default provider is a default
-  bill.
+  with adapters for Brave, Tavily, Exa, Google CSE, and **SearXNG**. The
+  operator picks one per agent; there is no default, because a default provider
+  is a default bill.
+
+  SearXNG is in the list rather than assumed: it has its own request and
+  response contract, so allowing its address through egress does not by itself
+  make any other adapter able to talk to it. It earns the fifth slot because it
+  is the only one that needs no key and no vendor, which matches a product
+  whose agents already run on the operator's own hardware.
 - **Keys through the `CredentialResolver`**, resolved per call from
   `session.agent.id` the way `tool-fs` resolves its roots. Not through the
   plugin's config block: a literal key in the `plugins` block would put an API
