@@ -555,6 +555,7 @@ export const routes: Route[] = [
               ? { instructions: optionalString(body, 'instructions') as string }
               : {}),
             ...(body.tools !== undefined ? { tools: allowlist(body.tools, 'tools') } : {}),
+            ...(body.skills !== undefined ? { skills: allowlist(body.skills, 'skills') } : {}),
             ...(body.credentials !== undefined ? { credentials: allowlist(body.credentials, 'credentials') } : {}),
           },
           // An empty string clears a pin; an absent key leaves it alone.

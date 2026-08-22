@@ -11,9 +11,8 @@ import {
   SkillRegistry,
   ToolRegistry,
   createSkillReadTool,
-  matchesSkillAllowlist,
+  missingSkillRequirements,
   readPendingApproval,
-  toolAllowlistCovers,
   type AgentDefinition,
   type ApprovalAnswer,
   type ApprovalPolicy,
@@ -1069,28 +1068,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Advisory, per the skills spec: a skill may say which toolsets its
     // procedure expects (`requires:`), and an agent enabling it without
     // them gets a warning at load — never a refusal, because a skill is
-    // prose and can degrade.
+    // prose and can degrade. The check itself is the kernel's
+    // (`missingSkillRequirements`), shared with the CLI's local runs so
+    // both hosts warn about the same configuration.
     for (const agent of registry.list()) {
-      const allowlist = agent.skills;
-      if (!allowlist || allowlist.length === 0) {
-        continue;
-      }
-      for (const skill of skillCatalog.list()) {
-        if (!skill.requires || skill.requires.length === 0) {
-          continue;
-        }
-        const enabled = skillCatalog
-          .idsFor(skill.id)
-          .some((id) => matchesSkillAllowlist(id, allowlist));
-        if (!enabled) {
-          continue;
-        }
-        const missing = skill.requires.filter(
-          (requirement) => !toolAllowlistCovers(requirement, agent.tools),
-        );
-        if (missing.length > 0) {
-          warn(`agent ${agent.id} enables skill ${skill.id}, which expects tools the agent is not allowed: ${missing.join(', ')}`);
-        }
+      for (const { skill, missing } of missingSkillRequirements(agent, skillCatalog)) {
+        warn(`agent ${agent.id} enables skill ${skill.id}, which expects tools the agent is not allowed: ${missing.join(', ')}`);
       }
     }
   };

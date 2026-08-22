@@ -11,6 +11,7 @@ import {
   EventBus,
   SkillRegistry,
   ToolRegistry,
+  missingSkillRequirements,
   type AgentDefinition,
   type AgentMemoryStore,
   type ApprovalPolicy,
@@ -1409,7 +1410,19 @@ const createAgentRuntime = async (
 
   // A soul is a full identity — without one, every provider serves the
   // same built-in Stratus persona.
-  const agent = options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT;
+  const agent: AgentDefinition = options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT;
+
+  // The same advisory the daemon gives at roster load, from the same
+  // kernel check: a soul enabling a skill whose `requires:` its `tools:`
+  // does not cover must warn here too, or the local test stays silent
+  // about a configuration `stratus serve` flags.
+  for (const { skill, missing } of missingSkillRequirements(agent, skills)) {
+    writeLine(
+      streams.stderr,
+      `Warning: agent ${agent.id} enables skill ${skill.id}, which expects tools the agent is not allowed: ${missing.join(', ')}`,
+    );
+  }
+
 
   const metadata = options.runtime.provider === 'demo'
     ? { provider: 'demo' as const, executor: 'local-command' }

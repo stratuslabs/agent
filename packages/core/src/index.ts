@@ -298,6 +298,53 @@ export const toolAllowlistCovers = (
   return matchesToolAllowlist(requirement, allowlist);
 };
 
+/** One skill an agent enabled without the tools it expects. Advisory — see `missingSkillRequirements`. */
+export interface SkillRequirementFinding {
+  skill: Skill;
+  /** The `requires:` entries the agent's tools allowlist does not cover. */
+  missing: string[];
+}
+
+/**
+ * The `requires:` entries of this agent's enabled skills that its `tools:`
+ * allowlist does not cover — what the load-time warning reports.
+ *
+ * One implementation, exported, because two hosts warn about the same
+ * configuration: the gateway at roster load and the CLI before a local
+ * run. A copy in each would drift, and `stratus run` staying silent about
+ * a soul `stratus serve` warns for is exactly the disagreement the local
+ * test exists to prevent. Advisory by design — a skill is prose and can
+ * degrade, so callers warn and continue, never refuse.
+ */
+export const missingSkillRequirements = (
+  agent: Pick<AgentDefinition, 'skills' | 'tools'>,
+  skills: SkillRegistry,
+): SkillRequirementFinding[] => {
+  const allowlist = agent.skills;
+  if (!allowlist || allowlist.length === 0) {
+    return [];
+  }
+  const findings: SkillRequirementFinding[] = [];
+  for (const skill of skills.list()) {
+    if (!skill.requires || skill.requires.length === 0) {
+      continue;
+    }
+    const enabled = skills
+      .idsFor(skill.id)
+      .some((id) => matchesSkillAllowlist(id, allowlist));
+    if (!enabled) {
+      continue;
+    }
+    const missing = skill.requires.filter(
+      (requirement) => !toolAllowlistCovers(requirement, agent.tools),
+    );
+    if (missing.length > 0) {
+      findings.push({ skill, missing });
+    }
+  }
+  return findings;
+};
+
 const matchesGlobbedAllowlist = (
   name: string,
   allowlist: readonly string[],
