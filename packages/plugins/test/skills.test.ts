@@ -121,8 +121,9 @@ test('a plugin contributing a skill and one contributing a same-named toolset in
 
   const record = result.loaded.find((plugin) => plugin.package === 'stratus-plugin-github-skills')?.skills[0];
   assert.equal(record?.id, 'stratus-plugin-github-skills:github');
-  assert.equal(record?.alias, 'github');
   assert.equal(record?.description, 'Use when the task calls for github.');
+  // The alias is the registry's to answer, live — records carry none.
+  assert.deepEqual(skills.idsFor('stratus-plugin-github-skills:github'), ['stratus-plugin-github-skills:github', 'github']);
 });
 
 test('two plugins contributing the same skill id resolve to their qualified forms; the bare id goes to neither', async () => {
@@ -287,5 +288,6 @@ test('an operator skill already holding the bare id leaves the plugin skill reac
   assert.deepEqual(result.failures, []);
   assert.equal(skills.resolve('code-review')?.description, 'The operator copy.');
   assert.equal(skills.resolve('stratus-plugin-acme:code-review')?.description, 'Use when the task calls for acme code review.');
-  assert.equal(result.loaded[0]?.skills[0]?.alias, undefined);
+  // No bare alias landed: the qualified id is the plugin skill's only id.
+  assert.deepEqual(skills.idsFor('stratus-plugin-acme:code-review'), ['stratus-plugin-acme:code-review']);
 });

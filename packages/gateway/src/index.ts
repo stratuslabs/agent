@@ -2098,14 +2098,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           package: plugin.package,
           trusted: plugin.trusted,
         })),
-        skills: plugin.skills.map((skill) => ({
-          id: skill.id,
-          name: skill.name,
-          description: skill.description,
-          ...(skill.alias !== undefined ? { alias: skill.alias } : {}),
-          package: plugin.package,
-          path: skill.path,
-        })),
+        // The alias comes from the live registry, exactly as `skills()`
+        // derives it: a plugin loaded later can have retired it, and this
+        // listing must not advertise a bare id `skill.read` would refuse.
+        skills: plugin.skills.map((skill) => {
+          const alias = skillCatalog.idsFor(skill.id).find((id) => id !== skill.id);
+          return {
+            id: skill.id,
+            name: skill.name,
+            description: skill.description,
+            ...(alias !== undefined ? { alias } : {}),
+            package: plugin.package,
+            path: skill.path,
+          };
+        }),
       }));
       const failed: GatewayPluginStatus[] = pluginFailures.map((failure) => ({
         package: failure.package,

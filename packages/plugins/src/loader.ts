@@ -100,16 +100,17 @@ const packageJsonFor = async (
 export const isFirstPartyPackage = (packageName: string): boolean =>
   packageName === '@stratusagent' || packageName.startsWith('@stratusagent/');
 
-/** What the daemon knows about one skill a plugin contributed. */
+/**
+ * What the daemon knows about one skill a plugin contributed.
+ *
+ * Deliberately no `alias` field: whether the bare id still reaches this
+ * skill is the registry's to answer, live — a plugin loading later can
+ * retire it — and a snapshot here would be a second answer that goes
+ * stale the moment it matters. Ask `SkillRegistry.idsFor`.
+ */
 export interface PluginSkillRecord {
   /** The qualified id (`stratus-plugin-github:pr-review`) — the canonical form. */
   id: string;
-  /**
-   * The bare id, when this package held it at load time. A plugin loading
-   * later and wanting the same bare id retires it for both — the registry
-   * is the live answer; this is the load-time snapshot.
-   */
-  alias?: string;
   name: string;
   description: string;
   /** The package whose skill this is — provenance, same as tools. */
@@ -345,10 +346,10 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
         options.skills?.register(skill);
         // The bare id is a convenience the skill holds only while it is
         // unambiguous — an operator skill or a second plugin wanting it
-        // leaves this one reachable qualified. See SkillRegistry.
+        // leaves this one reachable qualified. See SkillRegistry, which
+        // stays the only answer to whether the alias still resolves.
         options.skills?.registerAlias(bareId, skill.id);
-        const aliased = options.skills?.resolve(bareId)?.id === skill.id;
-        skills.push(aliased ? { ...record, alias: bareId } : record);
+        skills.push(record);
       }
 
       loaded.push({

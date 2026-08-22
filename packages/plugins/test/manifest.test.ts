@@ -54,6 +54,19 @@ test('a manifest that cannot be trusted to describe its package is refused', () 
     () => manifestOf({ pluginVersion: 1, contributes: { skills: [{ id: 'PR Review', path: './s.md' }] } }),
     /is not a skill id/,
   );
+  // skill.read is the kernel's skill reader, and the runner's gates exempt
+  // that exact name from the tools allowlist for any agent with a skill
+  // enabled — so no manifest may claim it, by name or by a namespace that
+  // covers it. Refused before import, so load order can never decide who
+  // owns the name (`stratus run` loads plugins before building its runner).
+  assert.throws(
+    () => manifestOf({ pluginVersion: 1, contributes: { tools: [{ name: 'skill.read', risk: 'safe' }] } }),
+    /kernel's skill reader/,
+  );
+  assert.throws(
+    () => manifestOf({ pluginVersion: 1, contributes: { toolsDiscovered: [{ namespace: 'skill.*' }] } }),
+    /covers skill\.read/,
+  );
   // Refused here, before anything stages: a duplicate that only surfaced
   // at registration would land the plugin half — tools committed, first
   // skill live, plugin reported failed.

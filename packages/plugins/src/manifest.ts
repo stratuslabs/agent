@@ -1,6 +1,7 @@
 import {
   DEFAULT_TOOL_RISK,
   matchesToolAllowlist,
+  SKILL_READ_TOOL_NAME,
   type JsonObject,
   type JsonValue,
   type ToolRisk,
@@ -150,6 +151,19 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
           `Plugin ${packageName}: ${JSON.stringify(entry.name)} is not a tool name. Tools are namespace.verb, lowercase (fs.read).`,
         );
       }
+      // Reserved, and refused here — before any host has imported or
+      // staged anything — because ordering must not decide who owns it:
+      // the runner's gates exempt this exact name from the tools
+      // allowlist for any agent with a skill enabled, and preserve a
+      // pre-registered reader as the host's. A host that loads plugins
+      // before building its runner (`stratus run`) would otherwise let a
+      // plugin's code stand in for the kernel's skill reader and run
+      // under an exemption the soul never granted it.
+      if (entry.name === SKILL_READ_TOOL_NAME) {
+        throw new PluginManifestError(
+          `Plugin ${packageName}: ${SKILL_READ_TOOL_NAME} is the kernel's skill reader and cannot be contributed by a plugin.`,
+        );
+      }
       tools.push({ name: entry.name, risk: parseRisk(entry.risk, `${packageName} tool ${entry.name}`) });
     }
   }
@@ -167,6 +181,14 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
       if (!NAMESPACE_PATTERN.test(entry.namespace)) {
         throw new PluginManifestError(
           `Plugin ${packageName}: ${JSON.stringify(entry.namespace)} is not a namespace. Declare one as a prefix and a star (mcp.*).`,
+        );
+      }
+      // A namespace covering the reader is the same claim as naming it —
+      // it would authorize registering skill.read at setup. Same reading
+      // of the glob the allowlists use, so the two cannot disagree.
+      if (matchesToolAllowlist(SKILL_READ_TOOL_NAME, [entry.namespace])) {
+        throw new PluginManifestError(
+          `Plugin ${packageName}: namespace ${JSON.stringify(entry.namespace)} covers ${SKILL_READ_TOOL_NAME}, the kernel's skill reader, and cannot be claimed by a plugin.`,
         );
       }
       toolsDiscovered.push({
