@@ -94,10 +94,20 @@ Installing a tool plugin still grants no agent anything: each agent's soul
 lists what it may call (`tools: [fs.read, fs.search]`, or `fs.*` for a whole
 toolset). Two independent gates, and the second one is per identity.
 
-Skills are next — see
-[`docs/architecture/plugins.md`](./docs/architecture/plugins.md) for the plugin
-contract, the trust model for third-party code, and what we build as core
-versus what the ecosystem builds.
+#### Skills
+
+Tools are capability; **skills** are competence — markdown procedures an agent
+loads only when relevant. Drop a directory with a `SKILL.md` into
+`~/.stratus/skills/` (or install a plugin that ships some), enable it per
+agent with `skills:` in the soul, and the agent pays one description line per
+turn until it decides the procedure is worth reading — the body arrives
+through the built-in `skill.read` tool, never through the system prompt. The
+[CLI README](./packages/cli/README.md#skills-how-an-agent-does-a-task-well)
+has the format and the allowlist rules.
+
+See [`docs/architecture/plugins.md`](./docs/architecture/plugins.md) for the
+plugin contract, the trust model for third-party code, and what we build as
+core versus what the ecosystem builds.
 
 ## Current status
 

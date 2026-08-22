@@ -56,7 +56,7 @@ Contract extensions owned by later steps:
 10. `AgentDefinition.skills?: string[]`, and `skills` added to the soul frontmatter list keys — the same allowlist shape `tools` already has (step 09).
 11. `AgentMemoryStore` grows `search` and `forget`, and `list` grows a bounded form (step 14). `append` + `list` admits exactly one retrieval policy — inject everything — which has a horizon of weeks on an always-on agent, and it gives the agent no way to participate in what is kept. This extends the interface; it does not change what is behind it. Decision 5 stands: JSONL remains the source of truth and the thing a user can read and edit, and the SQLite FTS index step 14 adds is derived from it and rebuildable by deleting it, which is what keeps "smarter stores never replace the files as the interface" true rather than merely stated.
 
-Anything beyond this list gets decided in this document first, not in an implementation PR. One cleanup rides along: persona + memory system-prompt rendering is currently duplicated in all three provider packages and becomes a single shared contract.
+Anything beyond this list gets decided in this document first, not in an implementation PR. One cleanup rides along: persona + memory system-prompt rendering was duplicated in all three provider packages; step 09 made it the kernel's shared renderer (`renderSystemPromptSections` in `core`), which is also where the skills block renders once instead of a fourth copy appearing.
 
 ### L1 — Capability packages
 

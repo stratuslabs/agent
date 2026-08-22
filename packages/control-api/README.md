@@ -105,7 +105,7 @@ log, and an address bar is one that gets noticed when it changes.
 | GET | `/approvals` | Calls parked on a human right now |
 | POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }` |
 | GET | `/catalog/models` | Models the stored sign-ins can actually reach, listed live |
-| GET | `/catalog/tools` | Every registered tool with the risk a call will face, and the plugins that contributed them |
+| GET | `/catalog/tools` | Every registered tool with the risk a call will face, every skill a soul's `skills:` can name, and the plugins that contributed them |
 | GET | `/credentials` | Which sign-ins exist — presence and endpoint, never a value |
 | POST | `/credentials/verify` | Live-check a key before storing it: `{ provider, key, type?, baseUrl? }` |
 | PUT | `/credentials/:provider` | Store an `api_key`, or an `oauth_token` for Anthropic |
@@ -141,33 +141,52 @@ started there would surprise everyone (its `api` and `approvals` blocks are
 ignored for the same reason).
 | WS | `/events` | The live event stream |
 
-### `GET /catalog/tools` answers two questions, not one
+### `GET /catalog/tools` answers three questions, not one
 
 ```jsonc
 {
   "tools": [
     { "name": "demo.echo", "risk": "safe" },
+    { "name": "skill.read", "risk": "safe" },
     { "name": "fs.read", "risk": "safe", "package": "@stratusagent/tool-fs", "trusted": true },
     { "name": "notes.read", "risk": "gated", "package": "stratus-plugin-notes", "trusted": false }
   ],
+  "skills": [
+    { "id": "code-review", "name": "Code Review",
+      "description": "Use when reviewing a diff or a pull request.",
+      "path": "/home/me/.stratus/skills/code-review/SKILL.md" },
+    { "id": "stratus-plugin-github:pr-review", "name": "pr-review", "alias": "pr-review",
+      "description": "Use for GitHub pull requests.",
+      "package": "stratus-plugin-github", "path": "…/skills/pr-review/SKILL.md" }
+  ],
   "plugins": [
     { "package": "@stratusagent/tool-fs", "name": "@stratusagent/tool-fs", "trusted": true,
-      "tools": [{ "name": "fs.read", "risk": "safe", "package": "@stratusagent/tool-fs", "trusted": true }] },
+      "tools": [{ "name": "fs.read", "risk": "safe", "package": "@stratusagent/tool-fs", "trusted": true }],
+      "skills": [] },
     { "package": "stratus-plugin-typo", "error": "Cannot find package 'stratus-plugin-typo'" }
   ]
 }
 ```
 
-Both halves, because either alone misleads. The **tools** say what an agent
-can be granted and at what risk; the **plugins** say what this daemon was
-*asked* to load — including one that failed, which is invisible in a list of
-tools and is usually why somebody opened the screen.
+All three halves, because any alone misleads. The **tools** say what an agent
+can be granted and at what risk; the **skills** say which procedures a soul's
+`skills:` can name; the **plugins** say what this daemon was *asked* to load —
+including one that failed, which is invisible in the other two and is usually
+why somebody opened the screen.
 
 A tool with no `package` is the kernel's, which is the honest answer for it
 rather than an omission. `risk` is read from the live registry, so it is the
 risk a call will actually face: a third-party package cannot declare its own
 tool `safe`, and this reports the floored value rather than the manifest's
 claim.
+
+A skill's `id` is the canonical form an allowlist names — bare for one the
+operator installed under `~/.stratus/skills/`, qualified
+`<package>:<skill>` for a plugin's. `alias` is the bare id a plugin's skill
+also answers to, present only while no other package or operator skill claims
+it. Skills are **descriptors only** — id, name, description, provenance;
+bodies never leave the daemon except through `skill.read`, on the agent's own
+turn and under the soul's allowlist.
 
 Nothing here says which *agent* may call what — that is the soul's allowlist,
 and it is per identity. `GET /agents/:id` carries it.

@@ -35,11 +35,19 @@ plugin can *register* one through the entrypoint, and today most cannot:
 | --- | --- | --- |
 | tools | `Tool` → `ToolRegistry` | **yes**, `context.tools` |
 | hooks | `EventBus.subscribe` | **yes**, `context.bus` |
-| skills | `SkillRegistry` | not yet — [09](../roadmap/09-skills.md) |
+| skills | `Skill` → `SkillRegistry` | **n/a — the host loads them from the manifest** ([09](../roadmap/09-skills.md)) |
 | providers | `ModelProvider` | **not yet** |
 | channels | `ChannelAdapter` | **not yet** |
 | memory | `AgentMemoryStore` | **not yet** |
 | executors | `Executor` | **not yet** |
+
+Skills are the one kind that never needed a registration handle: a skill is
+prose the manifest points at (`contributes.skills`, an id and a path inside
+the package), so the host reads and registers it **without running the
+plugin's code** — which is also why a broken skill file refuses the plugin at
+load, before its module is imported. A plugin's skills register under the
+qualified `<package>:<skill>` id, plus the bare id while no other package (and
+no operator-installed skill) claims it.
 
 The entrypoint is the `Plugin` interface the kernel has had since v1, plus the
 teardown hook [06](../roadmap/06-tool-packs.md) added for plugins that hold
