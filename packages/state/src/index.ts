@@ -12,10 +12,14 @@ import type {
   MemoryEntry,
   ModelProvider,
   Session,
+  SkillRegistry,
 } from '@stratusagent/core';
 import {
   agentIdWithSuffix,
+  createLazySkill,
   defineAgent,
+  isValidSkillId,
+  parseSkillDocument,
   parseSoul,
   type ParsedSoul,
 } from '@stratusagent/agents';
@@ -320,6 +324,7 @@ const WORKSPACES_DIRNAME = 'workspaces';
 const GLOBAL_CONFIG_FILENAME = 'config.json';
 const CREDENTIALS_FILENAME = 'credentials.json';
 const AGENTS_DIRNAME = 'agents';
+const SKILLS_DIRNAME = 'skills';
 const MEMORY_FILENAME = 'memory.jsonl';
 const LOGS_DIRNAME = 'logs';
 const GATEWAY_TOKEN_FILENAME = 'gateway-token';
@@ -358,6 +363,14 @@ export const memoryFilePath = (env: StateEnvironment): string =>
  */
 export const workspacesDirPath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), WORKSPACES_DIRNAME);
+/**
+ * Where operator-installed skills live: one directory per skill, the
+ * directory name is the id, `SKILL.md` inside it is the procedure. Plugins
+ * contribute skills through their manifest instead; this directory is for
+ * the ones an operator drops in by hand (or clones from a skill repo).
+ */
+export const skillsDirPath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), SKILLS_DIRNAME);
 export const agentWorkspacePath = (env: StateEnvironment, agentId: string): string =>
   path.join(workspacesDirPath(env), agentId);
 /**
@@ -1283,6 +1296,72 @@ export const loadRosterSouls = async (
     entries.push(entry);
   }
   return entries;
+};
+
+/** One operator-installed skill the daemon is serving, for listings and logs. */
+export interface OperatorSkillInfo {
+  id: string;
+  name: string;
+  description: string;
+  /** The SKILL.md path, for the operator asking where the prose lives. */
+  path: string;
+  /** Toolset globs the skill's frontmatter says it expects. Advisory. */
+  requires?: string[];
+}
+
+/**
+ * Load `~/.stratus/skills/` into a skill registry: each subdirectory with a
+ * `SKILL.md` is one skill, the directory name its id.
+ *
+ * Degrades the way `loadRosterSouls` does — one unparseable skill is a
+ * warning, never a refusal to serve the rest — with the same exception: an
+ * id collision has no right winner, so `SkillRegistry.register` throwing
+ * `DuplicateSkillIdError` propagates rather than being caught. Load these
+ * before plugins, so an operator's bare id beats a plugin's bare alias
+ * while the plugin's skill stays reachable qualified.
+ */
+export const loadOperatorSkills = async (
+  env: StateEnvironment,
+  registry: SkillRegistry,
+  warn: (message: string) => void = () => {},
+): Promise<OperatorSkillInfo[]> => {
+  let entries: import('node:fs').Dirent[] = [];
+  try {
+    entries = await readdir(skillsDirPath(env), { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  const loaded: OperatorSkillInfo[] = [];
+  for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const id = entry.name;
+    const skillPath = path.join(skillsDirPath(env), id, 'SKILL.md');
+    if (!isValidSkillId(id)) {
+      warn(`skipping ${skillPath}: ${JSON.stringify(id)} is not a skill id. Skill ids are kebab-case (web-research).`);
+      continue;
+    }
+    let document;
+    try {
+      document = parseSkillDocument(await readFile(skillPath, 'utf8'));
+    } catch (error) {
+      warn(`skipping ${skillPath}: ${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
+    registry.register(createLazySkill({ id, document, read: () => readFile(skillPath, 'utf8') }));
+    loaded.push({
+      id,
+      name: document.name ?? id,
+      description: document.description,
+      path: skillPath,
+      ...(document.requires ? { requires: document.requires } : {}),
+    });
+  }
+  return loaded;
 };
 
 /**

@@ -8,15 +8,16 @@ import {
   type SdkMcpToolDefinition,
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import type {
-  JsonObject,
-  ModelProvider,
-  ProviderRequest,
-  Session,
-  ToolCall,
-  ToolDescriptor,
-  ToolResult,
-  ExecutionContext,
+import {
+  renderSystemPromptSections,
+  type JsonObject,
+  type ModelProvider,
+  type ProviderRequest,
+  type Session,
+  type ToolCall,
+  type ToolDescriptor,
+  type ToolResult,
+  type ExecutionContext,
 } from '@stratusagent/core';
 
 export const DEFAULT_CLAUDE_CODE_MODEL = 'claude-opus-5';
@@ -266,32 +267,18 @@ export interface ClaudeCodeProviderConfig {
 
 const DEFAULT_IDLE_TIMEOUT_MS = 600_000;
 
+// One shared reading of what an agent is told about itself — persona,
+// memory, skills — rendered by the kernel rather than per provider package.
+// This runtime always sends a system prompt, so an agent with no
+// instructions gets the shared default persona line.
 const createSystemPrompt = (
   request: ProviderRequest,
   systemPrompt: string | undefined,
-): string => {
-  const sections: string[] = [];
-
-  if (systemPrompt) {
-    sections.push(systemPrompt);
-  }
-
-  // The agent's own persona travels with the session and must reach the
-  // model — this is what makes a Stratus agent themselves on any runtime.
-  const { name, instructions } = request.session.agent;
-  if (instructions && instructions.length > 0) {
-    sections.push(`You are ${name}. ${instructions}`);
-  } else {
-    sections.push(`You are ${name}, a helpful assistant.`);
-  }
-
-  if (request.memory && request.memory.length > 0) {
-    const facts = request.memory.map((entry) => `- ${entry.content}`).join('\n');
-    sections.push(`Things you remember from previous conversations (your own long-term memory):\n${facts}`);
-  }
-
-  return sections.join('\n\n');
-};
+): string =>
+  renderSystemPromptSections(request, {
+    ...(systemPrompt ? { preamble: systemPrompt } : {}),
+    fallbackPersona: true,
+  }).join('\n\n');
 
 // Forwards the kernel's abort signal into an AbortController the Agent SDK
 // understands, so aborting a turn terminates the underlying query.

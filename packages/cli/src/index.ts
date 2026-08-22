@@ -9,6 +9,7 @@ import {
   AgentRunner,
   AllowAllApprovalPolicy,
   EventBus,
+  SkillRegistry,
   ToolRegistry,
   type AgentDefinition,
   type AgentMemoryStore,
@@ -79,6 +80,7 @@ import {
   globalConfigPath,
   loadChannelCredentials,
   loadCredentials,
+  loadOperatorSkills,
   loadRosterSouls,
   listAgentSummaries,
   loadSoulFile,
@@ -1314,6 +1316,16 @@ const createAgentRuntime = async (
   tools.register(createDemoTool());
   tools.register(createRememberTool(memory));
 
+  // The same skills the daemon would serve, from the same directory, for
+  // the same reason the plugins below match: a skill that routes in
+  // `stratus run` routes in `stratus serve`, and one that is broken is
+  // broken (and warned about) in both. The runner registers `skill.read`
+  // itself, gated on the soul enabling any skill.
+  const skills = new SkillRegistry();
+  await loadOperatorSkills(runEnv, skills, (line) => {
+    writeLine(streams.stderr, `Warning: ${line}`);
+  });
+
   const bus = new EventBus({
     onError: (error) => {
       writeLine(streams.stderr, `Warning: event handler failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -1349,6 +1361,7 @@ const createAgentRuntime = async (
         import: (specifier) => import(specifier),
       },
       tools,
+      skills,
       bus,
       workspaceRoot: workspacesDirPath(runEnv),
     });
@@ -1386,6 +1399,7 @@ const createAgentRuntime = async (
     executor: createLocalCommandExecutor(),
     approvals: createApprovalPolicy(options.approvals ?? 'always', streams, options.env ?? {}, options.askApproval),
     bus,
+    skills,
     memory,
     ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
   });

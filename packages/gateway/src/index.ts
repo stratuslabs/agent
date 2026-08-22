@@ -8,8 +8,12 @@ import {
   AgentRunner,
   EventBus,
   RunAbortedError,
+  SkillRegistry,
   ToolRegistry,
+  createSkillReadTool,
+  matchesSkillAllowlist,
   readPendingApproval,
+  toolAllowlistCovers,
   type AgentDefinition,
   type ApprovalAnswer,
   type ApprovalPolicy,
@@ -38,6 +42,7 @@ import {
   createFileMemoryStore,
   createRuntimeProvider,
   DEFAULT_STRATUS_AGENT,
+  loadOperatorSkills,
   loadRosterSouls,
   FALLBACK_ACTIVE_METADATA_KEY,
   loadSoulFile,
@@ -54,6 +59,7 @@ import {
   workspacesDirPath,
   withLegacyDefaultMemories,
   type FallbackRuntime,
+  type OperatorSkillInfo,
   type RosterEntry,
   type RuntimeConfig,
   type PluginsConfig,
@@ -404,12 +410,27 @@ export interface GatewayTool {
   trusted?: boolean;
 }
 
+/** One skill this daemon serves — identity and provenance, never the body. */
+export interface GatewaySkill {
+  /** Canonical id: bare for an operator-installed skill, `<package>:<skill>` for a plugin's. */
+  id: string;
+  name: string;
+  description: string;
+  /** The bare id a plugin's skill also answers to, while no one else claims it. */
+  alias?: string;
+  /** The plugin package that contributed it; absent for operator-installed skills. */
+  package?: string;
+  /** Where the SKILL.md lives. */
+  path?: string;
+}
+
 /** A plugin this daemon was asked to load, and what came of it. */
 export interface GatewayPluginStatus {
   package: string;
   name?: string;
   trusted?: boolean;
   tools?: GatewayTool[];
+  skills?: GatewaySkill[];
   /** Present when the plugin did not load, and the only field that is. */
   error?: string;
 }
@@ -527,6 +548,12 @@ export interface Gateway {
    * itself the answer for them.
    */
   tools(): GatewayTool[];
+  /**
+   * Every skill this daemon serves — operator-installed and
+   * plugin-contributed — with the ids an allowlist can name. Descriptors
+   * only: bodies stay behind `skill.read`, on the agent's own turn.
+   */
+  skills(): GatewaySkill[];
   /**
    * The plugins this daemon loaded, and the ones it could not — a plugin an
    * operator enabled that failed to load is exactly what they need to see,
@@ -1038,6 +1065,34 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         registry.unregister(id);
       }
     }
+
+    // Advisory, per the skills spec: a skill may say which toolsets its
+    // procedure expects (`requires:`), and an agent enabling it without
+    // them gets a warning at load — never a refusal, because a skill is
+    // prose and can degrade.
+    for (const agent of registry.list()) {
+      const allowlist = agent.skills;
+      if (!allowlist || allowlist.length === 0) {
+        continue;
+      }
+      for (const skill of skillCatalog.list()) {
+        if (!skill.requires || skill.requires.length === 0) {
+          continue;
+        }
+        const enabled = skillCatalog
+          .idsFor(skill.id)
+          .some((id) => matchesSkillAllowlist(id, allowlist));
+        if (!enabled) {
+          continue;
+        }
+        const missing = skill.requires.filter(
+          (requirement) => !toolAllowlistCovers(requirement, agent.tools),
+        );
+        if (missing.length > 0) {
+          warn(`agent ${agent.id} enables skill ${skill.id}, which expects tools the agent is not allowed: ${missing.join(', ')}`);
+        }
+      }
+    }
   };
 
   /**
@@ -1111,8 +1166,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const toolProvenance = new Map<string, { package: string; trusted: boolean }>();
   let loadedPlugins: LoadedPlugin[] = [];
   let pluginFailures: PluginLoadFailure[] = [];
+  const skillCatalog = new SkillRegistry();
+  let operatorSkills: OperatorSkillInfo[] = [];
   tools.register(createDemoTool());
   tools.register(createRememberTool(memory));
+  // Registered here rather than left to the first runner, so `tools()`
+  // lists the reader before anything dispatches. The allowlist resolver
+  // mirrors the runner's own sourcing — the definition travelling with the
+  // session, then the roster — so the tool refuses exactly what the
+  // runner's gates refuse.
+  tools.register(createSkillReadTool(skillCatalog, {
+    allowlistFor: (session) => session.agent.skills ?? registry.get(session.agent.id)?.skills,
+  }));
   // Delegation is dispatcher-backed, not runner-capturing: the target agent
   // runs through the same per-provider routing as a direct dispatch, so a
   // delegated specialist uses their own provider and credentials.
@@ -1180,6 +1245,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       store,
       bus,
       agents: registry,
+      skills: skillCatalog,
       memory,
       streaming: true,
       ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
@@ -1788,6 +1854,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         import: (specifier) => import(specifier),
       },
       tools,
+      skills: skillCatalog,
       bus,
       workspaceRoot: workspacesDirPath(env),
     });
@@ -1798,10 +1865,27 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       for (const tool of plugin.tools) {
         toolProvenance.set(tool.name, { package: plugin.package, trusted: plugin.trusted });
       }
-      log(`plugin ${plugin.package} loaded — ${plugin.tools.map((tool) => `${tool.name} (${tool.risk})`).join(', ') || 'no tools'}`);
+      const contributed = [
+        ...plugin.tools.map((tool) => `${tool.name} (${tool.risk})`),
+        ...plugin.skills.map((skill) => `skill ${skill.id}`),
+      ];
+      log(`plugin ${plugin.package} loaded — ${contributed.join(', ') || 'no tools'}`);
     }
     for (const failure of result.failures) {
       warn(`plugin ${failure.package} did not load: ${failure.reason}`);
+    }
+  };
+
+  /**
+   * Load the operator's `~/.stratus/skills/` into the catalog. Before the
+   * plugins, deliberately: an operator's bare id outranks a plugin's bare
+   * alias for the same name, and the plugin's skill stays reachable by its
+   * qualified `<package>:<skill>` form.
+   */
+  const startSkills = async (): Promise<void> => {
+    operatorSkills = await loadOperatorSkills(env, skillCatalog, warn);
+    for (const skill of operatorSkills) {
+      log(`skill ${skill.id} loaded from ${skill.path}`);
     }
   };
 
@@ -1881,6 +1965,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Before the roster and before channels: a turn must never arrive for
       // an agent whose soul lists a tool the daemon has not registered yet,
       // which would refuse the call as "not permitted" and blame the soul.
+      // Skills first for the same reason — and before the plugins, so the
+      // operator's bare ids win their aliases (see startSkills).
+      await startSkills();
       await startPlugins();
       try {
         await startServing();
@@ -1972,6 +2059,33 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       });
     },
 
+    skills() {
+      // From the registry, not from the load records: the registry is the
+      // live answer for which bare aliases still resolve — a plugin loaded
+      // later can have retired one a record still remembers.
+      const provenance = new Map<string, { package?: string; path: string }>();
+      for (const info of operatorSkills) {
+        provenance.set(info.id, { path: info.path });
+      }
+      for (const plugin of loadedPlugins) {
+        for (const skill of plugin.skills) {
+          provenance.set(skill.id, { package: plugin.package, path: skill.path });
+        }
+      }
+      return skillCatalog.list().map((skill) => {
+        const alias = skillCatalog.idsFor(skill.id).find((id) => id !== skill.id);
+        const from = provenance.get(skill.id);
+        return {
+          id: skill.id,
+          name: skill.name,
+          description: skill.description,
+          ...(alias !== undefined ? { alias } : {}),
+          ...(from?.package !== undefined ? { package: from.package } : {}),
+          ...(from !== undefined ? { path: from.path } : {}),
+        };
+      });
+    },
+
     plugins() {
       const loaded: GatewayPluginStatus[] = loadedPlugins.map((plugin) => ({
         package: plugin.package,
@@ -1983,6 +2097,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           risk: tool.risk,
           package: plugin.package,
           trusted: plugin.trusted,
+        })),
+        skills: plugin.skills.map((skill) => ({
+          id: skill.id,
+          name: skill.name,
+          description: skill.description,
+          ...(skill.alias !== undefined ? { alias: skill.alias } : {}),
+          package: plugin.package,
+          path: skill.path,
         })),
       }));
       const failed: GatewayPluginStatus[] = pluginFailures.map((failure) => ({

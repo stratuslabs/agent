@@ -23,6 +23,7 @@
     "node": ">=22.13 <23 || >=23.4"
   },
   "dependencies": {
+    "@stratusagent/agents": "workspace:*",
     "@stratusagent/core": "workspace:*"
   },
   "devDependencies": {

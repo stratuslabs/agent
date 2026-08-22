@@ -5,6 +5,7 @@ import {
   type JsonValue,
   type ToolRisk,
 } from '@stratusagent/core';
+import { isValidSkillId } from '@stratusagent/agents';
 
 /**
  * The manifest version this host understands. A plugin declaring anything
@@ -39,7 +40,12 @@ export interface PluginSkillDeclaration {
 export interface PluginContributions {
   tools: PluginToolDeclaration[];
   toolsDiscovered: PluginNamespaceDeclaration[];
-  /** Parsed and reported, but not yet registrable — skills are step 09. */
+  /**
+   * Skills the package ships as files, loaded by the host from this
+   * declaration — a skill is prose, so registering it never requires
+   * importing the plugin's code. `path` is relative to the package root
+   * and must stay inside it.
+   */
   skills: PluginSkillDeclaration[];
 }
 
@@ -75,7 +81,6 @@ export class PluginConfigError extends Error {
 // not, so nothing can be typed to look like a flag or a hidden file.
 const TOOL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9_-]*)+$/;
 const NAMESPACE_PATTERN = /^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9_-]*)*\.\*$/;
-const SKILL_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
 const RISKS: ToolRisk[] = ['safe', 'gated', 'dangerous'];
 
@@ -181,7 +186,7 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
           `Plugin ${packageName}: every contributes.skills entry needs an "id" and a "path".`,
         );
       }
-      if (!SKILL_ID_PATTERN.test(entry.id)) {
+      if (!isValidSkillId(entry.id)) {
         throw new PluginManifestError(
           `Plugin ${packageName}: ${JSON.stringify(entry.id)} is not a skill id. Skill ids are kebab-case (web-research).`,
         );

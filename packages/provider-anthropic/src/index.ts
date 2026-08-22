@@ -5,13 +5,14 @@ import type {
   MessageParam,
   Tool as AnthropicTool,
 } from '@anthropic-ai/sdk/resources/messages/messages';
-import type {
-  JsonObject,
-  ModelProvider,
-  ProviderRequest,
-  Session,
-  ToolCall,
-  ToolDescriptor,
+import {
+  renderSystemPrompt,
+  type JsonObject,
+  type ModelProvider,
+  type ProviderRequest,
+  type Session,
+  type ToolCall,
+  type ToolDescriptor,
 } from '@stratusagent/core';
 
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5';
@@ -94,30 +95,13 @@ const createAnthropicTools = (
     };
   });
 
+// One shared reading of what an agent is told about itself — persona,
+// memory, skills — rendered by the kernel rather than per provider package.
 const createSystemPrompt = (
   request: ProviderRequest,
   systemPrompt: string | undefined,
-): string | undefined => {
-  const sections: string[] = [];
-
-  if (systemPrompt) {
-    sections.push(systemPrompt);
-  }
-
-  // The agent's own persona travels with the session and must reach the
-  // model — this is what makes a delegated specialist act like themselves.
-  const { name, instructions } = request.session.agent;
-  if (instructions && instructions.length > 0) {
-    sections.push(`You are ${name}. ${instructions}`);
-  }
-
-  if (request.memory && request.memory.length > 0) {
-    const facts = request.memory.map((entry) => `- ${entry.content}`).join('\n');
-    sections.push(`Things you remember from previous conversations (your own long-term memory):\n${facts}`);
-  }
-
-  return sections.length > 0 ? sections.join('\n\n') : undefined;
-};
+): string | undefined =>
+  renderSystemPrompt(request, { ...(systemPrompt ? { preamble: systemPrompt } : {}) });
 
 type RawTurns = Record<string, ContentBlock[]>;
 

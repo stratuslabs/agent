@@ -46,6 +46,14 @@ export interface AgentDefinition extends AgentDescriptor {
    * `matchesToolAllowlist`, which is the only reading of these entries.
    */
   tools?: string[];
+  /**
+   * Skills this agent may load: exact ids (`code-review`), a package's
+   * qualified ids (`stratus-plugin-github:*`), or `*`. Omitted = none,
+   * matching `credentials` rather than `tools` — a skill silently changing
+   * how an agent behaves is worse than an agent that has to be told. See
+   * `matchesSkillAllowlist`, which is the only reading of these entries.
+   */
+  skills?: string[];
   /** Credential names this agent may resolve. Omitted = none. */
   credentials?: string[];
 }
@@ -247,11 +255,59 @@ export const raiseRiskTo = (risk: ToolRisk, floor: ToolRisk): ToolRisk =>
  * is a second answer to "what may this agent do".
  */
 export const matchesToolAllowlist = (toolName: string, allowlist: readonly string[]): boolean =>
+  matchesGlobbedAllowlist(toolName, allowlist, '.*');
+
+/**
+ * Whether an agent's `skills:` allowlist permits a skill id.
+ *
+ * The same machinery as `matchesToolAllowlist` — one implementation of
+ * "does this glob select this name", not a second — with the separator the
+ * qualified skill form uses: `stratus-plugin-github:*` selects every skill
+ * that package contributes, `stratus-plugin-github:pr-review` exactly one,
+ * `code-review` an unqualified operator-installed skill, and `*` all of
+ * them. The glob keeps its colon for the same reason the tool glob keeps
+ * its dot: `pkg:*` must not be widened by a package that named itself to
+ * look like a prefix of another.
+ */
+export const matchesSkillAllowlist = (skillId: string, allowlist: readonly string[]): boolean =>
+  matchesGlobbedAllowlist(skillId, allowlist, ':*');
+
+/**
+ * Whether a tools allowlist plausibly covers a requirement — an exact tool
+ * name (`fs.read`) or a toolset glob (`browser.*`), the forms a skill's
+ * `requires:` is written in.
+ *
+ * Advisory by design: it feeds the load-time warning for an agent enabling
+ * a skill without the tools the skill expects, never an enforcement
+ * decision. An omitted allowlist is every registered tool, so it covers
+ * anything; a glob requirement is covered by the glob itself, by `*`, or
+ * by any entry naming something inside the namespace.
+ */
+export const toolAllowlistCovers = (
+  requirement: string,
+  allowlist: readonly string[] | undefined,
+): boolean => {
+  if (allowlist === undefined) {
+    return true;
+  }
+  if (requirement.endsWith('.*')) {
+    return allowlist.some(
+      (entry) => entry === '*' || entry === requirement || matchesToolAllowlist(entry, [requirement]),
+    );
+  }
+  return matchesToolAllowlist(requirement, allowlist);
+};
+
+const matchesGlobbedAllowlist = (
+  name: string,
+  allowlist: readonly string[],
+  globSuffix: string,
+): boolean =>
   allowlist.some((entry) => {
-    if (entry === '*' || entry === toolName) {
+    if (entry === '*' || entry === name) {
       return true;
     }
-    return entry.endsWith('.*') && toolName.startsWith(entry.slice(0, -1));
+    return entry.endsWith(globSuffix) && name.startsWith(entry.slice(0, -1));
   });
 
 export interface ToolDescriptor {
@@ -349,6 +405,12 @@ export interface ProviderRequest {
   tools?: ToolDescriptor[];
   /** Agent-scoped long-term memory, newest last. */
   memory?: MemoryEntry[];
+  /**
+   * The skills enabled for this agent — descriptors only, one prompt line
+   * each. Bodies never travel here; they arrive through `skill.read` when
+   * the model decides a description is relevant.
+   */
+  skills?: SkillDescriptor[];
   /**
    * Streaming sink. Adapters that stream call this per fragment and MUST
    * await the returned promise before the next call (backpressure); the
@@ -768,6 +830,326 @@ export class ToolRegistry {
   }
 }
 
+/**
+ * What a skill costs every turn: one line. `name` and `description` are the
+ * whole system-prompt footprint of an enabled skill — the body arrives only
+ * through `skill.read`, when the model decides the description is relevant.
+ */
+export interface SkillDescriptor {
+  id: string;
+  name: string;
+  /**
+   * What routing runs on, so it says *when to reach for this*, not what
+   * the body contains. "Use when reviewing a diff or a pull request", not
+   * "A rubric with twelve sections".
+   */
+  description: string;
+}
+
+/**
+ * A procedure an agent loads when it needs it. The body is behind `load()`
+ * rather than on the object because progressive disclosure is the whole
+ * point: an enabled-but-unused skill costs its description line and nothing
+ * else, per turn and in memory.
+ */
+export interface Skill extends SkillDescriptor {
+  /**
+   * Toolset globs this skill expects (`browser.*`, `fs.read`). Advisory: a
+   * skill is prose and degrades, so an agent enabling one without the tools
+   * gets a load-time warning, never a hard failure.
+   */
+  requires?: string[];
+  /** Load the full body. Callers go through `SkillRegistry.read`, which caches. */
+  load(): Promise<string>;
+}
+
+/**
+ * Two skills claiming one id, refused rather than resolved to whichever
+ * loaded last — the same reason a duplicate agent id or tool name is a
+ * load-time error: an allowlist naming the id would silently select the
+ * wrong procedure.
+ */
+export class DuplicateSkillIdError extends Error {
+  constructor(id: string) {
+    super(`Duplicate skill id: ${id}. Skill ids are unique per install; rename one, or address a plugin's skill by its qualified <package>:<skill> form.`);
+    this.name = 'DuplicateSkillIdError';
+  }
+}
+
+/**
+ * The kernel's skill catalog, alongside `ToolRegistry` and shaped like it.
+ *
+ * Ids come in two forms and the registry knows both: the canonical id a
+ * skill was registered under (`code-review`, or a plugin's qualified
+ * `stratus-plugin-github:pr-review`), and optional aliases — the bare id a
+ * plugin's skill also answers to while no other package claims it. Reads
+ * are cached per skill, not per read: a body read three times in one turn
+ * hits the disk once, whichever of its ids it was asked for by.
+ */
+export class SkillRegistry {
+  private skills = new Map<string, Skill>();
+  private aliases = new Map<string, string>();
+  /**
+   * Bare ids two plugins both wanted. Once contested, the bare form stays
+   * dead for everyone — re-granting it to whichever package loads first
+   * next time would flip which procedure `skills: [pr-review]` selects
+   * between restarts.
+   */
+  private contestedAliases = new Set<string>();
+  private bodies = new Map<string, Promise<string>>();
+
+  register(skill: Skill): void {
+    if (this.skills.has(skill.id) || this.aliases.has(skill.id)) {
+      throw new DuplicateSkillIdError(skill.id);
+    }
+    this.skills.set(skill.id, skill);
+  }
+
+  /**
+   * Give a registered skill a second addressable id — the bare form of a
+   * plugin's qualified id. Quietly yields instead of throwing, because an
+   * alias is a convenience and the skill stays reachable canonical: a bare
+   * id already registered as a skill of its own belongs to that skill, and
+   * one two plugins both want goes to neither (see `contestedAliases`).
+   */
+  registerAlias(alias: string, canonicalId: string): void {
+    const skill = this.skills.get(canonicalId);
+    if (!skill) {
+      throw new Error(`Cannot alias ${alias}: no skill is registered as ${canonicalId}.`);
+    }
+    if (alias === canonicalId || this.skills.has(alias) || this.contestedAliases.has(alias)) {
+      return;
+    }
+    const existing = this.aliases.get(alias);
+    if (existing !== undefined) {
+      if (existing !== canonicalId) {
+        this.aliases.delete(alias);
+        this.contestedAliases.add(alias);
+      }
+      return;
+    }
+    this.aliases.set(alias, canonicalId);
+  }
+
+  /** The skill behind an id, canonical or alias. */
+  resolve(id: string): Skill | undefined {
+    return this.skills.get(id) ?? this.skills.get(this.aliases.get(id) ?? '');
+  }
+
+  /**
+   * Whether `register(skill)` with this id would be refused — the check a
+   * loader runs *before* committing anything else a package contributes,
+   * so a duplicate skill refuses the plugin whole instead of leaving its
+   * tools registered and its skills not.
+   */
+  has(id: string): boolean {
+    return this.skills.has(id) || this.aliases.has(id);
+  }
+
+  /**
+   * Every id that reaches a skill, canonical first. This is what an
+   * allowlist is checked against: `skills: [pr-review]` and
+   * `skills: [stratus-plugin-github:*]` both select the same skill, and
+   * permission is about the skill, not about which of its names was used.
+   */
+  idsFor(canonicalId: string): string[] {
+    const ids = [canonicalId];
+    for (const [alias, target] of this.aliases) {
+      if (target === canonicalId) {
+        ids.push(alias);
+      }
+    }
+    return ids;
+  }
+
+  list(): Skill[] {
+    return [...this.skills.values()];
+  }
+
+  describe(): SkillDescriptor[] {
+    return this.list().map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      description: skill.description,
+    }));
+  }
+
+  /**
+   * The body behind an id, loaded lazily and cached per skill — keyed by
+   * the canonical id, so an alias read and a qualified read share one
+   * cache entry.
+   */
+  async read(id: string): Promise<string> {
+    const skill = this.resolve(id);
+    if (!skill) {
+      throw new Error(`Skill not found: ${id}`);
+    }
+    const cached = this.bodies.get(skill.id);
+    if (cached) {
+      return cached;
+    }
+    const loading = Promise.resolve(skill.load());
+    this.bodies.set(skill.id, loading);
+    try {
+      return await loading;
+    } catch (error) {
+      // A failed read must not poison the cache: the file may exist on the
+      // next attempt, and a cached rejection would refuse it forever.
+      this.bodies.delete(skill.id);
+      throw error;
+    }
+  }
+}
+
+export const SKILL_READ_TOOL_NAME = 'skill.read';
+
+export interface SkillReadToolOptions {
+  /**
+   * Which `skills:` entries the session's agent is held to. Defaults to the
+   * definition travelling with the session; a host whose roster can hold
+   * skills the session copy predates (the gateway) passes its own resolver
+   * so both gates and this tool answer from the same list.
+   */
+  allowlistFor?: (session: Session) => readonly string[] | undefined;
+}
+
+/**
+ * The reader behind progressive disclosure: descriptions reach the system
+ * prompt, and this is how a body follows when one turns out to be relevant.
+ *
+ * `risk: 'safe'` is deliberate — reading a file the operator installed and
+ * the soul opted into is not an act on the world. Which skill may be read
+ * is the soul's `skills:` allowlist, enforced here with the same matcher
+ * the runner's gates use, so there is one gate, not a second
+ * implementation of one.
+ *
+ * The tool itself is part of the skills mechanism, not a capability a soul
+ * lists under `tools:` — see the runner, which advertises and permits it
+ * exactly when the agent has any skill enabled.
+ */
+export const createSkillReadTool = (
+  skills: SkillRegistry,
+  options: SkillReadToolOptions = {},
+): Tool => ({
+  name: SKILL_READ_TOOL_NAME,
+  description:
+    'Load the full instructions of one of your skills by id. Call this before relying on a skill — the one-line list in your instructions is only a pointer, not the procedure.',
+  risk: 'safe',
+  parameters: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'The skill id, exactly as it appears in your skills list.' },
+    },
+    required: ['id'],
+  },
+  async execute(input: JsonObject, session: Session) {
+    const id = typeof input.id === 'string' ? input.id.trim() : '';
+    if (!id) {
+      throw new Error('skill.read requires a non-empty "id" string.');
+    }
+    const allowlist = options.allowlistFor ? options.allowlistFor(session) : session.agent.skills;
+    const skill = skills.resolve(id);
+    // Permission is about the skill, so every id that reaches it counts —
+    // a soul granting `stratus-plugin-github:*` covers a read by the bare
+    // alias. An id reaching no skill is judged as written, and permission
+    // is settled before existence so an agent with no grant learns
+    // nothing about what is installed.
+    const addressable = skill ? skills.idsFor(skill.id) : [id];
+    const permitted = allowlist !== undefined
+      && addressable.some((candidate) => matchesSkillAllowlist(candidate, allowlist));
+    if (!permitted) {
+      throw new Error(`Skill not permitted for agent ${session.agent.id}: ${id}`);
+    }
+    if (!skill) {
+      throw new Error(`Skill not found: ${id}`);
+    }
+    return { id: skill.id, name: skill.name, body: await skills.read(id) };
+  },
+});
+
+// ---- system prompt rendering ----------------------------------------------
+//
+// How an agent's identity reaches a model is a kernel contract, rendered
+// once here rather than per provider package — three packages carrying
+// their own copy of "You are ${name}" is three answers to what an agent is
+// told about itself, and the skills block would have made it a fourth copy
+// of a rule that matters (descriptions only, never bodies).
+
+/**
+ * The persona line. `fallback` supplies one for an agent with no
+ * instructions — runtimes that always need a system prompt (Claude Code)
+ * ask for it; API adapters that can omit the section do not.
+ */
+export const renderPersonaSection = (
+  agent: Pick<AgentDefinition, 'name' | 'instructions'>,
+  options: { fallback?: boolean } = {},
+): string | undefined => {
+  if (agent.instructions && agent.instructions.length > 0) {
+    return `You are ${agent.name}. ${agent.instructions}`;
+  }
+  return options.fallback ? `You are ${agent.name}, a helpful assistant.` : undefined;
+};
+
+export const renderMemorySection = (memory: readonly MemoryEntry[] | undefined): string | undefined => {
+  if (!memory || memory.length === 0) {
+    return undefined;
+  }
+  const facts = memory.map((entry) => `- ${entry.content}`).join('\n');
+  return `Things you remember from previous conversations (your own long-term memory):\n${facts}`;
+};
+
+/**
+ * The skills block: one line per enabled skill — id, name, and the
+ * description routing runs on. This is the whole point of the step: the
+ * marginal cost of an enabled-but-unused skill is this line, so nothing
+ * here may ever include a body.
+ */
+export const renderSkillsSection = (skills: readonly SkillDescriptor[] | undefined): string | undefined => {
+  if (!skills || skills.length === 0) {
+    return undefined;
+  }
+  const lines = skills.map((skill) => {
+    const label = skill.name && skill.name !== skill.id ? `${skill.id} (${skill.name})` : skill.id;
+    return `- ${label}: ${skill.description}`;
+  });
+  return `You have skills — procedures for doing particular tasks well. When one is relevant to the task at hand, load its full instructions with the ${SKILL_READ_TOOL_NAME} tool (pass the id) and follow them; the one-line descriptions here are pointers, not the procedures themselves:\n${lines.join('\n')}`;
+};
+
+export interface SystemPromptOptions {
+  /** Host-level preamble, rendered before the agent's own persona. */
+  preamble?: string;
+  /** Render a default persona line for an agent with no instructions. */
+  fallbackPersona?: boolean;
+}
+
+/**
+ * Every section that belongs in an agent's system prompt, in order, empty
+ * ones omitted. Returned as sections rather than one string because wire
+ * formats differ — Anthropic takes one system string, the OpenAI dialect a
+ * message per section — and the contract is the content, not the joining.
+ */
+export const renderSystemPromptSections = (
+  request: Pick<ProviderRequest, 'session' | 'memory' | 'skills'>,
+  options: SystemPromptOptions = {},
+): string[] => {
+  const sections = [
+    options.preamble,
+    renderPersonaSection(request.session.agent, { fallback: options.fallbackPersona ?? false }),
+    renderMemorySection(request.memory),
+    renderSkillsSection(request.skills),
+  ];
+  return sections.filter((section): section is string => section !== undefined && section.length > 0);
+};
+
+/** The sections joined the way single-string providers send them. */
+export const renderSystemPrompt = (
+  request: Pick<ProviderRequest, 'session' | 'memory' | 'skills'>,
+  options: SystemPromptOptions = {},
+): string | undefined => {
+  const sections = renderSystemPromptSections(request, options);
+  return sections.length > 0 ? sections.join('\n\n') : undefined;
+};
+
 export class DefaultExecutor implements Executor {
   async execute(call: ToolCall, tool: Tool, session: Session, context?: ExecutionContext): Promise<ToolResult> {
     try {
@@ -836,6 +1218,13 @@ export interface AgentRunnerOptions {
   plugins?: PluginRegistry;
   /** Known agent definitions; enables per-agent tool allowlists. */
   agents?: AgentRegistry;
+  /**
+   * The skill catalog. Passing one makes `skill.read` available — the
+   * runner registers it if the host has not — to exactly the agents whose
+   * soul enables any skill; see the two gates in `executeTurns` and
+   * `executeToolCall`.
+   */
+  skills?: SkillRegistry;
   /** Agent-scoped long-term memory, injected into every provider request. */
   memory?: AgentMemoryStore;
   /** Maximum provider turns per run before the session fails. */
@@ -859,6 +1248,7 @@ export class AgentRunner {
   readonly approvals: ApprovalPolicy;
   readonly plugins: PluginRegistry;
   readonly agents: AgentRegistry;
+  readonly skills: SkillRegistry | undefined;
   readonly memory: AgentMemoryStore | undefined;
   readonly maxTurns: number;
   readonly streaming: boolean;
@@ -873,9 +1263,20 @@ export class AgentRunner {
     this.approvals = options.approvals ?? new AllowAllApprovalPolicy();
     this.plugins = options.plugins ?? new PluginRegistry();
     this.agents = options.agents ?? new AgentRegistry();
+    this.skills = options.skills;
     this.memory = options.memory;
     this.maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
     this.streaming = options.streaming ?? false;
+    // The reader is part of the skills mechanism, so a runner given a
+    // catalog makes sure it exists — with this runner's own allowlist
+    // resolution, so the tool refuses exactly what the gates refuse. A host
+    // that registered its own (the gateway, so its tool listing is complete
+    // before the first dispatch) is left alone.
+    if (this.skills && !this.tools.get(SKILL_READ_TOOL_NAME)) {
+      this.tools.register(
+        createSkillReadTool(this.skills, { allowlistFor: (session) => this.skillAllowlistFor(session) }),
+      );
+    }
   }
 
   async initialize(): Promise<void> {
@@ -1008,6 +1409,40 @@ export class AgentRunner {
     return session.agent.tools ?? this.agents.get(session.agent.id)?.tools;
   }
 
+  /** The `skills:` entries this session's agent is held to — same sourcing as `allowedToolsFor`. */
+  private skillAllowlistFor(session: Session): readonly string[] | undefined {
+    return session.agent.skills ?? this.agents.get(session.agent.id)?.skills;
+  }
+
+  /**
+   * The skills this session's agent has enabled, as the one-line
+   * descriptors the prompt carries. Each skill appears once, under the id
+   * the allowlist actually granted (canonical before alias) — the id the
+   * model is told is the id `skill.read` will accept.
+   *
+   * Empty for an agent whose soul has no `skills:` key, which is what keys
+   * both `skill.read` gates: no skills, no reader.
+   */
+  private enabledSkillsFor(session: Session): SkillDescriptor[] {
+    if (!this.skills) {
+      return [];
+    }
+    const allowlist = this.skillAllowlistFor(session);
+    if (!allowlist || allowlist.length === 0) {
+      return [];
+    }
+    const enabled: SkillDescriptor[] = [];
+    for (const skill of this.skills.list()) {
+      const grantedId = this.skills
+        .idsFor(skill.id)
+        .find((candidate) => matchesSkillAllowlist(candidate, allowlist));
+      if (grantedId !== undefined) {
+        enabled.push({ id: grantedId, name: skill.name, description: skill.description });
+      }
+    }
+    return enabled;
+  }
+
   private async executeTurns(
     initialSession: Session,
     signal?: AbortSignal,
@@ -1024,9 +1459,18 @@ export class AgentRunner {
 
     try {
       const allowedTools = this.allowedToolsFor(session);
+      // Gate 1 of two for skill.read (gate 2 is executeToolCall): the
+      // reader rides on the agent having any skill enabled, not on the
+      // `tools:` allowlist — it is an implementation detail of the
+      // `skills:` key, and souls are not asked to list it. The exemption
+      // cuts both ways: an agent with no skills never sees the reader,
+      // however permissive its tools list.
+      const enabledSkills = this.enabledSkillsFor(session);
       const tools = this.tools
         .describe()
-        .filter((tool) => allowedTools === undefined || matchesToolAllowlist(tool.name, allowedTools));
+        .filter((tool) => (tool.name === SKILL_READ_TOOL_NAME
+          ? enabledSkills.length > 0
+          : allowedTools === undefined || matchesToolAllowlist(tool.name, allowedTools)));
 
       // Resumed, not restarted: a recovered turn spends the budget it was
       // already on. Starting at 1 would let a call parked on the last
@@ -1073,6 +1517,7 @@ export class AgentRunner {
           session,
           ...(tools.length > 0 ? { tools } : {}),
           ...(memory.length > 0 ? { memory } : {}),
+          ...(enabledSkills.length > 0 ? { skills: enabledSkills } : {}),
           ...(this.streaming ? { onDelta } : {}),
           ...(signal ? { signal } : {}),
         });
@@ -1402,8 +1847,19 @@ export class AgentRunner {
       return result;
     };
 
+    // Gate 2 of two for skill.read, independent of gate 1 on purpose: this
+    // path also serves providers hosting their own loop, and a model can
+    // call the reader by name without it having been advertised. The
+    // exemption keys on the same fact — the agent has a skill enabled — so
+    // the reader is never a tool the agent can see, is told to use, and is
+    // refused when it uses. Which skill may then be read is the `skills:`
+    // allowlist, enforced inside the tool itself.
     const allowedTools = this.allowedToolsFor(session);
-    if (allowedTools !== undefined && !matchesToolAllowlist(call.toolName, allowedTools)) {
+    if (call.toolName === SKILL_READ_TOOL_NAME) {
+      if (this.enabledSkillsFor(session).length === 0) {
+        return rejected(`Tool not permitted for agent ${session.agent.id}: ${call.toolName} (no skills enabled)`);
+      }
+    } else if (allowedTools !== undefined && !matchesToolAllowlist(call.toolName, allowedTools)) {
       return rejected(`Tool not permitted for agent ${session.agent.id}: ${call.toolName}`);
     }
 
