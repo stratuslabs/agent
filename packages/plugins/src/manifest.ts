@@ -191,6 +191,16 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
           `Plugin ${packageName}: ${JSON.stringify(entry.id)} is not a skill id. Skill ids are kebab-case (web-research).`,
         );
       }
+      // Refused at the manifest, not discovered mid-registration: the
+      // loader preflights staged skills against the shared registry and
+      // then registers after committing tools, so a duplicate that only
+      // surfaced at registration would leave the plugin half-landed —
+      // tools live, first skill live, plugin reported failed.
+      if (skills.some((declared) => declared.id === entry.id)) {
+        throw new PluginManifestError(
+          `Plugin ${packageName}: contributes.skills declares ${JSON.stringify(entry.id)} twice.`,
+        );
+      }
       skills.push({ id: entry.id, path: entry.path });
     }
   }

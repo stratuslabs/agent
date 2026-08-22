@@ -220,6 +220,44 @@ test('a skill path reaching outside its package is refused', async () => {
   assert.match(result.failures[0]?.reason ?? '', /outside its package/);
 });
 
+test('a manifest declaring one skill id twice refuses the plugin whole — nothing half-lands', async () => {
+  const host = await fakeHost({
+    'stratus-plugin-doubled': {
+      manifest: {
+        stratus: {
+          pluginVersion: 1,
+          contributes: {
+            tools: [{ name: 'doubled.run', risk: 'gated' }],
+            skills: [
+              { id: 'pr-review', path: './skills/SKILL.md' },
+              { id: 'pr-review', path: './skills/SKILL.md' },
+            ],
+          },
+        },
+      },
+      module: passivePlugin('doubled', (tools) => tools.register(tool('doubled.run'))),
+      files: { 'skills/SKILL.md': SKILL_SOURCE('doubled review') },
+    },
+  });
+
+  const skills = new SkillRegistry();
+  const tools = new ToolRegistry();
+  const result = await loadPlugins({
+    config: { 'stratus-plugin-doubled': { enabled: true } },
+    host,
+    tools,
+    skills,
+    bus: new EventBus(),
+  });
+
+  assert.equal(result.loaded.length, 0);
+  assert.match(result.failures[0]?.reason ?? '', /declares "pr-review" twice/);
+  // The whole point: a refused plugin leaves nothing behind — neither its
+  // tools nor the first of its duplicate skills.
+  assert.equal(tools.get('doubled.run'), undefined);
+  assert.deepEqual(skills.list(), []);
+});
+
 test('an operator skill already holding the bare id leaves the plugin skill reachable qualified only', async () => {
   const host = await fakeHost({
     'stratus-plugin-acme': {

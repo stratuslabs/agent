@@ -54,6 +54,16 @@ test('a manifest that cannot be trusted to describe its package is refused', () 
     () => manifestOf({ pluginVersion: 1, contributes: { skills: [{ id: 'PR Review', path: './s.md' }] } }),
     /is not a skill id/,
   );
+  // Refused here, before anything stages: a duplicate that only surfaced
+  // at registration would land the plugin half — tools committed, first
+  // skill live, plugin reported failed.
+  assert.throws(
+    () => manifestOf({
+      pluginVersion: 1,
+      contributes: { skills: [{ id: 'pr-review', path: './a.md' }, { id: 'pr-review', path: './b.md' }] },
+    }),
+    /declares "pr-review" twice/,
+  );
   assert.throws(
     () => manifestOf({ pluginVersion: 1, contributes: { tools: 'fs.read' } }),
     PluginManifestError as never,
