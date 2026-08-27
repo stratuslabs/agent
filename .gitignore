@@ -5,7 +5,6 @@ packages/*/*.tsbuildinfo
 
 # Local provider config (copy from stratus.config.json.example)
 stratus.config.json
-stratusclaw.config.json
 
 # Local agent state (per-agent long-term memory)
 .stratus/

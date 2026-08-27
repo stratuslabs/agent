@@ -284,8 +284,6 @@ export ANTHROPIC_API_KEY=your-key
 stratus run "say hello"
 ```
 
-Legacy `STRATUSCLAW_*` env vars and `stratusclaw.config.json` still work for compatibility.
-
 ## What you’ll see
 
 A run prints a short event log followed by the final session messages.

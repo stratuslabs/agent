@@ -93,7 +93,6 @@ import {
   resolveAgentApprovals,
   resolveEnvApiKey,
   DEFAULT_CONFIG_FILENAME,
-  LEGACY_CONFIG_FILENAME,
   loadConfigFile,
   resolveConfigLocation,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
@@ -488,7 +487,6 @@ Config file:
   The CLI looks for ./stratus.config.json first, then a path from --config / STRATUS_CONFIG,
   then the global ~/.stratus/config.json written by \`stratus setup\`.
   A "soul" key (or STRATUS_SOUL) points at a soul file so every run uses that agent.
-  Legacy STRATUSCLAW_* env vars and stratusclaw.config.json are still supported for compatibility.
 
 Plugins (tools):
   Capability is optional: install a package, then list it under "plugins" in a
@@ -1210,9 +1208,8 @@ export const warnOnCredentialOverride = async (
     return;
   }
   // The resolver records the variable that actually won — guessing it here
-  // would name the wrong one whenever a custom apiKeyEnv or the legacy
-  // STRATUSCLAW_ prefix supplied the key, sending the reader to unset
-  // something that was never the cause.
+  // would name the wrong one whenever a custom apiKeyEnv supplied the key,
+  // sending the reader to unset something that was never the cause.
   const primary = runtime.provider === 'anthropic' && runtime.apiKey ? runtime.apiKeyEnvVar : undefined;
   // A fallback demoted the same way costs exactly as much, and only bites
   // once the primary is already failing — the worst moment to discover it.
@@ -2254,15 +2251,11 @@ export const runSetup = async (
   const cwd = readWorkingDirectory(env);
   const processEnv = readProcessEnv(env);
 
-  // Config target: --config, then STRATUS_CONFIG / STRATUSCLAW_CONFIG, then
-  // the global ~/.stratus/config.json — the file `stratus run` falls back to
-  // from any directory, which is what makes setup a one-time step.
-  const envConfigVar = readNonEmptyString(processEnv.STRATUS_CONFIG)
-    ? 'STRATUS_CONFIG'
-    : readNonEmptyString(processEnv.STRATUSCLAW_CONFIG)
-      ? 'STRATUSCLAW_CONFIG'
-      : undefined;
-  const envConfigPath = envConfigVar ? String(processEnv[envConfigVar]).trim() : undefined;
+  // Config target: --config, then STRATUS_CONFIG, then the global
+  // ~/.stratus/config.json — the file `stratus run` falls back to from any
+  // directory, which is what makes setup a one-time step.
+  const envConfigVar = readNonEmptyString(processEnv.STRATUS_CONFIG) ? 'STRATUS_CONFIG' : undefined;
+  const envConfigPath = envConfigVar ? String(processEnv.STRATUS_CONFIG).trim() : undefined;
   const configPath = command.configPath
     ? path.resolve(cwd, command.configPath)
     : envConfigPath
@@ -2594,7 +2587,6 @@ export const runSetup = async (
     }
     const keyEnvSelector = provider === state.provider
       ? readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
-        ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV)
         ?? state.apiKeyEnv
       : undefined;
     return state.credentials[provider] !== undefined
@@ -2880,11 +2872,9 @@ export const runSetup = async (
     // stored key's bound endpoint is authoritative — so the inline test
     // exercises precisely what a real run will use.
     const keyEnv = readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
-      ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV)
       ?? state.apiKeyEnv
       ?? defaultKeyEnvFor(state.provider);
     const envKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
-      ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY)
       ?? readNonEmptyString(processEnv[String(keyEnv)]);
     const credential = envKey ? undefined : state.credentials[state.provider];
     const boundUrl = credential?.type === 'api_key' ? credential.baseUrl : undefined;
@@ -3058,8 +3048,7 @@ export const runSetup = async (
     // Listing the config soul while `stratus serve` registers the env one
     // would store tokens against an id the adapter then skips.
     const processEnv = readProcessEnv(env);
-    const envSoul = readNonEmptyString(processEnv.STRATUS_SOUL)
-      ?? readNonEmptyString(processEnv.STRATUSCLAW_SOUL);
+    const envSoul = readNonEmptyString(processEnv.STRATUS_SOUL);
     if (typeof envSoul === 'string' && state.soulPath && envSoul !== state.soulPath) {
       warnOnce(`STRATUS_SOUL points at ${envSoul}, which outranks the configured ${state.soulPath} — Channels lists what a run would actually use`);
     }
@@ -3264,24 +3253,18 @@ export const runSetup = async (
 
   const detectEnvOverride = (
     primary: string,
-    legacy: string,
     chosen: string,
     flagName?: string,
   ): { envVar: string; envValue: string; flag?: string } | undefined => {
-    const envVar = readNonEmptyString(processEnv[primary])
-      ? primary
-      : readNonEmptyString(processEnv[legacy])
-        ? legacy
-        : undefined;
-    if (!envVar) {
+    if (!readNonEmptyString(processEnv[primary])) {
       return undefined;
     }
-    const envValue = String(processEnv[envVar]).trim();
+    const envValue = String(processEnv[primary]).trim();
     if (envValue === chosen) {
       return undefined;
     }
     return {
-      envVar,
+      envVar: primary,
       envValue,
       ...(flagName ? { flag: `${flagName} ${quoteShellArg(chosen)}` } : {}),
     };
@@ -3325,18 +3308,15 @@ export const runSetup = async (
     // bare runs started here — say so, and make the suggested command pick
     // the file that was just written.
     if (configPath === globalConfigPath(env)) {
-      for (const shadow of [DEFAULT_CONFIG_FILENAME, LEGACY_CONFIG_FILENAME]) {
-        const shadowPath = path.join(cwd, shadow);
-        try {
-          await readFile(shadowPath, 'utf8');
-          writeLine(streams.stdout, `Note: ${shadowPath} exists and takes precedence over the global config for runs started in this directory.`);
-          writeLine(streams.stdout, 'The suggested commands below include --config so they use what you just saved.');
-          shadowConfigFlag = ` --config ${quoteShellArg(configPath)}`;
-          break;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-            throw error;
-          }
+      const shadowPath = path.join(cwd, DEFAULT_CONFIG_FILENAME);
+      try {
+        await readFile(shadowPath, 'utf8');
+        writeLine(streams.stdout, `Note: ${shadowPath} exists and takes precedence over the global config for runs started in this directory.`);
+        writeLine(streams.stdout, 'The suggested commands below include --config so they use what you just saved.');
+        shadowConfigFlag = ` --config ${quoteShellArg(configPath)}`;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
         }
       }
     }
@@ -3409,14 +3389,14 @@ export const runSetup = async (
     // Exported STRATUS_* variables outrank the config file, so warn when one
     // would make `stratus run` behave differently from what was just saved.
     const conflicts = [
-      detectEnvOverride('STRATUS_PROVIDER', 'STRATUSCLAW_PROVIDER', state.provider, '--provider'),
+      detectEnvOverride('STRATUS_PROVIDER', state.provider, '--provider'),
       ...(state.provider !== 'demo'
-        ? [detectEnvOverride('STRATUS_MODEL', 'STRATUSCLAW_MODEL', state.model ?? defaultModelFor(state.provider), '--model')]
+        ? [detectEnvOverride('STRATUS_MODEL', state.model ?? defaultModelFor(state.provider), '--model')]
         : []),
       ...(state.provider === 'openai'
-        ? [detectEnvOverride('STRATUS_BASE_URL', 'STRATUSCLAW_BASE_URL', state.baseUrl ?? DEFAULT_OPENAI_BASE_URL, '--base-url')]
-        : [detectEnvOverride('STRATUS_BASE_URL', 'STRATUSCLAW_BASE_URL', '')]),
-      detectEnvOverride('STRATUS_SYSTEM_PROMPT', 'STRATUSCLAW_SYSTEM_PROMPT', state.systemPrompt ?? ''),
+        ? [detectEnvOverride('STRATUS_BASE_URL', state.baseUrl ?? DEFAULT_OPENAI_BASE_URL, '--base-url')]
+        : [detectEnvOverride('STRATUS_BASE_URL', '')]),
+      detectEnvOverride('STRATUS_SYSTEM_PROMPT', state.systemPrompt ?? ''),
     ].filter((conflict) => conflict !== undefined);
 
     for (const conflict of conflicts) {
@@ -3674,23 +3654,20 @@ export const collectDoctorReport = async (
   // Config discovery, spelled out rather than delegated: doctor has to
   // report the files that LOST as well as the one in use, which is the
   // whole point when a stray project config is the answer.
-  // Which of the three named it, not just that one did: telling someone to
-  // fix STRATUS_CONFIG when STRATUSCLAW_CONFIG is what is set leaves the
-  // real override in place — the same mistake as provider and key
-  // attribution, in the one place a typo is most likely.
+  // Which of the two named it, not just that one did: telling someone to
+  // fix STRATUS_CONFIG when --config is what is set leaves the real
+  // override in place — the same mistake as provider and key attribution,
+  // in the one place a typo is most likely.
   const explicitSource = command.configPath !== undefined
     ? { name: '--config', value: command.configPath }
     : readNonEmptyString(processEnv.STRATUS_CONFIG)
       ? { name: 'STRATUS_CONFIG', value: String(processEnv.STRATUS_CONFIG) }
-      : readNonEmptyString(processEnv.STRATUSCLAW_CONFIG)
-        ? { name: 'STRATUSCLAW_CONFIG', value: String(processEnv.STRATUSCLAW_CONFIG) }
-        : undefined;
+      : undefined;
   const explicit = explicitSource?.value;
   const candidates = explicitSource
     ? [{ path: path.resolve(cwd, explicitSource.value), label: explicitSource.name }]
     : [
         { path: path.join(cwd, DEFAULT_CONFIG_FILENAME), label: 'project' },
-        { path: path.join(cwd, LEGACY_CONFIG_FILENAME), label: 'project (legacy)' },
         { path: globalConfigPath(env), label: 'global' },
       ];
   const present: Array<{ path: string; label: string }> = [];
@@ -3747,16 +3724,10 @@ export const collectDoctorReport = async (
 
   // Which variable supplied a value, not just the value: naming the wrong
   // one sends the reader to unset something that was never the cause,
-  // leaving the real override in place. The legacy STRATUSCLAW_ prefix is
-  // still honored by the resolver, so it has to be reportable too.
-  const envPick = (...names: string[]): { name: string; value: string } | undefined => {
-    for (const name of names) {
-      const value = readNonEmptyString(processEnv[name]);
-      if (typeof value === 'string') {
-        return { name, value };
-      }
-    }
-    return undefined;
+  // leaving the real override in place.
+  const envPick = (name: string): { name: string; value: string } | undefined => {
+    const value = readNonEmptyString(processEnv[name]);
+    return typeof value === 'string' ? { name, value } : undefined;
   };
 
   /**
@@ -3766,7 +3737,7 @@ export const collectDoctorReport = async (
    * while whether a run works at all, and what it bills, is whatever
    * resolveRuntimeConfig actually returns or throws.
    */
-  const envSoul = envPick('STRATUS_SOUL', 'STRATUSCLAW_SOUL');
+  const envSoul = envPick('STRATUS_SOUL');
   const soulValue = envSoul?.value ?? fileConfig.soul;
   const soulSource = envSoul ? envSoul.name : (winner ? winner.path : '');
   const soulPath = typeof soulValue === 'string' ? path.resolve(cwd, soulValue) : undefined;
@@ -3795,7 +3766,7 @@ export const collectDoctorReport = async (
     }
   }
 
-  const envProviderPick = envPick('STRATUS_PROVIDER', 'STRATUSCLAW_PROVIDER');
+  const envProviderPick = envPick('STRATUS_PROVIDER');
   const providerSource = envProviderPick
     ? envProviderPick.name
     : soul?.provider
@@ -3827,7 +3798,7 @@ export const collectDoctorReport = async (
 
   let model: DoctorSetting | undefined;
   if (resolved && resolved.provider !== 'demo') {
-    const envModel = envPick('STRATUS_MODEL', 'STRATUSCLAW_MODEL');
+    const envModel = envPick('STRATUS_MODEL');
     // A soul's model belongs to the soul's provider, and the config's model
     // to the config's provider — either can be stranded by an override.
     const soulModelApplies = soul?.provider === undefined || soul.provider === resolved.provider;
@@ -4227,8 +4198,7 @@ export const runService = async (
   // install directory and can come up on a different roster entirely.
   const processEnv = readProcessEnv(env);
   const selectedConfig = command.configPath
-    ?? readNonEmptyString(processEnv.STRATUS_CONFIG)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_CONFIG);
+    ?? readNonEmptyString(processEnv.STRATUS_CONFIG);
   if (command.action === 'install') {
     // A config the daemon cannot parse kills it during gateway.start(),
     // and the manager — having accepted the start — restarts it on a
@@ -4329,14 +4299,12 @@ export const runAgentNew = async (
         writeLine(streams.stdout, `Note: ${message}.`);
       });
       const soulProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
-        ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'))
         ?? activeConfig.provider
         ?? 'demo';
       // The active config's model was written for the provider named in
       // that config; it only travels into the soul when they still match.
       const configModelApplies = (activeConfig.provider ?? 'openai') === soulProvider;
       const soulModel = readNonEmptyString(processEnv.STRATUS_MODEL)
-        ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL)
         ?? (configModelApplies ? activeConfig.model : undefined)
         ?? (soulProvider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
       const soulPin = soulProvider !== 'demo' ? { provider: soulProvider, model: soulModel } : {};
