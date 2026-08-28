@@ -113,6 +113,20 @@ test('a plain description wrapping onto indented lines folds; a literal block ke
   assert.equal(literal.description, 'line one\nline two');
 });
 
+test('a literal block keeps its blank and #-prefixed lines — they are content, not comments', () => {
+  const document = parseSkillDocument(
+    '---\ndescription: |\n  first\n\n  # heading\n  last\n---\n\nBody.',
+  );
+  assert.equal(document.description, 'first\n\n# heading\nlast');
+
+  // In a folded block a blank line is a paragraph break, not the end of
+  // the value — and the line after it still belongs to the description.
+  const folded = parseSkillDocument(
+    '---\ndescription: >-\n  first part\n\n  second part\n---\n\nBody.',
+  );
+  assert.equal(folded.description, 'first part\nsecond part');
+});
+
 test('souls stay strict: an unknown soul key is still refused', () => {
   assert.throws(
     () => parseSoul('---\nname: Ava\nunknown-key: nope\n---\n\nPersona.'),

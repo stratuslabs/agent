@@ -125,10 +125,68 @@ test('install refuses an id already installed unless forced, and only: filters',
   await writeFile(path.join(source, 'one', 'SKILL.md'), skillFile('Use for one, v2.'));
   const collided = await installSkillsFromDirectory(env, source);
   assert.deepEqual(collided.installed.map((skill) => skill.id), ['two']);
-  assert.match(collided.skipped[0]?.reason ?? '', /already installed/);
+  // Present is not a failure: the id is reported as already installed —
+  // with the INSTALLED copy's identity, not the source's — so an
+  // enablement step following the install can still act on it.
+  assert.deepEqual(collided.skipped, []);
+  assert.equal(collided.alreadyInstalled[0]?.id, 'one');
+  assert.equal(collided.alreadyInstalled[0]?.description, 'Use for one, v1.');
 
   const forced = await installSkillsFromDirectory(env, source, { only: ['one'], force: true });
   assert.equal(forced.installed[0]?.description, 'Use for one, v2.');
+});
+
+test('symlinks: relative links inside a skill survive; a link escaping the skill refuses it', async () => {
+  const { symlink } = await import('node:fs/promises');
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilllink-'));
+  await mkdir(path.join(source, 'linky'), { recursive: true });
+  await writeFile(path.join(source, 'linky', 'SKILL.md'), skillFile('Use for links.'));
+  await writeFile(path.join(source, 'linky', 'ref.txt'), 'referenced');
+  await symlink('ref.txt', path.join(source, 'linky', 'link.txt'));
+  // A link reaching out of its skill would keep reaching out of
+  // ~/.stratus/skills once installed — where SKILL.md -> ../../credentials.json
+  // is a skill body that reads the operator's secrets.
+  await writeFile(path.join(source, 'secret.txt'), 'SECRET');
+  await mkdir(path.join(source, 'evil'), { recursive: true });
+  await writeFile(path.join(source, 'evil', 'SKILL.md'), skillFile('Use for evil.'));
+  await symlink(path.join('..', 'secret.txt'), path.join(source, 'evil', 'notes.txt'));
+
+  const homeDir = await freshHome();
+  const env = { homeDir };
+  const result = await installSkillsFromDirectory(env, source);
+
+  assert.deepEqual(result.installed.map((skill) => skill.id), ['linky']);
+  assert.match(result.skipped[0]?.reason ?? '', /symlink reaching outside/);
+  // The contained link stayed relative — it must not point back into a
+  // source directory that a cloned install deletes on return.
+  const { readlink } = await import('node:fs/promises');
+  assert.equal(await readlink(path.join(skillsDirPath(env), 'linky', 'link.txt')), 'ref.txt');
+  // And nothing landed for the refused skill, staging included.
+  const remaining = await import('node:fs/promises').then(({ readdir }) => readdir(skillsDirPath(env)));
+  assert.deepEqual(remaining.sort(), ['linky']);
+});
+
+test('a refused forced replacement leaves the working version in place', async () => {
+  const { symlink } = await import('node:fs/promises');
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillforce-'));
+  await mkdir(path.join(source, 'one'), { recursive: true });
+  await writeFile(path.join(source, 'one', 'SKILL.md'), skillFile('Use for one, v1.'));
+
+  const homeDir = await freshHome();
+  const env = { homeDir };
+  await installSkillsFromDirectory(env, source);
+
+  // v2 is hostile: refused before the installed v1 is touched.
+  await writeFile(path.join(source, 'one', 'SKILL.md'), skillFile('Use for one, v2.'));
+  await writeFile(path.join(source, 'outside.txt'), 'x');
+  await symlink(path.join('..', 'outside.txt'), path.join(source, 'one', 'esc.txt'));
+  const result = await installSkillsFromDirectory(env, source, { force: true });
+  assert.deepEqual(result.installed, []);
+  assert.match(result.skipped[0]?.reason ?? '', /symlink reaching outside/);
+
+  const registry = new SkillRegistry();
+  const loaded = await loadOperatorSkills(env, registry, () => {});
+  assert.equal(loaded[0]?.description, 'Use for one, v1.');
 });
 
 test('a repository whose root is the skill installs under its frontmatter name', async () => {

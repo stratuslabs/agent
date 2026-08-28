@@ -4665,10 +4665,16 @@ export const runSkillAdd = async (
     for (const skill of result.installed) {
       writeLine(streams.stdout, `installed ${skill.id} — ${skill.description}`);
     }
+    // Present already is a no-op, not a failure — and exactly what the
+    // "rerun with --agent" hint below produces, so these stay eligible
+    // for the enablement step.
+    for (const skill of result.alreadyInstalled) {
+      writeLine(streams.stdout, `already installed ${skill.id} — ${skill.description}`);
+    }
     for (const skip of result.skipped) {
       writeLine(streams.stderr, `Warning: skipped ${skip.id}: ${skip.reason}`);
     }
-    if (result.installed.length === 0) {
+    if (result.installed.length === 0 && result.alreadyInstalled.length === 0) {
       writeLine(streams.stderr, result.skipped.length > 0
         ? 'Error: nothing was installed.'
         : `Error: no skills found in ${command.source}. A skill is a directory with a SKILL.md.`);
@@ -4678,7 +4684,7 @@ export const runSkillAdd = async (
     // Installed is not enabled: a soul opts in through its skills:
     // allowlist, and that stays true when the install came through a
     // command. --agent is the explicit way to say both at once.
-    const ids = result.installed.map((skill) => skill.id);
+    const ids = [...result.installed, ...result.alreadyInstalled].map((skill) => skill.id);
     if (command.agentId === undefined) {
       writeLine(streams.stdout);
       writeLine(streams.stdout, 'Installed, not yet enabled. Add to an agent\'s soul frontmatter:');
@@ -4734,17 +4740,34 @@ export const runSkills = async (
   // follows "what is installed" — read from the same roster a dispatch
   // serves. Plugin-contributed skills are the daemon's to list
   // (/catalog/tools); this command reads the operator directory.
-  const roster = await loadRosterSouls(env, () => {}).catch(() => []);
+  //
+  // A roster that will not load (a duplicate agent id, deliberately
+  // fatal) is unreadable enablement, not empty enablement: say so and
+  // withhold the claim rather than reporting every skill unused.
+  let roster: Awaited<ReturnType<typeof loadRosterSouls>> = [];
+  let rosterUnreadable = false;
+  try {
+    roster = await loadRosterSouls(env, (line) => writeLine(streams.stderr, `Warning: ${line}`));
+  } catch (error) {
+    rosterUnreadable = true;
+    writeLine(
+      streams.stderr,
+      `Warning: cannot say who enables what — the roster did not load: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   for (const skill of skills) {
-    const enabledBy = roster
-      .filter((entry) => {
-        const allowlist = entry.soul.agent.skills;
-        return allowlist !== undefined
-          && allowlist.length > 0
-          && matchesSkillAllowlist(skill.id, allowlist);
-      })
-      .map((entry) => entry.soul.agent.name);
-    const suffix = enabledBy.length > 0 ? ` — enabled by ${enabledBy.join(', ')}` : ' — enabled by nobody yet';
+    let suffix = '';
+    if (!rosterUnreadable) {
+      const enabledBy = roster
+        .filter((entry) => {
+          const allowlist = entry.soul.agent.skills;
+          return allowlist !== undefined
+            && allowlist.length > 0
+            && matchesSkillAllowlist(skill.id, allowlist);
+        })
+        .map((entry) => entry.soul.agent.name);
+      suffix = enabledBy.length > 0 ? ` — enabled by ${enabledBy.join(', ')}` : ' — enabled by nobody yet';
+    }
     writeLine(streams.stdout, `${skill.id.padEnd(24)}${skill.description}${suffix}`);
   }
   return 0;

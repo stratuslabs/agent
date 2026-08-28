@@ -316,30 +316,51 @@ const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): Parsed
   let currentList: string[] | undefined;
   // Tolerant-mode line context: an unknown key whose indented block is
   // being skipped, or a known scalar whose value continues on indented
-  // lines (a YAML block scalar, or a plain scalar that wraps).
+  // lines (a YAML block scalar, or a plain scalar that wraps). Inside
+  // either, blank lines and lines starting with # are content or skipped
+  // block — never the comments the top level treats them as — so both are
+  // handled before the comment filter below.
   let skippingUnknownBlock = false;
-  let continuation: { key: string; separator: string } | undefined;
+  let continuation: { key: string; literal: boolean; pendingBreak: boolean } | undefined;
 
   const isIndented = (line: string): boolean => /^\s/.test(line);
 
   for (const rawLine of lines) {
     const line = rawLine.trimEnd();
-    if (line.trim().length === 0 || line.trim().startsWith('#')) {
+    const blank = line.trim().length === 0;
+
+    if (tolerant && skippingUnknownBlock && (blank || isIndented(line))) {
       continue;
     }
-
-    if (tolerant && isIndented(line)) {
-      if (skippingUnknownBlock) {
+    if (tolerant && continuation) {
+      if (blank) {
+        // A blank line is a line break in a literal block and a paragraph
+        // break in a folded or plain one — never the end of the value.
+        if (continuation.literal) {
+          const existing = scalars[continuation.key] ?? '';
+          if (existing.length > 0) {
+            scalars[continuation.key] = `${existing}\n`;
+          }
+        } else {
+          continuation.pendingBreak = true;
+        }
         continue;
       }
-      if (continuation) {
+      if (isIndented(line)) {
         const existing = scalars[continuation.key] ?? '';
-        const piece = unquote(line);
-        scalars[continuation.key] = existing.length > 0
-          ? `${existing}${continuation.separator}${piece}`
-          : piece;
+        const separator = continuation.literal || continuation.pendingBreak ? '\n' : ' ';
+        continuation.pendingBreak = false;
+        // The raw content, not unquote(): inside a block scalar a quote or
+        // a # is text, and YAML agrees.
+        const piece = line.trim();
+        scalars[continuation.key] = existing.length > 0 ? `${existing}${separator}${piece}` : piece;
         continue;
       }
+      // A non-indented line ends the value; fall through to read it.
+    }
+
+    if (blank || line.trim().startsWith('#')) {
+      continue;
     }
 
     const listItem = /^\s+-\s*(.*)$/.exec(line);
@@ -405,7 +426,7 @@ const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): Parsed
     // wrote them.
     if (tolerant && /^[>|][+-]?$/.test(inline)) {
       scalars[key] = '';
-      continuation = { key, separator: inline.startsWith('>') ? ' ' : '\n' };
+      continuation = { key, literal: inline.startsWith('|'), pendingBreak: false };
       continue;
     }
 
@@ -415,14 +436,14 @@ const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): Parsed
         // May be a plain scalar continuing on indented lines; empty stays
         // empty and is dropped below if nothing follows.
         scalars[key] = '';
-        continuation = { key, separator: ' ' };
+        continuation = { key, literal: false, pendingBreak: false };
         continue;
       }
       throw new Error(`${capitalize(shape.kind)} frontmatter key "${key}" has no value.`);
     }
     scalars[key] = scalar;
     if (tolerant) {
-      continuation = { key, separator: ' ' };
+      continuation = { key, literal: false, pendingBreak: false };
     }
   }
 

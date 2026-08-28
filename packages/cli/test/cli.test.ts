@@ -390,22 +390,25 @@ test('runCli skill add installs from a local skills repo, and --agent enables in
   );
 
   const env = { cwd, homeDir: home, processEnv: {} };
+  // The advertised two-step: install first, and the output suggests
+  // rerunning with --agent.
   const install = createStreams();
-  const installExit = await runCli({ argv: ['skill', 'add', source, '--skill', 'hn-search', '--agent', 'ava'], streams: install.streams, env });
+  const installExit = await runCli({ argv: ['skill', 'add', source, '--skill', 'hn-search'], streams: install.streams, env });
   assert.equal(installExit, 0);
   assert.match(install.output.stdout, /installed hn-search — Use when searching Hacker News\./);
-  assert.match(install.output.stdout, /enabled for Ava .*: hn-search/);
+  assert.match(install.output.stdout, /--agent <id>/);
   assert.ok(!install.output.stdout.includes('visual-qa'), '--skill did not filter');
-
-  const soul = await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8');
-  assert.match(soul, /skills:\n  - hn-search/);
   await readFile(path.join(home, '.stratus', 'skills', 'hn-search', 'SKILL.md'), 'utf8');
 
-  // Installed again without --force: refused, with the reason.
+  // The suggested rerun must actually work: already installed is a
+  // no-op for the copy and still eligible for enablement, not a refusal.
   const again = createStreams();
-  const againExit = await runCli({ argv: ['skill', 'add', source, '--skill', 'hn-search'], streams: again.streams, env });
-  assert.equal(againExit, 1);
-  assert.match(again.output.stderr, /already installed/);
+  const againExit = await runCli({ argv: ['skill', 'add', source, '--skill', 'hn-search', '--agent', 'ava'], streams: again.streams, env });
+  assert.equal(againExit, 0, again.output.stderr);
+  assert.match(again.output.stdout, /already installed hn-search/);
+  assert.match(again.output.stdout, /enabled for Ava .*: hn-search/);
+  const soul = await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8');
+  assert.match(soul, /skills:\n  - hn-search/);
 
   const list = createStreams();
   const listExit = await runCli({ argv: ['skills'], streams: list.streams, env });
@@ -441,6 +444,26 @@ test('runCli skill add clones a git source — the transport skills.sh repos arr
   assert.match(output.stdout, /Fetching file:\/\//);
   assert.match(output.stdout, /installed code-review — Use when reviewing a diff\./);
   await readFile(path.join(home, '.stratus', 'skills', 'code-review', 'SKILL.md'), 'utf8');
+});
+
+test('runCli skills withholds enablement claims when the roster cannot load', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillroster-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillroster-cwd-'));
+  const dir = path.join(home, '.stratus', 'skills', 'code-review');
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'SKILL.md'), '---\ndescription: Use when reviewing.\n---\n\nBody.\n');
+  // Two souls claiming one id: the roster refuses to load, deliberately.
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'a.md'), '---\nname: Ava\nid: ava\n---\n\nA.\n');
+  await writeFile(path.join(home, '.stratus', 'agents', 'b.md'), '---\nname: Beatrix\nid: ava\n---\n\nB.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({ argv: ['skills'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.equal(exitCode, 0);
+  assert.match(output.stderr, /cannot say who enables what/);
+  assert.match(output.stdout, /code-review\s+Use when reviewing\./);
+  // Unreadable is not "unused": no enablement claim either way.
+  assert.ok(!output.stdout.includes('enabled by'), 'made an enablement claim from an unreadable roster');
 });
 
 test('parseCommand reads skill add and skills forms', () => {
