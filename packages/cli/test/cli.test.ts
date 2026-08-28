@@ -518,6 +518,47 @@ test('runCli skill add --agent reaches the configured soul outside the agents di
   assert.match(list.output.stdout, /code-review\s+Use when reviewing\. — enabled by Ava/);
 });
 
+test('runCli skill commands handle configured-soul edges: unreadable, shadowed, symlinked source', async () => {
+  const { symlink } = await import('node:fs/promises');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilledge-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilledge-cwd-'));
+  const dir = path.join(home, '.stratus', 'skills', 'code-review');
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'SKILL.md'), '---\ndescription: Use when reviewing.\n---\n\nBody.\n');
+
+  // Unreadable configured soul: enablement is unknown, not "nobody".
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ soul: path.join(home, 'gone.md') })}\n`);
+  const unknown = createStreams();
+  const unknownExit = await runCli({ argv: ['skills'], streams: unknown.streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.equal(unknownExit, 0);
+  assert.match(unknown.output.stderr, /could not read the configured soul/);
+  assert.ok(!unknown.output.stdout.includes('enabled by'), 'claimed enablement without the configured soul');
+
+  // A roster file shadowed by the configured soul with the same id: the
+  // configured file is the one served, so it is the one edited.
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nDormant.\n');
+  const servedPath = path.join(home, 'served-ava.md');
+  await writeFile(servedPath, '---\nname: Ava\nid: ava\n---\n\nServed.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ soul: servedPath })}\n`);
+
+  // The local source reached through a symlink: installed as a real
+  // directory, never as a link back into the source tree.
+  const realSource = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilledge-src-'));
+  await mkdir(path.join(realSource, 'hn-search'), { recursive: true });
+  await writeFile(path.join(realSource, 'hn-search', 'SKILL.md'), '---\ndescription: Use when searching HN.\n---\n\nBody.\n');
+  const linkSource = path.join(cwd, 'linked-source');
+  await symlink(realSource, linkSource);
+
+  const add = createStreams();
+  const addExit = await runCli({ argv: ['skill', 'add', linkSource, '--agent', 'ava'], streams: add.streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.equal(addExit, 0, add.output.stderr);
+  assert.match(await readFile(servedPath, 'utf8'), /skills:\n  - hn-search/);
+  assert.ok(!(await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8')).includes('skills:'), 'edited the shadowed file');
+  const { lstat } = await import('node:fs/promises');
+  assert.ok((await lstat(path.join(home, '.stratus', 'skills', 'hn-search'))).isDirectory(), 'installed a link, not a directory');
+});
+
 test('runCli skills withholds enablement claims when the roster cannot load', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillroster-'));
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillroster-cwd-'));

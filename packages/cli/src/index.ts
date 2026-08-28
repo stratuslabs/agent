@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { appendFile, chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
@@ -4594,7 +4594,11 @@ const resolveSkillSource = async (
   const localPath = path.resolve(readWorkingDirectory(env), source);
   try {
     if ((await stat(localPath)).isDirectory()) {
-      return { kind: 'local', directory: localPath };
+      // The real directory, not the path as typed: a source that is
+      // itself a symlink would otherwise be copied as that link — an
+      // installed entry pointing back at the source tree, which the
+      // loader ignores as not-a-directory.
+      return { kind: 'local', directory: await realpath(localPath) };
     }
   } catch {
     // Not a local directory; read it as a remote source.
@@ -4667,17 +4671,30 @@ const cloneSkillSource = async (url: string, destination: string): Promise<void>
 const rosterSoulsWithConfigured = async (
   env: CliEnvironment,
   warn: (line: string) => void,
-): Promise<Awaited<ReturnType<typeof loadRosterSouls>>> => {
-  const roster = await loadRosterSouls(env, warn);
+): Promise<{ entries: Awaited<ReturnType<typeof loadRosterSouls>>; complete: boolean }> => {
+  const entries = await loadRosterSouls(env, warn);
+  let complete = true;
   try {
     const configured = await resolveConfiguredSoul({}, env);
-    if (configured && !roster.some((entry) => entry.soul.agent.id === configured.soul.agent.id)) {
-      roster.push({ soul: configured.soul, path: configured.path });
+    if (configured) {
+      const entry = { soul: configured.soul, path: configured.path };
+      const clash = entries.findIndex((candidate) => candidate.soul.agent.id === configured.soul.agent.id);
+      // Replaced, not skipped: a roster file claiming the configured
+      // soul's id is the one the gateway stops serving — both commands
+      // must answer for the soul a dispatch actually runs.
+      if (clash >= 0) {
+        entries[clash] = entry;
+      } else {
+        entries.push(entry);
+      }
     }
   } catch (error) {
+    // The configured agent's allowlist was not read, so the set is not
+    // the roster — callers making enablement claims must withhold them.
+    complete = false;
     warn(`could not read the configured soul: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return roster;
+  return { entries, complete };
 };
 
 export const runSkillAdd = async (
@@ -4750,7 +4767,7 @@ export const runSkillAdd = async (
       return 0;
     }
 
-    const roster = await rosterSoulsWithConfigured(env, (line) => writeLine(streams.stderr, `Warning: ${line}`));
+    const { entries: roster } = await rosterSoulsWithConfigured(env, (line) => writeLine(streams.stderr, `Warning: ${line}`));
     const entry = roster.find((candidate) => candidate.soul.agent.id === command.agentId);
     if (!entry) {
       writeLine(streams.stderr, `Error: no agent with id ${command.agentId} in ${agentsDirPath(env)} or the configured soul. The skills are installed; enable them by editing a soul.`);
@@ -4801,7 +4818,9 @@ export const runSkills = async (
   let roster: Awaited<ReturnType<typeof loadRosterSouls>> = [];
   let rosterUnreadable = false;
   try {
-    roster = await rosterSoulsWithConfigured(env, (line) => writeLine(streams.stderr, `Warning: ${line}`));
+    const resolved = await rosterSoulsWithConfigured(env, (line) => writeLine(streams.stderr, `Warning: ${line}`));
+    roster = resolved.entries;
+    rosterUnreadable = !resolved.complete;
   } catch (error) {
     rosterUnreadable = true;
     writeLine(
