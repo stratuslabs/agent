@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { appendFile, chmod, cp, mkdir, readdir, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, cp, mkdir, readdir, readFile, readlink, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -1606,6 +1606,7 @@ export const installSkillsFromDirectory = async (
  */
 const findEscapingSymlink = async (directory: string): Promise<string | undefined> => {
   const root = await realpath(directory);
+  const lexicalRoot = path.resolve(directory);
   const entries = await readdir(directory, { recursive: true, withFileTypes: true });
   for (const entry of entries) {
     if (!entry.isSymbolicLink()) {
@@ -1616,8 +1617,21 @@ const findEscapingSymlink = async (directory: string): Promise<string | undefine
     try {
       resolved = await realpath(linkPath);
     } catch {
-      // A dangling link resolves nowhere — it cannot read anything, and
-      // refusing the skill over it would refuse a broken decoration.
+      // Dangling here proves nothing: the link is preserved verbatim and
+      // re-resolves wherever the skill lands, so `../../credentials.json`
+      // dangles in a fresh clone and reads the operator's secrets once it
+      // sits under `~/.stratus/skills/<id>/`. With no target to resolve,
+      // the target is judged lexically: absolute is somebody's machine by
+      // construction, and a relative one must stay inside the skill by
+      // path arithmetic alone.
+      const target = await readlink(linkPath);
+      if (path.isAbsolute(target)) {
+        return path.relative(directory, linkPath);
+      }
+      const lexical = path.resolve(path.dirname(path.resolve(linkPath)), target);
+      if (lexical !== lexicalRoot && !lexical.startsWith(lexicalRoot + path.sep)) {
+        return path.relative(directory, linkPath);
+      }
       continue;
     }
     if (resolved !== root && !resolved.startsWith(root + path.sep)) {

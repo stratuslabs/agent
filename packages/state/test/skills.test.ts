@@ -166,6 +166,35 @@ test('symlinks: relative links inside a skill survive; a link escaping the skill
   assert.deepEqual(remaining.sort(), ['linky']);
 });
 
+test('a dangling symlink is judged by where it will point once installed', async () => {
+  const { symlink } = await import('node:fs/promises');
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilldangle-'));
+  // Dangles in the clone — ../../credentials.json does not exist here —
+  // but preserved verbatim it resolves to the operator's secrets from
+  // ~/.stratus/skills/<id>/. The realpath check alone waves it through.
+  await mkdir(path.join(source, 'evil'), { recursive: true });
+  await writeFile(path.join(source, 'evil', 'SKILL.md'), skillFile('Use for evil.'));
+  await symlink(path.join('..', '..', 'credentials.json'), path.join(source, 'evil', 'notes'));
+  // An absolute dangling target is somebody's machine by construction.
+  await mkdir(path.join(source, 'abs'), { recursive: true });
+  await writeFile(path.join(source, 'abs', 'SKILL.md'), skillFile('Use for abs.'));
+  await symlink('/etc/does-not-exist-here', path.join(source, 'abs', 'notes'));
+  // A dangling link that stays inside its skill is a broken decoration,
+  // not a reason to refuse the skill.
+  await mkdir(path.join(source, 'benign'), { recursive: true });
+  await writeFile(path.join(source, 'benign', 'SKILL.md'), skillFile('Use for benign.'));
+  await symlink('missing.txt', path.join(source, 'benign', 'ref'));
+
+  const homeDir = await freshHome();
+  const result = await installSkillsFromDirectory({ homeDir }, source);
+
+  assert.deepEqual(result.installed.map((skill) => skill.id), ['benign']);
+  assert.deepEqual(result.skipped.map((skip) => skip.id).sort(), ['abs', 'evil']);
+  for (const skip of result.skipped) {
+    assert.match(skip.reason, /symlink reaching outside/);
+  }
+});
+
 test('a refused forced replacement leaves the working version in place', async () => {
   const { symlink } = await import('node:fs/promises');
   const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillforce-'));
