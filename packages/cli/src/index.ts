@@ -3418,32 +3418,42 @@ export const runSetup = async (
       return only ? [only] : [];
     })();
 
-    if (chosen.length === 0) {
-      writeLine(streams.stdout, `Skipped. Install them yourself with: npm install -g ${groups.flatMap((group) => group.packages).join(' ')}`);
-      return;
+    // Held before the install rather than derived after it: picking one
+    // group is not a decision about the other, and the daemon starts a few
+    // lines below and warns about exactly what is still missing — the
+    // notice this whole offer exists to pre-empt.
+    const declined = groups.filter((group) => !chosen.includes(group));
+
+    if (chosen.length > 0) {
+      const packages = chosen.flatMap((group) => group.packages);
+      writeLine(streams.stdout, `Running: npm install -g ${packages.join(' ')}`);
+      // Never fails setup, for the same reason the service install does not:
+      // the config and credentials are already written, and a package that
+      // did not install is a warning at the next start, not a broken machine.
+      const result = await (env.packageInstaller ?? defaultPackageInstaller)(packages)
+        .catch((error: unknown) => ({
+          ok: false,
+          message: error instanceof Error ? error.message : String(error),
+        }));
+      if (result.ok) {
+        writeLine(streams.stdout, `Installed ${packages.join(' ')}.`);
+        // npm's exit code, not a second resolve: a package written into the
+        // global prefix a moment ago need not be resolvable from THIS
+        // process, whose module resolution was fixed when it started.
+        if (chosen.some((group) => group.id === 'dashboard')) {
+          dashboardReady = true;
+        }
+      } else {
+        writeLine(streams.stderr, `Could not install: ${result.message}`);
+        writeLine(streams.stderr, `Setup is saved either way — run \`npm install -g ${packages.join(' ')}\` yourself.`);
+      }
     }
 
-    const packages = chosen.flatMap((group) => group.packages);
-    writeLine(streams.stdout, `Running: npm install -g ${packages.join(' ')}`);
-    // Never fails setup, for the same reason the service install does not:
-    // the config and credentials are already written, and a package that
-    // did not install is a warning at the next start, not a broken machine.
-    const result = await (env.packageInstaller ?? defaultPackageInstaller)(packages)
-      .catch((error: unknown) => ({
-        ok: false,
-        message: error instanceof Error ? error.message : String(error),
-      }));
-    if (!result.ok) {
-      writeLine(streams.stderr, `Could not install: ${result.message}`);
-      writeLine(streams.stderr, `Setup is saved either way — run \`npm install -g ${packages.join(' ')}\` yourself.`);
-      return;
-    }
-    writeLine(streams.stdout, `Installed ${packages.join(' ')}.`);
-    // npm's exit code, not a second resolve: a package written into the
-    // global prefix a moment ago need not be resolvable from THIS process,
-    // whose module resolution was fixed when it started.
-    if (chosen.some((group) => group.id === 'dashboard')) {
-      dashboardReady = true;
+    if (declined.length > 0) {
+      const rest = declined.flatMap((group) => group.packages).join(' ');
+      writeLine(streams.stdout, chosen.length > 0
+        ? `Still missing. Install with: npm install -g ${rest}`
+        : `Skipped. Install them yourself with: npm install -g ${rest}`);
     }
   };
 

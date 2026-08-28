@@ -170,9 +170,11 @@ Install now with npm install -g?
 
 Three things about it worth knowing:
 
-- **It asks, and declining prints the command.** The control API binds a port,
-  and installing it is how an operator says they want one open — so this stays
-  a question, not a default.
+- **It asks, and anything left uninstalled prints its command** — whether you
+  skipped the offer entirely or took only one of the two, since choosing one
+  group is not a decision about the other. The control API binds a port, and
+  installing it is how an operator says they want one open, so this stays a
+  question rather than a default.
 - **It runs before the service install**, so the LaunchAgent comes up with
   those packages already present. A package installed *after* a daemon starts
   is invisible to it; that ordering is the whole reason the offer lives here

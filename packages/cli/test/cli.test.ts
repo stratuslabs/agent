@@ -1770,6 +1770,44 @@ test('declining the offer prints the command instead of running it', async () =>
   );
 });
 
+test('a partial install still names the group it left behind', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { blair: { appToken: 'xapp-1', botToken: 'xoxb-1' } } } }),
+  );
+
+  const installed: string[][] = [];
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: () => false,
+      packageInstaller: async (packages: string[]) => {
+        installed.push(packages);
+        return { ok: true, message: '' };
+      },
+      // Save & finish, then option 3 of 4: "Install the Web dashboard only".
+      setupInput: Readable.from(['7\n', '3\n']),
+    },
+  });
+
+  assert.deepEqual(installed, [['@stratusagent/control-api', '@stratusagent/dashboard']]);
+  // The group nobody chose is still missing, and the daemon is about to warn
+  // about it — saying so here is the entire point of the offer.
+  assert.match(output.stdout, /Still missing\. Install with: npm install -g @stratusagent\/channel-slack$/m);
+  // The half that WAS installed is not repeated as missing.
+  assert.doesNotMatch(output.stdout, /Still missing.*control-api/);
+  // ...and the dashboard it just installed is a real suggestion.
+  assert.match(output.stdout, /^ {2}stratus dashboard$/m);
+});
+
 test('setup honors STRATUS_CONFIG and --config for the write target', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
