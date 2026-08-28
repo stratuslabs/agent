@@ -420,11 +420,11 @@ const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): Parsed
     }
 
     const inline = value.trim();
-    // YAML block-scalar indicators: `>` folds continuation lines with
-    // spaces, `|` keeps their line breaks; either may carry a chomping
-    // sign. Only meaningful in tolerant mode — the strict dialect never
-    // wrote them.
-    if (tolerant && /^[>|][+-]?$/.test(inline)) {
+    // YAML block-scalar headers: `>` folds continuation lines with spaces,
+    // `|` keeps their line breaks; either may carry an indentation digit
+    // and a chomping sign in either order, and a trailing comment. Only
+    // meaningful in tolerant mode — the strict dialect never wrote them.
+    if (tolerant && /^[>|](?:[1-9][+-]?|[+-][1-9]?)?(?:\s+#.*)?$/.test(inline)) {
       scalars[key] = '';
       continuation = { key, literal: inline.startsWith('|'), pendingBreak: false };
       continue;

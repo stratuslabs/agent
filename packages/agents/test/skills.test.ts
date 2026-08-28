@@ -127,6 +127,23 @@ test('a literal block keeps its blank and #-prefixed lines — they are content,
   assert.equal(folded.description, 'first part\nsecond part');
 });
 
+test('block-scalar headers with indicators or trailing comments are recognized', () => {
+  const commented = parseSkillDocument(
+    '---\ndescription: >- # routing text\n  Use when the task\n  spans lines.\n---\n\nBody.',
+  );
+  assert.equal(commented.description, 'Use when the task spans lines.');
+
+  const indented = parseSkillDocument(
+    '---\ndescription: |2-\n  line one\n  line two\n---\n\nBody.',
+  );
+  assert.equal(indented.description, 'line one\nline two');
+
+  const chompFirst = parseSkillDocument(
+    '---\ndescription: >-2\n  folded text\n---\n\nBody.',
+  );
+  assert.equal(chompFirst.description, 'folded text');
+});
+
 test('souls stay strict: an unknown soul key is still refused', () => {
   assert.throws(
     () => parseSoul('---\nname: Ava\nunknown-key: nope\n---\n\nPersona.'),

@@ -476,6 +476,22 @@ test('runCli skill add of a repo whose root is the skill installs under the repo
   await readFile(path.join(home, '.stratus', 'skills', 'my-skills', 'SKILL.md'), 'utf8');
 });
 
+test('runCli skill add never prints a credential-bearing source URL', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillcred-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillcred-cwd-'));
+  const { streams, output } = createStreams();
+  // Connection refused fast; the point is what the output says, not the clone.
+  const exitCode = await runCli({
+    argv: ['skill', 'add', 'https://user:sekrit-token@127.0.0.1:1/repo.git'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+  assert.equal(exitCode, 1);
+  const everything = output.stdout + output.stderr;
+  assert.ok(!everything.includes('sekrit-token'), 'the credential reached the output');
+  assert.match(output.stdout, /Fetching https:\/\/\*\*\*@127\.0\.0\.1:1\/repo\.git/);
+});
+
 test('runCli skills withholds enablement claims when the roster cannot load', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillroster-'));
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillroster-cwd-'));

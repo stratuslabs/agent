@@ -4610,8 +4610,30 @@ const resolveSkillSource = async (
   );
 };
 
+/**
+ * A source URL safe to print: userinfo stripped. A token travels in exactly
+ * this position (`https://user:token@host/repo.git`), stdout is commonly
+ * retained in CI logs, and git's own stderr already redacts — only the
+ * unredacted URL is handed to git itself.
+ */
+const redactedSourceUrl = (url: string): string => {
+  try {
+    const parsed = new URL(url);
+    if (parsed.username || parsed.password) {
+      parsed.username = '***';
+      parsed.password = '';
+    }
+    return parsed.toString();
+  } catch {
+    // scp-style (git@host:path) or anything else URL() refuses: keep the
+    // shape, hide whatever sits before the @.
+    return url.replace(/^[^@/]+@/, '***@');
+  }
+};
+
 /** Shallow-clone a skills source. Git owns every transport we would otherwise re-implement. */
 const cloneSkillSource = async (url: string, destination: string): Promise<void> => {
+  const display = redactedSourceUrl(url);
   await new Promise<void>((resolve, reject) => {
     const child = spawn('git', ['clone', '--depth', '1', '--quiet', url, destination], {
       stdio: ['ignore', 'ignore', 'pipe'],
@@ -4621,13 +4643,15 @@ const cloneSkillSource = async (url: string, destination: string): Promise<void>
       stderr += String(chunk);
     });
     child.on('error', (error) => {
-      reject(new Error(`Could not run git to fetch ${url}: ${error.message}`));
+      reject(new Error(`Could not run git to fetch ${display}: ${error.message}`));
     });
     child.on('close', (code) => {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`git clone failed for ${url}: ${stderr.trim() || `exit code ${code}`}`));
+        // git redacts credentials in its own messages; the URL we echo is
+        // ours to redact.
+        reject(new Error(`git clone failed for ${display}: ${stderr.trim() || `exit code ${code}`}`));
       }
     });
   });
@@ -4646,7 +4670,7 @@ export const runSkillAdd = async (
   } else {
     const scratch = await mkdtemp(path.join(os.tmpdir(), 'stratus-skill-add-'));
     cleanup = () => rm(scratch, { recursive: true, force: true });
-    writeLine(streams.stdout, `Fetching ${resolved.url} …`);
+    writeLine(streams.stdout, `Fetching ${redactedSourceUrl(resolved.url)} …`);
     try {
       await cloneSkillSource(resolved.url, scratch);
     } catch (error) {
