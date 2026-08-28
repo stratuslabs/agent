@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { appendFile, chmod, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, cp, mkdir, readdir, readFile, readlink, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -21,6 +21,7 @@ import {
   isValidSkillId,
   parseSkillDocument,
   parseSoul,
+  type ParsedSkillDocument,
   type ParsedSoul,
 } from '@stratusagent/agents';
 import { defineLocalCommandTool } from '@stratusagent/executor-local';
@@ -1333,7 +1334,10 @@ export const loadOperatorSkills = async (
 
   const loaded: OperatorSkillInfo[] = [];
   for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!entry.isDirectory()) {
+    // Dot-directories are never skills and never warnings: an installer's
+    // staging directory or a stray .git must not spam the log for a
+    // window nobody controls.
+    if (!entry.isDirectory() || entry.name.startsWith('.')) {
       continue;
     }
     const id = entry.name;
@@ -1359,6 +1363,329 @@ export const loadOperatorSkills = async (
     });
   }
   return loaded;
+};
+
+/** A skill found in a source directory, validated and ready to copy. */
+export interface SkillInstallCandidate {
+  /** The id it would install under — its directory name in `~/.stratus/skills/`. */
+  id: string;
+  /** The directory that gets copied, SKILL.md and bundled files alike. */
+  directory: string;
+  name: string;
+  description: string;
+}
+
+/** A skill a source offered that was not installed, and why. */
+export interface SkillInstallSkip {
+  id: string;
+  reason: string;
+}
+
+export interface InstallSkillsOptions {
+  /** Install only these ids; everything else the source offers is skipped silently. */
+  only?: string[];
+  /** Replace an existing `~/.stratus/skills/<id>` instead of refusing it. */
+  force?: boolean;
+  /** See DiscoverSkillsOptions.rootId — forwarded to discovery. */
+  rootId?: string;
+}
+
+export interface DiscoverSkillsOptions {
+  /**
+   * What the source directory is called where it came from — for a cloned
+   * source, the repository's own name rather than the temporary directory
+   * git landed in, whose random basename is either not an id or, worse,
+   * accidentally one. Read only by the root-as-skill case.
+   */
+  rootId?: string;
+}
+
+export interface InstallSkillsResult {
+  installed: OperatorSkillInfo[];
+  /**
+   * Offered by the source and already present under the same id — not
+   * copied, but real, loadable, and as eligible for enablement as a fresh
+   * install. Distinct from `skipped` because "run again with --agent"
+   * must work on exactly these; folding them into skips made the
+   * advertised rerun fail with nothing installed.
+   */
+  alreadyInstalled: OperatorSkillInfo[];
+  skipped: SkillInstallSkip[];
+}
+
+// Where the ecosystem keeps skills inside a repository, in the order the
+// skills.sh CLI searches them. A directory named here is a container of
+// skills, not a skill.
+const SKILL_CONTAINER_DIRNAMES = ['skills', path.join('.claude', 'skills'), path.join('.agents', 'skills')];
+
+const SKILL_IGNORED_DIRNAMES = new Set(['.git', 'node_modules']);
+
+/**
+ * Find every skill a directory offers: a `SKILL.md` at its root makes the
+ * directory itself one skill; otherwise each immediate subdirectory with a
+ * `SKILL.md` is one — at the root and inside the container directories the
+ * ecosystem's repositories use (`skills/`, `.claude/skills/`,
+ * `.agents/skills/`). One level, not a recursive crawl: the conventions
+ * are flat, and a walk that reached deeper would install directories
+ * nobody published as skills.
+ *
+ * Invalid entries (an unparseable SKILL.md, an id that is not an id) come
+ * back as skips with the reason, so an installer can say what it left
+ * behind rather than silently thinning the source.
+ */
+export const discoverSkillsInDirectory = async (
+  sourceDir: string,
+  options: DiscoverSkillsOptions = {},
+): Promise<{ candidates: SkillInstallCandidate[]; skipped: SkillInstallSkip[] }> => {
+  const candidates: SkillInstallCandidate[] = [];
+  const skipped: SkillInstallSkip[] = [];
+  const claimed = new Set<string>();
+
+  const consider = async (directory: string, fallbackId: string, preferDocumentName = false): Promise<void> => {
+    let source: string;
+    try {
+      source = await readFile(path.join(directory, 'SKILL.md'), 'utf8');
+    } catch {
+      return;
+    }
+    let document: ParsedSkillDocument;
+    try {
+      document = parseSkillDocument(source);
+    } catch (error) {
+      skipped.push({ id: fallbackId, reason: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    // The directory name is the id, as it will be in `~/.stratus/skills/`.
+    // A repository whose root is the skill is the exception: its directory
+    // name is wherever it happened to be checked out, so the frontmatter
+    // `name` wins there, with the caller-supplied root id as the fallback
+    // for a nameless skill.
+    const fromDocument = document.name && isValidSkillId(document.name) ? document.name : undefined;
+    const fromFallback = isValidSkillId(fallbackId) ? fallbackId : undefined;
+    const id = preferDocumentName ? (fromDocument ?? fromFallback) : (fromFallback ?? fromDocument);
+    if (id === undefined) {
+      skipped.push({
+        id: fallbackId,
+        reason: `${JSON.stringify(fallbackId)} is not a skill id and the frontmatter name is not one either. Skill ids are kebab-case (web-research).`,
+      });
+      return;
+    }
+    if (claimed.has(id)) {
+      skipped.push({ id, reason: 'the source offers this id more than once; the first occurrence was kept' });
+      return;
+    }
+    claimed.add(id);
+    candidates.push({ id, directory, name: document.name ?? id, description: document.description });
+  };
+
+  await consider(sourceDir, options.rootId ?? path.basename(sourceDir), true);
+  // A root SKILL.md means the directory IS the skill, so everything under
+  // it is that skill's bundle: a SKILL.md inside its examples/ must not
+  // become a second installed (and enableable) skill. Root or children,
+  // never both — and a root that failed to parse still claims the layout,
+  // reported as its own skip rather than mined for lookalikes.
+  let rootIsSkill = candidates.length > 0 || skipped.length > 0;
+  if (!rootIsSkill) {
+    try {
+      await readFile(path.join(sourceDir, 'SKILL.md'), 'utf8');
+      rootIsSkill = true;
+    } catch {
+      // No root SKILL.md: a container of skills.
+    }
+  }
+  if (rootIsSkill) {
+    return { candidates, skipped };
+  }
+  const containers = [sourceDir, ...SKILL_CONTAINER_DIRNAMES.map((dirname) => path.join(sourceDir, dirname))];
+  for (const container of containers) {
+    let entries: import('node:fs').Dirent[] = [];
+    try {
+      entries = await readdir(container, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isDirectory() || SKILL_IGNORED_DIRNAMES.has(entry.name) || entry.name.startsWith('.')) {
+        continue;
+      }
+      await consider(path.join(container, entry.name), entry.name);
+    }
+  }
+
+  return { candidates, skipped };
+};
+
+/**
+ * Copy the skills a directory offers into `~/.stratus/skills/`, whole
+ * directories — a skill's bundled `references/` and `examples/` travel
+ * with its SKILL.md. The source is typically a fresh clone of a skills
+ * repository; a local path works identically.
+ *
+ * An id already installed is refused (per skill, with the rest still
+ * installing) rather than overwritten — `force` says the replacement is
+ * meant. Nothing here enables anything: a soul still opts in through its
+ * `skills:` allowlist, which is what makes bulk-installing a stranger's
+ * repository safe by default.
+ */
+export const installSkillsFromDirectory = async (
+  env: StateEnvironment,
+  sourceDir: string,
+  options: InstallSkillsOptions = {},
+): Promise<InstallSkillsResult> => {
+  const { candidates, skipped } = await discoverSkillsInDirectory(
+    sourceDir,
+    options.rootId !== undefined ? { rootId: options.rootId } : {},
+  );
+  const wanted = options.only === undefined
+    ? candidates
+    : candidates.filter((candidate) => options.only?.includes(candidate.id));
+  if (options.only !== undefined) {
+    for (const id of options.only) {
+      if (!candidates.some((candidate) => candidate.id === id)) {
+        skipped.push({ id, reason: 'the source does not offer a skill with this id' });
+      }
+    }
+  }
+
+  const installed: OperatorSkillInfo[] = [];
+  const alreadyInstalled: OperatorSkillInfo[] = [];
+  for (const candidate of wanted) {
+    const destination = path.join(skillsDirPath(env), candidate.id);
+    let exists = false;
+    try {
+      await readdir(destination);
+      exists = true;
+    } catch {
+      // Not installed yet.
+    }
+    if (exists && !options.force) {
+      // Present is not a failure: the id the caller asked for is here and
+      // loadable, and an enablement step that follows this install must
+      // see it. A copy whose SKILL.md no longer parses is the exception —
+      // that one is genuinely unusable until forced over.
+      const installedPath = path.join(destination, 'SKILL.md');
+      try {
+        const document = parseSkillDocument(await readFile(installedPath, 'utf8'));
+        alreadyInstalled.push({
+          id: candidate.id,
+          name: document.name ?? candidate.id,
+          description: document.description,
+          path: installedPath,
+          ...(document.requires ? { requires: document.requires } : {}),
+        });
+      } catch (error) {
+        skipped.push({
+          id: candidate.id,
+          reason: `already installed but unreadable (${error instanceof Error ? error.message : String(error)}); pass force to replace it`,
+        });
+      }
+      continue;
+    }
+
+    // Everything that can refuse happens before the existing version is
+    // touched, and the copy lands in a staging sibling first — a failed
+    // install must never have deleted the working version it was
+    // replacing. The rename at the end is the commit.
+    const escaping = await findEscapingSymlink(candidate.directory);
+    if (escaping !== undefined) {
+      skipped.push({
+        id: candidate.id,
+        reason: `contains a symlink reaching outside the skill (${escaping}) — installed, it would read files it does not own`,
+      });
+      continue;
+    }
+    await mkdir(skillsDirPath(env), { recursive: true });
+    const staging = path.join(skillsDirPath(env), `.installing-${candidate.id}-${randomUUID().slice(0, 8)}`);
+    try {
+      // verbatimSymlinks keeps a relative intra-skill link relative — the
+      // default rewrites it to an absolute path into the source, which
+      // for a cloned source is deleted the moment the install returns.
+      // Containment above is what makes preserving links safe.
+      await cp(candidate.directory, staging, {
+        recursive: true,
+        verbatimSymlinks: true,
+        filter: (candidateSource) => {
+          const base = path.basename(candidateSource);
+          return !SKILL_IGNORED_DIRNAMES.has(base);
+        },
+      });
+      const document = parseSkillDocument(await readFile(path.join(staging, 'SKILL.md'), 'utf8'));
+      if (exists) {
+        await rm(destination, { recursive: true, force: true });
+      }
+      await rename(staging, destination);
+      installed.push({
+        id: candidate.id,
+        name: document.name ?? candidate.id,
+        description: document.description,
+        path: path.join(destination, 'SKILL.md'),
+        ...(document.requires ? { requires: document.requires } : {}),
+      });
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
+  }
+
+  return { installed, alreadyInstalled, skipped };
+};
+
+/**
+ * The first symlink under `directory` whose target resolves outside it, or
+ * undefined when every link stays contained.
+ *
+ * Links are otherwise preserved verbatim on install, so an escaping one
+ * would keep escaping from `~/.stratus/skills/` — where `SKILL.md ->
+ * ../../credentials.json` is a skill body that reads the operator's
+ * secrets the moment an agent loads it. Refused per skill, before
+ * anything is copied or removed.
+ */
+const findEscapingSymlink = async (directory: string): Promise<string | undefined> => {
+  const root = await realpath(directory);
+  const lexicalRoot = path.resolve(directory);
+  const entries = await readdir(directory, { recursive: true, withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isSymbolicLink()) {
+      continue;
+    }
+    const linkPath = path.join(entry.parentPath, entry.name);
+    // What the copy filter drops was never going to install: a package
+    // manager routinely plants out-of-tree symlinks under node_modules,
+    // and refusing the skill over a link that will not exist afterwards
+    // is a false rejection. Judged by path segments, matching the filter.
+    const segments = path.relative(directory, linkPath).split(path.sep);
+    if (segments.some((segment) => SKILL_IGNORED_DIRNAMES.has(segment))) {
+      continue;
+    }
+    // The raw target first, and an absolute one refuses whether or not it
+    // resolves right now: preserved verbatim, an absolute path is pinned
+    // to the machine and tree the skill was inspected on — inside a
+    // cloned source it dangles the moment the clone is deleted, and
+    // anywhere else it is reading somebody's filesystem by fiat.
+    const target = await readlink(linkPath);
+    if (path.isAbsolute(target)) {
+      return path.relative(directory, linkPath);
+    }
+    let resolved: string;
+    try {
+      resolved = await realpath(linkPath);
+    } catch {
+      // Dangling here proves nothing: the link re-resolves wherever the
+      // skill lands, so `../../credentials.json` dangles in a fresh clone
+      // and reads the operator's secrets once it sits under
+      // `~/.stratus/skills/<id>/`. With no target to resolve, it is
+      // judged by path arithmetic alone: the relative target must stay
+      // inside the skill.
+      const lexical = path.resolve(path.dirname(path.resolve(linkPath)), target);
+      if (lexical !== lexicalRoot && !lexical.startsWith(lexicalRoot + path.sep)) {
+        return path.relative(directory, linkPath);
+      }
+      continue;
+    }
+    if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+      return path.relative(directory, linkPath);
+    }
+  }
+  return undefined;
 };
 
 /**

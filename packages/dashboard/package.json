@@ -1,6 +1,6 @@
 {
   "name": "@stratusagent/dashboard",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -32,7 +32,7 @@
     "url": "git+https://github.com/stratuslabs/agent.git",
     "directory": "packages/dashboard"
   },
-  "description": "The Stratus web dashboard: a static, build-step-free UI served by @stratusagent/control-api — roster, live chat, approvals, and settings",
+  "description": "The Stratus web dashboard: a static, build-step-free UI served by @stratusagent/control-api \u2014 roster, live chat, approvals, and settings",
   "keywords": [
     "stratus",
     "agent",

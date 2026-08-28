@@ -367,6 +367,230 @@ test('runCli executes the demo tool loop', async () => {
   assert.equal(output.stderr, '');
 });
 
+test('runCli skill add installs from a local skills repo, and --agent enables in the soul', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilladd-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilladd-cwd-'));
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilladd-src-'));
+  // The published shape: one directory per skill, ecosystem frontmatter
+  // included — tolerated, not refused.
+  await mkdir(path.join(source, 'hn-search'), { recursive: true });
+  await writeFile(
+    path.join(source, 'hn-search', 'SKILL.md'),
+    '---\nname: hn-search\ndescription: Use when searching Hacker News.\nlicense: MIT\nmetadata:\n  internal: false\n---\n\n# HN search\n',
+  );
+  await mkdir(path.join(source, 'visual-qa'), { recursive: true });
+  await writeFile(
+    path.join(source, 'visual-qa', 'SKILL.md'),
+    '---\nname: visual-qa\ndescription: Use when reviewing screenshots.\n---\n\n# Visual QA\n',
+  );
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'ava.md'),
+    '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n',
+  );
+
+  const env = { cwd, homeDir: home, processEnv: {} };
+  // The advertised two-step: install first, and the output suggests
+  // rerunning with --agent.
+  const install = createStreams();
+  const installExit = await runCli({ argv: ['skill', 'add', source, '--skill', 'hn-search'], streams: install.streams, env });
+  assert.equal(installExit, 0);
+  assert.match(install.output.stdout, /installed hn-search — Use when searching Hacker News\./);
+  assert.match(install.output.stdout, /--agent <id>/);
+  assert.ok(!install.output.stdout.includes('visual-qa'), '--skill did not filter');
+  await readFile(path.join(home, '.stratus', 'skills', 'hn-search', 'SKILL.md'), 'utf8');
+
+  // The suggested rerun must actually work: already installed is a
+  // no-op for the copy and still eligible for enablement, not a refusal.
+  const again = createStreams();
+  const againExit = await runCli({ argv: ['skill', 'add', source, '--skill', 'hn-search', '--agent', 'ava'], streams: again.streams, env });
+  assert.equal(againExit, 0, again.output.stderr);
+  assert.match(again.output.stdout, /already installed hn-search/);
+  assert.match(again.output.stdout, /enabled for Ava .*: hn-search/);
+  const soul = await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8');
+  assert.match(soul, /skills:\n  - hn-search/);
+
+  const list = createStreams();
+  const listExit = await runCli({ argv: ['skills'], streams: list.streams, env });
+  assert.equal(listExit, 0);
+  assert.match(list.output.stdout, /hn-search\s+Use when searching Hacker News\. — enabled by Ava/);
+});
+
+test('runCli skill add clones a git source — the transport skills.sh repos arrive by', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillgit-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillgit-cwd-'));
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillgit-src-'));
+  await mkdir(path.join(source, 'code-review'), { recursive: true });
+  await writeFile(
+    path.join(source, 'code-review', 'SKILL.md'),
+    '---\nname: code-review\ndescription: Use when reviewing a diff.\n---\n\n# Review\n',
+  );
+  const git = (...args: string[]) => new Promise<void>((resolve, reject) => {
+    const child = spawn('git', args, { cwd: source, stdio: 'ignore' });
+    child.on('error', reject);
+    child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`git ${args[0]} exited ${code}`))));
+  });
+  await git('init', '--quiet');
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.');
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--quiet', '-m', 'skills');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['skill', 'add', `file://${source}`],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /Fetching file:\/\//);
+  assert.match(output.stdout, /installed code-review — Use when reviewing a diff\./);
+  await readFile(path.join(home, '.stratus', 'skills', 'code-review', 'SKILL.md'), 'utf8');
+});
+
+test('runCli skill add of a repo whose root is the skill installs under the repo name', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillrootgit-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillrootgit-cwd-'));
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillrootgit-src-'));
+  // The repository IS the skill, and its SKILL.md has no name — the id
+  // must come from the repository's name, never from the random temp
+  // directory the clone lands in.
+  const source = path.join(parent, 'my-skills');
+  await mkdir(source, { recursive: true });
+  await writeFile(path.join(source, 'SKILL.md'), '---\ndescription: Use when rooting.\n---\n\nBody.\n');
+  const git = (...args: string[]) => new Promise<void>((resolve, reject) => {
+    const child = spawn('git', args, { cwd: source, stdio: 'ignore' });
+    child.on('error', reject);
+    child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`git ${args[0]} exited ${code}`))));
+  });
+  await git('init', '--quiet');
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.');
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--quiet', '-m', 'skill');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['skill', 'add', `file://${source}`],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /installed my-skills — Use when rooting\./);
+  await readFile(path.join(home, '.stratus', 'skills', 'my-skills', 'SKILL.md'), 'utf8');
+});
+
+test('runCli skill add never prints a credential-bearing source URL', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillcred-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillcred-cwd-'));
+  const { streams, output } = createStreams();
+  // Connection refused fast; the point is what the output says, not the clone.
+  const exitCode = await runCli({
+    argv: ['skill', 'add', 'https://user:sekrit-token@127.0.0.1:1/repo.git'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+  assert.equal(exitCode, 1);
+  const everything = output.stdout + output.stderr;
+  assert.ok(!everything.includes('sekrit-token'), 'the credential reached the output');
+  assert.match(output.stdout, /Fetching https:\/\/\*\*\*@127\.0\.0\.1:1\/repo\.git/);
+});
+
+test('runCli skill add --agent reaches the configured soul outside the agents directory', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillcfg-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillcfg-cwd-'));
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillcfg-src-'));
+  await mkdir(path.join(source, 'code-review'), { recursive: true });
+  await writeFile(path.join(source, 'code-review', 'SKILL.md'), '---\ndescription: Use when reviewing.\n---\n\nBody.\n');
+  // The served default soul lives OUTSIDE ~/.stratus/agents, named by the
+  // config — a roster case stratus agents and the daemon both include.
+  const soulPath = path.join(home, 'elsewhere', 'ava.md');
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  await writeFile(soulPath, '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ soul: soulPath })}\n`);
+
+  const env = { cwd, homeDir: home, processEnv: {} };
+  const add = createStreams();
+  const addExit = await runCli({ argv: ['skill', 'add', source, '--agent', 'ava'], streams: add.streams, env });
+  assert.equal(addExit, 0, add.output.stderr);
+  assert.match(add.output.stdout, /enabled for Ava .*: code-review/);
+  assert.match(await readFile(soulPath, 'utf8'), /skills:\n  - code-review/);
+
+  const list = createStreams();
+  await runCli({ argv: ['skills'], streams: list.streams, env });
+  assert.match(list.output.stdout, /code-review\s+Use when reviewing\. — enabled by Ava/);
+});
+
+test('runCli skill commands handle configured-soul edges: unreadable, shadowed, symlinked source', async () => {
+  const { symlink } = await import('node:fs/promises');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilledge-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilledge-cwd-'));
+  const dir = path.join(home, '.stratus', 'skills', 'code-review');
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'SKILL.md'), '---\ndescription: Use when reviewing.\n---\n\nBody.\n');
+
+  // Unreadable configured soul: enablement is unknown, not "nobody".
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ soul: path.join(home, 'gone.md') })}\n`);
+  const unknown = createStreams();
+  const unknownExit = await runCli({ argv: ['skills'], streams: unknown.streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.equal(unknownExit, 0);
+  assert.match(unknown.output.stderr, /could not read the configured soul/);
+  assert.ok(!unknown.output.stdout.includes('enabled by'), 'claimed enablement without the configured soul');
+
+  // A roster file shadowed by the configured soul with the same id: the
+  // configured file is the one served, so it is the one edited.
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nDormant.\n');
+  const servedPath = path.join(home, 'served-ava.md');
+  await writeFile(servedPath, '---\nname: Ava\nid: ava\n---\n\nServed.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ soul: servedPath })}\n`);
+
+  // The local source reached through a symlink: installed as a real
+  // directory, never as a link back into the source tree.
+  const realSource = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilledge-src-'));
+  await mkdir(path.join(realSource, 'hn-search'), { recursive: true });
+  await writeFile(path.join(realSource, 'hn-search', 'SKILL.md'), '---\ndescription: Use when searching HN.\n---\n\nBody.\n');
+  const linkSource = path.join(cwd, 'linked-source');
+  await symlink(realSource, linkSource);
+
+  const add = createStreams();
+  const addExit = await runCli({ argv: ['skill', 'add', linkSource, '--agent', 'ava'], streams: add.streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.equal(addExit, 0, add.output.stderr);
+  assert.match(await readFile(servedPath, 'utf8'), /skills:\n  - hn-search/);
+  assert.ok(!(await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8')).includes('skills:'), 'edited the shadowed file');
+  const { lstat } = await import('node:fs/promises');
+  assert.ok((await lstat(path.join(home, '.stratus', 'skills', 'hn-search'))).isDirectory(), 'installed a link, not a directory');
+});
+
+test('runCli skills withholds enablement claims when the roster cannot load', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillroster-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillroster-cwd-'));
+  const dir = path.join(home, '.stratus', 'skills', 'code-review');
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'SKILL.md'), '---\ndescription: Use when reviewing.\n---\n\nBody.\n');
+  // Two souls claiming one id: the roster refuses to load, deliberately.
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'a.md'), '---\nname: Ava\nid: ava\n---\n\nA.\n');
+  await writeFile(path.join(home, '.stratus', 'agents', 'b.md'), '---\nname: Beatrix\nid: ava\n---\n\nB.\n');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({ argv: ['skills'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+  assert.equal(exitCode, 0);
+  assert.match(output.stderr, /cannot say who enables what/);
+  assert.match(output.stdout, /code-review\s+Use when reviewing\./);
+  // Unreadable is not "unused": no enablement claim either way.
+  assert.ok(!output.stdout.includes('enabled by'), 'made an enablement claim from an unreadable roster');
+});
+
+test('parseCommand reads skill add and skills forms', () => {
+  assert.deepEqual(parseCommand(['skill', 'add', 'owner/repo']), { command: 'skill-add', source: 'owner/repo' });
+  assert.deepEqual(
+    parseCommand(['skill', 'add', './local', '--skill', 'a', '--skill', 'b', '--force', '--agent', 'ava']),
+    { command: 'skill-add', source: './local', skillIds: ['a', 'b'], force: true, agentId: 'ava' },
+  );
+  assert.deepEqual(parseCommand(['skills']), { command: 'skills' });
+  assert.deepEqual(parseCommand(['skill', 'list']), { command: 'skills' });
+  assert.throws(() => parseCommand(['skill', 'add']), /needs a source/);
+  assert.throws(() => parseCommand(['skill', 'frobnicate']), /Unknown skill subcommand/);
+});
+
 test('runCli warns like the daemon when a soul enables a skill without its required tools', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillreq-'));
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillreq-cwd-'));
