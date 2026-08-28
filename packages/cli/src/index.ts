@@ -215,6 +215,20 @@ export interface PackageInstallResult {
 /** Installs optional packages globally. */
 export type PackageInstaller = (packages: string[]) => Promise<PackageInstallResult>;
 
+/**
+ * Whether spawning npm needs a shell on this platform.
+ *
+ * On Windows npm is `npm.cmd`, a batch file: a bare `npm` does not exist as
+ * an executable there (PATHEXT is a shell's job, not spawn's), and naming
+ * the `.cmd` directly has thrown EINVAL since the fix for CVE-2024-27980 —
+ * both land in the caller's error handler, so a Windows setup would report
+ * that it could not install and leave Slack and the dashboard missing.
+ *
+ * Every package name reaching the shell is a constant in this file, so
+ * there is nothing user-supplied here for it to re-parse.
+ */
+export const npmNeedsShell = (platform: NodeJS.Platform): boolean => platform === 'win32';
+
 const defaultPackageInstaller: PackageInstaller = async (packages) => {
   const { spawn } = await import('node:child_process');
   return new Promise<PackageInstallResult>((resolve) => {
@@ -224,6 +238,7 @@ const defaultPackageInstaller: PackageInstaller = async (packages) => {
     // owns it, and two readers on one stream race for the same bytes.
     const child = spawn('npm', ['install', '-g', ...packages], {
       stdio: ['ignore', 'inherit', 'inherit'],
+      shell: npmNeedsShell(process.platform),
     });
     // `error` and `close` can both fire — a spawn that fails still closes.
     let settled = false;

@@ -30,6 +30,7 @@ import {
   readRecentRecords,
   slackAppManifest,
   tailLog,
+  npmNeedsShell,
 } from '../src/index.ts';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
@@ -1636,6 +1637,16 @@ test('setup warns when exported env vars override the saved config', async () =>
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /STRATUS_PROVIDER=openai is exported and takes precedence/);
   assert.match(output.stdout, /stratus run --provider demo "say hello"/);
+});
+
+test('npm is spawned through a shell only where it is a batch file', () => {
+  // Windows npm is npm.cmd: a bare `npm` is not an executable there, and
+  // naming the .cmd directly throws EINVAL — either way the install fails
+  // and setup reports it could not install anything.
+  assert.equal(npmNeedsShell('win32'), true);
+  // Everywhere else a shell would only add a re-parsing step nothing needs.
+  assert.equal(npmNeedsShell('darwin'), false);
+  assert.equal(npmNeedsShell('linux'), false);
 });
 
 test('setup offers the optional packages its own choices imply', async () => {
