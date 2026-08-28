@@ -30,6 +30,7 @@ import {
   readRecentRecords,
   slackAppManifest,
   tailLog,
+  npmNeedsShell,
 } from '../src/index.ts';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
@@ -469,32 +470,6 @@ test('resolveRuntimeConfig loads openai settings from renamed env vars', async (
   });
 });
 
-test('resolveRuntimeConfig still supports legacy env vars', async () => {
-  const runtime = await resolveRuntimeConfig({
-    command: 'run',
-    prompt: 'hello',
-    provider: 'openai',
-    format: 'text',
-    events: true,
-  }, {
-    processEnv: {
-      STRATUSCLAW_API_KEY: '',
-      STRATUSCLAW_MODEL: 'gpt-4.1-mini',
-      STRATUSCLAW_BASE_URL: 'https://example.test/v1',
-      STRATUSCLAW_API_KEY_ENV: 'CUSTOM_OPENAI_KEY',
-      CUSTOM_OPENAI_KEY: 'legacy-key',
-    },
-  });
-
-  assert.deepEqual(runtime, {
-    provider: 'openai',
-    apiKey: 'legacy-key',
-    apiKeyEnvVar: 'CUSTOM_OPENAI_KEY',
-    model: 'gpt-4.1-mini',
-    baseUrl: 'https://example.test/v1',
-  });
-});
-
 test('resolveRuntimeConfig loads openai settings from config file', async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
   const configPath = path.join(tempDir, 'stratus.config.json');
@@ -524,38 +499,6 @@ test('resolveRuntimeConfig loads openai settings from config file', async () => 
     apiKeyEnvVar: 'CUSTOM_OPENAI_KEY',
     model: 'gpt-4.1-mini',
     baseUrl: 'https://example.test/v1',
-  });
-});
-
-test('resolveRuntimeConfig falls back to legacy config filename', async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
-  const configPath = path.join(tempDir, 'stratusclaw.config.json');
-
-  await writeFile(configPath, JSON.stringify({
-    provider: 'openai',
-    model: 'gpt-4.1-mini',
-    apiKeyEnv: 'CUSTOM_OPENAI_KEY',
-  }, null, 2));
-
-  const runtime = await resolveRuntimeConfig({
-    command: 'run',
-    prompt: 'hello',
-    format: 'text',
-    events: true,
-  }, {
-    cwd: tempDir,
-    homeDir: tempHome,
-    processEnv: {
-      CUSTOM_OPENAI_KEY: 'config-key',
-    },
-  });
-
-  assert.deepEqual(runtime, {
-    provider: 'openai',
-    apiKey: 'config-key',
-    apiKeyEnvVar: 'CUSTOM_OPENAI_KEY',
-    model: 'gpt-4.1-mini',
-    baseUrl: 'https://api.openai.com/v1',
   });
 });
 
@@ -1694,6 +1637,175 @@ test('setup warns when exported env vars override the saved config', async () =>
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /STRATUS_PROVIDER=openai is exported and takes precedence/);
   assert.match(output.stdout, /stratus run --provider demo "say hello"/);
+});
+
+test('npm is spawned through a shell only where it is a batch file', () => {
+  // Windows npm is npm.cmd: a bare `npm` is not an executable there, and
+  // naming the .cmd directly throws EINVAL — either way the install fails
+  // and setup reports it could not install anything.
+  assert.equal(npmNeedsShell('win32'), true);
+  // Everywhere else a shell would only add a re-parsing step nothing needs.
+  assert.equal(npmNeedsShell('darwin'), false);
+  assert.equal(npmNeedsShell('linux'), false);
+});
+
+test('setup offers the optional packages its own choices imply', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Slack tokens stored for one agent — the daemon would warn about this at
+  // its next start, which is exactly the notice this offer exists to beat.
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { blair: { appToken: 'xapp-1', botToken: 'xoxb-1' } } } }),
+  );
+
+  const installed: string[][] = [];
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Nothing optional is installed on this machine.
+      packageResolver: () => false,
+      packageInstaller: async (packages: string[]) => {
+        installed.push(packages);
+        return { ok: true, message: '' };
+      },
+      // Save & finish, then "install all of them".
+      setupInput: Readable.from(['7\n', '1\n']),
+    },
+  });
+
+  assert.match(output.stdout, /2 optional packages are not installed/);
+  assert.match(output.stdout, /Slack tokens are stored for 1 agent\(s\)/);
+  assert.match(output.stdout, /opens an authenticated port on 127\.0\.0\.1/);
+  assert.deepEqual(installed, [[
+    '@stratusagent/channel-slack',
+    '@stratusagent/control-api',
+    '@stratusagent/dashboard',
+  ]]);
+});
+
+test('setup does not suggest the dashboard it could not install', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: () => false,
+      packageInstaller: async () => ({ ok: false, message: 'npm exited with code 243' }),
+      // Save & finish, then accept the one offer (no Slack tokens stored).
+      setupInput: Readable.from(['7\n', '1\n']),
+    },
+  });
+
+  assert.match(output.stdout, /One optional package is not installed/);
+  assert.match(output.stderr, /Could not install: npm exited with code 243/);
+  assert.match(output.stderr, /Setup is saved either way/);
+  // The whole point: a command that cannot work is not recommended.
+  assert.doesNotMatch(output.stdout, /^ {2}stratus dashboard$/m);
+  // ...and setup still saved.
+  assert.match(output.stdout, /Wrote /);
+});
+
+test('setup skips the offer for packages that are already installed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: () => true,
+      packageInstaller: async () => {
+        throw new Error('nothing was missing, so nothing should have been installed');
+      },
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  assert.doesNotMatch(output.stdout, /optional package/);
+  // Everything resolves, so the dashboard is a real suggestion again.
+  assert.match(output.stdout, /^ {2}stratus dashboard$/m);
+});
+
+test('declining the offer prints the command instead of running it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: () => false,
+      packageInstaller: async () => {
+        throw new Error('the offer was declined, so npm should not have run');
+      },
+      // Save & finish, then "Skip".
+      setupInput: Readable.from(['7\n', '2\n']),
+    },
+  });
+
+  assert.match(
+    output.stdout,
+    /Skipped\. Install them yourself with: npm install -g @stratusagent\/control-api @stratusagent\/dashboard/,
+  );
+});
+
+test('a partial install still names the group it left behind', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { blair: { appToken: 'xapp-1', botToken: 'xoxb-1' } } } }),
+  );
+
+  const installed: string[][] = [];
+  const { streams, output } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: () => false,
+      packageInstaller: async (packages: string[]) => {
+        installed.push(packages);
+        return { ok: true, message: '' };
+      },
+      // Save & finish, then option 3 of 4: "Install the Web dashboard only".
+      setupInput: Readable.from(['7\n', '3\n']),
+    },
+  });
+
+  assert.deepEqual(installed, [['@stratusagent/control-api', '@stratusagent/dashboard']]);
+  // The group nobody chose is still missing, and the daemon is about to warn
+  // about it — saying so here is the entire point of the offer.
+  assert.match(output.stdout, /Still missing\. Install with: npm install -g @stratusagent\/channel-slack$/m);
+  // The half that WAS installed is not repeated as missing.
+  assert.doesNotMatch(output.stdout, /Still missing.*control-api/);
+  // ...and the dashboard it just installed is a real suggestion.
+  assert.match(output.stdout, /^ {2}stratus dashboard$/m);
 });
 
 test('setup honors STRATUS_CONFIG and --config for the write target', async () => {
@@ -3800,7 +3912,7 @@ test('doctor reports an explicit config path that does not exist', async () => {
   assert.match(output.stdout, /every run with this setting fails/);
 });
 
-test('a run names the legacy variable when it supplied the key', async () => {
+test('a run names the generic variable when it supplied the key', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
@@ -3816,12 +3928,12 @@ test('a run names the legacy variable when it supplied the key', async () => {
     env: {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
       homeDir: home,
-      processEnv: { STRATUSCLAW_API_KEY: 'sk-ant-legacy' },
+      processEnv: { STRATUS_API_KEY: 'sk-ant-generic' },
       fetch: (async () => new Response('{}', { status: 401 })) as typeof fetch,
     },
   });
 
-  assert.match(output.stderr, /STRATUSCLAW_API_KEY in your environment outranks/);
+  assert.match(output.stderr, /STRATUS_API_KEY in your environment outranks/);
   assert.doesNotMatch(output.stderr, /ANTHROPIC_API_KEY in your environment/);
 });
 
@@ -3854,7 +3966,7 @@ test('doctor reports an unreadable soul as fatal, not as a fallback', async () =
   assert.doesNotMatch(output.stdout, /built-in — no soul configured/);
 });
 
-test('doctor attributes a legacy provider override to the legacy variable', async () => {
+test('doctor attributes a provider override to the variable that set it', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai' }));
@@ -3866,13 +3978,13 @@ test('doctor attributes a legacy provider override to the legacy variable', asyn
     env: {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
       homeDir: home,
-      processEnv: { STRATUSCLAW_PROVIDER: 'anthropic', STRATUSCLAW_MODEL: 'claude-opus-5' },
+      processEnv: { STRATUS_PROVIDER: 'anthropic', STRATUS_MODEL: 'claude-opus-5' },
     },
   });
 
   // No anthropic sign-in, so no run can start — but the intended provider
   // and the variable that chose it are still what the reader needs.
-  assert.match(output.stdout, /provider {2}anthropic \(unreachable\)\n {12}from STRATUSCLAW_PROVIDER/);
+  assert.match(output.stdout, /provider {2}anthropic \(unreachable\)\n {12}from STRATUS_PROVIDER/);
   assert.match(output.stdout, /No run can start: Missing API key for provider=anthropic/);
 });
 
@@ -4508,7 +4620,7 @@ test('serve applies the gateway soul-pin demotion before checking an agent', asy
   assert.match(output.stderr, /ANTHROPIC_API_KEY in your environment outranks the Claude subscription sign-in/);
 });
 
-test('doctor names the legacy config variable that pointed at a missing file', async () => {
+test('doctor names the config variable that pointed at a missing file', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
@@ -4520,13 +4632,13 @@ test('doctor names the legacy config variable that pointed at a missing file', a
     env: {
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
       homeDir: home,
-      processEnv: { STRATUSCLAW_CONFIG: './gone.json' },
+      processEnv: { STRATUS_CONFIG: './gone.json' },
     },
   });
 
   assert.equal(exitCode, 1);
-  assert.match(output.stdout, /gone\.json does not exist, but STRATUSCLAW_CONFIG names it/);
-  assert.doesNotMatch(output.stdout, /but STRATUS_CONFIG names it/);
+  assert.match(output.stdout, /gone\.json does not exist, but STRATUS_CONFIG names it/);
+  assert.doesNotMatch(output.stdout, /but --config names it/);
 });
 
 test('following recovers whole generations after several rotations', async () => {

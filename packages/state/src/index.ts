@@ -314,7 +314,6 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
 });
 
 export const DEFAULT_CONFIG_FILENAME = 'stratus.config.json';
-export const LEGACY_CONFIG_FILENAME = 'stratusclaw.config.json';
 const STRATUS_HOME_DIRNAME = '.stratus';
 const WORKSPACES_DIRNAME = 'workspaces';
 const GLOBAL_CONFIG_FILENAME = 'config.json';
@@ -1007,7 +1006,7 @@ export const resolveConfigLocation = async (
 ): Promise<ResolvedConfigLocation | undefined> => {
   const processEnv = readProcessEnv(env);
   const cwd = readWorkingDirectory(env);
-  const explicit = selection.configPath ?? processEnv.STRATUS_CONFIG ?? processEnv.STRATUSCLAW_CONFIG;
+  const explicit = selection.configPath ?? processEnv.STRATUS_CONFIG;
 
   if (explicit) {
     return { path: path.resolve(cwd, explicit), trusted: true };
@@ -1017,7 +1016,6 @@ export const resolveConfigLocation = async (
   // `stratus setup` is the fallback that makes the CLI work from anywhere.
   const candidates: ResolvedConfigLocation[] = [
     { path: path.join(cwd, DEFAULT_CONFIG_FILENAME), trusted: false },
-    { path: path.join(cwd, LEGACY_CONFIG_FILENAME), trusted: false },
     { path: globalConfigPath(env), trusted: true },
   ];
   for (const candidate of candidates) {
@@ -1133,7 +1131,6 @@ export const resolveSoulPath = (
   const processEnv = readProcessEnv(env);
   const soulPath = selection.soul
     ?? readNonEmptyString(processEnv.STRATUS_SOUL)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_SOUL)
     ?? fileConfig.soul;
 
   if (!soulPath) {
@@ -1304,7 +1301,6 @@ export const apiKeyEnvNameFor = (
   const processEnv = readProcessEnv(env);
   return String(
     readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
-      ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV)
       ?? (fileConfigApplies ? fileConfig.apiKeyEnv : undefined)
       ?? (provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'),
   );
@@ -1320,7 +1316,7 @@ export const resolveEnvApiKey = (
   env: StateEnvironment = {},
 ): { name: string; value: string } | undefined => {
   const processEnv = readProcessEnv(env);
-  for (const name of ['STRATUS_API_KEY', 'STRATUSCLAW_API_KEY', apiKeyEnvName]) {
+  for (const name of ['STRATUS_API_KEY', apiKeyEnvName]) {
     const value = readNonEmptyString(processEnv[name]);
     if (typeof value === 'string') {
       return { name, value };
@@ -1347,7 +1343,6 @@ export const resolveRuntimeConfig = async (
   // which outrank the config file's defaults.
   const provider = selection.provider
     ?? readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'))
     ?? readNonEmptyString(soul?.provider, (value) => parseProviderName(value, 'soul file'))
     ?? fileConfig.provider
     ?? 'demo';
@@ -1372,7 +1367,6 @@ export const resolveRuntimeConfig = async (
 
   const model = selection.model
     ?? readNonEmptyString(processEnv.STRATUS_MODEL)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL)
     ?? (soulModelApplies ? readNonEmptyString(soul?.model) : undefined)
     ?? (fileConfigApplies ? fileConfig.model : undefined)
     ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_MODEL : DEFAULT_OPENAI_MODEL);
@@ -1390,7 +1384,6 @@ export const resolveRuntimeConfig = async (
   const untrustedCustomBaseUrl = configTrusted === false
     && selection.baseUrl === undefined
     && readNonEmptyString(processEnv.STRATUS_BASE_URL) === undefined
-    && readNonEmptyString(processEnv.STRATUSCLAW_BASE_URL) === undefined
     && fileConfigApplies
     && fileConfig.baseUrl !== undefined
     && fileConfig.baseUrl.replace(/\/+$/, '') !== defaultEndpointFor(String(provider));
@@ -1421,8 +1414,7 @@ export const resolveRuntimeConfig = async (
     ? storedCredential.baseUrl
     : undefined;
   const explicitBaseUrl = selection.baseUrl
-    ?? readNonEmptyString(processEnv.STRATUS_BASE_URL)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_BASE_URL);
+    ?? readNonEmptyString(processEnv.STRATUS_BASE_URL);
   if (boundBaseUrl && explicitBaseUrl
     && String(explicitBaseUrl).replace(/\/+$/, '') !== boundBaseUrl.replace(/\/+$/, '')) {
     throw new Error(
@@ -1465,7 +1457,6 @@ export const resolveRuntimeConfig = async (
       };
 
   const systemPrompt = readNonEmptyString(processEnv.STRATUS_SYSTEM_PROMPT)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_SYSTEM_PROMPT)
     ?? fileConfig.systemPrompt;
 
   if (systemPrompt) {
@@ -1826,13 +1817,11 @@ export const applySoulPins = (
   // all, not a mismatching one.
   const defaultProvider: string | undefined = context.selectionProvider
     ?? readNonEmptyString(processEnv.STRATUS_PROVIDER)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER)
     ?? context.configProvider
     ?? (context.configPresent ? 'openai' : undefined);
   if (pins.provider) {
     delete selection.provider;
     delete processEnv.STRATUS_PROVIDER;
-    delete processEnv.STRATUSCLAW_PROVIDER;
     if (defaultProvider !== undefined && defaultProvider !== 'demo' && pins.provider !== defaultProvider) {
       // The default model, endpoint, and generic credentials were all
       // chosen for the default provider — none may ride along to the
@@ -1844,20 +1833,15 @@ export const applySoulPins = (
       // the resolver's own reading of a generic credential — so they stay.
       delete selection.model;
       delete processEnv.STRATUS_MODEL;
-      delete processEnv.STRATUSCLAW_MODEL;
       delete selection.baseUrl;
       delete processEnv.STRATUS_BASE_URL;
-      delete processEnv.STRATUSCLAW_BASE_URL;
       delete processEnv.STRATUS_API_KEY;
-      delete processEnv.STRATUSCLAW_API_KEY;
       delete processEnv.STRATUS_API_KEY_ENV;
-      delete processEnv.STRATUSCLAW_API_KEY_ENV;
     }
   }
   if (pins.model) {
     delete selection.model;
     delete processEnv.STRATUS_MODEL;
-    delete processEnv.STRATUSCLAW_MODEL;
   }
   return { selection, env: { ...env, processEnv } };
 };
@@ -2359,10 +2343,8 @@ export const listAgentSummaries = async (
       ? applySoulPins(soul, {}, env, pinContext).env
       : env;
     const soulEnv = readProcessEnv(normalized);
-    const envProvider = readNonEmptyString(soulEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
-      ?? readNonEmptyString(soulEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'));
-    const envModel = readNonEmptyString(soulEnv.STRATUS_MODEL)
-      ?? readNonEmptyString(soulEnv.STRATUSCLAW_MODEL);
+    const envProvider = readNonEmptyString(soulEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'));
+    const envModel = readNonEmptyString(soulEnv.STRATUS_MODEL);
 
     const soulProvider = soul?.provider;
     const soulModel = soul?.model;
@@ -2380,7 +2362,6 @@ export const listAgentSummaries = async (
   };
 
   const defaultSoulPath = readNonEmptyString(processEnv.STRATUS_SOUL)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_SOUL)
     ?? activeConfig.soul;
   const resolvedDefaultSoul = defaultSoulPath
     ? path.resolve(readWorkingDirectory(env), defaultSoulPath)

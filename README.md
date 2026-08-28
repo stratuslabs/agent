@@ -62,6 +62,11 @@ The packages that exist today:
   stratus dashboard
   ```
 
+`stratus setup` offers these installs at **Save & finish** when your own
+answers imply them — connecting an agent to Slack is already the decision to
+use Slack — and does it before starting the daemon, so it comes up with them
+present. Declining prints the command instead.
+
 Without a channel installed, everything else works exactly as before: the
 daemon logs an install hint for any agent that has channel credentials stored
 and serves the rest of the roster normally.
@@ -283,8 +288,6 @@ Then:
 export ANTHROPIC_API_KEY=your-key
 stratus run "say hello"
 ```
-
-Legacy `STRATUSCLAW_*` env vars and `stratusclaw.config.json` still work for compatibility.
 
 ## What you’ll see
 

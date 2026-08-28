@@ -93,7 +93,6 @@ import {
   resolveAgentApprovals,
   resolveEnvApiKey,
   DEFAULT_CONFIG_FILENAME,
-  LEGACY_CONFIG_FILENAME,
   loadConfigFile,
   resolveConfigLocation,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
@@ -201,7 +200,65 @@ export interface CliEnvironment {
   shutdownSignal?: AbortSignal;
   /** Runs launchctl/systemctl. Injected so tests never touch the real one. */
   serviceRunner?: ServiceRunner;
+  /** Reports whether an optional package is installed. Injected so tests do not assert on their own node_modules. */
+  packageResolver?: PackageResolver;
+  /** Installs optional packages. Injected so tests never run npm. */
+  packageInstaller?: PackageInstaller;
 }
+
+export interface PackageInstallResult {
+  ok: boolean;
+  /** Why it failed, as a line the operator can act on. Empty on success. */
+  message: string;
+}
+
+/** Installs optional packages globally. */
+export type PackageInstaller = (packages: string[]) => Promise<PackageInstallResult>;
+
+/**
+ * Whether spawning npm needs a shell on this platform.
+ *
+ * On Windows npm is `npm.cmd`, a batch file: a bare `npm` does not exist as
+ * an executable there (PATHEXT is a shell's job, not spawn's), and naming
+ * the `.cmd` directly has thrown EINVAL since the fix for CVE-2024-27980 —
+ * both land in the caller's error handler, so a Windows setup would report
+ * that it could not install and leave Slack and the dashboard missing.
+ *
+ * Every package name reaching the shell is a constant in this file, so
+ * there is nothing user-supplied here for it to re-parse.
+ */
+export const npmNeedsShell = (platform: NodeJS.Platform): boolean => platform === 'win32';
+
+const defaultPackageInstaller: PackageInstaller = async (packages) => {
+  const { spawn } = await import('node:child_process');
+  return new Promise<PackageInstallResult>((resolve) => {
+    // npm's own output is inherited rather than captured: a global install
+    // runs for tens of seconds, and a silent one is indistinguishable from
+    // a setup that has hung. stdin is NOT inherited — the setup prompter
+    // owns it, and two readers on one stream race for the same bytes.
+    const child = spawn('npm', ['install', '-g', ...packages], {
+      stdio: ['ignore', 'inherit', 'inherit'],
+      shell: npmNeedsShell(process.platform),
+    });
+    // `error` and `close` can both fire — a spawn that fails still closes.
+    let settled = false;
+    const finish = (result: PackageInstallResult): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(result);
+    };
+    child.once('error', (error: Error) => {
+      finish({ ok: false, message: error.message });
+    });
+    child.once('close', (code) => {
+      finish(code === 0
+        ? { ok: true, message: '' }
+        : { ok: false, message: `npm exited with code ${code ?? 'unknown'}` });
+    });
+  });
+};
 
 export interface CliRunOptions {
   argv: string[];
@@ -418,7 +475,9 @@ Commands:
                    subscription or API key), create your agent, connect it to
                    Slack, and test it — settings go to ~/.stratus/config.json,
                    sign-ins and channel tokens to ~/.stratus/credentials.json
-                   (0600)
+                   (0600). Save & finish offers to install any optional
+                   package your answers imply (the Slack channel, the control
+                   API and dashboard) before it starts the daemon
   chat             Talk with your agent — the conversation persists across turns
                    and remembered facts accumulate; /exit or Ctrl+C to leave
   run              Execute one local Stratus Agent session
@@ -488,7 +547,6 @@ Config file:
   The CLI looks for ./stratus.config.json first, then a path from --config / STRATUS_CONFIG,
   then the global ~/.stratus/config.json written by \`stratus setup\`.
   A "soul" key (or STRATUS_SOUL) points at a soul file so every run uses that agent.
-  Legacy STRATUSCLAW_* env vars and stratusclaw.config.json are still supported for compatibility.
 
 Plugins (tools):
   Capability is optional: install a package, then list it under "plugins" in a
@@ -1210,9 +1268,8 @@ export const warnOnCredentialOverride = async (
     return;
   }
   // The resolver records the variable that actually won — guessing it here
-  // would name the wrong one whenever a custom apiKeyEnv or the legacy
-  // STRATUSCLAW_ prefix supplied the key, sending the reader to unset
-  // something that was never the cause.
+  // would name the wrong one whenever a custom apiKeyEnv supplied the key,
+  // sending the reader to unset something that was never the cause.
   const primary = runtime.provider === 'anthropic' && runtime.apiKey ? runtime.apiKeyEnvVar : undefined;
   // A fallback demoted the same way costs exactly as much, and only bites
   // once the primary is already failing — the worst moment to discover it.
@@ -2254,15 +2311,11 @@ export const runSetup = async (
   const cwd = readWorkingDirectory(env);
   const processEnv = readProcessEnv(env);
 
-  // Config target: --config, then STRATUS_CONFIG / STRATUSCLAW_CONFIG, then
-  // the global ~/.stratus/config.json — the file `stratus run` falls back to
-  // from any directory, which is what makes setup a one-time step.
-  const envConfigVar = readNonEmptyString(processEnv.STRATUS_CONFIG)
-    ? 'STRATUS_CONFIG'
-    : readNonEmptyString(processEnv.STRATUSCLAW_CONFIG)
-      ? 'STRATUSCLAW_CONFIG'
-      : undefined;
-  const envConfigPath = envConfigVar ? String(processEnv[envConfigVar]).trim() : undefined;
+  // Config target: --config, then STRATUS_CONFIG, then the global
+  // ~/.stratus/config.json — the file `stratus run` falls back to from any
+  // directory, which is what makes setup a one-time step.
+  const envConfigVar = readNonEmptyString(processEnv.STRATUS_CONFIG) ? 'STRATUS_CONFIG' : undefined;
+  const envConfigPath = envConfigVar ? String(processEnv.STRATUS_CONFIG).trim() : undefined;
   const configPath = command.configPath
     ? path.resolve(cwd, command.configPath)
     : envConfigPath
@@ -2594,7 +2647,6 @@ export const runSetup = async (
     }
     const keyEnvSelector = provider === state.provider
       ? readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
-        ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV)
         ?? state.apiKeyEnv
       : undefined;
     return state.credentials[provider] !== undefined
@@ -2880,11 +2932,9 @@ export const runSetup = async (
     // stored key's bound endpoint is authoritative — so the inline test
     // exercises precisely what a real run will use.
     const keyEnv = readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
-      ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY_ENV)
       ?? state.apiKeyEnv
       ?? defaultKeyEnvFor(state.provider);
     const envKey = readNonEmptyString(processEnv.STRATUS_API_KEY)
-      ?? readNonEmptyString(processEnv.STRATUSCLAW_API_KEY)
       ?? readNonEmptyString(processEnv[String(keyEnv)]);
     const credential = envKey ? undefined : state.credentials[state.provider];
     const boundUrl = credential?.type === 'api_key' ? credential.baseUrl : undefined;
@@ -3058,8 +3108,7 @@ export const runSetup = async (
     // Listing the config soul while `stratus serve` registers the env one
     // would store tokens against an id the adapter then skips.
     const processEnv = readProcessEnv(env);
-    const envSoul = readNonEmptyString(processEnv.STRATUS_SOUL)
-      ?? readNonEmptyString(processEnv.STRATUSCLAW_SOUL);
+    const envSoul = readNonEmptyString(processEnv.STRATUS_SOUL);
     if (typeof envSoul === 'string' && state.soulPath && envSoul !== state.soulPath) {
       warnOnce(`STRATUS_SOUL points at ${envSoul}, which outranks the configured ${state.soulPath} — Channels lists what a run would actually use`);
     }
@@ -3264,27 +3313,148 @@ export const runSetup = async (
 
   const detectEnvOverride = (
     primary: string,
-    legacy: string,
     chosen: string,
     flagName?: string,
   ): { envVar: string; envValue: string; flag?: string } | undefined => {
-    const envVar = readNonEmptyString(processEnv[primary])
-      ? primary
-      : readNonEmptyString(processEnv[legacy])
-        ? legacy
-        : undefined;
-    if (!envVar) {
+    if (!readNonEmptyString(processEnv[primary])) {
       return undefined;
     }
-    const envValue = String(processEnv[envVar]).trim();
+    const envValue = String(processEnv[primary]).trim();
     if (envValue === chosen) {
       return undefined;
     }
     return {
-      envVar,
+      envVar: primary,
       envValue,
       ...(flagName ? { flag: `${flagName} ${quoteShellArg(chosen)}` } : {}),
     };
+  };
+
+  /**
+   * An optional package this setup's own choices imply, and why. Setup knows
+   * both facts before the daemon does — that Slack tokens were just stored,
+   * and that it is about to recommend `stratus dashboard` — so it is the one
+   * place that can offer the install rather than leave the gap to be found
+   * in a log after the fact.
+   */
+  interface PackageGroup {
+    id: 'slack' | 'dashboard';
+    label: string;
+    why: string;
+    packages: string[];
+  }
+
+  /**
+   * Whether `stratus dashboard` can work. Read before the offer and set by
+   * it, so the closing suggestions never name a command this machine cannot
+   * run — the failure that sends someone to the logs to find out why.
+   */
+  let dashboardReady = packageInstalled('@stratusagent/control-api', env)
+    && packageInstalled('@stratusagent/dashboard', env);
+
+  const missingPackageGroups = (): PackageGroup[] => {
+    const groups: PackageGroup[] = [];
+    const slackAgents = Object.keys(state.channels.slack ?? {}).length;
+    if (slackAgents > 0 && !packageInstalled('@stratusagent/channel-slack', env)) {
+      groups.push({
+        id: 'slack',
+        label: 'Slack channel',
+        why: `Slack tokens are stored for ${slackAgents} agent(s), but nothing connects to Slack without it`,
+        packages: ['@stratusagent/channel-slack'],
+      });
+    }
+    // Both, because the dashboard is what was offered: the control API is
+    // the port and the dashboard is the page served on it. Only the missing
+    // half is installed, so accepting this on a machine that already has
+    // the API does not reinstall it.
+    const dashboardPackages = ['@stratusagent/control-api', '@stratusagent/dashboard']
+      .filter((name) => !packageInstalled(name, env));
+    if (dashboardPackages.length > 0) {
+      groups.push({
+        id: 'dashboard',
+        label: 'Web dashboard',
+        why: '`stratus dashboard` needs it, and it opens an authenticated port on 127.0.0.1',
+        packages: dashboardPackages,
+      });
+    }
+    return groups;
+  };
+
+  /**
+   * Offers the packages above. Declining is a real answer and prints the
+   * command; the control API in particular binds a port, and installing it
+   * is how an operator says they want one open, so this asks rather than
+   * deciding for them.
+   */
+  const offerOptionalPackages = async (): Promise<void> => {
+    const groups = missingPackageGroups();
+    if (groups.length === 0) {
+      return;
+    }
+    writeLine(streams.stdout);
+    writeLine(streams.stdout, groups.length === 1
+      ? 'One optional package is not installed:'
+      : `${groups.length} optional packages are not installed:`);
+    for (const group of groups) {
+      writeLine(streams.stdout, `  ${group.packages.join(' ')}`);
+      writeLine(streams.stdout, `    ${group.why}.`);
+    }
+
+    const answer = await prompter.select('Install now with npm install -g?', groups.length === 1
+      ? ['Install it now', 'Skip']
+      : ['Install all of them now', ...groups.map((group) => `Install the ${group.label} only`), 'Skip']);
+
+    const chosen = ((): PackageGroup[] => {
+      if (answer.kind !== 'index') {
+        return [];
+      }
+      if (groups.length === 1) {
+        return answer.index === 0 ? groups : [];
+      }
+      if (answer.index === 0) {
+        return groups;
+      }
+      const only = groups[answer.index - 1];
+      return only ? [only] : [];
+    })();
+
+    // Held before the install rather than derived after it: picking one
+    // group is not a decision about the other, and the daemon starts a few
+    // lines below and warns about exactly what is still missing — the
+    // notice this whole offer exists to pre-empt.
+    const declined = groups.filter((group) => !chosen.includes(group));
+
+    if (chosen.length > 0) {
+      const packages = chosen.flatMap((group) => group.packages);
+      writeLine(streams.stdout, `Running: npm install -g ${packages.join(' ')}`);
+      // Never fails setup, for the same reason the service install does not:
+      // the config and credentials are already written, and a package that
+      // did not install is a warning at the next start, not a broken machine.
+      const result = await (env.packageInstaller ?? defaultPackageInstaller)(packages)
+        .catch((error: unknown) => ({
+          ok: false,
+          message: error instanceof Error ? error.message : String(error),
+        }));
+      if (result.ok) {
+        writeLine(streams.stdout, `Installed ${packages.join(' ')}.`);
+        // npm's exit code, not a second resolve: a package written into the
+        // global prefix a moment ago need not be resolvable from THIS
+        // process, whose module resolution was fixed when it started.
+        if (chosen.some((group) => group.id === 'dashboard')) {
+          dashboardReady = true;
+        }
+      } else {
+        writeLine(streams.stderr, `Could not install: ${result.message}`);
+        writeLine(streams.stderr, `Setup is saved either way — run \`npm install -g ${packages.join(' ')}\` yourself.`);
+      }
+    }
+
+    if (declined.length > 0) {
+      const rest = declined.flatMap((group) => group.packages).join(' ');
+      writeLine(streams.stdout, chosen.length > 0
+        ? `Still missing. Install with: npm install -g ${rest}`
+        : `Skipped. Install them yourself with: npm install -g ${rest}`);
+    }
   };
 
   const save = async (): Promise<void> => {
@@ -3325,18 +3495,15 @@ export const runSetup = async (
     // bare runs started here — say so, and make the suggested command pick
     // the file that was just written.
     if (configPath === globalConfigPath(env)) {
-      for (const shadow of [DEFAULT_CONFIG_FILENAME, LEGACY_CONFIG_FILENAME]) {
-        const shadowPath = path.join(cwd, shadow);
-        try {
-          await readFile(shadowPath, 'utf8');
-          writeLine(streams.stdout, `Note: ${shadowPath} exists and takes precedence over the global config for runs started in this directory.`);
-          writeLine(streams.stdout, 'The suggested commands below include --config so they use what you just saved.');
-          shadowConfigFlag = ` --config ${quoteShellArg(configPath)}`;
-          break;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-            throw error;
-          }
+      const shadowPath = path.join(cwd, DEFAULT_CONFIG_FILENAME);
+      try {
+        await readFile(shadowPath, 'utf8');
+        writeLine(streams.stdout, `Note: ${shadowPath} exists and takes precedence over the global config for runs started in this directory.`);
+        writeLine(streams.stdout, 'The suggested commands below include --config so they use what you just saved.');
+        shadowConfigFlag = ` --config ${quoteShellArg(configPath)}`;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
         }
       }
     }
@@ -3353,6 +3520,14 @@ export const runSetup = async (
         ? `Saved Slack tokens for ${connected} agent${connected === 1 ? '' : 's'} to ${credentialsPath(env)} — run \`${serveCommand()}\` to bring them online.`
         : `Removed the stored Slack tokens from ${credentialsPath(env)}.`);
     }
+
+    // Before the service block below, deliberately. A package installed
+    // after the daemon starts is invisible to it — installing does not
+    // reload a running process — so offering here is what makes the
+    // LaunchAgent come up with the Slack channel and the control API
+    // already present, instead of warning about them in a log nobody reads
+    // until the dashboard fails.
+    await offerOptionalPackages();
 
     // Last, so the daemon starts against the config and credentials that
     // were just written rather than the ones it would have found a moment
@@ -3409,14 +3584,14 @@ export const runSetup = async (
     // Exported STRATUS_* variables outrank the config file, so warn when one
     // would make `stratus run` behave differently from what was just saved.
     const conflicts = [
-      detectEnvOverride('STRATUS_PROVIDER', 'STRATUSCLAW_PROVIDER', state.provider, '--provider'),
+      detectEnvOverride('STRATUS_PROVIDER', state.provider, '--provider'),
       ...(state.provider !== 'demo'
-        ? [detectEnvOverride('STRATUS_MODEL', 'STRATUSCLAW_MODEL', state.model ?? defaultModelFor(state.provider), '--model')]
+        ? [detectEnvOverride('STRATUS_MODEL', state.model ?? defaultModelFor(state.provider), '--model')]
         : []),
       ...(state.provider === 'openai'
-        ? [detectEnvOverride('STRATUS_BASE_URL', 'STRATUSCLAW_BASE_URL', state.baseUrl ?? DEFAULT_OPENAI_BASE_URL, '--base-url')]
-        : [detectEnvOverride('STRATUS_BASE_URL', 'STRATUSCLAW_BASE_URL', '')]),
-      detectEnvOverride('STRATUS_SYSTEM_PROMPT', 'STRATUSCLAW_SYSTEM_PROMPT', state.systemPrompt ?? ''),
+        ? [detectEnvOverride('STRATUS_BASE_URL', state.baseUrl ?? DEFAULT_OPENAI_BASE_URL, '--base-url')]
+        : [detectEnvOverride('STRATUS_BASE_URL', '')]),
+      detectEnvOverride('STRATUS_SYSTEM_PROMPT', state.systemPrompt ?? ''),
     ].filter((conflict) => conflict !== undefined);
 
     for (const conflict of conflicts) {
@@ -3451,7 +3626,9 @@ export const runSetup = async (
       }
     }
     writeLine(streams.stdout, `  stratus run${extraFlags}${runConfigFlag}${shadowConfigFlag} "say hello"`);
-    writeLine(streams.stdout, '  stratus dashboard');
+    if (dashboardReady) {
+      writeLine(streams.stdout, '  stratus dashboard');
+    }
   };
 
   try {
@@ -3674,23 +3851,20 @@ export const collectDoctorReport = async (
   // Config discovery, spelled out rather than delegated: doctor has to
   // report the files that LOST as well as the one in use, which is the
   // whole point when a stray project config is the answer.
-  // Which of the three named it, not just that one did: telling someone to
-  // fix STRATUS_CONFIG when STRATUSCLAW_CONFIG is what is set leaves the
-  // real override in place — the same mistake as provider and key
-  // attribution, in the one place a typo is most likely.
+  // Which of the two named it, not just that one did: telling someone to
+  // fix STRATUS_CONFIG when --config is what is set leaves the real
+  // override in place — the same mistake as provider and key attribution,
+  // in the one place a typo is most likely.
   const explicitSource = command.configPath !== undefined
     ? { name: '--config', value: command.configPath }
     : readNonEmptyString(processEnv.STRATUS_CONFIG)
       ? { name: 'STRATUS_CONFIG', value: String(processEnv.STRATUS_CONFIG) }
-      : readNonEmptyString(processEnv.STRATUSCLAW_CONFIG)
-        ? { name: 'STRATUSCLAW_CONFIG', value: String(processEnv.STRATUSCLAW_CONFIG) }
-        : undefined;
+      : undefined;
   const explicit = explicitSource?.value;
   const candidates = explicitSource
     ? [{ path: path.resolve(cwd, explicitSource.value), label: explicitSource.name }]
     : [
         { path: path.join(cwd, DEFAULT_CONFIG_FILENAME), label: 'project' },
-        { path: path.join(cwd, LEGACY_CONFIG_FILENAME), label: 'project (legacy)' },
         { path: globalConfigPath(env), label: 'global' },
       ];
   const present: Array<{ path: string; label: string }> = [];
@@ -3747,16 +3921,10 @@ export const collectDoctorReport = async (
 
   // Which variable supplied a value, not just the value: naming the wrong
   // one sends the reader to unset something that was never the cause,
-  // leaving the real override in place. The legacy STRATUSCLAW_ prefix is
-  // still honored by the resolver, so it has to be reportable too.
-  const envPick = (...names: string[]): { name: string; value: string } | undefined => {
-    for (const name of names) {
-      const value = readNonEmptyString(processEnv[name]);
-      if (typeof value === 'string') {
-        return { name, value };
-      }
-    }
-    return undefined;
+  // leaving the real override in place.
+  const envPick = (name: string): { name: string; value: string } | undefined => {
+    const value = readNonEmptyString(processEnv[name]);
+    return typeof value === 'string' ? { name, value } : undefined;
   };
 
   /**
@@ -3766,7 +3934,7 @@ export const collectDoctorReport = async (
    * while whether a run works at all, and what it bills, is whatever
    * resolveRuntimeConfig actually returns or throws.
    */
-  const envSoul = envPick('STRATUS_SOUL', 'STRATUSCLAW_SOUL');
+  const envSoul = envPick('STRATUS_SOUL');
   const soulValue = envSoul?.value ?? fileConfig.soul;
   const soulSource = envSoul ? envSoul.name : (winner ? winner.path : '');
   const soulPath = typeof soulValue === 'string' ? path.resolve(cwd, soulValue) : undefined;
@@ -3795,7 +3963,7 @@ export const collectDoctorReport = async (
     }
   }
 
-  const envProviderPick = envPick('STRATUS_PROVIDER', 'STRATUSCLAW_PROVIDER');
+  const envProviderPick = envPick('STRATUS_PROVIDER');
   const providerSource = envProviderPick
     ? envProviderPick.name
     : soul?.provider
@@ -3827,7 +3995,7 @@ export const collectDoctorReport = async (
 
   let model: DoctorSetting | undefined;
   if (resolved && resolved.provider !== 'demo') {
-    const envModel = envPick('STRATUS_MODEL', 'STRATUSCLAW_MODEL');
+    const envModel = envPick('STRATUS_MODEL');
     // A soul's model belongs to the soul's provider, and the config's model
     // to the config's provider — either can be stranded by an override.
     const soulModelApplies = soul?.provider === undefined || soul.provider === resolved.provider;
@@ -4227,8 +4395,7 @@ export const runService = async (
   // install directory and can come up on a different roster entirely.
   const processEnv = readProcessEnv(env);
   const selectedConfig = command.configPath
-    ?? readNonEmptyString(processEnv.STRATUS_CONFIG)
-    ?? readNonEmptyString(processEnv.STRATUSCLAW_CONFIG);
+    ?? readNonEmptyString(processEnv.STRATUS_CONFIG);
   if (command.action === 'install') {
     // A config the daemon cannot parse kills it during gateway.start(),
     // and the manager — having accepted the start — restarts it on a
@@ -4329,14 +4496,12 @@ export const runAgentNew = async (
         writeLine(streams.stdout, `Note: ${message}.`);
       });
       const soulProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
-        ?? readNonEmptyString(processEnv.STRATUSCLAW_PROVIDER, (value) => parseProviderName(value, 'STRATUSCLAW_PROVIDER'))
         ?? activeConfig.provider
         ?? 'demo';
       // The active config's model was written for the provider named in
       // that config; it only travels into the soul when they still match.
       const configModelApplies = (activeConfig.provider ?? 'openai') === soulProvider;
       const soulModel = readNonEmptyString(processEnv.STRATUS_MODEL)
-        ?? readNonEmptyString(processEnv.STRATUSCLAW_MODEL)
         ?? (configModelApplies ? activeConfig.model : undefined)
         ?? (soulProvider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
       const soulPin = soulProvider !== 'demo' ? { provider: soulProvider, model: soulModel } : {};
@@ -4631,6 +4796,36 @@ export const runDashboard = async (
   return serving;
 };
 
+/** Reports whether an optional package is installed. */
+export type PackageResolver = (specifier: string) => boolean;
+
+/**
+ * Resolution and loading are separate questions, and only the first one
+ * means "not installed". Inspecting an import's error message cannot tell
+ * them apart: a package that IS installed but is missing one of its own
+ * dependencies throws ERR_MODULE_NOT_FOUND naming that dependency and the
+ * importer — so a broken install would read as an absent one, silently
+ * disabling a channel whose stored tokens say it should be running, or
+ * leaving a daemon without the API an operator installed it to have.
+ */
+const defaultPackageResolver: PackageResolver = (specifier) => {
+  try {
+    import.meta.resolve(specifier);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Whether an optional package is installed. The resolver is injectable
+ * because what is installed is a property of the machine: a test asserting
+ * on the real one would be asserting on its own node_modules, which is why
+ * every optional package is a devDependency here in the first place.
+ */
+const packageInstalled = (specifier: string, env: CliEnvironment = {}): boolean =>
+  (env.packageResolver ?? defaultPackageResolver)(specifier);
+
 type SlackAdapterFactory = typeof import('@stratusagent/channel-slack').createSlackChannelAdapter;
 
 /**
@@ -4641,16 +4836,7 @@ type SlackAdapterFactory = typeof import('@stratusagent/channel-slack').createSl
  * whose stored tokens say it should be running.
  */
 const loadSlackAdapter = async (): Promise<SlackAdapterFactory | undefined> => {
-  // Resolution and loading are separate questions, and only the first one
-  // means "not installed". Inspecting the import's error message cannot
-  // tell them apart: a package that IS installed but is missing one of
-  // its own dependencies throws ERR_MODULE_NOT_FOUND naming that
-  // dependency and this package as the importer — a broken install would
-  // read as an absent one, silently disabling a channel whose tokens say
-  // it should be running.
-  try {
-    import.meta.resolve('@stratusagent/channel-slack');
-  } catch {
+  if (!packageInstalled('@stratusagent/channel-slack')) {
     return undefined;
   }
   // Resolvable: any failure from here is a real problem with the
@@ -4670,9 +4856,7 @@ type ControlApiFactory = typeof import('@stratusagent/control-api').createContro
  * without the API an operator installed it to have.
  */
 const loadControlApi = async (): Promise<ControlApiFactory | undefined> => {
-  try {
-    import.meta.resolve('@stratusagent/control-api');
-  } catch {
+  if (!packageInstalled('@stratusagent/control-api')) {
     return undefined;
   }
   return (await import('@stratusagent/control-api')).createControlApi;
