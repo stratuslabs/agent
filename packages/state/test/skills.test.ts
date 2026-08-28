@@ -175,6 +175,41 @@ test('symlinks: relative links inside a skill survive; a link escaping the skill
   assert.deepEqual(remaining.sort(), ['linky']);
 });
 
+test('a root skill keeps its bundle: a SKILL.md inside examples/ is not a second install', async () => {
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillbundle-XYZ'));
+  await writeFile(
+    path.join(source, 'SKILL.md'),
+    '---\nname: pr-review\ndescription: Use when reviewing pull requests.\n---\n\nBody.\n',
+  );
+  await mkdir(path.join(source, 'examples', 'demo'), { recursive: true });
+  await writeFile(path.join(source, 'examples', 'demo', 'SKILL.md'), skillFile('A bundled example, not a skill.'));
+
+  const homeDir = await freshHome();
+  const result = await installSkillsFromDirectory({ homeDir }, source);
+  assert.deepEqual(result.installed.map((skill) => skill.id), ['pr-review']);
+  assert.deepEqual(result.skipped, []);
+  // The example travels inside the root skill's own directory.
+  await readFile(path.join(skillsDirPath({ homeDir }), 'pr-review', 'examples', 'demo', 'SKILL.md'), 'utf8');
+});
+
+test('symlinks under node_modules and .git do not refuse a skill — the copy drops them anyway', async () => {
+  const { symlink } = await import('node:fs/promises');
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillnm-'));
+  await mkdir(path.join(source, 'toolful', 'node_modules', '.bin'), { recursive: true });
+  await writeFile(path.join(source, 'toolful', 'SKILL.md'), skillFile('Use for toolful things.'));
+  await writeFile(path.join(source, 'elsewhere.js'), 'x');
+  // The out-of-tree link a package manager plants — never installed,
+  // because the copy filter drops node_modules whole.
+  await symlink(path.join('..', '..', '..', '..', 'elsewhere.js'), path.join(source, 'toolful', 'node_modules', '.bin', 'tool'));
+
+  const homeDir = await freshHome();
+  const result = await installSkillsFromDirectory({ homeDir }, source);
+  assert.deepEqual(result.installed.map((skill) => skill.id), ['toolful']);
+  const installedEntries = await import('node:fs/promises').then(({ readdir }) =>
+    readdir(path.join(skillsDirPath({ homeDir }), 'toolful')));
+  assert.deepEqual(installedEntries.sort(), ['SKILL.md']);
+});
+
 test('a dangling symlink is judged by where it will point once installed', async () => {
   const { symlink } = await import('node:fs/promises');
   const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilldangle-'));

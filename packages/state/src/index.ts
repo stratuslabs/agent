@@ -1479,6 +1479,23 @@ export const discoverSkillsInDirectory = async (
   };
 
   await consider(sourceDir, options.rootId ?? path.basename(sourceDir), true);
+  // A root SKILL.md means the directory IS the skill, so everything under
+  // it is that skill's bundle: a SKILL.md inside its examples/ must not
+  // become a second installed (and enableable) skill. Root or children,
+  // never both — and a root that failed to parse still claims the layout,
+  // reported as its own skip rather than mined for lookalikes.
+  let rootIsSkill = candidates.length > 0 || skipped.length > 0;
+  if (!rootIsSkill) {
+    try {
+      await readFile(path.join(sourceDir, 'SKILL.md'), 'utf8');
+      rootIsSkill = true;
+    } catch {
+      // No root SKILL.md: a container of skills.
+    }
+  }
+  if (rootIsSkill) {
+    return { candidates, skipped };
+  }
   const containers = [sourceDir, ...SKILL_CONTAINER_DIRNAMES.map((dirname) => path.join(sourceDir, dirname))];
   for (const container of containers) {
     let entries: import('node:fs').Dirent[] = [];
@@ -1631,6 +1648,14 @@ const findEscapingSymlink = async (directory: string): Promise<string | undefine
       continue;
     }
     const linkPath = path.join(entry.parentPath, entry.name);
+    // What the copy filter drops was never going to install: a package
+    // manager routinely plants out-of-tree symlinks under node_modules,
+    // and refusing the skill over a link that will not exist afterwards
+    // is a false rejection. Judged by path segments, matching the filter.
+    const segments = path.relative(directory, linkPath).split(path.sep);
+    if (segments.some((segment) => SKILL_IGNORED_DIRNAMES.has(segment))) {
+      continue;
+    }
     // The raw target first, and an absolute one refuses whether or not it
     // resolves right now: preserved verbatim, an absolute path is pinned
     // to the machine and tree the skill was inspected on — inside a
