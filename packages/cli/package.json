@@ -40,6 +40,7 @@
   "devDependencies": {
     "@stratusagent/channel-slack": "workspace:*",
     "@stratusagent/control-api": "workspace:*",
+    "@stratusagent/dashboard": "workspace:*",
     "@stratusagent/tool-browser": "workspace:*",
     "@stratusagent/tool-fs": "workspace:*",
     "@stratusagent/tool-shell": "workspace:*",
@@ -65,13 +66,17 @@
   },
   "peerDependencies": {
     "@stratusagent/channel-slack": "workspace:*",
-    "@stratusagent/control-api": "workspace:*"
+    "@stratusagent/control-api": "workspace:*",
+    "@stratusagent/dashboard": "workspace:*"
   },
   "peerDependenciesMeta": {
     "@stratusagent/channel-slack": {
       "optional": true
     },
     "@stratusagent/control-api": {
+      "optional": true
+    },
+    "@stratusagent/dashboard": {
       "optional": true
     }
   }

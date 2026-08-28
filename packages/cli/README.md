@@ -26,6 +26,10 @@ alongside the CLI and `stratus serve` picks it up automatically:
 npm install -g @stratusagent/channel-slack
 ```
 
+You rarely have to type that. Connect an agent in `stratus setup` → **Channels**
+and **Save & finish** offers the install, because storing tokens is already the
+decision to use Slack — see [What Save & finish offers](#what-save--finish-offers).
+
 If tokens are stored for an agent but the package isn't installed, `stratus
 serve` says so and starts anyway, serving every other channel.
 
@@ -140,6 +144,45 @@ token, so pass it with `--token` or `STRATUS_GATEWAY_TOKEN`.
 - **Channels** — put an agent on Slack without opening a file. Pick the agent, and setup prints the app manifest with their name already filled in, walks you through the two tokens (input hidden), verifies each against Slack before accepting it, and stores them where `stratus serve` looks. The list marks who is connected; picking a connected agent offers to replace their tokens or disconnect.
 - **Always on** — whether the roster keeps answering once you close the terminal. On by default, because an agent you have to remember to start is not always-on, and every Slack app you connected above stays silent until `stratusd` runs. Save & finish installs it (see [Always on](#always-on)); choose *do not run it for me* and setup removes any service it previously installed.
 - **Test run** — say hello with the current settings before saving anything.
+- **Save & finish** — writes everything, offers any optional package your
+  choices imply, then installs the always-on service.
+
+### What Save & finish offers
+
+The CLI ships no transport and no open port, so a fresh machine finishes setup
+missing the packages its own answers just asked for. Setup knows that before
+the daemon does — it stored the Slack tokens itself — so **Save & finish** names
+what is missing and offers to install it:
+
+```text
+2 optional packages are not installed:
+  @stratusagent/channel-slack
+    Slack tokens are stored for 1 agent(s), but nothing connects to Slack without it.
+  @stratusagent/control-api @stratusagent/dashboard
+    `stratus dashboard` needs it, and it opens an authenticated port on 127.0.0.1.
+
+Install now with npm install -g?
+> Install all of them now
+  Install the Slack channel only
+  Install the Web dashboard only
+  Skip
+```
+
+Three things about it worth knowing:
+
+- **It asks, and declining prints the command.** The control API binds a port,
+  and installing it is how an operator says they want one open — so this stays
+  a question, not a default.
+- **It runs before the service install**, so the LaunchAgent comes up with
+  those packages already present. A package installed *after* a daemon starts
+  is invisible to it; that ordering is the whole reason the offer lives here
+  rather than in a closing hint.
+- **A failed install never fails setup.** Your config and credentials are
+  already written; you get npm's exit code and the command to run yourself.
+
+Setup only suggests `stratus dashboard` at the end when it can actually work —
+a machine that skipped or failed that install is not told to run a command that
+would exit with an error.
 
 Credentials are stored in `~/.stratus/credentials.json` (owner-read-only) and settings in `~/.stratus/config.json`, so `stratus run` works from any directory afterwards. No env vars to export, no config files to hand-edit.
 

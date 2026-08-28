@@ -95,6 +95,9 @@ importers:
       '@stratusagent/control-api':
         specifier: workspace:*
         version: link:../control-api
+      '@stratusagent/dashboard':
+        specifier: workspace:*
+        version: link:../dashboard
       '@stratusagent/tool-browser':
         specifier: workspace:*
         version: link:../tool-browser

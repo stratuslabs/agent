@@ -200,7 +200,50 @@ export interface CliEnvironment {
   shutdownSignal?: AbortSignal;
   /** Runs launchctl/systemctl. Injected so tests never touch the real one. */
   serviceRunner?: ServiceRunner;
+  /** Reports whether an optional package is installed. Injected so tests do not assert on their own node_modules. */
+  packageResolver?: PackageResolver;
+  /** Installs optional packages. Injected so tests never run npm. */
+  packageInstaller?: PackageInstaller;
 }
+
+export interface PackageInstallResult {
+  ok: boolean;
+  /** Why it failed, as a line the operator can act on. Empty on success. */
+  message: string;
+}
+
+/** Installs optional packages globally. */
+export type PackageInstaller = (packages: string[]) => Promise<PackageInstallResult>;
+
+const defaultPackageInstaller: PackageInstaller = async (packages) => {
+  const { spawn } = await import('node:child_process');
+  return new Promise<PackageInstallResult>((resolve) => {
+    // npm's own output is inherited rather than captured: a global install
+    // runs for tens of seconds, and a silent one is indistinguishable from
+    // a setup that has hung. stdin is NOT inherited — the setup prompter
+    // owns it, and two readers on one stream race for the same bytes.
+    const child = spawn('npm', ['install', '-g', ...packages], {
+      stdio: ['ignore', 'inherit', 'inherit'],
+    });
+    // `error` and `close` can both fire — a spawn that fails still closes.
+    let settled = false;
+    const finish = (result: PackageInstallResult): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(result);
+    };
+    child.once('error', (error: Error) => {
+      finish({ ok: false, message: error.message });
+    });
+    child.once('close', (code) => {
+      finish(code === 0
+        ? { ok: true, message: '' }
+        : { ok: false, message: `npm exited with code ${code ?? 'unknown'}` });
+    });
+  });
+};
 
 export interface CliRunOptions {
   argv: string[];
@@ -417,7 +460,9 @@ Commands:
                    subscription or API key), create your agent, connect it to
                    Slack, and test it — settings go to ~/.stratus/config.json,
                    sign-ins and channel tokens to ~/.stratus/credentials.json
-                   (0600)
+                   (0600). Save & finish offers to install any optional
+                   package your answers imply (the Slack channel, the control
+                   API and dashboard) before it starts the daemon
   chat             Talk with your agent — the conversation persists across turns
                    and remembered facts accumulate; /exit or Ctrl+C to leave
   run              Execute one local Stratus Agent session
@@ -3270,6 +3315,123 @@ export const runSetup = async (
     };
   };
 
+  /**
+   * An optional package this setup's own choices imply, and why. Setup knows
+   * both facts before the daemon does — that Slack tokens were just stored,
+   * and that it is about to recommend `stratus dashboard` — so it is the one
+   * place that can offer the install rather than leave the gap to be found
+   * in a log after the fact.
+   */
+  interface PackageGroup {
+    id: 'slack' | 'dashboard';
+    label: string;
+    why: string;
+    packages: string[];
+  }
+
+  /**
+   * Whether `stratus dashboard` can work. Read before the offer and set by
+   * it, so the closing suggestions never name a command this machine cannot
+   * run — the failure that sends someone to the logs to find out why.
+   */
+  let dashboardReady = packageInstalled('@stratusagent/control-api', env)
+    && packageInstalled('@stratusagent/dashboard', env);
+
+  const missingPackageGroups = (): PackageGroup[] => {
+    const groups: PackageGroup[] = [];
+    const slackAgents = Object.keys(state.channels.slack ?? {}).length;
+    if (slackAgents > 0 && !packageInstalled('@stratusagent/channel-slack', env)) {
+      groups.push({
+        id: 'slack',
+        label: 'Slack channel',
+        why: `Slack tokens are stored for ${slackAgents} agent(s), but nothing connects to Slack without it`,
+        packages: ['@stratusagent/channel-slack'],
+      });
+    }
+    // Both, because the dashboard is what was offered: the control API is
+    // the port and the dashboard is the page served on it. Only the missing
+    // half is installed, so accepting this on a machine that already has
+    // the API does not reinstall it.
+    const dashboardPackages = ['@stratusagent/control-api', '@stratusagent/dashboard']
+      .filter((name) => !packageInstalled(name, env));
+    if (dashboardPackages.length > 0) {
+      groups.push({
+        id: 'dashboard',
+        label: 'Web dashboard',
+        why: '`stratus dashboard` needs it, and it opens an authenticated port on 127.0.0.1',
+        packages: dashboardPackages,
+      });
+    }
+    return groups;
+  };
+
+  /**
+   * Offers the packages above. Declining is a real answer and prints the
+   * command; the control API in particular binds a port, and installing it
+   * is how an operator says they want one open, so this asks rather than
+   * deciding for them.
+   */
+  const offerOptionalPackages = async (): Promise<void> => {
+    const groups = missingPackageGroups();
+    if (groups.length === 0) {
+      return;
+    }
+    writeLine(streams.stdout);
+    writeLine(streams.stdout, groups.length === 1
+      ? 'One optional package is not installed:'
+      : `${groups.length} optional packages are not installed:`);
+    for (const group of groups) {
+      writeLine(streams.stdout, `  ${group.packages.join(' ')}`);
+      writeLine(streams.stdout, `    ${group.why}.`);
+    }
+
+    const answer = await prompter.select('Install now with npm install -g?', groups.length === 1
+      ? ['Install it now', 'Skip']
+      : ['Install all of them now', ...groups.map((group) => `Install the ${group.label} only`), 'Skip']);
+
+    const chosen = ((): PackageGroup[] => {
+      if (answer.kind !== 'index') {
+        return [];
+      }
+      if (groups.length === 1) {
+        return answer.index === 0 ? groups : [];
+      }
+      if (answer.index === 0) {
+        return groups;
+      }
+      const only = groups[answer.index - 1];
+      return only ? [only] : [];
+    })();
+
+    if (chosen.length === 0) {
+      writeLine(streams.stdout, `Skipped. Install them yourself with: npm install -g ${groups.flatMap((group) => group.packages).join(' ')}`);
+      return;
+    }
+
+    const packages = chosen.flatMap((group) => group.packages);
+    writeLine(streams.stdout, `Running: npm install -g ${packages.join(' ')}`);
+    // Never fails setup, for the same reason the service install does not:
+    // the config and credentials are already written, and a package that
+    // did not install is a warning at the next start, not a broken machine.
+    const result = await (env.packageInstaller ?? defaultPackageInstaller)(packages)
+      .catch((error: unknown) => ({
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      }));
+    if (!result.ok) {
+      writeLine(streams.stderr, `Could not install: ${result.message}`);
+      writeLine(streams.stderr, `Setup is saved either way — run \`npm install -g ${packages.join(' ')}\` yourself.`);
+      return;
+    }
+    writeLine(streams.stdout, `Installed ${packages.join(' ')}.`);
+    // npm's exit code, not a second resolve: a package written into the
+    // global prefix a moment ago need not be resolvable from THIS process,
+    // whose module resolution was fixed when it started.
+    if (chosen.some((group) => group.id === 'dashboard')) {
+      dashboardReady = true;
+    }
+  };
+
   const save = async (): Promise<void> => {
     const config: Record<string, string> = { provider: state.provider };
     if (state.provider !== 'demo') {
@@ -3333,6 +3495,14 @@ export const runSetup = async (
         ? `Saved Slack tokens for ${connected} agent${connected === 1 ? '' : 's'} to ${credentialsPath(env)} — run \`${serveCommand()}\` to bring them online.`
         : `Removed the stored Slack tokens from ${credentialsPath(env)}.`);
     }
+
+    // Before the service block below, deliberately. A package installed
+    // after the daemon starts is invisible to it — installing does not
+    // reload a running process — so offering here is what makes the
+    // LaunchAgent come up with the Slack channel and the control API
+    // already present, instead of warning about them in a log nobody reads
+    // until the dashboard fails.
+    await offerOptionalPackages();
 
     // Last, so the daemon starts against the config and credentials that
     // were just written rather than the ones it would have found a moment
@@ -3431,7 +3601,9 @@ export const runSetup = async (
       }
     }
     writeLine(streams.stdout, `  stratus run${extraFlags}${runConfigFlag}${shadowConfigFlag} "say hello"`);
-    writeLine(streams.stdout, '  stratus dashboard');
+    if (dashboardReady) {
+      writeLine(streams.stdout, '  stratus dashboard');
+    }
   };
 
   try {
@@ -4599,6 +4771,36 @@ export const runDashboard = async (
   return serving;
 };
 
+/** Reports whether an optional package is installed. */
+export type PackageResolver = (specifier: string) => boolean;
+
+/**
+ * Resolution and loading are separate questions, and only the first one
+ * means "not installed". Inspecting an import's error message cannot tell
+ * them apart: a package that IS installed but is missing one of its own
+ * dependencies throws ERR_MODULE_NOT_FOUND naming that dependency and the
+ * importer — so a broken install would read as an absent one, silently
+ * disabling a channel whose stored tokens say it should be running, or
+ * leaving a daemon without the API an operator installed it to have.
+ */
+const defaultPackageResolver: PackageResolver = (specifier) => {
+  try {
+    import.meta.resolve(specifier);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Whether an optional package is installed. The resolver is injectable
+ * because what is installed is a property of the machine: a test asserting
+ * on the real one would be asserting on its own node_modules, which is why
+ * every optional package is a devDependency here in the first place.
+ */
+const packageInstalled = (specifier: string, env: CliEnvironment = {}): boolean =>
+  (env.packageResolver ?? defaultPackageResolver)(specifier);
+
 type SlackAdapterFactory = typeof import('@stratusagent/channel-slack').createSlackChannelAdapter;
 
 /**
@@ -4609,16 +4811,7 @@ type SlackAdapterFactory = typeof import('@stratusagent/channel-slack').createSl
  * whose stored tokens say it should be running.
  */
 const loadSlackAdapter = async (): Promise<SlackAdapterFactory | undefined> => {
-  // Resolution and loading are separate questions, and only the first one
-  // means "not installed". Inspecting the import's error message cannot
-  // tell them apart: a package that IS installed but is missing one of
-  // its own dependencies throws ERR_MODULE_NOT_FOUND naming that
-  // dependency and this package as the importer — a broken install would
-  // read as an absent one, silently disabling a channel whose tokens say
-  // it should be running.
-  try {
-    import.meta.resolve('@stratusagent/channel-slack');
-  } catch {
+  if (!packageInstalled('@stratusagent/channel-slack')) {
     return undefined;
   }
   // Resolvable: any failure from here is a real problem with the
@@ -4638,9 +4831,7 @@ type ControlApiFactory = typeof import('@stratusagent/control-api').createContro
  * without the API an operator installed it to have.
  */
 const loadControlApi = async (): Promise<ControlApiFactory | undefined> => {
-  try {
-    import.meta.resolve('@stratusagent/control-api');
-  } catch {
+  if (!packageInstalled('@stratusagent/control-api')) {
     return undefined;
   }
   return (await import('@stratusagent/control-api')).createControlApi;

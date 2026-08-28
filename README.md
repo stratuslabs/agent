@@ -62,6 +62,11 @@ The packages that exist today:
   stratus dashboard
   ```
 
+`stratus setup` offers these installs at **Save & finish** when your own
+answers imply them — connecting an agent to Slack is already the decision to
+use Slack — and does it before starting the daemon, so it comes up with them
+present. Declining prints the command instead.
+
 Without a channel installed, everything else works exactly as before: the
 daemon logs an install hint for any agent that has channel credentials stored
 and serves the rest of the roster normally.
