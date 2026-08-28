@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { appendFile, chmod, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, cp, mkdir, readdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -21,6 +21,7 @@ import {
   isValidSkillId,
   parseSkillDocument,
   parseSoul,
+  type ParsedSkillDocument,
   type ParsedSoul,
 } from '@stratusagent/agents';
 import { defineLocalCommandTool } from '@stratusagent/executor-local';
@@ -1359,6 +1360,186 @@ export const loadOperatorSkills = async (
     });
   }
   return loaded;
+};
+
+/** A skill found in a source directory, validated and ready to copy. */
+export interface SkillInstallCandidate {
+  /** The id it would install under — its directory name in `~/.stratus/skills/`. */
+  id: string;
+  /** The directory that gets copied, SKILL.md and bundled files alike. */
+  directory: string;
+  name: string;
+  description: string;
+}
+
+/** A skill a source offered that was not installed, and why. */
+export interface SkillInstallSkip {
+  id: string;
+  reason: string;
+}
+
+export interface InstallSkillsOptions {
+  /** Install only these ids; everything else the source offers is skipped silently. */
+  only?: string[];
+  /** Replace an existing `~/.stratus/skills/<id>` instead of refusing it. */
+  force?: boolean;
+}
+
+export interface InstallSkillsResult {
+  installed: OperatorSkillInfo[];
+  skipped: SkillInstallSkip[];
+}
+
+// Where the ecosystem keeps skills inside a repository, in the order the
+// skills.sh CLI searches them. A directory named here is a container of
+// skills, not a skill.
+const SKILL_CONTAINER_DIRNAMES = ['skills', path.join('.claude', 'skills'), path.join('.agents', 'skills')];
+
+const SKILL_IGNORED_DIRNAMES = new Set(['.git', 'node_modules']);
+
+/**
+ * Find every skill a directory offers: a `SKILL.md` at its root makes the
+ * directory itself one skill; otherwise each immediate subdirectory with a
+ * `SKILL.md` is one — at the root and inside the container directories the
+ * ecosystem's repositories use (`skills/`, `.claude/skills/`,
+ * `.agents/skills/`). One level, not a recursive crawl: the conventions
+ * are flat, and a walk that reached deeper would install directories
+ * nobody published as skills.
+ *
+ * Invalid entries (an unparseable SKILL.md, an id that is not an id) come
+ * back as skips with the reason, so an installer can say what it left
+ * behind rather than silently thinning the source.
+ */
+export const discoverSkillsInDirectory = async (
+  sourceDir: string,
+): Promise<{ candidates: SkillInstallCandidate[]; skipped: SkillInstallSkip[] }> => {
+  const candidates: SkillInstallCandidate[] = [];
+  const skipped: SkillInstallSkip[] = [];
+  const claimed = new Set<string>();
+
+  const consider = async (directory: string, fallbackId: string): Promise<void> => {
+    let source: string;
+    try {
+      source = await readFile(path.join(directory, 'SKILL.md'), 'utf8');
+    } catch {
+      return;
+    }
+    let document: ParsedSkillDocument;
+    try {
+      document = parseSkillDocument(source);
+    } catch (error) {
+      skipped.push({ id: fallbackId, reason: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    // The directory name is the id, as it will be in `~/.stratus/skills/`;
+    // a repository whose root is the skill has no meaningful directory
+    // name, so its frontmatter `name` stands in when it is id-shaped.
+    const id = isValidSkillId(fallbackId)
+      ? fallbackId
+      : (document.name && isValidSkillId(document.name) ? document.name : undefined);
+    if (id === undefined) {
+      skipped.push({
+        id: fallbackId,
+        reason: `${JSON.stringify(fallbackId)} is not a skill id and the frontmatter name is not one either. Skill ids are kebab-case (web-research).`,
+      });
+      return;
+    }
+    if (claimed.has(id)) {
+      skipped.push({ id, reason: 'the source offers this id more than once; the first occurrence was kept' });
+      return;
+    }
+    claimed.add(id);
+    candidates.push({ id, directory, name: document.name ?? id, description: document.description });
+  };
+
+  await consider(sourceDir, path.basename(sourceDir));
+  const containers = [sourceDir, ...SKILL_CONTAINER_DIRNAMES.map((dirname) => path.join(sourceDir, dirname))];
+  for (const container of containers) {
+    let entries: import('node:fs').Dirent[] = [];
+    try {
+      entries = await readdir(container, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isDirectory() || SKILL_IGNORED_DIRNAMES.has(entry.name) || entry.name.startsWith('.')) {
+        continue;
+      }
+      await consider(path.join(container, entry.name), entry.name);
+    }
+  }
+
+  return { candidates, skipped };
+};
+
+/**
+ * Copy the skills a directory offers into `~/.stratus/skills/`, whole
+ * directories — a skill's bundled `references/` and `examples/` travel
+ * with its SKILL.md. The source is typically a fresh clone of a skills
+ * repository; a local path works identically.
+ *
+ * An id already installed is refused (per skill, with the rest still
+ * installing) rather than overwritten — `force` says the replacement is
+ * meant. Nothing here enables anything: a soul still opts in through its
+ * `skills:` allowlist, which is what makes bulk-installing a stranger's
+ * repository safe by default.
+ */
+export const installSkillsFromDirectory = async (
+  env: StateEnvironment,
+  sourceDir: string,
+  options: InstallSkillsOptions = {},
+): Promise<InstallSkillsResult> => {
+  const { candidates, skipped } = await discoverSkillsInDirectory(sourceDir);
+  const wanted = options.only === undefined
+    ? candidates
+    : candidates.filter((candidate) => options.only?.includes(candidate.id));
+  if (options.only !== undefined) {
+    for (const id of options.only) {
+      if (!candidates.some((candidate) => candidate.id === id)) {
+        skipped.push({ id, reason: 'the source does not offer a skill with this id' });
+      }
+    }
+  }
+
+  const installed: OperatorSkillInfo[] = [];
+  for (const candidate of wanted) {
+    const destination = path.join(skillsDirPath(env), candidate.id);
+    let exists = false;
+    try {
+      await readdir(destination);
+      exists = true;
+    } catch {
+      // Not installed yet.
+    }
+    if (exists) {
+      if (!options.force) {
+        skipped.push({ id: candidate.id, reason: 'already installed; pass force to replace it' });
+        continue;
+      }
+      // Replaced whole, not merged over: a leftover file from the old
+      // version is exactly the stale state force exists to clear.
+      await rm(destination, { recursive: true, force: true });
+    }
+    await mkdir(path.dirname(destination), { recursive: true });
+    await cp(candidate.directory, destination, {
+      recursive: true,
+      filter: (candidateSource) => {
+        const base = path.basename(candidateSource);
+        return !SKILL_IGNORED_DIRNAMES.has(base);
+      },
+    });
+    const skillPath = path.join(destination, 'SKILL.md');
+    const document = parseSkillDocument(await readFile(skillPath, 'utf8'));
+    installed.push({
+      id: candidate.id,
+      name: document.name ?? candidate.id,
+      description: document.description,
+      path: skillPath,
+      ...(document.requires ? { requires: document.requires } : {}),
+    });
+  }
+
+  return { installed, skipped };
 };
 
 /**

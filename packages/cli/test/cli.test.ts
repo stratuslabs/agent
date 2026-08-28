@@ -367,6 +367,94 @@ test('runCli executes the demo tool loop', async () => {
   assert.equal(output.stderr, '');
 });
 
+test('runCli skill add installs from a local skills repo, and --agent enables in the soul', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilladd-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilladd-cwd-'));
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilladd-src-'));
+  // The published shape: one directory per skill, ecosystem frontmatter
+  // included — tolerated, not refused.
+  await mkdir(path.join(source, 'hn-search'), { recursive: true });
+  await writeFile(
+    path.join(source, 'hn-search', 'SKILL.md'),
+    '---\nname: hn-search\ndescription: Use when searching Hacker News.\nlicense: MIT\nmetadata:\n  internal: false\n---\n\n# HN search\n',
+  );
+  await mkdir(path.join(source, 'visual-qa'), { recursive: true });
+  await writeFile(
+    path.join(source, 'visual-qa', 'SKILL.md'),
+    '---\nname: visual-qa\ndescription: Use when reviewing screenshots.\n---\n\n# Visual QA\n',
+  );
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'ava.md'),
+    '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n',
+  );
+
+  const env = { cwd, homeDir: home, processEnv: {} };
+  const install = createStreams();
+  const installExit = await runCli({ argv: ['skill', 'add', source, '--skill', 'hn-search', '--agent', 'ava'], streams: install.streams, env });
+  assert.equal(installExit, 0);
+  assert.match(install.output.stdout, /installed hn-search — Use when searching Hacker News\./);
+  assert.match(install.output.stdout, /enabled for Ava .*: hn-search/);
+  assert.ok(!install.output.stdout.includes('visual-qa'), '--skill did not filter');
+
+  const soul = await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8');
+  assert.match(soul, /skills:\n  - hn-search/);
+  await readFile(path.join(home, '.stratus', 'skills', 'hn-search', 'SKILL.md'), 'utf8');
+
+  // Installed again without --force: refused, with the reason.
+  const again = createStreams();
+  const againExit = await runCli({ argv: ['skill', 'add', source, '--skill', 'hn-search'], streams: again.streams, env });
+  assert.equal(againExit, 1);
+  assert.match(again.output.stderr, /already installed/);
+
+  const list = createStreams();
+  const listExit = await runCli({ argv: ['skills'], streams: list.streams, env });
+  assert.equal(listExit, 0);
+  assert.match(list.output.stdout, /hn-search\s+Use when searching Hacker News\. — enabled by Ava/);
+});
+
+test('runCli skill add clones a git source — the transport skills.sh repos arrive by', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillgit-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillgit-cwd-'));
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillgit-src-'));
+  await mkdir(path.join(source, 'code-review'), { recursive: true });
+  await writeFile(
+    path.join(source, 'code-review', 'SKILL.md'),
+    '---\nname: code-review\ndescription: Use when reviewing a diff.\n---\n\n# Review\n',
+  );
+  const git = (...args: string[]) => new Promise<void>((resolve, reject) => {
+    const child = spawn('git', args, { cwd: source, stdio: 'ignore' });
+    child.on('error', reject);
+    child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`git ${args[0]} exited ${code}`))));
+  });
+  await git('init', '--quiet');
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.');
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--quiet', '-m', 'skills');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['skill', 'add', `file://${source}`],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /Fetching file:\/\//);
+  assert.match(output.stdout, /installed code-review — Use when reviewing a diff\./);
+  await readFile(path.join(home, '.stratus', 'skills', 'code-review', 'SKILL.md'), 'utf8');
+});
+
+test('parseCommand reads skill add and skills forms', () => {
+  assert.deepEqual(parseCommand(['skill', 'add', 'owner/repo']), { command: 'skill-add', source: 'owner/repo' });
+  assert.deepEqual(
+    parseCommand(['skill', 'add', './local', '--skill', 'a', '--skill', 'b', '--force', '--agent', 'ava']),
+    { command: 'skill-add', source: './local', skillIds: ['a', 'b'], force: true, agentId: 'ava' },
+  );
+  assert.deepEqual(parseCommand(['skills']), { command: 'skills' });
+  assert.deepEqual(parseCommand(['skill', 'list']), { command: 'skills' });
+  assert.throws(() => parseCommand(['skill', 'add']), /needs a source/);
+  assert.throws(() => parseCommand(['skill', 'frobnicate']), /Unknown skill subcommand/);
+});
+
 test('runCli warns like the daemon when a soul enables a skill without its required tools', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillreq-'));
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillreq-cwd-'));

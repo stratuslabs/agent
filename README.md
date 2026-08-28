@@ -102,11 +102,14 @@ toolset). Two independent gates, and the second one is per identity.
 #### Skills
 
 Tools are capability; **skills** are competence — markdown procedures an agent
-loads only when relevant. Drop a directory with a `SKILL.md` into
-`~/.stratus/skills/` (or install a plugin that ships some), enable it per
-agent with `skills:` in the soul, and the agent pays one description line per
-turn until it decides the procedure is worth reading — the body arrives
-through the built-in `skill.read` tool, never through the system prompt. The
+loads only when relevant. Install them from any GitHub repo laid out as skill
+directories — `stratus skill add owner/repo` works with repos published to
+[skills.sh](https://skills.sh) unmodified — or drop a directory with a
+`SKILL.md` into `~/.stratus/skills/` (or install a plugin that ships some).
+Enable per agent with `skills:` in the soul, and the agent pays one
+description line per turn until it decides the procedure is worth reading —
+the body arrives through the built-in `skill.read` tool, never through the
+system prompt. The
 [CLI README](./packages/cli/README.md#skills-how-an-agent-does-a-task-well)
 has the format and the allowlist rules.
 

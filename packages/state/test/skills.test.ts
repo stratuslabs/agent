@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 import { SkillRegistry } from '@stratusagent/core';
 
-import { loadOperatorSkills, skillsDirPath } from '../src/index.ts';
+import { installSkillsFromDirectory, loadOperatorSkills, skillsDirPath } from '../src/index.ts';
 
 const skillFile = (description: string, body = 'The procedure.'): string =>
   `---\ndescription: ${description}\n---\n\n${body}\n`;
@@ -67,4 +67,78 @@ test('one broken skill is a warning, and the rest still load', async () => {
   assert.equal(warnings.length, 3);
   assert.ok(warnings.some((line) => line.includes('not a skill id')));
   assert.ok(warnings.some((line) => line.includes('no "description"')));
+});
+
+test('install discovers a skills repo laid out like the ecosystem publishes them', async () => {
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillsrc-'));
+  // Subdirectories at the root, each a skill with a bundled README — the
+  // shape of a typical skills.sh repository.
+  for (const id of ['hn-search', 'design-tokens']) {
+    await mkdir(path.join(source, id), { recursive: true });
+    await writeFile(path.join(source, id, 'SKILL.md'), skillFile(`Use for ${id}.`, `# ${id}`));
+    await writeFile(path.join(source, id, 'README.md'), 'for humans');
+  }
+  // A container directory too, and clutter that must not become a skill.
+  await mkdir(path.join(source, 'skills', 'extra'), { recursive: true });
+  await writeFile(path.join(source, 'skills', 'extra', 'SKILL.md'), skillFile('Use for extra things.'));
+  await mkdir(path.join(source, '.git', 'objects'), { recursive: true });
+  await writeFile(path.join(source, '.git', 'config'), 'not a skill');
+  await mkdir(path.join(source, 'node_modules', 'dep'), { recursive: true });
+  await writeFile(path.join(source, 'node_modules', 'dep', 'SKILL.md'), skillFile('Never this.'));
+  // One broken skill: reported, and the rest still install.
+  await mkdir(path.join(source, 'vague'), { recursive: true });
+  await writeFile(path.join(source, 'vague', 'SKILL.md'), '---\nname: Vague\n---\n\nBody.');
+
+  const homeDir = await freshHome();
+  const env = { homeDir };
+  const result = await installSkillsFromDirectory(env, source);
+
+  assert.deepEqual(result.installed.map((skill) => skill.id).sort(), ['design-tokens', 'extra', 'hn-search']);
+  assert.equal(result.skipped.length, 1);
+  assert.match(result.skipped[0]?.reason ?? '', /no "description"/);
+
+  // Whole directories travel — the bundled README came along — and the
+  // installed skills load through the normal loader.
+  await readFile(path.join(skillsDirPath(env), 'hn-search', 'README.md'), 'utf8');
+  const registry = new SkillRegistry();
+  const loaded = await loadOperatorSkills(env, registry, () => {});
+  assert.deepEqual(loaded.map((skill) => skill.id).sort(), ['design-tokens', 'extra', 'hn-search']);
+});
+
+test('install refuses an id already installed unless forced, and only: filters', async () => {
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillsrc-'));
+  for (const id of ['one', 'two']) {
+    await mkdir(path.join(source, id), { recursive: true });
+    await writeFile(path.join(source, id, 'SKILL.md'), skillFile(`Use for ${id}, v1.`));
+  }
+
+  const homeDir = await freshHome();
+  const env = { homeDir };
+  const first = await installSkillsFromDirectory(env, source, { only: ['one'] });
+  assert.deepEqual(first.installed.map((skill) => skill.id), ['one']);
+  assert.ok(first.skipped.length === 0);
+
+  const missing = await installSkillsFromDirectory(env, source, { only: ['three'] });
+  assert.deepEqual(missing.installed, []);
+  assert.match(missing.skipped[0]?.reason ?? '', /does not offer/);
+
+  await writeFile(path.join(source, 'one', 'SKILL.md'), skillFile('Use for one, v2.'));
+  const collided = await installSkillsFromDirectory(env, source);
+  assert.deepEqual(collided.installed.map((skill) => skill.id), ['two']);
+  assert.match(collided.skipped[0]?.reason ?? '', /already installed/);
+
+  const forced = await installSkillsFromDirectory(env, source, { only: ['one'], force: true });
+  assert.equal(forced.installed[0]?.description, 'Use for one, v2.');
+});
+
+test('a repository whose root is the skill installs under its frontmatter name', async () => {
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillroot-XYZ'));
+  await writeFile(
+    path.join(source, 'SKILL.md'),
+    '---\nname: pr-review\ndescription: Use when reviewing pull requests.\n---\n\nBody.\n',
+  );
+
+  const homeDir = await freshHome();
+  const result = await installSkillsFromDirectory({ homeDir }, source);
+  assert.deepEqual(result.installed.map((skill) => skill.id), ['pr-review']);
 });

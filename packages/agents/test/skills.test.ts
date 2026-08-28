@@ -59,9 +59,64 @@ test('a skill without a description is refused — routing runs on it', () => {
     /no "description"/,
   );
   assert.throws(() => parseSkillDocument('No frontmatter at all.'), /no frontmatter/);
+  // A block-scalar description with no body reads as absent, never as an
+  // empty string that satisfies the requirement.
   assert.throws(
-    () => parseSkillDocument('---\ndescription: fine\nunknown-key: nope\n---\nbody'),
-    /Unknown skill frontmatter key/,
+    () => parseSkillDocument('---\nname: x\ndescription: >-\n---\n\nBody.'),
+    /no "description"/,
+  );
+});
+
+test('ecosystem frontmatter parses: unknown keys and their blocks skip, block scalars fold', () => {
+  // The shape skills published to skills.sh and similar registries wear:
+  // fields other hosts own, nested metadata, a folded description.
+  const document = parseSkillDocument(`---
+name: pdf-tools
+description: >-
+  Use when working with PDF files —
+  merging, splitting, or extracting text.
+license: MIT
+allowed-tools:
+  - Read
+  - Bash
+metadata:
+  internal: false
+  author: someone
+version: 2.0.1
+---
+
+# PDF tools
+
+The procedure.
+`);
+  assert.equal(document.name, 'pdf-tools');
+  assert.equal(
+    document.description,
+    'Use when working with PDF files — merging, splitting, or extracting text.',
+  );
+  assert.equal(document.version, '2.0.1');
+  // Another host's tool names are not our `requires` vocabulary — ignored,
+  // not mapped into false advisory warnings.
+  assert.equal(document.requires, undefined);
+  assert.ok(document.body.startsWith('# PDF tools'));
+});
+
+test('a plain description wrapping onto indented lines folds; a literal block keeps its breaks', () => {
+  const wrapped = parseSkillDocument(
+    '---\ndescription: Use when the task\n  spans two lines.\n---\n\nBody.',
+  );
+  assert.equal(wrapped.description, 'Use when the task spans two lines.');
+
+  const literal = parseSkillDocument(
+    '---\ndescription: |\n  line one\n  line two\n---\n\nBody.',
+  );
+  assert.equal(literal.description, 'line one\nline two');
+});
+
+test('souls stay strict: an unknown soul key is still refused', () => {
+  assert.throws(
+    () => parseSoul('---\nname: Ava\nunknown-key: nope\n---\n\nPersona.'),
+    /Unknown soul frontmatter key/,
   );
 });
 

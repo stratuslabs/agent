@@ -551,10 +551,38 @@ Lead with the verdict, then findings ordered by severity...
 
 The frontmatter is the soul dialect — `name`, `description`, optional
 `version`, and an optional `requires:` list of toolsets the procedure expects
-(`browser.*`). The directory name is the skill's id. Plugins can ship skills
-too, declared in their manifest; those are addressed by the package name
-verbatim (`stratus-plugin-github:pr-review`), and by the bare id while no
-other package claims it.
+(`browser.*`) — read **tolerantly**, unlike a soul's: keys other ecosystems
+write (`license`, `allowed-tools`, nested `metadata:`) and YAML's multi-line
+descriptions are skipped rather than refused, so a skill published for
+another agent loads here unmodified. The directory name is the skill's id.
+Plugins can ship skills too, declared in their manifest; those are addressed
+by the package name verbatim (`stratus-plugin-github:pr-review`), and by the
+bare id while no other package claims it.
+
+### Installing skills
+
+Anything on GitHub laid out as skill directories — including repos published
+to [skills.sh](https://skills.sh) — installs directly:
+
+```bash
+stratus skill add owner/skills-repo          # a whole repo of skills
+stratus skill add owner/repo --skill hn-search --agent ava
+stratus skill add ./my-skills                # a local directory
+stratus skills                               # what is installed, and who enables it
+```
+
+`skill add` takes a GitHub `owner/repo`, any git URL, or a local path; it
+finds skills at the repo root, one level down, and in the `skills/`,
+`.claude/skills/`, and `.agents/skills/` directories the ecosystem uses, then
+copies each **whole directory** into `~/.stratus/skills/`. An id already
+installed is refused per skill (`--force` replaces it), and an unparseable
+skill is reported while the rest still install.
+
+**Installed is not enabled.** A skill is markdown, but it is markdown your
+agent will *follow*, so installing a repo grants no agent anything — each
+soul still opts in through `skills:`. Pass `--agent <id>` to do both at once:
+the command appends the installed ids to that soul's list (rendering the file
+through the canonical formatter, like the API's field edits do).
 
 An agent gets a skill only when its soul asks — same allowlist shape as
 `tools:`, except that omitting it means **none** (a skill silently changing

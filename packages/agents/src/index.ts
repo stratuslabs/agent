@@ -284,6 +284,19 @@ interface FrontmatterShape {
   kind: string;
   scalarKeys: readonly string[];
   listKeys: readonly string[];
+  /**
+   * Ignore what the shape does not name instead of refusing it — unknown
+   * keys, whatever indented block sits under one, and the YAML block and
+   * multi-line scalars other ecosystems write.
+   *
+   * Skills opt in: they travel an ecosystem whose frontmatter carries
+   * fields other hosts own (`license`, `metadata`, `allowed-tools`), and
+   * refusing those would refuse most published skills over metadata that
+   * changes nothing here. Souls stay strict, deliberately — an unknown
+   * soul key can be a typo'd allowlist, and a soul that loads with
+   * silently weaker access is the worse failure.
+   */
+  tolerant?: boolean;
 }
 
 interface ParsedFrontmatter {
@@ -293,15 +306,40 @@ interface ParsedFrontmatter {
 
 // A deliberately tiny frontmatter dialect: `key: value` scalars and block
 // lists of `- item` lines. Enough for souls and skills, no YAML dependency.
+// Tolerant mode (see FrontmatterShape) additionally reads the block-scalar
+// forms (`description: >-` and friends) and plain multi-line scalars, and
+// skips unknown keys with their nested blocks.
 const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): ParsedFrontmatter => {
   const scalars: ParsedFrontmatter['scalars'] = {};
   const lists: ParsedFrontmatter['lists'] = {};
+  const tolerant = shape.tolerant ?? false;
   let currentList: string[] | undefined;
+  // Tolerant-mode line context: an unknown key whose indented block is
+  // being skipped, or a known scalar whose value continues on indented
+  // lines (a YAML block scalar, or a plain scalar that wraps).
+  let skippingUnknownBlock = false;
+  let continuation: { key: string; separator: string } | undefined;
+
+  const isIndented = (line: string): boolean => /^\s/.test(line);
 
   for (const rawLine of lines) {
     const line = rawLine.trimEnd();
     if (line.trim().length === 0 || line.trim().startsWith('#')) {
       continue;
+    }
+
+    if (tolerant && isIndented(line)) {
+      if (skippingUnknownBlock) {
+        continue;
+      }
+      if (continuation) {
+        const existing = scalars[continuation.key] ?? '';
+        const piece = unquote(line);
+        scalars[continuation.key] = existing.length > 0
+          ? `${existing}${continuation.separator}${piece}`
+          : piece;
+        continue;
+      }
     }
 
     const listItem = /^\s+-\s*(.*)$/.exec(line);
@@ -324,6 +362,8 @@ const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): Parsed
     const key = entry[1] ?? '';
     const value = entry[2] ?? '';
     currentList = undefined;
+    skippingUnknownBlock = false;
+    continuation = undefined;
 
     if (shape.listKeys.includes(key)) {
       const list: string[] = [];
@@ -348,16 +388,50 @@ const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): Parsed
     }
 
     if (!shape.scalarKeys.includes(key)) {
+      if (tolerant) {
+        // The key and anything nested under it belong to some other host.
+        skippingUnknownBlock = true;
+        continue;
+      }
       throw new Error(
         `Unknown ${shape.kind} frontmatter key: "${key}". Supported keys: ${[...shape.scalarKeys, ...shape.listKeys].join(', ')}.`,
       );
     }
 
+    const inline = value.trim();
+    // YAML block-scalar indicators: `>` folds continuation lines with
+    // spaces, `|` keeps their line breaks; either may carry a chomping
+    // sign. Only meaningful in tolerant mode — the strict dialect never
+    // wrote them.
+    if (tolerant && /^[>|][+-]?$/.test(inline)) {
+      scalars[key] = '';
+      continuation = { key, separator: inline.startsWith('>') ? ' ' : '\n' };
+      continue;
+    }
+
     const scalar = unquote(value);
     if (scalar.length === 0) {
+      if (tolerant) {
+        // May be a plain scalar continuing on indented lines; empty stays
+        // empty and is dropped below if nothing follows.
+        scalars[key] = '';
+        continuation = { key, separator: ' ' };
+        continue;
+      }
       throw new Error(`${capitalize(shape.kind)} frontmatter key "${key}" has no value.`);
     }
     scalars[key] = scalar;
+    if (tolerant) {
+      continuation = { key, separator: ' ' };
+    }
+  }
+
+  // A tolerant block scalar that never got a body reads as absent, not as
+  // an empty string that would satisfy a required-field check.
+  for (const [key, value] of Object.entries(scalars)) {
+    if (value !== undefined && value.length === 0) {
+      delete scalars[key];
+    }
   }
 
   return { scalars, lists };
@@ -505,6 +579,11 @@ export const parseSkillDocument = (source: string): ParsedSkillDocument => {
     kind: 'skill',
     scalarKeys: SKILL_SCALAR_KEYS,
     listKeys: SKILL_LIST_KEYS,
+    // Skills travel the wider agent-skills ecosystem (skills.sh and the
+    // registries behind it), whose frontmatter carries fields other hosts
+    // own. Those are metadata to skip, not defects to refuse — see
+    // FrontmatterShape.tolerant, and note souls do NOT set this.
+    tolerant: true,
   });
   const description = scalars.description;
   if (!description) {

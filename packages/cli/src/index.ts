@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { appendFile, chmod, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,6 +11,7 @@ import {
   EventBus,
   SkillRegistry,
   ToolRegistry,
+  matchesSkillAllowlist,
   missingSkillRequirements,
   type AgentDefinition,
   type AgentMemoryStore,
@@ -81,8 +82,10 @@ import {
   globalConfigPath,
   loadChannelCredentials,
   loadCredentials,
+  installSkillsFromDirectory,
   loadOperatorSkills,
   loadRosterSouls,
+  skillsDirPath,
   listAgentSummaries,
   loadSoulFile,
   memoryFilePath,
@@ -329,6 +332,22 @@ export interface ParsedChatCommand {
   maxTurns?: number;
 }
 
+export interface ParsedSkillAddCommand {
+  command: 'skill-add';
+  /** A GitHub `owner/repo`, a git URL, or a local path. */
+  source: string;
+  /** Install only these ids (repeatable --skill). */
+  skillIds?: string[];
+  /** Replace an already-installed id instead of refusing it. */
+  force?: boolean;
+  /** Enable the installed skills in this agent's soul afterwards. */
+  agentId?: string;
+}
+
+export interface ParsedSkillsCommand {
+  command: 'skills';
+}
+
 export interface ParsedAgentsCommand {
   command: 'agents';
   format: 'text' | 'json';
@@ -399,6 +418,8 @@ export type ParsedCommand =
   | ParsedSetupCommand
   | ParsedAgentNewCommand
   | ParsedAgentsCommand
+  | ParsedSkillAddCommand
+  | ParsedSkillsCommand
   | ParsedDoctorCommand
   | ParsedLogsCommand
   | ParsedServiceCommand
@@ -465,6 +486,9 @@ Usage:
   stratus run --config ./stratus.config.json --provider openai "Say hello"
   stratus agents
   stratus agents --gateway http://127.0.0.1:4123
+  stratus skill add stratuslabs/skill-code-review
+  stratus skill add ./my-skills --skill code-review --agent ava
+  stratus skills
   stratus doctor
   stratus service install
   stratus service status
@@ -502,6 +526,15 @@ Commands:
   logs             Read the daemon's log from any terminal: -f to follow,
                    -n <count> for backlog, --agent / --session to filter,
                    --format json for the raw records
+  skill add        Install skills from a GitHub repo (owner/repo or URL) or a
+                   local path into ~/.stratus/skills — whole directories, one
+                   per skill; works with skills published for other agents
+                   (skills.sh-style repos). Installed is not enabled: a soul
+                   opts in via skills:, or pass --agent <id> to enable now.
+                   --skill <id> picks from a multi-skill repo (repeatable),
+                   --force replaces an already-installed id
+  skills           List installed skills and which agents enable each
+                   (also: stratus skill list)
   agent new        Create an agent identity (generates a human-ish name + avatar theme)
   agents           List your agents: who they are, where their souls live, what
                    they run on, what they remember (also: stratus agent list).
@@ -569,10 +602,13 @@ Plugins (tools):
   Installing one grants no agent anything — each soul lists what it may call.
 
 Soul files:
-  A soul file is markdown with frontmatter (name, provider, model, tools, credentials)
+  A soul file is markdown with frontmatter (name, provider, model, tools, skills, credentials)
   followed by the agent's persona in prose. See examples/souls/ava.md.
   "tools" takes exact names or a whole toolset: tools: [fs.read, fs.search] or
   tools: [fs.*]. Omitted means every registered tool.
+  "skills" is the same allowlist shape over installed skills (see stratus
+  skills), except omitted means none — a skill is enabled per agent, never
+  by being installed.
 `;
 
 const writeLine = (stream: Pick<typeof process.stdout, 'write'>, line = ''): void => {
@@ -952,6 +988,75 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       format,
       ...(agentId ? { agentId } : {}),
       ...(sessionId ? { sessionId } : {}),
+    };
+  }
+
+  if (command === 'skills' || (command === 'skill' && rest[0] === 'list')) {
+    const skillsRest = command === 'skills' ? rest : rest.slice(1);
+    for (const token of skillsRest) {
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+    return { command: 'skills' };
+  }
+
+  if (command === 'skill') {
+    const [subcommand, ...skillRest] = rest;
+    if (subcommand === '--help' || subcommand === '-h') {
+      return { command: 'help' };
+    }
+    if (subcommand !== 'add') {
+      throw new Error(`Unknown skill subcommand: ${subcommand ?? '(missing)'}. Try: stratus skill add <source>, stratus skills`);
+    }
+
+    let source: string | undefined;
+    const skillIds: string[] = [];
+    let force = false;
+    let agentId: string | undefined;
+
+    for (let index = 0; index < skillRest.length; index += 1) {
+      const token = skillRest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--skill') {
+        skillIds.push(readOptionValue(skillRest, index, '--skill'));
+        index += 1;
+        continue;
+      }
+      if (token === '--agent') {
+        agentId = readOptionValue(skillRest, index, '--agent');
+        index += 1;
+        continue;
+      }
+      if (token === '--force') {
+        force = true;
+        continue;
+      }
+      if (token.startsWith('--')) {
+        throw new Error(`Unknown option: ${token}`);
+      }
+      if (source !== undefined) {
+        throw new Error(`skill add takes one source; got both ${JSON.stringify(source)} and ${JSON.stringify(token)}.`);
+      }
+      source = token;
+    }
+
+    if (source === undefined) {
+      throw new Error('skill add needs a source: a GitHub owner/repo, a git URL, or a local path.');
+    }
+
+    return {
+      command: 'skill-add',
+      source,
+      ...(skillIds.length > 0 ? { skillIds } : {}),
+      ...(force ? { force } : {}),
+      ...(agentId !== undefined ? { agentId } : {}),
     };
   }
 
@@ -4476,6 +4581,175 @@ export const runService = async (
   return result.ok ? 0 : 1;
 };
 
+/**
+ * What a `skill add` source string means, in order: a directory on this
+ * machine, a GitHub `owner/repo` shorthand, or a URL git can clone. The
+ * shorthand is the form skills.sh and its CLI print, so a skill published
+ * there installs by the name its listing shows.
+ */
+const resolveSkillSource = async (
+  source: string,
+  env: CliEnvironment,
+): Promise<{ kind: 'local'; directory: string } | { kind: 'git'; url: string }> => {
+  const localPath = path.resolve(readWorkingDirectory(env), source);
+  try {
+    if ((await stat(localPath)).isDirectory()) {
+      return { kind: 'local', directory: localPath };
+    }
+  } catch {
+    // Not a local directory; read it as a remote source.
+  }
+  if (/^[\w.-]+\/[\w.-]+$/.test(source)) {
+    return { kind: 'git', url: `https://github.com/${source}` };
+  }
+  if (/^(https?|git|ssh|file):\/\//.test(source) || /^git@[\w.-]+:/.test(source)) {
+    return { kind: 'git', url: source };
+  }
+  throw new Error(
+    `Cannot read ${JSON.stringify(source)} as a skill source. Pass a GitHub owner/repo, a git URL, or a local path.`,
+  );
+};
+
+/** Shallow-clone a skills source. Git owns every transport we would otherwise re-implement. */
+const cloneSkillSource = async (url: string, destination: string): Promise<void> => {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('git', ['clone', '--depth', '1', '--quiet', url, destination], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += String(chunk);
+    });
+    child.on('error', (error) => {
+      reject(new Error(`Could not run git to fetch ${url}: ${error.message}`));
+    });
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`git clone failed for ${url}: ${stderr.trim() || `exit code ${code}`}`));
+      }
+    });
+  });
+};
+
+export const runSkillAdd = async (
+  command: ParsedSkillAddCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const resolved = await resolveSkillSource(command.source, env);
+  let sourceDir: string;
+  let cleanup: (() => Promise<void>) | undefined;
+  if (resolved.kind === 'local') {
+    sourceDir = resolved.directory;
+  } else {
+    const scratch = await mkdtemp(path.join(os.tmpdir(), 'stratus-skill-add-'));
+    cleanup = () => rm(scratch, { recursive: true, force: true });
+    writeLine(streams.stdout, `Fetching ${resolved.url} …`);
+    try {
+      await cloneSkillSource(resolved.url, scratch);
+    } catch (error) {
+      await cleanup();
+      throw error;
+    }
+    sourceDir = scratch;
+  }
+
+  try {
+    const result = await installSkillsFromDirectory(env, sourceDir, {
+      ...(command.skillIds ? { only: command.skillIds } : {}),
+      ...(command.force ? { force: true } : {}),
+    });
+
+    for (const skill of result.installed) {
+      writeLine(streams.stdout, `installed ${skill.id} — ${skill.description}`);
+    }
+    for (const skip of result.skipped) {
+      writeLine(streams.stderr, `Warning: skipped ${skip.id}: ${skip.reason}`);
+    }
+    if (result.installed.length === 0) {
+      writeLine(streams.stderr, result.skipped.length > 0
+        ? 'Error: nothing was installed.'
+        : `Error: no skills found in ${command.source}. A skill is a directory with a SKILL.md.`);
+      return 1;
+    }
+
+    // Installed is not enabled: a soul opts in through its skills:
+    // allowlist, and that stays true when the install came through a
+    // command. --agent is the explicit way to say both at once.
+    const ids = result.installed.map((skill) => skill.id);
+    if (command.agentId === undefined) {
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, 'Installed, not yet enabled. Add to an agent\'s soul frontmatter:');
+      writeLine(streams.stdout, '  skills:');
+      for (const id of ids) {
+        writeLine(streams.stdout, `    - ${id}`);
+      }
+      writeLine(streams.stdout, `(or rerun with --agent <id>, or list them: stratus skills)`);
+      return 0;
+    }
+
+    const roster = await loadRosterSouls(env, (line) => writeLine(streams.stderr, `Warning: ${line}`));
+    const entry = roster.find((candidate) => candidate.soul.agent.id === command.agentId);
+    if (!entry) {
+      writeLine(streams.stderr, `Error: no agent with id ${command.agentId} in ${agentsDirPath(env)}. The skills are installed; enable them by editing a soul.`);
+      return 1;
+    }
+    const existing = entry.soul.agent.skills ?? [];
+    const additions = ids.filter((id) => !matchesSkillAllowlist(id, existing));
+    if (additions.length === 0) {
+      writeLine(streams.stdout, `${entry.soul.agent.name} already has all of these enabled.`);
+      return 0;
+    }
+    // A field edit renders through formatSoul, which canonicalizes the
+    // file — same trade the control API's field edits make.
+    const next: ParsedSoul = {
+      ...entry.soul,
+      agent: { ...entry.soul.agent, skills: [...existing, ...additions] },
+    };
+    await writeFile(entry.path, formatSoul(next));
+    writeLine(streams.stdout, `enabled for ${next.agent.name} (${entry.path}): ${additions.join(', ')}`);
+    return 0;
+  } finally {
+    await cleanup?.();
+  }
+};
+
+export const runSkills = async (
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const registry = new SkillRegistry();
+  const skills = await loadOperatorSkills(env, registry, (line) => {
+    writeLine(streams.stderr, `Warning: ${line}`);
+  });
+  if (skills.length === 0) {
+    writeLine(streams.stdout, `No skills installed in ${skillsDirPath(env)}.`);
+    writeLine(streams.stdout, 'Install some: stratus skill add <owner/repo | git url | path>');
+    return 0;
+  }
+
+  // Who has each skill enabled, so the listing answers the question that
+  // follows "what is installed" — read from the same roster a dispatch
+  // serves. Plugin-contributed skills are the daemon's to list
+  // (/catalog/tools); this command reads the operator directory.
+  const roster = await loadRosterSouls(env, () => {}).catch(() => []);
+  for (const skill of skills) {
+    const enabledBy = roster
+      .filter((entry) => {
+        const allowlist = entry.soul.agent.skills;
+        return allowlist !== undefined
+          && allowlist.length > 0
+          && matchesSkillAllowlist(skill.id, allowlist);
+      })
+      .map((entry) => entry.soul.agent.name);
+    const suffix = enabledBy.length > 0 ? ` — enabled by ${enabledBy.join(', ')}` : ' — enabled by nobody yet';
+    writeLine(streams.stdout, `${skill.id.padEnd(24)}${skill.description}${suffix}`);
+  }
+  return 0;
+};
+
 export const runAgentNew = async (
   command: ParsedAgentNewCommand,
   streams: CliStreams,
@@ -5349,6 +5623,14 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'agents') {
       return await runAgents(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'skill-add') {
+      return await runSkillAdd(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'skills') {
+      return await runSkills(streams, resolvedEnv);
     }
 
     if (command.command === 'doctor') {
