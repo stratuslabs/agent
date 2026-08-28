@@ -151,11 +151,20 @@ test('symlinks: relative links inside a skill survive; a link escaping the skill
   await writeFile(path.join(source, 'evil', 'SKILL.md'), skillFile('Use for evil.'));
   await symlink(path.join('..', 'secret.txt'), path.join(source, 'evil', 'notes.txt'));
 
+  // An absolute link is refused even when it currently resolves inside
+  // the skill: preserved verbatim, it is pinned to this checkout's path —
+  // dangling the moment a cloned source is cleaned up.
+  await mkdir(path.join(source, 'absin'), { recursive: true });
+  await writeFile(path.join(source, 'absin', 'SKILL.md'), skillFile('Use for absin.'));
+  await writeFile(path.join(source, 'absin', 'ref.txt'), 'referenced');
+  await symlink(path.join(source, 'absin', 'ref.txt'), path.join(source, 'absin', 'link.txt'));
+
   const homeDir = await freshHome();
   const env = { homeDir };
   const result = await installSkillsFromDirectory(env, source);
 
   assert.deepEqual(result.installed.map((skill) => skill.id), ['linky']);
+  assert.deepEqual(result.skipped.map((skip) => skip.id).sort(), ['absin', 'evil']);
   assert.match(result.skipped[0]?.reason ?? '', /symlink reaching outside/);
   // The contained link stayed relative — it must not point back into a
   // source directory that a cloned install deletes on return.
@@ -218,7 +227,7 @@ test('a refused forced replacement leaves the working version in place', async (
   assert.equal(loaded[0]?.description, 'Use for one, v1.');
 });
 
-test('a repository whose root is the skill installs under its frontmatter name', async () => {
+test('a repository whose root is the skill installs under its frontmatter name, or the rootId for a nameless one', async () => {
   const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillroot-XYZ'));
   await writeFile(
     path.join(source, 'SKILL.md'),
@@ -226,6 +235,18 @@ test('a repository whose root is the skill installs under its frontmatter name',
   );
 
   const homeDir = await freshHome();
-  const result = await installSkillsFromDirectory({ homeDir }, source);
-  assert.deepEqual(result.installed.map((skill) => skill.id), ['pr-review']);
+  // The frontmatter name wins at the root even over a valid rootId — the
+  // checkout location is circumstance; the name is the skill's own.
+  const named = await installSkillsFromDirectory({ homeDir }, source, { rootId: 'my-skills' });
+  assert.deepEqual(named.installed.map((skill) => skill.id), ['pr-review']);
+
+  // A nameless root skill takes the rootId — for a cloned source that is
+  // the repository's name, never the temp directory git landed in.
+  const nameless = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillroot-XYZ'));
+  await writeFile(
+    path.join(nameless, 'SKILL.md'),
+    '---\ndescription: Use when reviewing pull requests.\n---\n\nBody.\n',
+  );
+  const viaRootId = await installSkillsFromDirectory({ homeDir }, nameless, { rootId: 'my-skills' });
+  assert.deepEqual(viaRootId.installed.map((skill) => skill.id), ['my-skills']);
 });

@@ -4657,9 +4657,16 @@ export const runSkillAdd = async (
   }
 
   try {
+    // For a cloned source the temp directory's random basename must not
+    // name a root-level skill — the repository's own name is what a
+    // nameless root SKILL.md installs under.
+    const rootId = resolved.kind === 'git'
+      ? path.basename(new URL(resolved.url.replace(/^git@([^:]+):/, 'ssh://git@$1/')).pathname, '.git')
+      : undefined;
     const result = await installSkillsFromDirectory(env, sourceDir, {
       ...(command.skillIds ? { only: command.skillIds } : {}),
       ...(command.force ? { force: true } : {}),
+      ...(rootId !== undefined && rootId.length > 0 ? { rootId } : {}),
     });
 
     for (const skill of result.installed) {

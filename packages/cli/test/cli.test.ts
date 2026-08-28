@@ -446,6 +446,36 @@ test('runCli skill add clones a git source — the transport skills.sh repos arr
   await readFile(path.join(home, '.stratus', 'skills', 'code-review', 'SKILL.md'), 'utf8');
 });
 
+test('runCli skill add of a repo whose root is the skill installs under the repo name', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillrootgit-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillrootgit-cwd-'));
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillrootgit-src-'));
+  // The repository IS the skill, and its SKILL.md has no name — the id
+  // must come from the repository's name, never from the random temp
+  // directory the clone lands in.
+  const source = path.join(parent, 'my-skills');
+  await mkdir(source, { recursive: true });
+  await writeFile(path.join(source, 'SKILL.md'), '---\ndescription: Use when rooting.\n---\n\nBody.\n');
+  const git = (...args: string[]) => new Promise<void>((resolve, reject) => {
+    const child = spawn('git', args, { cwd: source, stdio: 'ignore' });
+    child.on('error', reject);
+    child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`git ${args[0]} exited ${code}`))));
+  });
+  await git('init', '--quiet');
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '.');
+  await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--quiet', '-m', 'skill');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['skill', 'add', `file://${source}`],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+  assert.equal(exitCode, 0, output.stderr);
+  assert.match(output.stdout, /installed my-skills — Use when rooting\./);
+  await readFile(path.join(home, '.stratus', 'skills', 'my-skills', 'SKILL.md'), 'utf8');
+});
+
 test('runCli skills withholds enablement claims when the roster cannot load', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillroster-'));
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillroster-cwd-'));

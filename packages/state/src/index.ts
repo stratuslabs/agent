@@ -1386,6 +1386,18 @@ export interface InstallSkillsOptions {
   only?: string[];
   /** Replace an existing `~/.stratus/skills/<id>` instead of refusing it. */
   force?: boolean;
+  /** See DiscoverSkillsOptions.rootId — forwarded to discovery. */
+  rootId?: string;
+}
+
+export interface DiscoverSkillsOptions {
+  /**
+   * What the source directory is called where it came from — for a cloned
+   * source, the repository's own name rather than the temporary directory
+   * git landed in, whose random basename is either not an id or, worse,
+   * accidentally one. Read only by the root-as-skill case.
+   */
+  rootId?: string;
 }
 
 export interface InstallSkillsResult {
@@ -1423,12 +1435,13 @@ const SKILL_IGNORED_DIRNAMES = new Set(['.git', 'node_modules']);
  */
 export const discoverSkillsInDirectory = async (
   sourceDir: string,
+  options: DiscoverSkillsOptions = {},
 ): Promise<{ candidates: SkillInstallCandidate[]; skipped: SkillInstallSkip[] }> => {
   const candidates: SkillInstallCandidate[] = [];
   const skipped: SkillInstallSkip[] = [];
   const claimed = new Set<string>();
 
-  const consider = async (directory: string, fallbackId: string): Promise<void> => {
+  const consider = async (directory: string, fallbackId: string, preferDocumentName = false): Promise<void> => {
     let source: string;
     try {
       source = await readFile(path.join(directory, 'SKILL.md'), 'utf8');
@@ -1442,12 +1455,14 @@ export const discoverSkillsInDirectory = async (
       skipped.push({ id: fallbackId, reason: error instanceof Error ? error.message : String(error) });
       return;
     }
-    // The directory name is the id, as it will be in `~/.stratus/skills/`;
-    // a repository whose root is the skill has no meaningful directory
-    // name, so its frontmatter `name` stands in when it is id-shaped.
-    const id = isValidSkillId(fallbackId)
-      ? fallbackId
-      : (document.name && isValidSkillId(document.name) ? document.name : undefined);
+    // The directory name is the id, as it will be in `~/.stratus/skills/`.
+    // A repository whose root is the skill is the exception: its directory
+    // name is wherever it happened to be checked out, so the frontmatter
+    // `name` wins there, with the caller-supplied root id as the fallback
+    // for a nameless skill.
+    const fromDocument = document.name && isValidSkillId(document.name) ? document.name : undefined;
+    const fromFallback = isValidSkillId(fallbackId) ? fallbackId : undefined;
+    const id = preferDocumentName ? (fromDocument ?? fromFallback) : (fromFallback ?? fromDocument);
     if (id === undefined) {
       skipped.push({
         id: fallbackId,
@@ -1463,7 +1478,7 @@ export const discoverSkillsInDirectory = async (
     candidates.push({ id, directory, name: document.name ?? id, description: document.description });
   };
 
-  await consider(sourceDir, path.basename(sourceDir));
+  await consider(sourceDir, options.rootId ?? path.basename(sourceDir), true);
   const containers = [sourceDir, ...SKILL_CONTAINER_DIRNAMES.map((dirname) => path.join(sourceDir, dirname))];
   for (const container of containers) {
     let entries: import('node:fs').Dirent[] = [];
@@ -1500,7 +1515,10 @@ export const installSkillsFromDirectory = async (
   sourceDir: string,
   options: InstallSkillsOptions = {},
 ): Promise<InstallSkillsResult> => {
-  const { candidates, skipped } = await discoverSkillsInDirectory(sourceDir);
+  const { candidates, skipped } = await discoverSkillsInDirectory(
+    sourceDir,
+    options.rootId !== undefined ? { rootId: options.rootId } : {},
+  );
   const wanted = options.only === undefined
     ? candidates
     : candidates.filter((candidate) => options.only?.includes(candidate.id));
@@ -1613,21 +1631,25 @@ const findEscapingSymlink = async (directory: string): Promise<string | undefine
       continue;
     }
     const linkPath = path.join(entry.parentPath, entry.name);
+    // The raw target first, and an absolute one refuses whether or not it
+    // resolves right now: preserved verbatim, an absolute path is pinned
+    // to the machine and tree the skill was inspected on — inside a
+    // cloned source it dangles the moment the clone is deleted, and
+    // anywhere else it is reading somebody's filesystem by fiat.
+    const target = await readlink(linkPath);
+    if (path.isAbsolute(target)) {
+      return path.relative(directory, linkPath);
+    }
     let resolved: string;
     try {
       resolved = await realpath(linkPath);
     } catch {
-      // Dangling here proves nothing: the link is preserved verbatim and
-      // re-resolves wherever the skill lands, so `../../credentials.json`
-      // dangles in a fresh clone and reads the operator's secrets once it
-      // sits under `~/.stratus/skills/<id>/`. With no target to resolve,
-      // the target is judged lexically: absolute is somebody's machine by
-      // construction, and a relative one must stay inside the skill by
-      // path arithmetic alone.
-      const target = await readlink(linkPath);
-      if (path.isAbsolute(target)) {
-        return path.relative(directory, linkPath);
-      }
+      // Dangling here proves nothing: the link re-resolves wherever the
+      // skill lands, so `../../credentials.json` dangles in a fresh clone
+      // and reads the operator's secrets once it sits under
+      // `~/.stratus/skills/<id>/`. With no target to resolve, it is
+      // judged by path arithmetic alone: the relative target must stay
+      // inside the skill.
       const lexical = path.resolve(path.dirname(path.resolve(linkPath)), target);
       if (lexical !== lexicalRoot && !lexical.startsWith(lexicalRoot + path.sep)) {
         return path.relative(directory, linkPath);
