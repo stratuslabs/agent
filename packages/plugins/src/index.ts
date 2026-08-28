@@ -41,4 +41,5 @@ export {
   type LoadPluginsResult,
   type OptionalModuleHost,
   type PluginLoadFailure,
+  type PluginSkillRecord,
 } from './loader.ts';

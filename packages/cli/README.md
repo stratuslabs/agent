@@ -526,6 +526,68 @@ echo every unparseable line back in its error text — which the tool returns.
 A command that can be handed a path is a file reader wearing another name, so
 `--file` is now refused in every scope, including ones you add.
 
+## Skills: how an agent does a task well
+
+Tools are capability; a **skill** is competence — markdown that teaches an
+agent a procedure: the rubric for a code review, the order to check things in,
+the format to answer in. A skill is a directory with a `SKILL.md`:
+
+```text
+~/.stratus/skills/
+  code-review/
+    SKILL.md
+```
+
+```markdown
+---
+name: Code Review
+description: Use when reviewing a diff or a pull request.
+---
+
+# Code review
+
+Lead with the verdict, then findings ordered by severity...
+```
+
+The frontmatter is the soul dialect — `name`, `description`, optional
+`version`, and an optional `requires:` list of toolsets the procedure expects
+(`browser.*`). The directory name is the skill's id. Plugins can ship skills
+too, declared in their manifest; those are addressed by the package name
+verbatim (`stratus-plugin-github:pr-review`), and by the bare id while no
+other package claims it.
+
+An agent gets a skill only when its soul asks — same allowlist shape as
+`tools:`, except that omitting it means **none** (a skill silently changing
+how an agent behaves is worse than an agent that has to be told):
+
+```markdown
+---
+name: Ava
+tools: [fs.read, fs.search]
+skills:
+  - code-review
+  - stratus-plugin-github:*
+---
+```
+
+**An enabled skill costs one line per turn, not its body.** Only the name and
+description reach the system prompt; the agent loads the full procedure with
+the built-in `skill.read` tool when the description says it is relevant. That
+is what lets a fleet carry thirty procedures without every turn paying for all
+thirty. `skill.read` is part of the skills mechanism — never list it under
+`tools:`; it appears (and works) for exactly the agents whose soul enables any
+skill, and reads only the skills that soul allows.
+
+**Write the description for routing.** It is the only thing the model sees
+before deciding to load the body, so it says *when to reach for this*, not
+what the file contains: "Use when reviewing a diff or a pull request", not "A
+rubric with twelve sections". A skill without a description does not load.
+
+A skill whose `requires:` names toolsets the agent's `tools:` does not cover
+is a warning when the daemon loads the roster, never a refusal — a skill is
+prose, and can degrade. `stratus run` and `stratus chat` serve the same skills
+directory the daemon does, so a skill that routes locally routes in Slack.
+
 ## Always on
 
 `stratus serve` stays a foreground process on purpose — debuggable, and
@@ -685,7 +747,7 @@ environment quietly demoting a Claude subscription sign-in to per-token billing.
 
 ## Agents are people
 
-An agent's identity lives in a **soul file** — markdown with frontmatter for the structured parts (name, provider, model, tool allowlists) and prose for the personality:
+An agent's identity lives in a **soul file** — markdown with frontmatter for the structured parts (name, provider, model, tool and skill allowlists) and prose for the personality:
 
 ```markdown
 ---
@@ -695,6 +757,8 @@ model: claude-opus-5
 tools:
   - demo.echo
   - memory.remember
+skills:
+  - code-review
 ---
 
 You are a sharp, warm generalist. Answer first, explain second...

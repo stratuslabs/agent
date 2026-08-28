@@ -367,6 +367,40 @@ test('runCli executes the demo tool loop', async () => {
   assert.equal(output.stderr, '');
 });
 
+test('runCli warns like the daemon when a soul enables a skill without its required tools', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillreq-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillreq-cwd-'));
+  const skillDir = path.join(home, '.stratus', 'skills', 'site-audit');
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(
+    path.join(skillDir, 'SKILL.md'),
+    '---\ndescription: Use when auditing a live site.\nrequires:\n  - browser.*\n---\n\nOpen the page and walk the flows.\n',
+  );
+  const soulPath = path.join(home, '.stratus', 'agents', 'ava.md');
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  await writeFile(
+    soulPath,
+    '---\nname: Ava\nid: ava\ntools:\n  - demo.echo\nskills:\n  - site-audit\n---\n\nYou audit sites.\n',
+  );
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({ soul: soulPath })}\n`,
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'hello'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  // The same advisory `stratus serve` gives at roster load — a local test
+  // that stayed silent about it would disagree with the daemon. And only
+  // an advisory: the run itself still completes.
+  assert.equal(exitCode, 0);
+  assert.match(output.stderr, /agent ava enables skill site-audit, which expects tools the agent is not allowed: browser\.\*/);
+});
+
 test('runCli denies tool calls when approvals are set to never', async () => {
   const { streams, output } = createStreams();
   const exitCode = await runCli({

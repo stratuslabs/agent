@@ -2,7 +2,8 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { EventBus, JsonObject, Plugin, ToolRegistry } from '@stratusagent/core';
+import type { EventBus, JsonObject, Plugin, Skill, SkillRegistry, ToolRegistry } from '@stratusagent/core';
+import { createLazySkill, parseSkillDocument } from '@stratusagent/agents';
 
 import {
   parsePluginManifest,
@@ -59,8 +60,15 @@ export const loadOptionalModule = async <T = unknown>(
 /** The ABI every loadable plugin exports. See `plugins.md`. */
 export type CreatePlugin = (config: JsonObject) => Plugin | Promise<Plugin>;
 
-/** Where a package's own package.json is, given something it resolved to. */
-const packageJsonFor = async (resolvedUrl: string, specifier: string): Promise<unknown> => {
+/**
+ * Where a package's own package.json is, given something it resolved to —
+ * the parsed manifest source plus the directory it was found in, which is
+ * the package root a manifest's relative skill paths resolve against.
+ */
+const packageJsonFor = async (
+  resolvedUrl: string,
+  specifier: string,
+): Promise<{ packageJson: unknown; directory: string }> => {
   let directory = path.dirname(fileURLToPath(resolvedUrl));
   // Bounded rather than "until the filesystem root": a walk that reaches
   // `/` would read some unrelated package.json and validate a manifest
@@ -68,7 +76,7 @@ const packageJsonFor = async (resolvedUrl: string, specifier: string): Promise<u
   for (let depth = 0; depth < 8; depth += 1) {
     try {
       const raw = await readFile(path.join(directory, 'package.json'), 'utf8');
-      return JSON.parse(raw) as unknown;
+      return { packageJson: JSON.parse(raw) as unknown, directory };
     } catch {
       const parent = path.dirname(directory);
       if (parent === directory) {
@@ -92,6 +100,25 @@ const packageJsonFor = async (resolvedUrl: string, specifier: string): Promise<u
 export const isFirstPartyPackage = (packageName: string): boolean =>
   packageName === '@stratusagent' || packageName.startsWith('@stratusagent/');
 
+/**
+ * What the daemon knows about one skill a plugin contributed.
+ *
+ * Deliberately no `alias` field: whether the bare id still reaches this
+ * skill is the registry's to answer, live — a plugin loading later can
+ * retire it — and a snapshot here would be a second answer that goes
+ * stale the moment it matters. Ask `SkillRegistry.idsFor`.
+ */
+export interface PluginSkillRecord {
+  /** The qualified id (`stratus-plugin-github:pr-review`) — the canonical form. */
+  id: string;
+  name: string;
+  description: string;
+  /** The package whose skill this is — provenance, same as tools. */
+  package: string;
+  /** Absolute path of the SKILL.md, for operators asking where prose lives. */
+  path: string;
+}
+
 export interface LoadedPlugin {
   /** The package name — a plugin's identity is its package. */
   package: string;
@@ -100,6 +127,7 @@ export interface LoadedPlugin {
   manifest: PluginManifest;
   trusted: boolean;
   tools: PluginToolRecord[];
+  skills: PluginSkillRecord[];
   /**
    * The plugin itself, so the host can shut it down. A browser plugin holds
    * a Chromium and a listening socket; a daemon that stopped without
@@ -120,6 +148,12 @@ export interface LoadPluginsOptions {
   host: OptionalModuleHost;
   /** The registry a plugin's tools are committed into once it loads whole. */
   tools: ToolRegistry;
+  /**
+   * The catalog a plugin's manifest-declared skills register into once it
+   * loads whole. Omitted, contributed skills are ignored — a host that
+   * cannot serve skills should not half-register them.
+   */
+  skills?: SkillRegistry;
   bus: EventBus;
   /**
    * Where tool output belongs on this machine. Supplied to any plugin whose
@@ -159,6 +193,70 @@ const configFor = (
   return rest;
 };
 
+/** A declared skill, read and validated but not yet in any registry. */
+interface StagedPluginSkill {
+  skill: Skill;
+  bareId: string;
+  record: PluginSkillRecord;
+}
+
+/**
+ * Read and validate every skill a manifest declares — staged, not
+ * registered, the same discipline the tool view keeps: nothing a plugin
+ * contributes lands anywhere until the whole plugin has loaded. A skill
+ * file that is missing, escapes its package, or will not parse refuses the
+ * plugin whole, before its code is imported — a skill is prose, so the
+ * host reads it from the declaration alone.
+ */
+const stageManifestSkills = async (
+  manifest: PluginManifest,
+  packageDirectory: string,
+): Promise<StagedPluginSkill[]> => {
+  const staged: StagedPluginSkill[] = [];
+  for (const declaration of manifest.contributes.skills) {
+    const filePath = path.resolve(packageDirectory, declaration.path);
+    // A manifest names files inside its own package; `../` reaching out of
+    // it would make "installing a plugin" read arbitrary files under the
+    // skill's name.
+    if (!filePath.startsWith(packageDirectory + path.sep)) {
+      throw new PluginManifestError(
+        `Plugin ${manifest.packageName}: skill ${declaration.id} declares a path outside its package: ${declaration.path}`,
+      );
+    }
+    let source: string;
+    try {
+      source = await readFile(filePath, 'utf8');
+    } catch (error) {
+      throw new PluginManifestError(
+        `Plugin ${manifest.packageName}: skill ${declaration.id} could not be read at ${declaration.path}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    let document;
+    try {
+      document = parseSkillDocument(source);
+    } catch (error) {
+      throw new PluginManifestError(
+        `Plugin ${manifest.packageName}: skill ${declaration.id} is not a valid SKILL.md: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    // The canonical id is the package name verbatim plus the declared id —
+    // verbose on purpose; see "Naming" in docs/architecture/plugins.md.
+    const qualified = `${manifest.packageName}:${declaration.id}`;
+    staged.push({
+      bareId: declaration.id,
+      skill: createLazySkill({ id: qualified, document, read: () => readFile(filePath, 'utf8') }),
+      record: {
+        id: qualified,
+        name: document.name ?? declaration.id,
+        description: document.description,
+        package: manifest.packageName,
+        path: filePath,
+      },
+    });
+  }
+  return staged;
+};
+
 /**
  * Turn a `plugins` config block into running capability.
  *
@@ -196,7 +294,8 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
     let instance: Plugin | undefined;
     try {
       const resolved = options.host.resolve(specifier);
-      const manifest = parsePluginManifest(await packageJsonFor(resolved, specifier), specifier);
+      const { packageJson, directory } = await packageJsonFor(resolved, specifier);
+      const manifest = parsePluginManifest(packageJson, specifier);
       const isTrusted = trusted(manifest.packageName);
       // Validated *after* the host's defaults are folded in, because that
       // is the configuration the plugin will actually be handed: a manifest
@@ -204,6 +303,11 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
       // for missing the very setting the host supplies.
       const config = configFor(block, manifest, options.workspaceRoot);
       validatePluginConfig(manifest, config);
+
+      // Skills are read and validated before the module is imported —
+      // they are files the manifest names, so a broken one fails the
+      // plugin without running any of its code.
+      const stagedSkills = options.skills ? await stageManifestSkills(manifest, directory) : [];
 
       const module = (await options.host.import(specifier)) as { createPlugin?: CreatePlugin };
       if (typeof module.createPlugin !== 'function') {
@@ -222,7 +326,31 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
 
       const view = new ManifestBoundToolRegistry({ manifest, target: options.tools, trusted: isTrusted });
       await plugin.setup({ bus: options.bus, tools: view });
+
+      // Everything that can refuse happens before anything commits, so a
+      // plugin never lands half — tools registered, skills not. The
+      // qualified id makes a canonical collision here mean the same
+      // package twice; still refused with both halves consistent.
+      if (options.skills) {
+        for (const { skill } of stagedSkills) {
+          if (options.skills.has(skill.id)) {
+            throw new PluginManifestError(
+              `Skill id collision: ${skill.id} is already registered. A skill id is unique per install.`,
+            );
+          }
+        }
+      }
       const tools = view.commit(owners);
+      const skills: PluginSkillRecord[] = [];
+      for (const { skill, bareId, record } of stagedSkills) {
+        options.skills?.register(skill);
+        // The bare id is a convenience the skill holds only while it is
+        // unambiguous — an operator skill or a second plugin wanting it
+        // leaves this one reachable qualified. See SkillRegistry, which
+        // stays the only answer to whether the alias still resolves.
+        options.skills?.registerAlias(bareId, skill.id);
+        skills.push(record);
+      }
 
       loaded.push({
         package: manifest.packageName,
@@ -230,6 +358,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
         manifest,
         trusted: isTrusted,
         tools,
+        skills,
         instance: plugin,
       });
     } catch (error) {

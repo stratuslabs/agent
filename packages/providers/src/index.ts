@@ -1,11 +1,12 @@
-import type {
-  JsonObject,
-  ModelProvider,
-  ProviderPart,
-  ProviderRequest,
-  ProviderResponse,
-  ToolCall,
-  ToolDescriptor,
+import {
+  renderSystemPromptSections,
+  type JsonObject,
+  type ModelProvider,
+  type ProviderPart,
+  type ProviderRequest,
+  type ProviderResponse,
+  type ToolCall,
+  type ToolDescriptor,
 } from '@stratusagent/core';
 
 export interface ProviderResponseBuilder {
@@ -503,26 +504,13 @@ const createOpenAICompatibleMessages = (
 ): OpenAICompatibleMessage[] => {
   const messages: OpenAICompatibleMessage[] = [];
 
-  if (systemPrompt) {
-    messages.push({ role: 'system', content: systemPrompt });
-  }
-
-  // The agent's own persona travels with the session and must reach the
-  // model — this is what makes a delegated specialist act like themselves.
-  const instructions = request.session.agent.instructions;
-  if (instructions && instructions.length > 0) {
-    messages.push({
-      role: 'system',
-      content: `You are ${request.session.agent.name}. ${instructions}`,
-    });
-  }
-
-  if (request.memory && request.memory.length > 0) {
-    const facts = request.memory.map((entry) => `- ${entry.content}`).join('\n');
-    messages.push({
-      role: 'system',
-      content: `Things you remember from previous conversations (your own long-term memory):\n${facts}`,
-    });
+  // One shared reading of what an agent is told about itself — persona,
+  // memory, skills — rendered by the kernel (see core's system prompt
+  // renderer); this dialect sends each section as its own system message.
+  for (const section of renderSystemPromptSections(request, {
+    ...(systemPrompt ? { preamble: systemPrompt } : {}),
+  })) {
+    messages.push({ role: 'system', content: section });
   }
 
   for (const message of request.session.messages) {

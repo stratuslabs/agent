@@ -229,3 +229,71 @@ test('a startup that fails after the plugins loaded still lets them go', async (
   await gateway.stop();
   assert.equal(disposed, 1);
 });
+
+test('a contested bare alias disappears from every listing, plugins() included', async () => {
+  const home = await newHome();
+  // Built by hand rather than through hostFor because these packages ship
+  // a file besides package.json — the SKILL.md the manifest points at.
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-skillpkgs-'));
+  const entries = new Map<string, string>();
+  const skillSource = (label: string): string =>
+    `---\ndescription: Use when the task calls for ${label}.\n---\n\n# ${label}\n`;
+  for (const name of ['stratus-plugin-acme', 'stratus-plugin-zephyr']) {
+    const directory = path.join(root, name.replace(/[@/]/g, '_'));
+    await mkdir(path.join(directory, 'dist'), { recursive: true });
+    await mkdir(path.join(directory, 'skills'), { recursive: true });
+    await writeFile(path.join(directory, 'package.json'), JSON.stringify({
+      name,
+      stratus: { pluginVersion: 1, contributes: { skills: [{ id: 'pr-review', path: './skills/SKILL.md' }] } },
+    }));
+    await writeFile(path.join(directory, 'skills', 'SKILL.md'), skillSource(name));
+    entries.set(name, pathToFileURL(path.join(directory, 'dist', 'index.js')).href);
+  }
+  const host: OptionalModuleHost = {
+    resolve(specifier) {
+      const resolved = entries.get(specifier);
+      if (!resolved) {
+        throw new Error(`Cannot find package '${specifier}'`);
+      }
+      return resolved;
+    },
+    async import(specifier) {
+      return { createPlugin: () => ({ name: specifier, setup() {} }) };
+    },
+  };
+
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    plugins: {
+      'stratus-plugin-acme': { enabled: true },
+      'stratus-plugin-zephyr': { enabled: true },
+    },
+    pluginHost: host,
+    log: () => {},
+    warn: () => {},
+  });
+
+  await gateway.start();
+  try {
+    // Both skills serve, qualified; the bare id belongs to neither — and
+    // no listing may advertise an alias skill.read would refuse. The
+    // first plugin held the alias briefly at load, which is exactly the
+    // snapshot plugins() must not echo.
+    const catalog = gateway.skills();
+    assert.deepEqual(
+      catalog.map((skill) => skill.id).sort(),
+      ['stratus-plugin-acme:pr-review', 'stratus-plugin-zephyr:pr-review'],
+    );
+    assert.ok(catalog.every((skill) => skill.alias === undefined));
+
+    const statuses = gateway.plugins();
+    for (const status of statuses) {
+      for (const skill of status.skills ?? []) {
+        assert.equal(skill.alias, undefined, `${status.package} still advertises the contested alias`);
+      }
+    }
+  } finally {
+    await gateway.stop();
+  }
+});

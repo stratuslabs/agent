@@ -480,6 +480,40 @@ test('createOpenAICompatibleProvider renders agent memory as a system message', 
   assert.match(memoryMessage.content, /- Their name is Sam\./);
 });
 
+test('createOpenAICompatibleProvider renders enabled skills as one line each, never a body', async () => {
+  let requestBody: { messages?: Array<{ role: string; content: string }> } = {};
+
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as typeof requestBody;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ choices: [{ message: { content: 'Hi!' } }] }),
+      } as Response;
+    },
+  });
+
+  const request: ProviderRequest = {
+    ...createRequest(),
+    skills: [
+      { id: 'code-review', name: 'Code Review', description: 'Use when reviewing a diff.' },
+      { id: 'stratus-plugin-github:pr-review', name: 'pr-review', description: 'Use for GitHub pull requests.' },
+    ],
+  };
+
+  await provider.generate(request);
+
+  const skillsMessage = requestBody.messages?.find(
+    (message) => message.role === 'system' && message.content.includes('skill.read'),
+  );
+  assert.ok(skillsMessage, 'skills should be rendered as a system message naming skill.read');
+  assert.match(skillsMessage.content, /- code-review \(Code Review\): Use when reviewing a diff\./);
+  assert.match(skillsMessage.content, /- stratus-plugin-github:pr-review \(pr-review\): Use for GitHub pull requests\./);
+});
+
 test('createOpenAICompatibleProvider sanitizes tool names and resolves collisions', async () => {
   assert.equal(sanitizeOpenAICompatibleToolName('demo.echo'), 'demo_echo');
   assert.equal(sanitizeOpenAICompatibleToolName('files:read/all'), 'files_read_all');

@@ -6,6 +6,7 @@ import {
   type AvatarTheme,
   type JsonObject,
   type Session,
+  type Skill,
   type Tool,
 } from '@stratusagent/core';
 
@@ -183,6 +184,7 @@ export interface DefineAgentInput {
   id?: string;
   instructions?: string;
   tools?: string[];
+  skills?: string[];
   credentials?: string[];
   avatar?: AvatarTheme;
   /** Seed for deterministic identity generation (used in tests). */
@@ -238,6 +240,7 @@ export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
     ...(input.instructions ? { instructions: input.instructions } : {}),
     avatar: input.avatar ?? generateAvatarTheme(name),
     ...(input.tools ? { tools: input.tools } : {}),
+    ...(input.skills ? { skills: input.skills } : {}),
     ...(input.credentials ? { credentials: input.credentials } : {}),
   };
 };
@@ -262,10 +265,7 @@ export interface ParseSoulOptions {
 }
 
 const SOUL_SCALAR_KEYS = ['name', 'id', 'provider', 'model'] as const;
-const SOUL_LIST_KEYS = ['tools', 'credentials'] as const;
-
-type SoulScalarKey = (typeof SOUL_SCALAR_KEYS)[number];
-type SoulListKey = (typeof SOUL_LIST_KEYS)[number];
+const SOUL_LIST_KEYS = ['tools', 'skills', 'credentials'] as const;
 
 const unquote = (value: string): string => {
   const trimmed = value.trim();
@@ -279,16 +279,23 @@ const unquote = (value: string): string => {
   return trimmed;
 };
 
-interface SoulFrontmatter {
-  scalars: Partial<Record<SoulScalarKey, string>>;
-  lists: Partial<Record<SoulListKey, string[]>>;
+interface FrontmatterShape {
+  /** Lowercased document kind for error messages ("soul", "skill"). */
+  kind: string;
+  scalarKeys: readonly string[];
+  listKeys: readonly string[];
+}
+
+interface ParsedFrontmatter {
+  scalars: Partial<Record<string, string>>;
+  lists: Partial<Record<string, string[]>>;
 }
 
 // A deliberately tiny frontmatter dialect: `key: value` scalars and block
-// lists of `- item` lines. Enough for souls, no YAML dependency.
-const parseSoulFrontmatter = (lines: string[]): SoulFrontmatter => {
-  const scalars: SoulFrontmatter['scalars'] = {};
-  const lists: SoulFrontmatter['lists'] = {};
+// lists of `- item` lines. Enough for souls and skills, no YAML dependency.
+const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): ParsedFrontmatter => {
+  const scalars: ParsedFrontmatter['scalars'] = {};
+  const lists: ParsedFrontmatter['lists'] = {};
   let currentList: string[] | undefined;
 
   for (const rawLine of lines) {
@@ -300,7 +307,7 @@ const parseSoulFrontmatter = (lines: string[]): SoulFrontmatter => {
     const listItem = /^\s+-\s*(.*)$/.exec(line);
     if (listItem) {
       if (!currentList) {
-        throw new Error(`Soul frontmatter has a list item outside a list: "${line.trim()}"`);
+        throw new Error(`${capitalize(shape.kind)} frontmatter has a list item outside a list: "${line.trim()}"`);
       }
       const item = unquote(listItem[1] ?? '');
       if (item.length > 0) {
@@ -311,22 +318,22 @@ const parseSoulFrontmatter = (lines: string[]): SoulFrontmatter => {
 
     const entry = /^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)$/.exec(line);
     if (!entry) {
-      throw new Error(`Soul frontmatter line is not "key: value": "${line.trim()}"`);
+      throw new Error(`${capitalize(shape.kind)} frontmatter line is not "key: value": "${line.trim()}"`);
     }
 
     const key = entry[1] ?? '';
     const value = entry[2] ?? '';
     currentList = undefined;
 
-    if ((SOUL_LIST_KEYS as readonly string[]).includes(key)) {
+    if (shape.listKeys.includes(key)) {
       const list: string[] = [];
-      lists[key as SoulListKey] = list;
+      lists[key] = list;
       const inline = value.trim();
       if (inline.length > 0) {
         // Inline form: tools: [a, b]
         const match = /^\[(.*)\]$/.exec(inline);
         if (!match) {
-          throw new Error(`Soul frontmatter list "${key}" must be a block list or [a, b]: "${inline}"`);
+          throw new Error(`${capitalize(shape.kind)} frontmatter list "${key}" must be a block list or [a, b]: "${inline}"`);
         }
         for (const item of (match[1] ?? '').split(',')) {
           const cleaned = unquote(item);
@@ -340,20 +347,47 @@ const parseSoulFrontmatter = (lines: string[]): SoulFrontmatter => {
       continue;
     }
 
-    if (!(SOUL_SCALAR_KEYS as readonly string[]).includes(key)) {
+    if (!shape.scalarKeys.includes(key)) {
       throw new Error(
-        `Unknown soul frontmatter key: "${key}". Supported keys: ${[...SOUL_SCALAR_KEYS, ...SOUL_LIST_KEYS].join(', ')}.`,
+        `Unknown ${shape.kind} frontmatter key: "${key}". Supported keys: ${[...shape.scalarKeys, ...shape.listKeys].join(', ')}.`,
       );
     }
 
     const scalar = unquote(value);
     if (scalar.length === 0) {
-      throw new Error(`Soul frontmatter key "${key}" has no value.`);
+      throw new Error(`${capitalize(shape.kind)} frontmatter key "${key}" has no value.`);
     }
-    scalars[key as SoulScalarKey] = scalar;
+    scalars[key] = scalar;
   }
 
   return { scalars, lists };
+};
+
+const capitalize = (word: string): string => `${word.charAt(0).toUpperCase()}${word.slice(1)}`;
+
+/**
+ * Split a markdown document into its `---`-fenced frontmatter lines (if
+ * any) and the body after them. Shared by souls and skills — one reading
+ * of what the fences mean, wherever the dialect appears.
+ */
+const extractFrontmatter = (
+  source: string,
+  kind: string,
+): { lines: string[] | undefined; body: string } => {
+  const normalized = source.replace(/\r\n/g, '\n');
+  const opener = /^---[ \t]*\n/.exec(normalized);
+  if (!opener) {
+    return { lines: undefined, body: normalized };
+  }
+  const closer = /\n---[ \t]*(\n|$)/.exec(normalized.slice(opener[0].length - 1));
+  if (!closer || closer.index === undefined) {
+    throw new Error(`${capitalize(kind)} frontmatter opened with --- but never closed.`);
+  }
+  const frontmatterEnd = opener[0].length - 1 + closer.index;
+  return {
+    lines: normalized.slice(opener[0].length, frontmatterEnd).split('\n'),
+    body: normalized.slice(frontmatterEnd + closer[0].length),
+  };
 };
 
 /**
@@ -362,31 +396,19 @@ const parseSoulFrontmatter = (lines: string[]): SoulFrontmatter => {
  * generated, so the smallest possible soul is just prose.
  */
 export const parseSoul = (source: string, options: ParseSoulOptions = {}): ParsedSoul => {
-  const normalized = source.replace(/\r\n/g, '\n');
-  let frontmatter: SoulFrontmatter = { scalars: {}, lists: {} };
-  let body = normalized;
-
-  const opener = /^---[ \t]*\n/.exec(normalized);
-  if (opener) {
-    const closer = /\n---[ \t]*(\n|$)/.exec(normalized.slice(opener[0].length - 1));
-    if (!closer || closer.index === undefined) {
-      throw new Error('Soul frontmatter opened with --- but never closed.');
-    }
-    const frontmatterEnd = opener[0].length - 1 + closer.index;
-    frontmatter = parseSoulFrontmatter(
-      normalized.slice(opener[0].length, frontmatterEnd).split('\n'),
-    );
-    body = normalized.slice(frontmatterEnd + closer[0].length);
-  }
+  const { lines, body } = extractFrontmatter(source, 'soul');
+  const { scalars, lists } = lines
+    ? parseFrontmatterLines(lines, { kind: 'soul', scalarKeys: SOUL_SCALAR_KEYS, listKeys: SOUL_LIST_KEYS })
+    : { scalars: {}, lists: {} } as ParsedFrontmatter;
 
   const instructions = body.trim();
-  const { scalars, lists } = frontmatter;
 
   const agent = defineAgent({
     ...(scalars.name ? { name: scalars.name } : {}),
     ...(scalars.id ? { id: scalars.id } : {}),
     ...(instructions ? { instructions } : {}),
     ...(lists.tools ? { tools: lists.tools } : {}),
+    ...(lists.skills ? { skills: lists.skills } : {}),
     ...(lists.credentials ? { credentials: lists.credentials } : {}),
     ...(options.seed !== undefined ? { seed: options.seed } : {}),
   });
@@ -413,6 +435,7 @@ export const formatSoul = (soul: ParsedSoul): string => {
   }
   for (const [key, values] of [
     ['tools', soul.agent.tools],
+    ['skills', soul.agent.skills],
     ['credentials', soul.agent.credentials],
   ] as const) {
     if (values && values.length > 0) {
@@ -428,6 +451,99 @@ export const formatSoul = (soul: ParsedSoul): string => {
   lines.push('');
   return lines.join('\n');
 };
+
+// ---- skills ----------------------------------------------------------------
+
+/**
+ * The shape a skill id is written in: lowercase kebab-case (`web-research`).
+ * One pattern for the manifest's declared ids and the operator directory's
+ * folder names — two copies would drift into two answers to what a valid
+ * id is.
+ */
+export const SKILL_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+export const isValidSkillId = (id: string): boolean => SKILL_ID_PATTERN.test(id);
+
+const SKILL_SCALAR_KEYS = ['name', 'description', 'version'] as const;
+const SKILL_LIST_KEYS = ['requires'] as const;
+
+/**
+ * A parsed `SKILL.md`: the one-line identity that reaches the system
+ * prompt, and the body that only ever travels through `skill.read`.
+ */
+export interface ParsedSkillDocument {
+  /** Display name; the registered skill falls back to its id. */
+  name?: string;
+  /**
+   * When to reach for this skill — what routing runs on, so it earns its
+   * place by saying when, not what the body contains.
+   */
+  description: string;
+  /** Informational; nothing keys on it. */
+  version?: string;
+  /** Toolset globs the procedure expects (`browser.*`). Advisory — see `Skill.requires`. */
+  requires?: string[];
+  body: string;
+}
+
+/**
+ * Parse a `SKILL.md` — the same frontmatter dialect souls use (`key: value`
+ * scalars, block lists), with the skill's keys: `name`, `description`,
+ * optional `version`, optional `requires`. The body is the procedure
+ * itself, markdown, untouched.
+ *
+ * `description` is required: it is the only thing the model sees before
+ * deciding to load the body, and a skill without one is unreachable by the
+ * mechanism that makes skills cheap.
+ */
+export const parseSkillDocument = (source: string): ParsedSkillDocument => {
+  const { lines, body } = extractFrontmatter(source, 'skill');
+  if (!lines) {
+    throw new Error('Skill file has no frontmatter. A SKILL.md starts with --- and needs at least a description.');
+  }
+  const { scalars, lists } = parseFrontmatterLines(lines, {
+    kind: 'skill',
+    scalarKeys: SKILL_SCALAR_KEYS,
+    listKeys: SKILL_LIST_KEYS,
+  });
+  const description = scalars.description;
+  if (!description) {
+    throw new Error(
+      'Skill frontmatter has no "description". The description is what an agent routes on — say when to reach for this skill.',
+    );
+  }
+  return {
+    ...(scalars.name ? { name: scalars.name } : {}),
+    description,
+    ...(scalars.version ? { version: scalars.version } : {}),
+    ...(lists.requires && lists.requires.length > 0 ? { requires: lists.requires } : {}),
+    body: body.trim(),
+  };
+};
+
+export interface LazySkillInput {
+  /** The id the skill registers under — qualified for a plugin's skill. */
+  id: string;
+  /** The parsed document, from the load-time read that validated the file. */
+  document: ParsedSkillDocument;
+  /** Re-read the file's source. Called on demand; the registry caches. */
+  read: () => Promise<string>;
+}
+
+/**
+ * A `Skill` whose body stays on disk until somebody asks. The identity
+ * comes from the load-time parse (which is also what validated the file);
+ * `load()` re-reads rather than closing over the body, so an
+ * enabled-but-unused skill costs its description line and nothing else —
+ * in the prompt and in memory.
+ */
+export const createLazySkill = ({ id, document, read }: LazySkillInput): Skill => ({
+  id,
+  name: document.name ?? id,
+  description: document.description,
+  ...(document.requires ? { requires: document.requires } : {}),
+  load: async () => parseSkillDocument(await read()).body,
+});
 
 export const MEMORY_TOOL_NAME = 'memory.remember';
 

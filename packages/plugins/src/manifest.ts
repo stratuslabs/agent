@@ -1,10 +1,12 @@
 import {
   DEFAULT_TOOL_RISK,
   matchesToolAllowlist,
+  SKILL_READ_TOOL_NAME,
   type JsonObject,
   type JsonValue,
   type ToolRisk,
 } from '@stratusagent/core';
+import { isValidSkillId } from '@stratusagent/agents';
 
 /**
  * The manifest version this host understands. A plugin declaring anything
@@ -39,7 +41,12 @@ export interface PluginSkillDeclaration {
 export interface PluginContributions {
   tools: PluginToolDeclaration[];
   toolsDiscovered: PluginNamespaceDeclaration[];
-  /** Parsed and reported, but not yet registrable — skills are step 09. */
+  /**
+   * Skills the package ships as files, loaded by the host from this
+   * declaration — a skill is prose, so registering it never requires
+   * importing the plugin's code. `path` is relative to the package root
+   * and must stay inside it.
+   */
   skills: PluginSkillDeclaration[];
 }
 
@@ -75,7 +82,6 @@ export class PluginConfigError extends Error {
 // not, so nothing can be typed to look like a flag or a hidden file.
 const TOOL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9_-]*)+$/;
 const NAMESPACE_PATTERN = /^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9_-]*)*\.\*$/;
-const SKILL_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
 const RISKS: ToolRisk[] = ['safe', 'gated', 'dangerous'];
 
@@ -145,6 +151,19 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
           `Plugin ${packageName}: ${JSON.stringify(entry.name)} is not a tool name. Tools are namespace.verb, lowercase (fs.read).`,
         );
       }
+      // Reserved, and refused here — before any host has imported or
+      // staged anything — because ordering must not decide who owns it:
+      // the runner's gates exempt this exact name from the tools
+      // allowlist for any agent with a skill enabled, and preserve a
+      // pre-registered reader as the host's. A host that loads plugins
+      // before building its runner (`stratus run`) would otherwise let a
+      // plugin's code stand in for the kernel's skill reader and run
+      // under an exemption the soul never granted it.
+      if (entry.name === SKILL_READ_TOOL_NAME) {
+        throw new PluginManifestError(
+          `Plugin ${packageName}: ${SKILL_READ_TOOL_NAME} is the kernel's skill reader and cannot be contributed by a plugin.`,
+        );
+      }
       tools.push({ name: entry.name, risk: parseRisk(entry.risk, `${packageName} tool ${entry.name}`) });
     }
   }
@@ -164,6 +183,14 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
           `Plugin ${packageName}: ${JSON.stringify(entry.namespace)} is not a namespace. Declare one as a prefix and a star (mcp.*).`,
         );
       }
+      // A namespace covering the reader is the same claim as naming it —
+      // it would authorize registering skill.read at setup. Same reading
+      // of the glob the allowlists use, so the two cannot disagree.
+      if (matchesToolAllowlist(SKILL_READ_TOOL_NAME, [entry.namespace])) {
+        throw new PluginManifestError(
+          `Plugin ${packageName}: namespace ${JSON.stringify(entry.namespace)} covers ${SKILL_READ_TOOL_NAME}, the kernel's skill reader, and cannot be claimed by a plugin.`,
+        );
+      }
       toolsDiscovered.push({
         namespace: entry.namespace,
         risk: parseRisk(entry.risk, `${packageName} namespace ${entry.namespace}`),
@@ -181,9 +208,19 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
           `Plugin ${packageName}: every contributes.skills entry needs an "id" and a "path".`,
         );
       }
-      if (!SKILL_ID_PATTERN.test(entry.id)) {
+      if (!isValidSkillId(entry.id)) {
         throw new PluginManifestError(
           `Plugin ${packageName}: ${JSON.stringify(entry.id)} is not a skill id. Skill ids are kebab-case (web-research).`,
+        );
+      }
+      // Refused at the manifest, not discovered mid-registration: the
+      // loader preflights staged skills against the shared registry and
+      // then registers after committing tools, so a duplicate that only
+      // surfaced at registration would leave the plugin half-landed —
+      // tools live, first skill live, plugin reported failed.
+      if (skills.some((declared) => declared.id === entry.id)) {
+        throw new PluginManifestError(
+          `Plugin ${packageName}: contributes.skills declares ${JSON.stringify(entry.id)} twice.`,
         );
       }
       skills.push({ id: entry.id, path: entry.path });

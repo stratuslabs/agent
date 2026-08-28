@@ -87,6 +87,27 @@ test('editing a soul round-trips through the parser and refuses an id change', a
     // Untouched keys survive: an edit is not a replacement.
     assert.match(soul, /provider: anthropic/);
 
+    // Every allowlist is editable by field — skills exactly as tools and
+    // credentials, or a client can grant tools but not the procedures
+    // that use them.
+    const allowlisted = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tools: ['fs.read'], skills: ['code-review'] }),
+    });
+    assert.equal(allowlisted.status, 200);
+    const withSkills = await readFile(path.join(home, '.stratus', 'agents', 'ava.md'), 'utf8');
+    assert.match(withSkills, /skills:\n  - code-review/);
+    assert.match(withSkills, /tools:\n  - fs\.read/);
+
+    const badSkills = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ skills: 'code-review' }),
+    });
+    assert.equal(badSkills.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(badSkills)).error.code, 'invalid_allowlist');
+
     // An id keys sessions, memory, and credentials. Changing it in place
     // would not rename an agent — it would hand this one's history away.
     const renamed = await harness.call('/api/v1/agents/ava', {
