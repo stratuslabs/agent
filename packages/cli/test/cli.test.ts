@@ -492,6 +492,32 @@ test('runCli skill add never prints a credential-bearing source URL', async () =
   assert.match(output.stdout, /Fetching https:\/\/\*\*\*@127\.0\.0\.1:1\/repo\.git/);
 });
 
+test('runCli skill add --agent reaches the configured soul outside the agents directory', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillcfg-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillcfg-cwd-'));
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillcfg-src-'));
+  await mkdir(path.join(source, 'code-review'), { recursive: true });
+  await writeFile(path.join(source, 'code-review', 'SKILL.md'), '---\ndescription: Use when reviewing.\n---\n\nBody.\n');
+  // The served default soul lives OUTSIDE ~/.stratus/agents, named by the
+  // config — a roster case stratus agents and the daemon both include.
+  const soulPath = path.join(home, 'elsewhere', 'ava.md');
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  await writeFile(soulPath, '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ soul: soulPath })}\n`);
+
+  const env = { cwd, homeDir: home, processEnv: {} };
+  const add = createStreams();
+  const addExit = await runCli({ argv: ['skill', 'add', source, '--agent', 'ava'], streams: add.streams, env });
+  assert.equal(addExit, 0, add.output.stderr);
+  assert.match(add.output.stdout, /enabled for Ava .*: code-review/);
+  assert.match(await readFile(soulPath, 'utf8'), /skills:\n  - code-review/);
+
+  const list = createStreams();
+  await runCli({ argv: ['skills'], streams: list.streams, env });
+  assert.match(list.output.stdout, /code-review\s+Use when reviewing\. — enabled by Ava/);
+});
+
 test('runCli skills withholds enablement claims when the roster cannot load', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillroster-'));
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillroster-cwd-'));

@@ -4657,6 +4657,29 @@ const cloneSkillSource = async (url: string, destination: string): Promise<void>
   });
 };
 
+/**
+ * The souls skill enablement is judged against: the agents directory plus
+ * the configured default soul (config `soul:` / STRATUS_SOUL), which may
+ * live outside it and is served all the same. The daemon's roster and
+ * `stratus agents` both include it, so `skill add --agent` and `stratus
+ * skills` must not answer from a narrower set.
+ */
+const rosterSoulsWithConfigured = async (
+  env: CliEnvironment,
+  warn: (line: string) => void,
+): Promise<Awaited<ReturnType<typeof loadRosterSouls>>> => {
+  const roster = await loadRosterSouls(env, warn);
+  try {
+    const configured = await resolveConfiguredSoul({}, env);
+    if (configured && !roster.some((entry) => entry.soul.agent.id === configured.soul.agent.id)) {
+      roster.push({ soul: configured.soul, path: configured.path });
+    }
+  } catch (error) {
+    warn(`could not read the configured soul: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return roster;
+};
+
 export const runSkillAdd = async (
   command: ParsedSkillAddCommand,
   streams: CliStreams,
@@ -4727,10 +4750,10 @@ export const runSkillAdd = async (
       return 0;
     }
 
-    const roster = await loadRosterSouls(env, (line) => writeLine(streams.stderr, `Warning: ${line}`));
+    const roster = await rosterSoulsWithConfigured(env, (line) => writeLine(streams.stderr, `Warning: ${line}`));
     const entry = roster.find((candidate) => candidate.soul.agent.id === command.agentId);
     if (!entry) {
-      writeLine(streams.stderr, `Error: no agent with id ${command.agentId} in ${agentsDirPath(env)}. The skills are installed; enable them by editing a soul.`);
+      writeLine(streams.stderr, `Error: no agent with id ${command.agentId} in ${agentsDirPath(env)} or the configured soul. The skills are installed; enable them by editing a soul.`);
       return 1;
     }
     const existing = entry.soul.agent.skills ?? [];
@@ -4778,7 +4801,7 @@ export const runSkills = async (
   let roster: Awaited<ReturnType<typeof loadRosterSouls>> = [];
   let rosterUnreadable = false;
   try {
-    roster = await loadRosterSouls(env, (line) => writeLine(streams.stderr, `Warning: ${line}`));
+    roster = await rosterSoulsWithConfigured(env, (line) => writeLine(streams.stderr, `Warning: ${line}`));
   } catch (error) {
     rosterUnreadable = true;
     writeLine(
