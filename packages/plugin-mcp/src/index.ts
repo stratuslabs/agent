@@ -250,6 +250,14 @@ interface DiscoveredTool {
 interface ServerState {
   spec: McpServerSpec;
   client: Client | undefined;
+  /**
+   * The transport of a connect still in flight, from the moment it exists
+   * until the connect settles. `dispose()` closes it directly: without
+   * this, a dispose racing a handshake could only wait for the connect's
+   * own `disposed` re-checks to run — for a stdio server, a spawned child
+   * holding granted env would live on until the connect timeout expired.
+   */
+  pending: Transport | undefined;
   connected: boolean;
   connecting: boolean;
   attempt: number;
@@ -274,6 +282,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
   const states: ServerState[] = Object.entries(config.servers).map(([name, block]) => ({
     spec: resolveServerSpec(name, block, processEnv),
     client: undefined,
+    pending: undefined,
     connected: false,
     connecting: false,
     attempt: 0,
@@ -443,6 +452,10 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         await transport.close().catch(() => {});
         return;
       }
+      // Tracked from here until the connect settles (the finally below),
+      // so dispose() can cut a handshake short instead of waiting for
+      // these awaits to notice `disposed` on their own.
+      state.pending = transport;
       const client = new Client({ name: '@stratusagent/plugin-mcp', version: '0.7.0' });
       client.onclose = () => {
         if (disposed || state.client !== client) {
@@ -474,6 +487,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
       options.onConnected?.(state.spec.name);
     } finally {
       state.connecting = false;
+      state.pending = undefined;
     }
   };
 
@@ -511,6 +525,12 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
           clearTimeout(state.timer);
           state.timer = undefined;
         }
+        // A connect still mid-handshake first: closing its transport kills
+        // the child and rejects the in-flight awaits, so shutdown does not
+        // wait out a connect timeout on a server that is never answering.
+        const pending = state.pending;
+        state.pending = undefined;
+        await pending?.close().catch(() => {});
         const client = state.client;
         state.client = undefined;
         state.connected = false;

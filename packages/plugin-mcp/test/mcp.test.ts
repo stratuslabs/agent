@@ -376,6 +376,50 @@ test('a server name that cannot be a name segment is refused as configuration', 
   assert.throws(() => createMcpPlugin({}), /needs a "servers" object/);
 });
 
+test('dispose() cuts a connect still mid-handshake instead of waiting out its timeout', async () => {
+  // A transport whose server end never answers: connect() suspends
+  // awaiting the initialize response, which is exactly when a daemon
+  // stopping must not have to wait for the connect timeout — for a stdio
+  // server the pending transport is a live child process.
+  let closeCalled = false;
+  let handed = () => {};
+  const transportHanded = new Promise<void>((resolve) => {
+    handed = resolve;
+  });
+  const hanging: Transport = {
+    async start() {},
+    async send() {},
+    async close() {
+      closeCalled = true;
+      this.onclose?.();
+    },
+  };
+  const plugin = createMcpPlugin(
+    { servers: { slow: { url: 'http://127.0.0.1:9/unused' } } },
+    {
+      transportFor: () => {
+        handed();
+        return hanging;
+      },
+      warn: () => {},
+      log: () => {},
+    },
+  );
+  const target = new ToolRegistry();
+  const view = await viewFor(target);
+  const settingUp = plugin.setup({ bus: new EventBus(), tools: view });
+  await transportHanded;
+  // One macrotask turn drains every microtask, which carries connect() to
+  // its suspension point — awaiting a response that never comes.
+  await new Promise((resolve) => setImmediate(resolve));
+
+  await plugin.dispose?.();
+  assert.equal(closeCalled, true, 'dispose reached the in-flight transport directly');
+  // Unblocked by the close, not by a timeout: the rejected handshake takes
+  // the unreachable-server path and setup resolves.
+  await settingUp;
+});
+
 test('a mistyped grant is refused, never silently ignored', () => {
   // A passEnv that is not an array of names would silently fall back to
   // the default list — the server starts without its token and fails
