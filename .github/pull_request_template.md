@@ -5,8 +5,8 @@
 
 ## Docs
 
-<!-- Name the file, don't tick a box. "Documented in packages/cli/README.md
-     § Logs" is checkable; "yes, documented" is not.
+<!-- Name the file, don't tick a box. "Documented in docs/guides/logs.md"
+     is checkable; "yes, documented" is not.
 
      Anything a user can see needs a line here: a new command or flag, a
      changed default, a new file the CLI writes, a changed setup menu.

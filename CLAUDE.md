@@ -12,11 +12,19 @@ reading the source.
 
 Where things are documented:
 
-- `packages/cli/README.md` — the CLI's own surface: setup, every command,
-  the options table. This is the detailed one.
-- `README.md` (root) — what the project is, what is included versus
-  optional, and a usage block that points at the CLI README rather than
-  duplicating it.
+- `docs/` — the detailed surface, one home per fact. A command or flag
+  lands in `docs/reference/cli.md` *and* the guide that owns its behavior
+  (`docs/guides/…`); a config key in `docs/reference/config.md` plus its
+  guide; a new file the CLI writes in the guide that owns that area.
+  `docs/README.md` is the index — a new page gets a row there.
+- `README.md` (root) — the pitch: quickstart, the feature table, the docs
+  table. Links, never depth: a fact documented in `docs/` is not restated
+  here, because the restated copy is the one that drifts.
+- `packages/cli/README.md` — the npm page: install, the command and
+  options tables, links into `docs/`. Same rule — link, don't restate.
+  Links and images here must be **absolute** `github.com` /
+  `raw.githubusercontent.com` URLs: npm does not resolve monorepo-relative
+  paths, and it renders this file only on publish.
 - `HELP_TEXT` in `packages/cli/src/index.ts` — every command and flag.
 - `packages/channel-slack/README.md` — the Slack app setup.
 - `packages/control-api/README.md` — the HTTP + WS surface: every endpoint,

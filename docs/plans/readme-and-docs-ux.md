@@ -1,5 +1,14 @@
 # Plan: friendly entry points, docs that carry the depth
 
+> **Status: decided and executed.** North star: Paperclip's structure with
+> Hermes Agent's install-speed. Tagline: *"Always-on agents that get
+> smarter over time."* Hero: the Stratus Labs banner, committed at
+> `docs/assets/stratus-banner.png` (the npm page needs an absolute
+> `raw.githubusercontent.com` URL, which is why it lives in the repo).
+> Docs: plain `docs/` for now; Mintlify is the intended next step when
+> ready — the tree is laid out so adopting it is a scaffold change, not a
+> reorganization. No community badges yet.
+
 The root `README.md` and `packages/cli/README.md` are the two places a new
 person lands — the GitHub repo and the npm package page — and both currently
 read as the full product manual. This plan restructures them into short,
