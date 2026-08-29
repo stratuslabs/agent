@@ -4852,6 +4852,11 @@ const runUpdate = async (
     }
     if (unit.scriptPath !== undefined && !(await pathExists(unit.scriptPath))) {
       unitNotes.push(`the unit's entrypoint no longer exists: ${unit.scriptPath}`);
+    } else if (unit.scriptPath !== undefined && process.argv[1] !== undefined && unit.scriptPath !== process.argv[1]) {
+      // A versioned package directory can keep the old file alive after an
+      // upgrade — the daemon then runs the old CLI indefinitely with
+      // nothing missing on disk to notice.
+      unitNotes.push(`the unit runs entrypoint ${unit.scriptPath}; this shell runs ${process.argv[1]}`);
     }
   }
 
@@ -4966,6 +4971,10 @@ const runUpdate = async (
 
   if (status?.installed) {
     out('Rewriting the service unit with current node and entrypoint paths…');
+    // The rewrite overwrites the unit before it bootstraps, so a failure
+    // in between must be able to put the old definition back — otherwise
+    // a stopped daemon is left with neither unit to start from.
+    const previousUnit = await readFile(serviceUnitPath(serviceEnv), 'utf8').catch(() => undefined);
     const install = await installService(
       // The unit's own working directory survives the rewrite: relative
       // paths in the pinned config (a `soul`) resolve against it, so a
@@ -4982,6 +4991,24 @@ const runUpdate = async (
       writeLine(install.ok ? streams.stdout : streams.stderr, message);
     }
     if (!install.ok) {
+      if (wasRunning) {
+        // The fleet was up when the update began and must not stay down
+        // over a failed rewrite: restore the previous unit definition and
+        // start it again. The exit code stays 1 — the update failed — but
+        // the world it found is put back.
+        if (previousUnit !== undefined) {
+          await writeFile(serviceUnitPath(serviceEnv), previousUnit, { mode: 0o644 }).catch((error: unknown) => {
+            writeLine(streams.stderr, `Could not restore the previous unit either: ${error instanceof Error ? error.message : String(error)}`);
+          });
+        }
+        const restarted = await startService(serviceEnv);
+        for (const message of restarted.messages) {
+          writeLine(restarted.ok ? streams.stdout : streams.stderr, message);
+        }
+        writeLine(streams.stderr, restarted.ok
+          ? 'The unit rewrite failed, so stratusd was restarted on its previous unit. Fix the failure above and run `stratus update` again.'
+          : 'The unit rewrite failed AND stratusd could not be restarted — bring it back with `stratus service start`, or `stratus service install` to rewrite the unit by hand.');
+      }
       return 1;
     }
     if (!wasRunning) {

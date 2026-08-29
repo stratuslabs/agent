@@ -221,11 +221,6 @@ const defaultRunner: ServiceRunner = async (command, args) => {
 const runnerFor = (env: ServiceEnvironment): ServiceRunner => env.run ?? defaultRunner;
 const uidOf = (env: ServiceEnvironment): number => env.uid ?? (typeof process.getuid === 'function' ? process.getuid() : 0);
 
-/** What `systemctl is-active` prints when it actually knows the answer. */
-const KNOWN_ACTIVE_STATES = new Set([
-  'active', 'reloading', 'inactive', 'failed', 'activating', 'deactivating', 'maintenance',
-]);
-
 /** What `systemctl is-enabled` prints when it actually knows the answer. */
 const KNOWN_ENABLEMENT_STATES = new Set([
   'enabled', 'enabled-runtime', 'linked', 'linked-runtime', 'alias',
@@ -274,9 +269,16 @@ export const readServiceStatus = async (env: ServiceEnvironment = {}): Promise<S
     }
     const active = await run('systemctl', ['--user', 'is-active', SYSTEMD_UNIT]);
     const state = active.stdout.trim();
-    if (KNOWN_ACTIVE_STATES.has(state)) {
-      return state === 'active';
+    // `reloading` is an active unit re-reading its config — running.
+    if (state === 'active' || state === 'reloading') {
+      return true;
     }
+    if (state === 'inactive' || state === 'failed') {
+      return false;
+    }
+    // Transitional states (activating, deactivating) are neither a "yes"
+    // nor a "no" a caller should act on, same as a manager that never
+    // answered.
     return undefined;
   };
 

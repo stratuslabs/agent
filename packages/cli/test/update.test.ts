@@ -10,6 +10,7 @@ import {
   installService,
   parseCommand,
   readServiceCommand,
+  readServiceStatus,
   runCli,
   serviceUnitPath,
   type ServiceRunner,
@@ -473,6 +474,97 @@ test('update refuses when the manager cannot say whether the daemon is running',
   assert.equal(code, 1);
   assert.match(output.stderr, /is running could not be determined/);
   assert.ok(!output.stdout.includes('Rewriting the service unit'), output.stdout);
+});
+
+test('a reloading systemd unit is running; a transitional one is unknown, not stopped', async () => {
+  const home = await freshHome();
+  await installService({ platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner }, {});
+  const statusWith = (state: string) => readServiceStatus({
+    platform: 'linux',
+    homeDir: home,
+    run: async (command, args) => (command === 'systemctl' && args.includes('is-active')
+      ? { code: 0, stdout: `${state}\n`, stderr: '' }
+      : { code: 0, stdout: 'enabled', stderr: '' }),
+  });
+  assert.equal((await statusWith('reloading'))?.running, true);
+  assert.equal((await statusWith('activating'))?.running, undefined);
+  assert.equal((await statusWith('inactive'))?.running, false);
+});
+
+test('a failed unit rewrite restores the previous unit and restarts the daemon', async () => {
+  const home = await freshHome();
+  const staleNode = path.join(home, 'nvm', 'v20.0.0', 'node');
+  let restarts = 0;
+  const runner: ServiceRunner = async (command, args) => {
+    if (command === 'systemctl' && args.includes('is-active')) {
+      return { code: 0, stdout: 'active', stderr: '' };
+    }
+    if (command === 'systemctl' && args.includes('is-enabled')) {
+      return { code: 0, stdout: 'enabled', stderr: '' };
+    }
+    if (command === 'systemctl' && args.includes('daemon-reload')) {
+      return { code: 1, stdout: '', stderr: 'daemon-reload refused' };
+    }
+    if (command === 'systemctl' && args.includes('restart')) {
+      restarts += 1;
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  // Seeded with a working runner so the install itself succeeds.
+  await installService(
+    { platform: 'linux', homeDir: home, cwd: home, execPath: staleNode, scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner },
+    {},
+  );
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceRunner: runner,
+      packageVersionFetcher: async () => CLI_VERSION,
+    },
+  });
+  assert.equal(code, 1);
+  assert.match(output.stderr, /restarted on its previous unit/);
+  assert.ok(restarts > 0, 'the daemon must be started again after the failed rewrite');
+  // The previous unit definition — stale node path and all — is back.
+  const restored = await readFile(serviceUnitPath({ platform: 'linux', homeDir: home }), 'utf8');
+  assert.ok(restored.includes(staleNode), 'the old unit definition must be restored');
+});
+
+test('update --check flags an entrypoint that exists but is not the one this shell runs', async () => {
+  const home = await freshHome();
+  await runStateMigrations({ homeDir: home });
+  // The old CLI file still exists — a versioned package directory kept
+  // alive after an upgrade — so an existence check alone sees nothing.
+  const oldEntrypoint = path.join(home, 'old-versions', 'bin.js');
+  await mkdir(path.dirname(oldEntrypoint), { recursive: true });
+  await writeFile(oldEntrypoint, '// old build');
+  await installService(
+    { homeDir: home, cwd: home, execPath: process.execPath, scriptPath: oldEntrypoint, execArgv: [], run: runningServiceRunner },
+    {},
+  );
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update', '--check'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => CLI_VERSION,
+    },
+  });
+  assert.equal(code, 1, output.stdout);
+  assert.match(output.stdout, /unit runs entrypoint/);
+  assert.doesNotMatch(output.stdout, /Nothing to do/);
 });
 
 test('doctor names a unit whose interpreter no longer exists', async () => {
