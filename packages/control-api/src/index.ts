@@ -22,7 +22,7 @@ export { API_PREFIX } from './http.ts';
 export type { EventEnvelope, EventFilter } from './events.ts';
 
 /** Kept in step with package.json, the way the CLI keeps its own version. */
-export const CONTROL_API_VERSION = '0.9.1';
+export const CONTROL_API_VERSION = '0.9.2';
 
 /** The default port `stratusd` serves its API on. Loopback only. */
 export const DEFAULT_CONTROL_API_PORT = 4123;
