@@ -6,7 +6,8 @@ Make the agent a *boundary*, not a row: an agent's sessions, memory,
 credentials, workspace, and command execution are structurally its own, so a
 bug — or a prompt-injected agent — cannot reach another agent's state or the
 daemon's, because the handle does not exist in its process rather than
-because a filter remembered to exclude it.
+because a filter remembered to exclude it — with the OS-enforced wall
+available as configuration, not a rewrite, where a threat model demands it.
 
 ## Why now
 
@@ -17,8 +18,8 @@ isolation with a scrubbed environment … and it is not built." Steps 01–14
 built the policy: risk levels that fail closed, command scopes,
 `envMode: 'replace'`, canonicalized fs roots, remote approval. This step
 builds the boundary under it, and the order was right — policy is what makes
-an isolated agent *useful*; isolation is what makes the policy layer's bugs
-survivable.
+an isolated agent *useful*; isolation is what narrows the blast radius when
+the policy layer fails.
 
 It is due now because the fleet acts unattended. After
 [10](./10-proactive.md), agents fire on schedules with nobody watching;
@@ -53,17 +54,24 @@ before it.
 
 ### A. Per-agent state layout
 
-- Every per-agent durable resource moves under the agent's own directory:
-  `~/.stratus/agents/<id>/` gains `sessions.db`, `memory.jsonl` (and its
-  FTS index), and the shell workspace, joining the command whitelist that
-  already lives there. Agent ids are already validated path-safe slugs
+- Every per-agent durable resource moves under the agent's own directory,
+  `~/.stratus/agents/<id>/`: `sessions.db`, `memory.jsonl` (and its FTS
+  index), the workspace from `~/.stratus/workspaces/<id>`, and the command
+  whitelist from `~/.stratus/agents/<id>.whitelist.json` beside the soul.
+  Nothing is in per-agent-directory form today — the whitelist is the
+  closest, a per-agent *file* in the shared directory — so all four move.
+  Agent ids are already validated path-safe slugs
   (a standing invariant) precisely so they can key paths — this step is
   why that invariant exists.
 - Directories are `0700`, same posture as `credentials.json`.
-- One migration, alias-aware like the legacy memory merge: the shared
-  `sessions.db` and `memory.jsonl` split by agent id on first start, old
-  files left in place renamed, never deleted. Schedules (rows in the same
-  database) migrate with their sessions.
+- One migration, alias-aware like the legacy memory merge, covering all
+  four resources: the shared `sessions.db` and `memory.jsonl` split by
+  agent id on first start; the per-agent workspace directory and whitelist
+  file move whole. Originals are left in place renamed, never deleted —
+  repointing a store constructor at a path the migration did not populate
+  is how workspace contents and persistent approvals would silently
+  vanish, which is exactly the defect class this layer exists to end.
+  Schedules (rows in the same database) migrate with their sessions.
 - The gateway may still be one process after this layer alone — the win is
   that cross-agent reads become *impossible to write accidentally*: a store
   is opened on an agent's path, so there is no query that could return
@@ -87,7 +95,25 @@ before it.
 - Each runtime's environment holds **only that agent's credentials**,
   resolved by the supervisor at spawn. `envMode: 'replace'` protected
   child *commands*; this protects the agent process itself — agent A's
-  address space never contains agent B's keys, or the Slack tokens.
+  address space never contains agent B's keys, or the Slack tokens. The
+  credential store stays supervisor-only: a runtime is handed resolved
+  values — or, once [08](./08-deployment-profiles.md)'s per-request
+  credential source exists, an opaque handle over IPC — never the path to
+  `~/.stratus/credentials.json` or a resolver over it.
+- **The limit of same-user processes, stated so no doc can overclaim it:**
+  runtimes sharing the supervisor's OS user are a real fault boundary and
+  a real partition of memory and environment, but not a filesystem
+  boundary — the OS sees one user, so a runtime that fully escaped both
+  the policy layer and its own tool surface could still open the
+  credential store or a sibling's directory. Layer B narrows what a
+  compromised runtime *holds* and touches by default; denying what it can
+  *reach* is precisely the deferred hardening (per-agent OS users,
+  `sandbox-exec`) or an `isolation: container` third mode that runs the
+  whole runtime — not just its commands — inside layer C's container with
+  only `agents/<id>/` mounted. That mode is the NanoClaw posture as one
+  more value of the same knob; it is held in the open questions rather
+  than promised here, and the documentation this step lands must draw
+  this line exactly where the mechanism does.
 - Per-agent crash containment: a runtime that OOMs or wedges is killed and
   restarted alone, with [03](./03-permissions.md)'s restart recovery
   scoped to that agent; the fleet does not notice.
@@ -161,7 +187,10 @@ step needs, which is the evidence the seams were right.
   read agent B's sessions, memory, or whitelist — by inspecting the spawned
   runtime's environment and open paths, not by asking A's tools nicely. The
   test fails if a fleet-wide credential or another agent's path reaches a
-  runtime's env or argv.
+  runtime's env or argv, and credential resolution is shown
+  supervisor-only at the seam: no runtime code path opens the credential
+  store, and the runtime package carries no dependency on the resolver
+  that can.
 - `kill -9` on one agent's runtime mid-turn: the turn fails honestly (the
   abandoned-turn sweep already reports this), the agent restarts, its
   parked approvals recover, and a concurrent turn on another agent
@@ -172,9 +201,11 @@ step needs, which is the evidence the seams were right.
   [04](./04-agent-sdk-bridge.md) is the model: one behavior, two
   transports.
 - Migration drill: a `~/.stratus` with shared `sessions.db` and
-  `memory.jsonl` starts under the new layout, every agent finds its
-  history and memories, the originals are preserved, and a second start
-  does not re-migrate.
+  `memory.jsonl`, populated `workspaces/<id>` directories, and
+  `agents/<id>.whitelist.json` files starts under the new layout; every
+  agent finds its history, memories, workspace contents, and persistent
+  approvals; the originals are preserved; and a second start does not
+  re-migrate.
 - A command run under `executor-container` cannot read a host path outside
   the agent's roots and workspace (tested with a real runtime on macOS via
   Apple `container` and on Linux via Docker); the same soul with
@@ -195,9 +226,15 @@ step needs, which is the evidence the seams were right.
 - **Where the provider lives** for the Claude-subscription path: the SDK
   bridge holds per-agent auth state; confirm it moves into the runtime
   cleanly or name what the supervisor must broker.
-- **Per-agent OS users**: out of scope here, but the recipe shape (a
+- **Per-agent OS users, and `isolation: container`**: both out of scope
+  here, but both must stay reachable. The recipe shape for users (a
   `runAs` on the soul, supervisor spawns with it) should be sketched in
-  this step's PR so nothing in the IPC design forecloses it.
+  this step's PR so nothing in the IPC design forecloses it — and a
+  containerized *runtime* (the whole of layer B's child inside layer C's
+  container, only `agents/<id>/` mounted) forecloses the child-IPC
+  transport outright, since a socket crosses a container boundary and an
+  inherited IPC channel does not cheaply. That is a real argument in the
+  transport question above, not a separate decision.
 - **Does 08's process-per-tenant collapse into this?** A tenant as a set
   of agent runtimes plus a namespaced supervisor looks strictly simpler
   than a parallel mechanism — decide when 08 starts, against real tenant
