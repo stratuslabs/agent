@@ -15,6 +15,7 @@ import type {
   SkillRegistry,
 } from '@stratusagent/core';
 import {
+  boundMemoryList,
   boundMemoryRead,
   clampMemoryRecallLimit,
   compareMemoryChronology,
@@ -334,8 +335,7 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
       if (options?.limit === undefined) {
         return { entries: merged.sort(compareMemoryChronology), truncated: anyTruncated };
       }
-      const bounded = boundMemoryRead(merged, Math.max(1, Math.floor(options.limit)));
-      bounded.entries.sort(compareMemoryChronology);
+      const bounded = boundMemoryList(merged, options.limit);
       return { entries: bounded.entries, truncated: bounded.truncated || anyTruncated };
     },
     async search(agentId, query, limit) {

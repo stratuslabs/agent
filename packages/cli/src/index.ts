@@ -61,6 +61,8 @@ import {
   createRecallTool,
   createRememberTool,
   defineAgent,
+  FORGET_TOOL_NAME,
+  MEMORY_TOOL_NAME,
   formatSoul,
   generateAgentName,
   parseSoul,
@@ -1332,7 +1334,7 @@ export const eventDetail = (event: StratusEvent): Record<string, unknown> | unde
       // this" is unanswerable later without it. The fact itself stays out
       // of the trace, like every other tool input and output.
       const output = event.result.output;
-      const entry = (event.result.toolName === 'memory.remember' || event.result.toolName === 'memory.forget')
+      const entry = (event.result.toolName === MEMORY_TOOL_NAME || event.result.toolName === FORGET_TOOL_NAME)
         && event.result.ok && typeof output === 'object' && output !== null && !Array.isArray(output)
         && typeof output.id === 'string'
         ? output.id

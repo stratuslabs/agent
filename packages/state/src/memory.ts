@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, chmod, mkdir, readFile, rm, stat } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, open, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
   assertMemoryContentWithinCap,
+  boundMemoryList,
   boundMemoryRead,
   clampMemoryRecallLimit,
   compareMemoryChronology,
@@ -51,7 +52,16 @@ interface MemoryFileRecords {
 }
 
 const isTombstoneRecord = (value: unknown): value is MemoryTombstone =>
-  typeof value === 'object' && value !== null && typeof (value as MemoryTombstone).forgets === 'string';
+  typeof value === 'object' && value !== null && typeof (value as MemoryTombstone).forgets === 'string'
+  && typeof (value as MemoryTombstone).agentId === 'string'
+  && typeof (value as MemoryTombstone).createdAt === 'string';
+
+const isEntryRecord = (value: unknown): value is MemoryEntry =>
+  typeof value === 'object' && value !== null
+  && typeof (value as MemoryEntry).id === 'string'
+  && typeof (value as MemoryEntry).agentId === 'string'
+  && typeof (value as MemoryEntry).content === 'string'
+  && typeof (value as MemoryEntry).createdAt === 'string';
 
 /** Every record in the file, in file order — the shape the index applies. */
 const parseOrderedRecords = (raw: string, filePath: string): (MemoryEntry | MemoryTombstone)[] => {
@@ -60,11 +70,20 @@ const parseOrderedRecords = (raw: string, filePath: string): (MemoryEntry | Memo
     if (line.trim().length === 0) {
       continue;
     }
+    let parsed: unknown;
     try {
-      ordered.push(JSON.parse(line) as MemoryEntry | MemoryTombstone);
+      parsed = JSON.parse(line);
     } catch {
       throw new Error(`Memory file has an invalid line: ${filePath}`);
     }
+    // Shape-checked, not only parsed: hand-added JSON that is not a
+    // well-formed record would otherwise surface later as a TypeError in a
+    // read or an undefined bound into the index — errors that never name
+    // the file the way this one does.
+    if (!isTombstoneRecord(parsed) && !isEntryRecord(parsed)) {
+      throw new Error(`Memory file has an invalid line: ${filePath}`);
+    }
+    ordered.push(parsed);
   }
   return ordered;
 };
@@ -234,6 +253,35 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
   // credentials and session files. A file created earlier under a looser
   // umask is tightened BEFORE new content lands in it; the mode option
   // covers fresh creation.
+  // A hand-edited file may end without a newline; appending straight after
+  // that would fuse two records into one invalid line and break every read
+  // until someone repairs the file. Prefixing a newline when the last byte
+  // needs one keeps the record parseable — and if a concurrent append lands
+  // in between, the false-positive prefix is only a blank line, which every
+  // reader skips.
+  const needsLeadingNewline = async (): Promise<boolean> => {
+    let handle;
+    try {
+      handle = await open(filePath, 'r');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return false;
+      }
+      throw error;
+    }
+    try {
+      const { size } = await handle.stat();
+      if (size === 0) {
+        return false;
+      }
+      const lastByte = new Uint8Array(1);
+      await handle.read(lastByte, 0, 1, size - 1);
+      return lastByte[0] !== 0x0a;
+    } finally {
+      await handle.close();
+    }
+  };
+
   const appendRecord = async (record: MemoryEntry | MemoryTombstone): Promise<void> => {
     await mkdir(path.dirname(filePath), { recursive: true });
     try {
@@ -247,7 +295,8 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
         throw error;
       }
     }
-    await appendFile(filePath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    const prefix = (await needsLeadingNewline()) ? '\n' : '';
+    await appendFile(filePath, `${prefix}${JSON.stringify(record)}\n`, { mode: 0o600 });
   };
 
   const openIndex = async (): Promise<SqliteDatabase> => {
@@ -279,90 +328,135 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
     return db;
   };
 
+  interface CatchUpPlan {
+    /** 'none' — the index already matches the record; nothing to write. */
+    action: 'none' | 'apply';
+    /** Drop every row first (schema change, edit, shrink, replaced file). */
+    clear: boolean;
+    records: (MemoryEntry | MemoryTombstone)[];
+    watermark: IndexWatermark;
+  }
+
+  const emptyWatermark = (): IndexWatermark =>
+    ({ offset: 0, digest: digestOf(new Uint8Array(0)), inode: '', mtimeMs: '' });
+
+  const sameWatermark = (a: IndexWatermark & { schema?: string | undefined }, b: IndexWatermark & { schema?: string | undefined }): boolean =>
+    a.offset === b.offset && a.digest === b.digest && a.inode === b.inode
+    && a.mtimeMs === b.mtimeMs && a.schema === b.schema;
+
   /**
-   * Bring the index up to date with the record before a search reads it.
+   * Decide what would bring the index up to date with the record, given the
+   * watermark `snapshot` — all file I/O, digesting, and parsing, none of it
+   * holding the database lock.
    *
    * - inode, mtime, and size (≡ recorded consumed offset) all match →
    *   nothing happened; O(1), no work.
    * - File grew and the prefix digest matches → a pure append, whoever
    *   wrote it; index the tail.
-   * - Anything else — shrunk, edited in place, replaced — → full rebuild.
-   *   The failure direction is rebuild, never trust.
-   *
-   * Runs inside one IMMEDIATE transaction so the CLI and the daemon,
-   * which share the file, cannot interleave a catch-up.
+   * - Anything else — shrunk, edited in place, replaced, a stale schema
+   *   stamp — → full rebuild. The failure direction is rebuild, never trust.
    */
-  const ensureIndexCurrent = async (database: SqliteDatabase): Promise<void> => {
-    database.exec('BEGIN IMMEDIATE;');
+  const planCatchUp = async (snapshot: IndexWatermark & { schema?: string | undefined }): Promise<CatchUpPlan> => {
+    // A stamp from another schema is a rebuild trigger, not an error.
+    const schemaStale = snapshot.schema !== undefined && snapshot.schema !== INDEX_SCHEMA_VERSION;
+    const base = schemaStale ? emptyWatermark() : snapshot;
+
+    let fileStat;
     try {
-      let watermark = readWatermark(database);
-      if (watermark.schema !== undefined && watermark.schema !== INDEX_SCHEMA_VERSION) {
-        // A stamp from another schema is a rebuild trigger, not an error.
-        clearIndex(database);
-        watermark = { ...watermark, offset: 0, digest: digestOf(new Uint8Array(0)), inode: '', mtimeMs: '', schema: undefined };
+      fileStat = await stat(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
       }
-
-      let fileStat;
-      try {
-        fileStat = await stat(filePath);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          throw error;
-        }
-        if (watermark.offset !== 0) {
-          clearIndex(database);
-        }
-        writeWatermark(database, { offset: 0, digest: digestOf(new Uint8Array(0)), inode: '', mtimeMs: '' });
-        database.exec('COMMIT;');
-        return;
+      if (sameWatermark(snapshot, { ...emptyWatermark(), schema: INDEX_SCHEMA_VERSION })) {
+        return { action: 'none', clear: false, records: [], watermark: emptyWatermark() };
       }
+      return { action: 'apply', clear: schemaStale || base.offset !== 0, records: [], watermark: emptyWatermark() };
+    }
 
-      if (
-        String(fileStat.ino) === watermark.inode
-        && fileStat.size === watermark.offset
-        && String(fileStat.mtimeMs) === watermark.mtimeMs
-      ) {
-        database.exec('COMMIT;');
-        return;
-      }
+    if (
+      snapshot.schema === INDEX_SCHEMA_VERSION
+      && String(fileStat.ino) === base.inode
+      && fileStat.size === base.offset
+      && String(fileStat.mtimeMs) === base.mtimeMs
+    ) {
+      return { action: 'none', clear: false, records: [], watermark: base };
+    }
 
-      const buffer = await readFile(filePath);
-      // Only complete lines are consumed: a line still being appended by
-      // another process stays past the watermark until it has its newline,
-      // instead of being half-read and then trusted forever.
-      const lastNewline = buffer.lastIndexOf(0x0a);
-      const consumedEnd = lastNewline === -1 ? 0 : lastNewline + 1;
+    const buffer = await readFile(filePath);
+    // Only complete lines are consumed: a line still being appended by
+    // another process stays past the watermark until it has its newline,
+    // instead of being half-read and then trusted forever.
+    const lastNewline = buffer.lastIndexOf(0x0a);
+    const consumedEnd = lastNewline === -1 ? 0 : lastNewline + 1;
 
-      const sameFile = String(fileStat.ino) === watermark.inode || watermark.inode === '';
-      const pureAppend = sameFile
-        && consumedEnd >= watermark.offset
-        && digestOf(buffer.subarray(0, watermark.offset)) === watermark.digest;
+    const sameFile = String(fileStat.ino) === base.inode || base.inode === '';
+    const pureAppend = sameFile
+      && consumedEnd >= base.offset
+      && digestOf(buffer.subarray(0, base.offset)) === base.digest;
 
-      if (pureAppend) {
-        if (consumedEnd > watermark.offset) {
-          const tail = buffer.subarray(watermark.offset, consumedEnd).toString('utf8');
-          applyRecords(database, parseOrderedRecords(tail, filePath));
-        }
-      } else {
-        clearIndex(database);
-        const consumed = buffer.subarray(0, consumedEnd).toString('utf8');
-        applyRecords(database, parseOrderedRecords(consumed, filePath));
-      }
-      writeWatermark(database, {
+    const from = pureAppend ? base.offset : 0;
+    const records = parseOrderedRecords(buffer.subarray(from, consumedEnd).toString('utf8'), filePath);
+    return {
+      action: 'apply',
+      clear: schemaStale || !pureAppend,
+      records,
+      watermark: {
         offset: consumedEnd,
         digest: digestOf(buffer.subarray(0, consumedEnd)),
         inode: String(fileStat.ino),
         mtimeMs: String(fileStat.mtimeMs),
-      });
-      database.exec('COMMIT;');
-    } catch (error) {
-      try {
-        database.exec('ROLLBACK;');
-      } catch {
-        // The transaction may never have started or already died; the
-        // original error is the one worth reporting.
+      },
+    };
+  };
+
+  /**
+   * Bring the index up to date with the record before a search reads it.
+   *
+   * Planned optimistically outside the transaction — the full-file read and
+   * digest of a large record must not hold the write lock long enough for a
+   * peer process's own catch-up to hit its busy timeout — then committed
+   * under BEGIN IMMEDIATE only if the watermark is still the one the plan
+   * was made against. A lost race means the peer indexed meanwhile: re-plan
+   * against its watermark, which is usually 'none'. The last attempt
+   * re-plans while holding the lock, so contention can delay a catch-up but
+   * never starve it.
+   */
+  const ensureIndexCurrent = async (database: SqliteDatabase): Promise<void> => {
+    const OPTIMISTIC_ATTEMPTS = 3;
+    for (let attempt = 0; ; attempt += 1) {
+      const snapshot = readWatermark(database);
+      const plan = await planCatchUp(snapshot);
+      if (plan.action === 'none') {
+        return;
       }
-      throw error;
+      database.exec('BEGIN IMMEDIATE;');
+      try {
+        const current = readWatermark(database);
+        const raced = !sameWatermark(current, snapshot);
+        if (raced && attempt < OPTIMISTIC_ATTEMPTS) {
+          database.exec('ROLLBACK;');
+          continue;
+        }
+        const finalPlan = raced ? await planCatchUp(current) : plan;
+        if (finalPlan.action === 'apply') {
+          if (finalPlan.clear) {
+            clearIndex(database);
+          }
+          applyRecords(database, finalPlan.records);
+          writeWatermark(database, finalPlan.watermark);
+        }
+        database.exec('COMMIT;');
+        return;
+      } catch (error) {
+        try {
+          database.exec('ROLLBACK;');
+        } catch {
+          // The transaction may never have started or already died; the
+          // original error is the one worth reporting.
+        }
+        throw error;
+      }
     }
   };
 
@@ -387,9 +481,7 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       }
       // The bound applies after the tombstone filter — a store whose recent
       // entries are mostly forgotten still fills its slice with live ones.
-      const bounded = boundMemoryRead(live, Math.max(1, Math.floor(options.limit)));
-      bounded.entries.sort(compareMemoryChronology);
-      return bounded;
+      return boundMemoryList(live, options.limit);
     },
 
     async search(agentId: string, query: string, limit?: number): Promise<MemoryReadResult> {

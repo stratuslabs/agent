@@ -146,6 +146,21 @@ test('the recall limit is the store’s to clamp', () => {
   assert.equal(clampMemoryRecallLimit(-5), 1);
   assert.equal(clampMemoryRecallLimit(3.7), 3);
   assert.equal(clampMemoryRecallLimit(10_000), MEMORY_RECALL_MAX_LIMIT);
+  // "As many as allowed" clamps to the ceiling like any over-large number.
+  assert.equal(clampMemoryRecallLimit(Number.POSITIVE_INFINITY), MEMORY_RECALL_MAX_LIMIT);
+});
+
+test('one entry no budget could admit is skipped, never allowed to starve the read', () => {
+  // Written before the per-entry cap existed, or by hand: larger than the
+  // whole read budget, and the newest entry — first in recall order.
+  const monster = { id: 'm', agentId: 'x', content: 'y'.repeat(MEMORY_READ_MAX_BYTES + 1), createdAt: '2026-01-02T00:00:00.000Z' };
+  const small = [
+    { id: 'a', agentId: 'x', content: 'small fact a', createdAt: '2026-01-01T00:00:00.001Z' },
+    { id: 'b', agentId: 'x', content: 'small fact b', createdAt: '2026-01-01T00:00:00.002Z' },
+  ];
+  const result = boundMemoryRead([monster, ...small], 10);
+  assert.deepEqual(result.entries.map((entry) => entry.id), ['b', 'a']);
+  assert.equal(result.truncated, true);
 });
 
 test('tokenizer and bounding helpers hold their edges', () => {

@@ -229,6 +229,52 @@ test('the file store refuses an over-cap fact and the record stays clean', async
   await assert.rejects(async () => stat(filePath), (error: NodeJS.ErrnoException) => error.code === 'ENOENT');
 });
 
+test('an append after a hand edit that dropped the trailing newline keeps the record parseable', async () => {
+  const filePath = path.join(await tempDir(), 'memory.jsonl');
+  const store = createFileMemoryStore(filePath);
+  await store.append('ava', 'the first fact about terns');
+  // An operator adds a line with a tool that writes no trailing newline.
+  const handLine = entryLine('ava:memory:hand', 'ava', 'a hand-written fact about gulls', new Date().toISOString());
+  await appendFile(filePath, handLine.trimEnd());
+
+  await store.append('ava', 'the next fact about puffins');
+  const { entries } = await store.list('ava');
+  assert.deepEqual(
+    entries.map((entry) => entry.content).sort(),
+    ['a hand-written fact about gulls', 'the first fact about terns', 'the next fact about puffins'],
+  );
+  assert.equal((await store.search('ava', 'gulls')).entries.length, 1);
+  assert.equal((await store.search('ava', 'puffins')).entries.length, 1);
+});
+
+test('a hand-added line that parses but is not a record fails with the error that names the file', async () => {
+  const filePath = path.join(await tempDir(), 'memory.jsonl');
+  const store = createFileMemoryStore(filePath);
+  await store.append('ava', 'a well-formed fact');
+  await appendFile(filePath, 'null\n');
+  await assert.rejects(() => store.list('ava'), /invalid line.*memory\.jsonl/);
+  await assert.rejects(() => store.search('ava', 'fact'), /invalid line.*memory\.jsonl/);
+
+  const missingField = path.join(await tempDir(), 'memory.jsonl');
+  await writeFile(missingField, `${JSON.stringify({ id: 'x', agentId: 'ava', content: 'no createdAt' })}\n`);
+  await assert.rejects(() => createFileMemoryStore(missingField).list('ava'), /invalid line.*memory\.jsonl/);
+});
+
+test('an over-budget hand-written entry cannot starve the entries behind it', async () => {
+  const filePath = path.join(await tempDir(), 'memory.jsonl');
+  const store = createFileMemoryStore(filePath);
+  await store.append('ava', 'a small fact about plovers');
+  // Newest, and larger than the whole read budget — first in recall order.
+  await appendFile(filePath, entryLine('ava:memory:huge', 'ava', `plovers ${'x'.repeat(MEMORY_READ_MAX_BYTES)}`, '2027-01-01T00:00:00.000Z'));
+
+  const listed = await store.list('ava', { limit: 10 });
+  assert.deepEqual(listed.entries.map((entry) => entry.content), ['a small fact about plovers']);
+  assert.equal(listed.truncated, true);
+  const found = await store.search('ava', 'plovers');
+  assert.deepEqual(found.entries.map((entry) => entry.content), ['a small fact about plovers']);
+  assert.equal(found.truncated, true);
+});
+
 test('the index file is owner-only, like the JSONL it derives from', async () => {
   const filePath = path.join(await tempDir(), 'memory.jsonl');
   const store = createFileMemoryStore(filePath);

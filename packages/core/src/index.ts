@@ -481,9 +481,11 @@ export interface MemoryListOptions {
 
 /** Clamp a caller-chosen search limit into the store's own bounds. */
 export const clampMemoryRecallLimit = (limit?: number): number => {
-  if (limit === undefined || !Number.isFinite(limit)) {
+  if (limit === undefined || Number.isNaN(limit)) {
     return MEMORY_RECALL_DEFAULT_LIMIT;
   }
+  // Infinity means "as many as allowed" and clamps to the ceiling like any
+  // other over-large number, rather than falling back to the default.
   return Math.min(MEMORY_RECALL_MAX_LIMIT, Math.max(1, Math.floor(limit)));
 };
 
@@ -509,6 +511,14 @@ export const boundMemoryRead = (
       break;
     }
     const size = memoryContentByteLength(entry.content);
+    // An entry no budget could ever admit — hand-written, or stored before
+    // the per-entry cap existed — is skipped rather than allowed to starve
+    // everything ranked behind it: breaking here would return an empty
+    // read while dozens of small live facts exist.
+    if (size > maxBytes) {
+      truncated = true;
+      continue;
+    }
     if (bytes + size > maxBytes) {
       truncated = true;
       break;
@@ -517,6 +527,18 @@ export const boundMemoryRead = (
     bytes += size;
   }
   return { entries, truncated };
+};
+
+/**
+ * The bounded `list` both implementations share: select the winners by
+ * `boundMemoryRead`, present them oldest first. Selection order and
+ * presentation order are different things; conflating them is the bug this
+ * helper exists so nobody writes three times.
+ */
+export const boundMemoryList = (candidates: readonly MemoryEntry[], limit: number): MemoryReadResult => {
+  const bounded = boundMemoryRead(candidates, Math.max(1, Math.floor(limit)));
+  bounded.entries.sort(compareMemoryChronology);
+  return bounded;
 };
 
 /**
@@ -590,9 +612,7 @@ export class InMemoryAgentMemoryStore implements AgentMemoryStore {
     if (options.limit === undefined) {
       return { entries: live.sort(compareMemoryChronology), truncated: false };
     }
-    const bounded = boundMemoryRead(live, Math.max(1, Math.floor(options.limit)));
-    bounded.entries.sort(compareMemoryChronology);
-    return bounded;
+    return boundMemoryList(live, options.limit);
   }
 
   async search(agentId: string, query: string, limit?: number): Promise<MemoryReadResult> {

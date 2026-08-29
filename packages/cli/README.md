@@ -809,6 +809,13 @@ tombstone line, so you can still see what an agent chose to drop. A single
 fact is capped at 4 KiB — an oversized `memory.remember` is refused outright
 rather than stored truncated.
 
+One thing to check on souls written before recall existed: a `tools:`
+allowlist naming exactly `memory.remember` lets the agent keep saving facts
+but not search them, and with the prompt now carrying only the recent slice,
+its older memories are out of reach. Add `memory.recall` and `memory.forget`
+— or just `memory.*`, as the example above does. A soul with no `tools:`
+list is unaffected; omitted means every registered tool.
+
 The JSONL is the record and you may edit it: add a line by hand and it is
 recallable; fix a typo and nothing goes stale. Search is served from a
 derived FTS index the CLI writes alongside, `~/.stratus/memory.jsonl.index`
