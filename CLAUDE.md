@@ -91,16 +91,22 @@ hand and by review:
   tsconfigs set `rewriteRelativeImportExtensions`, and tests import
   `../src/index.ts` under type stripping. Cross-package, use the bare
   `@stratusagent/<pkg>` specifier, never a deep path.
-- **Arrow consts, never `function` declarations.** Classes exist for two
-  things only: stateful kernel registries and stores, and error types —
+- **Arrow consts, never `function` declarations.** Classes are the
+  exception, kept for stateful long-lived objects — the kernel
+  registries and stores, runners and executors (`AgentRunner`,
+  `LocalCommandExecutor`, `BrowserSessionPool`) — and for error types:
   an error is `class X extends Error` that sets `this.name` in its
-  constructor and is exported from the barrel. Everything else is a
-  `create*` (construct a live thing) or `define*` (canonicalize a
-  definition literal) factory returning a plain object.
+  constructor and is exported from the barrel. Plain values and
+  stateless behavior come from a `create*` (construct a live thing) or
+  `define*` (canonicalize a definition literal) factory returning a
+  plain object.
 - **The strict flags are load-bearing.** `exactOptionalPropertyTypes`
   means an optional property is added with a conditional spread —
-  `...(x ? { x } : {})` — never assigned `undefined`. `any` appears
-  nowhere in src; narrow from `unknown` instead.
+  `...(x !== undefined ? { x } : {})` — never assigned `undefined`.
+  Check against `undefined`, not truthiness, unless dropping the falsy
+  values is the point: `0` and `false` are real settings here (`--api-port 0`
+  asks for any free port). `any` appears nowhere in src; narrow from
+  `unknown` instead.
 - **Tools throw plain `Error`s; the executor converts.** In any package
   that can depend on `@stratusagent/executors`, build `ToolResult`s
   through its `successResult`/`failureResult`, never hand-rolled

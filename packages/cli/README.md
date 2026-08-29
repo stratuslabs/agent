@@ -82,9 +82,10 @@ to endpoints a project config selects. Details:
 
 ## Optional packages
 
-The CLI ships no transport, no tools, and no open port — each is a separate
-package you add only when you want it, and `stratus setup` offers the ones
-your answers imply:
+Out of the box an agent can already echo, remember, recall, delegate, and
+(in the daemon) schedule. Everything beyond that — a transport, real-world
+tools, an open port — is a separate package you add only when you want it,
+and `stratus setup` offers the ones your answers imply:
 
 ```bash
 npm install -g @stratusagent/channel-slack                        # agents in Slack
