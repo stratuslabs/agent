@@ -49,6 +49,8 @@ the file.
 | `approvals` | Who may authorize an agent's tool calls, and how | [Approvals](../guides/approvals.md) |
 | `api` | Which interface and port a daemon binds | [Remote access](../guides/remote-access.md) |
 
-Each block's keys and shape are documented in its own guide; all three
-share the per-agent `agents` sub-block pattern, where an agent's entry
-overrides the defaults above it key by key.
+Each block's keys and shape are documented in its own guide. `approvals`
+and each plugin's entry also take a per-agent `agents` sub-block, where an
+agent's entry overrides the defaults above it key by key; the `api` block
+has no per-agent form — its keys are exactly `enabled`, `host`, and
+`port`.

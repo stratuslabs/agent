@@ -19,18 +19,22 @@ stratus serve                          # stratusd: the whole roster, always on
 stratus serve --idle-timeout 120 --no-events
 stratus serve --approvals remote       # ask a human in Slack instead of refusing
 stratus service install                # keep stratusd running under launchd/systemd
-stratus service status
+stratus service status                 # asks the service manager; exits non-zero when not running
+stratus service start
+stratus service stop
+stratus service uninstall
 stratus logs -f                        # what the daemon has been doing
 stratus logs --agent ava -n 200
 stratus doctor                         # what a run would use right now, and why
 stratus update                         # the whole upgrade dance, in the safe order
 stratus update --check                 # report what an update would do, do nothing
 stratus agent new                      # create an agent (guided on a terminal)
-stratus agent new --format soul > ava.md
-stratus agents                         # who's on the team: souls, models, memory
+stratus agent new --name Ava --instructions "You research things." --format soul > ava.md
+stratus agents                         # who's on the team (also: stratus agent list)
 stratus skill add owner/repo           # install skills from GitHub or a local path
-stratus skills                         # what is installed, and who enables it
-stratus schedules                      # what the fleet has scheduled, and where it reports
+stratus skill add owner/repo --skill hn-search --agent ava
+stratus skills                         # what is installed, who enables it (also: stratus skill list)
+stratus schedules                      # what the fleet has scheduled (also: stratus schedule list)
 stratus schedules cancel <id>          # stop the next firing, revoke its destination
 stratus dashboard                      # local browser dashboard
 ```
@@ -62,7 +66,9 @@ stratus dashboard                      # local browser dashboard
 | `--config <file>` | Load settings from a specific config file |
 | `--approvals` | `run`/`chat`: tool approval mode — `always`, `ask`, or `never`. `serve`: how the daemon reaches a human — `headless` (refuse gated calls) or `remote` (ask in Slack); overrides the config's `approvals.mode` |
 | `--max-turns` | Max provider turns per run (default 8) |
-| `--format` | `text` or `json` |
+| `--format` | `text` or `json`; `agent new` also accepts `soul` — a ready-to-edit soul file |
+| `--name` | `agent new`: the agent's name (omit to have one generated) |
+| `--instructions` | `agent new`: the agent's persona/instructions |
 | `--idle-timeout` | `stratus serve`: seconds of provider silence before the watchdog aborts a turn (default 120) |
 | `--no-events` | Hide the event log |
 | `--no-log-file` | `stratus serve`: do not write `~/.stratus/logs/stratusd.jsonl` |
@@ -76,7 +82,9 @@ stratus dashboard                      # local browser dashboard
 | `--no-login` | `stratus service install`: install without the start-at-login trigger |
 | `-f`, `--follow` | `stratus logs`: follow the log, across rotations |
 | `-n <count>` | `stratus logs`: how much backlog to print (default 50) |
-| `--agent`, `--session` | `stratus logs`: show only one agent's or one session's records |
+| `--agent` | `stratus logs`: show only one agent's records. `skill add`: also enable the installed skills in that agent's soul |
+| `--session` | `stratus logs`: show only one session's records |
+| `--skill <id>` | `stratus skill add`: pick one skill from a multi-skill repo (repeatable) |
 | `--force` | `stratus skill add`: replace an already-installed skill id |
 | `--help`, `-h` | Show help |
 

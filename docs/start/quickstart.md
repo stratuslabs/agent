@@ -20,13 +20,17 @@ stratus run --prompt "please use the echo tool"
 
 ## 2) Open the local dashboard
 
+The dashboard is two optional packages, so install them first:
+
 ```bash
+npm install -g @stratusagent/control-api @stratusagent/dashboard
 stratus dashboard
 ```
 
-The command prints the local URL and opens your default browser. With the
-[control API and dashboard installed](../guides/remote-access.md) this is the
-full web UI; without them it is a small smoke-test page.
+The command finds a running daemon (or starts one in the foreground, and
+says which it did), mints a single-use sign-in link, and opens your
+browser at it. More on how that works — and why the link only works
+once — in [Remote access](../guides/remote-access.md).
 
 ## 3) Run a real provider path
 
@@ -116,14 +120,6 @@ to the provider for a final answer:
 [assistant] → tool call demo.echo({"text":"please use the echo tool"})
 [tool:demo.echo] { "ok": true, "output": { "uppercase": "PLEASE USE THE ECHO TOOL", ... } }
 [assistant] The demo.echo tool finished with: {"received":"please use the echo tool", ...}
-```
-
-The dashboard prints a line like this when it starts:
-
-```text
-Stratus Agent Dashboard ready at http://127.0.0.1:4123
-Press Ctrl+C to stop.
-Opened your default browser.
 ```
 
 ## Where next
