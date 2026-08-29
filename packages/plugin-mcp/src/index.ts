@@ -1,6 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 import {
@@ -216,6 +217,31 @@ const resolveServerSpec = (
   };
 };
 
+/**
+ * Whether a failed call means the *connection* failed, as opposed to the
+ * tool. A stdio server dying fires `client.onclose`, but a Streamable HTTP
+ * server that restarted or expired its session reports the loss only on
+ * the request path — the stale `mcp-session-id` gets an HTTP error, and
+ * nothing ever closes the transport — so without classifying rejections
+ * here, every later call would keep reusing the dead session until the
+ * daemon restarted.
+ *
+ * - `StreamableHTTPError` is the transport's own word for an HTTP-level
+ *   failure (a 404 on a stale session, a 5xx).
+ * - `ErrorCode.ConnectionClosed` is a request rejected because the
+ *   transport went away under it.
+ * - A `TypeError` is how `fetch` reports a network failure (the server is
+ *   simply gone); no JSON-RPC error from a live server arrives as one.
+ *
+ * Everything else — the server answering with a tool error, invalid
+ * params, a timeout on a slow tool — is a live connection and no reason
+ * to tear it down.
+ */
+const isConnectionFailure = (error: unknown): boolean =>
+  error instanceof StreamableHTTPError
+  || (error instanceof McpError && error.code === ErrorCode.ConnectionClosed)
+  || error instanceof TypeError;
+
 const buildTransport = (spec: McpServerSpec): Transport => {
   if (spec.command !== undefined) {
     return new StdioClientTransport({
@@ -309,10 +335,21 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
           `MCP server ${state.spec.name} is not connected; ${registeredName} is unavailable until it comes back.`,
         );
       }
-      const result = await client.callTool({ name: current.mcpName, arguments: input }, undefined, {
-        timeout: state.spec.callTimeoutMs,
-        ...(context?.signal ? { signal: context.signal } : {}),
-      });
+      let result;
+      try {
+        result = await client.callTool({ name: current.mcpName, arguments: input }, undefined, {
+          timeout: state.spec.callTimeoutMs,
+          ...(context?.signal ? { signal: context.signal } : {}),
+        });
+      } catch (error) {
+        // A session-loss surfaces here, not on onclose — see
+        // isConnectionFailure. Guarded on the client this call used, so a
+        // reconnect that already replaced it is left alone.
+        if (isConnectionFailure(error) && state.client === client) {
+          dropConnection(state, error);
+        }
+        throw error;
+      }
       return normalizeCallResult(result, {
         server: state.spec.name,
         tool: current.mcpName,
@@ -416,6 +453,28 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
       }
     }
     state.tools = next;
+  };
+
+  /**
+   * Treat a server whose connection failed mid-call as down: further calls
+   * refuse with "not connected" instead of re-sending into a dead session,
+   * and the reconnect loop brings it back. The onclose handler is keyed to
+   * `state.client`, already cleared here, so closing cannot schedule a
+   * second reconnect.
+   */
+  const dropConnection = (state: ServerState, cause: unknown): void => {
+    const client = state.client;
+    if (!client || disposed) {
+      return;
+    }
+    state.client = undefined;
+    state.connected = false;
+    warn(
+      `mcp server ${state.spec.name} connection failed mid-call — its tools are unavailable until it reconnects: `
+      + `${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+    void client.close().catch(() => {});
+    scheduleReconnect(state);
   };
 
   const scheduleReconnect = (state: ServerState): void => {

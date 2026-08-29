@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -341,6 +342,80 @@ test('a tool discovered only on reconnect registers, and one no longer advertise
     // And the committed view is still the boundary: nothing outside mcp.*
     // can have appeared through the reconnect path.
     assert.throws(() => view.register({ name: 'fs.write', async execute() { return null; } } as Tool));
+  } finally {
+    clearInterval(keepAlive);
+    await plugin.dispose?.();
+  }
+});
+
+test('an HTTP session lost mid-call marks the server down and reconnects — onclose never fires on that path', async () => {
+  // A sessionful Streamable HTTP server that restarted: the handshake
+  // worked, and later requests fail on the wire (a 404 for the stale
+  // mcp-session-id) without the transport ever closing. The bridge must
+  // notice on the call path or it re-sends into the dead session forever.
+  const build = { current: linearTools };
+  const handle = fakeServer(build);
+  let failSends = false;
+  const failingWrapperFor = async (): Promise<Transport> => {
+    const inner = await handle.transportFor();
+    const wrapper: Transport = {
+      async start() {
+        inner.onmessage = (message, extra) => wrapper.onmessage?.(message, extra);
+        inner.onerror = (error) => wrapper.onerror?.(error);
+        inner.onclose = () => wrapper.onclose?.();
+        await inner.start();
+      },
+      async send(message, sendOptions) {
+        if (failSends) {
+          throw new StreamableHTTPError(404, 'Error POSTing to endpoint: session not found');
+        }
+        await inner.send(message, sendOptions);
+      },
+      async close() {
+        await inner.close();
+      },
+    };
+    return wrapper;
+  };
+
+  let connections = 0;
+  let signalReconnected = () => {};
+  const reconnected = new Promise<void>((resolve) => {
+    signalReconnected = resolve;
+  });
+  const target = new ToolRegistry();
+  const plugin = createMcpPlugin(
+    { servers: { linear: { url: 'http://127.0.0.1:9/unused' } } },
+    {
+      // The first connect goes through the failing wrapper; the reconnect
+      // dials the restarted server directly.
+      transportFor: () => (connections === 0 ? failingWrapperFor() : handle.transportFor()),
+      warn: () => {},
+      log: () => {},
+      reconnectDelayMs: () => 1,
+      onConnected: () => {
+        connections += 1;
+        if (connections === 2) {
+          signalReconnected();
+        }
+      },
+    },
+  );
+  await loadThroughView(plugin, target);
+  const keepAlive = setInterval(() => {}, 50);
+  try {
+    const tool = target.get('mcp.linear.get_issue')!;
+    assert.equal(await tool.execute({ id: 'ENG-1' }, sessionFor('ava')), 'issue ENG-1');
+
+    failSends = true;
+    await assert.rejects(tool.execute({ id: 'ENG-2' }, sessionFor('ava')), /session not found/);
+    // The very next call — before the reconnect can have run — refuses as
+    // disconnected instead of re-sending into the dead session, which is
+    // the state transition the fix exists for.
+    await assert.rejects(tool.execute({ id: 'ENG-3' }, sessionFor('ava')), /is not connected/);
+
+    await reconnected;
+    assert.equal(await tool.execute({ id: 'ENG-4' }, sessionFor('ava')), 'issue ENG-4');
   } finally {
     clearInterval(keepAlive);
     await plugin.dispose?.();
