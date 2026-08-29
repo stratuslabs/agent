@@ -24,7 +24,7 @@ test('file memory store appends and lists per agent with read-time dedupe', asyn
   const store = createFileMemoryStore(memoryFilePath({ homeDir: tempHome }));
   await store.append('ava', 'likes short answers');
   await store.append('scout', 'reads everything');
-  const entries = await store.list('ava');
+  const { entries } = await store.list('ava');
   assert.equal(entries.length, 1);
   assert.equal(entries[0]?.content, 'likes short answers');
 });

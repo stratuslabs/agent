@@ -26,6 +26,8 @@ import {
 } from '@stratusagent/core';
 import {
   createDelegateTool,
+  createForgetTool,
+  createRecallTool,
   createRememberTool,
   type ParsedSoul,
 } from '@stratusagent/agents';
@@ -1153,6 +1155,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   let operatorSkills: OperatorSkillInfo[] = [];
   tools.register(createDemoTool());
   tools.register(createRememberTool(memory));
+  tools.register(createRecallTool(memory));
+  tools.register(createForgetTool(memory));
   // Registered here rather than left to the first runner, so `tools()`
   // lists the reader before anything dispatches. The allowlist resolver
   // mirrors the runner's own sourcing — the definition travelling with the

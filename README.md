@@ -142,7 +142,7 @@ It is not yet a full production agent platform. The v1 kernel deliberately left 
 
 Stratus agents are designed to feel like a person you work with, not a stateless bot:
 
-- **One identity everywhere.** An agent's memory is keyed to the agent — never to a session or channel — so what they learn in one thread they know in every other conversation. Agents can save facts with the built-in `memory.remember` tool, and their memory is handed to the model on every turn. CLI runs persist it to `~/.stratus/memory.jsonl`, so the agent you talk to tomorrow remembers today — from any directory.
+- **One identity everywhere.** An agent's memory is keyed to the agent — never to a session or channel — so what they learn in one thread they know in every other conversation. Agents save facts with the built-in `memory.remember` tool, search everything they know with `memory.recall`, and retire what no longer holds with `memory.forget`; the most recent facts ride along in every prompt, and the rest is a search away. CLI runs persist it all to `~/.stratus/memory.jsonl` (with a rebuildable search index alongside), so the agent you talk to tomorrow remembers today — from any directory. Details in the [CLI README](./packages/cli/README.md).
 - **Scoped access.** Each agent has its own tool allowlist and its own credential allowlist. An agent can only call the tools it was given, and can only resolve the secrets it was granted.
 - **Delegation.** An orchestrator agent uses the `agent.delegate` tool to hand a task to a teammate and gets their reply back — the teammate runs with *their own* memory, tools, and credentials.
 - **Routing.** `createAgentRouter` maps inbound work (a channel, a mention, a message) to the right agent, so the same person consistently answers in the same places.
@@ -174,7 +174,7 @@ provider: anthropic
 model: claude-opus-5
 tools:
   - demo.echo
-  - memory.remember
+  - memory.*
 ---
 
 You are a sharp, warm generalist assistant. Answer first, explain second...

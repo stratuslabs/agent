@@ -15,6 +15,11 @@ import type {
   SkillRegistry,
 } from '@stratusagent/core';
 import {
+  boundMemoryRead,
+  clampMemoryRecallLimit,
+  compareMemoryChronology,
+} from '@stratusagent/core';
+import {
   agentIdWithSuffix,
   createLazySkill,
   defineAgent,
@@ -305,18 +310,64 @@ export const DEFAULT_STRATUS_AGENT = {
 // entries stored under the legacy ids, while new facts land under 'stratus'.
 const LEGACY_DEFAULT_AGENT_IDS = ['demo-agent', 'anthropic-agent', 'openai-agent'];
 
-export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryStore => ({
-  append: (agentId, content, metadata) => store.append(agentId, content, metadata),
-  async list(agentId) {
-    if (agentId !== DEFAULT_STRATUS_AGENT.id) {
-      return store.list(agentId);
-    }
-    const batches = await Promise.all(
-      [DEFAULT_STRATUS_AGENT.id, ...LEGACY_DEFAULT_AGENT_IDS].map((id) => store.list(id)),
-    );
-    return batches.flat().sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  },
-});
+// Every method is alias-aware, not just `list`: a `search` or `forget` that
+// delegated on agentId alone would compile, satisfy the interface, and
+// quietly make every inherited entry unfindable and unforgettable — visible
+// in `list`, absent from `recall`. Merged batches sort with everything else
+// by the shared ordering rule, and bounds apply after the merge, never per
+// alias, or a busy legacy id crowds out the others.
+export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryStore => {
+  const aliasIds = (agentId: string): string[] =>
+    agentId === DEFAULT_STRATUS_AGENT.id
+      ? [DEFAULT_STRATUS_AGENT.id, ...LEGACY_DEFAULT_AGENT_IDS]
+      : [agentId];
+  return {
+    append: (agentId, content, metadata) => store.append(agentId, content, metadata),
+    async list(agentId, options) {
+      const ids = aliasIds(agentId);
+      if (ids.length === 1) {
+        return store.list(agentId, options);
+      }
+      const batches = await Promise.all(ids.map((id) => store.list(id, options)));
+      const merged = batches.flatMap((batch) => batch.entries);
+      const anyTruncated = batches.some((batch) => batch.truncated);
+      if (options?.limit === undefined) {
+        return { entries: merged.sort(compareMemoryChronology), truncated: anyTruncated };
+      }
+      const bounded = boundMemoryRead(merged, Math.max(1, Math.floor(options.limit)));
+      bounded.entries.sort(compareMemoryChronology);
+      return { entries: bounded.entries, truncated: bounded.truncated || anyTruncated };
+    },
+    async search(agentId, query, limit) {
+      const ids = aliasIds(agentId);
+      if (ids.length === 1) {
+        return store.search(agentId, query, limit);
+      }
+      const batches = await Promise.all(ids.map((id) => store.search(id, query, limit)));
+      const bounded = boundMemoryRead(batches.flatMap((batch) => batch.entries), clampMemoryRecallLimit(limit));
+      return {
+        entries: bounded.entries,
+        truncated: bounded.truncated || batches.some((batch) => batch.truncated),
+      };
+    },
+    async forget(agentId, entryId) {
+      for (const id of aliasIds(agentId)) {
+        if (await store.forget(id, entryId)) {
+          return true;
+        }
+      }
+      return false;
+    },
+    async audit(agentId) {
+      const ids = aliasIds(agentId);
+      if (ids.length === 1) {
+        return store.audit(agentId);
+      }
+      const batches = await Promise.all(ids.map((id) => store.audit(id)));
+      return batches.flat().sort(compareMemoryChronology);
+    },
+  };
+};
 
 export const DEFAULT_CONFIG_FILENAME = 'stratus.config.json';
 const STRATUS_HOME_DIRNAME = '.stratus';
@@ -609,78 +660,8 @@ export const migrateLegacyMemory = async (env: StateEnvironment): Promise<void> 
   }
 };
 
-// Agents keep the same memory across runs: every remembered fact lands in
-// ~/.stratus/memory.jsonl (keyed by agent id), so the Ava you talk to
-// tomorrow — from any directory or process — is the Ava you talked to
-// today. One JSON entry per line, written with O_APPEND: concurrent runs
-// each add their own line instead of re-writing the file, so no run can
-// clobber another's remembered fact.
-export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
-  const readEntries = async (): Promise<MemoryEntry[]> => {
-    let raw: string;
-    try {
-      raw = await readFile(filePath, 'utf8');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return [];
-      }
-      throw error;
-    }
-
-    return raw
-      .split('\n')
-      .filter((line) => line.trim().length > 0)
-      .map((line) => {
-        try {
-          return JSON.parse(line) as MemoryEntry;
-        } catch {
-          throw new Error(`Memory file has an invalid line: ${filePath}`);
-        }
-      });
-  };
-
-  return {
-    async append(agentId: string, content: string, metadata?: JsonObject) {
-      const entry: MemoryEntry = {
-        id: `${agentId}:memory:${randomUUID()}`,
-        agentId,
-        content,
-        createdAt: new Date().toISOString(),
-        ...(metadata ? { metadata } : {}),
-      };
-      await mkdir(path.dirname(filePath), { recursive: true });
-      // Long-term memory is conversation content — owner-only, like the
-      // credentials and session files. A file created earlier under a
-      // looser umask is tightened BEFORE the new fact lands in it; the
-      // mode option covers fresh creation.
-      try {
-        await chmod(filePath, 0o600);
-      } catch (error) {
-        // Only a missing file is fine (the append below creates it
-        // owner-only). Any other failure means the file EXISTS but cannot
-        // be tightened — never write conversation content into a file
-        // that stays readable by others.
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          throw error;
-        }
-      }
-      await appendFile(filePath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
-      return entry;
-    },
-    async list(agentId: string) {
-      // Dedupe by id at read time: even if a rare race double-imported a
-      // fact, the agent only ever sees it once.
-      const seen = new Set<string>();
-      return (await readEntries()).filter((entry) => {
-        if (entry.agentId !== agentId || seen.has(entry.id)) {
-          return false;
-        }
-        seen.add(entry.id);
-        return true;
-      });
-    },
-  };
-};
+export { createFileMemoryStore } from './memory.ts';
+import { createFileMemoryStore } from './memory.ts';
 
 export const parseProviderName = (value: string, label: string): StratusProviderName => {
   if (value === 'demo' || value === 'openai' || value === 'anthropic') {
@@ -2794,7 +2775,7 @@ export const listAgentSummaries = async (
       ...(parsed.provider ? { provider: parsed.provider } : {}),
       ...(parsed.model ? { model: parsed.model } : {}),
       runsOn: runsOnFor(parsed),
-      memories: (await memory.list(agent.id)).length,
+      memories: (await memory.list(agent.id)).entries.length,
       ...(persona ? { persona } : {}),
       ...(agent.avatar ? { avatar: agent.avatar } : {}),
     });
@@ -2828,7 +2809,7 @@ export const listAgentSummaries = async (
     default: resolvedDefaultSoul === undefined,
     builtIn: true,
     runsOn: runsOnFor(),
-    memories: (await memory.list(DEFAULT_STRATUS_AGENT.id)).length,
+    memories: (await memory.list(DEFAULT_STRATUS_AGENT.id)).entries.length,
     ...(builtInPersona ? { persona: builtInPersona } : {}),
   });
 

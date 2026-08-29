@@ -212,7 +212,7 @@ const observe = async (
 
   return {
     sdkSessionId: session.metadata?.[SDK_SESSION_METADATA_KEY],
-    memory: await memoryStore.list(AGENT.id),
+    memory: (await memoryStore.list(AGENT.id)).entries,
     toolCalls,
     toolResults,
     pairing: calledIds.map((called, index) => ({ called, answered: answeredIds[index] })),

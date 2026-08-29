@@ -674,6 +674,73 @@ export const createRememberTool = (store: AgentMemoryStore): Tool => ({
   },
 });
 
+export const RECALL_TOOL_NAME = 'memory.recall';
+
+/**
+ * Searches the agent's own long-term memory. `safe` by the same rule as
+ * `memory.remember`: reading what this agent already knows. The query is
+ * literal text — the store does whatever escaping its backend needs, so no
+ * query a model writes is ever a syntax error; matching nothing is a normal
+ * result, because an agent that has learned nothing yet is the ordinary
+ * starting state, not a broken tool.
+ */
+export const createRecallTool = (store: AgentMemoryStore): Tool => ({
+  name: RECALL_TOOL_NAME,
+  description: 'Search your long-term memory for facts you have remembered. Only your most recent memories appear in your prompt automatically — use this to find everything older.',
+  risk: 'safe',
+  parameters: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: 'What to look for, as plain words. Every word must appear in a fact for it to match.' },
+      limit: { type: 'number', description: 'Maximum facts to return. Optional; the store bounds it either way.' },
+    },
+    required: ['query'],
+  },
+  async execute(input: JsonObject, session: Session) {
+    if (typeof input.query !== 'string') {
+      throw new Error('memory.recall requires a "query" string.');
+    }
+    const limit = typeof input.limit === 'number' ? input.limit : undefined;
+    const result = await store.search(session.agent.id, input.query, limit);
+    return {
+      results: result.entries.map((entry) => ({ id: entry.id, content: entry.content, createdAt: entry.createdAt })),
+      truncated: result.truncated,
+    };
+  },
+});
+
+export const FORGET_TOOL_NAME = 'memory.forget';
+
+/**
+ * Retires one of the agent's own memories, by id. Tombstoned rather than
+ * deleted — which is what makes `safe` defensible for it: the entry stops
+ * being live but does not stop existing, so an operator can still see what
+ * an agent chose to drop.
+ */
+export const createForgetTool = (store: AgentMemoryStore): Tool => ({
+  name: FORGET_TOOL_NAME,
+  description: 'Forget one of your remembered facts by its id (from memory.recall or memory.remember). It stops informing future conversations.',
+  risk: 'safe',
+  parameters: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'The id of the memory entry to forget.' },
+    },
+    required: ['id'],
+  },
+  async execute(input: JsonObject, session: Session) {
+    const id = typeof input.id === 'string' ? input.id.trim() : '';
+    if (!id) {
+      throw new Error('memory.forget requires a non-empty "id" string.');
+    }
+    const forgotten = await store.forget(session.agent.id, id);
+    if (!forgotten) {
+      throw new Error(`No live memory entry with id ${id} belongs to this agent — nothing was forgotten.`);
+    }
+    return { forgotten: true, id };
+  },
+});
+
 export const DELEGATE_TOOL_NAME = 'agent.delegate';
 
 /**
