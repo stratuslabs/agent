@@ -220,6 +220,72 @@ test('a due schedule fires through dispatch with its slot consumed first', async
   store.close();
 });
 
+test('a long-missed short-interval schedule skips forward without spinning a per-interval loop', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  let dispatches = 0;
+  const runtime = runtimeWith(store, { dispatch: async () => { dispatches += 1; } });
+
+  // A one-minute schedule whose slot is a full year in the past: the skip
+  // must land on the first future slot in one closed-form jump, not by
+  // stepping ~525k intervals. Phase stays aligned to the original slot.
+  const intervalMs = 60_000;
+  const slotMs = Date.now() - 365 * 24 * 60 * 60 * 1000;
+  store.insert(record({ id: 'ancient', cadence: { kind: 'every', intervalMs }, nextFireAt: new Date(slotMs).toISOString() }));
+
+  const started = Date.now();
+  await runtime.start();
+  // The skip runs synchronously inside start(); if it looped per interval
+  // it would take seconds and likely time out. Bounded here to prove it did
+  // not.
+  assert.ok(Date.now() - started < 1_000, 'skipping a year of minutes must not spin a loop');
+
+  const next = store.get('ancient')?.nextFireAt;
+  assert.ok(next, 'the schedule keeps a future slot');
+  const nextMs = Date.parse(next);
+  assert.ok(nextMs > Date.now(), 'the next slot is in the future');
+  assert.equal((nextMs - slotMs) % intervalMs, 0, 'the next slot stays phase-aligned to the original');
+  assert.equal(dispatches, 0, 'a fully-missed window is skipped, not replayed');
+  runtime.stop();
+  await runtime.drain();
+  store.close();
+});
+
+test('the concurrency cap warns once per deferred slot, not once per tick', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const warnings: string[] = [];
+  const held = deferred<void>();
+  let dispatches = 0;
+
+  const runtime = runtimeWith(store, {
+    warn: (line) => { if (/deferring this firing/.test(line)) warnings.push(line); },
+    // The first firing is held open across many ticks; the second schedule
+    // cannot run (agent at cap 1) and is deferred every tick.
+    dispatch: async () => { dispatches += 1; if (dispatches === 1) { await held.promise; } },
+  });
+
+  // Two schedules for the SAME agent, both due, with a large interval so
+  // neither slot advances during the test — one fires and is held, the
+  // other is deferred on the same slot every tick.
+  const due = new Date(Date.now() - 5).toISOString();
+  store.insert(record({ id: 'holder', agentId: 'ava', cadence: { kind: 'every', intervalMs: 3_600_000 }, nextFireAt: due }));
+  store.insert(record({ id: 'waiter', agentId: 'ava', cadence: { kind: 'every', intervalMs: 3_600_000 }, nextFireAt: due }));
+
+  await runtime.start();
+  await waitFor(() => dispatches === 1, 'the first firing to be held');
+  await waitFor(() => warnings.length >= 1, 'the deferral warning');
+  // Many ticks pass (tickMs is 10) while the holder stays open; the deferred
+  // slot must not re-warn on each.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(warnings.length, 1, 'the deferred slot warns once across many ticks, not once per tick');
+
+  held.resolve();
+  runtime.stop();
+  await runtime.drain();
+  store.close();
+});
+
 test('a slightly-late recurring firing advances from its slot, not from now — no cadence drift', async () => {
   const home = await newHome();
   const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));

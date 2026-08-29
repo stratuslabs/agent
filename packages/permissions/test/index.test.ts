@@ -124,6 +124,19 @@ test('the interactive prompt renders a gated call\'s arguments, so a schedule sh
   }));
   assert.match(asked[0]!, /C-SECRET-OPS/, 'the destination survives a long prompt');
   assert.match(asked[0]!, /30m/);
+
+  // When even the per-field-capped rendering overflows (many fields), the
+  // cut announces itself rather than silently showing a partial call as if
+  // it were whole — the honest-prompt property.
+  asked.length = 0;
+  const manyFields: Record<string, string> = {};
+  for (let index = 0; index < 40; index += 1) {
+    manyFields[`field_${index}`] = 'y'.repeat(100);
+  }
+  await policy.approve(context('schedule.every', 'gated', {
+    call: { id: 'call-1', toolName: 'schedule.every', input: manyFields },
+  }));
+  assert.match(asked[0]!, /arguments truncated — inspect the call before approving/);
 });
 
 test('"always" lasts for the session that said it, and no longer', async () => {

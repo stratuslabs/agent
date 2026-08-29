@@ -247,6 +247,13 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
   const inflight = new Set<Promise<void>>();
   const runningPerAgent = new Map<string, number>();
   /**
+   * `${scheduleId}:${slot}` pairs a concurrency-cap deferral has already
+   * logged, so a firing that outlasts its cadence warns once per deferred
+   * slot rather than once per tick. Cleared when the slot finally fires or
+   * is skipped — the same slot recurs on every tick until then.
+   */
+  const deferralsWarned = new Set<string>();
+  /**
    * Session ids of firings THIS scheduler started and has not seen settle.
    *
    * The unforgeable half of the destination carve-out. Metadata alone
@@ -337,6 +344,27 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     },
   };
 
+  /**
+   * The first slot strictly after `now`, skipping every window that passed
+   * while the daemon was down — in closed form, so downtime never costs a
+   * loop. For an interval this stays phase-aligned to the original slot
+   * (the cadence keeps its offset); for a cron it is the next matching time
+   * after now, which one bounded search already finds. A one-shot never
+   * reaches here — a passed `at` has no following occurrence to skip.
+   */
+  const skipToFuture = (
+    cadence: ScheduleRecord['cadence'],
+    slotDate: Date,
+    now: Date,
+  ): Date | undefined => {
+    if (cadence.kind === 'every') {
+      const elapsed = now.getTime() - slotDate.getTime();
+      const jumps = Math.floor(elapsed / cadence.intervalMs) + 1;
+      return new Date(slotDate.getTime() + jumps * cadence.intervalMs);
+    }
+    return nextFireAfter(cadence, now);
+  };
+
   /** `record` with its slot replaced — or removed, for a spent one-shot. */
   const withNextFire = (
     record: ScheduleRecord,
@@ -365,26 +393,34 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     const following = nextFireAfter(record.cadence, slotDate);
 
     if (following && following.getTime() <= now.getTime()) {
-      // Window passed entirely. Advance to the first future slot — or
-      // lose to a concurrent cancel, which is fine either way: skipped
-      // and gone both mean "not replayed".
-      let next: Date | undefined = following;
-      while (next && next.getTime() <= now.getTime()) {
-        next = nextFireAfter(record.cadence, next);
-      }
+      // Window passed entirely. Jump straight to the first slot after now —
+      // in closed form, never by stepping one interval at a time. A daemon
+      // down for a year against an `every 1m` schedule would otherwise spin
+      // ~525k iterations here, synchronously inside the awaited start(),
+      // stalling the whole boot. (A concurrent cancel makes the claim
+      // no-op, which is fine: skipped and gone both mean "not replayed".)
+      const next = skipToFuture(record.cadence, slotDate, now);
       log(`schedule ${record.id}: missed firing(s) while the daemon was down; skipping to ${next ? next.toISOString() : 'never'}`);
       store.claimSlot(withNextFire(record, next), slot);
+      deferralsWarned.delete(`${record.id}:${slot}`);
       return;
     }
 
     const running = runningPerAgent.get(record.agentId) ?? 0;
     if (running >= maxConcurrentPerAgent) {
       // Deferred, not dropped: the slot stays due and the next tick
-      // retries. The log line is the operator's clue that firings are
-      // outlasting their own cadence.
-      warn(`schedule ${record.id}: ${record.agentId} already has ${running} scheduled turn(s) running; deferring this firing`);
+      // retries. Warned once per deferred slot, not once per tick — a
+      // firing that outlasts its cadence would otherwise repeat the same
+      // line every tickMs (~1/s) into a log CLAUDE.md keeps as a minimal
+      // trace. The entry clears when the slot finally fires or is skipped.
+      const deferralKey = `${record.id}:${slot}`;
+      if (!deferralsWarned.has(deferralKey)) {
+        deferralsWarned.add(deferralKey);
+        warn(`schedule ${record.id}: ${record.agentId} already has ${running} scheduled turn(s) running; deferring this firing (slot ${slot})`);
+      }
       return;
     }
+    deferralsWarned.delete(`${record.id}:${slot}`);
 
     const firedAt = now.toISOString();
     const sessionId = `${SCHEDULE_SESSION_ID_PREFIX}${record.id}:${slot}`;

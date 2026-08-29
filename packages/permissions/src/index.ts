@@ -297,13 +297,22 @@ const capStrings = (value: JsonValue): JsonValue => {
  * is shown to a human, never matched against a scope. Long values are
  * capped individually (see `capStrings`) so no single field can hide the
  * rest; the overall cap is only a backstop for an object with many fields.
+ *
+ * When even the per-field-capped rendering overflows, the cut is **not
+ * silent**: it ends with an explicit marker, so an approver is never shown
+ * a partial argument set that reads as complete — a field trimmed off the
+ * tail (a schedule's `destination`, say) must announce itself as hidden,
+ * the same warning the Slack prompt already renders. An honest prompt is
+ * the security property here; the realistic few-field call never truncates.
  */
 const summarizeInput = (input: JsonObject): string | undefined => {
   if (Object.keys(input).length === 0) {
     return undefined;
   }
   const oneLine = JSON.stringify(capStrings(input));
-  return oneLine.length > PROMPT_OVERALL_LIMIT ? `${oneLine.slice(0, PROMPT_OVERALL_LIMIT)}…` : oneLine;
+  return oneLine.length > PROMPT_OVERALL_LIMIT
+    ? `${oneLine.slice(0, PROMPT_OVERALL_LIMIT)}… [arguments truncated — inspect the call before approving]`
+    : oneLine;
 };
 
 /**
