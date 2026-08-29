@@ -622,3 +622,52 @@ test('an injected codex transport reaches the codex runtime and a codex fallback
   assert.equal(resolved.fallback?.codexSubscription, true);
   assert.equal(resolved.fallback?.codexRunTurn, codexRunTurn, 'the fallback must carry the injected transport');
 });
+
+test('a codex key never follows a configured endpoint — a named base URL refuses the run', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'codex' }));
+
+  // A stored key bound to an endpoint: codex consumes no URL, so honoring
+  // the binding is impossible and dropping it would send the key to the
+  // harness's own endpoint instead — the exact redirect bindings exist to
+  // prevent. The run is refused.
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ codex: { type: 'api_key', value: 'sk-proxy-key', baseUrl: 'https://proxy.local/v1' } }),
+  );
+  await assert.rejects(
+    () => resolveRuntimeConfig({}, { homeDir: home, cwd: home, processEnv: {} }),
+    /codex does not use a custom base URL/,
+  );
+
+  // The same for an explicit URL beside an environment key.
+  await assert.rejects(
+    () => resolveRuntimeConfig({}, {
+      homeDir: home,
+      cwd: home,
+      processEnv: { CODEX_API_KEY: 'sk-env', STRATUS_BASE_URL: 'https://proxy.local/v1' },
+    }),
+    /codex does not use a custom base URL/,
+  );
+});
+
+test('a codex fallback with an endpoint-bound key is quietly skipped, never unbound', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({
+      openai: { type: 'api_key', value: 'sk-openai' },
+      codex: { type: 'api_key', value: 'sk-proxy-key', baseUrl: 'https://proxy.local/v1' },
+    }),
+  );
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'openai', model: 'gpt-4o', fallbackProvider: 'codex', fallbackModel: 'gpt-5.5' }),
+  );
+
+  const resolved = await resolveRuntimeConfig({}, { homeDir: home, cwd: home, processEnv: {} });
+  assert.equal(resolved.provider, 'openai');
+  assert.equal(resolved.fallback, undefined, 'a bound codex key must not serve a fallback that cannot honor the binding');
+});

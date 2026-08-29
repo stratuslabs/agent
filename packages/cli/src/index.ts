@@ -3181,7 +3181,12 @@ export const runSetup = async (
       ? readNonEmptyString(processEnv.STRATUS_API_KEY)
       : undefined)
       ?? readNonEmptyString(processEnv[defaultKeyEnvFor(fallbackProvider)]);
-    const credential = envKey ? undefined : state.credentials[fallbackProvider];
+    const candidate = envKey ? undefined : state.credentials[fallbackProvider];
+    // A codex fallback consumes no endpoint URL, so a stored key bound to
+    // one cannot serve it — the same skip resolveRuntimeConfig performs.
+    const credential = fallbackProvider === 'codex' && candidate?.type === 'api_key' && candidate.baseUrl !== undefined
+      ? undefined
+      : candidate;
     const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);
     // A codex oauth entry is the subscription marker, not a token to send.
     const codexSubscription = fallbackProvider === 'codex' && !apiKey && credential?.type === 'oauth_token';
@@ -3263,6 +3268,13 @@ export const runSetup = async (
     }
 
     if (state.provider === 'codex') {
+      // The harness owns its endpoints: a key bound to one cannot be
+      // honored on codex — resolveRuntimeConfig refuses this outright, and
+      // the inline test mirrors it rather than quietly unbinding the key.
+      if (boundUrl !== undefined) {
+        writeLine(streams.stdout, `Your saved codex key is bound to ${boundUrl}, and codex does not use a custom base URL. Store the key without one to run on codex.`);
+        return undefined;
+      }
       const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);
       // The subscription marker means the machine's own codex sign-in
       // serves the run — nothing more to resolve here.

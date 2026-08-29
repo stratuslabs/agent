@@ -461,13 +461,18 @@ test('a slow delta consumer is not counted as codex silence', async () => {
 });
 
 test('the idle timer suspends across hosted tool waits and its abort reaches hosted work', async () => {
-  const toolSignals: Array<AbortSignal | undefined> = [];
+  // Sampled while the tool is still executing: the turn-final abort in
+  // generate()'s cleanup fires on every exit by design, so the signal's
+  // state after the turn says nothing about the idle timer.
+  const abortedDuringTool: boolean[] = [];
+  let sawSignal = false;
   const provider = createCodexProvider({
     idleTimeoutMs: 60,
     executeTool: async (_session, call, context) => {
-      toolSignals.push(context?.signal);
+      sawSignal = context?.signal !== undefined;
       // 3x the idle timeout — survives only if the timer suspended.
       await new Promise((resolve) => setTimeout(resolve, 200));
+      abortedDuringTool.push(context?.signal?.aborted ?? false);
       return { callId: call.id, toolName: call.toolName, ok: true, output: { echoed: true } };
     },
     runTurn: (params) => (async function* (): AsyncGenerator<CodexThreadEvent> {
@@ -490,9 +495,74 @@ test('the idle timer suspends across hosted tool waits and its abort reaches hos
   });
 
   assert.deepEqual(response.parts, [{ type: 'text', text: 'survived the slow tool' }]);
-  const signal = toolSignals[0];
-  assert.ok(signal, 'hosted tools must receive the abort signal even without a caller signal');
-  assert.equal(signal.aborted, false, 'the idle timer must not fire during a hosted tool wait');
+  assert.equal(sawSignal, true, 'hosted tools must receive the abort signal even without a caller signal');
+  assert.deepEqual(abortedDuringTool, [false], 'the idle timer must not fire during a hosted tool wait');
+});
+
+test('hosted work still in flight is aborted when the codex run dies', async () => {
+  // The subprocess can fire a tools/call and then die without awaiting it.
+  // The HTTP handler executing that call is detached from generate(), so
+  // unless the provider aborts its controller on the way out, the kernel
+  // keeps executing a tool for a turn that has already been reported
+  // failed — a command running after its turn is dead.
+  let started: () => void;
+  const toolStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  let finished: (signal: AbortSignal | undefined) => void;
+  const toolFinished = new Promise<AbortSignal | undefined>((resolve) => {
+    finished = resolve;
+  });
+
+  const provider = createCodexProvider({
+    executeTool: async (_session, call, context) => {
+      started();
+      // Runs until cancellation reaches it — the exact dependence on the
+      // abort that this test exists to pin.
+      await new Promise<void>((resolve) => {
+        context?.signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+      finished(context?.signal);
+      return { callId: call.id, toolName: call.toolName, ok: false, output: null, error: 'aborted' };
+    },
+    runTurn: (params) => (async function* (): AsyncGenerator<CodexThreadEvent> {
+      const config = params.clientOptions.config as CapturedConfig;
+      const server = config.mcp_servers?.stratus;
+      assert.ok(server);
+      // Fired, never awaited — the call is mid-execution when the stream dies.
+      void fetch(server.url, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${params.clientOptions.env[MCP_TOKEN_ENV_VAR]}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'demo_echo', arguments: {} } }),
+      }).catch(() => {});
+      await toolStarted;
+      throw new Error('codex died');
+      yield { type: 'turn.completed' };
+    })(),
+  });
+
+  await assert.rejects(
+    () => provider.generate({ session: createSession(), tools: [{ name: 'demo.echo' }] }),
+    /codex died/,
+  );
+
+  // The gate has a way to lose: without the abort, the hosted call never
+  // settles and the deadline rejects instead of the suite hanging.
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), 10_000);
+  try {
+    const signal = await Promise.race([
+      toolFinished,
+      new Promise<never>((_, reject) => {
+        deadline.signal.addEventListener('abort', () => {
+          reject(new Error('the in-flight hosted call was never aborted — it outlived its dead turn'));
+        }, { once: true });
+      }),
+    ]);
+    assert.equal(signal?.aborted, true);
+  } finally {
+    clearTimeout(timer);
+  }
 });
 
 test('concurrent MCP tool calls execute one at a time', async () => {

@@ -551,7 +551,11 @@ export const createCodexProvider = ({
       }
     };
     const resetIdleTimer = (): void => {
-      if (idleTimeoutMs <= 0 || activeHostedTools > 0) {
+      // Never after the abort: the turn is over (or already being cut
+      // loose), and a hosted call settling late must not re-arm a timer
+      // the finally below has already cleared — a leaked ten-minute timer
+      // pins the process for exactly that long.
+      if (idleTimeoutMs <= 0 || activeHostedTools > 0 || controller.signal.aborted) {
         return;
       }
       if (idleTimer) {
@@ -767,6 +771,14 @@ export const createCodexProvider = ({
       if (idleTimer) {
         clearTimeout(idleTimer);
       }
+      // The turn is over, success or failure. Hosted work still in flight —
+      // a tools/call the subprocess fired and then died without awaiting —
+      // belongs to no turn now, and closing the socket alone would orphan
+      // it mid-execution rather than stop it: the HTTP handler is detached
+      // from this function, so nothing else ever cancels the executor
+      // beneath it. The abort fires first so cancellation reaches that
+      // work, then the socket goes away.
+      controller.abort();
       await mcp?.close();
     }
 

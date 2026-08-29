@@ -941,6 +941,17 @@ export const routes: Route[] = [
       }
       const value = requireString(body, 'value');
       const baseUrl = optionalString(body, 'baseUrl');
+      if (baseUrl && provider === 'codex') {
+        // The codex harness owns its endpoints, so a bound key could never
+        // be honored there — and runtime resolution refuses to run rather
+        // than send it anywhere else. Refusing the binding up front beats
+        // storing a credential every later run rejects.
+        throw new ApiError(
+          400,
+          'unsupported_credential_endpoint',
+          'A codex key is not endpoint-bound: the codex harness owns its endpoints. Store it without a baseUrl.',
+        );
+      }
 
       // The whole read-modify-write under one lock. `saveCredentials` treats
       // what it is given as the complete provider set and drops anything

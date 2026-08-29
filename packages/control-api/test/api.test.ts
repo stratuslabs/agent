@@ -1719,6 +1719,17 @@ test('a codex sign-in is storable both ways and reachable through every credenti
     const codexRow = listed.providers.find((entry) => entry.provider === 'codex');
     assert.deepEqual(codexRow, { provider: 'codex', stored: true, type: 'oauth_token' });
 
+    // A codex key is never endpoint-bound: the harness owns its endpoints,
+    // and runtime resolution refuses a bound key rather than unbinding it —
+    // so the store refuses the binding up front.
+    const bound = await harness.call('/api/v1/credentials/codex', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'api_key', value: 'sk-proxy', baseUrl: 'https://proxy.local/v1' }),
+    });
+    assert.equal(bound.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(bound)).error.code, 'unsupported_credential_endpoint');
+
     // A ChatGPT sign-in has no key to check: the verify route says so
     // instead of condemning a credential that works once saved.
     const verify = await json<{ status: string; detail?: string }>(await harness.call('/api/v1/credentials/verify', {

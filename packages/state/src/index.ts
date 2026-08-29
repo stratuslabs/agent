@@ -1884,6 +1884,23 @@ export const resolveRuntimeConfig = async (
     : undefined;
   const explicitBaseUrl = selection.baseUrl
     ?? readNonEmptyString(processEnv.STRATUS_BASE_URL);
+
+  // The codex harness owns its endpoints, so no configured URL is ever
+  // consumed for a codex run — which means a named endpoint cannot be
+  // honored, and silently dropping it would send the key somewhere other
+  // than where the person who named the endpoint said it may go. Fail
+  // closed instead: a codex run with any base URL in play — a bound
+  // stored key, a flag or env URL, or the config file's — is refused.
+  if (provider === 'codex') {
+    const namedBaseUrl = boundBaseUrl
+      ?? explicitBaseUrl
+      ?? (fileConfigApplies ? fileConfig.baseUrl : undefined);
+    if (namedBaseUrl !== undefined) {
+      throw new Error(
+        `provider=codex does not use a custom base URL — the codex harness owns its endpoints, so a key meant for ${String(namedBaseUrl)} would not be sent there. Remove the base URL (or store the codex key without one) to run on codex.`,
+      );
+    }
+  }
   if (boundBaseUrl && explicitBaseUrl
     && String(explicitBaseUrl).replace(/\/+$/, '') !== boundBaseUrl.replace(/\/+$/, '')) {
     throw new Error(
@@ -1986,7 +2003,16 @@ export const resolveRuntimeConfig = async (
         && fileConfig.fallbackBaseUrl !== undefined
         && fileConfig.fallbackBaseUrl.replace(/\/+$/, '') !== DEFAULT_OPENAI_BASE_URL;
       const fallbackEnvKey = readNonEmptyString(processEnv[defaultApiKeyEnvName(fallbackProvider)]);
-      const fallbackCredential = fallbackEnvKey || fallbackUntrustedUrl ? undefined : credentials[fallbackProvider];
+      const fallbackCandidate = fallbackEnvKey || fallbackUntrustedUrl ? undefined : credentials[fallbackProvider];
+      // A codex fallback consumes no endpoint URL, so a stored key bound to
+      // one cannot be honored there — and must not silently follow the
+      // harness to a different endpoint. The fallback is quietly skipped,
+      // the same treatment as any other sign-in it cannot use.
+      const fallbackCredential = fallbackProvider === 'codex'
+        && fallbackCandidate?.type === 'api_key'
+        && fallbackCandidate.baseUrl !== undefined
+        ? undefined
+        : fallbackCandidate;
       const primaryReusable = fallbackProvider === provider
         && (envApiKey !== undefined || !fallbackUntrustedUrl);
       const fallbackApiKey = (primaryReusable ? apiKey : undefined)

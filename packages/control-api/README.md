@@ -110,7 +110,7 @@ log, and an address bar is one that gets noticed when it changes.
 | GET | `/catalog/tools` | Every registered tool with the risk a call will face, every skill a soul's `skills:` can name, and the plugins that contributed them |
 | GET | `/credentials` | Which sign-ins exist — presence and endpoint, never a value |
 | POST | `/credentials/verify` | Live-check a key before storing it: `{ provider, key, type?, baseUrl? }` |
-| PUT | `/credentials/:provider` | Store an `api_key`, or an `oauth_token` for Anthropic (a Claude setup token) or Codex (a marker that the machine's `codex login` sign-in serves runs — the value is never read) |
+| PUT | `/credentials/:provider` | Store an `api_key`, or an `oauth_token` for Anthropic (a Claude setup token) or Codex (a marker that the machine's `codex login` sign-in serves runs — the value is never read). A codex key refuses a `baseUrl`: the harness owns its endpoints, so a bound key could never be honored there |
 | PUT | `/credentials/channels/:channel` | Store a channel's tokens (today: `slack`) |
 | GET/PUT | `/config` | Settings, whitelisted to keys this API owns |
 
