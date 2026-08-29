@@ -110,16 +110,19 @@ log, and an address bar is one that gets noticed when it changes.
 | GET | `/catalog/tools` | Every registered tool with the risk a call will face, every skill a soul's `skills:` can name, and the plugins that contributed them |
 | GET | `/credentials` | Which sign-ins exist — presence and endpoint, never a value |
 | POST | `/credentials/verify` | Live-check a key before storing it: `{ provider, key, type?, baseUrl? }` |
-| PUT | `/credentials/:provider` | Store an `api_key`, or an `oauth_token` for Anthropic |
+| PUT | `/credentials/:provider` | Store an `api_key`, or an `oauth_token` for Anthropic (a Claude setup token) or Codex (a marker that the machine's `codex login` sign-in serves runs — the value is never read). A codex key refuses a `baseUrl`: the harness owns its endpoints, so a bound key could never be honored there |
 | PUT | `/credentials/channels/:channel` | Store a channel's tokens (today: `slack`) |
 | GET/PUT | `/config` | Settings, whitelisted to keys this API owns |
 
 `POST /credentials/verify` reports `ok`, `rejected`, or `unreachable`, and
 only an explicit 401/403 is `rejected` — a compatible endpoint with no models
 route says nothing about the key. Pass `type` with it: a `oauth_token` cannot
-call the models endpoint at all, so it answers `unreachable` rather than
-sending a Claude subscription token as an `x-api-key` and condemning a
-credential that works perfectly well once saved.
+call a models endpoint at all — a Claude subscription token, or a codex
+ChatGPT sign-in that has no key to check — so it answers `unreachable`
+rather than condemning a credential that works perfectly well once saved. A
+codex `api_key` is an OpenAI platform key and is checked against the
+platform's models endpoint. Provider names on these routes are `anthropic`,
+`openai`, and `codex`.
 
 `PUT /config` does not write the `plugins` block. `GET` returns it, and a
 `PUT` carrying it back is accepted (the round trip has to work) but the value

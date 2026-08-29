@@ -137,8 +137,8 @@ token, so pass it with `--token` or `STRATUS_GATEWAY_TOKEN`.
   7) Save & finish
 ```
 
-- **Providers** — sign in to one or more. For Claude, choose how you pay: a **Claude Pro/Max subscription** (run `claude setup-token`, paste the token — runs route through the Claude Code runtime, so your plan covers usage; requires Claude Code installed and signed in. Tool runs and memory work there too, so it's the same agent as on an API key) or an **Anthropic API key**, pasted straight into the prompt (input is hidden) and checked against the live API when the endpoint supports it — a rejected key is refused; an unreachable endpoint saves the key and verifies it on your first run. OpenAI-compatible services work like API keys, including local models and proxies via a custom base URL.
-- **Models** — pick a **default** and a **fallback**, listed live from the provider APIs where possible (subscription sign-ins and offline setups fall back to the known Claude lineup). If the default model errors mid-run, the run automatically retries on the fallback — even across providers.
+- **Providers** — sign in to one or more. For Claude, choose how you pay: a **Claude Pro/Max subscription** (run `claude setup-token`, paste the token — runs route through the Claude Code runtime, so your plan covers usage; requires Claude Code installed and signed in. Tool runs and memory work there too, so it's the same agent as on an API key) or an **Anthropic API key**, pasted straight into the prompt (input is hidden) and checked against the live API when the endpoint supports it — a rejected key is refused; an unreachable endpoint saves the key and verifies it on your first run. OpenAI-compatible services work like API keys, including local models and proxies via a custom base URL. **Codex (ChatGPT)** works either way too: pick the ChatGPT subscription (uses this machine's own `codex login` sign-in — Stratus records the choice and never touches codex's tokens) or paste an OpenAI API key, verified against the platform and passed to codex as `CODEX_API_KEY`. Runs route through the Codex harness with its native shell and web tools disabled, so it is the same agent under the same kernel policy as every other provider.
+- **Models** — pick a **default** and a **fallback**, listed live from the provider APIs where possible (subscription sign-ins and offline setups fall back to the known Claude lineup, and codex always lists its known harness lineup — no endpoint serves it). If the default model errors mid-run, the run automatically retries on the fallback — even across providers.
 - **Menus are keyboard-driven** — arrow keys (or `j`/`k`) to move, Enter to pick, digits to jump, Esc to go back.
 - **Agent** — name your agent (or accept a generated identity), describe their personality, and their soul file lands in `~/.stratus/agents/`, ready to edit.
 - **Channels** — put an agent on Slack without opening a file. Pick the agent, and setup prints the app manifest with their name already filled in, walks you through the two tokens (input hidden), verifies each against Slack before accepting it, and stores them where `stratus serve` looks. The list marks who is connected; picking a connected agent offers to replace their tokens or disconnect.
@@ -897,6 +897,7 @@ Files
 Sign-ins
   anthropic Claude subscription (Pro/Max) — runs go through the Claude Code runtime
   openai    not signed in
+  codex     not signed in
 
 Channels
   slack     no agents connected
@@ -1001,8 +1002,8 @@ to refuse over.
 | Flag | Purpose |
 | --- | --- |
 | `--soul <file>` | Run as the agent defined by a soul file (also `STRATUS_SOUL` / config `soul` key) |
-| `--provider` | `anthropic`, `openai`, or `demo` (offline, no account) |
-| `--model` | Model for real providers (anthropic default: `claude-opus-5`) |
+| `--provider` | `anthropic`, `openai`, `codex`, or `demo` (offline, no account) |
+| `--model` | Model for real providers (anthropic default: `claude-opus-5`, codex default: `gpt-5.5`) |
 | `--base-url` | Override the provider API base URL |
 | `--config <file>` | Load settings from a specific config file |
 | `--approvals` | `run`/`chat`: tool approval mode — `always`, `ask`, or `never`. `serve`: how the daemon reaches a human — `headless` (refuse gated calls) or `remote` (ask in Slack); overrides the config's `approvals.mode` |

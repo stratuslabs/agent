@@ -35,6 +35,8 @@ import {
   createOpenAICompatibleProvider,
   createProviderResponseBuilder,
   defineProvider,
+  hasHostedToolSideEffects,
+  type HostedToolExecutor,
 } from '@stratusagent/providers';
 import {
   createAnthropicProvider,
@@ -43,9 +45,12 @@ import {
 import {
   createClaudeCodeProvider,
   type ClaudeCodeQueryFn,
-  hasHostedToolSideEffects,
-  type ClaudeCodeToolExecutor,
 } from '@stratusagent/provider-claude-code';
+import {
+  createCodexProvider,
+  DEFAULT_CODEX_MODEL,
+  type CodexRunTurn,
+} from '@stratusagent/provider-codex';
 
 /**
  * Where Stratus state lives and how the process environment is read. Every
@@ -66,9 +71,15 @@ export interface StateEnvironment {
    * launching Claude Code for real.
    */
   queryFn?: ClaudeCodeQueryFn;
+  /**
+   * The Codex harness transport — `queryFn`'s counterpart for the third
+   * provider shape. Without it the codex runtime is the one nothing can
+   * drive except by launching the codex binary for real.
+   */
+  codexRunTurn?: CodexRunTurn;
 }
 
-export type StratusProviderName = 'demo' | 'openai' | 'anthropic';
+export type StratusProviderName = 'demo' | 'openai' | 'anthropic' | 'codex';
 
 /**
  * Who may approve one agent's gated calls, and where they are asked.
@@ -198,7 +209,7 @@ export interface StratusConfigFile {
 
 /** A resolved, ready-to-run fallback model (always a real provider). */
 export interface FallbackRuntime {
-  provider: 'anthropic' | 'openai';
+  provider: 'anthropic' | 'openai' | 'codex';
   model: string;
   baseUrl?: string;
   apiKey?: string;
@@ -213,6 +224,18 @@ export interface FallbackRuntime {
    * primary fails.
    */
   queryFn?: ClaudeCodeQueryFn;
+  /**
+   * The codex harness transport for a codex fallback — `queryFn`'s
+   * counterpart, for the same reason: no other primary carries one.
+   */
+  codexRunTurn?: CodexRunTurn;
+  /**
+   * A codex fallback with no key runs on the machine's own `codex login`
+   * sign-in. Recorded explicitly (from the stored subscription marker)
+   * because "no key" alone must not count as a working sign-in — a
+   * fallback without one is skipped, not discovered broken mid-rescue.
+   */
+  codexSubscription?: true;
 }
 
 export type RuntimeConfig =
@@ -260,9 +283,48 @@ export type RuntimeConfig =
       /** See the openai variant — the variable that supplied the key. */
       apiKeyEnvVar?: string;
       fallback?: FallbackRuntime;
+    }
+  | {
+      provider: 'codex';
+      model: string;
+      /**
+       * OpenAI API key for metered billing, handed to the codex harness.
+       * Absent means the machine's own `codex login` (ChatGPT) sign-in
+       * serves the run — the harness holds those tokens itself, under
+       * ~/.codex, and Stratus never reads them.
+       */
+      apiKey?: string;
+      systemPrompt?: string;
+      /**
+       * Not consumed by the harness itself (codex owns its transport);
+       * carried so a cross-provider fallback still inherits the
+       * environment's pinned fetch.
+       */
+      fetch?: typeof fetch;
+      /**
+       * The harness transport seam — this provider's counterpart to the
+       * anthropic variant's `queryFn`. Without it a codex config is the
+       * one runtime a test cannot drive.
+       */
+      codexRunTurn?: CodexRunTurn;
+      soul?: ParsedSoul;
+      /** Absolute path the soul was loaded from, for callers that re-read it. */
+      soulPath?: string;
+      /** See the openai variant — the variable that supplied the key. */
+      apiKeyEnvVar?: string;
+      fallback?: FallbackRuntime;
     };
 
-/** A stored sign-in for a provider, kept in ~/.stratus/credentials.json. */
+/**
+ * A stored sign-in for a provider, kept in ~/.stratus/credentials.json.
+ *
+ * An `oauth_token` means subscription billing, and what the value holds
+ * differs by provider: for anthropic it is a real Claude Code setup token,
+ * sent into the harness on every run. For codex it is only a marker that
+ * this machine uses its own `codex login` (ChatGPT) sign-in — the actual
+ * tokens live in codex's auth store under ~/.codex, and the stored value
+ * is never read or sent anywhere.
+ */
 export interface StoredCredential {
   type: 'api_key' | 'oauth_token';
   value: string;
@@ -274,7 +336,15 @@ export interface StoredCredential {
   baseUrl?: string;
 }
 
-export type CredentialProviderName = 'anthropic' | 'openai';
+/**
+ * Every provider a sign-in can be stored for, as data. Exported so the
+ * surfaces that enumerate providers (setup's summary, doctor, the control
+ * API's credentials listing, model discovery) sweep one list instead of
+ * each hand-writing the pair this used to be — those copies are exactly
+ * how an implemented provider stays unreachable from a surface.
+ */
+export const CREDENTIAL_PROVIDER_NAMES = ['anthropic', 'openai', 'codex'] as const;
+export type CredentialProviderName = (typeof CREDENTIAL_PROVIDER_NAMES)[number];
 export type CredentialsFile = Partial<Record<CredentialProviderName, StoredCredential>>;
 
 /**
@@ -466,7 +536,7 @@ export const loadCredentials = async (env: StateEnvironment): Promise<Credential
   }
 
   const credentials: CredentialsFile = {};
-  for (const provider of ['anthropic', 'openai'] as const) {
+  for (const provider of CREDENTIAL_PROVIDER_NAMES) {
     const entry = (parsed as Record<string, unknown>)[provider];
     if (
       typeof entry === 'object' && entry !== null && !Array.isArray(entry) &&
@@ -512,7 +582,7 @@ const writeRawCredentialsFile = async (env: StateEnvironment, contents: Record<s
 // re-run of setup.
 export const saveCredentials = async (env: StateEnvironment, credentials: CredentialsFile): Promise<void> => {
   const existing = await loadRawCredentialsFile(env);
-  for (const provider of ['anthropic', 'openai'] as const) {
+  for (const provider of CREDENTIAL_PROVIDER_NAMES) {
     if (credentials[provider]) {
       existing[provider] = credentials[provider];
     } else {
@@ -891,7 +961,7 @@ export const runStateMigrations = async (env: StateEnvironment): Promise<Applied
 };
 
 export const parseProviderName = (value: string, label: string): StratusProviderName => {
-  if (value === 'demo' || value === 'openai' || value === 'anthropic') {
+  if (value === 'demo' || value === 'openai' || value === 'anthropic' || value === 'codex') {
     return value;
   }
 
@@ -1916,7 +1986,7 @@ export const apiKeyEnvNameFor = (
   return String(
     readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
       ?? (fileConfigApplies ? fileConfig.apiKeyEnv : undefined)
-      ?? (provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'),
+      ?? defaultApiKeyEnvName(provider),
   );
 };
 
@@ -1983,7 +2053,11 @@ export const resolveRuntimeConfig = async (
     ?? readNonEmptyString(processEnv.STRATUS_MODEL)
     ?? (soulModelApplies ? readNonEmptyString(soul?.model) : undefined)
     ?? (fileConfigApplies ? fileConfig.model : undefined)
-    ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_MODEL : DEFAULT_OPENAI_MODEL);
+    ?? (provider === 'anthropic'
+      ? DEFAULT_ANTHROPIC_MODEL
+      : provider === 'codex'
+        ? DEFAULT_CODEX_MODEL
+        : DEFAULT_OPENAI_MODEL);
 
   const apiKeyEnvName = apiKeyEnvNameFor(provider as CredentialProviderName, fileConfig, fileConfigApplies, env);
 
@@ -1996,6 +2070,10 @@ export const resolveRuntimeConfig = async (
   const defaultEndpointFor = (target: string): string =>
     target === 'anthropic' ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_OPENAI_BASE_URL;
   const untrustedCustomBaseUrl = configTrusted === false
+    // The codex harness owns its endpoints entirely — no configured URL is
+    // ever consumed for it, so there is nothing a project config could
+    // redirect a credential to.
+    && provider !== 'codex'
     && selection.baseUrl === undefined
     && readNonEmptyString(processEnv.STRATUS_BASE_URL) === undefined
     && fileConfigApplies
@@ -2018,6 +2096,10 @@ export const resolveRuntimeConfig = async (
   const authToken = provider === 'anthropic' && storedCredential?.type === 'oauth_token'
     ? storedCredential.value
     : undefined;
+  // A stored codex oauth_token is a subscription marker, not a secret: it
+  // records that this machine's own `codex login` sign-in serves the run,
+  // and its value is never read or sent anywhere (see StoredCredential).
+  const codexSubscription = provider === 'codex' && storedCredential?.type === 'oauth_token';
 
   // A stored key bound to an endpoint is used ONLY with that endpoint — a
   // config file can never redirect it, not even to the official default
@@ -2029,6 +2111,23 @@ export const resolveRuntimeConfig = async (
     : undefined;
   const explicitBaseUrl = selection.baseUrl
     ?? readNonEmptyString(processEnv.STRATUS_BASE_URL);
+
+  // The codex harness owns its endpoints, so no configured URL is ever
+  // consumed for a codex run — which means a named endpoint cannot be
+  // honored, and silently dropping it would send the key somewhere other
+  // than where the person who named the endpoint said it may go. Fail
+  // closed instead: a codex run with any base URL in play — a bound
+  // stored key, a flag or env URL, or the config file's — is refused.
+  if (provider === 'codex') {
+    const namedBaseUrl = boundBaseUrl
+      ?? explicitBaseUrl
+      ?? (fileConfigApplies ? fileConfig.baseUrl : undefined);
+    if (namedBaseUrl !== undefined) {
+      throw new Error(
+        `provider=codex does not use a custom base URL — the codex harness owns its endpoints, so a key meant for ${String(namedBaseUrl)} would not be sent there. Remove the base URL (or store the codex key without one) to run on codex.`,
+      );
+    }
+  }
   if (boundBaseUrl && explicitBaseUrl
     && String(explicitBaseUrl).replace(/\/+$/, '') !== boundBaseUrl.replace(/\/+$/, '')) {
     throw new Error(
@@ -2039,13 +2138,19 @@ export const resolveRuntimeConfig = async (
   const baseUrl = boundBaseUrl
     ?? explicitBaseUrl
     ?? (fileConfigApplies ? fileConfig.baseUrl : undefined)
-    // The Anthropic SDK knows its own endpoint; only openai needs a default.
-    ?? (provider === 'anthropic' ? undefined : DEFAULT_OPENAI_BASE_URL);
+    // The Anthropic SDK knows its own endpoint, and the codex harness owns
+    // its endpoints entirely; only openai needs a default.
+    ?? (provider === 'anthropic' || provider === 'codex' ? undefined : DEFAULT_OPENAI_BASE_URL);
 
-  if (!apiKey && !authToken) {
+  if (!apiKey && !authToken && !codexSubscription) {
     if (untrustedCustomBaseUrl && credentials[provider as CredentialProviderName]) {
       throw new Error(
         `The project config at ${configPathShown} sets a custom base URL (${fileConfig.baseUrl}), so your saved sign-in is not sent to it. Set ${apiKeyEnvName} or STRATUS_API_KEY to use this endpoint, or run with --config to trust the file explicitly.`,
+      );
+    }
+    if (provider === 'codex') {
+      throw new Error(
+        `Missing sign-in for provider=codex. Run \`stratus setup\` to record a ChatGPT (\`codex login\`) sign-in or store an API key, or set STRATUS_API_KEY or ${apiKeyEnvName}.`,
       );
     }
     throw new Error(
@@ -2062,13 +2167,22 @@ export const resolveRuntimeConfig = async (
         ...(authToken ? { authToken } : {}),
         ...(envApiKeyEntry ? { apiKeyEnvVar: envApiKeyEntry.name } : {}),
       }
-    : {
-        provider: 'openai',
-        model: String(model),
-        baseUrl: String(baseUrl),
-        apiKey: String(apiKey),
-        ...(envApiKeyEntry ? { apiKeyEnvVar: envApiKeyEntry.name } : {}),
-      };
+    : provider === 'codex'
+      ? {
+          provider: 'codex',
+          model: String(model),
+          // No apiKey means the machine's own `codex login` sign-in serves
+          // the run; the harness reads its own auth store.
+          ...(apiKey ? { apiKey: String(apiKey) } : {}),
+          ...(envApiKeyEntry ? { apiKeyEnvVar: envApiKeyEntry.name } : {}),
+        }
+      : {
+          provider: 'openai',
+          model: String(model),
+          baseUrl: String(baseUrl),
+          apiKey: String(apiKey),
+          ...(envApiKeyEntry ? { apiKeyEnvVar: envApiKeyEntry.name } : {}),
+        };
 
   const systemPrompt = readNonEmptyString(processEnv.STRATUS_SYSTEM_PROMPT)
     ?? fileConfig.systemPrompt;
@@ -2083,6 +2197,10 @@ export const resolveRuntimeConfig = async (
 
   if (env.queryFn && resolved.provider === 'anthropic') {
     resolved.queryFn = env.queryFn;
+  }
+
+  if (env.codexRunTurn && resolved.provider === 'codex') {
+    resolved.codexRunTurn = env.codexRunTurn;
   }
 
   if (soul) {
@@ -2111,8 +2229,17 @@ export const resolveRuntimeConfig = async (
         && configTrusted === false
         && fileConfig.fallbackBaseUrl !== undefined
         && fileConfig.fallbackBaseUrl.replace(/\/+$/, '') !== DEFAULT_OPENAI_BASE_URL;
-      const fallbackEnvKey = readNonEmptyString(processEnv[fallbackProvider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY']);
-      const fallbackCredential = fallbackEnvKey || fallbackUntrustedUrl ? undefined : credentials[fallbackProvider];
+      const fallbackEnvKey = readNonEmptyString(processEnv[defaultApiKeyEnvName(fallbackProvider)]);
+      const fallbackCandidate = fallbackEnvKey || fallbackUntrustedUrl ? undefined : credentials[fallbackProvider];
+      // A codex fallback consumes no endpoint URL, so a stored key bound to
+      // one cannot be honored there — and must not silently follow the
+      // harness to a different endpoint. The fallback is quietly skipped,
+      // the same treatment as any other sign-in it cannot use.
+      const fallbackCredential = fallbackProvider === 'codex'
+        && fallbackCandidate?.type === 'api_key'
+        && fallbackCandidate.baseUrl !== undefined
+        ? undefined
+        : fallbackCandidate;
       const primaryReusable = fallbackProvider === provider
         && (envApiKey !== undefined || !fallbackUntrustedUrl);
       const fallbackApiKey = (primaryReusable ? apiKey : undefined)
@@ -2121,8 +2248,13 @@ export const resolveRuntimeConfig = async (
       const fallbackAuthToken = fallbackProvider !== provider && fallbackProvider === 'anthropic' && fallbackCredential?.type === 'oauth_token'
         ? fallbackCredential.value
         : (primaryReusable ? authToken : undefined);
+      // A codex fallback works keyless only when the subscription marker
+      // says this machine has a `codex login` sign-in — its own stored
+      // marker, or the primary's when both are codex.
+      const fallbackCodexSubscription = fallbackProvider === 'codex' && !fallbackApiKey
+        && (fallbackCredential?.type === 'oauth_token' || (primaryReusable && codexSubscription));
 
-      if (fallbackApiKey || fallbackAuthToken) {
+      if (fallbackApiKey || fallbackAuthToken || fallbackCodexSubscription) {
         // When the fallback key comes out of the credential store (its own
         // entry, or the primary's reused stored key), its bound endpoint is
         // authoritative — config URLs cannot redirect it.
@@ -2150,12 +2282,14 @@ export const resolveRuntimeConfig = async (
             : (fallbackAnthropicBaseUrl ? { baseUrl: fallbackAnthropicBaseUrl } : {})),
           ...(fallbackApiKey ? { apiKey: String(fallbackApiKey) } : {}),
           ...(fallbackAuthToken ? { authToken: fallbackAuthToken } : {}),
+          ...(fallbackCodexSubscription ? { codexSubscription: true as const } : {}),
           // Here rather than with the primary's transport above, because
           // the fallback does not exist yet at that point. A subscription
           // fallback behind an OpenAI primary has no transport to inherit,
           // so without this it reaches the real Agent SDK the moment the
           // primary fails.
           ...(env.queryFn && fallbackProvider === 'anthropic' ? { queryFn: env.queryFn } : {}),
+          ...(env.codexRunTurn && fallbackProvider === 'codex' ? { codexRunTurn: env.codexRunTurn } : {}),
         };
       }
     }
@@ -2308,7 +2442,7 @@ export const createFallbackWrappedProvider = (
 export const createRuntimeProvider = (
   config: RuntimeConfig,
   onFallback?: (error: unknown) => void,
-  executeTool?: ClaudeCodeToolExecutor,
+  executeTool?: HostedToolExecutor,
   maxTurns?: number,
   persistSession?: (session: Session) => Promise<void>,
 ): ModelProvider => {
@@ -2332,6 +2466,9 @@ export const createRuntimeProvider = (
       // wins — it is the only way a cross-provider pair can say it.
       ...(config.provider === 'anthropic' && config.queryFn ? { queryFn: config.queryFn } : {}),
       ...(fallback.queryFn ? { queryFn: fallback.queryFn } : {}),
+      // The codex transport travels the same way, for the same reason.
+      ...(config.provider === 'codex' && config.codexRunTurn ? { codexRunTurn: config.codexRunTurn } : {}),
+      ...(fallback.codexRunTurn ? { codexRunTurn: fallback.codexRunTurn } : {}),
     } as RuntimeConfig, undefined, executeTool, maxTurns);
     return createFallbackWrappedProvider(primary, fallbackProvider, onFallback ?? (() => {}), persistSession);
   }
@@ -2363,6 +2500,25 @@ export const createRuntimeProvider = (
       ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
       ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
       ...(config.fetch ? { fetch: config.fetch } : {}),
+    });
+  }
+
+  if (config.provider === 'codex') {
+    // The third provider shape: a harness with its own inner loop. Kernel
+    // tools run through the host chain (approvals, events, allowlists
+    // intact) over the provider's loopback MCP endpoint, so this runtime
+    // is the same agent as every other provider — with or without an API
+    // key, which only decides billing.
+    return createCodexProvider({
+      model: config.model,
+      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+      ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
+      ...(config.codexRunTurn ? { runTurn: config.codexRunTurn } : {}),
+      ...(executeTool ? { executeTool } : {}),
+      // Codex has no native turn cap, so the provider enforces the same
+      // limit as a hosted-tool budget — the inner loop consumes all tool
+      // calls inside one generate, and the outer runner never sees them.
+      ...(maxTurns !== undefined ? { maxTurns } : {}),
     });
   }
 
@@ -2562,8 +2718,19 @@ export const servedRuntimes = async (
  * enumerating providers (a catalog sweep, a sign-in status line) need on its
  * own for a provider that is *not* the configured default.
  */
-export const defaultApiKeyEnvName = (provider: CredentialProviderName): string =>
-  provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+export const defaultApiKeyEnvName = (provider: CredentialProviderName): string => {
+  switch (provider) {
+    case 'openai':
+      return 'OPENAI_API_KEY';
+    // The variable the codex binary itself honors — an OpenAI platform key
+    // under a different name, because for codex it is exec-mode auth, not
+    // the general OPENAI_API_KEY (which codex no longer reads at runtime).
+    case 'codex':
+      return 'CODEX_API_KEY';
+    default:
+      return 'ANTHROPIC_API_KEY';
+  }
+};
 
 /**
  * Shown when live model listing is unavailable: a Claude subscription token
@@ -2575,6 +2742,23 @@ export const KNOWN_CLAUDE_MODELS = [
   'claude-haiku-4-5',
   'claude-opus-4-6',
   'claude-sonnet-4-6',
+];
+
+/**
+ * The codex harness serves its own model lineup, and no endpoint Stratus
+ * can call lists it — a ChatGPT sign-in lives inside codex's own auth
+ * store, and even an API key's /models listing answers for the platform,
+ * not the harness. So codex model discovery is this list, the same way a
+ * Claude subscription falls back to the known Claude lineup.
+ */
+export const KNOWN_CODEX_MODELS = [
+  'gpt-5.5',
+  'gpt-5.6-sol',
+  'gpt-5.6-luna',
+  'gpt-5.6-terra',
+  'gpt-5.4',
+  'gpt-5.4-mini',
+  'gpt-5.2',
 ];
 
 // Model ids that cannot serve /chat/completions and must not become the
@@ -2604,6 +2788,11 @@ export const verifyProviderKey = async (
     return { status: 'unreachable', detail: 'fetch is unavailable' };
   }
 
+  // A codex API key is an OpenAI platform key under a different env name,
+  // so it verifies against the platform's models endpoint like any other
+  // OpenAI key. (A ChatGPT subscription sign-in never reaches this
+  // function — it has no key to check; callers short-circuit it the same
+  // way they do a Claude subscription token.)
   const root = (baseUrl ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_OPENAI_BASE_URL)).replace(/\/+$/, '');
   const url = provider === 'anthropic' ? `${root}/v1/models` : `${root}/models`;
   const headers = provider === 'anthropic'
@@ -2664,7 +2853,7 @@ export const collectAvailableModels = async (
   const fetchImpl = env.fetch ?? globalThis.fetch;
   const models: CatalogModel[] = [];
 
-  for (const provider of ['anthropic', 'openai'] as const) {
+  for (const provider of CREDENTIAL_PROVIDER_NAMES) {
     // Discovery uses the credential a real run would use. STRATUS_API_KEY
     // and a configured apiKeyEnv authenticate the DEFAULT provider only —
     // a secondary provider relies on its own env var or stored sign-in,
@@ -2677,6 +2866,13 @@ export const collectAvailableModels = async (
     const credential = envKey ? undefined : selection.credentials[provider];
     const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);
     if (!apiKey && !credential) {
+      continue;
+    }
+
+    if (provider === 'codex') {
+      // Nothing to fetch: the harness lineup has no listable endpoint
+      // (see KNOWN_CODEX_MODELS), whichever way the sign-in bills.
+      models.push(...KNOWN_CODEX_MODELS.map((id) => ({ provider, id })));
       continue;
     }
 
@@ -2971,7 +3167,11 @@ export const listAgentSummaries = async (
     const model = envModel
       ?? (soulModelApplies ? soulModel : undefined)
       ?? (configModelApplies ? activeConfig.model : undefined)
-      ?? (provider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
+      ?? (provider === 'openai'
+        ? DEFAULT_OPENAI_MODEL
+        : provider === 'codex'
+          ? DEFAULT_CODEX_MODEL
+          : DEFAULT_ANTHROPIC_MODEL);
     return { provider, model };
   };
 

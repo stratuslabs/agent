@@ -14,11 +14,23 @@ import {
   type ModelProvider,
   type ProviderRequest,
   type Session,
-  type ToolCall,
   type ToolDescriptor,
-  type ToolResult,
   type ExecutionContext,
 } from '@stratusagent/core';
+import {
+  bridgedToolNames,
+  hasHostedToolSideEffects,
+  latestUserMessagePrompt,
+  markHostedToolSideEffects,
+  renderTranscriptPrompt,
+  type HostedToolExecutor,
+} from '@stratusagent/providers';
+
+// These helpers are shared with every provider that wraps a harness owning
+// its own loop, and they moved to `@stratusagent/providers` when a second
+// one appeared. Re-exported here because this is where they used to live,
+// and the documented import paths keep working.
+export { bridgedToolNames, hasHostedToolSideEffects, markHostedToolSideEffects };
 
 export const DEFAULT_CLAUDE_CODE_MODEL = 'claude-opus-5';
 
@@ -32,34 +44,7 @@ const MCP_SERVER_NAME = 'stratus';
  * host owns approvals, events, allowlists, and the executor —
  * AgentRunner.executeHostedToolCall is the canonical implementation.
  */
-export type ClaudeCodeToolExecutor = (session: Session, call: ToolCall, context?: ExecutionContext) => Promise<ToolResult>;
-
-const HOSTED_SIDE_EFFECTS = Symbol.for('stratus.hostedToolSideEffects');
-
-/** Marks an error as coming from a turn that had already executed kernel tools. */
-export const markHostedToolSideEffects = <T>(error: T): T => {
-  if (typeof error === 'object' && error !== null) {
-    (error as Record<PropertyKey, unknown>)[HOSTED_SIDE_EFFECTS] = true;
-  }
-  return error;
-};
-
-/**
- * True when this error aborted a turn that had already executed kernel
- * tools. Retrying such a request on another provider would repeat those
- * side effects (a fact remembered twice, a command run twice), so
- * fallback wrappers must rethrow instead of failing over.
- */
-export const hasHostedToolSideEffects = (error: unknown): boolean =>
-  typeof error === 'object' && error !== null
-  && (error as Record<PropertyKey, unknown>)[HOSTED_SIDE_EFFECTS] === true;
-
-// MCP tool names must match ^[a-zA-Z0-9_-]{1,64}$, so kernel names like
-// "demo.echo" are flattened; the original name travels in the closure.
-const sanitizeToolName = (name: string): string => {
-  const cleaned = name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
-  return cleaned.length > 0 ? cleaned : 'tool';
-};
+export type ClaudeCodeToolExecutor = HostedToolExecutor;
 
 const zodTypeFor = (schema: unknown): z.ZodType => {
   if (typeof schema !== 'object' || schema === null) {
@@ -120,31 +105,6 @@ const zodShapeFor = (parameters: JsonObject | undefined): Record<string, z.ZodTy
  * createClaudeCodeProvider wires this automatically; exported for hosts
  * with their own loops and for tests.
  */
-/**
- * The MCP name each kernel tool is bridged under, keyed by the kernel's
- * own dotted name.
- *
- * Exported because the mapping is needed in two directions and must not be
- * derived twice: the bridge registers tools under these names, and streamed
- * deltas arrive carrying them and have to be reported back to the kernel in
- * its own naming. A second copy of the dedup rule would drift the first
- * time two tools sanitize alike.
- */
-export const bridgedToolNames = (descriptors: readonly ToolDescriptor[]): Map<string, string> => {
-  const used = new Set<string>();
-  const byKernelName = new Map<string, string>();
-  for (const descriptor of descriptors) {
-    const base = sanitizeToolName(descriptor.name);
-    let name = base;
-    for (let suffix = 2; used.has(name); suffix += 1) {
-      name = `${base.slice(0, 60)}_${suffix}`;
-    }
-    used.add(name);
-    byKernelName.set(descriptor.name, name);
-  }
-  return byKernelName;
-};
-
 export const bridgeKernelTools = (
   descriptors: readonly ToolDescriptor[],
   session: Session,
@@ -166,7 +126,8 @@ export const bridgeKernelTools = (
 
   const wireNames = bridgedToolNames(descriptors);
   return descriptors.map((descriptor) => {
-    const name = wireNames.get(descriptor.name) ?? sanitizeToolName(descriptor.name);
+    // The map is built from these same descriptors, so the lookup always hits.
+    const name = wireNames.get(descriptor.name) ?? descriptor.name;
     return sdkTool(
       name,
       descriptor.description ?? `Stratus tool ${descriptor.name}`,
@@ -315,54 +276,9 @@ const rememberSdkSessionId = (session: ProviderRequest['session'], id: string): 
   (session.metadata ??= {})[SDK_SESSION_METADATA_KEY] = id;
 };
 
-/**
- * The newest user message, which is all a resumed session needs: the SDK
- * is holding everything before it. Falls back to the full transcript when
- * there is no user message to isolate, so a caller can never end up
- * sending nothing.
- */
-const createResumePrompt = (request: ProviderRequest): string => {
-  for (let index = request.session.messages.length - 1; index >= 0; index -= 1) {
-    const message = request.session.messages[index];
-    if (message?.role === 'user') {
-      return message.content;
-    }
-  }
-  return createPrompt(request);
-};
-
-const createPrompt = (request: ProviderRequest): string => {
-  const conversational = request.session.messages.filter(
-    (message) => message.role === 'user' || message.role === 'assistant' || message.role === 'tool',
-  );
-
-  if (conversational.length === 1 && conversational[0]?.role === 'user') {
-    return conversational[0].content;
-  }
-
-  const lines: string[] = ['Conversation so far:'];
-  for (const message of conversational) {
-    if (message.role === 'tool') {
-      lines.push(`[tool ${message.name ?? 'result'}] ${message.content}`);
-      continue;
-    }
-    // A tool call is part of the assistant's turn: without it, the next
-    // query would see a result with no record of what was asked (e.g. a
-    // memory id but not the remembered fact) and reason over half the
-    // history. Its runner message carries empty content, so skip that.
-    if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
-      for (const call of message.toolCalls) {
-        lines.push(`[assistant called tool ${call.toolName}] ${JSON.stringify(call.input)}`);
-      }
-      if (message.content.length === 0) {
-        continue;
-      }
-    }
-    lines.push(`[${message.role}] ${message.content}`);
-  }
-  lines.push('', 'Continue the conversation by replying to the latest user message.');
-  return lines.join('\n');
-};
+// The transcript-per-prompt rendering is shared with every harness provider:
+// `renderTranscriptPrompt` for a fresh SDK session, `latestUserMessagePrompt`
+// for a resumed one.
 
 /**
  * Runs turns through the Claude Agent SDK (Claude Code as a library), so a
@@ -561,7 +477,7 @@ export const createClaudeCodeProvider = ({
       const attemptOptions: Options = { ...options, ...(resume ? { resume } : {}) };
       resetIdleTimer();
       for await (const message of queryFn({
-        prompt: resume ? createResumePrompt(request) : createPrompt(request),
+        prompt: resume ? latestUserMessagePrompt(request) : renderTranscriptPrompt(request),
         options: attemptOptions,
       })) {
         resetIdleTimer();

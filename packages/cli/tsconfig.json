@@ -30,6 +30,9 @@
       "path": "../provider-claude-code"
     },
     {
+      "path": "../provider-codex"
+    },
+    {
       "path": "../executor-local"
     },
     {

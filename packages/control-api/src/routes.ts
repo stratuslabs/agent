@@ -9,6 +9,7 @@ import { redactAnthropicRawTurns } from '@stratusagent/provider-anthropic';
 import {
   claimSoulFile,
   collectAvailableModels,
+  CREDENTIAL_PROVIDER_NAMES,
   DEFAULT_STRATUS_AGENT,
   discoverActiveConfig,
   globalConfigPath,
@@ -180,6 +181,11 @@ const credentialSource = (runtime: RuntimeConfig): string => {
   if (runtime.provider === 'anthropic' && runtime.authToken) {
     return 'subscription';
   }
+  if (runtime.provider === 'codex' && runtime.apiKey === undefined) {
+    // No key resolved means the machine's own `codex login` sign-in
+    // serves the run — the harness holds those tokens itself.
+    return 'subscription';
+  }
   return runtime.apiKeyEnvVar ? `environment (${runtime.apiKeyEnvVar})` : 'stored';
 };
 
@@ -275,8 +281,8 @@ const allowlist = (value: unknown, field: string): string[] => {
 };
 
 const parseProviderParam = (value: string): CredentialProviderName => {
-  if (value !== 'anthropic' && value !== 'openai') {
-    throw new ApiError(400, 'unknown_provider', `Credentials are stored for anthropic and openai, not ${value}.`);
+  if (value !== 'anthropic' && value !== 'openai' && value !== 'codex') {
+    throw new ApiError(400, 'unknown_provider', `Credentials are stored for anthropic, openai, and codex, not ${value}.`);
   }
   return value;
 };
@@ -822,7 +828,10 @@ export const routes: Route[] = [
       // anthropic with no base URL of its own, and the fallback handed the
       // Anthropic key to the OpenAI URL.
       const configApplies = provider !== undefined && (config.provider ?? 'openai') === provider;
-      const baseUrl = resolved?.baseUrl ?? (configApplies ? config.baseUrl : undefined);
+      // The codex runtime carries no endpoint at all — the harness owns its
+      // endpoints — so only the other providers have one to pass along.
+      const baseUrl = (resolved && resolved.provider !== 'codex' ? resolved.baseUrl : undefined)
+        ?? (configApplies ? config.baseUrl : undefined);
       const apiKeyEnv = resolved?.apiKeyEnvVar ?? (configApplies ? config.apiKeyEnv : undefined);
       const credentials = await loadCredentials(context.env);
       const models = await collectAvailableModels(
@@ -866,7 +875,7 @@ export const routes: Route[] = [
       // Presence, type, and bound endpoint — never a value. Nothing that
       // reads this file hands a secret back out over the network.
       return {
-        providers: (['anthropic', 'openai'] as const).map((provider) => {
+        providers: CREDENTIAL_PROVIDER_NAMES.map((provider) => {
           const stored = credentials[provider];
           return {
             provider,
@@ -894,14 +903,16 @@ export const routes: Route[] = [
         throw new ApiError(400, 'invalid_credential_type', 'type must be api_key or oauth_token.');
       }
       if (type === 'oauth_token') {
-        // A subscription token cannot call the models endpoint — the same
-        // reason the model catalog falls back to the known Claude lineup for
-        // one. Checked as an api_key it comes back `rejected`, condemning a
+        // A subscription sign-in cannot call the models endpoint — the same
+        // reason the model catalog falls back to the known lineups for one.
+        // Checked as an api_key it comes back `rejected`, condemning a
         // credential that works perfectly well once saved, so this says what
         // is true instead: it cannot be checked from here.
         return {
           status: 'unreachable',
-          detail: 'a Claude subscription token cannot be checked against the models endpoint; save it and run a turn',
+          detail: provider === 'codex'
+            ? 'a ChatGPT (codex login) sign-in cannot be checked against a models endpoint; save it and run a turn'
+            : 'a Claude subscription token cannot be checked against the models endpoint; save it and run a turn',
         };
       }
       return verifyProviderKey(provider, key, baseUrl, context.env.fetch ?? globalThis.fetch);
@@ -917,18 +928,30 @@ export const routes: Route[] = [
       if (type !== 'api_key' && type !== 'oauth_token') {
         throw new ApiError(400, 'invalid_credential_type', 'type must be api_key or oauth_token.');
       }
-      if (type === 'oauth_token' && provider !== 'anthropic') {
-        // Runtime resolution only turns an OAuth credential into an auth
-        // token for Anthropic. Stored anywhere else it is a sign-in that
-        // reports as present and then fails every run with "missing API key".
+      if (type === 'oauth_token' && provider === 'openai') {
+        // Runtime resolution turns an OAuth credential into an auth token
+        // for Anthropic, and reads it as the ChatGPT sign-in marker for
+        // codex. Stored for openai it is a sign-in that reports as present
+        // and then fails every run with "missing API key".
         throw new ApiError(
           400,
           'unsupported_credential_type',
-          'A subscription token is an Anthropic credential; other providers need an api_key.',
+          'A subscription sign-in is an Anthropic or Codex credential; openai needs an api_key.',
         );
       }
       const value = requireString(body, 'value');
       const baseUrl = optionalString(body, 'baseUrl');
+      if (baseUrl && provider === 'codex') {
+        // The codex harness owns its endpoints, so a bound key could never
+        // be honored there — and runtime resolution refuses to run rather
+        // than send it anywhere else. Refusing the binding up front beats
+        // storing a credential every later run rejects.
+        throw new ApiError(
+          400,
+          'unsupported_credential_endpoint',
+          'A codex key is not endpoint-bound: the codex harness owns its endpoints. Store it without a baseUrl.',
+        );
+      }
 
       // The whole read-modify-write under one lock. `saveCredentials` treats
       // what it is given as the complete provider set and drops anything

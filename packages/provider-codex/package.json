@@ -1,5 +1,5 @@
 {
-  "name": "@stratusagent/state",
+  "name": "@stratusagent/provider-codex",
   "version": "0.9.1",
   "type": "module",
   "main": "./dist/index.js",
@@ -22,31 +22,30 @@
     "node": ">=22.13 <23 || >=23.4"
   },
   "dependencies": {
-    "@stratusagent/agents": "workspace:*",
+    "@openai/codex-sdk": "^0.151.0",
     "@stratusagent/core": "workspace:*",
-    "@stratusagent/executor-local": "workspace:*",
-    "@stratusagent/provider-anthropic": "workspace:*",
-    "@stratusagent/provider-claude-code": "workspace:*",
-    "@stratusagent/provider-codex": "workspace:*",
     "@stratusagent/providers": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.6.0",
     "typescript": "^5.9.3"
   },
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/stratuslabs/agent.git",
-    "directory": "packages/state"
-  },
-  "description": "Shared Stratus state wiring: config resolution, credential storage, the soul roster, file-backed agent memory, and provider construction \u2014 used by the CLI and the gateway alike",
+  "description": "ChatGPT/Codex runtime for Stratus Agent: runs turns through the OpenAI Codex harness with kernel tools served over a loopback MCP endpoint",
   "keywords": [
     "stratus",
     "agent",
     "ai",
-    "llm"
+    "llm",
+    "codex",
+    "chatgpt",
+    "subscription"
   ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/provider-codex"
+  },
   "publishConfig": {
     "access": "public"
   }
