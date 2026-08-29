@@ -221,6 +221,11 @@ const defaultRunner: ServiceRunner = async (command, args) => {
 const runnerFor = (env: ServiceEnvironment): ServiceRunner => env.run ?? defaultRunner;
 const uidOf = (env: ServiceEnvironment): number => env.uid ?? (typeof process.getuid === 'function' ? process.getuid() : 0);
 
+/** What `systemctl is-active` prints when it actually knows the answer. */
+const KNOWN_ACTIVE_STATES = new Set([
+  'active', 'reloading', 'inactive', 'failed', 'activating', 'deactivating', 'maintenance',
+]);
+
 /** What `systemctl is-enabled` prints when it actually knows the answer. */
 const KNOWN_ENABLEMENT_STATES = new Set([
   'enabled', 'enabled-runtime', 'linked', 'linked-runtime', 'alias',
@@ -231,8 +236,14 @@ export interface ServiceStatus {
   platform: ServicePlatform;
   /** A unit file exists on disk. */
   installed: boolean;
-  /** The service manager reports it running. */
-  running: boolean;
+  /**
+   * The service manager reports it running; undefined when the manager did
+   * not answer (a timeout, a broken user bus). "No answer" is not "no":
+   * reading it as stopped lets a transient failure justify actions — a
+   * rewrite-and-boot-out during `stratus update`, say — that turn a
+   * running daemon into an outage.
+   */
+  running: boolean | undefined;
   /** Starts automatically at login; undefined when the manager could not say. */
   runAtLogin: boolean | undefined;
   unitPath: string;
@@ -248,15 +259,25 @@ export const readServiceStatus = async (env: ServiceEnvironment = {}): Promise<S
   const unitPath = serviceUnitPath(env);
   const run = runnerFor(env);
   // Whether a daemon is alive is the manager's answer, never the file's —
-  // asked the same way whatever the unit file turned out to be.
-  const isRunning = async (): Promise<boolean> => {
+  // asked the same way whatever the unit file turned out to be. A manager
+  // that did not answer is undefined, not false: only a recognizable "no"
+  // (a job launchd cannot find, a systemd state word) reads as stopped.
+  const isRunning = async (): Promise<boolean | undefined> => {
     if (platform === 'launchd') {
       const printed = await run('launchctl', ['print', `gui/${uidOf(env)}/${SERVICE_LABEL}`]);
-      // `state = running` appears only while the process is alive; a
-      // loaded but stopped job prints `state = not running`.
-      return printed.code === 0 && /state\s*=\s*running/.test(printed.stdout);
+      if (printed.code === 0) {
+        // `state = running` appears only while the process is alive; a
+        // loaded but stopped job prints `state = not running`.
+        return /state\s*=\s*running/.test(printed.stdout);
+      }
+      return /could not find|no such/i.test(`${printed.stderr} ${printed.stdout}`) ? false : undefined;
     }
-    return (await run('systemctl', ['--user', 'is-active', SYSTEMD_UNIT])).stdout.trim() === 'active';
+    const active = await run('systemctl', ['--user', 'is-active', SYSTEMD_UNIT]);
+    const state = active.stdout.trim();
+    if (KNOWN_ACTIVE_STATES.has(state)) {
+      return state === 'active';
+    }
+    return undefined;
   };
 
   let contents: string;
@@ -319,6 +340,13 @@ export interface ServiceCommandInfo {
   scriptPath?: string;
   /** The `--config` the unit pins the daemon to, if any. */
   configPath?: string;
+  /**
+   * The directory the unit runs the daemon from. Relative paths in the
+   * pinned config (a `soul`, say) resolve against it, so a rewrite that
+   * substituted the rewriting command's own cwd would restart the daemon
+   * on different files.
+   */
+  workingDirectory?: string;
 }
 
 const unxml = (value: string): string => value
@@ -342,12 +370,15 @@ export const readServiceCommand = async (env: ServiceEnvironment = {}): Promise<
     return undefined;
   }
   let argv: string[] = [];
+  let workingDirectory: string | undefined;
   if (servicePlatform(env) === 'launchd') {
     const section = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(contents);
     if (!section?.[1]) {
       return undefined;
     }
     argv = [...section[1].matchAll(/<string>([\s\S]*?)<\/string>/g)].map((match) => unxml(match[1] ?? ''));
+    const directory = /<key>WorkingDirectory<\/key>\s*<string>([\s\S]*?)<\/string>/.exec(contents);
+    workingDirectory = directory?.[1] !== undefined ? unxml(directory[1]) : undefined;
   } else {
     const line = /^ExecStart=(.*)$/m.exec(contents);
     if (!line?.[1]) {
@@ -357,6 +388,9 @@ export const readServiceCommand = async (env: ServiceEnvironment = {}): Promise<
     // and `$$` specifier escapes, then undo the JSON quoting.
     argv = (line[1].match(/"(?:[^"\\]|\\.)*"/g) ?? [])
       .map((token) => JSON.parse(token.replace(/\$\$/g, '$').replace(/%%/g, '%')) as string);
+    const directory = /^WorkingDirectory=(.*)$/m.exec(contents);
+    // Written with systemdValue (only `%` is escaped in unit values).
+    workingDirectory = directory?.[1] !== undefined ? directory[1].replace(/%%/g, '%') : undefined;
   }
   if (argv.length === 0) {
     return undefined;
@@ -377,6 +411,7 @@ export const readServiceCommand = async (env: ServiceEnvironment = {}): Promise<
     ...(argv[0] !== undefined ? { execPath: argv[0] } : {}),
     ...(scriptPath !== undefined ? { scriptPath } : {}),
     ...(configPath !== undefined ? { configPath } : {}),
+    ...(workingDirectory !== undefined ? { workingDirectory } : {}),
   };
 };
 

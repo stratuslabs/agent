@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -358,6 +358,121 @@ test('update and --check treat state from a newer build as a refusal, before any
   assert.equal(code, 1);
   assert.match(full.output.stderr, /newer Stratus build/);
   assert.ok(!full.output.stdout.includes('Stopping stratusd'), 'refusal must come before the service stop');
+});
+
+test('the unit rewrite preserves the working directory the daemon was installed with', async () => {
+  const home = await freshHome();
+  const projectDir = path.join(home, 'projects', 'fleet');
+  await mkdir(projectDir, { recursive: true });
+  // Installed from a project directory — relative paths in the pinned
+  // config resolve against it.
+  await installService(
+    { platform: 'linux', homeDir: home, cwd: projectDir, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runningServiceRunner },
+    {},
+  );
+  const before = await readServiceCommand({ platform: 'linux', homeDir: home });
+  assert.equal(before?.workingDirectory, projectDir);
+
+  const elsewhere = path.join(home, 'somewhere-else');
+  await mkdir(elsewhere, { recursive: true });
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: elsewhere, // the update runs from a different directory
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => CLI_VERSION,
+    },
+  });
+  assert.equal(code, 0, output.stderr);
+  const after = await readServiceCommand({ platform: 'linux', homeDir: home });
+  assert.equal(after?.workingDirectory, projectDir, 'the rewrite must not substitute its own cwd');
+});
+
+test('a migration failure after the service stop restarts the daemon on its previous unit', async () => {
+  const home = await freshHome();
+  const starts: string[][] = [];
+  const runner: ServiceRunner = async (command, args) => {
+    if (command === 'systemctl' && args.includes('is-active')) {
+      return { code: 0, stdout: 'active', stderr: '' };
+    }
+    if (command === 'systemctl' && args.includes('is-enabled')) {
+      return { code: 0, stdout: 'enabled', stderr: '' };
+    }
+    if (command === 'systemctl' && args.includes('restart')) {
+      starts.push([command, ...args]);
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  await installService(
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner },
+    {},
+  );
+  // Make the stamp unwritable so runStateMigrations throws after the stop:
+  // a symlink into a directory that does not exist reads as ENOENT (an
+  // unversioned home) but fails every write — works whoever runs the test,
+  // root included, where permission bits would not.
+  await mkdir(path.dirname(stateFilePath({ homeDir: home })), { recursive: true });
+  await symlink(path.join(home, 'no-such-dir', 'state.json'), stateFilePath({ homeDir: home }));
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceRunner: runner,
+      packageVersionFetcher: async () => CLI_VERSION,
+    },
+  });
+  assert.equal(code, 1);
+  assert.match(output.stderr, /State migration failed/);
+  assert.match(output.stderr, /restarted on its previous unit/);
+  assert.ok(starts.length > 0, 'the daemon must be restarted after the failed migration');
+  assert.ok(!output.stdout.includes('Rewriting the service unit'), 'the rewrite must not run on unmigrated state');
+});
+
+test('update refuses when the manager cannot say whether the daemon is running', async () => {
+  const home = await freshHome();
+  // is-active answers garbage — previously collapsed to "not running",
+  // which read a transient failure as a deliberate stop.
+  const undecidedRunner: ServiceRunner = async (command, args) => {
+    if (command === 'systemctl' && args.includes('is-active')) {
+      return { code: 124, stdout: '', stderr: 'did not respond' };
+    }
+    if (command === 'systemctl' && args.includes('is-enabled')) {
+      return { code: 0, stdout: 'enabled', stderr: '' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  await installService(
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: undecidedRunner },
+    {},
+  );
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceRunner: undecidedRunner,
+      packageVersionFetcher: async () => CLI_VERSION,
+    },
+  });
+  assert.equal(code, 1);
+  assert.match(output.stderr, /is running could not be determined/);
+  assert.ok(!output.stdout.includes('Rewriting the service unit'), output.stdout);
 });
 
 test('doctor names a unit whose interpreter no longer exists', async () => {

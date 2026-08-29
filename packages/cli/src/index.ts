@@ -127,6 +127,7 @@ import {
   STATE_SCHEMA_VERSION,
   type AgentSummary,
   type ApiConfig,
+  type AppliedStateMigration,
   type ApprovalsConfig,
   type CatalogModel,
   type ChannelCredentials,
@@ -4715,7 +4716,9 @@ export const runService = async (
       writeLine(streams.stdout, `No service manager for ${process.platform}. Run \`stratus serve\` yourself.`);
       return 1;
     }
-    writeLine(streams.stdout, `stratusd  ${status.running ? 'running' : status.installed ? 'installed, not running' : 'not installed'}`);
+    writeLine(streams.stdout, `stratusd  ${status.running === undefined
+      ? 'state unknown — the service manager did not answer'
+      : status.running ? 'running' : status.installed ? 'installed, not running' : 'not installed'}`);
     writeLine(streams.stdout, `  manager   ${status.platform}`);
     writeLine(streams.stdout, `  unit      ${status.unitPath}`);
     if (status.detail) {
@@ -4729,7 +4732,7 @@ export const runService = async (
     writeLine(streams.stdout, status.installed
       ? '  logs      stratus logs -f'
       : '  install   stratus service install');
-    return status.running ? 0 : 1;
+    return status.running === true ? 0 : 1;
   }
 
   // A service manager passes none of this shell's environment on, so a
@@ -4861,7 +4864,11 @@ const runUpdate = async (
   out(`  state       schema ${stamp.schemaVersion}${stateNewer
     ? ` — written by a NEWER build than this one (which understands ${STATE_SCHEMA_VERSION})`
     : `, ${pending.length === 0 ? 'no pending migrations' : `${pending.length} pending migration${pending.length === 1 ? '' : 's'}`}`}`);
-  out(`  service     ${status === undefined ? `no service manager for ${process.platform}` : status.installed ? (status.running ? 'installed, running' : 'installed, not running') : 'not installed'}`);
+  out(`  service     ${status === undefined
+    ? `no service manager for ${process.platform}`
+    : status.installed
+      ? (status.running === undefined ? 'installed, state unknown' : status.running ? 'installed, running' : 'installed, not running')
+      : 'not installed'}`);
   for (const note of unitNotes) {
     out(`  unit        ${note}`);
   }
@@ -4887,13 +4894,13 @@ const runUpdate = async (
     return 1;
   }
 
-  if (status?.installed && status.runAtLogin === undefined) {
-    // The rewrite has to re-state the login setting, and the manager could
-    // not say what it currently is. Guessing would silently convert a
-    // deliberate --no-login install into one that starts at login (or the
-    // reverse) on a transient status failure — refuse instead, before
-    // anything has been stopped.
-    writeLine(streams.stderr, 'Not updating: whether stratusd starts at login could not be determined (the service manager did not answer), and rewriting the unit would have to guess. Check `stratus service status` and retry.');
+  if (status?.installed && (status.runAtLogin === undefined || status.running === undefined)) {
+    // The rewrite has to re-state the login setting and restore the prior
+    // run state, and the manager could not say what either currently is.
+    // Guessing would let a transient status failure convert a deliberate
+    // --no-login install, or rewrite-and-stop a daemon that was actually
+    // running — refuse instead, before anything has been stopped.
+    writeLine(streams.stderr, `Not updating: whether stratusd ${status.running === undefined ? 'is running' : 'starts at login'} could not be determined (the service manager did not answer), and the unit rewrite would have to guess. Check \`stratus service status\` and retry.`);
     return 1;
   }
 
@@ -4930,7 +4937,26 @@ const runUpdate = async (
       : 'Package already up to date.');
   }
 
-  const applied = await runStateMigrations(env);
+  let applied: AppliedStateMigration[];
+  try {
+    applied = await runStateMigrations(env);
+  } catch (error) {
+    // A daemon stopped for an update that then failed must not stay down:
+    // the old unit is still in place (the rewrite has not happened), so
+    // restarting restores the world the update found. The failure is still
+    // a failure — but an offline fleet on top of it is not.
+    writeLine(streams.stderr, `State migration failed: ${error instanceof Error ? error.message : String(error)}`);
+    if (wasRunning) {
+      const restarted = await startService(serviceEnv);
+      for (const message of restarted.messages) {
+        writeLine(restarted.ok ? streams.stdout : streams.stderr, message);
+      }
+      writeLine(streams.stderr, restarted.ok
+        ? 'stratusd was restarted on its previous unit. Fix the migration failure and run `stratus update` again.'
+        : 'stratusd could not be restarted either — bring it back with `stratus service start` once the failure is fixed.');
+    }
+    return 1;
+  }
   if (applied.length === 0) {
     out('No pending state migrations.');
   }
@@ -4940,12 +4966,18 @@ const runUpdate = async (
 
   if (status?.installed) {
     out('Rewriting the service unit with current node and entrypoint paths…');
-    const install = await installService(serviceEnv, {
-      ...(status.runAtLogin === false ? { runAtLogin: false } : {}),
-      // The config the existing unit was pinned to survives the rewrite —
-      // a unit rewritten onto a different roster is its own outage.
-      ...(unit?.configPath !== undefined ? { configPath: unit.configPath } : {}),
-    });
+    const install = await installService(
+      // The unit's own working directory survives the rewrite: relative
+      // paths in the pinned config (a `soul`) resolve against it, so a
+      // rewrite run from some other directory must not substitute its own.
+      unit?.workingDirectory !== undefined ? { ...serviceEnv, cwd: unit.workingDirectory } : serviceEnv,
+      {
+        ...(status.runAtLogin === false ? { runAtLogin: false } : {}),
+        // The config the existing unit was pinned to survives the rewrite —
+        // a unit rewritten onto a different roster is its own outage.
+        ...(unit?.configPath !== undefined ? { configPath: unit.configPath } : {}),
+      },
+    );
     for (const message of install.messages) {
       writeLine(install.ok ? streams.stdout : streams.stderr, message);
     }
