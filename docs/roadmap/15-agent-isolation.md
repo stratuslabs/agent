@@ -244,6 +244,18 @@ step needs, which is the evidence the seams were right.
   migration. It must not wait for the supervisor work.
 - The Node version floor is unaffected: runtimes are the same Node, and
   `node:sqlite` moves with the store.
+- **Three properties named for the implementing PRs and deliberately not
+  elaborated here** — a step's spec is light on purpose, and this is the
+  line past which detail belongs to the PR that implements it. The
+  aggregate session facade is supervisor-only: a runner is handed an
+  agent-bound store that rejects every mismatched session id, tested by a
+  direct sibling-id lookup through the runtime-facing handle. Delegation
+  cancellation becomes a correlated start/cancel RPC pair, because an
+  `AbortSignal` does not cross a socket: a parent runtime's exit or
+  socket loss cancels its delegated turns, under the parity suite. And
+  the migration is staged and idempotent: restartable after a kill at any
+  resource boundary without duplicating rows, overwriting a moved
+  directory, or mistaking a renamed source for completion.
 
 ## Acceptance criteria
 
