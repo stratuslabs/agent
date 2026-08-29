@@ -276,7 +276,55 @@ export const declaredRiskFor = (manifest: PluginManifest, toolName: string): Too
  * before the plugin's own schema sees the block — a plugin author writes a
  * schema for their settings, not for the machinery that selects them.
  */
-export const HOST_CONFIG_KEYS = ['enabled', 'agents'] as const;
+export const HOST_CONFIG_KEYS = ['enabled', 'agents', 'toolRisks'] as const;
+
+/**
+ * Read the operator's per-tool risk overrides out of a plugin's config
+ * block, or refuse the block.
+ *
+ * `toolRisks` is the host's key, not the plugin's, and that placement is
+ * the security property: the view applies these at registration, so the
+ * word that lowers a tool's risk is the operator's — written in a trusted
+ * config — and never something the plugin's own code gets to say about
+ * itself. It exists for the one case a manifest cannot settle: a bridge's
+ * discovered tools all register at their namespace's declared risk, and an
+ * operator who has actually read one server's tool is entitled to decide
+ * `mcp.linear.get_issue` may run unattended while everything else stays
+ * gated.
+ *
+ * A name the manifest does not declare (literally or by namespace) is
+ * refused rather than ignored — a typo here would silently leave the tool
+ * at its default, which for a lowering override is invisible until someone
+ * wonders why they are still being asked.
+ */
+export const parseToolRiskOverrides = (
+  manifest: PluginManifest,
+  block: JsonObject,
+): Map<string, ToolRisk> => {
+  const overrides = new Map<string, ToolRisk>();
+  const raw = block.toolRisks;
+  if (raw === undefined) {
+    return overrides;
+  }
+  const where = `plugins["${manifest.packageName}"].toolRisks`;
+  if (!isObject(raw)) {
+    throw new PluginConfigError(`${where} must be an object of tool name to risk.`);
+  }
+  for (const [name, value] of Object.entries(raw)) {
+    if (typeof value !== 'string' || !RISKS.includes(value as ToolRisk)) {
+      throw new PluginConfigError(
+        `${where}.${name} must be safe, gated, or dangerous; got ${JSON.stringify(value)}.`,
+      );
+    }
+    if (declaredRiskFor(manifest, name) === undefined) {
+      throw new PluginConfigError(
+        `${where} names ${name}, which ${manifest.packageName} does not declare — not as a tool and not inside a declared namespace.`,
+      );
+    }
+    overrides.set(name, value as ToolRisk);
+  }
+  return overrides;
+};
 
 const typeOf = (value: JsonValue): string => {
   if (value === null) return 'null';
@@ -365,7 +413,7 @@ export const validatePluginConfig = (manifest: PluginManifest, block: JsonObject
   if (!schema) {
     return;
   }
-  const { enabled: _enabled, agents, ...defaults } = block as JsonObject & { agents?: JsonValue };
+  const { enabled: _enabled, agents, toolRisks: _toolRisks, ...defaults } = block as JsonObject & { agents?: JsonValue };
   validateAgainstSchema(defaults as JsonObject, schema, `plugins["${manifest.packageName}"]`);
 
   if (agents === undefined) {
@@ -403,7 +451,7 @@ export const resolvePluginAgentConfig = (block: JsonObject | undefined, agentId:
   if (!block) {
     return {};
   }
-  const { enabled: _enabled, agents, ...defaults } = block as JsonObject & { agents?: JsonValue };
+  const { enabled: _enabled, agents, toolRisks: _toolRisks, ...defaults } = block as JsonObject & { agents?: JsonValue };
   const overrides = isObject(agents) ? (agents as JsonObject)[agentId] : undefined;
   return isObject(overrides) ? { ...defaults, ...(overrides as JsonObject) } : { ...defaults };
 };

@@ -720,6 +720,21 @@ export interface ModelProvider {
 }
 
 /**
+ * What a scrubbed subprocess inherits by name when its operator granted
+ * nothing else — the replacement-environment treatment `tool-shell`
+ * introduced, shared here because a second copy of the list is a second
+ * answer to "what does a child see by default". Two spawners use it: the
+ * shell tool's commands and the MCP bridge's stdio servers.
+ *
+ * Short, and every entry is here because subprocesses break without it
+ * rather than because it seemed harmless. Nothing on this list is a
+ * secret, and that is the test for adding one: an operator who needs
+ * `GITHUB_TOKEN` in a child's environment is making a deliberate decision,
+ * in config, that an auditor can see.
+ */
+export const DEFAULT_SUBPROCESS_PASS_ENV: readonly string[] = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ'];
+
+/**
  * Ambient context for one tool execution. The abort signal is the turn's:
  * executors kill in-flight subprocesses on abort, and long-running tools
  * should observe it too.
@@ -1105,6 +1120,20 @@ export class ToolRegistry {
 
   register(tool: Tool): void {
     this.tools.set(tool.name, tool);
+  }
+
+  /**
+   * Forget a tool, reporting whether one was registered under that name.
+   *
+   * Exists for the one registrar whose contribution can shrink while the
+   * daemon runs: a bridge whose tools are discovered from somebody else's
+   * server picks up a removal on reconnect, and a registry nothing ever
+   * deletes from would keep advertising a tool every call to which must
+   * fail. Hosts do not reach for this directly — a plugin's removals go
+   * through its manifest-bound view, which refuses names it does not own.
+   */
+  unregister(name: string): boolean {
+    return this.tools.delete(name);
   }
 
   get(name: string): Tool | undefined {
