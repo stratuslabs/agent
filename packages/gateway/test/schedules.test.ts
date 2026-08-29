@@ -416,20 +416,14 @@ test('the restart sweep retires a spent one-shot unless its turn is still parked
   store.close();
 });
 
-test('isPreauthorized answers from the row a human approved, and cancel revokes it', async () => {
+test('the destination grant holds only inside a live firing, from the row a human approved', async () => {
   const home = await newHome();
   const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
-  const runtime = runtimeWith(store);
-  store.insert(record({
-    id: 'sched-1',
-    destination: { channel: 'slack', to: 'C-ENG' },
-    nextFireAt: new Date(Date.now() + 60_000).toISOString(),
-  }));
 
-  const firingSession = (agentId: string, scheduleId?: string): Session => {
+  const sessionLike = (sessionId: string, agentId: string, scheduleId?: string): Session => {
     const now = new Date().toISOString();
     return {
-      id: 'schedule:sched-1:x',
+      id: sessionId,
       agent: { id: agentId, name: agentId },
       status: 'running',
       messages: [],
@@ -439,14 +433,124 @@ test('isPreauthorized answers from the row a human approved, and cancel revokes 
     };
   };
 
-  assert.equal(runtime.isPreauthorized(firingSession('ava', 'sched-1'), 'slack:C-ENG'), true);
-  assert.equal(runtime.isPreauthorized(firingSession('ava', 'sched-1'), 'slack:C-OTHER'), false, 'only the declared destination');
-  assert.equal(runtime.isPreauthorized(firingSession('bea', 'sched-1'), 'slack:C-ENG'), false, "another agent's session gains nothing");
-  assert.equal(runtime.isPreauthorized(firingSession('ava'), 'slack:C-ENG'), false, 'a session with no schedule id is not a firing');
+  const during: Array<[string, boolean]> = [];
+  const fired = deferred<string>();
+  const runtime = runtimeWith(store, {
+    dispatch: async (input) => {
+      // The checks a firing's own message.send calls would make, taken
+      // while the firing is in flight — the only window the grant exists.
+      const firing = (agentId: string, scheduleId?: string): Session =>
+        sessionLike(input.sessionId, agentId, scheduleId);
+      during.push(['declared destination', runtime.isPreauthorized(firing('ava', 'sched-1'), 'slack:C-ENG')]);
+      during.push(['other destination', runtime.isPreauthorized(firing('ava', 'sched-1'), 'slack:C-OTHER')]);
+      during.push(["another agent's session", runtime.isPreauthorized(firing('bea', 'sched-1'), 'slack:C-ENG')]);
+      during.push(['no schedule id', runtime.isPreauthorized(firing('ava'), 'slack:C-ENG')]);
+      // Cancelled mid-turn: the very next send gates.
+      assert.equal(runtime.cancel('sched-1'), true);
+      during.push(['after cancel', runtime.isPreauthorized(firing('ava', 'sched-1'), 'slack:C-ENG')]);
+      fired.resolve(input.sessionId);
+    },
+  });
 
-  assert.equal(runtime.cancel('sched-1'), true);
-  assert.equal(runtime.isPreauthorized(firingSession('ava', 'sched-1'), 'slack:C-ENG'), false, 'cancel revokes the grant');
+  store.insert(record({
+    id: 'sched-1',
+    cadence: { kind: 'every', intervalMs: 600_000 },
+    destination: { channel: 'slack', to: 'C-ENG' },
+    nextFireAt: new Date(Date.now() - 5).toISOString(),
+  }));
+  await runtime.start();
+  const firingSessionId = await fired.promise;
+  runtime.stop();
+  await runtime.drain();
+
+  assert.deepEqual(during, [
+    ['declared destination', true],
+    ['other destination', false],
+    ["another agent's session", false],
+    ['no schedule id', false],
+    ['after cancel', false],
+  ]);
+  // Once the firing settles the grant is gone with it.
+  assert.equal(runtime.isPreauthorized(sessionLike(firingSessionId, 'ava', 'sched-1'), 'slack:C-ENG'), false);
   store.close();
+});
+
+test('metadata alone cannot borrow a schedule\'s grant — the session must be a scheduler-started firing', async () => {
+  // The control API forwards caller-supplied metadata into new sessions,
+  // so a dispatch stamped with a live schedule's id is exactly the forgery
+  // this test pins down: right agent, right destination, right metadata —
+  // wrong provenance.
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const runtime = runtimeWith(store);
+  store.insert(record({
+    id: 'sched-1',
+    destination: { channel: 'slack', to: 'C-ENG' },
+    nextFireAt: new Date(Date.now() + 60_000).toISOString(),
+  }));
+
+  const now = new Date().toISOString();
+  const forged: Session = {
+    id: 'api-dispatched-session',
+    agent: { id: 'ava', name: 'ava' },
+    status: 'running',
+    messages: [],
+    createdAt: now,
+    updatedAt: now,
+    metadata: { scheduled: true, [SCHEDULE_ID_METADATA_KEY]: 'sched-1' },
+  };
+  assert.equal(runtime.isPreauthorized(forged, 'slack:C-ENG'), false);
+  store.close();
+});
+
+test('a cancel racing the due scan wins: the claimed-away slot never fires', async () => {
+  const home = await newHome();
+  const real = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const fired: string[] = [];
+  const witnessFired = deferred<void>();
+  let witnessCount = 0;
+
+  // The race, made deterministic: the cancel lands after due() returned
+  // the row and before the slot is claimed — exactly the gap `stratus
+  // schedules cancel` hits from its own process.
+  const racingStore: typeof real = Object.create(real);
+  racingStore.due = (nowIso: string) => {
+    const rows = real.due(nowIso);
+    for (const row of rows) {
+      if (row.id === 'doomed') {
+        real.delete('doomed');
+      }
+    }
+    return rows;
+  };
+
+  const runtime = runtimeWith(racingStore, {
+    dispatch: async (input) => {
+      fired.push(input.sessionId);
+      if (input.sessionId.startsWith('schedule:witness:')) {
+        witnessCount += 1;
+        if (witnessCount >= 2) {
+          witnessFired.resolve();
+        }
+      }
+    },
+  });
+
+  real.insert(record({ id: 'doomed', cadence: { kind: 'every', intervalMs: 600_000 }, nextFireAt: new Date().toISOString() }));
+  real.insert(record({
+    id: 'witness',
+    agentId: 'bea',
+    cadence: { kind: 'every', intervalMs: 20 },
+    nextFireAt: new Date().toISOString(),
+  }));
+  await runtime.start();
+  await witnessFired.promise;
+  runtime.stop();
+  await runtime.drain();
+
+  assert.ok(fired.every((sessionId) => !sessionId.startsWith('schedule:doomed:')),
+    'a cancelled schedule ran anyway — the revoked grant\'s prompt executed');
+  real.close();
 });
 
 // ---- end to end through the gateway -------------------------------------------

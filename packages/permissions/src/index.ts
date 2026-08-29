@@ -169,12 +169,14 @@ export interface DestinationScopeOptions {
    * Whether this session may speak to this destination unattended.
    *
    * This is the schedule carve-out and deliberately nothing wider: the
-   * expected implementation reads the schedule id off the session's
-   * metadata, loads the row a human approved, and answers by comparing
-   * destinations — so the grant is a single (schedule, destination) pair,
-   * minted by an approval, revoked the moment `schedule.cancel` deletes
-   * the row. Consulted per call, never cached here: a schedule cancelled
-   * mid-turn must gate the very next send.
+   * expected implementation first checks that the session is a firing the
+   * scheduler itself started and still has in flight — metadata alone
+   * proves nothing, since dispatch callers can write it — then loads the
+   * row a human approved and answers by comparing destinations. So the
+   * grant is a single (schedule, destination) pair, minted by an
+   * approval, revoked the moment `schedule.cancel` deletes the row.
+   * Consulted per call, never cached here: a schedule cancelled mid-turn
+   * must gate the very next send.
    */
   isPreauthorized(session: Session, destination: string): boolean | Promise<boolean>;
 }

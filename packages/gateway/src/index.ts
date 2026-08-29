@@ -38,6 +38,7 @@ import { createSchedulerRuntime, SqliteScheduleStore, type SchedulerLimits } fro
 export {
   SqliteScheduleStore,
   createSchedulerRuntime,
+  type ScheduleStoreLike,
   type SchedulerLimits,
   type SchedulerRuntime,
   type SchedulerRuntimeOptions,

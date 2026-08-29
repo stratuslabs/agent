@@ -96,14 +96,22 @@ export class SqliteScheduleStore {
   }
 
   /**
-   * Consume a slot: the update the double-run guarantee rests on. Written
-   * BEFORE the dispatch, so a daemon that dies mid-firing restarts to a
-   * row whose window is already spent.
+   * Consume a slot, atomically: the write the double-run guarantee rests
+   * on, executed BEFORE the dispatch so a daemon that dies mid-firing
+   * restarts to a row whose window is already spent.
+   *
+   * Conditional on the slot still being the one the tick read, because
+   * the read and this write are separated by real time and the CLI
+   * deletes rows from another process: a schedule cancelled in that gap
+   * must stay cancelled — `stratus schedules cancel` revoking the grant
+   * but the prompt running anyway would be the worst of both. False means
+   * the row is gone or its slot moved, and the caller fires nothing.
    */
-  update(record: ScheduleRecord): void {
-    this.db
-      .prepare('UPDATE schedules SET next_fire_at = ?, body = ? WHERE id = ?')
-      .run(record.nextFireAt ?? '', JSON.stringify(record), record.id);
+  claimSlot(record: ScheduleRecord, expectedNextFireAt: string): boolean {
+    return this.db
+      .prepare('UPDATE schedules SET next_fire_at = ?, body = ? WHERE id = ? AND next_fire_at = ?')
+      .run(record.nextFireAt ?? '', JSON.stringify(record), record.id, expectedNextFireAt)
+      .changes > 0;
   }
 
   delete(id: string): boolean {
@@ -138,8 +146,23 @@ const DEFAULT_MIN_INTERVAL_MS = 60_000;
 const DEFAULT_MAX_CONCURRENT_PER_AGENT = 1;
 const DEFAULT_TICK_MS = 1_000;
 
+/**
+ * What the scheduler needs from its store — `SqliteScheduleStore` as the
+ * runtime reads it. An interface so a test can wrap the real store and
+ * misbehave in the gaps (a cancel racing a due scan), which is exactly
+ * where the guarantees live.
+ */
+export interface ScheduleStoreLike {
+  insert(record: ScheduleRecord): void;
+  get(id: string): ScheduleRecord | undefined;
+  list(agentId?: string): ScheduleRecord[];
+  due(nowIso: string): ScheduleRecord[];
+  claimSlot(record: ScheduleRecord, expectedNextFireAt: string): boolean;
+  delete(id: string): boolean;
+}
+
 export interface SchedulerRuntimeOptions {
-  store: SqliteScheduleStore;
+  store: ScheduleStoreLike;
   /**
    * The gateway's own dispatch — never a second runner. Late-bound by
    * closure because the scheduler is built while the gateway still is.
@@ -198,6 +221,24 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
   let timer: NodeJS.Timeout | undefined;
   const inflight = new Set<Promise<void>>();
   const runningPerAgent = new Map<string, number>();
+  /**
+   * Session ids of firings THIS scheduler started and has not seen settle.
+   *
+   * The unforgeable half of the destination carve-out. Metadata alone
+   * cannot be it: the control API forwards caller-supplied metadata into
+   * new sessions, so a client could stamp a live schedule's id onto a
+   * dispatch of its own and borrow the grant. Membership here is minted
+   * only by `fireOrSkip`, in memory, so the only sessions that can pass
+   * are the ones the scheduler itself dispatched — and a message queued
+   * into a firing's session from outside runs after the firing settles
+   * (single-flight), by which point the id is gone from this set.
+   *
+   * Deliberately not durable: a firing recovered after a restart (parked
+   * on some other approval, which only happens where a human is
+   * reachable) finishes without the grant and simply asks — losing a
+   * convenience is the right failure direction for a security scope.
+   */
+  const activeFirings = new Set<string>();
 
   const enforceFloor = (input: ScheduleCreateInput): void => {
     const { cadence } = input;
@@ -299,13 +340,15 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     const following = nextFireAfter(record.cadence, slotDate);
 
     if (following && following.getTime() <= now.getTime()) {
-      // Window passed entirely. Advance to the first future slot.
+      // Window passed entirely. Advance to the first future slot — or
+      // lose to a concurrent cancel, which is fine either way: skipped
+      // and gone both mean "not replayed".
       let next: Date | undefined = following;
       while (next && next.getTime() <= now.getTime()) {
         next = nextFireAfter(record.cadence, next);
       }
       log(`schedule ${record.id}: missed firing(s) while the daemon was down; skipping to ${next ? next.toISOString() : 'never'}`);
-      store.update(withNextFire(record, next));
+      store.claimSlot(withNextFire(record, next), slot);
       return;
     }
 
@@ -321,10 +364,17 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     const firedAt = now.toISOString();
     const sessionId = `schedule:${record.id}:${slot}`;
     const next = nextFireAfter(record.cadence, new Date(Math.max(slotDate.getTime(), now.getTime())));
-    // The slot is spent BEFORE the dispatch — the double-run guarantee.
-    store.update(withNextFire(record, next, { lastFiredAt: firedAt, lastSessionId: sessionId }));
+    // The slot is spent BEFORE the dispatch — the double-run guarantee —
+    // and spent ATOMICALLY against the slot this tick read: a schedule
+    // cancelled between the due scan and here is gone, and its prompt
+    // must not run on a grant that was just revoked.
+    if (!store.claimSlot(withNextFire(record, next, { lastFiredAt: firedAt, lastSessionId: sessionId }), slot)) {
+      log(`schedule ${record.id}: slot ${slot} was cancelled or already claimed; not firing`);
+      return;
+    }
 
     runningPerAgent.set(record.agentId, running + 1);
+    activeFirings.add(sessionId);
     const firing = dispatch({
       sessionId,
       agentId: record.agentId,
@@ -341,6 +391,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
         warn(`schedule ${record.id} firing failed: ${error instanceof Error ? error.message : String(error)}`);
       },
     ).finally(() => {
+      activeFirings.delete(sessionId);
       const count = (runningPerAgent.get(record.agentId) ?? 1) - 1;
       if (count > 0) {
         runningPerAgent.set(record.agentId, count);
@@ -385,6 +436,14 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
   return {
     handle,
     isPreauthorized(session, destination) {
+      // A live firing of this scheduler's, first: session metadata is
+      // written by whoever dispatches, so on its own it proves nothing —
+      // see `activeFirings`. The row checks then bind the grant to the
+      // schedule the human approved, re-read per call so a cancel revokes
+      // mid-turn.
+      if (!activeFirings.has(session.id)) {
+        return false;
+      }
       const scheduleId = session.metadata?.[SCHEDULE_ID_METADATA_KEY];
       if (typeof scheduleId !== 'string') {
         return false;
