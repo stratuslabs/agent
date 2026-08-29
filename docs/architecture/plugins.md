@@ -225,9 +225,22 @@ from being a wildcard:
   it, and the third-party floor still applies on top. A bridge cannot mark a
   server's tool `safe` by discovering it, which is the same conclusion 11
   reaches from its own direction: the risk assignment is ours, not the
-  server's.
+  server's. The one word that outranks the declaration is the operator's —
+  the host-owned `toolRisks` config key below — because "ours" means the
+  person running the daemon, never the code being judged.
 - **Provenance is unchanged.** The package is still recorded, so risk
   resolution can still ask whose code a tool is.
+- **The view stays live after load.** Discovered names arrive when a server
+  answers, which for a bridge is also on every *reconnect* — so the
+  registration view a namespace plugin's `setup()` received keeps working
+  after the plugin has committed. A late registration passes the identical
+  gate (undeclared name rejected, declared risk and overrides applied,
+  collision refused) and lands in the shared registry at once, since a
+  plugin that already loaded whole has nothing left to stage. The view can
+  also `unregister` — **only names the plugin itself registered** — so a
+  tool a server stops advertising stops being advertised to agents, and the
+  plugin's tool records (and everything reading them: the catalog, the
+  dashboard) stay the live truth rather than a load-time snapshot.
 
 The cost is real and belongs in the open: a namespace tells an operator
 strictly less than a list. They learn *where* a plugin may register and under
@@ -273,6 +286,30 @@ for the same idea. It matters more here than there, because for a plugin like
 `tool-fs` these values *are* an access-control boundary: a flat `roots` array
 would give every agent enabling `fs.*` the same roots, which is one agent
 reading another's files.
+
+**`toolRisks` is the third host-owned key**, sibling to `enabled` and
+`agents`: tool name to `safe` / `gated` / `dangerous`, the operator's
+per-tool risk word.
+
+```jsonc
+"@stratusagent/plugin-mcp": {
+  "enabled": true,
+  "servers": { "linear": { "url": "https://mcp.linear.app/mcp" } },
+  "toolRisks": { "mcp.linear.get_issue": "safe" }
+}
+```
+
+An entry replaces the manifest's declaration for that exact name — both
+directions, which is its point: a bridge's namespace is declared `gated` as
+a ceiling on what *discovery* may claim, and the operator who has actually
+read one server's tool is the one party entitled to decide it may run
+unattended. Placement is the security property: the key is stripped before
+the plugin's config reaches its code and applied by the registration view,
+so the word that lowers a tool's risk is written in a trusted config, never
+by the plugin — and the third-party floor still binds it, because config
+can vouch for a tool, not for the code implementing it. A name the
+manifest does not cover is refused rather than ignored; a typo'd override
+that silently did nothing would surface as a prompt nobody can explain.
 
 A plugin is still constructed once, not once per agent. It resolves the caller's
 settings **at execution time**, from `session.agent.id` — `Tool.execute(input,

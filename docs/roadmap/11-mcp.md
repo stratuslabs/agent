@@ -6,6 +6,51 @@ A plugin that connects to Model Context Protocol servers and registers their
 tools in the `ToolRegistry` — under the same allowlist, the same risk model,
 and the same approval policy as a tool written for Stratus.
 
+## Status
+
+**Shipped.** `@stratusagent/plugin-mcp`, plus the one seam the plugin host
+was missing for it.
+
+- **The bridge.** Configured per server (stdio command or Streamable HTTP
+  endpoint, each with its own env grants or headers), it discovers tools at
+  connect and registers them as `mcp.<server>.<tool>` through the
+  manifest-bound view, under `toolsDiscovered: [{ "namespace": "mcp.*",
+  "risk": "gated" }]`. Results normalize into `JsonValue`; images, audio,
+  and binary resources land in the per-agent workspace and return under
+  `files`, the key channels upload — which is how a bridged image reaches
+  Slack.
+- **The view stays live after commit.** The registration view used to be
+  staging that ended at load, so a tool discovered on reconnect had nowhere
+  to go. It now keeps working for a committed plugin — the identical gate,
+  applied late: an undeclared name is rejected exactly as at first load, and
+  `unregister` reaches only the plugin's own names. The plugin's tool
+  records are live too, so `/catalog/tools` and the gateway's provenance
+  answer for reconnect-discovered tools without being told.
+- **Risk is ours, enforced in two layers.** Every bridged tool floors at
+  `gated` (a `readOnlyHint` from the server changes nothing), and the
+  per-tool override became the host-owned `toolRisks` config key — applied
+  by the view, stripped from what the plugin's code sees, so the word that
+  lowers a tool's risk is only ever the operator's. It generalizes to every
+  plugin, and the third-party floor still binds it.
+- **Lifecycle.** Connect at startup with a per-server timeout; an
+  unreachable server leaves the daemon serving everything else, with an
+  install-hint-style line naming the config block, and reconnects with
+  backoff (1s doubling to 60s). Reconnect re-lists and diffs: additions
+  register, removals unregister, both logged because an allowlist may no
+  longer mean what it meant. Two server tool names folding to one bridged
+  name refuse the server rather than letting one answer for the other.
+- **Environment scrubbing.** A stdio server's environment is replaced, not
+  inherited — the default pass list (`PATH`, `HOME`, `LANG`, `LC_ALL`,
+  `TZ`) moved to core as `DEFAULT_SUBPROCESS_PASS_ENV` so `tool-shell` and
+  the bridge share one answer — proven by a test that spawns a real stdio
+  server and reads its env: `ANTHROPIC_API_KEY` is not there.
+
+Of the open questions below: bridged tools already appear differently in
+`GET /catalog/tools` — every plugin tool carries `package` provenance, and
+the `mcp.<server>.` prefix says whose code it is — so no separate marking
+was added. OAuth-authenticated HTTP servers stay deferred; a static bearer
+in `headers` is what exists.
+
 ## Why now
 
 [06](./06-tool-packs.md) names MCP client support as out of scope and "worth a

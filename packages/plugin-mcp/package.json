@@ -1,0 +1,81 @@
+{
+  "name": "@stratusagent/plugin-mcp",
+  "version": "0.7.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types"
+  },
+  "engines": {
+    "node": ">=22.13 <23 || >=23.4"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@stratusagent/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3",
+    "zod": "^4.4.3",
+    "@stratusagent/plugins": "workspace:*"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/plugin-mcp"
+  },
+  "description": "The MCP bridge for Stratus Agent: mounts any Model Context Protocol server's tools as mcp.<server>.<tool>, under the same allowlists, risk model, and approval policy as native tools",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "stratus-plugin",
+    "mcp",
+    "model-context-protocol",
+    "tools"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "stratus": {
+    "pluginVersion": 1,
+    "contributes": {
+      "toolsDiscovered": [
+        {
+          "namespace": "mcp.*",
+          "risk": "gated"
+        }
+      ]
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "servers": {
+          "type": "object"
+        },
+        "workspaceRoot": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "servers"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

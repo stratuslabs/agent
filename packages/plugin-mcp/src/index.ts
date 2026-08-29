@@ -1,0 +1,477 @@
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+
+import {
+  DEFAULT_SUBPROCESS_PASS_ENV,
+  type ExecutionContext,
+  type JsonObject,
+  type JsonValue,
+  type Plugin,
+  type Session,
+  type Tool,
+  type ToolRegistry,
+} from '@stratusagent/core';
+
+import {
+  bridgedToolName,
+  normalizeCallResult,
+  sanitizeToolSegment,
+  SERVER_NAME_PATTERN,
+} from './normalize.ts';
+
+export { bridgedToolName, normalizeCallResult, sanitizeToolSegment, SERVER_NAME_PATTERN } from './normalize.ts';
+
+/**
+ * The MCP bridge: mounts Model Context Protocol servers as Stratus tools.
+ *
+ * Each configured server's tools register as `mcp.<server>.<tool>`, so a
+ * soul allowlists `mcp.linear.*` and an operator can see at a glance which
+ * tools are somebody else's code. Risk is ours, not the server's: the
+ * manifest declares the `mcp.*` namespace `gated`, the registration view
+ * enforces it, and an operator who has read a server lowers a specific
+ * tool through the host's `toolRisks` key — never through anything this
+ * package could do on its own.
+ *
+ * Lifecycle: connect at startup, reconnect with backoff, and a server that
+ * is down degrades to its tools being unavailable rather than failing the
+ * daemon's start. Tool descriptors are built once per connect; a server
+ * that changes its list mid-run is picked up on reconnect, and the change
+ * is logged because an agent's allowlist may no longer mean what it meant.
+ */
+
+const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
+const DEFAULT_CALL_TIMEOUT_MS = 60_000;
+const RECONNECT_INITIAL_DELAY_MS = 1_000;
+const RECONNECT_MAX_DELAY_MS = 60_000;
+
+/** What one configured server looks like once its block has been read. */
+export interface McpServerSpec {
+  /** The config key — a name segment, so `mcp.<name>.*` is what a soul writes. */
+  name: string;
+  /** stdio: the executable to spawn. Exactly one of `command` and `url`. */
+  command?: string;
+  args: string[];
+  cwd?: string;
+  /**
+   * The subprocess environment, already resolved: the scrubbed default
+   * inheritance plus whatever the operator granted by name or set
+   * outright. This is the whole environment — the daemon's is not there
+   * to read.
+   */
+  env: Record<string, string>;
+  /** HTTP: the Streamable HTTP endpoint. */
+  url?: string;
+  /** HTTP: headers sent with every request — where a bearer token goes. */
+  headers: Record<string, string>;
+  connectTimeoutMs: number;
+  callTimeoutMs: number;
+}
+
+export interface McpPluginOptions {
+  /** The environment `passEnv` grants *from*. Defaults to the daemon's. */
+  processEnv?: NodeJS.ProcessEnv;
+  /**
+   * Transport seam for tests: hand back a connected pair instead of
+   * spawning or dialing. The default builds stdio or Streamable HTTP from
+   * the spec.
+   */
+  transportFor?: (spec: McpServerSpec) => Transport | Promise<Transport>;
+  /**
+   * Reconnect pacing, attempt (0-based) to delay. The default doubles from
+   * one second and caps at one minute; tests shrink it so a reconnect is
+   * an event to await rather than a wall-clock to sleep through.
+   */
+  reconnectDelayMs?: (attempt: number) => number;
+  /**
+   * Called after a server (re)connects and its tools are registered — the
+   * gate a test holds instead of guessing at timers, and a hook a host
+   * could count connections with.
+   */
+  onConnected?: (server: string) => void;
+  log?: (message: string) => void;
+  warn?: (message: string) => void;
+}
+
+class McpConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'McpConfigError';
+  }
+}
+
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const asStringRecord = (value: unknown, where: string): Record<string, string> => {
+  if (value === undefined) {
+    return {};
+  }
+  if (!isObject(value)) {
+    throw new McpConfigError(`${where} must be an object of string values.`);
+  }
+  const record: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry !== 'string') {
+      throw new McpConfigError(`${where}.${key} must be a string.`);
+    }
+    record[key] = entry;
+  }
+  return record;
+};
+
+const asTimeout = (value: unknown, fallback: number): number =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
+
+/**
+ * Resolve one server block into a spec, or refuse it. Refusals here are
+ * configuration errors and fail the plugin at load — a mistyped block is
+ * the operator's to fix, unlike a server that is merely down.
+ */
+const resolveServerSpec = (
+  name: string,
+  block: unknown,
+  processEnv: NodeJS.ProcessEnv,
+): McpServerSpec => {
+  const where = `servers.${name}`;
+  if (!SERVER_NAME_PATTERN.test(name)) {
+    throw new McpConfigError(
+      `Server name ${JSON.stringify(name)} is not usable: it becomes a tool-name segment (mcp.${name}.*), so it must be lowercase [a-z0-9_-] starting with a letter or digit.`,
+    );
+  }
+  if (!isObject(block)) {
+    throw new McpConfigError(`${where} must be an object.`);
+  }
+  const command = typeof block.command === 'string' && block.command.length > 0 ? block.command : undefined;
+  const url = typeof block.url === 'string' && block.url.length > 0 ? block.url : undefined;
+  if ((command === undefined) === (url === undefined)) {
+    throw new McpConfigError(`${where} must set exactly one of "command" (stdio) or "url" (HTTP).`);
+  }
+  if (url !== undefined) {
+    try {
+      void new URL(url);
+    } catch {
+      throw new McpConfigError(`${where}.url is not a URL: ${url}`);
+    }
+  }
+
+  // The replacement-environment treatment: the child gets exactly what was
+  // granted — the harmless default inheritance, names the operator
+  // forwarded, values the operator set — and nothing else. The daemon's
+  // environment holds every key an operator exported, and a subprocess MCP
+  // server is a subprocess: ANTHROPIC_API_KEY must not be there to read.
+  const env: Record<string, string> = {};
+  const passEnv = Array.isArray(block.passEnv)
+    ? block.passEnv.filter((entry): entry is string => typeof entry === 'string')
+    : [...DEFAULT_SUBPROCESS_PASS_ENV];
+  for (const key of passEnv) {
+    const value = processEnv[key];
+    if (value !== undefined) {
+      env[key] = value;
+    }
+  }
+  Object.assign(env, asStringRecord(block.env, `${where}.env`));
+
+  return {
+    name,
+    ...(command !== undefined ? { command } : {}),
+    args: Array.isArray(block.args)
+      ? block.args.filter((entry): entry is string => typeof entry === 'string')
+      : [],
+    ...(typeof block.cwd === 'string' && block.cwd.length > 0 ? { cwd: block.cwd } : {}),
+    env,
+    ...(url !== undefined ? { url } : {}),
+    headers: asStringRecord(block.headers, `${where}.headers`),
+    connectTimeoutMs: asTimeout(block.connectTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS),
+    callTimeoutMs: asTimeout(block.callTimeoutMs, DEFAULT_CALL_TIMEOUT_MS),
+  };
+};
+
+const buildTransport = (spec: McpServerSpec): Transport => {
+  if (spec.command !== undefined) {
+    return new StdioClientTransport({
+      command: spec.command,
+      args: spec.args,
+      ...(spec.cwd !== undefined ? { cwd: spec.cwd } : {}),
+      env: spec.env,
+    });
+  }
+  // The assertion papers over the SDK's own optional-property types not
+  // being written for exactOptionalPropertyTypes; the object is a Transport.
+  return new StreamableHTTPClientTransport(new URL(spec.url as string), {
+    requestInit: { headers: spec.headers },
+  }) as unknown as Transport;
+};
+
+/** The slice of a `tools/list` entry the bridge reads. */
+interface AdvertisedTool {
+  name: string;
+  description?: string | undefined;
+  inputSchema?: unknown;
+}
+
+/** What the bridge knows about one discovered tool, snapshotted at connect. */
+interface DiscoveredTool {
+  /** The name the server knows it by — what `tools/call` is sent. */
+  mcpName: string;
+  description?: string;
+  parameters?: JsonObject;
+}
+
+interface ServerState {
+  spec: McpServerSpec;
+  client: Client | undefined;
+  connected: boolean;
+  connecting: boolean;
+  attempt: number;
+  timer: NodeJS.Timeout | undefined;
+  /** Registered name → what it bridges to. The live descriptor cache. */
+  tools: Map<string, DiscoveredTool>;
+}
+
+export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptions = {}): Plugin => {
+  const log = options.log ?? ((message: string) => console.error(`[plugin-mcp] ${message}`));
+  const warn = options.warn ?? ((message: string) => console.error(`[plugin-mcp] ${message}`));
+  const processEnv = options.processEnv ?? process.env;
+  const delayFor = options.reconnectDelayMs
+    ?? ((attempt: number) => Math.min(RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, RECONNECT_MAX_DELAY_MS));
+  const workspaceRoot = typeof config.workspaceRoot === 'string' ? config.workspaceRoot : undefined;
+
+  if (!isObject(config.servers)) {
+    throw new McpConfigError(
+      'plugins["@stratusagent/plugin-mcp"] needs a "servers" object — one entry per MCP server, keyed by the name its tools mount under.',
+    );
+  }
+  const states: ServerState[] = Object.entries(config.servers).map(([name, block]) => ({
+    spec: resolveServerSpec(name, block, processEnv),
+    client: undefined,
+    connected: false,
+    connecting: false,
+    attempt: 0,
+    timer: undefined,
+    tools: new Map(),
+  }));
+
+  let view: ToolRegistry | undefined;
+  let disposed = false;
+
+  const proxyTool = (state: ServerState, registeredName: string, info: DiscoveredTool): Tool => ({
+    name: registeredName,
+    description: info.description ?? `Tool ${info.mcpName} on the MCP server ${state.spec.name}.`,
+    ...(info.parameters ? { parameters: info.parameters } : {}),
+    // No risk claim, deliberately: what a bridged tool registers at is the
+    // namespace's declared risk (and any operator override), applied by
+    // the manifest-bound view — the server's opinion of itself never
+    // enters, and neither does this package's.
+    async execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue> {
+      const client = state.connected ? state.client : undefined;
+      const current = state.tools.get(registeredName);
+      if (!client || !current) {
+        throw new Error(
+          `MCP server ${state.spec.name} is not connected; ${registeredName} is unavailable until it comes back.`,
+        );
+      }
+      const result = await client.callTool({ name: current.mcpName, arguments: input }, undefined, {
+        timeout: state.spec.callTimeoutMs,
+        ...(context?.signal ? { signal: context.signal } : {}),
+      });
+      return normalizeCallResult(result, {
+        server: state.spec.name,
+        tool: current.mcpName,
+        agentId: session.agent.id,
+        ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+      });
+    },
+  });
+
+  /** Every page of `tools/list`, not just the first. */
+  const listAllTools = async (client: Client, spec: McpServerSpec): Promise<AdvertisedTool[]> => {
+    const tools: AdvertisedTool[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await client.listTools(cursor ? { cursor } : undefined, { timeout: spec.connectTimeoutMs });
+      tools.push(...page.tools);
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
+    return tools;
+  };
+
+  /**
+   * Reconcile what a server advertises with what is registered — first
+   * connect and reconnect run the identical path, through the identical
+   * manifest-bound gate. Every difference is logged: a tool appearing,
+   * disappearing, or changing shape changes what an agent's allowlist
+   * selects.
+   */
+  const syncTools = (
+    state: ServerState,
+    advertised: AdvertisedTool[],
+    firstConnect: boolean,
+  ): void => {
+    if (!view) {
+      return;
+    }
+    const next = new Map<string, DiscoveredTool>();
+    for (const tool of advertised) {
+      const segment = sanitizeToolSegment(tool.name);
+      if (segment === undefined) {
+        throw new McpConfigError(
+          `MCP server ${state.spec.name} advertises a tool named ${JSON.stringify(tool.name)}, which leaves nothing usable as a name segment.`,
+        );
+      }
+      const registered = bridgedToolName(state.spec.name, segment);
+      if (next.has(registered)) {
+        // Folding two of the server's names into one registered name would
+        // make the second silently answer calls meant for the first —
+        // refused, the same reason any collision is.
+        throw new McpConfigError(
+          `MCP server ${state.spec.name} advertises two tools that both bridge to ${registered} (one of them ${JSON.stringify(tool.name)}). Rename one on the server.`,
+        );
+      }
+      next.set(registered, {
+        mcpName: tool.name,
+        ...(typeof tool.description === 'string' ? { description: tool.description } : {}),
+        ...(isObject(tool.inputSchema) ? { parameters: tool.inputSchema as JsonObject } : {}),
+      });
+    }
+
+    for (const registered of state.tools.keys()) {
+      if (!next.has(registered)) {
+        view.unregister(registered);
+        log(`mcp server ${state.spec.name} no longer advertises ${registered} — unregistered; souls allowlisting it select nothing until it returns`);
+      }
+    }
+    for (const [registered, info] of next) {
+      const existing = state.tools.get(registered);
+      const changed = existing !== undefined
+        && (existing.mcpName !== info.mcpName
+          || existing.description !== info.description
+          || JSON.stringify(existing.parameters) !== JSON.stringify(info.parameters));
+      if (existing !== undefined && !changed) {
+        continue;
+      }
+      if (changed) {
+        view.unregister(registered);
+      }
+      try {
+        view.register(proxyTool(state, registered, info));
+      } catch (error) {
+        // On first connect this is a load-time refusal and propagates; on
+        // reconnect there is no load to refuse, so the one colliding tool
+        // is skipped, named, and everything else keeps working.
+        if (firstConnect) {
+          throw error;
+        }
+        next.delete(registered);
+        warn(`mcp server ${state.spec.name}: ${registered} was not registered: ${error instanceof Error ? error.message : String(error)}`);
+        continue;
+      }
+      if (!firstConnect) {
+        log(`mcp server ${state.spec.name} ${changed ? 'changed' : 'added'} ${registered}${changed ? '' : ' — an allowlist naming mcp.' + state.spec.name + '.* now grants it'}`);
+      }
+    }
+    state.tools = next;
+  };
+
+  const scheduleReconnect = (state: ServerState): void => {
+    if (disposed || state.timer !== undefined || state.connecting) {
+      return;
+    }
+    const delay = delayFor(state.attempt);
+    state.attempt += 1;
+    state.timer = setTimeout(() => {
+      state.timer = undefined;
+      void connect(state, false).catch((error) => {
+        warn(`mcp server ${state.spec.name} reconnect failed: ${error instanceof Error ? error.message : String(error)}`);
+        scheduleReconnect(state);
+      });
+    }, delay);
+    // A daemon holds the process open anyway; a one-shot CLI run must not
+    // be kept alive by a server that is never coming back.
+    state.timer.unref?.();
+  };
+
+  const connect = async (state: ServerState, firstConnect: boolean): Promise<void> => {
+    if (disposed || state.connecting) {
+      return;
+    }
+    state.connecting = true;
+    try {
+      const transport = await (options.transportFor ?? buildTransport)(state.spec);
+      const client = new Client({ name: '@stratusagent/plugin-mcp', version: '0.7.0' });
+      client.onclose = () => {
+        if (disposed || state.client !== client) {
+          return;
+        }
+        state.connected = false;
+        state.client = undefined;
+        warn(`mcp server ${state.spec.name} disconnected — its tools are unavailable until it comes back`);
+        scheduleReconnect(state);
+      };
+      await client.connect(transport, { timeout: state.spec.connectTimeoutMs });
+      try {
+        const advertised = await listAllTools(client, state.spec);
+        syncTools(state, advertised, firstConnect);
+      } catch (error) {
+        // The client is connected but not yet stored, so nothing else will
+        // ever close it — for a stdio server that is a spawned subprocess
+        // left running. Let go before reporting the failure.
+        await client.close().catch(() => {});
+        throw error;
+      }
+      state.client = client;
+      state.connected = true;
+      state.attempt = 0;
+      log(`mcp server ${state.spec.name} connected — ${state.tools.size} tool${state.tools.size === 1 ? '' : 's'} under mcp.${state.spec.name}.*`);
+      options.onConnected?.(state.spec.name);
+    } finally {
+      state.connecting = false;
+    }
+  };
+
+  return {
+    name: '@stratusagent/plugin-mcp',
+
+    async setup(context) {
+      view = context.tools;
+      await Promise.all(states.map(async (state) => {
+        try {
+          await connect(state, true);
+        } catch (error) {
+          // A configuration or trust refusal fails the plugin at load; a
+          // server that is merely unreachable must not — the daemon goes
+          // on serving every other agent, and this server's tools appear
+          // when it does.
+          if (error instanceof McpConfigError || (error as Error | undefined)?.name === 'PluginManifestError') {
+            throw error;
+          }
+          warn(
+            `mcp server ${state.spec.name} is unreachable — starting without its tools; they register when it comes back. `
+            + `Check ${state.spec.command !== undefined ? `the command (${state.spec.command})` : `the endpoint (${state.spec.url})`} `
+            + `under plugins["@stratusagent/plugin-mcp"].servers.${state.spec.name}. `
+            + `(${error instanceof Error ? error.message : String(error)})`,
+          );
+          scheduleReconnect(state);
+        }
+      }));
+    },
+
+    async dispose() {
+      disposed = true;
+      await Promise.allSettled(states.map(async (state) => {
+        if (state.timer !== undefined) {
+          clearTimeout(state.timer);
+          state.timer = undefined;
+        }
+        const client = state.client;
+        state.client = undefined;
+        state.connected = false;
+        await client?.close();
+      }));
+    },
+  };
+};
+
+/** The loader's ABI. See `docs/architecture/plugins.md`. */
+export const createPlugin = (config: JsonObject): Plugin => createMcpPlugin(config);
