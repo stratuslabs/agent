@@ -770,9 +770,19 @@ pinned version in CI — any pending migrations run automatically, each one
 idempotent, applied in order, and recorded as it completes. This is deliberate:
 an upgrade path that migrates only through one blessed command leaves the
 other install methods on unmigrated state, and the two populations diverge
-silently. The reverse direction refuses instead of guessing: `stratus serve`
-will not start against state stamped by a **newer** build than itself, because
-an older daemon guessing at a newer format is the one way to corrupt it.
+silently. (One constraint that keeps the automatic path honest: a migration
+must be safe to run while a daemon is serving, because this path does not
+stop the managed service — only `stratus update` does. A migration needing
+exclusive access to shared state is not registered until the registry can
+require that bracket.)
+
+The reverse direction refuses instead of guessing: against state stamped by
+a **newer** build than itself, anything that *writes* under `~/.stratus` —
+`serve`, `setup`, `chat`, `run`, `skill add`, `dashboard`, `schedules
+cancel`, `service install`/`start` — refuses with a line naming the fix,
+because a downgraded build writing into a newer format is the one way to
+corrupt it. Read-only commands (`logs`, `agents`, `doctor`, `service
+status`/`stop`) warn and continue: reading is how you diagnose your way out.
 
 **`stratus update` does the operational sequence around that, in the order
 that cannot lose data:**

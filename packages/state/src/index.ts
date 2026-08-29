@@ -717,6 +717,16 @@ export interface StateMigration {
    * processes can race the stamp and a crash can lose the record of a
    * completed run. Returns a line describing what actually changed, or
    * undefined when there was nothing to do.
+   *
+   * Must also be safe to run while a daemon is serving: migrations run
+   * automatically on the first command of a newer build, and that path
+   * does not stop the managed service — only `stratus update` brackets
+   * with a stop/restart. A migration needing exclusive access to shared
+   * state (the SQLite session database, above all) must NOT be registered
+   * until this registry grows a way to require that bracket — a
+   * `requiresExclusive` marker the automatic path defers on — because a
+   * migration that is only safe under `update` is unsafe under every
+   * other install path.
    */
   apply(env: StateEnvironment): Promise<string | undefined>;
 }

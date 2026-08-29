@@ -6224,11 +6224,25 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     if (command.command !== 'update') {
       const stamp = await readStateStamp(resolvedEnv);
       if (stamp.schemaVersion > STATE_SCHEMA_VERSION) {
-        if (command.command === 'serve') {
-          // The daemon refuses state it does not understand rather than
-          // guessing at a format it was not written for — under a service
-          // manager, guessing wrong would corrupt on a restart loop.
+        // Anything that writes under ~/.stratus refuses, not only the
+        // daemon: a downgraded build's setup, chat, or run can discard
+        // fields and invariants the newer format relies on — the exact
+        // hazard the stamp exists to close. Read-only commands warn and
+        // continue, because reading logs or the roster is how someone
+        // diagnoses their way OUT of this state; so do `service stop`,
+        // `status`, and `uninstall`, for the same reason. (`agent new`
+        // only prints an identity — it writes nothing.)
+        const writesState = command.command === 'serve'
+          || command.command === 'setup'
+          || command.command === 'chat'
+          || command.command === 'run'
+          || command.command === 'skill-add'
+          || command.command === 'dashboard'
+          || (command.command === 'schedules' && command.action === 'cancel')
+          || (command.command === 'service' && (command.action === 'install' || command.action === 'start'));
+        if (writesState) {
           writeLine(streams.stderr, newerStateMessage(stamp.schemaVersion));
+          writeLine(streams.stderr, `Refusing \`stratus ${command.command}\` — it writes state the newer format owns. Read-only commands (logs, agents, doctor, service status/stop) still work.`);
           return 1;
         }
         writeLine(streams.stderr, `Warning: ${newerStateMessage(stamp.schemaVersion)}`);

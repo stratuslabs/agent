@@ -218,7 +218,7 @@ test('every command migrates on first use of a newer build, and serve refuses ne
   assert.equal((await stat(loose)).mode & 0o777, 0o600);
   assert.equal((await readStateStamp({ homeDir: home })).schemaVersion, STATE_SCHEMA_VERSION);
 
-  // State written by a newer build: ordinary commands warn and continue…
+  // State written by a newer build: read-only commands warn and continue…
   await writeFile(stateFilePath({ homeDir: home }), JSON.stringify({ schemaVersion: STATE_SCHEMA_VERSION + 1, applied: [] }));
   const warned = createStreams();
   assert.equal(await runCli({
@@ -228,15 +228,19 @@ test('every command migrates on first use of a newer build, and serve refuses ne
   }), 0);
   assert.match(warned.output.stderr, /newer Stratus build/);
 
-  // …while the daemon refuses outright rather than guessing at a format it
-  // was not written for.
-  const refused = createStreams();
-  assert.equal(await runCli({
-    argv: ['serve'],
-    streams: refused.streams,
-    env: { homeDir: home, cwd: home, processEnv: {} },
-  }), 1);
-  assert.match(refused.output.stderr, /newer Stratus build/);
+  // …while anything that writes under ~/.stratus refuses outright rather
+  // than guessing at a format it was not written for — the daemon, and
+  // equally a downgraded CLI's setup/chat/run.
+  for (const argv of [['serve'], ['run', 'hello'], ['chat'], ['setup']]) {
+    const refused = createStreams();
+    assert.equal(await runCli({
+      argv,
+      streams: refused.streams,
+      env: { homeDir: home, cwd: home, processEnv: {} },
+    }), 1, `stratus ${argv[0]} must refuse newer state`);
+    assert.match(refused.output.stderr, /newer Stratus build/);
+    assert.match(refused.output.stderr, /Refusing `stratus/);
+  }
 });
 
 test('readServiceCommand does not mistake a node option operand for the entrypoint', async () => {
@@ -495,6 +499,7 @@ test('a failed unit rewrite restores the previous unit and restarts the daemon',
   const home = await freshHome();
   const staleNode = path.join(home, 'nvm', 'v20.0.0', 'node');
   let restarts = 0;
+  let reloads = 0;
   const runner: ServiceRunner = async (command, args) => {
     if (command === 'systemctl' && args.includes('is-active')) {
       return { code: 0, stdout: 'active', stderr: '' };
@@ -503,7 +508,12 @@ test('a failed unit rewrite restores the previous unit and restarts the daemon',
       return { code: 0, stdout: 'enabled', stderr: '' };
     }
     if (command === 'systemctl' && args.includes('daemon-reload')) {
-      return { code: 1, stdout: '', stderr: 'daemon-reload refused' };
+      // The rewrite's reload fails; the rollback's succeeds — the double
+      // failure has its own test below.
+      reloads += 1;
+      return reloads === 1
+        ? { code: 1, stdout: '', stderr: 'daemon-reload refused' }
+        : { code: 0, stdout: '', stderr: '' };
     }
     if (command === 'systemctl' && args.includes('restart')) {
       restarts += 1;
@@ -565,6 +575,22 @@ test('update --check flags an entrypoint that exists but is not the one this she
   assert.equal(code, 1, output.stdout);
   assert.match(output.stdout, /unit runs entrypoint/);
   assert.doesNotMatch(output.stdout, /Nothing to do/);
+});
+
+test('a start whose daemon-reload fails is a failed start, not a footnote', async () => {
+  // If the manager cannot reload, "restart" runs whatever definition it
+  // already had loaded — reporting success would claim the file on disk
+  // was started when it may not have been (the rollback path relies on
+  // this being honest).
+  const result = await startService({
+    platform: 'linux',
+    homeDir: await freshHome(),
+    run: async (command, args) => (command === 'systemctl' && args.includes('daemon-reload')
+      ? { code: 1, stdout: '', stderr: 'no bus' }
+      : { code: 0, stdout: '', stderr: '' }),
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.messages.join('\n'), /daemon-reload failed/);
 });
 
 test('starting a systemd service reloads the manager first, so the unit on disk is the one that runs', async () => {
