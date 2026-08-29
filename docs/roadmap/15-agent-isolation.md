@@ -1,0 +1,205 @@
+# 15 — Agent isolation: per-agent state, process-per-agent, containerized execution
+
+## Goal
+
+Make the agent a *boundary*, not a row: an agent's sessions, memory,
+credentials, workspace, and command execution are structurally its own, so a
+bug — or a prompt-injected agent — cannot reach another agent's state or the
+daemon's, because the handle does not exist in its process rather than
+because a filter remembered to exclude it.
+
+## Why now
+
+The v2 architecture called its safety posture **policy before isolation**
+(decision 6 in [`stratus-v2.md`](../architecture/stratus-v2.md)) and said
+outright what would upgrade policy to a boundary: "worker or process
+isolation with a scrubbed environment … and it is not built." Steps 01–14
+built the policy: risk levels that fail closed, command scopes,
+`envMode: 'replace'`, canonicalized fs roots, remote approval. This step
+builds the boundary under it, and the order was right — policy is what makes
+an isolated agent *useful*; isolation is what makes the policy layer's bugs
+survivable.
+
+It is due now because the fleet acts unattended. After
+[10](./10-proactive.md), agents fire on schedules with nobody watching;
+after [06](./06-tool-packs.md), a turn can touch the filesystem, the shell,
+and the web. The realistic failure is not a malicious plugin — it is one
+agent, talked into something by a page it fetched, running in a process that
+holds every agent's provider keys and one shared `sessions.db`. Today the
+blast radius of one compromised agent is the fleet.
+
+The neighbors have staked out the corners of this space. OpenClaw is the
+shared-process, app-level-checks model — where Stratus is today, with
+tighter policy. NanoClaw is container-first: the whole agent lives in a
+container and sees only what is mounted. Hermes sits between: profiles give
+each agent instance its own process, config, and memory, with pluggable
+execution backends from local to Docker. This step lands Stratus at the
+Hermes point *with one gateway still coordinating the fleet* — which
+profiles-as-separate-installs cannot do — and makes the NanoClaw posture a
+configuration rather than a rewrite.
+
+It also pre-decides half of [08](./08-deployment-profiles.md): the hosted
+profile's open question — key-prefix namespaces vs. process-per-tenant —
+gets much easier once process-per-*agent* exists, because a tenant boundary
+becomes a grouping of boundaries that are already real.
+
+## Scope
+
+Three layers, deliberately separable — the first is cheap and delivers most
+of "sessions never cross" on its own; each later layer hardens the one
+before it.
+
+**In:**
+
+### A. Per-agent state layout
+
+- Every per-agent durable resource moves under the agent's own directory:
+  `~/.stratus/agents/<id>/` gains `sessions.db`, `memory.jsonl` (and its
+  FTS index), and the shell workspace, joining the command whitelist that
+  already lives there. Agent ids are already validated path-safe slugs
+  (a standing invariant) precisely so they can key paths — this step is
+  why that invariant exists.
+- Directories are `0700`, same posture as `credentials.json`.
+- One migration, alias-aware like the legacy memory merge: the shared
+  `sessions.db` and `memory.jsonl` split by agent id on first start, old
+  files left in place renamed, never deleted. Schedules (rows in the same
+  database) migrate with their sessions.
+- The gateway may still be one process after this layer alone — the win is
+  that cross-agent reads become *impossible to write accidentally*: a store
+  is opened on an agent's path, so there is no query that could return
+  another agent's rows.
+
+### B. Agent runtime as a child process
+
+- The gateway becomes a small supervisor plus N agent runtimes. The
+  supervisor keeps what is fleet-infrastructure: the control API, the
+  channel adapters (Slack tokens are gateway secrets an agent must never
+  read — parenting them enforces the invariant that today is a resolver
+  rule), the roster, the scheduler tick, and approval routing. An agent
+  runtime is the kernel loop, the provider, the tool registry and
+  executors, and that agent's stores from layer A.
+- **The gateway API does not change.** Surfaces never owned an agent loop
+  (ground rule since [01](./01-gateway.md)); they consume the same API
+  whether it is backed by closures or by IPC to a child. The typed event
+  stream is already the one contract every consumer uses — it becomes the
+  wire format between runtime and supervisor instead of only between
+  gateway and surfaces.
+- Each runtime's environment holds **only that agent's credentials**,
+  resolved by the supervisor at spawn. `envMode: 'replace'` protected
+  child *commands*; this protects the agent process itself — agent A's
+  address space never contains agent B's keys, or the Slack tokens.
+- Per-agent crash containment: a runtime that OOMs or wedges is killed and
+  restarted alone, with [03](./03-permissions.md)'s restart recovery
+  scoped to that agent; the fleet does not notice.
+- `isolation: shared | process` per soul, defaulting to `process`. `shared`
+  keeps the current in-process path for constrained machines and for tests
+  — it is a supported mode, not a deprecated one, which is also what keeps
+  the seam honest: both modes run the same parity suite.
+
+### C. Containerized command execution
+
+- `@stratusagent/executor-container`: the `Executor` contract from
+  `@stratusagent/executors`, implemented over Apple `container` (macOS) or
+  Docker/Podman (Linux) instead of `node:child_process`. What
+  `executor-local` spawns on the host, this runs in a per-agent container
+  whose mounts are exactly the agent's fs roots plus its workspace —
+  agent-composed commands see what the agent was granted and nothing else.
+- Opt-in per agent (`executor: container` in the tool-shell plugin
+  config), recommended in the docs wherever a runtime is available.
+  **Container isolation as a *default* stays out of scope** — that is a
+  standing v2 decision this step does not reverse; it makes the posture a
+  config value so a deployment whose threat model demands it writes one
+  line instead of forking.
+
+**Out:** separate OS users per agent and `sandbox-exec` profiles (the
+process boundary is what makes them *possible*; adding them is hardening a
+later step or a deployment recipe can take up); VM-per-agent; moving
+in-process tools (`tool-fs`, `tool-web`, `tool-browser`, memory) behind the
+executor seam — they run in the runtime process and stay contained by
+policy, exactly as Hermes's non-terminal tools do, and pretending layer C
+covers them would be a false promise; any change to kernel contracts —
+`Executor`, `Tool`, and the event stream already carry everything this
+step needs, which is the evidence the seams were right.
+
+## Design sketch
+
+- **Supervisor/runtime split follows one rule**, the same shape 08 uses for
+  framework/downstream: what serves the *fleet* (surfaces, transport
+  secrets, approval routing, the scheduler's clock) lives in the
+  supervisor; what serves *one agent* (loop, provider, tools, stores)
+  lives in its runtime. Anything that wants to live in both is probably a
+  rule that belongs exported from `@stratusagent/state`.
+- **IPC is the event stream plus a dispatch call.** A runtime is close to a
+  gateway with a roster of one; the supervisor dispatches a turn and
+  subscribes to events, over a local socket per runtime. No new
+  serialization format — the events are already JSON, already typed,
+  already the only side-channel-free surface.
+- **Approvals evaluate in the runtime, resolve in the supervisor.** The
+  permission engine runs where the tool call is (the runtime — it needs the
+  tool, the input, and `commandFor`), but a `gated` call that needs a human
+  parks and asks *through* the supervisor, which owns the Slack approvers.
+  This is the same park-and-resume the engine already does across daemon
+  restarts, pointed at a socket instead of a store.
+- **Scheduler stays in the supervisor**, consuming slots before dispatch
+  exactly as [10](./10-proactive.md) built it; a firing becomes a dispatch
+  to the agent's runtime. Double-run protection does not change — the
+  schedule row was always the lock.
+- **`agent.delegate` crosses the boundary through the supervisor**, which
+  is where it must go anyway for 08's sub-leases: the supervisor is the
+  only party that can hand a delegated runtime a *narrower* credential set
+  than the parent's, because it is the only party holding any.
+- **Layer A ships without layer B.** The store constructors already take
+  paths; layer A is changing what path each agent's stores open, plus the
+  migration. It must not wait for the supervisor work.
+- The Node version floor is unaffected: runtimes are the same Node, and
+  `node:sqlite` moves with the store.
+
+## Acceptance criteria
+
+- **The boundary is tested as a boundary, not as behavior.** With two
+  agents under `process` isolation, agent A's runtime is shown unable to
+  read agent B's sessions, memory, or whitelist — by inspecting the spawned
+  runtime's environment and open paths, not by asking A's tools nicely. The
+  test fails if a fleet-wide credential or another agent's path reaches a
+  runtime's env or argv.
+- `kill -9` on one agent's runtime mid-turn: the turn fails honestly (the
+  abandoned-turn sweep already reports this), the agent restarts, its
+  parked approvals recover, and a concurrent turn on another agent
+  completes unaffected.
+- The same scripted conversation — tool call, gated approval via Slack,
+  streamed reply, restart, resume — passes identically under
+  `isolation: shared` and `isolation: process`. The parity suite from
+  [04](./04-agent-sdk-bridge.md) is the model: one behavior, two
+  transports.
+- Migration drill: a `~/.stratus` with shared `sessions.db` and
+  `memory.jsonl` starts under the new layout, every agent finds its
+  history and memories, the originals are preserved, and a second start
+  does not re-migrate.
+- A command run under `executor-container` cannot read a host path outside
+  the agent's roots and workspace (tested with a real runtime on macOS via
+  Apple `container` and on Linux via Docker); the same soul with
+  `executor: local` still passes the tool-shell suite unchanged.
+- Docs land with the change, per the repo rule: the layout move and
+  `isolation`/`executor` config in the CLI README, the supervisor split in
+  the control-api README where it touches event delivery, and the v2
+  decision-6 paragraph updated from "it is not built" to a pointer here.
+
+## Open questions
+
+- **IPC transport**: `node:child_process` IPC channel (free, already
+  framed) vs. a unix socket speaking the control API's own envelope
+  (uniform with every other consumer, and a runtime becomes debuggable
+  with the same tools as a gateway). Lean socket — one envelope everywhere
+  has been the payoff of every "one contract" decision so far — but the
+  child IPC channel is acceptable v1.
+- **Where the provider lives** for the Claude-subscription path: the SDK
+  bridge holds per-agent auth state; confirm it moves into the runtime
+  cleanly or name what the supervisor must broker.
+- **Per-agent OS users**: out of scope here, but the recipe shape (a
+  `runAs` on the soul, supervisor spawns with it) should be sketched in
+  this step's PR so nothing in the IPC design forecloses it.
+- **Does 08's process-per-tenant collapse into this?** A tenant as a set
+  of agent runtimes plus a namespaced supervisor looks strictly simpler
+  than a parallel mechanism — decide when 08 starts, against real tenant
+  counts, but this step should leave a note in `08-deployment-profiles.md`
+  when it lands.
