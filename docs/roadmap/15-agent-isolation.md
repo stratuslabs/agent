@@ -67,7 +67,13 @@ before it.
   legacy `Ava_1`, `team.alpha`, and `AVA` that key real data today, and
   its own comments say why holding them to `AGENT_ID_PATTERN` on upgrade
   would strand their agents. So the layout and the migration walk the
-  validated roster's actual ids, never a pattern.
+  validated roster's actual ids, never a pattern — and not only the
+  roster: the gateway deliberately keeps a missing soul's sessions when
+  it drops the soul, so the migration derives owners from the stored
+  `agent_id` values as well, carrying an absent agent's rows into its
+  per-agent store (an id that fails path-safety validation is quarantined
+  loudly, never silently omitted) so a soul restored later finds its
+  history where the layout says it lives.
 - Directories are `0700`, same posture as `credentials.json`.
 - One migration, alias-aware like the legacy memory merge, covering all
   four resources: the shared `sessions.db` and `memory.jsonl` split by
@@ -95,7 +101,13 @@ before it.
   single-flight locking lean on the same uniqueness. Per-agent stores
   therefore come with a supervisor-wide session → agent index, written at
   create (where a duplicate is refused), consulted by every lookup that
-  arrives without an agent. Without it, sharding quietly turns "which
+  arrives without an agent. The index and a per-agent store are two
+  durable writes where the shared database had one atomic primary key, so
+  the create has a single transactional authority: the index write is the
+  claim, the store write follows, and startup reconciliation resolves a
+  crash between them deterministically — an index row with no session is
+  released, a session with no index row is re-indexed or failed loudly,
+  never both left to disagree. Without it, sharding quietly turns "which
   conversation" into a guess. And the index alone is not enough, because
   the session surface is fleet-wide in more places than the point lookup:
   `countByStatus` and `lastActivityByAgent` feed the health and roster
@@ -198,11 +210,21 @@ step needs, which is the evidence the seams were right.
   supervisor; what serves *one agent* (loop, provider, tools, stores)
   lives in its runtime. Anything that wants to live in both is probably a
   rule that belongs exported from `@stratusagent/state`.
-- **IPC is the event stream plus a dispatch call.** A runtime is close to a
+- **IPC is the event stream plus a dispatch call — in both directions.**
+  A runtime is close to a
   gateway with a roster of one; the supervisor dispatches a turn and
   subscribes to events, over a local socket per runtime. No new
   serialization format — the events are already JSON, already typed,
-  already the only side-channel-free surface.
+  already the only side-channel-free surface. But dispatch-down and
+  events-up is not the whole traffic: the gateway's first-party tools
+  close over fleet state that now lives in the supervisor —
+  `schedule.*` and `message.send` reach the scheduler and the channel
+  adapters' outbound seam, and the destination carve-out consults the
+  schedule row mid-turn. Those become explicit runtime → supervisor
+  request/response operations (schedule create/list/cancel, outbound
+  send, the preauthorization check), the same envelope pointed the other
+  way, and they ride the parity suite: a scheduled turn reporting to its
+  declared destination passes identically in both modes.
 - **Approvals evaluate in the runtime, resolve in the supervisor.** The
   permission engine runs where the tool call is (the runtime — it needs the
   tool, the input, and `commandFor`), but a `gated` call that needs a human
@@ -246,7 +268,11 @@ step needs, which is the evidence the seams were right.
   agents, rather than picking one. The fleet-wide reads answer across
   every sharded store — status counts, per-agent activity, the unfiltered
   listing, and the restart recovery sweep — tested with two agents where
-  one's parked session would be missed by a single-store walk.
+  one's parked session would be missed by a single-store walk. A crash
+  between the index write and the store write on create leaves, after
+  restart, either a released id or a re-indexed session — never a
+  stranded claim or an unreachable conversation — tested by killing the
+  process on each side of the create.
 - With state sharded, the fleet-wide schedule surface is unchanged: every
   agent's schedules still fire, all appear in `stratus schedules`, and a
   bare-id cancel still lands — destination-grant revocation included —
@@ -266,7 +292,10 @@ step needs, which is the evidence the seams were right.
   `agents/<id>.whitelist.json` files starts under the new layout; every
   agent finds its history, memories, workspace contents, and persistent
   approvals; the originals are preserved; and a second start does not
-  re-migrate.
+  re-migrate. An agent whose soul is absent at migration time keeps its
+  rows: restoring the soul afterwards finds the history in its per-agent
+  store, and a stored id that fails validation is quarantined with a log
+  line, never dropped.
 - A command run under `executor-container` cannot read a host path outside
   the agent's roots and workspace (tested with a real runtime on macOS via
   Apple `container` and on Linux via Docker); the same soul with
