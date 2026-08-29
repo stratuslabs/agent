@@ -60,9 +60,14 @@ before it.
   whitelist from `~/.stratus/agents/<id>.whitelist.json` beside the soul.
   Nothing is in per-agent-directory form today — the whitelist is the
   closest, a per-agent *file* in the shared directory — so all four move.
-  Agent ids are already validated path-safe slugs
-  (a standing invariant) precisely so they can key paths — this step is
-  why that invariant exists.
+  Agent ids are already validated as single, path-safe
+  segments precisely so they can key paths — this step is why that
+  validation exists — but the invariant is path *safety*, not the slug
+  shape ids are minted in: `isValidAgentId` deliberately accepts the
+  legacy `Ava_1`, `team.alpha`, and `AVA` that key real data today, and
+  its own comments say why holding them to `AGENT_ID_PATTERN` on upgrade
+  would strand their agents. So the layout and the migration walk the
+  validated roster's actual ids, never a pattern.
 - Directories are `0700`, same posture as `credentials.json`.
 - One migration, alias-aware like the legacy memory merge, covering all
   four resources: the shared `sessions.db` and `memory.jsonl` split by
@@ -72,6 +77,16 @@ before it.
   is how workspace contents and persistent approvals would silently
   vanish, which is exactly the defect class this layer exists to end.
   Schedules (rows in the same database) migrate with their sessions.
+- **One session index survives the sharding.** Session ids are
+  caller-chosen, and the control API resolves them *without* an agent id —
+  `GET /sessions/:id`, a message to an existing session — which is
+  unambiguous today only because the shared database's global primary key
+  makes a duplicate id unrepresentable; event attribution and
+  single-flight locking lean on the same uniqueness. Per-agent stores
+  therefore come with a supervisor-wide session → agent index, written at
+  create (where a duplicate is refused), consulted by every lookup that
+  arrives without an agent. Without it, sharding quietly turns "which
+  conversation" into a guess.
 - The gateway may still be one process after this layer alone — the win is
   that cross-agent reads become *impossible to write accidentally*: a store
   is opened on an agent's path, so there is no query that could return
@@ -182,15 +197,25 @@ step needs, which is the evidence the seams were right.
 
 ## Acceptance criteria
 
-- **The boundary is tested as a boundary, not as behavior.** With two
-  agents under `process` isolation, agent A's runtime is shown unable to
-  read agent B's sessions, memory, or whitelist — by inspecting the spawned
-  runtime's environment and open paths, not by asking A's tools nicely. The
-  test fails if a fleet-wide credential or another agent's path reaches a
-  runtime's env or argv, and credential resolution is shown
-  supervisor-only at the seam: no runtime code path opens the credential
+- **The test claims what the mode provides — non-possession, not
+  inability.** With two agents under `process` isolation, nothing hands
+  agent A's runtime any of agent B's state or the fleet's secrets: the
+  test fails if another agent's path, a fleet-wide credential, or the
+  credential store's location reaches the runtime's env, argv, or
+  spawn-time configuration, and credential resolution is shown
+  supervisor-only at the seam — no runtime code path opens the credential
   store, and the runtime package carries no dependency on the resolver
-  that can.
+  that can. Proving the OS *denies* an escaped runtime the read belongs to
+  the hardened modes (OS users, a containerized runtime) and lands as
+  their acceptance test when they do — a same-user process cannot pass it,
+  and this criterion does not pretend otherwise.
+- Caller-chosen session ids stay globally unique across the sharded
+  stores: creating a session under one agent with an id another agent's
+  store already holds is refused at the create seam, and
+  `GET /sessions/:id` — no agent in hand — resolves through the index to
+  the right store, identically in both isolation modes. A migration that
+  surfaces a pre-existing duplicate fails loudly at startup, naming both
+  agents, rather than picking one.
 - `kill -9` on one agent's runtime mid-turn: the turn fails honestly (the
   abandoned-turn sweep already reports this), the agent restarts, its
   parked approvals recover, and a concurrent turn on another agent
