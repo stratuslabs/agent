@@ -3,7 +3,8 @@
   "compilerOptions": {
     "rootDir": "./src",
     "outDir": "./dist",
-    "composite": true
+    "composite": true,
+    "rewriteRelativeImportExtensions": true
   },
   "references": [
     {
@@ -20,6 +21,9 @@
     },
     {
       "path": "../plugins"
+    },
+    {
+      "path": "../permissions"
     }
   ],
   "include": [

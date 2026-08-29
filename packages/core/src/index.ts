@@ -519,6 +519,20 @@ export interface Tool {
    * asked) is judged by `risk` alone.
    */
   commandFor?(input: JsonObject): string | undefined;
+  /**
+   * The outbound destination this invocation would speak to, for a tool
+   * whose calls name one (`message.send`), in the channel-qualified form
+   * `<channel>:<native id>` (`slack:C0123456`).
+   *
+   * `commandFor`'s twin, for the same reason it exists: a policy that
+   * wanted to judge a send by where it goes would otherwise have to know
+   * which input field a particular messaging tool keeps its destination
+   * in. Returning a string is a request to be judged by the destination —
+   * the scope that can pre-authorize one is the schedule's, decided in
+   * `@stratusagent/permissions` — and a tool that returns nothing (or is
+   * not asked) is judged by `risk` alone.
+   */
+  destinationFor?(input: JsonObject): string | undefined;
   execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue>;
 }
 

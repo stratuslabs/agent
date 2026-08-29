@@ -111,3 +111,20 @@ all. The shipped manifest turns it on; an app created before this shipped
 needs `settings.interactivity.is_enabled` set to `true` once, under **App
 Manifest**. No request URL is needed — the clicks arrive over the same Socket
 Mode connection.
+
+## Speaking first: the outbound seam
+
+The adapter also implements the channel contract's `resolveOutbound` — how a
+scheduled turn's `message.send` reaches a channel, and how a schedule's
+destination is validated at creation. The address is the agent **plus** a
+conversation id (`C…`/`G…`/`D…`, never a name): each agent is its own Slack
+app, possibly in its own workspace, so the id alone names nothing.
+
+Validation is membership: the app must be able to see the conversation
+(`conversations.info`) and be a member of it — `/invite` it where it should
+report. A DM id passes on its own, because a `D…` conversation exists only
+because someone opened it with the app; the adapter never opens new DMs, so
+an agent cannot cold-message a workspace. This is what the
+`channels:read` / `groups:read` / `mpim:read` scopes in the manifest are
+for — an app created before this shipped needs them added under **OAuth &
+Permissions** and reinstalled once, or every destination reads as invisible.

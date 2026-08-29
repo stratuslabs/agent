@@ -209,6 +209,8 @@ stratus doctor                         # what a run would use right now, and why
 stratus agent new                      # create an agent (guided on a terminal)
 stratus agent new --format soul > ava.md
 stratus agents                         # who's on the team: souls, models, memory
+stratus schedules                      # what the fleet has scheduled, and where it reports
+stratus schedules cancel <id>          # stop the next firing, revoke its destination
 stratus dashboard                      # local browser dashboard
 ```
 
@@ -232,9 +234,13 @@ terminal to prompt on. If somebody *is* reachable, `--approvals remote` asks
 them instead — see [Asking a human](#asking-a-human-remote-approval).
 
 A tool that declares no risk counts as `gated`, never `safe` — forgetting to
-classify something should cost a prompt, not an unattended command. The
-built-in tools (`demo.echo`, `memory.remember`, `agent.delegate`) are all
-`safe`; anything you install is where this starts to bite, which is what the
+classify something should cost a prompt, not an unattended command. Most
+built-in tools (`demo.echo`, `memory.remember`, `agent.delegate`,
+`schedule.list`, `schedule.cancel`) are `safe`; the built-in exceptions are
+`schedule.every`, `schedule.at`, and `message.send`, which are `gated`
+because they act past the end of the turn — see
+[Proactive agents](#proactive-schedules-and-outbound-messages). Anything you
+install is where this starts to bite, which is what the
 [Tools](#tools-what-an-agent-can-actually-do) section below is about.
 
 A **shell** is the exception to the whole paragraph, because its risk is in
@@ -615,6 +621,77 @@ A skill whose `requires:` names toolsets the agent's `tools:` does not cover
 is a warning when the daemon loads the roster, never a refusal — a skill is
 prose, and can degrade. `stratus run` and `stratus chat` serve the same skills
 directory the daemon does, so a skill that routes locally routes in Slack.
+
+## Proactive: schedules and outbound messages
+
+Everything above answers when spoken to. Two toolsets make an always-on
+daemon into agents that act on their own:
+
+- **`schedule.every` / `schedule.at`** — recurring (an interval like `"30m"`
+  or a five-field cron expression, local time) or one-shot (ISO-8601), with
+  the prompt each firing runs and, optionally, the destination its reports
+  are pre-authorized to post to.
+- **`schedule.list` / `schedule.cancel`** — an agent's own audit and undo.
+- **`message.send`** — post to a channel or DM outside the current
+  conversation: `{ destination: { channel: "slack", to: "C0123456789" }, text }`.
+  Without it a scheduled turn works in silence.
+
+Souls opt in like any other tool:
+
+```markdown
+---
+name: Ava
+tools:
+  - schedule.*
+  - message.send
+---
+```
+
+**The approval belongs to the schedule, not to the firing.** Creating a
+schedule is `gated`: a human approves "every morning, check the repo, report
+to #eng" once — cadence, prompt, and destination together. A `message.send`
+from that schedule's firings *to that destination* then runs unattended, in
+headless mode included: it is the decision already made, not a new one.
+Anywhere else — another channel, a DM, a schedule that declared no
+destination — stays gated exactly as in an inbound turn, so under `headless`
+it is refused and under `remote` it asks in Slack (in the configured
+`approvals.slackChannel`, since a scheduled turn has no thread of its own).
+Note that a plain **Allow once** on `schedule.every` therefore mints
+something durable — the request shows the cadence, prompt, and destination,
+because that is what is being approved.
+
+The rest of the shape, briefly:
+
+- **Each firing is its own session** (`schedule:<id>:<slot>`), dispatched
+  through the same path a channel message takes, marked
+  `scheduled: true` in metadata. Continuity across firings is what agent
+  memory is for.
+- **Schedules are immutable.** Editing is cancel-plus-create, so the
+  approval's scope is exactly the row's lifetime.
+- **A destination is validated at creation** — the agent's Slack app must be
+  able to see the conversation and be a member of it — so a schedule that
+  could never report is refused while somebody is present to hear why, not
+  at 6am. The same membership check runs on every send: no cold-DMing.
+- **Schedules survive restarts** (they live in the daemon's own database),
+  a slot is consumed *before* its firing dispatches so a crash mid-firing
+  never double-runs it, and a missed window gets at most one late catch-up —
+  windows that passed entirely are skipped with a log line.
+- **Two limits hold unattended spend down**: an interval floor (default one
+  minute) and a per-agent cap on concurrent scheduled turns (default one —
+  a firing that would exceed it waits for the next tick).
+
+What the fleet has set is never only the agents' business:
+
+```bash
+stratus schedules                    # every agent's schedules, straight from the daemon's database
+stratus schedules cancel <id>        # stop the next firing; the destination grant dies with the row
+```
+
+Cancelling — from the CLI, the control API (`DELETE /schedules/:id`), or the
+agent's own `schedule.cancel` — revokes the pre-authorized destination in the
+same stroke, and a running daemon notices without a restart. The daemon log
+records that a schedule was created, fired, or cancelled (ids and
+destinations, never prompt contents beyond the row itself).
 
 ## Always on
 

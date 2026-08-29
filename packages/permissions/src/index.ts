@@ -124,6 +124,13 @@ export interface PermissionDecision {
    * that logs it is making that choice knowingly.
    */
   command?: string;
+  /**
+   * The outbound destination this decision was about, for a tool that
+   * carries one (`Tool.destinationFor`). Unlike `command` it also appears
+   * in `reason`: a channel id is a classification, like a command scope's
+   * base-plus-subcommand, not agent-composed text.
+   */
+  destination?: string;
 }
 
 export interface PermissionPolicyOptions {
@@ -148,6 +155,28 @@ export interface PermissionPolicyOptions {
    * with no scope list, and an unusable one for a shell.
    */
   commands?: CommandScopeOptions;
+  /**
+   * The destination-scope check, for tools that carry one
+   * (`Tool.destinationFor`). Omitted, every gated send needs a human —
+   * which is exactly the pre-carve-out behaviour, so a policy built
+   * without it loses nothing but the schedule feature.
+   */
+  destinations?: DestinationScopeOptions;
+}
+
+export interface DestinationScopeOptions {
+  /**
+   * Whether this session may speak to this destination unattended.
+   *
+   * This is the schedule carve-out and deliberately nothing wider: the
+   * expected implementation reads the schedule id off the session's
+   * metadata, loads the row a human approved, and answers by comparing
+   * destinations — so the grant is a single (schedule, destination) pair,
+   * minted by an approval, revoked the moment `schedule.cancel` deletes
+   * the row. Consulted per call, never cached here: a schedule cancelled
+   * mid-turn must gate the very next send.
+   */
+  isPreauthorized(session: Session, destination: string): boolean | Promise<boolean>;
 }
 
 export interface CommandScopeOptions {
@@ -302,7 +331,7 @@ const awaitRemote = async (
  * argument shape makes `rm -rf` a read.
  */
 export const createPermissionPolicy = (options: PermissionPolicyOptions): ApprovalPolicy => {
-  const { mode, ask, request, onDecision, commands } = options;
+  const { mode, ask, request, onDecision, commands, destinations } = options;
   if (mode === 'interactive' && !ask) {
     throw new Error('interactive permission mode needs an `ask` function to reach a human.');
   }
@@ -325,6 +354,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
     allowed: boolean,
     reason: string,
     command?: string,
+    destination?: string,
   ): boolean => {
     onDecision?.({
       allowed,
@@ -335,6 +365,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       agentId: context.session.agent.id,
       reason,
       ...(command === undefined ? {} : { command }),
+      ...(destination === undefined ? {} : { destination }),
     });
     return allowed;
   };
@@ -385,6 +416,24 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         }
       } else if (alwaysAllowed.has(sessionKey(session.id, call.toolName))) {
         return report(context, true, `${call.toolName} was approved for the rest of this session`);
+      }
+
+      // The schedule's destination scope, checked before the headless
+      // refusal because an unattended firing is exactly when it applies.
+      // `gated` only: a destination cannot launder a `dangerous` call, the
+      // same way no argument shape makes `rm -rf` a read.
+      if (risk === 'gated' && destinations) {
+        const destination = context.tool.destinationFor?.(call.input);
+        if (destination !== undefined
+          && await destinations.isPreauthorized(session, destination)) {
+          return report(
+            context,
+            true,
+            `${call.toolName} to ${destination} was pre-authorized when this schedule was approved`,
+            undefined,
+            destination,
+          );
+        }
       }
 
       if (mode === 'headless') {

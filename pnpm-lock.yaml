@@ -225,6 +225,9 @@ importers:
         specifier: workspace:*
         version: link:../state
     devDependencies:
+      '@stratusagent/permissions':
+        specifier: workspace:*
+        version: link:../permissions
       '@types/node':
         specifier: ^24.6.0
         version: 24.12.2

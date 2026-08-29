@@ -104,6 +104,8 @@ log, and an address bar is one that gets noticed when it changes.
 | POST | `/sessions/:id/messages` | Dispatch a message; returns `202 { sessionId, turnId }` |
 | GET | `/approvals` | Calls parked on a human right now |
 | POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }` |
+| GET | `/schedules` | Every schedule the fleet has set — cadence, prompt, pre-authorized destination, next firing. The audit list: each row with a destination is a standing permission to speak |
+| DELETE | `/schedules/:id` | Cancel a schedule. Also revokes the destination grant riding on the row — a still-running firing's next send is gated normally. 404 when no such schedule exists |
 | GET | `/catalog/models` | Models the stored sign-ins can actually reach, listed live |
 | GET | `/catalog/tools` | Every registered tool with the risk a call will face, every skill a soul's `skills:` can name, and the plugins that contributed them |
 | GET | `/credentials` | Which sign-ins exist — presence and endpoint, never a value |

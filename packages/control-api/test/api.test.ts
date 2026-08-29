@@ -1658,3 +1658,42 @@ test('saving settings does not delete the plugins somebody is running', async ()
     await harness.stop();
   }
 });
+
+test('schedules are listable and cancellable over the API', async () => {
+  const harness = await startApi();
+  try {
+    // The daemon's own database, from a second connection the way the CLI
+    // opens it: the API's listing must be read-through, not a snapshot.
+    const { SqliteScheduleStore } = await import('@stratusagent/gateway');
+    const store = new SqliteScheduleStore(path.join(harness.home, '.stratus', 'sessions.db'));
+    store.insert({
+      id: 'sched-1',
+      agentId: 'stratus',
+      cadence: { kind: 'every', intervalMs: 3_600_000 },
+      prompt: 'check the repo and report',
+      destination: { channel: 'slack', to: 'C-ENG' },
+      createdAt: new Date().toISOString(),
+      nextFireAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    store.close();
+
+    const listed = await json<{ schedules: Array<Record<string, unknown>> }>(
+      await harness.call('/api/v1/schedules'),
+    );
+    assert.equal(listed.schedules.length, 1);
+    assert.equal(listed.schedules[0]?.id, 'sched-1');
+    assert.equal(listed.schedules[0]?.cadence, 'every 1h');
+    assert.equal(listed.schedules[0]?.destination, 'slack:C-ENG');
+    assert.equal(listed.schedules[0]?.prompt, 'check the repo and report');
+
+    const cancelled = await harness.call('/api/v1/schedules/sched-1', { method: 'DELETE' });
+    assert.equal(cancelled.status, 200);
+    const missing = await harness.call('/api/v1/schedules/sched-1', { method: 'DELETE' });
+    assert.equal(missing.status, 404);
+
+    const after = await json<{ schedules: unknown[] }>(await harness.call('/api/v1/schedules'));
+    assert.equal(after.schedules.length, 0);
+  } finally {
+    await harness.stop();
+  }
+});

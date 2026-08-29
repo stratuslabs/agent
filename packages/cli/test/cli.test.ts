@@ -6662,3 +6662,68 @@ test('a real plugin loads through the real loader, with the risks its manifest d
   assert.match(output.stdout, /fs\.write \(gated\)/);
   assert.ok(!output.stderr.includes('did not load'), output.stderr);
 });
+
+// ---- stratus schedules (step 10) --------------------------------------------
+
+test('parseCommand reads the schedules command and its cancel form', () => {
+  assert.deepEqual(parseCommand(['schedules']), { command: 'schedules', action: 'list', format: 'text' });
+  assert.deepEqual(parseCommand(['schedule', 'list']), { command: 'schedules', action: 'list', format: 'text' });
+  assert.deepEqual(parseCommand(['schedules', '--format', 'json']), { command: 'schedules', action: 'list', format: 'json' });
+  assert.deepEqual(parseCommand(['schedules', 'cancel', 'sched-1']), {
+    command: 'schedules',
+    action: 'cancel',
+    scheduleId: 'sched-1',
+    format: 'text',
+  });
+  assert.deepEqual(parseCommand(['schedule', 'cancel', 'sched-1']), {
+    command: 'schedules',
+    action: 'cancel',
+    scheduleId: 'sched-1',
+    format: 'text',
+  });
+  assert.throws(() => parseCommand(['schedules', 'cancel']), /needs the schedule id/);
+  assert.throws(() => parseCommand(['schedules', '--format', 'yaml']), /Unsupported format/);
+});
+
+test('stratus schedules lists the daemon database and cancel revokes a row', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-sched-cli-'));
+  const { SqliteScheduleStore, defaultSessionDbPath } = await import('@stratusagent/gateway');
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const store = new SqliteScheduleStore(defaultSessionDbPath({ homeDir: home }));
+  store.insert({
+    id: 'sched-1',
+    agentId: 'ava',
+    cadence: { kind: 'cron', expression: '0 7 * * *' },
+    prompt: 'check the repo and report what changed',
+    destination: { channel: 'slack', to: 'C-ENG' },
+    createdAt: '2026-08-29T00:00:00.000Z',
+    nextFireAt: '2026-08-30T07:00:00.000Z',
+  });
+  store.close();
+
+  const listing = createStreams();
+  assert.equal(await runCli({ argv: ['schedules'], streams: listing.streams, env }), 0);
+  assert.match(listing.output.stdout, /sched-1 {2}\[ava\] {2}cron 0 7 \* \* \*/);
+  assert.match(listing.output.stdout, /slack:C-ENG/);
+  assert.match(listing.output.stdout, /check the repo and report what changed/);
+
+  const asJson = createStreams();
+  assert.equal(await runCli({ argv: ['schedules', '--format', 'json'], streams: asJson.streams, env }), 0);
+  const parsed = JSON.parse(asJson.output.stdout) as { schedules: Array<Record<string, unknown>> };
+  assert.equal(parsed.schedules[0]?.cadence, 'cron 0 7 * * *');
+  assert.equal(parsed.schedules[0]?.destination, 'slack:C-ENG');
+
+  const cancel = createStreams();
+  assert.equal(await runCli({ argv: ['schedules', 'cancel', 'sched-1'], streams: cancel.streams, env }), 0);
+  assert.match(cancel.output.stdout, /Cancelled sched-1/);
+  assert.match(cancel.output.stdout, /slack:C-ENG is revoked/);
+
+  const missing = createStreams();
+  assert.equal(await runCli({ argv: ['schedules', 'cancel', 'sched-1'], streams: missing.streams, env }), 1);
+  assert.match(missing.output.stderr, /No schedule with id sched-1/);
+
+  const empty = createStreams();
+  assert.equal(await runCli({ argv: ['schedules'], streams: empty.streams, env }), 0);
+  assert.match(empty.output.stdout, /No schedules set/);
+  await rm(home, { recursive: true, force: true });
+});

@@ -14,11 +14,14 @@
     "scopes": {
       "bot": [
         "app_mentions:read",
+        "channels:read",
         "chat:write",
         "files:write",
+        "groups:read",
         "im:history",
         "im:read",
         "im:write",
+        "mpim:read",
         "users:read"
       ]
     }
