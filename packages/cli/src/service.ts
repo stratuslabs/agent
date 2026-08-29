@@ -231,8 +231,14 @@ export interface ServiceStatus {
   platform: ServicePlatform;
   /** A unit file exists on disk. */
   installed: boolean;
-  /** The service manager reports it running. */
-  running: boolean;
+  /**
+   * The service manager reports it running; undefined when the manager did
+   * not answer (a timeout, a broken user bus). "No answer" is not "no":
+   * reading it as stopped lets a transient failure justify actions — a
+   * rewrite-and-boot-out during `stratus update`, say — that turn a
+   * running daemon into an outage.
+   */
+  running: boolean | undefined;
   /** Starts automatically at login; undefined when the manager could not say. */
   runAtLogin: boolean | undefined;
   unitPath: string;
@@ -248,15 +254,32 @@ export const readServiceStatus = async (env: ServiceEnvironment = {}): Promise<S
   const unitPath = serviceUnitPath(env);
   const run = runnerFor(env);
   // Whether a daemon is alive is the manager's answer, never the file's —
-  // asked the same way whatever the unit file turned out to be.
-  const isRunning = async (): Promise<boolean> => {
+  // asked the same way whatever the unit file turned out to be. A manager
+  // that did not answer is undefined, not false: only a recognizable "no"
+  // (a job launchd cannot find, a systemd state word) reads as stopped.
+  const isRunning = async (): Promise<boolean | undefined> => {
     if (platform === 'launchd') {
       const printed = await run('launchctl', ['print', `gui/${uidOf(env)}/${SERVICE_LABEL}`]);
-      // `state = running` appears only while the process is alive; a
-      // loaded but stopped job prints `state = not running`.
-      return printed.code === 0 && /state\s*=\s*running/.test(printed.stdout);
+      if (printed.code === 0) {
+        // `state = running` appears only while the process is alive; a
+        // loaded but stopped job prints `state = not running`.
+        return /state\s*=\s*running/.test(printed.stdout);
+      }
+      return /could not find|no such/i.test(`${printed.stderr} ${printed.stdout}`) ? false : undefined;
     }
-    return (await run('systemctl', ['--user', 'is-active', SYSTEMD_UNIT])).stdout.trim() === 'active';
+    const active = await run('systemctl', ['--user', 'is-active', SYSTEMD_UNIT]);
+    const state = active.stdout.trim();
+    // `reloading` is an active unit re-reading its config — running.
+    if (state === 'active' || state === 'reloading') {
+      return true;
+    }
+    if (state === 'inactive' || state === 'failed') {
+      return false;
+    }
+    // Transitional states (activating, deactivating) are neither a "yes"
+    // nor a "no" a caller should act on, same as a manager that never
+    // answered.
+    return undefined;
   };
 
   let contents: string;
@@ -309,6 +332,90 @@ export interface ServiceActionResult {
   /** Lines to show the user, in order. */
   messages: string[];
 }
+
+export interface ServiceCommandInfo {
+  /** node, flags, entrypoint, subcommand — as the unit would run them. */
+  argv: string[];
+  /** The interpreter the unit names: argv[0]. */
+  execPath?: string;
+  /** The entrypoint: the first argv entry after the interpreter that is not a flag. */
+  scriptPath?: string;
+  /** The `--config` the unit pins the daemon to, if any. */
+  configPath?: string;
+  /**
+   * The directory the unit runs the daemon from. Relative paths in the
+   * pinned config (a `soul`, say) resolve against it, so a rewrite that
+   * substituted the rewriting command's own cwd would restart the daemon
+   * on different files.
+   */
+  workingDirectory?: string;
+}
+
+const unxml = (value: string): string => value
+  .replace(/&lt;/g, '<')
+  .replace(/&gt;/g, '>')
+  .replace(/&amp;/g, '&');
+
+/**
+ * What the installed unit would actually run — parsed back out of the unit
+ * file. This is how `stratus update` preserves an existing unit's `--config`
+ * across a rewrite, and how it notices the failure that motivates the
+ * rewrite in the first place: a unit whose absolute node path (say an nvm
+ * version directory) no longer exists, which stops the service without
+ * anything saying so.
+ */
+export const readServiceCommand = async (env: ServiceEnvironment = {}): Promise<ServiceCommandInfo | undefined> => {
+  let contents: string;
+  try {
+    contents = await readFile(serviceUnitPath(env), 'utf8');
+  } catch {
+    return undefined;
+  }
+  let argv: string[] = [];
+  let workingDirectory: string | undefined;
+  if (servicePlatform(env) === 'launchd') {
+    const section = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(contents);
+    if (!section?.[1]) {
+      return undefined;
+    }
+    argv = [...section[1].matchAll(/<string>([\s\S]*?)<\/string>/g)].map((match) => unxml(match[1] ?? ''));
+    const directory = /<key>WorkingDirectory<\/key>\s*<string>([\s\S]*?)<\/string>/.exec(contents);
+    workingDirectory = directory?.[1] !== undefined ? unxml(directory[1]) : undefined;
+  } else {
+    const line = /^ExecStart=(.*)$/m.exec(contents);
+    if (!line?.[1]) {
+      return undefined;
+    }
+    // Written as systemdArgument(JSON.stringify(arg)): reverse the `%%`
+    // and `$$` specifier escapes, then undo the JSON quoting.
+    argv = (line[1].match(/"(?:[^"\\]|\\.)*"/g) ?? [])
+      .map((token) => JSON.parse(token.replace(/\$\$/g, '$').replace(/%%/g, '%')) as string);
+    const directory = /^WorkingDirectory=(.*)$/m.exec(contents);
+    // Written with systemdValue (only `%` is escaped in unit values).
+    workingDirectory = directory?.[1] !== undefined ? directory[1].replace(/%%/g, '%') : undefined;
+  }
+  if (argv.length === 0) {
+    return undefined;
+  }
+  // The entrypoint is the argument just before `serve` — that is the shape
+  // `serviceDefinition` writes: node, its flags, the script, the
+  // subcommand. "First non-flag after node" is not good enough, because a
+  // node option can take its value as a separate element (`--require
+  // /path/preload.cjs`), and execArgv is copied into the unit verbatim.
+  const serveIndex = argv.indexOf('serve');
+  const scriptPath = serveIndex > 1
+    ? argv[serveIndex - 1]
+    : argv.slice(1).find((argument) => !argument.startsWith('-'));
+  const configIndex = argv.indexOf('--config');
+  const configPath = configIndex !== -1 ? argv[configIndex + 1] : undefined;
+  return {
+    argv,
+    ...(argv[0] !== undefined ? { execPath: argv[0] } : {}),
+    ...(scriptPath !== undefined ? { scriptPath } : {}),
+    ...(configPath !== undefined ? { configPath } : {}),
+    ...(workingDirectory !== undefined ? { workingDirectory } : {}),
+  };
+};
 
 export const installService = async (
   env: ServiceEnvironment = {},
@@ -438,6 +545,22 @@ export const startService = async (env: ServiceEnvironment = {}): Promise<Servic
   }
   const run = runnerFor(env);
   if (platform === 'systemd') {
+    // Before the restart: the unit file on disk may not be the definition
+    // the manager has loaded — a hand edit, or an update rolling back a
+    // failed rewrite — and `restart` alone runs the loaded one. A failed
+    // reload is therefore a failed start, not a footnote: a restart that
+    // "succeeded" afterwards may be running definition the caller just
+    // replaced, while reporting the file on disk was started.
+    const reload = await run('systemctl', ['--user', 'daemon-reload']);
+    if (reload.code !== 0) {
+      return {
+        ok: false,
+        messages: [
+          `systemctl daemon-reload failed: ${reload.stderr.trim() || reload.stdout.trim()}`,
+          'Without it the manager may run a previously loaded unit definition, not the file on disk.',
+        ],
+      };
+    }
     const result = await run('systemctl', ['--user', 'restart', SYSTEMD_UNIT]);
     return result.code === 0
       ? { ok: true, messages: ['stratusd started.'] }

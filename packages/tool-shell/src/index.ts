@@ -1,7 +1,7 @@
 import { mkdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { JsonObject, JsonValue, Plugin, Session } from '@stratusagent/core';
+import { DEFAULT_SUBPROCESS_PASS_ENV, type JsonObject, type JsonValue, type Plugin, type Session } from '@stratusagent/core';
 import {
   defineLocalCommandTool,
   type LocalCommandExecution,
@@ -13,16 +13,10 @@ import { resolvePluginAgentConfig } from '@stratusagent/plugins';
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 100_000;
 
-/**
- * What the child is allowed to inherit by name.
- *
- * Short, and every entry is here because commands break without it rather
- * than because it seemed harmless. Nothing on this list is a secret, and
- * that is the test for adding one: an operator who needs `GITHUB_TOKEN` in
- * a command's environment is making a deliberate decision, in config, that
- * an auditor can see.
- */
-const DEFAULT_PASS_ENV = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ'];
+// What the child is allowed to inherit by name — the kernel's one list,
+// shared with the MCP bridge's stdio servers, so "what does a scrubbed
+// child see" has one answer. See DEFAULT_SUBPROCESS_PASS_ENV in core.
+const DEFAULT_PASS_ENV = [...DEFAULT_SUBPROCESS_PASS_ENV];
 
 export interface ShellPluginConfig extends JsonObject {
   /** Where commands start. A starting directory, not a jail — see the README. */

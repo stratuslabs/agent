@@ -251,6 +251,28 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  packages/plugin-mcp:
+    dependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.30.0
+        version: 1.30.0(zod@4.4.3)
+      '@stratusagent/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@stratusagent/plugins':
+        specifier: workspace:*
+        version: link:../plugins
+      '@types/node':
+        specifier: ^24.6.0
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+
   packages/plugins:
     dependencies:
       '@stratusagent/agents':

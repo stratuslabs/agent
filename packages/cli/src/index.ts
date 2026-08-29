@@ -122,8 +122,14 @@ import {
   workspacesDirPath,
   gatewayInfoPath,
   gatewayTokenPath,
+  newerStateMessage,
+  pendingStateMigrations,
+  readStateStamp,
+  runStateMigrations,
+  STATE_SCHEMA_VERSION,
   type AgentSummary,
   type ApiConfig,
+  type AppliedStateMigration,
   type ApprovalsConfig,
   type CatalogModel,
   type ChannelCredentials,
@@ -141,6 +147,7 @@ import {
 
 import {
   installService,
+  readServiceCommand,
   readServiceStatus,
   servicePlatform,
   serviceUnitPath,
@@ -154,6 +161,7 @@ import {
 export {
   installService,
   launchdPlist,
+  readServiceCommand,
   readServiceStatus,
   servicePlatform,
   serviceUnitPath,
@@ -215,10 +223,14 @@ export interface CliEnvironment {
   shutdownSignal?: AbortSignal;
   /** Runs launchctl/systemctl. Injected so tests never touch the real one. */
   serviceRunner?: ServiceRunner;
+  /** Service-manager platform override (tests) — which unit format and manager commands apply. */
+  servicePlatform?: NodeJS.Platform;
   /** Reports whether an optional package is installed. Injected so tests do not assert on their own node_modules. */
   packageResolver?: PackageResolver;
   /** Installs optional packages. Injected so tests never run npm. */
   packageInstaller?: PackageInstaller;
+  /** Looks up a package's latest published version. Injected so tests never ask npm. */
+  packageVersionFetcher?: PackageVersionFetcher;
 }
 
 export interface PackageInstallResult {
@@ -229,6 +241,65 @@ export interface PackageInstallResult {
 
 /** Installs optional packages globally. */
 export type PackageInstaller = (packages: string[]) => Promise<PackageInstallResult>;
+
+/** The latest published version of a package, or undefined when the registry did not answer. */
+export type PackageVersionFetcher = (packageName: string) => Promise<string | undefined>;
+
+/** How long `stratus update` waits for npm to answer a version lookup. */
+export const VERSION_LOOKUP_TIMEOUT_MS = 15_000;
+
+const defaultPackageVersionFetcher: PackageVersionFetcher = async (packageName) => {
+  const { spawn } = await import('node:child_process');
+  return new Promise((resolve) => {
+    const child = spawn('npm', ['view', packageName, 'version'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: npmNeedsShell(process.platform),
+    });
+    let stdout = '';
+    let settled = false;
+    const finish = (value: string | undefined): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    // An unreachable registry must degrade to "unknown", never hang the
+    // update on someone's terminal.
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish(undefined);
+    }, VERSION_LOOKUP_TIMEOUT_MS);
+    timer.unref?.();
+    child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8'); });
+    child.once('error', () => finish(undefined));
+    child.once('close', (code) => finish(code === 0 && stdout.trim().length > 0 ? stdout.trim() : undefined));
+  });
+};
+
+/**
+ * Dotted-numeric comparison, enough for this package's own versions:
+ * positive when `a` is newer than `b`. Anything unparseable in a segment
+ * counts as zero rather than throwing — a weird registry answer must not
+ * crash the update that would fix things.
+ */
+export const compareVersions = (a: string, b: string): number => {
+  const parse = (value: string): number[] =>
+    value.trim().replace(/^v/, '').split('.').map((part) => {
+      const numeric = Number.parseInt(part, 10);
+      return Number.isInteger(numeric) ? numeric : 0;
+    });
+  const left = parse(a);
+  const right = parse(b);
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0);
+    if (difference !== 0) {
+      return difference;
+    }
+  }
+  return 0;
+};
 
 /**
  * Whether spawning npm needs a shell on this platform.
@@ -384,6 +455,12 @@ export interface ParsedDoctorCommand {
   configPath?: string;
 }
 
+export interface ParsedUpdateCommand {
+  command: 'update';
+  /** Report what an update would do — version, migrations, unit health — without doing any of it. */
+  check: boolean;
+}
+
 export interface ParsedServiceCommand {
   command: 'service';
   action: 'install' | 'uninstall' | 'status' | 'start' | 'stop';
@@ -440,13 +517,14 @@ export type ParsedCommand =
   | ParsedSchedulesCommand
   | ParsedDoctorCommand
   | ParsedLogsCommand
+  | ParsedUpdateCommand
   | ParsedServiceCommand
   | ParsedServeCommand
   | ParsedHelpCommand;
 
 type CliConfigFile = StratusConfigFile;
 
-export const CLI_VERSION = '0.8.0';
+export const CLI_VERSION = '0.9.1';
 
 const DASHBOARD_TITLE = 'Stratus Agent Dashboard';
 
@@ -510,6 +588,8 @@ Usage:
   stratus schedules
   stratus schedules cancel <id>
   stratus doctor
+  stratus update
+  stratus update --check
   stratus service install
   stratus service status
   stratus logs -f
@@ -570,6 +650,14 @@ Commands:
   doctor           Show what a run would use right now — provider, model, soul —
                    and which file or environment variable decided each, then
                    flag anything that would surprise you (--format json)
+  update           The whole upgrade dance, in the order that cannot lose
+                   data: stop stratusd, upgrade the package from npm, run
+                   pending state migrations, rewrite the service unit with
+                   current node/entrypoint paths, restart. --check reports
+                   what it would do without doing any of it (exits 1 when
+                   something is actionable). Works offline too — an
+                   unreachable npm skips the upgrade but still migrates and
+                   repairs the unit
   dashboard        Open the web dashboard: finds a running daemon (or starts one),
                    mints a single-use sign-in link, and opens your browser at it.
                    Needs @stratusagent/control-api and @stratusagent/dashboard
@@ -962,6 +1050,24 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       throw new Error(`Unknown option: ${token}`);
     }
     return { command: 'doctor', format, ...(configPath ? { configPath } : {}) };
+  }
+
+  if (command === 'update') {
+    let check = false;
+    for (const token of rest) {
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--check') {
+        check = true;
+        continue;
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+    return { command: 'update', check };
   }
 
   if (command === 'service') {
@@ -4453,6 +4559,24 @@ export const collectDoctorReport = async (
     );
   }
 
+  // The invisible failure doctor exists to surface: the service unit embeds
+  // absolute node and entrypoint paths, and upgrading node (an nvm version
+  // directory, say) leaves the unit pointing at an interpreter that no
+  // longer exists. The service stops working and nothing else says so.
+  const unitCommand = await readServiceCommand(serviceEnvFor(env));
+  if (unitCommand?.execPath !== undefined && !(await pathExists(unitCommand.execPath))) {
+    problems.push(
+      `The service unit points at a node interpreter that no longer exists (${unitCommand.execPath}), so stratusd cannot start. `
+      + 'Run `stratus update` (or `stratus service install`) to rewrite it with current paths.',
+    );
+  }
+  if (unitCommand?.scriptPath !== undefined && !(await pathExists(unitCommand.scriptPath))) {
+    problems.push(
+      `The service unit points at a CLI entrypoint that no longer exists (${unitCommand.scriptPath}), so stratusd cannot start. `
+      + 'Run `stratus update` (or `stratus service install`) to rewrite it with current paths.',
+    );
+  }
+
   return {
     ...(winner ? { configInUse: winner.path } : {}),
     configShadowed: shadowed.map((entry) => entry.path),
@@ -4610,6 +4734,7 @@ const serviceEnvFor = (env: CliEnvironment): ServiceEnvironment => ({
   ...(env.homeDir !== undefined ? { homeDir: env.homeDir } : {}),
   cwd: readWorkingDirectory(env),
   ...(env.serviceRunner !== undefined ? { run: env.serviceRunner } : {}),
+  ...(env.servicePlatform !== undefined ? { platform: env.servicePlatform } : {}),
 });
 
 /**
@@ -4706,7 +4831,9 @@ export const runService = async (
       writeLine(streams.stdout, `No service manager for ${process.platform}. Run \`stratus serve\` yourself.`);
       return 1;
     }
-    writeLine(streams.stdout, `stratusd  ${status.running ? 'running' : status.installed ? 'installed, not running' : 'not installed'}`);
+    writeLine(streams.stdout, `stratusd  ${status.running === undefined
+      ? 'state unknown — the service manager did not answer'
+      : status.running ? 'running' : status.installed ? 'installed, not running' : 'not installed'}`);
     writeLine(streams.stdout, `  manager   ${status.platform}`);
     writeLine(streams.stdout, `  unit      ${status.unitPath}`);
     if (status.detail) {
@@ -4720,7 +4847,7 @@ export const runService = async (
     writeLine(streams.stdout, status.installed
       ? '  logs      stratus logs -f'
       : '  install   stratus service install');
-    return status.running ? 0 : 1;
+    return status.running === true ? 0 : 1;
   }
 
   // A service manager passes none of this shell's environment on, so a
@@ -4781,6 +4908,242 @@ export const runService = async (
     writeLine(result.ok ? streams.stdout : streams.stderr, message);
   }
   return result.ok ? 0 : 1;
+};
+
+const CLI_PACKAGE_NAME = '@stratusagent/cli';
+
+const pathExists = async (candidate: string): Promise<boolean> => {
+  try {
+    await stat(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * `stratus update` — the whole upgrade dance, in the order that cannot lose
+ * data: stop the service (so no daemon holds the session database while
+ * state migrates), upgrade the package, run pending migrations, rewrite the
+ * service unit with current paths, restart.
+ *
+ * The unit rewrite is the step that repairs the failure nothing else
+ * surfaces: the unit embeds absolute node and entrypoint paths (a service
+ * manager loads no shell profile, so it must), and upgrading node — under
+ * nvm, a whole new version directory — leaves the unit pointing at an
+ * interpreter that no longer exists. The service stops working and nothing
+ * says so; the agents just stop answering.
+ *
+ * Each step degrades independently: an unreachable npm skips the version
+ * check and package upgrade but still migrates and rewrites the unit —
+ * which is exactly the repair the offline case needs.
+ */
+const runUpdate = async (
+  command: ParsedUpdateCommand,
+  streams: CliStreams,
+  env: CliEnvironment,
+): Promise<number> => {
+  const serviceEnv = serviceEnvFor(env);
+  const out = (line: string): void => writeLine(streams.stdout, line);
+
+  const latest = await (env.packageVersionFetcher ?? defaultPackageVersionFetcher)(CLI_PACKAGE_NAME);
+  const upgradeAvailable = latest !== undefined && compareVersions(latest, CLI_VERSION) > 0;
+
+  // A stamp from a newer build makes every later step wrong, not just the
+  // migration one: this build would migrate — and stop the daemon to do it —
+  // against a format it does not understand. Checked here, before anything
+  // has a side effect.
+  const stamp = await readStateStamp(env);
+  const stateNewer = stamp.schemaVersion > STATE_SCHEMA_VERSION;
+
+  const status = await readServiceStatus(serviceEnv).catch(() => undefined);
+  const unit = status?.installed ? await readServiceCommand(serviceEnv) : undefined;
+  const unitNotes: string[] = [];
+  if (status?.installed && unit?.execPath !== undefined) {
+    if (!(await pathExists(unit.execPath))) {
+      unitNotes.push(`the unit's interpreter no longer exists: ${unit.execPath} — stratusd cannot start until the unit is rewritten`);
+    } else if (unit.execPath !== process.execPath) {
+      unitNotes.push(`the unit runs ${unit.execPath}; this shell runs ${process.execPath}`);
+    }
+    if (unit.scriptPath !== undefined && !(await pathExists(unit.scriptPath))) {
+      unitNotes.push(`the unit's entrypoint no longer exists: ${unit.scriptPath}`);
+    } else if (unit.scriptPath !== undefined && process.argv[1] !== undefined && unit.scriptPath !== process.argv[1]) {
+      // A versioned package directory can keep the old file alive after an
+      // upgrade — the daemon then runs the old CLI indefinitely with
+      // nothing missing on disk to notice.
+      unitNotes.push(`the unit runs entrypoint ${unit.scriptPath}; this shell runs ${process.argv[1]}`);
+    }
+  }
+
+  const pending = await pendingStateMigrations(env);
+
+  out(`stratus ${CLI_VERSION}`);
+  out(latest === undefined
+    ? '  latest      unknown — npm did not answer'
+    : `  latest      ${latest}${upgradeAvailable ? ' — update available' : ' — up to date'}`);
+  out(`  state       schema ${stamp.schemaVersion}${stateNewer
+    ? ` — written by a NEWER build than this one (which understands ${STATE_SCHEMA_VERSION})`
+    : `, ${pending.length === 0 ? 'no pending migrations' : `${pending.length} pending migration${pending.length === 1 ? '' : 's'}`}`}`);
+  out(`  service     ${status === undefined
+    ? `no service manager for ${process.platform}`
+    : status.installed
+      ? (status.running === undefined ? 'installed, state unknown' : status.running ? 'installed, running' : 'installed, not running')
+      : 'not installed'}`);
+  for (const note of unitNotes) {
+    out(`  unit        ${note}`);
+  }
+
+  if (command.check) {
+    for (const migration of pending) {
+      out(`  pending     ${migration.id} — ${migration.description}`);
+    }
+    if (stateNewer) {
+      out('This build cannot update that state — upgrade the package itself (`npm install -g @stratusagent/cli`).');
+      return 1;
+    }
+    const actionable = upgradeAvailable || pending.length > 0 || unitNotes.length > 0;
+    out(actionable
+      ? 'Run `stratus update` to apply the above.'
+      : 'Nothing to do.');
+    // Actionable exits 1, so a cron job or script can notice.
+    return actionable ? 1 : 0;
+  }
+
+  if (stateNewer) {
+    writeLine(streams.stderr, newerStateMessage(stamp.schemaVersion));
+    return 1;
+  }
+
+  if (status?.installed && (status.runAtLogin === undefined || status.running === undefined)) {
+    // The rewrite has to re-state the login setting and restore the prior
+    // run state, and the manager could not say what either currently is.
+    // Guessing would let a transient status failure convert a deliberate
+    // --no-login install, or rewrite-and-stop a daemon that was actually
+    // running — refuse instead, before anything has been stopped.
+    writeLine(streams.stderr, `Not updating: whether stratusd ${status.running === undefined ? 'is running' : 'starts at login'} could not be determined (the service manager did not answer), and the unit rewrite would have to guess. Check \`stratus service status\` and retry.`);
+    return 1;
+  }
+
+  const wasRunning = status?.running === true;
+  if (wasRunning) {
+    // No daemon may hold the session database while state migrates — this
+    // bracket is the one place an update could otherwise lose data.
+    out('Stopping stratusd for the update…');
+    const stopped = await stopService(serviceEnv);
+    for (const message of stopped.messages) {
+      writeLine(stopped.ok ? streams.stdout : streams.stderr, message);
+    }
+    if (!stopped.ok) {
+      writeLine(streams.stderr, 'Not updating while the daemon may still be running.');
+      return 1;
+    }
+  }
+
+  let upgradeFailed = false;
+  if (upgradeAvailable) {
+    out(`Upgrading ${CLI_PACKAGE_NAME} ${CLI_VERSION} → ${latest}…`);
+    const installed = await (env.packageInstaller ?? defaultPackageInstaller)([`${CLI_PACKAGE_NAME}@latest`]);
+    if (installed.ok) {
+      // This process is still the old build; migrations the new version
+      // adds run when it first starts — which the restart below is.
+      out('Upgraded. Migrations the new version adds run on its first start.');
+    } else {
+      upgradeFailed = true;
+      writeLine(streams.stderr, `npm install failed: ${installed.message || 'unknown error'} — continuing with migrations and the unit rewrite.`);
+    }
+  } else {
+    out(latest === undefined
+      ? 'Skipping the package upgrade — npm did not answer.'
+      : 'Package already up to date.');
+  }
+
+  let applied: AppliedStateMigration[];
+  try {
+    applied = await runStateMigrations(env);
+  } catch (error) {
+    // A daemon stopped for an update that then failed must not stay down:
+    // the old unit is still in place (the rewrite has not happened), so
+    // restarting restores the world the update found. The failure is still
+    // a failure — but an offline fleet on top of it is not.
+    writeLine(streams.stderr, `State migration failed: ${error instanceof Error ? error.message : String(error)}`);
+    if (wasRunning) {
+      const restarted = await startService(serviceEnv);
+      for (const message of restarted.messages) {
+        writeLine(restarted.ok ? streams.stdout : streams.stderr, message);
+      }
+      writeLine(streams.stderr, restarted.ok
+        ? 'stratusd was restarted on its previous unit. Fix the migration failure and run `stratus update` again.'
+        : 'stratusd could not be restarted either — bring it back with `stratus service start` once the failure is fixed.');
+    }
+    return 1;
+  }
+  if (applied.length === 0) {
+    out('No pending state migrations.');
+  }
+  for (const migration of applied) {
+    out(`Migrated: ${migration.description}${migration.detail !== undefined ? ` — ${migration.detail}` : ''}`);
+  }
+
+  if (status?.installed) {
+    out('Rewriting the service unit with current node and entrypoint paths…');
+    // The rewrite overwrites the unit before it bootstraps, so a failure
+    // in between must be able to put the old definition back — otherwise
+    // a stopped daemon is left with neither unit to start from.
+    const previousUnit = await readFile(serviceUnitPath(serviceEnv), 'utf8').catch(() => undefined);
+    const install = await installService(
+      // The unit's own working directory survives the rewrite: relative
+      // paths in the pinned config (a `soul`) resolve against it, so a
+      // rewrite run from some other directory must not substitute its own.
+      unit?.workingDirectory !== undefined ? { ...serviceEnv, cwd: unit.workingDirectory } : serviceEnv,
+      {
+        ...(status.runAtLogin === false ? { runAtLogin: false } : {}),
+        // The config the existing unit was pinned to survives the rewrite —
+        // a unit rewritten onto a different roster is its own outage.
+        ...(unit?.configPath !== undefined ? { configPath: unit.configPath } : {}),
+      },
+    );
+    for (const message of install.messages) {
+      writeLine(install.ok ? streams.stdout : streams.stderr, message);
+    }
+    if (!install.ok) {
+      if (wasRunning) {
+        // The fleet was up when the update began and must not stay down
+        // over a failed rewrite: restore the previous unit definition and
+        // start it again. The exit code stays 1 — the update failed — but
+        // the world it found is put back.
+        if (previousUnit !== undefined) {
+          await writeFile(serviceUnitPath(serviceEnv), previousUnit, { mode: 0o644 }).catch((error: unknown) => {
+            writeLine(streams.stderr, `Could not restore the previous unit either: ${error instanceof Error ? error.message : String(error)}`);
+          });
+        }
+        const restarted = await startService(serviceEnv);
+        for (const message of restarted.messages) {
+          writeLine(restarted.ok ? streams.stdout : streams.stderr, message);
+        }
+        writeLine(streams.stderr, restarted.ok
+          ? 'The unit rewrite failed, so stratusd was restarted on its previous unit. Fix the failure above and run `stratus update` again.'
+          : 'The unit rewrite failed AND stratusd could not be restarted — bring it back with `stratus service start`, or `stratus service install` to rewrite the unit by hand.');
+      }
+      return 1;
+    }
+    if (!wasRunning) {
+      // installService starts the daemon; a service that was deliberately
+      // stopped before the update stays that way.
+      const stopped = await stopService(serviceEnv);
+      if (!stopped.ok) {
+        // The update itself succeeded, but the user's prior state was not
+        // restored: an intentionally stopped daemon is now running. That
+        // is a failure a script must see, not a footnote.
+        writeLine(streams.stderr, 'stratusd was not running before the update, and stopping it again failed — it is now RUNNING. Stop it with `stratus service stop`.');
+        return 1;
+      }
+      out('stratusd was not running before the update, so it was left stopped.');
+    }
+  } else if (status !== undefined) {
+    out('No service installed — nothing to rewrite. `stratus service install` sets one up.');
+  }
+
+  return upgradeFailed ? 1 : 0;
 };
 
 /**
@@ -5966,6 +6329,54 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
       return 0;
     }
 
+    // Migrations run on first use of a newer build — every command, every
+    // install path — not only via `stratus update`: state that migrates
+    // only sometimes is worse than state that never migrates, because the
+    // two populations diverge silently. `update` is excluded because it
+    // owns the migration step at its own place in the upgrade sequence
+    // (after the service stop and the package upgrade), and `--check` has
+    // to be able to report what is pending rather than having just done it.
+    if (command.command !== 'update') {
+      const stamp = await readStateStamp(resolvedEnv);
+      if (stamp.schemaVersion > STATE_SCHEMA_VERSION) {
+        // Anything that writes under ~/.stratus refuses, not only the
+        // daemon: a downgraded build's setup, chat, or run can discard
+        // fields and invariants the newer format relies on — the exact
+        // hazard the stamp exists to close. Read-only commands warn and
+        // continue, because reading logs or the roster is how someone
+        // diagnoses their way OUT of this state; so do `service stop`,
+        // `status`, and `uninstall`, for the same reason. (`agent new`
+        // only prints an identity — it writes nothing.)
+        const writesState = command.command === 'serve'
+          || command.command === 'setup'
+          || command.command === 'chat'
+          || command.command === 'run'
+          || command.command === 'skill-add'
+          || command.command === 'dashboard'
+          || (command.command === 'schedules' && command.action === 'cancel')
+          || (command.command === 'service' && (command.action === 'install' || command.action === 'start'));
+        if (writesState) {
+          writeLine(streams.stderr, newerStateMessage(stamp.schemaVersion));
+          writeLine(streams.stderr, `Refusing \`stratus ${command.command}\` — it writes state the newer format owns. Read-only commands (logs, agents, doctor, service status/stop) still work.`);
+          return 1;
+        }
+        writeLine(streams.stderr, `Warning: ${newerStateMessage(stamp.schemaVersion)}`);
+      } else {
+        try {
+          for (const migration of await runStateMigrations(resolvedEnv)) {
+            if (migration.detail !== undefined) {
+              writeLine(streams.stderr, `state migration ${migration.id}: ${migration.detail}`);
+            }
+          }
+        } catch (error) {
+          // A failed migration must not brick every command, but running
+          // on unmigrated state is worth a line: silence here is how the
+          // migrated and unmigrated populations diverge.
+          writeLine(streams.stderr, `Warning: state migration failed (${error instanceof Error ? error.message : String(error)}). Continuing on unmigrated state — \`stratus update\` retries it.`);
+        }
+      }
+    }
+
     // Every handler is awaited, never bare-returned: a bare `return
     // promise` inside try/catch settles the async function before the
     // catch can see it, so a command that fails at runtime — a gateway
@@ -6001,6 +6412,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'service') {
       return await runService(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'update') {
+      return await runUpdate(command, streams, resolvedEnv);
     }
 
     if (command.command === 'chat') {

@@ -1277,8 +1277,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
   const tools = new ToolRegistry();
   // Which package each tool came from. Kernel tools are absent from this
-  // map, which is how `tools()` reports them as the kernel's.
-  const toolProvenance = new Map<string, { package: string; trusted: boolean }>();
+  // map, which is how `tools()` reports them as the kernel's. Derived per
+  // read from the plugins' live tool records rather than snapshotted at
+  // load, because the records can change while the daemon runs: a bridge
+  // registers what its server advertises, and a tool discovered on
+  // reconnect would otherwise show as the kernel's.
+  const toolProvenance = (): Map<string, { package: string; trusted: boolean }> => {
+    const provenance = new Map<string, { package: string; trusted: boolean }>();
+    for (const plugin of loadedPlugins) {
+      for (const tool of plugin.tools) {
+        provenance.set(tool.name, { package: plugin.package, trusted: plugin.trusted });
+      }
+    }
+    return provenance;
+  };
   let loadedPlugins: LoadedPlugin[] = [];
   let pluginFailures: PluginLoadFailure[] = [];
   const skillCatalog = new SkillRegistry();
@@ -2022,9 +2034,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     pluginFailures = result.failures;
 
     for (const plugin of result.loaded) {
-      for (const tool of plugin.tools) {
-        toolProvenance.set(tool.name, { package: plugin.package, trusted: plugin.trusted });
-      }
       const contributed = [
         ...plugin.tools.map((tool) => `${tool.name} (${tool.risk})`),
         ...plugin.skills.map((skill) => `skill ${skill.id}`),
@@ -2232,8 +2241,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // the one a call will actually be judged at, floor applied, and a
       // second list assembled from manifests would drift from it the first
       // time a floor was raised.
+      const provenanceByName = toolProvenance();
       return tools.describe().map((descriptor) => {
-        const provenance = toolProvenance.get(descriptor.name);
+        const provenance = provenanceByName.get(descriptor.name);
         return {
           name: descriptor.name,
           ...(descriptor.description ? { description: descriptor.description } : {}),
