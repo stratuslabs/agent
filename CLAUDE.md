@@ -12,11 +12,19 @@ reading the source.
 
 Where things are documented:
 
-- `packages/cli/README.md` — the CLI's own surface: setup, every command,
-  the options table. This is the detailed one.
-- `README.md` (root) — what the project is, what is included versus
-  optional, and a usage block that points at the CLI README rather than
-  duplicating it.
+- `docs/` — the detailed surface, one home per fact. A command or flag
+  lands in `docs/reference/cli.md` *and* the guide that owns its behavior
+  (`docs/guides/…`); a config key in `docs/reference/config.md` plus its
+  guide; a new file the CLI writes in the guide that owns that area.
+  `docs/README.md` is the index — a new page gets a row there.
+- `README.md` (root) — the pitch: quickstart, the feature table, the docs
+  table. Links, never depth: a fact documented in `docs/` is not restated
+  here, because the restated copy is the one that drifts.
+- `packages/cli/README.md` — the npm page: install, the command and
+  options tables, links into `docs/`. Same rule — link, don't restate.
+  Links and images here must be **absolute** `github.com` /
+  `raw.githubusercontent.com` URLs: npm does not resolve monorepo-relative
+  paths, and it renders this file only on publish.
 - `HELP_TEXT` in `packages/cli/src/index.ts` — every command and flag.
 - `packages/channel-slack/README.md` — the Slack app setup.
 - `packages/control-api/README.md` — the HTTP + WS surface: every endpoint,
@@ -69,6 +77,75 @@ immediately:
 
 If you need a rule that is not exported, export it. Do not copy it.
 
+## Code shape
+
+There is no linter and no formatter — `pnpm build && pnpm typecheck &&
+pnpm test` is the whole automated gate — so everything below is held by
+hand and by review:
+
+- **ESM, named exports, one entry per package.** `src/index.ts` is the
+  only public surface, re-exporting **by explicit name** — no `export *`,
+  no `export default`. Adding a symbol to the barrel is an API decision;
+  make it deliberately.
+- **Relative imports end in `.ts`** (`from './paths.ts'`) — package
+  tsconfigs set `rewriteRelativeImportExtensions`, and tests import
+  `../src/index.ts` under type stripping. Cross-package, use the bare
+  `@stratusagent/<pkg>` specifier, never a deep path.
+- **Arrow consts, never `function` declarations.** Classes are the
+  exception, kept for stateful long-lived objects — the kernel
+  registries and stores, runners and executors (`AgentRunner`,
+  `LocalCommandExecutor`, `BrowserSessionPool`) — and for error types:
+  an error is `class X extends Error` that sets `this.name` in its
+  constructor, exported from the barrel when callers are meant to catch
+  it by type (some, like `ApiError` and `McpConfigError`, deliberately
+  stay internal). Plain values and
+  stateless behavior come from a `create*` (construct a live thing) or
+  `define*` (canonicalize a definition literal) factory returning a
+  plain object.
+- **The strict flags are load-bearing.** `exactOptionalPropertyTypes`
+  means an optional property is added with a conditional spread —
+  `...(x !== undefined ? { x } : {})` — never assigned `undefined`.
+  Check against `undefined`, not truthiness, unless dropping the falsy
+  values is the point: `0` and `false` are real settings here (`--api-port 0`
+  asks for any free port). `any` appears nowhere in src; narrow from
+  `unknown` instead.
+- **Tools throw plain `Error`s; the executor converts.** In any package
+  that can depend on `@stratusagent/executors`, build `ToolResult`s
+  through its `successResult`/`failureResult`, never hand-rolled
+  `{ ok, error }` — `core` is the one exception, since `executors`
+  depends on it and core stays dependency-free. A control API route
+  handler reports failure by throwing `ApiError(status, code, message)`
+  (internal to `control-api`); HTTP *clients* — `tool-web`, providers,
+  the MCP bridge — throw plain `Error`s like any other tool code. Error text a user
+  will read is a full sentence that names the fix:
+  `No schedule of yours has id ${id}. schedule.list shows what exists.`
+- **Comments explain why, and cite the incident when there is one.**
+  About a quarter of src is comments, and they are how a rule survives
+  the next refactor — tool-fs resolving per-agent config on every call
+  carries the reason ("caching at setup would hand every agent the first
+  agent's roots") in place. A comment narrating what the next line does
+  is not house style; delete it.
+
+## Refactoring: where code goes
+
+- **New capability is a plugin behind the kernel seams, never a bigger
+  kernel.** The seams are the optional `AgentRunnerOptions` slots —
+  `SessionStore`, `Executor`, `ApprovalPolicy`, `ModelProvider`,
+  `AgentMemoryStore`, `Plugin` — interfaces with permissive in-memory
+  defaults. Extend one with an optional, defaulted method plus a JSDoc
+  note on what a host that omits it gives up; never by subclassing.
+- **Split a file when a concern is separately testable or separately
+  shared, not by line count.** `state` grew `memory.ts` and `gateway`
+  grew `schedules.ts` that way; a large `index.ts` that is one coherent
+  surface stays one file.
+- **`core`, `egress`, and `dashboard` carry no dependencies on
+  purpose.** Keep them that way — a dependency added to `core` lands in
+  every install of everything.
+- The moment a private rule gets a second consumer, move it to the
+  shared package and **re-export it from its old home** (the way
+  `gateway` still exports `applySoulPins`) — a refactor that moves a
+  symbol should break no importer.
+
 ## Runtime and tests
 
 - **Node `>=22.13 <23 || >=23.4`.** The gateway's session store uses
@@ -79,6 +156,14 @@ If you need a rule that is not exported, export it. Do not copy it.
 - Tests run under `node --test --experimental-strip-types`. Type
   stripping means **no TypeScript parameter properties** (`constructor(private x)`)
   and no enums — write the assignment out.
+- Tests are flat `node:test`: `import test from 'node:test'` and
+  `import assert from 'node:assert/strict'`, top-level
+  `test('a sentence describing the behavior', …)` — no `describe`/`it`,
+  no assertion or mocking libraries. Files live in
+  `packages/<pkg>/test/`, never beside src. Fakes are hand-written typed
+  object literals (`const provider: ModelProvider = { … }`), named
+  `create*`/`fake*`/`stub*` at the top of the test file; reach for
+  `t.mock` only to fake timers.
 - New behavior needs a test that fails without the change. Verify that it
   does; a test that passes both ways is worse than none, because it reads
   as covered.
@@ -125,6 +210,22 @@ If you need a rule that is not exported, export it. Do not copy it.
   pushes destroy review context and are not wanted here.
 - One PR at a time, based off `main`, not stacked on another branch.
 - Never push to a branch other than the one you were asked to work on.
+
+## Before you push
+
+What review here actually catches, in the order to check it yourself:
+
+1. `pnpm build && pnpm typecheck && pnpm test` green — the whole CI gate;
+   no linter backstops what these miss.
+2. Re-read your own diff adversarially: what would make a reviewer reject
+   it? Fix that now, not in the follow-up commit.
+3. The new-behavior test fails without the change — actually verify it
+   does (see Runtime and tests).
+4. Everything user-visible has a docs change in this same PR, in the file
+   the map at the top names.
+5. The diff is minimal: no drive-by reformatting, no widening beyond what
+   the change needs. A small PR that lands beats a broad one that stalls.
+6. Nothing in the diff re-derives a rule another package already exports.
 
 ## Security invariants
 
