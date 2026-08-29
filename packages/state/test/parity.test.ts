@@ -21,6 +21,11 @@ import {
   type ClaudeCodeStreamMessage,
   type ClaudeCodeToolExecutor,
 } from '@stratusagent/provider-claude-code';
+import {
+  CODEX_THREAD_METADATA_KEY,
+  type CodexRunTurn,
+  type CodexThreadEvent,
+} from '@stratusagent/provider-codex';
 
 import { createFileMemoryStore, createRuntimeProvider } from '../src/index.ts';
 
@@ -76,6 +81,7 @@ const fallbackSession = (id: string): Session => ({
 /** What both paths must agree on, gathered from one scripted run. */
 interface Observed {
   sdkSessionId: unknown;
+  codexThreadId: unknown;
   memory: MemoryEntry[];
   toolCalls: Array<{ toolName: string; input: unknown }>;
   toolResults: Array<{ toolName: string; ok: boolean }>;
@@ -154,6 +160,50 @@ const claudeCodeQuery = (): ClaudeCodeQueryFn => (params) => {
 };
 
 const SDK_SESSION_ID = 'sdk-parity-1';
+const CODEX_THREAD_ID = 'codex-parity-1';
+
+/**
+ * The codex path: the harness consumes the tool call inside its own loop,
+ * reaching the kernel over the provider's loopback MCP endpoint — the
+ * scripted turn plays the codex subprocess, reading the endpoint and token
+ * exactly where codex would (the config overrides and its own environment)
+ * and driving a real HTTP tools/call mid-turn.
+ */
+const codexRunTurn = (): CodexRunTurn => (params) =>
+  (async function* (): AsyncGenerator<CodexThreadEvent> {
+    yield { type: 'thread.started', thread_id: CODEX_THREAD_ID };
+    if (params.resumeThreadId) {
+      // A resumed thread answers from the harness's own history: only the
+      // newest user message travels, and no tool runs again.
+      assert.equal(params.resumeThreadId, CODEX_THREAD_ID);
+      assert.equal(params.input, FOLLOW_UP);
+      yield { type: 'item.completed', item: { id: 'm1', type: 'agent_message', text: RECALLED } };
+      yield { type: 'turn.completed' };
+      return;
+    }
+    const config = params.clientOptions.config as {
+      mcp_servers?: Record<string, { url: string; bearer_token_env_var: string }>;
+    };
+    const server = config.mcp_servers?.stratus;
+    assert.ok(server, 'the kernel tools were not served to the codex process');
+    const token = params.clientOptions.env[server.bearer_token_env_var];
+    // `memory.remember` reaches codex as `memory_remember`: the MCP name
+    // charset has no dots, and the kernel still records its own naming.
+    const response = await fetch(server.url, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'memory_remember', arguments: { fact: REMEMBERED } },
+      }),
+    });
+    const outcome = await response.json() as { result?: { isError?: boolean } };
+    assert.notEqual(outcome.result?.isError, true, 'the bridged call failed');
+    yield { type: 'item.completed', item: { id: 'm2', type: 'agent_message', text: FINAL_TEXT } };
+    yield { type: 'turn.completed' };
+  })();
 
 const observe = async (
   build: (executeTool: ClaudeCodeToolExecutor) => ModelProvider,
@@ -212,6 +262,7 @@ const observe = async (
 
   return {
     sdkSessionId: session.metadata?.[SDK_SESSION_METADATA_KEY],
+    codexThreadId: session.metadata?.[CODEX_THREAD_METADATA_KEY],
     memory: (await memoryStore.list(AGENT.id)).entries,
     toolCalls,
     toolResults,
@@ -471,4 +522,53 @@ test('a second turn lands identically, and the subscription path resumes rather 
   // its own session id and sends only the new message.
   assert.equal(apiKey.sdkSessionId, undefined);
   assert.equal(subscription.sdkSessionId, SDK_SESSION_ID);
+});
+
+test('a tool call and a memory write land identically on the codex path', async () => {
+  // The third provider shape, through the same factory: the harness owns
+  // the loop and its tool calls arrive over the loopback MCP endpoint, so
+  // what has to hold is that the kernel ends up holding the same things —
+  // tool, arguments, memory, events, transcript, status — as the path the
+  // runner drives itself.
+  const apiKey = await observe((executeTool) => createRuntimeProvider(
+    { provider: 'anthropic', model: 'claude-opus-5', apiKey: 'sk-ant-test', fetch: anthropicFetch() },
+    undefined,
+    executeTool,
+  ));
+
+  const codex = await observe((executeTool) => createRuntimeProvider(
+    { provider: 'codex', model: 'gpt-5.5', codexRunTurn: codexRunTurn() },
+    undefined,
+    executeTool,
+  ));
+
+  assert.deepEqual(
+    codex.memory.map((entry) => [entry.agentId, entry.content]),
+    apiKey.memory.map((entry) => [entry.agentId, entry.content]),
+  );
+  assert.deepEqual(codex.toolCalls, apiKey.toolCalls);
+  assert.deepEqual(codex.toolResults, apiKey.toolResults);
+  for (const { called, answered } of codex.pairing) {
+    assert.equal(answered, called, `codex path answered ${called} with ${String(answered)}`);
+  }
+  assert.deepEqual(codex.events, apiKey.events);
+  assert.equal(codex.finalText, apiKey.finalText);
+  assert.equal(codex.status, apiKey.status);
+});
+
+test('a second turn on the codex path resumes its thread rather than replaying', async () => {
+  const codex = await observe((executeTool) => createRuntimeProvider(
+    { provider: 'codex', model: 'gpt-5.5', codexRunTurn: codexRunTurn() },
+    undefined,
+    executeTool,
+  ), FOLLOW_UP);
+
+  assert.equal(codex.finalText, RECALLED);
+  assert.equal(codex.memory.length, 1, 'the second turn must not remember twice');
+  assert.equal(codex.toolCalls.length, 1);
+  // The harness carries its own history: the session records the codex
+  // thread id (the treatment the subscription path gives its SDK session),
+  // and the resumed turn sent only the newest user message — asserted
+  // inside the scripted turn, which fails on a replayed transcript.
+  assert.equal(codex.codexThreadId, CODEX_THREAD_ID);
 });

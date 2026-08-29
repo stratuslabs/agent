@@ -47,8 +47,9 @@ offline on the built-in demo provider. Needs Node 22.13+ — details in
 | 🖥 | **Managed from anywhere** — one authenticated API, a web dashboard on top | [Remote access](docs/guides/remote-access.md) |
 
 Providers: Claude via the official Anthropic SDK, Claude subscription
-(Pro/Max) via the Claude Agent SDK, or any OpenAI-compatible API — with a
-fallback model that catches mid-run errors, even across providers.
+(Pro/Max) via the Claude Agent SDK, ChatGPT/Codex via the OpenAI Codex SDK,
+or any OpenAI-compatible API — with a fallback model that catches mid-run
+errors, even across providers.
 
 ## Feels like a teammate
 

@@ -13,6 +13,7 @@ stratus chat --soul ./ava.md
 stratus run "say hello"
 stratus run --soul ./ava.md "introduce yourself"
 stratus run --provider anthropic --model claude-opus-5 "hello"
+stratus run --provider codex "say hello"
 stratus run --prompt "use the echo tool" --format json
 stratus serve                          # stratusd: the whole roster, always on
 stratus serve --idle-timeout 120 --no-events
@@ -55,8 +56,8 @@ stratus dashboard                      # local browser dashboard
 | `--prompt`, `-p` | Pass the prompt explicitly |
 | `--stdin` | Read the prompt from stdin |
 | `--soul <file>` | Run as the agent defined by a soul file (also `STRATUS_SOUL` / config `soul` key) |
-| `--provider` | `anthropic`, `openai`, or `demo` (offline, no account) |
-| `--model` | Model for real providers (anthropic default: `claude-opus-5`) |
+| `--provider` | `anthropic`, `openai`, `codex`, or `demo` (offline, no account) |
+| `--model` | Model for real providers (anthropic default: `claude-opus-5`, codex default: `gpt-5.5`) |
 | `--base-url` | Override the provider API base URL |
 | `--config <file>` | Load settings from a specific config file |
 | `--approvals` | `run`/`chat`: tool approval mode — `always`, `ask`, or `never`. `serve`: how the daemon reaches a human — `headless` (refuse gated calls) or `remote` (ask in Slack); overrides the config's `approvals.mode` |

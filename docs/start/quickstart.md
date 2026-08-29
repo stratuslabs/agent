@@ -51,6 +51,18 @@ export STRATUS_MODEL=gpt-4.1-mini
 stratus run "say hello"
 ```
 
+And so does Codex, on a ChatGPT subscription (`codex login` on the same
+machine) or an OpenAI API key (`CODEX_API_KEY`) — `stratus setup` records
+which. Codex is a harness with its own loop, not another chat-completions
+endpoint; Stratus disables its native shell and web tools and serves the
+agent's own tools to it under kernel policy
+([`packages/provider-codex/README.md`](../../packages/provider-codex/README.md)
+has the details):
+
+```bash
+stratus run --provider codex "say hello"
+```
+
 Or with a config file `stratus.config.json` (start from
 [`stratus.config.json.example`](../../stratus.config.json.example)):
 

@@ -20,8 +20,9 @@ says so plainly if yours is too old. Details:
 [Installation](https://github.com/stratuslabs/agent/blob/main/docs/start/installation.md).
 
 `stratus setup` is the whole onboarding, as one small menu: sign in (Claude
-Pro/Max subscription or API key, or any OpenAI-compatible service), pick
-default and fallback models, create your first agent, connect Slack, and
+Pro/Max subscription or API key, ChatGPT/Codex, or any OpenAI-compatible
+service), pick default and fallback models, create your first agent,
+connect Slack, and
 install the always-on service — no config files to edit, no env vars to
 export. Walkthrough:
 [Setup](https://github.com/stratuslabs/agent/blob/main/docs/start/setup.md).
@@ -53,8 +54,8 @@ Full reference with every subcommand:
 | Flag | Purpose |
 | --- | --- |
 | `--soul <file>` | Run as the agent defined by a soul file (also `STRATUS_SOUL` / config `soul` key) |
-| `--provider` | `anthropic`, `openai`, or `demo` (offline, no account) |
-| `--model` | Model for real providers (anthropic default: `claude-opus-5`) |
+| `--provider` | `anthropic`, `openai`, `codex`, or `demo` (offline, no account) |
+| `--model` | Model for real providers (anthropic default: `claude-opus-5`, codex default: `gpt-5.5`) |
 | `--base-url` | Override the provider API base URL |
 | `--config <file>` | Load settings from a specific config file |
 | `--approvals` | `run`/`chat`: `always`, `ask`, or `never`. `serve`: `headless` (refuse gated calls) or `remote` (ask in Slack) |

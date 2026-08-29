@@ -11,7 +11,7 @@ ships — is specified in
 ## What one install brings
 
 Installing the CLI (`npm install -g @stratusagent/cli`) brings the whole
-runtime with it — these twelve packages are what you get, and you never
+runtime with it — these thirteen packages are what you get, and you never
 install them individually:
 
 - `@stratusagent/cli`, the `stratus` command: setup, chat, one-shot runs, the gateway, the dashboard
@@ -23,6 +23,7 @@ install them individually:
 - `@stratusagent/providers`, helpers for building model providers
 - `@stratusagent/provider-anthropic`, the Claude provider on the official Anthropic SDK
 - `@stratusagent/provider-claude-code`, the Claude subscription runtime on the Claude Agent SDK
+- `@stratusagent/provider-codex`, the ChatGPT/Codex runtime on the OpenAI Codex SDK, with kernel tools served over a loopback MCP endpoint
 - `@stratusagent/executors`, helpers for execution behavior
 - `@stratusagent/executor-local`, a concrete local child-process executor adapter
 - `@stratusagent/plugins`, the plugin host: reads a plugin's manifest without importing it, holds `setup()` to what that manifest declared, and turns a config block into running capability

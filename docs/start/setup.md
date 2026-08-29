@@ -24,10 +24,17 @@ digits to jump, Esc to go back.
   against the live API when the endpoint supports it — a rejected key is
   refused; an unreachable endpoint saves the key and verifies it on your
   first run. OpenAI-compatible services work like API keys, including local
-  models and proxies via a custom base URL.
+  models and proxies via a custom base URL. **Codex (ChatGPT)** works either
+  way too: pick the ChatGPT subscription (uses this machine's own
+  `codex login` sign-in — Stratus records the choice and never touches
+  codex's tokens) or paste an OpenAI API key, verified against the platform
+  and passed to codex as `CODEX_API_KEY`. Runs route through the Codex
+  harness with its native shell and web tools disabled, so it is the same
+  agent under the same kernel policy as every other provider.
 - **Models** — pick a **default** and a **fallback**, listed live from the
   provider APIs where possible (subscription sign-ins and offline setups fall
-  back to the known Claude lineup). If the default model errors mid-run, the
+  back to the known Claude lineup, and codex always lists its known harness
+  lineup — no endpoint serves it). If the default model errors mid-run, the
   run automatically retries on the fallback — even across providers.
 - **Agent** — name your agent (or accept a generated identity), describe
   their personality, and their soul file lands in `~/.stratus/agents/`, ready

@@ -1,12 +1,15 @@
 import {
   renderSystemPromptSections,
+  type ExecutionContext,
   type JsonObject,
   type ModelProvider,
   type ProviderPart,
   type ProviderRequest,
   type ProviderResponse,
+  type Session,
   type ToolCall,
   type ToolDescriptor,
+  type ToolResult,
 } from '@stratusagent/core';
 
 export interface ProviderResponseBuilder {
@@ -597,4 +600,133 @@ const isProviderResponse = (value: ProviderResponseInput): value is ProviderResp
   }
 
   return 'parts' in value && Array.isArray(value.parts);
+};
+
+// ---------------------------------------------------------------------------
+// Hosted-loop provider helpers
+//
+// Shared by every provider that wraps a harness owning its own agent loop
+// (`provider-claude-code`, `provider-codex`). These used to live in
+// `provider-claude-code`; they moved here when a second harness provider
+// needed the same rules, because a second hand-rolled copy of any of them
+// drifts from the first. `provider-claude-code` re-exports them, so the
+// documented import paths still work.
+// ---------------------------------------------------------------------------
+
+/**
+ * Executes one kernel tool call on behalf of a provider-hosted loop. The
+ * host owns approvals, events, allowlists, and the executor —
+ * AgentRunner.executeHostedToolCall is the canonical implementation.
+ */
+export type HostedToolExecutor = (
+  session: Session,
+  call: ToolCall,
+  context?: ExecutionContext,
+) => Promise<ToolResult>;
+
+const HOSTED_SIDE_EFFECTS = Symbol.for('stratus.hostedToolSideEffects');
+
+/** Marks an error as coming from a turn that had already executed kernel tools. */
+export const markHostedToolSideEffects = <T>(error: T): T => {
+  if (typeof error === 'object' && error !== null) {
+    (error as Record<PropertyKey, unknown>)[HOSTED_SIDE_EFFECTS] = true;
+  }
+  return error;
+};
+
+/**
+ * True when this error aborted a turn that had already executed kernel
+ * tools. Retrying such a request on another provider would repeat those
+ * side effects (a fact remembered twice, a command run twice), so
+ * fallback wrappers must rethrow instead of failing over.
+ */
+export const hasHostedToolSideEffects = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null
+  && (error as Record<PropertyKey, unknown>)[HOSTED_SIDE_EFFECTS] === true;
+
+// MCP tool names must match ^[a-zA-Z0-9_-]{1,64}$, so kernel names like
+// "demo.echo" are flattened; the original name travels with the caller.
+const sanitizeMcpToolName = (name: string): string => {
+  const cleaned = name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+  return cleaned.length > 0 ? cleaned : 'tool';
+};
+
+/**
+ * The MCP name each kernel tool is bridged under, keyed by the kernel's
+ * own dotted name.
+ *
+ * Exported because the mapping is needed in two directions and must not be
+ * derived twice: a bridge registers tools under these names, and streamed
+ * deltas arrive carrying them and have to be reported back to the kernel in
+ * its own naming. A second copy of the dedup rule would drift the first
+ * time two tools sanitize alike.
+ */
+export const bridgedToolNames = (descriptors: readonly ToolDescriptor[]): Map<string, string> => {
+  const used = new Set<string>();
+  const byKernelName = new Map<string, string>();
+  for (const descriptor of descriptors) {
+    const base = sanitizeMcpToolName(descriptor.name);
+    let name = base;
+    for (let suffix = 2; used.has(name); suffix += 1) {
+      name = `${base.slice(0, 60)}_${suffix}`;
+    }
+    used.add(name);
+    byKernelName.set(descriptor.name, name);
+  }
+  return byKernelName;
+};
+
+/**
+ * A session rendered as one prompt string for a harness that takes a single
+ * prompt per run: the whole conversation, latest user message last. Used
+ * when a harness session is fresh (or its stored session could not be
+ * resumed) and knows nothing yet.
+ */
+export const renderTranscriptPrompt = (request: ProviderRequest): string => {
+  const conversational = request.session.messages.filter(
+    (message) => message.role === 'user' || message.role === 'assistant' || message.role === 'tool',
+  );
+
+  if (conversational.length === 1 && conversational[0]?.role === 'user') {
+    return conversational[0].content;
+  }
+
+  const lines: string[] = ['Conversation so far:'];
+  for (const message of conversational) {
+    if (message.role === 'tool') {
+      lines.push(`[tool ${message.name ?? 'result'}] ${message.content}`);
+      continue;
+    }
+    // A tool call is part of the assistant's turn: without it, the next
+    // run would see a result with no record of what was asked (e.g. a
+    // memory id but not the remembered fact) and reason over half the
+    // history. Its runner message carries empty content, so skip that.
+    if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
+      for (const call of message.toolCalls) {
+        lines.push(`[assistant called tool ${call.toolName}] ${JSON.stringify(call.input)}`);
+      }
+      if (message.content.length === 0) {
+        continue;
+      }
+    }
+    lines.push(`[${message.role}] ${message.content}`);
+  }
+  lines.push('', 'Continue the conversation by replying to the latest user message.');
+  return lines.join('\n');
+};
+
+/**
+ * The newest user message, which is all a resumed harness session needs:
+ * the harness is holding everything before it. Falls back to the full
+ * transcript when there is no user message to isolate, so a caller can
+ * never end up sending nothing.
+ */
+export const latestUserMessagePrompt = (request: ProviderRequest): string => {
+  for (let index = request.session.messages.length - 1; index >= 0; index -= 1) {
+    const message = request.session.messages[index];
+    if (message?.role === 'user') {
+      return message.content;
+    }
+  }
+  return renderTranscriptPrompt(request);
 };

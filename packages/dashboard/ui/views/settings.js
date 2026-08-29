@@ -2,7 +2,7 @@ import { el } from '../lib/dom.js';
 import { api } from '../lib/api.js';
 import { refreshCore, store } from '../app.js';
 
-const PROVIDERS = ['anthropic', 'openai'];
+const PROVIDERS = ['anthropic', 'openai', 'codex'];
 
 /**
  * Bring a `<select>`'s options up to date without disturbing a choice.
@@ -83,7 +83,7 @@ export const renderSettings = (section) => {
     const provider = el('select', {}, ...PROVIDERS.map((name) => el('option', { value: name }, name)));
     const type = el('select', {},
       el('option', { value: 'api_key' }, 'API key'),
-      el('option', { value: 'oauth_token' }, 'Claude subscription token'));
+      el('option', { value: 'oauth_token' }, 'Subscription sign-in'));
     const value = el('input', { type: 'password', placeholder: 'paste the key' });
     const baseUrl = el('input', { placeholder: 'optional — a proxy or local endpoint' });
 
@@ -149,6 +149,7 @@ export const renderSettings = (section) => {
         el('label', {}, 'Key'), value,
         el('label', {}, 'Endpoint'), baseUrl,
         el('p', { class: 'field-note' }, 'A key is bound to the endpoint you save it with, and is never sent anywhere else.'),
+        el('p', { class: 'field-note' }, 'A subscription sign-in is a Claude Code setup token for anthropic. For codex it only records that this machine uses `codex login` — type anything (say, "chatgpt") as the value; it is never sent anywhere.'),
         el('div', { class: 'actions' }, verifyButton, saveButton),
       ),
       refresh() {
@@ -156,7 +157,7 @@ export const renderSettings = (section) => {
           el('div', { class: 'grow' },
             el('div', { class: 'title' }, entry.provider),
             el('div', { class: 'sub' }, entry.stored
-              ? `${entry.type === 'oauth_token' ? 'Claude subscription' : 'API key'}${entry.baseUrl ? ` · ${entry.baseUrl}` : ''}`
+              ? `${entry.type === 'oauth_token' ? (entry.provider === 'codex' ? 'ChatGPT sign-in (codex login)' : 'Claude subscription') : 'API key'}${entry.baseUrl ? ` · ${entry.baseUrl}` : ''}`
               : 'not signed in')),
           el('span', { class: `pill${entry.stored ? ' running' : ''}` }, entry.stored ? 'signed in' : 'none'),
         )));
