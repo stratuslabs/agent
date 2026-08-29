@@ -14,6 +14,7 @@ import {
   CLI_VERSION,
   createLogWriter,
   currentLogPosition,
+  eventDetail,
   formatEvent,
   truncateRedirectLogs,
   installService,
@@ -1635,7 +1636,7 @@ test('concurrent memory appends never clobber each other', async () => {
     ...Array.from({ length: 5 }, (_, i) => other.append('ava', `fact b${i}`)),
   ]);
 
-  const entries = await store.list('ava');
+  const { entries } = await store.list('ava');
   assert.equal(entries.length, 10);
   const contents = new Set(entries.map((entry) => entry.content));
   assert.equal(contents.size, 10);
@@ -3484,7 +3485,7 @@ test('memory reads dedupe by entry id', async () => {
   const raw = await readFile(path.join(dir, 'memory.jsonl'), 'utf8');
   await writeFile(path.join(dir, 'memory.jsonl'), raw + raw);
 
-  const entries = await store.list('ava');
+  const { entries } = await store.list('ava');
   assert.equal(entries.length, 1);
   assert.equal(entries[0]?.id, entry.id);
 });
@@ -4483,6 +4484,41 @@ test('recent records reach back through a rotated generation', async () => {
   const records = await readRecentRecords(dir, 10);
   assert.equal(records.length, 10);
   assert.deepEqual(records.map((record) => record.msg), Array.from({ length: 10 }, (_, i) => `line ${i}`));
+});
+
+test('the structured log names the memory entry a write or forget touched — and never its content', () => {
+  const completed = eventDetail({
+    type: 'tool.completed',
+    sessionId: 'sess-1',
+    result: {
+      callId: 'call-1',
+      toolName: 'memory.remember',
+      ok: true,
+      output: { remembered: true, id: 'ava:memory:abc' },
+    },
+  });
+  assert.deepEqual(completed, { tool: 'memory.remember', ok: true, entry: 'ava:memory:abc' });
+
+  const forgotten = eventDetail({
+    type: 'tool.completed',
+    sessionId: 'sess-1',
+    result: { callId: 'call-2', toolName: 'memory.forget', ok: true, output: { forgotten: true, id: 'ava:memory:abc' } },
+  });
+  assert.deepEqual(forgotten, { tool: 'memory.forget', ok: true, entry: 'ava:memory:abc' });
+
+  // Every other tool's output stays out of the trace, recall included —
+  // recall output is memory content.
+  const recalled = eventDetail({
+    type: 'tool.completed',
+    sessionId: 'sess-1',
+    result: {
+      callId: 'call-3',
+      toolName: 'memory.recall',
+      ok: true,
+      output: { results: [{ id: 'x', content: 'the secret fact' }], truncated: false },
+    },
+  });
+  assert.deepEqual(recalled, { tool: 'memory.recall', ok: true });
 });
 
 test('logs filters by agent and can emit the raw records', async () => {

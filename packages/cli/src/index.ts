@@ -57,8 +57,12 @@ import {
 } from '@stratusagent/provider-claude-code';
 import {
   agentIdWithSuffix,
+  createForgetTool,
+  createRecallTool,
   createRememberTool,
   defineAgent,
+  FORGET_TOOL_NAME,
+  MEMORY_TOOL_NAME,
   formatSoul,
   generateAgentName,
   parseSoul,
@@ -1315,7 +1319,7 @@ export const formatEvent = (event: StratusEvent): string | null => {
  * granted permission leaves no trace whatsoever. Still no tool input: what
  * was asked is here, what it was asked with is not.
  */
-const eventDetail = (event: StratusEvent): Record<string, unknown> | undefined => {
+export const eventDetail = (event: StratusEvent): Record<string, unknown> | undefined => {
   switch (event.type) {
     case 'session.updated':
       return { status: event.status };
@@ -1324,8 +1328,19 @@ const eventDetail = (event: StratusEvent): Record<string, unknown> | undefined =
     case 'tool.called':
     case 'tool.denied':
       return { tool: event.call.toolName };
-    case 'tool.completed':
-      return { tool: event.result.toolName, ok: event.result.ok };
+    case 'tool.completed': {
+      // A memory write or retirement names the entry it touched — the id
+      // is a reference, not content, and "when did the agent learn/drop
+      // this" is unanswerable later without it. The fact itself stays out
+      // of the trace, like every other tool input and output.
+      const output = event.result.output;
+      const entry = (event.result.toolName === MEMORY_TOOL_NAME || event.result.toolName === FORGET_TOOL_NAME)
+        && event.result.ok && typeof output === 'object' && output !== null && !Array.isArray(output)
+        && typeof output.id === 'string'
+        ? output.id
+        : undefined;
+      return { tool: event.result.toolName, ok: event.result.ok, ...(entry !== undefined ? { entry } : {}) };
+    }
     case 'tool.approval-requested':
       return { tool: event.call.toolName, risk: event.risk, requestId: event.requestId };
     case 'tool.approval-resolved':
@@ -1478,6 +1493,8 @@ const createAgentRuntime = async (
   const tools = new ToolRegistry();
   tools.register(createDemoTool());
   tools.register(createRememberTool(memory));
+  tools.register(createRecallTool(memory));
+  tools.register(createForgetTool(memory));
 
   // The same skills the daemon would serve, from the same directory, for
   // the same reason the plugins below match: a skill that routes in
@@ -2413,7 +2430,8 @@ export const slackAppManifest = (agentName: string): string => JSON.stringify({
 const DEFAULT_SOUL_STARTER = [
   'You are a helpful, warm generalist. Answer first, explain second, and',
   'keep replies short unless the question genuinely needs depth. Use',
-  'memory.remember for durable facts about the people you work with.',
+  'memory.remember for durable facts about the people you work with, and',
+  'memory.recall to look up what you know when a conversation calls for it.',
 ].join('\n');
 
 interface SetupState {
