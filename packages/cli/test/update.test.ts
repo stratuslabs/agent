@@ -237,6 +237,129 @@ test('every command migrates on first use of a newer build, and serve refuses ne
   assert.match(refused.output.stderr, /newer Stratus build/);
 });
 
+test('readServiceCommand does not mistake a node option operand for the entrypoint', async () => {
+  const home = await freshHome();
+  const scriptPath = path.join(home, 'lib', 'bin.js');
+  const env = {
+    platform: 'linux' as const,
+    homeDir: home,
+    cwd: home,
+    execPath: path.join(home, 'node'),
+    scriptPath,
+    // A node option whose value is its own argv element — exactly the
+    // shape execArgv copies into the unit verbatim.
+    execArgv: ['--require', path.join(home, 'preload.cjs')],
+    run: runningServiceRunner,
+  };
+  await installService(env, {});
+  const command = await readServiceCommand(env);
+  assert.equal(command?.scriptPath, scriptPath);
+});
+
+test('update refuses to rewrite the unit when the login setting cannot be determined', async () => {
+  const home = await freshHome();
+  // is-enabled answers garbage — a broken user bus, a timeout — so
+  // readServiceStatus reports runAtLogin undefined on systemd.
+  const undecidedRunner: ServiceRunner = async (command, args) => {
+    if (command === 'systemctl' && args.includes('is-active')) {
+      return { code: 0, stdout: 'active', stderr: '' };
+    }
+    if (command === 'systemctl' && args.includes('is-enabled')) {
+      return { code: 124, stdout: '', stderr: 'did not respond' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  await installService(
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: undecidedRunner },
+    {},
+  );
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceRunner: undecidedRunner,
+      packageVersionFetcher: async () => CLI_VERSION,
+    },
+  });
+  assert.equal(code, 1);
+  assert.match(output.stderr, /starts at login could not be determined/);
+  // Refused before anything had a side effect: the daemon was not stopped.
+  assert.ok(!output.stdout.includes('Stopping stratusd'), output.stdout);
+});
+
+test('update fails loudly when it cannot restore a deliberately stopped daemon', async () => {
+  const home = await freshHome();
+  const stoppedRunner: ServiceRunner = async (command, args) => {
+    if (command === 'systemctl' && args.includes('is-active')) {
+      return { code: 0, stdout: 'inactive', stderr: '' };
+    }
+    if (command === 'systemctl' && args.includes('is-enabled')) {
+      return { code: 0, stdout: 'enabled', stderr: '' };
+    }
+    if (command === 'systemctl' && args.includes('stop')) {
+      return { code: 1, stdout: '', stderr: 'stop refused' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  await installService(
+    { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: stoppedRunner },
+    {},
+  );
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      servicePlatform: 'linux',
+      serviceRunner: stoppedRunner,
+      packageVersionFetcher: async () => CLI_VERSION,
+    },
+  });
+  // The unit was rewritten and the daemon started, but the prior stopped
+  // state was not restored — a script must see that as a failure.
+  assert.equal(code, 1);
+  assert.match(output.stderr, /now RUNNING/);
+});
+
+test('update and --check treat state from a newer build as a refusal, before any side effect', async () => {
+  const home = await freshHome();
+  await runStateMigrations({ homeDir: home });
+  await writeFile(stateFilePath({ homeDir: home }), JSON.stringify({
+    schemaVersion: STATE_SCHEMA_VERSION + 1,
+    // Every known migration already applied — the case where pending-only
+    // logic would report "Nothing to do".
+    applied: ['0001-owner-only-state-files'],
+  }));
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: {},
+    serviceRunner: runningServiceRunner,
+    packageVersionFetcher: async () => CLI_VERSION,
+  };
+
+  const check = createStreams();
+  assert.equal(await runCli({ argv: ['update', '--check'], streams: check.streams, env }), 1);
+  assert.match(check.output.stdout, /NEWER build/);
+  assert.doesNotMatch(check.output.stdout, /Nothing to do/);
+
+  const full = createStreams();
+  const code = await runCli({ argv: ['update'], streams: full.streams, env });
+  assert.equal(code, 1);
+  assert.match(full.output.stderr, /newer Stratus build/);
+  assert.ok(!full.output.stdout.includes('Stopping stratusd'), 'refusal must come before the service stop');
+});
+
 test('doctor names a unit whose interpreter no longer exists', async () => {
   const home = await freshHome();
   await installService(

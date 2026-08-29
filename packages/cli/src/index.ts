@@ -220,6 +220,8 @@ export interface CliEnvironment {
   shutdownSignal?: AbortSignal;
   /** Runs launchctl/systemctl. Injected so tests never touch the real one. */
   serviceRunner?: ServiceRunner;
+  /** Service-manager platform override (tests) — which unit format and manager commands apply. */
+  servicePlatform?: NodeJS.Platform;
   /** Reports whether an optional package is installed. Injected so tests do not assert on their own node_modules. */
   packageResolver?: PackageResolver;
   /** Installs optional packages. Injected so tests never run npm. */
@@ -4616,6 +4618,7 @@ const serviceEnvFor = (env: CliEnvironment): ServiceEnvironment => ({
   ...(env.homeDir !== undefined ? { homeDir: env.homeDir } : {}),
   cwd: readWorkingDirectory(env),
   ...(env.serviceRunner !== undefined ? { run: env.serviceRunner } : {}),
+  ...(env.servicePlatform !== undefined ? { platform: env.servicePlatform } : {}),
 });
 
 /**
@@ -4828,6 +4831,13 @@ const runUpdate = async (
   const latest = await (env.packageVersionFetcher ?? defaultPackageVersionFetcher)(CLI_PACKAGE_NAME);
   const upgradeAvailable = latest !== undefined && compareVersions(latest, CLI_VERSION) > 0;
 
+  // A stamp from a newer build makes every later step wrong, not just the
+  // migration one: this build would migrate — and stop the daemon to do it —
+  // against a format it does not understand. Checked here, before anything
+  // has a side effect.
+  const stamp = await readStateStamp(env);
+  const stateNewer = stamp.schemaVersion > STATE_SCHEMA_VERSION;
+
   const status = await readServiceStatus(serviceEnv).catch(() => undefined);
   const unit = status?.installed ? await readServiceCommand(serviceEnv) : undefined;
   const unitNotes: string[] = [];
@@ -4848,7 +4858,9 @@ const runUpdate = async (
   out(latest === undefined
     ? '  latest      unknown — npm did not answer'
     : `  latest      ${latest}${upgradeAvailable ? ' — update available' : ' — up to date'}`);
-  out(`  state       schema ${(await readStateStamp(env)).schemaVersion}, ${pending.length === 0 ? 'no pending migrations' : `${pending.length} pending migration${pending.length === 1 ? '' : 's'}`}`);
+  out(`  state       schema ${stamp.schemaVersion}${stateNewer
+    ? ` — written by a NEWER build than this one (which understands ${STATE_SCHEMA_VERSION})`
+    : `, ${pending.length === 0 ? 'no pending migrations' : `${pending.length} pending migration${pending.length === 1 ? '' : 's'}`}`}`);
   out(`  service     ${status === undefined ? `no service manager for ${process.platform}` : status.installed ? (status.running ? 'installed, running' : 'installed, not running') : 'not installed'}`);
   for (const note of unitNotes) {
     out(`  unit        ${note}`);
@@ -4858,12 +4870,31 @@ const runUpdate = async (
     for (const migration of pending) {
       out(`  pending     ${migration.id} — ${migration.description}`);
     }
+    if (stateNewer) {
+      out('This build cannot update that state — upgrade the package itself (`npm install -g @stratusagent/cli`).');
+      return 1;
+    }
     const actionable = upgradeAvailable || pending.length > 0 || unitNotes.length > 0;
     out(actionable
       ? 'Run `stratus update` to apply the above.'
       : 'Nothing to do.');
     // Actionable exits 1, so a cron job or script can notice.
     return actionable ? 1 : 0;
+  }
+
+  if (stateNewer) {
+    writeLine(streams.stderr, newerStateMessage(stamp.schemaVersion));
+    return 1;
+  }
+
+  if (status?.installed && status.runAtLogin === undefined) {
+    // The rewrite has to re-state the login setting, and the manager could
+    // not say what it currently is. Guessing would silently convert a
+    // deliberate --no-login install into one that starts at login (or the
+    // reverse) on a transient status failure — refuse instead, before
+    // anything has been stopped.
+    writeLine(streams.stderr, 'Not updating: whether stratusd starts at login could not be determined (the service manager did not answer), and rewriting the unit would have to guess. Check `stratus service status` and retry.');
+    return 1;
   }
 
   const wasRunning = status?.running === true;
@@ -4925,9 +4956,14 @@ const runUpdate = async (
       // installService starts the daemon; a service that was deliberately
       // stopped before the update stays that way.
       const stopped = await stopService(serviceEnv);
-      out(stopped.ok
-        ? 'stratusd was not running before the update, so it was left stopped.'
-        : 'stratusd was not running before the update, but stopping it again failed — check `stratus service status`.');
+      if (!stopped.ok) {
+        // The update itself succeeded, but the user's prior state was not
+        // restored: an intentionally stopped daemon is now running. That
+        // is a failure a script must see, not a footnote.
+        writeLine(streams.stderr, 'stratusd was not running before the update, and stopping it again failed — it is now RUNNING. Stop it with `stratus service stop`.');
+        return 1;
+      }
+      out('stratusd was not running before the update, so it was left stopped.');
     }
   } else if (status !== undefined) {
     out('No service installed — nothing to rewrite. `stratus service install` sets one up.');

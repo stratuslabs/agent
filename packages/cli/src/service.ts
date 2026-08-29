@@ -361,7 +361,15 @@ export const readServiceCommand = async (env: ServiceEnvironment = {}): Promise<
   if (argv.length === 0) {
     return undefined;
   }
-  const scriptPath = argv.slice(1).find((argument) => !argument.startsWith('-'));
+  // The entrypoint is the argument just before `serve` — that is the shape
+  // `serviceDefinition` writes: node, its flags, the script, the
+  // subcommand. "First non-flag after node" is not good enough, because a
+  // node option can take its value as a separate element (`--require
+  // /path/preload.cjs`), and execArgv is copied into the unit verbatim.
+  const serveIndex = argv.indexOf('serve');
+  const scriptPath = serveIndex > 1
+    ? argv[serveIndex - 1]
+    : argv.slice(1).find((argument) => !argument.startsWith('-'));
   const configIndex = argv.indexOf('--config');
   const configPath = configIndex !== -1 ? argv[configIndex + 1] : undefined;
   return {
