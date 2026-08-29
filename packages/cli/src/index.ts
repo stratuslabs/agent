@@ -1557,33 +1557,45 @@ export const warnOnCredentialOverride = async (
   if (runtime.provider === 'demo') {
     return;
   }
-  const stored = (await loadCredentials(env)).anthropic;
-  if (stored?.type !== 'oauth_token') {
-    return;
-  }
+  const credentials = await loadCredentials(env);
+  const processEnv = readProcessEnv(env);
   // The resolver records the variable that actually won — guessing it here
   // would name the wrong one whenever a custom apiKeyEnv supplied the key,
   // sending the reader to unset something that was never the cause.
-  const primary = runtime.provider === 'anthropic' && runtime.apiKey ? runtime.apiKeyEnvVar : undefined;
-  // A fallback demoted the same way costs exactly as much, and only bites
-  // once the primary is already failing — the worst moment to discover it.
-  // The fallback path consults the provider's own conventional variable.
-  const processEnv = readProcessEnv(env);
-  const fallbackVar = runtime.fallback?.provider === 'anthropic'
-    && runtime.fallback.apiKey !== undefined
-    && readNonEmptyString(processEnv.ANTHROPIC_API_KEY) === runtime.fallback.apiKey
-    ? 'ANTHROPIC_API_KEY'
+  const primaryOverride = runtime.apiKey !== undefined
+    ? { provider: runtime.provider, envVar: runtime.apiKeyEnvVar }
     : undefined;
-  const culprit = primary ?? fallbackVar;
-  if (!culprit) {
-    return;
+  // Both subscription sign-ins demote the same way: a Claude setup token
+  // and the codex ChatGPT marker each lose to an environment API key, and
+  // the run otherwise looks identical while billing per token.
+  for (const target of ['anthropic', 'codex'] as const) {
+    if (credentials[target]?.type !== 'oauth_token') {
+      continue;
+    }
+    const planName = target === 'anthropic'
+      ? 'Claude subscription sign-in'
+      : 'ChatGPT (codex login) sign-in';
+    const primary = primaryOverride?.provider === target ? primaryOverride.envVar : undefined;
+    // A fallback demoted the same way costs exactly as much, and only bites
+    // once the primary is already failing — the worst moment to discover it.
+    // The fallback path consults the provider's own conventional variable.
+    const conventionalVar = defaultApiKeyEnvName(target);
+    const fallbackVar = runtime.fallback?.provider === target
+      && runtime.fallback.apiKey !== undefined
+      && readNonEmptyString(processEnv[conventionalVar]) === runtime.fallback.apiKey
+      ? conventionalVar
+      : undefined;
+    const culprit = primary ?? fallbackVar;
+    if (!culprit) {
+      continue;
+    }
+    writeLine(
+      streams.stderr,
+      `Warning: ${culprit} in your environment outranks the ${planName} saved by \`stratus setup\`, `
+      + `so ${primary ? 'this run is' : 'a fallback retry would be'} billed per token instead of through your plan. `
+      + 'Unset it to use the subscription, or run `stratus doctor` to see everything that is being overridden.',
+    );
   }
-  writeLine(
-    streams.stderr,
-    `Warning: ${culprit} in your environment outranks the Claude subscription sign-in saved by \`stratus setup\`, `
-    + `so ${primary ? 'this run is' : 'a fallback retry would be'} billed per token instead of through your plan. `
-    + 'Unset it to use the subscription, or run `stratus doctor` to see everything that is being overridden.',
-  );
 };
 
 const createApprovalPolicy = (
@@ -5463,6 +5475,44 @@ export const runSkills = async (
   return 0;
 };
 
+/**
+ * The provider/model a newly created soul pins. Frontmatter pins what a run
+ * from this directory would actually use: env vars outrank the active
+ * config file (project-local or explicit first, global otherwise), and no
+ * provider anywhere falls back to demo — the exact precedence of stratus
+ * run. Demo produces no model at all: the soul keeps following the
+ * machine's configuration instead of demanding credentials nothing has
+ * signed in for. The active config's model was written for the provider
+ * named in that config, so it only travels into the soul when they still
+ * match; otherwise the selected provider's own default model stands in.
+ *
+ * Exported for tests: the interactive path that consumes it needs a TTY.
+ */
+export const soulPinForNewAgent = (
+  activeConfig: StratusConfigFile,
+  processEnv: NodeJS.ProcessEnv,
+): { provider: StratusProviderName; model?: string } => {
+  // The map already validates, so the value is a provider name; the cast
+  // only undoes `readNonEmptyString`'s widening to `string`.
+  const envProvider = readNonEmptyString(
+    processEnv.STRATUS_PROVIDER,
+    (value) => parseProviderName(value, 'STRATUS_PROVIDER'),
+  ) as StratusProviderName | undefined;
+  const provider = envProvider ?? activeConfig.provider ?? 'demo';
+  if (provider === 'demo') {
+    return { provider };
+  }
+  const configModelApplies = (activeConfig.provider ?? 'openai') === provider;
+  const model = readNonEmptyString(processEnv.STRATUS_MODEL)
+    ?? (configModelApplies ? activeConfig.model : undefined)
+    ?? (provider === 'openai'
+      ? DEFAULT_OPENAI_MODEL
+      : provider === 'codex'
+        ? DEFAULT_CODEX_MODEL
+        : DEFAULT_ANTHROPIC_MODEL);
+  return { provider, model };
+};
+
 export const runAgentNew = async (
   command: ParsedAgentNewCommand,
   streams: CliStreams,
@@ -5497,28 +5547,16 @@ export const runAgentNew = async (
 
       const persona = instructions || DEFAULT_SOUL_STARTER;
 
-      // Frontmatter pins what a run from this directory would actually use:
-      // env vars outrank the active config file (project-local or explicit
-      // first, global otherwise), and no provider anywhere falls back to
-      // demo — the exact precedence of stratus run. Demo produces no pin
-      // at all: the soul keeps following the machine's configuration
-      // instead of demanding credentials nothing has signed in for.
       const processEnv = readProcessEnv(env);
       // Creating an agent must not be blocked by a broken config — it only
       // feeds the soul's provider/model hint, so fall back to defaults.
       const { location: configLocation, config: activeConfig } = await discoverActiveConfig(env, (message) => {
         writeLine(streams.stdout, `Note: ${message}.`);
       });
-      const soulProvider = readNonEmptyString(processEnv.STRATUS_PROVIDER, (value) => parseProviderName(value, 'STRATUS_PROVIDER'))
-        ?? activeConfig.provider
-        ?? 'demo';
-      // The active config's model was written for the provider named in
-      // that config; it only travels into the soul when they still match.
-      const configModelApplies = (activeConfig.provider ?? 'openai') === soulProvider;
-      const soulModel = readNonEmptyString(processEnv.STRATUS_MODEL)
-        ?? (configModelApplies ? activeConfig.model : undefined)
-        ?? (soulProvider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL);
-      const soulPin = soulProvider !== 'demo' ? { provider: soulProvider, model: soulModel } : {};
+      const { provider: soulProvider, model: soulModel } = soulPinForNewAgent(activeConfig, processEnv);
+      const soulPin = soulProvider !== 'demo' && soulModel !== undefined
+        ? { provider: soulProvider, model: soulModel }
+        : {};
 
       const claimed = await claimSoulFile(
         env,

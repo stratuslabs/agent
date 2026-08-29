@@ -238,6 +238,45 @@ test('kernel tools are served over a loopback MCP endpoint the codex process can
   ]);
 });
 
+test('maxTurns bounds the inner loop: calls past the budget are refused, not executed', async () => {
+  // Codex has no native turn cap, so the kernel's limit is enforced at the
+  // tool endpoint — a call past the budget comes back as a tool error with
+  // nothing executed, and the loop finishes with what it has.
+  const executed: string[] = [];
+  const runTurn: CodexRunTurn = (params) => (async function* (): AsyncGenerator<CodexThreadEvent> {
+    const config = params.clientOptions.config as CapturedConfig;
+    const server = config.mcp_servers?.stratus;
+    assert.ok(server);
+    const call = async (id: number) => {
+      const response = await fetch(server.url, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${params.clientOptions.env[MCP_TOKEN_ENV_VAR]}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'demo_echo', arguments: {} } }),
+      });
+      return (await response.json() as { result: { isError?: boolean; content: Array<{ text: string }> } }).result;
+    };
+    const first = await call(1);
+    assert.notEqual(first.isError, true, 'the first call is inside the budget');
+    const second = await call(2);
+    assert.equal(second.isError, true, 'the second call must be refused');
+    assert.match(second.content[0]!.text, /Turn budget exhausted/);
+    yield { type: 'item.completed', item: { id: 'm1', type: 'agent_message', text: 'stopping here' } };
+    yield { type: 'turn.completed' };
+  })();
+
+  const response = await createCodexProvider({
+    runTurn,
+    maxTurns: 1,
+    executeTool: async (_session, call) => {
+      executed.push(call.toolName);
+      return { callId: call.id, toolName: call.toolName, ok: true, output: null };
+    },
+  }).generate({ session: createSession(), tools: [{ name: 'demo.echo' }] });
+
+  assert.deepEqual(executed, ['demo.echo'], 'only the budgeted call may execute');
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'stopping here' }]);
+});
+
 test('without an executor the runtime stays text-only', async () => {
   const { runTurn, calls } = createFakeRunTurn(successEvents('Hi.'));
   await createCodexProvider({ runTurn }).generate({

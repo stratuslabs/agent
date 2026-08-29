@@ -41,6 +41,9 @@ export type CodexToolExecutor = HostedToolExecutor;
 
 const DEFAULT_IDLE_TIMEOUT_MS = 600_000;
 
+/** Hosted tool calls per generate when the host sets no explicit budget. */
+const DEFAULT_TOOL_MAX_TURNS = 8;
+
 // ---------------------------------------------------------------------------
 // The kernel-tool MCP endpoint
 //
@@ -413,6 +416,14 @@ export interface CodexProviderConfig {
   executeTool?: CodexToolExecutor;
   /** Path to a specific codex executable (the SDK's bundled one otherwise). */
   codexPathOverride?: string;
+  /**
+   * Hosted tool calls allowed per generate. Codex has no native turn cap,
+   * so the limit is enforced where the kernel holds the loop anyway — the
+   * tool endpoint: a call past the budget is refused as a tool error, not
+   * executed, and codex finishes with what it has. Defaults to 8, the same
+   * budget the Claude Code runtime gives its inner loop.
+   */
+  maxTurns?: number;
   /** Test injection point; defaults to the real Codex SDK. */
   runTurn?: CodexRunTurn;
   /**
@@ -526,6 +537,7 @@ export const createCodexProvider = ({
   systemPrompt,
   executeTool,
   codexPathOverride,
+  maxTurns,
   runTurn = runTurnWithSdk,
   idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
   onResumeFailed,
@@ -568,8 +580,22 @@ export const createCodexProvider = ({
     };
 
     let hostedToolRuns = 0;
+    const toolBudget = maxTurns ?? DEFAULT_TOOL_MAX_TURNS;
     const countedExecute: CodexToolExecutor | undefined = executeTool
       ? async (session, call, context) => {
+          // The budget is the kernel's max-turns limit, enforced at the one
+          // gate every codex tool call passes: past it, the call is refused
+          // (a tool error, with nothing executed and no side effects), so
+          // the inner loop is bounded the same way the outer runner's is.
+          if (hostedToolRuns >= toolBudget) {
+            return {
+              callId: call.id,
+              toolName: call.toolName,
+              ok: false,
+              output: null,
+              error: `Turn budget exhausted: this run already made ${toolBudget} hosted tool call${toolBudget === 1 ? '' : 's'}. Answer with what you have.`,
+            };
+          }
           hostedToolRuns += 1;
           activeHostedTools += 1;
           suspendIdleTimer();

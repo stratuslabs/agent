@@ -28,6 +28,8 @@ import {
   parseCommand,
   resolveRuntimeConfig,
   runCli,
+  soulPinForNewAgent,
+  warnOnCredentialOverride,
   readRecentRecords,
   slackAppManifest,
   tailLog,
@@ -4099,6 +4101,67 @@ test('a run warns when an environment key overrides the subscription sign-in', a
   });
 
   assert.match(output.stderr, /ANTHROPIC_API_KEY in your environment outranks the Claude subscription sign-in/);
+});
+
+test('an environment key demoting the codex ChatGPT sign-in gets the same cost warning', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ codex: { type: 'oauth_token', value: 'chatgpt' } }),
+  );
+
+  // The resolved runtime an env-key run produces: the marker lost to
+  // CODEX_API_KEY, and the resolver recorded which variable won.
+  const { streams, output } = createStreams();
+  await warnOnCredentialOverride(
+    { provider: 'codex', model: 'gpt-5.5', apiKey: 'sk-from-env', apiKeyEnvVar: 'CODEX_API_KEY' },
+    streams,
+    { homeDir: home, processEnv: { CODEX_API_KEY: 'sk-from-env' } },
+  );
+  assert.match(output.stderr, /CODEX_API_KEY in your environment outranks the ChatGPT \(codex login\) sign-in/);
+  assert.match(output.stderr, /billed per token/);
+
+  // A codex fallback demoted the same way warns too — it only bites once
+  // the primary is already failing, the worst moment to discover it.
+  const fallbackStreams = createStreams();
+  await warnOnCredentialOverride(
+    {
+      provider: 'anthropic',
+      model: 'claude-opus-5',
+      authToken: 'sk-ant-oat',
+      fallback: { provider: 'codex', model: 'gpt-5.5', apiKey: 'sk-from-env' },
+    },
+    fallbackStreams.streams,
+    { homeDir: home, processEnv: { CODEX_API_KEY: 'sk-from-env' } },
+  );
+  assert.match(fallbackStreams.output.stderr, /CODEX_API_KEY in your environment outranks the ChatGPT \(codex login\) sign-in/);
+  assert.match(fallbackStreams.output.stderr, /a fallback retry would be/);
+});
+
+test('a new agent on a codex machine pins the codex default model, not a Claude one', async () => {
+  // The interactive creation path pins what a run from this directory
+  // would use; before the codex arm existed here, a codex machine got a
+  // soul pinned to provider codex with claude-opus-5 — an invalid model
+  // for every later run.
+  assert.deepEqual(
+    soulPinForNewAgent({}, { STRATUS_PROVIDER: 'codex' }),
+    { provider: 'codex', model: 'gpt-5.5' },
+  );
+  assert.deepEqual(
+    soulPinForNewAgent({ provider: 'codex' }, {}),
+    { provider: 'codex', model: 'gpt-5.5' },
+  );
+  // A config model written for codex travels; another provider's does not.
+  assert.deepEqual(
+    soulPinForNewAgent({ provider: 'codex', model: 'gpt-5.4' }, {}),
+    { provider: 'codex', model: 'gpt-5.4' },
+  );
+  assert.deepEqual(
+    soulPinForNewAgent({ provider: 'openai', model: 'gpt-4.1-mini' }, { STRATUS_PROVIDER: 'codex' }),
+    { provider: 'codex', model: 'gpt-5.5' },
+  );
+  assert.deepEqual(soulPinForNewAgent({}, {}), { provider: 'demo' });
 });
 
 test('doctor names the custom variable that actually supplied the key', async () => {

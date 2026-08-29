@@ -2515,6 +2515,10 @@ export const createRuntimeProvider = (
       ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
       ...(config.codexRunTurn ? { runTurn: config.codexRunTurn } : {}),
       ...(executeTool ? { executeTool } : {}),
+      // Codex has no native turn cap, so the provider enforces the same
+      // limit as a hosted-tool budget — the inner loop consumes all tool
+      // calls inside one generate, and the outer runner never sees them.
+      ...(maxTurns !== undefined ? { maxTurns } : {}),
     });
   }
 
