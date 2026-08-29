@@ -334,15 +334,25 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
     // enters, and neither does this package's.
     async execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue> {
       const client = state.connected ? state.client : undefined;
-      const current = state.tools.get(registeredName);
-      if (!client || !current) {
+      if (!client) {
         throw new Error(
           `MCP server ${state.spec.name} is not connected; ${registeredName} is unavailable until it comes back.`,
         );
       }
+      // Identity, not equality, against the live map: syncTools keeps the
+      // same descriptor object across a reconnect exactly when nothing
+      // about the tool changed. A call can be held between issue and
+      // execution — parked on a human's approval — and a reconnect that
+      // swapped the definition underneath it must fail the call rather
+      // than run the replacement with input approved for the original.
+      if (state.tools.get(registeredName) !== info) {
+        throw new Error(
+          `${registeredName} changed on MCP server ${state.spec.name} after this call was issued — the server now advertises a different definition, or none. Call it again to run the updated tool.`,
+        );
+      }
       let result;
       try {
-        result = await client.callTool({ name: current.mcpName, arguments: input }, undefined, {
+        result = await client.callTool({ name: info.mcpName, arguments: input }, undefined, {
           timeout: state.spec.callTimeoutMs,
           ...(context?.signal ? { signal: context.signal } : {}),
         });
@@ -357,7 +367,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
       }
       return normalizeCallResult(result, {
         server: state.spec.name,
-        tool: current.mcpName,
+        tool: info.mcpName,
         agentId: session.agent.id,
         ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
       });
@@ -452,6 +462,11 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
           || existing.description !== info.description
           || JSON.stringify(existing.parameters) !== JSON.stringify(info.parameters));
       if (existing !== undefined && !changed) {
+        // The identical descriptor keeps its identity across the
+        // reconnect, on purpose: the proxy's staleness check compares the
+        // object it captured against this map, and only an actual change
+        // may fail a call that was issued — or approved — before it.
+        next.set(registered, existing);
         continue;
       }
       if (changed) {

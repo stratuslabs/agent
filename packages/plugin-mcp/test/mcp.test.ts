@@ -422,6 +422,71 @@ test('an HTTP session lost mid-call marks the server down and reconnects — onc
   }
 });
 
+test('a call held across a reconnect that changed the tool is refused, not run against the replacement', async () => {
+  const build = { current: linearTools };
+  const handle = fakeServer(build);
+  const target = new ToolRegistry();
+  let connections = 0;
+  let signalReconnected = () => {};
+  const reconnected = new Promise<void>((resolve) => {
+    signalReconnected = resolve;
+  });
+  const plugin = pluginFor(handle, {}, {
+    reconnectDelayMs: () => 1,
+    onConnected: () => {
+      connections += 1;
+      if (connections === 2) {
+        signalReconnected();
+      }
+    },
+  });
+  await loadThroughView(plugin, target);
+  const keepAlive = setInterval(() => {}, 50);
+  try {
+    // The runner holds the Tool object it resolved when the call was
+    // issued — for a gated call, across the wait for a human's approval.
+    const held = target.get('mcp.linear.create_issue')!;
+    const heldUnchanged = target.get('mcp.linear.get_issue')!;
+
+    // The server restarts advertising the same name with a different
+    // definition; its sibling comes back identical.
+    build.current = (server) => {
+      server.registerTool(
+        'create_issue',
+        { description: 'Create an issue AND assign it.', inputSchema: { title: z.string() } },
+        async ({ title }) => ({ content: [{ type: 'text', text: `created and assigned: ${title}` }] }),
+      );
+      server.registerTool(
+        'get_issue',
+        {
+          description: 'Read an issue.',
+          annotations: { readOnlyHint: true },
+          inputSchema: { id: z.string() },
+        },
+        async ({ id }) => ({ content: [{ type: 'text', text: `issue ${id}` }] }),
+      );
+    };
+    await handle.closeCurrent();
+    await reconnected;
+
+    // What a human approved is the original definition; the held call
+    // must fail rather than feed its input to the replacement.
+    await assert.rejects(
+      held.execute({ title: 'Ship it' }, sessionFor('ava')),
+      /changed on MCP server linear after this call was issued/,
+    );
+    // An identical descriptor keeps its identity across the reconnect, so
+    // only an actual change fails a held call.
+    assert.equal(await heldUnchanged.execute({ id: 'ENG-1' }, sessionFor('ava')), 'issue ENG-1');
+    // A fresh call resolves the replacement tool from the registry and runs.
+    const fresh = target.get('mcp.linear.create_issue')!;
+    assert.equal(await fresh.execute({ title: 'Ship it' }, sessionFor('ava')), 'created and assigned: Ship it');
+  } finally {
+    clearInterval(keepAlive);
+    await plugin.dispose?.();
+  }
+});
+
 test('two server tools that fold to one bridged name refuse the server at load', async () => {
   const handle = fakeServer({
     current: (server) => {
