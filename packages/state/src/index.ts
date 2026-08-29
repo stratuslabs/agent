@@ -801,7 +801,14 @@ export const readStateStamp = async (env: StateEnvironment): Promise<StateStamp>
 
 const writeStateStamp = async (env: StateEnvironment, stamp: StateStamp): Promise<void> => {
   await mkdir(stratusHomePath(env), { recursive: true });
-  await writeFile(stateFilePath(env), `${JSON.stringify(stamp, null, 2)}\n`);
+  // Atomically, via rename: `writeFile` truncates before it writes, so a
+  // crash in between would leave partial JSON — which reads as schema 0,
+  // exactly the state that lets an older binary past the newer-schema
+  // refusal. A rename either lands the whole stamp or leaves the old one.
+  const target = stateFilePath(env);
+  const temp = `${target}.tmp-${randomUUID()}`;
+  await writeFile(temp, `${JSON.stringify(stamp, null, 2)}\n`);
+  await rename(temp, target);
 };
 
 /** The refusal line, phrased for the person who just downgraded without meaning to. */

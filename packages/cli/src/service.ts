@@ -545,6 +545,12 @@ export const startService = async (env: ServiceEnvironment = {}): Promise<Servic
   }
   const run = runnerFor(env);
   if (platform === 'systemd') {
+    // Best-effort, before the restart: the unit file on disk may not be
+    // the definition the manager has loaded — a hand edit, or an update
+    // rolling back a failed rewrite — and `restart` alone runs the loaded
+    // one. A reload that fails does not block the start; the restart's
+    // own result is the answer.
+    await run('systemctl', ['--user', 'daemon-reload']);
     const result = await run('systemctl', ['--user', 'restart', SYSTEMD_UNIT]);
     return result.code === 0
       ? { ok: true, messages: ['stratusd started.'] }

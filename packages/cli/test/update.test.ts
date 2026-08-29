@@ -13,6 +13,7 @@ import {
   readServiceStatus,
   runCli,
   serviceUnitPath,
+  startService,
   type ServiceRunner,
 } from '../src/index.ts';
 import {
@@ -413,12 +414,11 @@ test('a migration failure after the service stop restarts the daemon on its prev
     { platform: 'linux', homeDir: home, cwd: home, execPath: path.join(home, 'node'), scriptPath: path.join(home, 'bin.js'), execArgv: [], run: runner },
     {},
   );
-  // Make the stamp unwritable so runStateMigrations throws after the stop:
-  // a symlink into a directory that does not exist reads as ENOENT (an
-  // unversioned home) but fails every write — works whoever runs the test,
-  // root included, where permission bits would not.
-  await mkdir(path.dirname(stateFilePath({ homeDir: home })), { recursive: true });
-  await symlink(path.join(home, 'no-such-dir', 'state.json'), stateFilePath({ homeDir: home }));
+  // Make the migration itself throw after the stop: a self-referential
+  // symlink makes the owner-only migration's stat fail with ELOOP — works
+  // whoever runs the test, root included, where permission bits would not.
+  await mkdir(path.dirname(credentialsPath({ homeDir: home })), { recursive: true });
+  await symlink(credentialsPath({ homeDir: home }), credentialsPath({ homeDir: home }));
 
   const { streams, output } = createStreams();
   const code = await runCli({
@@ -565,6 +565,21 @@ test('update --check flags an entrypoint that exists but is not the one this she
   assert.equal(code, 1, output.stdout);
   assert.match(output.stdout, /unit runs entrypoint/);
   assert.doesNotMatch(output.stdout, /Nothing to do/);
+});
+
+test('starting a systemd service reloads the manager first, so the unit on disk is the one that runs', async () => {
+  const home = await freshHome();
+  const calls: string[] = [];
+  const runner: ServiceRunner = async (command, args) => {
+    calls.push(`${command} ${args.join(' ')}`);
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const result = await startService({ platform: 'linux', homeDir: home, run: runner });
+  assert.equal(result.ok, true);
+  const reloadAt = calls.findIndex((call) => call.includes('daemon-reload'));
+  const restartAt = calls.findIndex((call) => call.includes('restart'));
+  assert.ok(reloadAt !== -1 && restartAt !== -1, calls.join('\n'));
+  assert.ok(reloadAt < restartAt, 'daemon-reload must precede the restart — restart alone runs the previously loaded definition');
 });
 
 test('doctor names a unit whose interpreter no longer exists', async () => {

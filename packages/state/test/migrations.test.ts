@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -37,6 +37,9 @@ test('running migrations stamps the home directory and a second run has nothing 
   // The stamp is a real file an operator can read.
   const onDisk = JSON.parse(await readFile(stateFilePath(env), 'utf8')) as { schemaVersion: number };
   assert.equal(onDisk.schemaVersion, STATE_SCHEMA_VERSION);
+  // Written atomically via rename: no temp-file debris left behind.
+  const stateDir = path.dirname(stateFilePath(env));
+  assert.deepEqual((await readdir(stateDir)).filter((name) => name.includes('.tmp-')), []);
 
   assert.deepEqual(await runStateMigrations(env), []);
   assert.deepEqual(await pendingStateMigrations(env), []);
