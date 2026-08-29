@@ -15,8 +15,9 @@ presence — not a stateless chatbot. The runtime underneath is a tiny,
 readable TypeScript kernel; everything optional is a plugin you add only
 when you want it.
 
-If a chatbot is a *session*, a Stratus agent is a *colleague*: it remembers
-tomorrow what you told it today, in every channel it lives in.
+A chatbot forgets you when the tab closes. A Stratus agent remembers
+tomorrow what you told it today — in the terminal, in Slack, everywhere it
+lives.
 
 ## Quickstart
 
@@ -26,8 +27,8 @@ stratus setup     # sign in, create your first agent, connect Slack — one menu
 stratus chat      # talk; the conversation persists
 ```
 
-No account yet? `stratus run "say hello"` works offline on the built-in
-demo provider. Needs Node 22.13+ — details in
+No API key or provider sign-in yet? `stratus run "say hello"` works
+offline on the built-in demo provider. Needs Node 22.13+ — details in
 [Installation](docs/start/installation.md).
 
 ## What your agents can do
@@ -49,7 +50,7 @@ Providers: Claude via the official Anthropic SDK, Claude subscription
 (Pro/Max) via the Claude Agent SDK, or any OpenAI-compatible API — with a
 fallback model that catches mid-run errors, even across providers.
 
-## Agents are people
+## Feels like a teammate
 
 An agent's whole identity lives in a **soul file** — frontmatter for the
 structured parts, prose for the personality:
@@ -92,15 +93,6 @@ The trust model behind that is in
 [Plugins](docs/concepts/plugins.md) and
 [Security](docs/concepts/security.md); the design itself in
 [`docs/architecture/`](docs/architecture/stratus-v2.md).
-
-## What Stratus is not (yet)
-
-Early, and honest about it: the core loop, the gateway, Slack, permissions,
-tools, skills, schedules, MCP, and the dashboard are real today. Not yet a
-production multi-tenant platform — remote executors, retries/queues, the
-macOS app, deployment profiles, and per-agent isolation are
-[on the roadmap](docs/roadmap/README.md), in that spirit of small kernel,
-capability as plugins.
 
 ## Documentation
 

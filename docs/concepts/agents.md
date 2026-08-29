@@ -1,7 +1,6 @@
-# Agents are people
+# Agents
 
-Stratus agents are designed to feel like a person you work with, not a
-stateless bot:
+Stratus agents are designed to work like a teammate, not a stateless bot:
 
 - **One identity everywhere.** An agent's memory is keyed to the agent —
   never to a session or channel — so what they learn in one thread they
