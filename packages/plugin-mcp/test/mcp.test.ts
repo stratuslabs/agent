@@ -543,6 +543,145 @@ test('a server that pages tools/list forever is refused as unreachable instead o
   }
 });
 
+test('an empty-string pagination cursor is passed back verbatim, not dropped as falsy', async () => {
+  const transportFor = async (): Promise<Transport> => {
+    const server = new Server({ name: 'pager', version: '1.0.0' }, { capabilities: { tools: {} } });
+    server.setRequestHandler(ListToolsRequestSchema, async (request) => {
+      // A compliant server may hand out any string as a cursor, "" included.
+      // Dropped on truthiness, the client refetches this first page forever.
+      if (request.params?.cursor === '') {
+        return { tools: [{ name: 'second', inputSchema: { type: 'object' as const } }] };
+      }
+      return { tools: [{ name: 'first', inputSchema: { type: 'object' as const } }], nextCursor: '' };
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    return clientTransport;
+  };
+  const target = new ToolRegistry();
+  const plugin = createMcpPlugin(
+    { servers: { pager: { url: 'http://127.0.0.1:9/unused' } } },
+    { transportFor, warn: () => {}, log: () => {}, reconnectDelayMs: () => 3_600_000 },
+  );
+  await loadThroughView(plugin, target);
+  try {
+    assert.deepEqual(
+      target.list().map((tool) => tool.name).sort(),
+      ['mcp.pager.first', 'mcp.pager.second'],
+    );
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('discovery shares one connect budget across pages instead of resetting it per request', async () => {
+  // Distinct cursors on every page, so only the deadline can end the walk —
+  // and a fake clock that leaps forward on each read, so time "passes"
+  // without the test waiting on anything.
+  const transportFor = async (): Promise<Transport> => {
+    const server = new Server({ name: 'slowpager', version: '1.0.0' }, { capabilities: { tools: {} } });
+    let page = 0;
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
+      page += 1;
+      return { tools: [], nextCursor: `page-${page}` };
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    return clientTransport;
+  };
+  let clock = 0;
+  const warnings: string[] = [];
+  const plugin = createMcpPlugin(
+    { servers: { slowpager: { url: 'http://127.0.0.1:9/unused' } } },
+    {
+      transportFor,
+      warn: (message) => warnings.push(message),
+      log: () => {},
+      reconnectDelayMs: () => 3_600_000,
+      now: () => {
+        const at = clock;
+        clock += 8_000;
+        return at;
+      },
+    },
+  );
+  const target = new ToolRegistry();
+  await loadThroughView(plugin, target);
+  try {
+    assert.equal(target.list().length, 0);
+    // With a fresh budget per page, this server's instant pages would run
+    // into the page-count guard instead — a different refusal.
+    assert.match(
+      warnings.find((message) => message.includes('slowpager')) ?? '',
+      /did not finish tool discovery within its 15000ms connect budget/,
+    );
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('a connection that closes during discovery is not published as connected', async () => {
+  const build = { current: linearTools };
+  const handle = fakeServer(build);
+  let transportForCalls = 0;
+  let signalConnected = () => {};
+  const connectedOnce = new Promise<void>((resolve) => {
+    signalConnected = resolve;
+  });
+  // The first dial closes the moment the tools/list response has been
+  // delivered — before connect() can publish the client — as a server
+  // crashing right after answering would.
+  const closingWrapperFor = async (): Promise<Transport> => {
+    const inner = await handle.transportFor();
+    const wrapper: Transport = {
+      async start() {
+        inner.onmessage = (message, extra) => {
+          wrapper.onmessage?.(message, extra);
+          const shaped = message as { result?: { tools?: unknown } };
+          if (shaped.result?.tools !== undefined) {
+            void inner.close();
+          }
+        };
+        inner.onerror = (error) => wrapper.onerror?.(error);
+        inner.onclose = () => wrapper.onclose?.();
+        await inner.start();
+      },
+      send: (message, sendOptions) => inner.send(message, sendOptions),
+      close: () => inner.close(),
+    };
+    return wrapper;
+  };
+  const target = new ToolRegistry();
+  const plugin = createMcpPlugin(
+    { servers: { linear: { url: 'http://127.0.0.1:9/unused' } } },
+    {
+      transportFor: () => {
+        transportForCalls += 1;
+        return transportForCalls === 1 ? closingWrapperFor() : handle.transportFor();
+      },
+      warn: () => {},
+      log: () => {},
+      reconnectDelayMs: () => 1,
+      onConnected: () => signalConnected(),
+    },
+  );
+  const keepAlive = setInterval(() => {}, 50);
+  await loadThroughView(plugin, target);
+  try {
+    await connectedOnce;
+    // The dead first dial was treated as a failed connect and retried —
+    // never marked connected, which onConnected firing on attempt one
+    // (with only one dial made) would betray.
+    assert.equal(transportForCalls, 2);
+    const tool = target.get('mcp.linear.get_issue');
+    assert.ok(tool);
+    assert.equal(await tool!.execute({ id: 'ENG-1' }, sessionFor('ava')), 'issue ENG-1');
+  } finally {
+    clearInterval(keepAlive);
+    await plugin.dispose?.();
+  }
+});
+
 test('a binary block cannot steer the written path: the server-side tool name is folded before it names a file', async () => {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-traversal-'));
   const output = await normalizeCallResult(

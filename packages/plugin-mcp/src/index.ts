@@ -101,6 +101,11 @@ export interface McpPluginOptions {
   onConnected?: (server: string) => void;
   log?: (message: string) => void;
   warn?: (message: string) => void;
+  /**
+   * Clock seam for the discovery deadline: the budget arithmetic only shows
+   * itself when time passes mid-walk, which a real clock makes a race.
+   */
+  now?: () => number;
 }
 
 class McpConfigError extends Error {
@@ -360,7 +365,11 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
   });
 
   /** Every page of `tools/list`, not just the first. */
-  const listAllTools = async (client: Client, spec: McpServerSpec): Promise<AdvertisedTool[]> => {
+  const listAllTools = async (
+    client: Client,
+    spec: McpServerSpec,
+    remainingMs: () => number,
+  ): Promise<AdvertisedTool[]> => {
     const tools: AdvertisedTool[] = [];
     let cursor: string | undefined;
     let pages = 0;
@@ -371,7 +380,20 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
           `MCP server ${spec.name} returned more than ${MAX_TOOL_LIST_PAGES} pages of tools/list; refusing discovery rather than following its cursors forever.`,
         );
       }
-      const page = await client.listTools(cursor ? { cursor } : undefined, { timeout: spec.connectTimeoutMs });
+      // One budget for the whole walk, not one per page: a fresh timeout
+      // for every request would let a slowly paginating server multiply
+      // the advertised connect bound by its page count, holding setup —
+      // and daemon start — for minutes on end.
+      const budget = remainingMs();
+      if (budget <= 0) {
+        throw new Error(
+          `MCP server ${spec.name} did not finish tool discovery within its ${spec.connectTimeoutMs}ms connect budget.`,
+        );
+      }
+      // A cursor is the server's opaque string, the empty string included —
+      // dropped on truthiness, an "" cursor would refetch the first page
+      // until the page guard condemned a compliant server.
+      const page = await client.listTools(cursor !== undefined ? { cursor } : undefined, { timeout: budget });
       tools.push(...page.tools);
       cursor = page.nextCursor;
     } while (cursor !== undefined);
@@ -516,8 +538,18 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
       // these awaits to notice `disposed` on their own.
       state.pending = transport;
       const client = new Client({ name: '@stratusagent/plugin-mcp', version: '0.7.0' });
+      // A close that lands before this client is published cannot be
+      // dropped: the identity guard below would discard it, and connect()
+      // would then mark an already-closed client connected — leaving the
+      // first tool call to fail for nothing and recovery to the call-path
+      // classifier.
+      let closedBeforePublish = false;
       client.onclose = () => {
-        if (disposed || state.client !== client) {
+        if (disposed) {
+          return;
+        }
+        if (state.client !== client) {
+          closedBeforePublish = true;
           return;
         }
         state.connected = false;
@@ -525,11 +557,18 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         warn(`mcp server ${state.spec.name} disconnected — its tools are unavailable until it comes back`);
         scheduleReconnect(state);
       };
+      // One deadline for the handshake and the whole discovery walk — see
+      // listAllTools for why the walk must not get a fresh budget per page.
+      const clock = options.now ?? Date.now;
+      const deadline = clock() + state.spec.connectTimeoutMs;
       await client.connect(transport, { timeout: state.spec.connectTimeoutMs });
       try {
-        const advertised = await listAllTools(client, state.spec);
+        const advertised = await listAllTools(client, state.spec, () => deadline - clock());
         if (disposed) {
           throw new Error(`disposed while discovering ${state.spec.name}`);
+        }
+        if (closedBeforePublish) {
+          throw new Error(`MCP server ${state.spec.name} closed the connection during discovery.`);
         }
         syncTools(state, advertised, firstConnect);
       } catch (error) {

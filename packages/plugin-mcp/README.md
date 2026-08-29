@@ -91,7 +91,7 @@ this package's code:
 | `passEnv` | stdio | Names forwarded from the daemon's environment. Defaults to `PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ`. |
 | `url` | HTTP | The Streamable HTTP endpoint. |
 | `headers` | HTTP | Headers sent with every request — where a bearer token goes. |
-| `connectTimeoutMs` | both | Per-connect budget (default 15000), so an unreachable server cannot stall startup. |
+| `connectTimeoutMs` | both | One budget for the connect handshake *and* the whole tool-discovery walk (default 15000), so a server can stall startup neither by being unreachable nor by paginating slowly. |
 | `callTimeoutMs` | both | Per-call budget (default 60000). |
 
 A setting on the wrong transport kind — `headers` on a stdio server, `env`
