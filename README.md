@@ -84,11 +84,14 @@ agent, never to a session. More in [Agents](docs/concepts/agents.md).
 
 One package, `@stratusagent/cli`, carries the runtime: the kernel, the
 providers, the roster, and `stratusd` — the always-on gateway. Everything
-else is an optional plugin, and **installing a plugin does not run it**:
-capability is enabled in a config you chose and then allowlisted per agent,
-two gates apart. Channels (Slack), tools (fs, shell, web, browser), the MCP
-bridge, and the control API + dashboard each arrive as separate packages —
-`stratus setup` offers the ones your answers imply.
+else arrives as a separate package, each behind its own explicit switch. A
+tool or MCP plugin **runs nothing by being installed**: a config you chose
+must enable it, and an agent's soul must allowlist its tools — two gates
+apart. The two surfaces are the deliberate exceptions: the Slack channel
+connects when an agent's tokens are stored (the decision you made
+connecting the app), and installing the control API + dashboard *is* the
+decision to open an authenticated local port (`--no-api` takes it back).
+`stratus setup` offers the packages your answers imply.
 
 The trust model behind that is in
 [Plugins](docs/concepts/plugins.md) and

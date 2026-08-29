@@ -94,8 +94,12 @@ npm install -g @stratusagent/plugin-mcp                           # mount MCP se
 npm install -g @stratusagent/control-api @stratusagent/dashboard  # HTTP API + web UI
 ```
 
-Installing a plugin runs nothing and grants no agent anything — capability
-is enabled in a config you chose, then allowlisted per agent:
+A tool or MCP plugin runs nothing by being installed — a config you chose
+enables it, then each agent's soul allowlists its tools. The two surfaces
+switch on differently, on purpose: the Slack channel connects when an
+agent's stored tokens say so, and installing the control API is itself the
+decision to open an authenticated local port (`--no-api` takes it back).
+The reasoning:
 [the plugin trust model](https://github.com/stratuslabs/agent/blob/main/docs/concepts/plugins.md).
 
 ## Learn more

@@ -38,8 +38,9 @@ npm install -g @stratusagent/plugin-mcp        # mount MCP servers' tools
 npm install -g @stratusagent/control-api @stratusagent/dashboard   # HTTP API + web UI
 ```
 
-What each adds, and the gates that keep an installed package from doing
-anything by itself: [Slack](../guides/slack.md) ·
+What each adds, and which switch turns each one on — a trusted config plus
+a soul allowlist for tools, stored tokens for a channel, presence itself
+for the control API: [Slack](../guides/slack.md) ·
 [Tools](../guides/tools.md) · [MCP](../guides/mcp.md) ·
 [Remote access](../guides/remote-access.md) ·
 [the plugin trust model](../concepts/plugins.md).
