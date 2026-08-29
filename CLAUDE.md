@@ -111,8 +111,10 @@ hand and by review:
   that can depend on `@stratusagent/executors`, build `ToolResult`s
   through its `successResult`/`failureResult`, never hand-rolled
   `{ ok, error }` — `core` is the one exception, since `executors`
-  depends on it and core stays dependency-free. HTTP failures throw
-  `ApiError(status, code, message)`. Error text a user
+  depends on it and core stays dependency-free. A control API route
+  handler reports failure by throwing `ApiError(status, code, message)`
+  (internal to `control-api`); HTTP *clients* — `tool-web`, providers,
+  the MCP bridge — throw plain `Error`s like any other tool code. Error text a user
   will read is a full sentence that names the fix:
   `No schedule of yours has id ${id}. schedule.list shows what exists.`
 - **Comments explain why, and cite the incident when there is one.**
