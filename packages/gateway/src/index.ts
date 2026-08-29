@@ -162,6 +162,12 @@ export class SqliteSessionStore implements SessionStore {
     // (the user_version pragma is a real page-one write) so the loop
     // below covers them for the connection's whole lifetime.
     this.db.exec('PRAGMA journal_mode = WAL');
+    // A busy timeout, because this file has a second writer: `stratus
+    // schedules cancel` opens its own connection to the schedules table
+    // living here, and WAL serializes writers file-wide — a session save
+    // racing that delete would otherwise throw `database is locked` rather
+    // than wait its brief turn.
+    this.db.exec('PRAGMA busy_timeout = 5000');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,

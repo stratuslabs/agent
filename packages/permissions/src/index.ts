@@ -2,6 +2,7 @@ import type {
   ApprovalAnswer,
   ApprovalContext,
   ApprovalPolicy,
+  JsonObject,
   Session,
   Tool,
   ToolCall,
@@ -255,6 +256,23 @@ const untilAborted = async <T>(
  */
 const sessionKey = (sessionId: string, toolName: string): string => `${sessionId}\u0000${toolName}`;
 
+/** How much of a call's arguments the terminal prompt shows before eliding. */
+const PROMPT_INPUT_LIMIT = 200;
+
+/**
+ * A one-line rendering of a gated call's arguments for a terminal prompt,
+ * or undefined when there are none. Bounded — an approver reads it inline,
+ * not a scrollback of JSON — and never a decision input: what this returns
+ * is shown to a human, never matched against a scope.
+ */
+const summarizeInput = (input: JsonObject): string | undefined => {
+  if (Object.keys(input).length === 0) {
+    return undefined;
+  }
+  const oneLine = JSON.stringify(input);
+  return oneLine.length > PROMPT_INPUT_LIMIT ? `${oneLine.slice(0, PROMPT_INPUT_LIMIT)}…` : oneLine;
+};
+
 /**
  * Puts the question to someone at a terminal. A prompt's answer is free
  * text from a person mid-typing, so it is read leniently and anything that
@@ -269,7 +287,18 @@ const awaitPrompt = async (
   // The command, when there is one: for a shell call the tool name is the
   // least interesting half of the question, and an approver shown only
   // `shell.run (gated)` is being asked to trust something they cannot see.
-  const what = command === undefined ? `${call.toolName} (${risk})` : `${call.toolName}: ${command}`;
+  // The same is true of any gated call that carries arguments — approving
+  // `schedule.every` sets up recurring unattended work and (with a
+  // destination) a standing permission to speak, so the operator must see
+  // the cadence, prompt, and destination, not just the tool name. When
+  // there is no command scope to show, fall back to a compact rendering of
+  // the call's input, exactly as the remote (Slack) prompt already does.
+  const argumentSummary = command === undefined ? summarizeInput(call.input) : undefined;
+  const what = command !== undefined
+    ? `${call.toolName}: ${command}`
+    : argumentSummary !== undefined
+      ? `${call.toolName} (${risk}): ${argumentSummary}`
+      : `${call.toolName} (${risk})`;
   const always = command === undefined ? 'always this session' : 'always this scope';
   const pending = ask(
     `Allow ${what} for ${session.agent.name}? [y]es / [a]lways (${always}) / [N]o: `,

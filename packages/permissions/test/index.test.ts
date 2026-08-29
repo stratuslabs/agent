@@ -76,6 +76,38 @@ test('an interactive prompt takes yes, always, and anything else as no', async (
   assert.match(asked[0]!, /Allow shell\.run \(gated\) for Ava\?/);
 });
 
+test('the interactive prompt renders a gated call\'s arguments, so a schedule shows what it sets up', async () => {
+  const asked: string[] = [];
+  const policy = createPermissionPolicy({
+    mode: 'interactive',
+    ask: async (question) => {
+      asked.push(question);
+      return 'n';
+    },
+  });
+
+  // Approving schedule.every mints recurring unattended work and a standing
+  // outbound grant — the operator must see the cadence, prompt, and
+  // destination, not just the tool name.
+  await policy.approve(context('schedule.every', 'gated', {
+    call: {
+      id: 'call-1',
+      toolName: 'schedule.every',
+      input: { every: '30m', prompt: 'check the repo', destination: { channel: 'slack', to: 'C-ENG' } },
+    },
+  }));
+  assert.match(asked[0]!, /schedule\.every \(gated\):/);
+  assert.match(asked[0]!, /30m/);
+  assert.match(asked[0]!, /check the repo/);
+  assert.match(asked[0]!, /C-ENG/);
+
+  // A call with no arguments still reads exactly as before — no empty
+  // "(): " tail.
+  asked.length = 0;
+  await policy.approve(context('memory.remember', 'gated'));
+  assert.match(asked[0]!, /Allow memory\.remember \(gated\) for Ava\?/);
+});
+
 test('"always" lasts for the session that said it, and no longer', async () => {
   let asks = 0;
   const policy = createPermissionPolicy({

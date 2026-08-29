@@ -220,6 +220,31 @@ test('a due schedule fires through dispatch with its slot consumed first', async
   store.close();
 });
 
+test('a slightly-late recurring firing advances from its slot, not from now — no cadence drift', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const fired = deferred<void>();
+  const runtime = runtimeWith(store, { dispatch: async () => { fired.resolve(); } });
+
+  // A due slot in the past against a one-hour interval: the firing is
+  // "late" but its window is still open. The next slot must be exactly
+  // slot + 1h — computed from the slot — regardless of when the tick
+  // actually picked it up. Asserted by equality, so nothing races the
+  // wall clock.
+  const intervalMs = 3_600_000;
+  const slot = new Date(Date.now() - 50).toISOString();
+  store.insert(record({ id: 'nodrift', cadence: { kind: 'every', intervalMs }, nextFireAt: slot }));
+
+  await runtime.start();
+  await fired.promise;
+  runtime.stop();
+  await runtime.drain();
+
+  const expected = new Date(Date.parse(slot) + intervalMs).toISOString();
+  assert.equal(store.get('nodrift')?.nextFireAt, expected);
+  store.close();
+});
+
 test('the per-agent cap defers a firing while one is still running', async () => {
   const home = await newHome();
   const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));

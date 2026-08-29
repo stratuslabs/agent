@@ -46,6 +46,14 @@ export class SqliteScheduleStore {
       }
     }
     this.db.exec('PRAGMA journal_mode = WAL');
+    // WAL serializes writers to one at a time across the whole file, and
+    // this database is shared between two processes: the daemon claims
+    // slots and saves sessions while `stratus schedules cancel` deletes a
+    // row from another connection. Without a busy timeout the loser of that
+    // lock throws `database is locked` immediately — a cancel that silently
+    // failed would leave the schedule (and its destination grant) live.
+    // Wait for the writer instead.
+    this.db.exec('PRAGMA busy_timeout = 5000');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS schedules (
         id TEXT PRIMARY KEY,
@@ -380,7 +388,13 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
 
     const firedAt = now.toISOString();
     const sessionId = `${SCHEDULE_SESSION_ID_PREFIX}${record.id}:${slot}`;
-    const next = nextFireAfter(record.cadence, new Date(Math.max(slotDate.getTime(), now.getTime())));
+    // Advance from the scheduled slot, not from now: `following` is the
+    // occurrence after this one, and the branch above proved it is still in
+    // the future (a passed-entirely window was skipped there). Computing it
+    // from `now` instead would push every future firing later by whatever
+    // scheduler or event-loop delay this one suffered, permanently drifting
+    // an `every 1h` cadence by the lateness of its first slightly-late tick.
+    const next = following;
     // The slot is spent BEFORE the dispatch — the double-run guarantee —
     // and spent ATOMICALLY against the slot this tick read: a schedule
     // cancelled between the due scan and here is gone, and its prompt
