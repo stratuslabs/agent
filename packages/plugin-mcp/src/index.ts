@@ -552,7 +552,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
       // so dispose() can cut a handshake short instead of waiting for
       // these awaits to notice `disposed` on their own.
       state.pending = transport;
-      const client = new Client({ name: '@stratusagent/plugin-mcp', version: '0.8.0' });
+      const client = new Client({ name: '@stratusagent/plugin-mcp', version: '0.9.0' });
       // A close that lands before this client is published cannot be
       // dropped: the identity guard below would discard it, and connect()
       // would then mark an already-closed client connected — leaving the
