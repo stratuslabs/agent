@@ -123,6 +123,23 @@ export class SqliteScheduleStore {
   }
 }
 
+/**
+ * The session-id namespace scheduled firings live in — `schedule:<id>:<slot>`.
+ *
+ * Reserved: the gateway refuses an *external* dispatch (a control-API
+ * message post, a channel) that names a session id in this space, so the
+ * only turns that ever run on a firing's session are the firing itself.
+ * That is the load-bearing half of the destination carve-out being
+ * unforgeable — the id is derivable from `GET /schedules`, so keeping it
+ * out of an attacker's reach depends on nobody but the scheduler being
+ * allowed to dispatch into it, not on it being secret.
+ */
+export const SCHEDULE_SESSION_ID_PREFIX = 'schedule:';
+
+/** Whether a session id belongs to the reserved scheduled-firing namespace. */
+export const isScheduleSessionId = (sessionId: string): boolean =>
+  sessionId.startsWith(SCHEDULE_SESSION_ID_PREFIX);
+
 export interface SchedulerLimits {
   /**
    * The floor under a recurring cadence, milliseconds. Applied to intervals
@@ -362,7 +379,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     }
 
     const firedAt = now.toISOString();
-    const sessionId = `schedule:${record.id}:${slot}`;
+    const sessionId = `${SCHEDULE_SESSION_ID_PREFIX}${record.id}:${slot}`;
     const next = nextFireAfter(record.cadence, new Date(Math.max(slotDate.getTime(), now.getTime())));
     // The slot is spent BEFORE the dispatch — the double-run guarantee —
     // and spent ATOMICALLY against the slot this tick read: a schedule

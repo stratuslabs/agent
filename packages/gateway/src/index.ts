@@ -33,7 +33,13 @@ import {
   type ScheduleDestination,
   type ScheduleRecord,
 } from '@stratusagent/agents';
-import { createSchedulerRuntime, SqliteScheduleStore, type SchedulerLimits } from './schedules.ts';
+import {
+  createSchedulerRuntime,
+  isScheduleSessionId,
+  SqliteScheduleStore,
+  SCHEDULE_SESSION_ID_PREFIX,
+  type SchedulerLimits,
+} from './schedules.ts';
 
 export {
   SqliteScheduleStore,
@@ -744,9 +750,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const scheduler = createSchedulerRuntime({
     store: scheduleStore,
     // Late-bound on purpose: firings go through the gateway's own dispatch
-    // — single-flight, watchdog, refusal while stopping — never a second
-    // runner.
-    dispatch: (input) => dispatch(input),
+    // path — single-flight, watchdog, refusal while stopping — never a
+    // second runner. Through the firing-only entry, which is allowed into
+    // the reserved `schedule:` namespace the public `dispatch` refuses.
+    dispatch: (input) => dispatchScheduledFiring(input),
     validateDestination: async (agentId, destination) => {
       await outboundFor(agentId, destination);
     },
@@ -1920,9 +1927,37 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return turn;
   };
 
+  /**
+   * A scheduled firing's own dispatch — single-flight and stopping-aware
+   * like the public one, but permitted into the reserved `schedule:`
+   * namespace the public one refuses. Firings are the only writers of that
+   * namespace, which is what keeps the destination carve-out unforgeable:
+   * an external message can never share, resume, or race a firing's
+   * session, so `isPreauthorized` can trust that a `schedule:` session
+   * running is the scheduler's turn and no one else's.
+   */
+  const dispatchScheduledFiring = (input: DispatchInput): Promise<Session> => {
+    if (stopping) {
+      throw new Error('The gateway is stopping and no longer accepts new work.');
+    }
+    return onSessionChain(input.sessionId, () => dispatchInternal(input));
+  };
+
   const dispatch = async (input: DispatchInput): Promise<Session> => {
     if (stopping) {
       throw new Error('The gateway is stopping and no longer accepts new work.');
+    }
+
+    // The reserved namespace is the scheduler's alone. A caller that could
+    // name a firing's session id — derivable from `GET /schedules` — would
+    // otherwise queue a turn of its own behind the firing (single-flight)
+    // and run inside the grant, using `message.send` to the schedule's
+    // approved destination without its own approval. Refused here, at the
+    // one door every external dispatch comes through.
+    if (isScheduleSessionId(input.sessionId)) {
+      throw new Error(
+        `Session ids beginning with "${SCHEDULE_SESSION_ID_PREFIX}" are reserved for scheduled firings and cannot be dispatched externally.`,
+      );
     }
 
     const { turnId } = input;

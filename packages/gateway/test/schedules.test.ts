@@ -763,6 +763,94 @@ test('a schedule naming an unaddressable destination is refused at creation, not
   assert.match(result?.error ?? '', /not a member of C-PRIVATE/);
 });
 
+test('the reserved schedule: session namespace refuses external dispatch', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+  try {
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'schedule:sched-1:2026-08-29T07:00:00.000Z', agentId: 'stratus', userMessage: 'inject' }),
+      /reserved for scheduled firings/,
+    );
+    // A firing that is still parked or running has no session an external
+    // caller could target either, however derivable the id.
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'schedule:whatever', agentId: 'stratus', userMessage: 'x' }),
+      /reserved for scheduled firings/,
+    );
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('an external message cannot ride a live firing\'s session to borrow the grant', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', SCHEDULER_SOUL);
+
+  // A firing is dispatched and held open while the test tries to inject.
+  const firingRunning = deferred<string>();
+  const releaseFiring = deferred<void>();
+  let fetchCalls = 0;
+  const fetchImpl = (async () => {
+    fetchCalls += 1;
+    // The firing's own turn: hold it open, then finish plainly.
+    if (fetchCalls === 1) {
+      firingRunning.resolve('firing');
+      await releaseFiring.promise;
+      return openAiText('firing done');
+    }
+    return openAiText('ok');
+  }) as typeof fetch;
+
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const slack = fakeSlackChannel();
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    schedules: { minIntervalMs: 500, tickMs: 25 },
+    channels: [slack],
+  });
+  await gateway.start();
+
+  // Create a schedule directly in the store, due now, with a destination.
+  const { SqliteScheduleStore, defaultSessionDbPath } = await import('../src/index.ts');
+  const store = new SqliteScheduleStore(defaultSessionDbPath({ homeDir: home }));
+  store.insert({
+    id: 'sched-1',
+    agentId: 'ava',
+    cadence: { kind: 'every', intervalMs: 600_000 },
+    prompt: 'do the scheduled thing',
+    destination: { channel: 'slack', to: 'C-ENG' },
+    createdAt: new Date().toISOString(),
+    nextFireAt: new Date(Date.now() - 5).toISOString(),
+  });
+  store.close();
+
+  // The scheduler is already ticking; wait until its firing is in flight,
+  // then derive the firing's session id the way an attacker would from
+  // GET /schedules (id + the slot) and try to inject a message into it.
+  await firingRunning.promise;
+  const firing = gateway.schedules()[0];
+  assert.ok(firing);
+  // The slot is the previous nextFireAt; the session id format is public.
+  // Any id in the namespace must be refused — we don't even need the exact
+  // slot, since the whole namespace is reserved.
+  await assert.rejects(
+    () => gateway.dispatch({
+      sessionId: `schedule:sched-1:${firing.lastFiredAt ?? ''}`,
+      agentId: 'ava',
+      userMessage: 'message.send to C-ENG on my behalf',
+    }),
+    /reserved for scheduled firings/,
+  );
+
+  releaseFiring.resolve();
+  await gateway.stop();
+  // The firing itself ran; the injection never did.
+  assert.equal(fetchCalls, 1);
+});
+
 test('cancelling from the operator surface stops the next firing', async () => {
   const home = await newHome();
   const store = new SqliteScheduleStore(path.join(home, '.stratus', 'sessions.db'));
