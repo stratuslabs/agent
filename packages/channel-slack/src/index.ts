@@ -7,6 +7,8 @@ import {
   channelSessionKey,
   type ChannelAdapter,
   type GatewayLike,
+  type OutboundAddress,
+  type OutboundConnection,
   type OutboundMessageRef,
 } from '@stratusagent/channels';
 
@@ -105,6 +107,17 @@ export interface SlackWebLike {
     // The real SDK takes file DATA (a buffer or stream), never a path
     // string — typing it that way here keeps fakes honest too.
     uploadV2(args: { channel_id: string; file: Buffer; filename?: string; title?: string; thread_ts?: string }): Promise<unknown>;
+  };
+  conversations: {
+    /**
+     * What backs destination validation: whether a conversation exists as
+     * this app sees it, and whether the app is in it. Needs the
+     * conversations read scopes (`channels:read`, `groups:read`,
+     * `im:read`, `mpim:read`) — see the README's app manifest.
+     */
+    info(args: { channel: string }): Promise<{
+      channel?: { id?: string; is_member?: boolean; is_im?: boolean };
+    }>;
   };
   users: {
     info(args: { user: string }): Promise<{ user?: { name?: string; profile?: { display_name?: string; real_name?: string } } }>;
@@ -661,6 +674,80 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     connections.find((candidate) => candidate.config.agentId === agentId);
 
   /**
+   * The addressable outbound seam — the channel contract's first real
+   * `OutboundConnection` implementation. Validate-then-hand-over: every
+   * refusal here happens at schedule creation or at the moment of a send,
+   * with a message written for the person who named the destination,
+   * because the alternative is a connection whose first post fails at 6am.
+   *
+   * Membership is the boundary on purpose (see the spec's cold-DM
+   * decision): the app posts only into conversations it has been invited
+   * to, and a DM conversation id (`D…`) is its own proof — the DM exists
+   * only because someone opened it with the app.
+   */
+  const resolveOutbound = async (address: OutboundAddress): Promise<OutboundConnection> => {
+    const to = address.to.trim();
+    if (!to) {
+      throw new Error('slack: a destination needs a conversation id (C…/G…/D…).');
+    }
+    const connection = connectionFor(address.agentId);
+    if (!connection) {
+      throw new Error(configuredAgents.has(address.agentId)
+        ? `slack: ${address.agentId}'s Slack app is not connected right now, so ${to} cannot be reached.`
+        : `slack: agent ${address.agentId} has no Slack app, so it cannot post to Slack at all.`);
+    }
+    let conversation: { id?: string; is_member?: boolean; is_im?: boolean } | undefined;
+    try {
+      conversation = (await connection.web.conversations.info({ channel: to })).channel;
+    } catch (error) {
+      // channel_not_found covers both "no such id" and "not visible to
+      // this app" — Slack deliberately does not distinguish, and neither
+      // should the message pretend to.
+      throw new Error(
+        `slack: ${address.agentId}'s app cannot see ${to} (${error instanceof Error ? error.message : String(error)}). `
+        + 'Use the conversation id, not a name, and check the app is in that workspace with the conversations read scopes.',
+      );
+    }
+    if (!conversation?.id) {
+      throw new Error(`slack: ${address.agentId}'s app cannot see a conversation ${to}.`);
+    }
+    if (!conversation.is_im && conversation.is_member !== true) {
+      throw new Error(
+        `slack: ${address.agentId}'s app is not a member of ${to} — invite it there before it can post.`,
+      );
+    }
+    const channelId = conversation.id;
+    const web = connection.web;
+    return {
+      async post(text: string): Promise<OutboundMessageRef> {
+        const chunks = splitForSlack(text.trim().length > 0 ? text : '(empty message)');
+        let first: OutboundMessageRef | undefined;
+        for (const chunk of chunks) {
+          const posted = await web.chat.postMessage({ channel: channelId, text: chunk });
+          if (!first) {
+            first = { channel: posted.channel ?? channelId, ts: posted.ts ?? '' };
+          }
+        }
+        return first ?? { channel: channelId, ts: '' };
+      },
+      async edit(ref: OutboundMessageRef, text: string): Promise<void> {
+        await web.chat.update({ channel: ref.channel, ts: ref.ts, text: truncateForSlack(text) });
+      },
+      async upload(filePath: string, title?: string): Promise<void> {
+        // File DATA, read here, for the same reason the renderer does it:
+        // a missing file is this upload's own failure.
+        const data = await readFile(filePath);
+        await web.files.uploadV2({
+          channel_id: channelId,
+          file: data,
+          filename: path.basename(filePath),
+          ...(title ? { title } : {}),
+        });
+      },
+    };
+  };
+
+  /**
    * Renders one parked call as buttons and remembers where it went.
    *
    * A request this adapter cannot route is DENIED here rather than left to
@@ -1139,6 +1226,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
   return {
     name: 'slack',
+    resolveOutbound,
 
     async start(gateway) {
       gatewayRef = gateway;

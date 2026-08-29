@@ -27,10 +27,30 @@ import {
 import {
   createDelegateTool,
   createForgetTool,
+  createMessageSendTool,
   createRecallTool,
   createRememberTool,
+  createScheduleTools,
   type ParsedSoul,
+  type ScheduleDestination,
+  type ScheduleRecord,
 } from '@stratusagent/agents';
+import {
+  createSchedulerRuntime,
+  isScheduleSessionId,
+  SqliteScheduleStore,
+  SCHEDULE_SESSION_ID_PREFIX,
+  type SchedulerLimits,
+} from './schedules.ts';
+
+export {
+  SqliteScheduleStore,
+  createSchedulerRuntime,
+  type ScheduleStoreLike,
+  type SchedulerLimits,
+  type SchedulerRuntime,
+  type SchedulerRuntimeOptions,
+} from './schedules.ts';
 import { createLocalCommandExecutor } from '@stratusagent/executor-local';
 import {
   loadPlugins,
@@ -69,6 +89,15 @@ import {
 } from '@stratusagent/state';
 
 const SESSIONS_DB_FILENAME = 'sessions.db';
+
+/**
+ * Where a daemon with no explicit `sessionDbPath` keeps its database — the
+ * one rule for it, exported because `stratus schedules` opens the same file
+ * from another process and a re-derived copy of this join is how the CLI
+ * ends up auditing a database no daemon writes.
+ */
+export const defaultSessionDbPath = (env: StateEnvironment = {}): string =>
+  path.join(stratusHomePath(env), SESSIONS_DB_FILENAME);
 const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
 /**
  * How long a parked call waits for a person. Long enough to survive a
@@ -135,6 +164,12 @@ export class SqliteSessionStore implements SessionStore {
     // (the user_version pragma is a real page-one write) so the loop
     // below covers them for the connection's whole lifetime.
     this.db.exec('PRAGMA journal_mode = WAL');
+    // A busy timeout, because this file has a second writer: `stratus
+    // schedules cancel` opens its own connection to the schedules table
+    // living here, and WAL serializes writers file-wide — a session save
+    // racing that delete would otherwise throw `database is locked` rather
+    // than wait its brief turn.
+    this.db.exec('PRAGMA busy_timeout = 5000');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
@@ -305,6 +340,18 @@ export interface GatewayChannelAdapter {
   name: string;
   start(gateway: Gateway): Promise<void>;
   stop(): Promise<void>;
+  /**
+   * The addressable outbound seam, mirroring
+   * `@stratusagent/channels`' `ChannelAdapter.resolveOutbound` structurally
+   * for the same reason the rest of this interface does. Optional: an
+   * adapter with no concept of a destination simply lacks it, and the
+   * gateway treats absence as "this channel cannot be spoken through".
+   * Implementations MUST reject a destination they could not deliver to,
+   * with a message fit to show the person who named it.
+   */
+  resolveOutbound?(address: { agentId: string; to: string }): Promise<{
+    post(text: string): Promise<unknown>;
+  }>;
 }
 
 /**
@@ -329,6 +376,16 @@ export interface SessionRouting {
  */
 export interface ApprovalTransport {
   request: ApprovalRequester;
+  /**
+   * The schedule carve-out, for a policy that understands destinations
+   * (`@stratusagent/permissions`' `destinations` option takes exactly this
+   * shape). True when the session is a firing of a schedule that still
+   * exists, belongs to this agent, and was approved with this destination
+   * — the gateway answers from the schedule row, so cancelling revokes.
+   */
+  destinations: {
+    isPreauthorized(session: Session, destination: string): boolean;
+  };
 }
 
 /**
@@ -464,6 +521,12 @@ export interface GatewayOptions {
   /** Session database path. Default ~/.stratus/sessions.db. */
   sessionDbPath?: string;
   /**
+   * Scheduler limits — the interval floor, the per-agent cap on concurrent
+   * scheduled turns, and the tick cadence. Defaults are production values;
+   * tests lower them.
+   */
+  schedules?: SchedulerLimits;
+  /**
    * Plugins to load, keyed by package name — the `plugins` block, which the
    * caller has already read from a **trusted** config. The gateway does not
    * go looking for one: a plugin runs in-process with the daemon, and which
@@ -538,6 +601,19 @@ export interface Gateway {
   activeTurnId(sessionId: string): string | undefined;
   /** Every call parked on a human right now, oldest first. */
   pendingApprovals(): PendingApproval[];
+  /**
+   * Every schedule the fleet has set, oldest first — the audit list the
+   * spec demands: an agent that scheduled something an operator cannot see
+   * or stop is a bug. Each row is also the scope of its own destination
+   * grant, so this doubles as the list of standing permissions to speak.
+   */
+  schedules(): ScheduleRecord[];
+  /**
+   * Cancel any agent's schedule — the operator's stop button, and the
+   * revocation of the destination grant riding on the row. False when no
+   * such schedule exists.
+   */
+  cancelSchedule(scheduleId: string): boolean;
   /**
    * Every registered tool, with the risk it will actually be judged at and
    * the package it came from.
@@ -642,10 +718,59 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // The default database lives in the gateway-owned ~/.stratus, which is
   // tightened to owner-only; a caller-supplied path may sit in a shared
   // directory that must not be chmodded from under other processes.
+  const sessionDbPath = options.sessionDbPath ?? defaultSessionDbPath(env);
   const store = options.sessionDbPath
-    ? new SqliteSessionStore(options.sessionDbPath)
-    : new SqliteSessionStore(path.join(stratusHomePath(env), SESSIONS_DB_FILENAME), { ownedDirectory: true });
+    ? new SqliteSessionStore(sessionDbPath)
+    : new SqliteSessionStore(sessionDbPath, { ownedDirectory: true });
   const memory = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
+
+  // ---- schedules ----------------------------------------------------------
+
+  // The same database sessions live in — one file to back up — through the
+  // schedule store's own connection (see its docs for why).
+  const scheduleStore = new SqliteScheduleStore(sessionDbPath);
+
+  /**
+   * The write side of an addressable destination, through whichever
+   * started channel serves its kind. Resolution happens per call against
+   * the live adapter list, so a channel that failed to start is honestly
+   * "cannot address" rather than a stale reference — and rejecting is how
+   * both callers (schedule creation, `message.send`) hear why.
+   */
+  const outboundFor = async (
+    agentId: string,
+    destination: ScheduleDestination,
+  ): Promise<{ post(text: string): Promise<unknown> }> => {
+    const adapter = startedChannels.find(
+      (candidate) => candidate.name === destination.channel && candidate.resolveOutbound,
+    );
+    if (!adapter?.resolveOutbound) {
+      throw new Error(
+        `No running channel can deliver to '${destination.channel}' destinations — `
+        + (startedChannels.length === 0
+          ? 'no channel adapters are running.'
+          : `running channels: ${startedChannels.map((candidate) => candidate.name).join(', ')}.`),
+      );
+    }
+    return adapter.resolveOutbound({ agentId, to: destination.to });
+  };
+
+  const scheduler = createSchedulerRuntime({
+    store: scheduleStore,
+    // Late-bound on purpose: firings go through the gateway's own dispatch
+    // path — single-flight, watchdog, refusal while stopping — never a
+    // second runner. Through the firing-only entry, which is allowed into
+    // the reserved `schedule:` namespace the public `dispatch` refuses.
+    dispatch: (input) => dispatchScheduledFiring(input),
+    validateDestination: async (agentId, destination) => {
+      await outboundFor(agentId, destination);
+    },
+    sessionStatus: async (sessionId) => (await store.get(sessionId))?.status,
+    hasAgent: (agentId) => registry.get(agentId) !== undefined,
+    ...(options.schedules ? { limits: options.schedules } : {}),
+    log,
+    warn,
+  });
 
   // ---- approval brokering -------------------------------------------------
 
@@ -918,7 +1043,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   const configuredApprovals = typeof options.approvals === 'function'
-    ? options.approvals({ request: requestApproval })
+    ? options.approvals({
+        request: requestApproval,
+        destinations: {
+          isPreauthorized: (session, destination) => scheduler.isPreauthorized(session, destination),
+        },
+      })
     : options.approvals;
 
   /**
@@ -1168,6 +1298,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // Delegation is dispatcher-backed, not runner-capturing: the target agent
   // runs through the same per-provider routing as a direct dispatch, so a
   // delegated specialist uses their own provider and credentials.
+  // Scheduling and outbound speech are gateway-registered for the same
+  // reason delegation is: the tools need the dispatcher, the store, and
+  // the channels, and the plugin context carries none of them. Souls still
+  // opt in by allowlist (`schedule.*`, `message.send`) like any other tool.
+  for (const scheduleTool of createScheduleTools(scheduler.handle)) {
+    tools.register(scheduleTool);
+  }
+  tools.register(createMessageSendTool(async ({ agentId, destination, text }) => {
+    const connection = await outboundFor(agentId, destination);
+    await connection.post(text);
+  }));
   tools.register(createDelegateTool({
     registry,
     dispatch: (input) => dispatchInternal({
@@ -1796,9 +1937,37 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return turn;
   };
 
+  /**
+   * A scheduled firing's own dispatch — single-flight and stopping-aware
+   * like the public one, but permitted into the reserved `schedule:`
+   * namespace the public one refuses. Firings are the only writers of that
+   * namespace, which is what keeps the destination carve-out unforgeable:
+   * an external message can never share, resume, or race a firing's
+   * session, so `isPreauthorized` can trust that a `schedule:` session
+   * running is the scheduler's turn and no one else's.
+   */
+  const dispatchScheduledFiring = (input: DispatchInput): Promise<Session> => {
+    if (stopping) {
+      throw new Error('The gateway is stopping and no longer accepts new work.');
+    }
+    return onSessionChain(input.sessionId, () => dispatchInternal(input));
+  };
+
   const dispatch = async (input: DispatchInput): Promise<Session> => {
     if (stopping) {
       throw new Error('The gateway is stopping and no longer accepts new work.');
+    }
+
+    // The reserved namespace is the scheduler's alone. A caller that could
+    // name a firing's session id — derivable from `GET /schedules` — would
+    // otherwise queue a turn of its own behind the firing (single-flight)
+    // and run inside the grant, using `message.send` to the schedule's
+    // approved destination without its own approval. Refused here, at the
+    // one door every external dispatch comes through.
+    if (isScheduleSessionId(input.sessionId)) {
+      throw new Error(
+        `Session ids beginning with "${SCHEDULE_SESSION_ID_PREFIX}" are reserved for scheduled firings and cannot be dispatched externally.`,
+      );
     }
 
     const { turnId } = input;
@@ -1912,6 +2081,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
     }
 
+    // After the channels, so a catch-up firing has somewhere to report and
+    // the missed-window log lines land in a gateway whose surfaces are
+    // listening. The sweep inside is quick (store reads); the firings it
+    // may start are tracked, not awaited.
+    await scheduler.start();
+
     // Last, and not awaited: recovery re-asks, so it needs the channels
     // above already listening — but a turn parked behind a slow approver
     // must not hold up start(), or a daemon with one outstanding request
@@ -1978,6 +2153,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // in-flight turns (already-started dispatches keep running), drain,
       // and close.
       stopping = true;
+      // No new firings from here: the tick stops before anything drains,
+      // so the drain below is over a set that can only shrink. A tick
+      // already past its `stopping` check loses to `dispatch`'s own
+      // refusal — the second gate is why this needs no handshake.
+      scheduler.stop();
       // Deny what is parked before draining, or the drain waits out every
       // outstanding approval timeout — a shutdown would hang for as long as
       // the longest request had left. Each denial is a real decision the
@@ -1992,10 +2172,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       await Promise.allSettled(startedChannels.map((adapter) => adapter.stop()));
       startedChannels.length = 0;
       await Promise.allSettled([...inflight]);
+      // After the turn drain: a firing's wrapper settles after its
+      // dispatch does (it retires spent one-shots), so this is the last
+      // writer of the schedule table.
+      await scheduler.drain();
       // After the turns that might still be using them. A plugin holding a
       // browser is the reason this exists, and closing it out from under a
       // running screenshot would fail that turn rather than tidy up.
       await disposePlugins();
+      scheduleStore.close();
       store.close();
       log('stratusd stopped');
     },
@@ -2028,6 +2213,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return [...pendingApprovals.values()]
         .map((parked) => parked.pending)
         .sort((a, b) => a.parkedAt.localeCompare(b.parkedAt));
+    },
+
+    schedules() {
+      return scheduler.list();
+    },
+
+    cancelSchedule(scheduleId) {
+      return scheduler.cancel(scheduleId);
     },
 
     tools() {

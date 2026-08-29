@@ -2,6 +2,8 @@ import type {
   ApprovalAnswer,
   ApprovalContext,
   ApprovalPolicy,
+  JsonObject,
+  JsonValue,
   Session,
   Tool,
   ToolCall,
@@ -124,6 +126,13 @@ export interface PermissionDecision {
    * that logs it is making that choice knowingly.
    */
   command?: string;
+  /**
+   * The outbound destination this decision was about, for a tool that
+   * carries one (`Tool.destinationFor`). Unlike `command` it also appears
+   * in `reason`: a channel id is a classification, like a command scope's
+   * base-plus-subcommand, not agent-composed text.
+   */
+  destination?: string;
 }
 
 export interface PermissionPolicyOptions {
@@ -148,6 +157,30 @@ export interface PermissionPolicyOptions {
    * with no scope list, and an unusable one for a shell.
    */
   commands?: CommandScopeOptions;
+  /**
+   * The destination-scope check, for tools that carry one
+   * (`Tool.destinationFor`). Omitted, every gated send needs a human —
+   * which is exactly the pre-carve-out behaviour, so a policy built
+   * without it loses nothing but the schedule feature.
+   */
+  destinations?: DestinationScopeOptions;
+}
+
+export interface DestinationScopeOptions {
+  /**
+   * Whether this session may speak to this destination unattended.
+   *
+   * This is the schedule carve-out and deliberately nothing wider: the
+   * expected implementation first checks that the session is a firing the
+   * scheduler itself started and still has in flight — metadata alone
+   * proves nothing, since dispatch callers can write it — then loads the
+   * row a human approved and answers by comparing destinations. So the
+   * grant is a single (schedule, destination) pair, minted by an
+   * approval, revoked the moment `schedule.cancel` deletes the row.
+   * Consulted per call, never cached here: a schedule cancelled mid-turn
+   * must gate the very next send.
+   */
+  isPreauthorized(session: Session, destination: string): boolean | Promise<boolean>;
 }
 
 export interface CommandScopeOptions {
@@ -225,6 +258,64 @@ const untilAborted = async <T>(
 const sessionKey = (sessionId: string, toolName: string): string => `${sessionId}\u0000${toolName}`;
 
 /**
+ * How long any single string value may be before it is elided, and the
+ * overall backstop for an argument object with an unusual number of fields.
+ */
+const PROMPT_VALUE_LIMIT = 120;
+const PROMPT_OVERALL_LIMIT = 400;
+
+/**
+ * Cap every string in a value to `PROMPT_VALUE_LIMIT`, structure preserved.
+ *
+ * The point is *per field*, not overall: a schedule's free-form `prompt`
+ * must not be able to push its `destination` past a length cut and hide the
+ * one thing the operator most needs to see — where an approved schedule may
+ * post. Bounding each string instead keeps every key visible, so a long
+ * prompt shortens itself and leaves the cadence and destination intact.
+ */
+const capStrings = (value: JsonValue): JsonValue => {
+  if (typeof value === 'string') {
+    return value.length > PROMPT_VALUE_LIMIT ? `${value.slice(0, PROMPT_VALUE_LIMIT)}…` : value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(capStrings);
+  }
+  if (value !== null && typeof value === 'object') {
+    const out: JsonObject = {};
+    for (const [key, nested] of Object.entries(value)) {
+      out[key] = capStrings(nested);
+    }
+    return out;
+  }
+  return value;
+};
+
+/**
+ * A one-line rendering of a gated call's arguments for a terminal prompt,
+ * or undefined when there are none. Bounded — an approver reads it inline,
+ * not a scrollback of JSON — and never a decision input: what this returns
+ * is shown to a human, never matched against a scope. Long values are
+ * capped individually (see `capStrings`) so no single field can hide the
+ * rest; the overall cap is only a backstop for an object with many fields.
+ *
+ * When even the per-field-capped rendering overflows, the cut is **not
+ * silent**: it ends with an explicit marker, so an approver is never shown
+ * a partial argument set that reads as complete — a field trimmed off the
+ * tail (a schedule's `destination`, say) must announce itself as hidden,
+ * the same warning the Slack prompt already renders. An honest prompt is
+ * the security property here; the realistic few-field call never truncates.
+ */
+const summarizeInput = (input: JsonObject): string | undefined => {
+  if (Object.keys(input).length === 0) {
+    return undefined;
+  }
+  const oneLine = JSON.stringify(capStrings(input));
+  return oneLine.length > PROMPT_OVERALL_LIMIT
+    ? `${oneLine.slice(0, PROMPT_OVERALL_LIMIT)}… [arguments truncated — inspect the call before approving]`
+    : oneLine;
+};
+
+/**
  * Puts the question to someone at a terminal. A prompt's answer is free
  * text from a person mid-typing, so it is read leniently and anything that
  * is not recognisably a yes is a no.
@@ -238,7 +329,18 @@ const awaitPrompt = async (
   // The command, when there is one: for a shell call the tool name is the
   // least interesting half of the question, and an approver shown only
   // `shell.run (gated)` is being asked to trust something they cannot see.
-  const what = command === undefined ? `${call.toolName} (${risk})` : `${call.toolName}: ${command}`;
+  // The same is true of any gated call that carries arguments — approving
+  // `schedule.every` sets up recurring unattended work and (with a
+  // destination) a standing permission to speak, so the operator must see
+  // the cadence, prompt, and destination, not just the tool name. When
+  // there is no command scope to show, fall back to a compact rendering of
+  // the call's input, exactly as the remote (Slack) prompt already does.
+  const argumentSummary = command === undefined ? summarizeInput(call.input) : undefined;
+  const what = command !== undefined
+    ? `${call.toolName}: ${command}`
+    : argumentSummary !== undefined
+      ? `${call.toolName} (${risk}): ${argumentSummary}`
+      : `${call.toolName} (${risk})`;
   const always = command === undefined ? 'always this session' : 'always this scope';
   const pending = ask(
     `Allow ${what} for ${session.agent.name}? [y]es / [a]lways (${always}) / [N]o: `,
@@ -302,7 +404,7 @@ const awaitRemote = async (
  * argument shape makes `rm -rf` a read.
  */
 export const createPermissionPolicy = (options: PermissionPolicyOptions): ApprovalPolicy => {
-  const { mode, ask, request, onDecision, commands } = options;
+  const { mode, ask, request, onDecision, commands, destinations } = options;
   if (mode === 'interactive' && !ask) {
     throw new Error('interactive permission mode needs an `ask` function to reach a human.');
   }
@@ -325,6 +427,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
     allowed: boolean,
     reason: string,
     command?: string,
+    destination?: string,
   ): boolean => {
     onDecision?.({
       allowed,
@@ -335,6 +438,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       agentId: context.session.agent.id,
       reason,
       ...(command === undefined ? {} : { command }),
+      ...(destination === undefined ? {} : { destination }),
     });
     return allowed;
   };
@@ -385,6 +489,24 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         }
       } else if (alwaysAllowed.has(sessionKey(session.id, call.toolName))) {
         return report(context, true, `${call.toolName} was approved for the rest of this session`);
+      }
+
+      // The schedule's destination scope, checked before the headless
+      // refusal because an unattended firing is exactly when it applies.
+      // `gated` only: a destination cannot launder a `dangerous` call, the
+      // same way no argument shape makes `rm -rf` a read.
+      if (risk === 'gated' && destinations) {
+        const destination = context.tool.destinationFor?.(call.input);
+        if (destination !== undefined
+          && await destinations.isPreauthorized(session, destination)) {
+          return report(
+            context,
+            true,
+            `${call.toolName} to ${destination} was pre-authorized when this schedule was approved`,
+            undefined,
+            destination,
+          );
+        }
       }
 
       if (mode === 'headless') {

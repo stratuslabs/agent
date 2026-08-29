@@ -122,10 +122,47 @@ export interface GatewayLike {
   }): boolean;
 }
 
+/**
+ * A destination this adapter is being asked to speak to, outside any
+ * conversation it is currently rendering.
+ *
+ * The agent is part of the address, not ambient context: each agent is its
+ * own app on the platform — its own tokens, possibly its own workspace — so
+ * a destination id alone does not say whose credentials it should be
+ * resolved against, or even whose id space it belongs to.
+ */
+export interface OutboundAddress {
+  /** Whose app must do the talking. */
+  agentId: string;
+  /**
+   * Channel-native destination id — for Slack a channel or DM id
+   * (`C…`/`G…`/`D…`), the same convention approver lists already use.
+   * Never a Stratus identity: mapping through one adds a lookup that can
+   * only be wrong.
+   */
+  to: string;
+}
+
 export interface ChannelAdapter {
   name: string;
   start(gateway: GatewayLike): Promise<void>;
   stop(): Promise<void>;
+  /**
+   * The write side of an addressable destination — what `message.send` and
+   * schedule-creation validation resolve. Optional because it is a
+   * capability, not a courtesy: a transport with no concept of a
+   * destination simply does not have the method, and a caller that needs
+   * it checks, the same way `GatewayLike.sessionRouting` works.
+   *
+   * The contract is validate-then-hand-over: an implementation MUST refuse
+   * — by rejecting, with a message fit to show the person who named the
+   * destination — anything it could not actually deliver to (an agent with
+   * no app here, a conversation that does not exist or that the agent's
+   * app is not a member of), rather than returning a connection whose
+   * first `post` fails at 6am with nobody watching. Resolving is therefore
+   * also how a destination is checked without sending anything.
+   */
+  resolveOutbound?(address: OutboundAddress): Promise<OutboundConnection>;
 }
 
 export interface ChannelSessionKeyParts {

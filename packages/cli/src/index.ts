@@ -57,10 +57,13 @@ import {
 } from '@stratusagent/provider-claude-code';
 import {
   agentIdWithSuffix,
+  canonicalDestination,
   createForgetTool,
   createRecallTool,
   createRememberTool,
   defineAgent,
+  describeCadence,
+  describeSchedule,
   FORGET_TOOL_NAME,
   MEMORY_TOOL_NAME,
   formatSoul,
@@ -365,6 +368,14 @@ export interface ParsedAgentsCommand {
   token?: string;
 }
 
+export interface ParsedSchedulesCommand {
+  command: 'schedules';
+  action: 'list' | 'cancel';
+  /** cancel only: which schedule. */
+  scheduleId?: string;
+  format: 'text' | 'json';
+}
+
 export interface ParsedDoctorCommand {
   command: 'doctor';
   format: 'text' | 'json';
@@ -424,6 +435,7 @@ export type ParsedCommand =
   | ParsedAgentsCommand
   | ParsedSkillAddCommand
   | ParsedSkillsCommand
+  | ParsedSchedulesCommand
   | ParsedDoctorCommand
   | ParsedLogsCommand
   | ParsedServiceCommand
@@ -493,6 +505,8 @@ Usage:
   stratus skill add stratuslabs/skill-code-review
   stratus skill add ./my-skills --skill code-review --agent ava
   stratus skills
+  stratus schedules
+  stratus schedules cancel <id>
   stratus doctor
   stratus service install
   stratus service status
@@ -539,6 +553,12 @@ Commands:
                    --force replaces an already-installed id
   skills           List installed skills and which agents enable each
                    (also: stratus skill list)
+  schedules        List every schedule the fleet has set — cadence, prompt,
+                   pre-authorized destination, next firing — straight from the
+                   daemon's database (--format json). "stratus schedules
+                   cancel <id>" stops the next firing and revokes the
+                   destination that was approved with it
+                   (also: stratus schedule list / schedule cancel <id>)
   agent new        Create an agent identity (generates a human-ish name + avatar theme)
   agents           List your agents: who they are, where their souls live, what
                    they run on, what they remember (also: stratus agent list).
@@ -866,6 +886,49 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       format,
       ...(gateway ? { gateway } : {}),
       ...(token ? { token } : {}),
+    };
+  }
+
+  if (command === 'schedules' || (command === 'schedule' && rest[0] === 'list') || (command === 'schedule' && rest[0] === 'cancel')) {
+    const schedulesRest = command === 'schedules' ? rest : rest.slice(1);
+    const action = (command === 'schedule' ? rest[0] : schedulesRest[0]) === 'cancel' ? 'cancel' : 'list';
+    const tokens = action === 'cancel' && command === 'schedules' ? schedulesRest.slice(1) : schedulesRest;
+    let format: 'text' | 'json' = 'text';
+    let scheduleId: string | undefined;
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if (!token || (action === 'list' && token === 'list' && index === 0)) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--format') {
+        const value = readOptionValue(tokens, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported format: ${value}`);
+        }
+        format = value;
+        index += 1;
+        continue;
+      }
+      if (token.startsWith('--')) {
+        throw new Error(`Unknown option: ${token}`);
+      }
+      if (action === 'cancel' && scheduleId === undefined) {
+        scheduleId = token;
+        continue;
+      }
+      throw new Error(`Unexpected argument: ${token}. Try: stratus schedules, stratus schedules cancel <id>`);
+    }
+    if (action === 'cancel' && !scheduleId) {
+      throw new Error('schedules cancel needs the schedule id: stratus schedules cancel <id>.');
+    }
+    return {
+      command: 'schedules',
+      action,
+      ...(scheduleId ? { scheduleId } : {}),
+      format,
     };
   }
 
@@ -2394,11 +2457,17 @@ const verifySlackAppToken = async (token: string, fetchImpl: typeof fetch | unde
 // package being installed.
 const SLACK_BOT_SCOPES = [
   'app_mentions:read',
+  // The conversations read family backs outbound destination validation
+  // (conversations.info): whether a channel a schedule wants to report to
+  // exists, and whether this app is a member of it.
+  'channels:read',
   'chat:write',
   'files:write',
+  'groups:read',
   'im:history',
   'im:read',
   'im:write',
+  'mpim:read',
   'users:read',
 ];
 const SLACK_BOT_EVENTS = ['app_mention', 'message.im'];
@@ -4811,6 +4880,58 @@ export const runSkillAdd = async (
   }
 };
 
+/**
+ * List and cancel what the fleet has scheduled — against the daemon's own
+ * database, the way `stratus logs` reads the daemon's own log. WAL makes a
+ * second process on the file routine; a running daemon re-reads due rows
+ * every tick and the destination grant on every send, so a cancel from
+ * here takes effect without asking it anything.
+ */
+export const runSchedules = async (
+  command: ParsedSchedulesCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  // Lazy like the serve path: node:sqlite loads only for the command that
+  // needs it.
+  const { SqliteScheduleStore, defaultSessionDbPath } = await import('@stratusagent/gateway');
+  const store = new SqliteScheduleStore(defaultSessionDbPath(env));
+  try {
+    if (command.action === 'cancel') {
+      const id = command.scheduleId ?? '';
+      const record = store.get(id);
+      if (!record || !store.delete(id)) {
+        writeLine(streams.stderr, `No schedule with id ${id}. \`stratus schedules\` lists what exists.`);
+        return 1;
+      }
+      writeLine(streams.stdout, `Cancelled ${id} (${record.agentId}, ${describeCadence(record.cadence)}).`);
+      if (record.destination) {
+        writeLine(streams.stdout, `Its pre-authorized destination ${canonicalDestination(record.destination)} is revoked with it.`);
+      }
+      return 0;
+    }
+
+    const schedules = store.list();
+    if (command.format === 'json') {
+      writeLine(streams.stdout, JSON.stringify({ schedules: schedules.map(describeSchedule) }, null, 2));
+      return 0;
+    }
+    if (schedules.length === 0) {
+      writeLine(streams.stdout, 'No schedules set. An agent sets one with the schedule.every / schedule.at tools.');
+      return 0;
+    }
+    for (const record of schedules) {
+      const destination = record.destination ? `  →  ${canonicalDestination(record.destination)}` : '';
+      writeLine(streams.stdout, `${record.id}  [${record.agentId}]  ${describeCadence(record.cadence)}${destination}`);
+      writeLine(streams.stdout, `  next: ${record.nextFireAt ?? '(spent — awaiting cleanup)'}${record.lastFiredAt ? `   last: ${record.lastFiredAt}` : ''}`);
+      writeLine(streams.stdout, `  prompt: ${record.prompt}`);
+    }
+    return 0;
+  } finally {
+    store.close();
+  }
+};
+
 export const runSkills = async (
   streams: CliStreams,
   env: CliEnvironment = {},
@@ -5536,9 +5657,13 @@ export const runServe = async (
     },
   };
   const approvals = (transport: ApprovalTransport): ApprovalPolicy => createPermissionPolicy(
+    // The destination scope rides along in BOTH modes — it is what lets a
+    // scheduled turn report to the channel a human approved with the
+    // schedule, and headless (where every other gated call is refused) is
+    // exactly the deployment it exists for.
     approvalMode === 'remote'
-      ? { mode: 'remote', request: transport.request, onDecision, commands }
-      : { mode: 'headless', onDecision, commands },
+      ? { mode: 'remote', request: transport.request, onDecision, commands, destinations: transport.destinations }
+      : { mode: 'headless', onDecision, commands, destinations: transport.destinations },
   );
 
   if (approvalMode === 'remote') {
@@ -5745,6 +5870,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'skills') {
       return await runSkills(streams, resolvedEnv);
+    }
+
+    if (command.command === 'schedules') {
+      return await runSchedules(command, streams, resolvedEnv);
     }
 
     if (command.command === 'doctor') {

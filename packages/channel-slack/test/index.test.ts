@@ -57,6 +57,8 @@ interface FakeWeb extends SlackWebLike {
   onPostEnter?: () => void;
   /** Held by chat.postMessage, so a test can act while a post is in flight. */
   postGate?: Promise<void>;
+  /** What conversations.info answers for; anything else rejects channel_not_found. */
+  knownConversations: Map<string, { is_member?: boolean; is_im?: boolean }>;
 }
 
 const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
@@ -102,6 +104,16 @@ const createFakeWeb = (botUserId: string, teamId: string): FakeWeb => {
           wasBuffer: Buffer.isBuffer(args.file),
         });
         return {};
+      },
+    },
+    knownConversations: new Map(),
+    conversations: {
+      async info({ channel }) {
+        const known = web.knownConversations.get(channel);
+        if (!known) {
+          throw new Error('channel_not_found');
+        }
+        return { channel: { id: channel, ...known } };
       },
     },
     users: {
@@ -1509,4 +1521,91 @@ test('an update Slack applied but never confirmed does not lose its outcome', as
 
   assert.equal(web.updates.length, updatesAfterOutcome, 'the decision is left exactly as Slack stored it');
   assert.match(web.updates.at(-1)?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+});
+
+// ---- addressable outbound (step 10) -----------------------------------------
+
+const startedAdapterWith = async (web: FakeWeb): Promise<import('@stratusagent/channels').ChannelAdapter> => {
+  const socket = createFakeSocket();
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    log: () => {},
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+  return adapter;
+};
+
+test('resolveOutbound posts to a channel the app is a member of, splitting oversized text', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  const adapter = await startedAdapterWith(web);
+
+  const connection = await adapter.resolveOutbound!({ agentId: 'ava', to: 'C-ENG' });
+  const ref = await connection.post('morning report: all green');
+  assert.equal(web.posts.length, 1);
+  assert.equal(web.posts[0]?.channel, 'C-ENG');
+  assert.equal(web.posts[0]?.text, 'morning report: all green');
+  assert.equal(ref.channel, 'C-ENG');
+  assert.ok(ref.ts.length > 0);
+
+  // A report longer than one Slack message arrives whole, in order.
+  const long = ['a'.repeat(3000), 'b'.repeat(3000)].join('\n');
+  await connection.post(long);
+  assert.equal(web.posts.length, 3);
+  assert.ok((web.posts[1]?.text.length ?? 0) <= 4000);
+  assert.match(web.posts[2]?.text ?? '', /b/);
+
+  await adapter.stop();
+});
+
+test('resolveOutbound refuses a channel the app is not a member of, naming the fix', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-PRIVATE', { is_member: false });
+  const adapter = await startedAdapterWith(web);
+
+  await assert.rejects(
+    () => adapter.resolveOutbound!({ agentId: 'ava', to: 'C-PRIVATE' }),
+    /not a member of C-PRIVATE — invite it/,
+  );
+  assert.equal(web.posts.length, 0, 'nothing is posted on a refusal');
+  await adapter.stop();
+});
+
+test('resolveOutbound refuses a conversation the app cannot see', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  const adapter = await startedAdapterWith(web);
+
+  await assert.rejects(
+    () => adapter.resolveOutbound!({ agentId: 'ava', to: 'C-NOWHERE' }),
+    /cannot see C-NOWHERE/,
+  );
+  await adapter.stop();
+});
+
+test('resolveOutbound treats a DM conversation as addressable without membership', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('D-DYLAN', { is_im: true });
+  const adapter = await startedAdapterWith(web);
+
+  const connection = await adapter.resolveOutbound!({ agentId: 'ava', to: 'D-DYLAN' });
+  await connection.post('scheduled reminder');
+  assert.equal(web.posts[0]?.channel, 'D-DYLAN');
+  await adapter.stop();
+});
+
+test('resolveOutbound refuses an agent with no Slack app of its own', async () => {
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('C-ENG', { is_member: true });
+  const adapter = await startedAdapterWith(web);
+
+  await assert.rejects(
+    () => adapter.resolveOutbound!({ agentId: 'bea', to: 'C-ENG' }),
+    /bea has no Slack app/,
+  );
+  await adapter.stop();
 });
