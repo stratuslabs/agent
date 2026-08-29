@@ -7,6 +7,7 @@ import { createLazySkill, parseSkillDocument } from '@stratusagent/agents';
 
 import {
   parsePluginManifest,
+  parseToolRiskOverrides,
   validatePluginConfig,
   PluginManifestError,
   type PluginManifest,
@@ -126,6 +127,12 @@ export interface LoadedPlugin {
   name: string;
   manifest: PluginManifest;
   trusted: boolean;
+  /**
+   * The plugin's registered tools, **live**: the same array its view keeps
+   * current, so a bridge's reconnect-time registrations and removals show
+   * here without the host being told. Read it when answering; do not copy
+   * it into a snapshot that will go stale.
+   */
   tools: PluginToolRecord[];
   skills: PluginSkillRecord[];
   /**
@@ -179,7 +186,10 @@ const configFor = (
   manifest: PluginManifest,
   workspaceRoot: string | undefined,
 ): JsonObject => {
-  const { enabled: _enabled, ...rest } = block;
+  // `toolRisks` is the host's key, applied by the view at registration —
+  // stripped here so the plugin's code never sees, and so can never
+  // second-guess, the operator's risk word.
+  const { enabled: _enabled, toolRisks: _toolRisks, ...rest } = block;
   const declaresWorkspace = Boolean(
     manifest.config
     && typeof manifest.config.properties === 'object'
@@ -303,6 +313,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
       // for missing the very setting the host supplies.
       const config = configFor(block, manifest, options.workspaceRoot);
       validatePluginConfig(manifest, config);
+      const riskOverrides = parseToolRiskOverrides(manifest, block);
 
       // Skills are read and validated before the module is imported —
       // they are files the manifest names, so a broken one fails the
@@ -324,7 +335,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
       }
       instance = plugin;
 
-      const view = new ManifestBoundToolRegistry({ manifest, target: options.tools, trusted: isTrusted });
+      const view = new ManifestBoundToolRegistry({ manifest, target: options.tools, trusted: isTrusted, riskOverrides });
       await plugin.setup({ bus: options.bus, tools: view });
 
       // Everything that can refuse happens before anything commits, so a

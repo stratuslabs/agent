@@ -11,6 +11,7 @@
 export {
   declaredRiskFor,
   parsePluginManifest,
+  parseToolRiskOverrides,
   resolvePluginAgentConfig,
   validateAgainstSchema,
   validatePluginConfig,
