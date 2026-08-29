@@ -3,6 +3,7 @@ import type {
   ApprovalContext,
   ApprovalPolicy,
   JsonObject,
+  JsonValue,
   Session,
   Tool,
   ToolCall,
@@ -256,21 +257,53 @@ const untilAborted = async <T>(
  */
 const sessionKey = (sessionId: string, toolName: string): string => `${sessionId}\u0000${toolName}`;
 
-/** How much of a call's arguments the terminal prompt shows before eliding. */
-const PROMPT_INPUT_LIMIT = 200;
+/**
+ * How long any single string value may be before it is elided, and the
+ * overall backstop for an argument object with an unusual number of fields.
+ */
+const PROMPT_VALUE_LIMIT = 120;
+const PROMPT_OVERALL_LIMIT = 400;
+
+/**
+ * Cap every string in a value to `PROMPT_VALUE_LIMIT`, structure preserved.
+ *
+ * The point is *per field*, not overall: a schedule's free-form `prompt`
+ * must not be able to push its `destination` past a length cut and hide the
+ * one thing the operator most needs to see — where an approved schedule may
+ * post. Bounding each string instead keeps every key visible, so a long
+ * prompt shortens itself and leaves the cadence and destination intact.
+ */
+const capStrings = (value: JsonValue): JsonValue => {
+  if (typeof value === 'string') {
+    return value.length > PROMPT_VALUE_LIMIT ? `${value.slice(0, PROMPT_VALUE_LIMIT)}…` : value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(capStrings);
+  }
+  if (value !== null && typeof value === 'object') {
+    const out: JsonObject = {};
+    for (const [key, nested] of Object.entries(value)) {
+      out[key] = capStrings(nested);
+    }
+    return out;
+  }
+  return value;
+};
 
 /**
  * A one-line rendering of a gated call's arguments for a terminal prompt,
  * or undefined when there are none. Bounded — an approver reads it inline,
  * not a scrollback of JSON — and never a decision input: what this returns
- * is shown to a human, never matched against a scope.
+ * is shown to a human, never matched against a scope. Long values are
+ * capped individually (see `capStrings`) so no single field can hide the
+ * rest; the overall cap is only a backstop for an object with many fields.
  */
 const summarizeInput = (input: JsonObject): string | undefined => {
   if (Object.keys(input).length === 0) {
     return undefined;
   }
-  const oneLine = JSON.stringify(input);
-  return oneLine.length > PROMPT_INPUT_LIMIT ? `${oneLine.slice(0, PROMPT_INPUT_LIMIT)}…` : oneLine;
+  const oneLine = JSON.stringify(capStrings(input));
+  return oneLine.length > PROMPT_OVERALL_LIMIT ? `${oneLine.slice(0, PROMPT_OVERALL_LIMIT)}…` : oneLine;
 };
 
 /**

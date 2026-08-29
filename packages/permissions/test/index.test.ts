@@ -106,6 +106,24 @@ test('the interactive prompt renders a gated call\'s arguments, so a schedule sh
   asked.length = 0;
   await policy.approve(context('memory.remember', 'gated'));
   assert.match(asked[0]!, /Allow memory\.remember \(gated\) for Ava\?/);
+
+  // A long free-form prompt must not push the destination out of view: the
+  // approver is authorizing where the schedule may post, and that field
+  // stays visible however long the prompt is.
+  asked.length = 0;
+  await policy.approve(context('schedule.every', 'gated', {
+    call: {
+      id: 'call-1',
+      toolName: 'schedule.every',
+      input: {
+        every: '30m',
+        prompt: 'x'.repeat(500),
+        destination: { channel: 'slack', to: 'C-SECRET-OPS' },
+      },
+    },
+  }));
+  assert.match(asked[0]!, /C-SECRET-OPS/, 'the destination survives a long prompt');
+  assert.match(asked[0]!, /30m/);
 });
 
 test('"always" lasts for the session that said it, and no longer', async () => {
