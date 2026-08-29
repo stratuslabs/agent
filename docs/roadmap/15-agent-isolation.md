@@ -124,7 +124,16 @@ before it.
   credential store stays supervisor-only: a runtime is handed resolved
   values — or, once [08](./08-deployment-profiles.md)'s per-request
   credential source exists, an opaque handle over IPC — never the path to
-  `~/.stratus/credentials.json` or a resolver over it.
+  `~/.stratus/credentials.json` or a resolver over it. Spawn-time env is
+  not the whole contract: the gateway today re-resolves configuration per
+  dispatch, so a rotated credential selects a new runner on the next turn
+  — `runnerKeyFor`'s comment says exactly this — and a runtime keeping a
+  revoked key until someone thought to restart it would regress that. So
+  the supervisor re-resolves on each dispatch and the dispatch carries
+  the agent's current credentials (the same shape 08's per-request source
+  wants); a credential changed through the control API reaches the
+  affected runtime before its next turn, by that handoff or by a runtime
+  restart.
 - **The limit of same-user processes, stated so no doc can overclaim it:**
   runtimes sharing the supervisor's OS user are a real fault boundary and
   a real partition of memory and environment, but not a filesystem
@@ -235,7 +244,8 @@ step needs, which is the evidence the seams were right.
   parked approvals recover, and a concurrent turn on another agent
   completes unaffected.
 - The same scripted conversation — tool call, gated approval via Slack,
-  streamed reply, restart, resume — passes identically under
+  streamed reply, a credential rotated through the control API taking
+  effect on the next turn, restart, resume — passes identically under
   `isolation: shared` and `isolation: process`. The parity suite from
   [04](./04-agent-sdk-bridge.md) is the model: one behavior, two
   transports.
