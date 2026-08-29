@@ -136,7 +136,7 @@ export interface ApiConfig {
  * Typed as an open object because the keys belong to the plugin, not to
  * this file — the daemon validates them against the manifest's own schema
  * at load time, which is the only place that knows what `roots` means.
- * What this package owns is the two keys the *host* reads.
+ * What this package owns is the three keys the *host* reads.
  */
 export interface PluginConfigBlock extends JsonObject {
   /** Default true: a listed plugin runs unless it says otherwise. */
@@ -148,6 +148,15 @@ export interface PluginConfigBlock extends JsonObject {
    * between agents rather than a preference.
    */
   agents?: JsonObject;
+  /**
+   * The operator's per-tool risk word, tool name to `safe`/`gated`/
+   * `dangerous`, replacing the manifest's declaration for that name.
+   * Host-owned and applied by the registration view — the plugin's code
+   * never sees it — because a risk that *lowers* must come from the
+   * trusted config, not from the code being judged. Validated against the
+   * manifest at load, in `@stratusagent/plugins`.
+   */
+  toolRisks?: JsonObject;
 }
 
 /**

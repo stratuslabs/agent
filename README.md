@@ -73,7 +73,7 @@ and serves the rest of the roster normally.
 
 #### Tools
 
-Four packages give agents something to actually do. Each is listed and enabled
+Five packages give agents something to actually do. Each is listed and enabled
 in a **trusted** config (`~/.stratus/config.json`, or a file you passed with
 `--config`) — never by being installed, and never by a `stratus.config.json`
 that shipped in a repository you cloned:
@@ -85,6 +85,8 @@ that shipped in a repository you cloned:
 - [`@stratusagent/tool-web`](./packages/tool-web) — `web.fetch`: a URL as readable text, no browser. This is the one an agent wants twenty times for every once it wants the next.
 
 - [`@stratusagent/tool-browser`](./packages/tool-browser) — `browser.goto`, `.read`, `.screenshot`, `.act` on `playwright-core` (a few megabytes; it downloads no browser — you point it at one you have, or fetch Chromium deliberately).
+
+- [`@stratusagent/plugin-mcp`](./packages/plugin-mcp) — the MCP bridge: any [Model Context Protocol](https://modelcontextprotocol.io) server's tools as `mcp.<server>.<tool>`, discovered at connect, every one `gated` regardless of the server's self-description, with per-tool operator overrides. Stdio servers run under a replaced environment like `tool-shell` commands.
 
   ```bash
   npm install -g @stratusagent/tool-fs @stratusagent/tool-web
@@ -128,6 +130,7 @@ Today it is useful for:
 - upgrading in place (`stratus update`) — stop the daemon, upgrade from npm, run any pending state migrations (`~/.stratus` is versioned, and migrations also run themselves on the first command of a newer build, whatever installed it), rewrite the service unit's absolute node/entrypoint paths, restart; `--check` reports without changing anything (see `packages/cli/README.md`)
 - talking to your agents in Slack — each agent is its own Slack app with its own avatar and presence, threads are resumable conversations, and replies stream via message edits (install `@stratusagent/channel-slack`, then run `stratus setup` → **Channels** to create and connect each agent's app; see `packages/channel-slack/README.md`)
 - giving agents real capability — a filesystem inside roots you choose, a shell whose safe commands run unattended and whose destructive ones ask, a web fetcher, and a browser — each an optional plugin you install and enable, with the tools an agent may call listed in its own soul (`tools: [fs.*, web.fetch]`); see `packages/tool-fs/README.md` and its siblings
+- mounting any [MCP](https://modelcontextprotocol.io) server's tools under that same policy — `@stratusagent/plugin-mcp` connects to stdio or HTTP servers and registers what they advertise as `mcp.<server>.<tool>`, every tool `gated` until you say otherwise, so the whole existing MCP ecosystem is available to a soul that opts in (see `packages/plugin-mcp/README.md`)
 - agents that act without being spoken to first — an agent sets its own schedule (`schedule.every "0 7 * * *"`, approved by a human once, destination included) and each firing runs unattended and reports into Slack with `message.send`; `stratus schedules` lists and cancels what the fleet has set (see `packages/cli/README.md`)
 - running a multi-turn agent loop locally: provider → tools → provider until the model finishes
 - running real tool-calling sessions against Claude (via the official Anthropic SDK) or any OpenAI-compatible provider (tools are advertised with JSON schemas, tool calls execute locally, and results are fed back to the model)
@@ -425,6 +428,7 @@ packages/
   executors/
   gateway/
   permissions/
+  plugin-mcp/
   plugins/
   provider-anthropic/
   provider-claude-code/

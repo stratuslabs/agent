@@ -64,6 +64,18 @@ export const createPlugin = (config) => ({
   leaves none of the first three behind.
 - **Refuses collisions.** Two packages contributing one tool name is a
   load-time error naming both, never whichever loaded last.
+- **Keeps the view live for discovered names.** A plugin declared with
+  `toolsDiscovered` (the MCP bridge) learns names from a server, on connect
+  and again on reconnect — so the view it was handed keeps registering after
+  commit, under the identical gate, and can `unregister` its own names when
+  a server stops advertising one. Its tool records stay current, which is
+  what the catalog and dashboard read.
+- **Applies the operator's `toolRisks`.** A host-owned config key (sibling
+  to `enabled` and `agents`, stripped before your code sees the block) that
+  replaces the manifest's risk for an exact tool name, both directions,
+  still floored for untrusted packages. It exists so an operator who has
+  read a bridged server's tool can mark it `safe` — a claim the plugin's
+  own code never gets to make.
 
 ## Resolving settings per call
 

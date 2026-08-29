@@ -443,6 +443,7 @@ is fine for a private agent and is not what you want once a shell is installed.
 | [`@stratusagent/tool-web`](../tool-web) | `web.fetch` | `gated` |
 | [`@stratusagent/tool-browser`](../tool-browser) | `browser.goto`, `.read`, `.screenshot` | `gated` |
 | | `browser.act` | `dangerous` — always a human |
+| [`@stratusagent/plugin-mcp`](../plugin-mcp) | `mcp.<server>.<tool>` — any MCP server's tools, discovered at connect | `gated`, whatever the server says; per-tool `toolRisks` overrides |
 
 Each package's README carries its own settings and the reasoning behind its
 risk levels. Three things are worth knowing here:
@@ -461,6 +462,13 @@ risk levels. Three things are worth knowing here:
   NAT64 spellings of the same addresses. It is enforced on the connection,
   so a redirect or a DNS answer cannot walk an agent into your metadata
   endpoint. `allowedHosts` opens a specific one when you mean to.
+- **`plugin-mcp` mounts somebody else's code.** Each configured MCP server's
+  tools register as `mcp.<server>.<tool>`, so `tools: [mcp.linear.*]` grants
+  one server, and every bridged tool is `gated` regardless of how the
+  server describes itself — the operator's per-tool `toolRisks` entry is
+  the only thing that lowers one. A stdio server's environment is replaced
+  the way `tool-shell`'s is. See [the bridge's README](../plugin-mcp) for
+  server settings and lifecycle.
 
 `GET /api/v1/catalog/tools` lists what a running daemon actually has, and the
 dashboard's **Plugins** screen renders it — including a plugin you enabled that

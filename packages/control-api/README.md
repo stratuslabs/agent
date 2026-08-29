@@ -180,7 +180,11 @@ A tool with no `package` is the kernel's, which is the honest answer for it
 rather than an omission. `risk` is read from the live registry, so it is the
 risk a call will actually face: a third-party package cannot declare its own
 tool `safe`, and this reports the floored value rather than the manifest's
-claim.
+claim. A tool bridged from an MCP server shows the same way — `package:
+"@stratusagent/plugin-mcp"`, and the `mcp.<server>.` prefix names whose
+server it is — including one discovered after startup, on a reconnect: the
+list is derived per read from the plugins' live records, never a load-time
+snapshot.
 
 A skill's `id` is the canonical form an allowlist names — bare for one the
 operator installed under `~/.stratus/skills/`, qualified
