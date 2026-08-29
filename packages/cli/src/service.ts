@@ -310,6 +310,68 @@ export interface ServiceActionResult {
   messages: string[];
 }
 
+export interface ServiceCommandInfo {
+  /** node, flags, entrypoint, subcommand — as the unit would run them. */
+  argv: string[];
+  /** The interpreter the unit names: argv[0]. */
+  execPath?: string;
+  /** The entrypoint: the first argv entry after the interpreter that is not a flag. */
+  scriptPath?: string;
+  /** The `--config` the unit pins the daemon to, if any. */
+  configPath?: string;
+}
+
+const unxml = (value: string): string => value
+  .replace(/&lt;/g, '<')
+  .replace(/&gt;/g, '>')
+  .replace(/&amp;/g, '&');
+
+/**
+ * What the installed unit would actually run — parsed back out of the unit
+ * file. This is how `stratus update` preserves an existing unit's `--config`
+ * across a rewrite, and how it notices the failure that motivates the
+ * rewrite in the first place: a unit whose absolute node path (say an nvm
+ * version directory) no longer exists, which stops the service without
+ * anything saying so.
+ */
+export const readServiceCommand = async (env: ServiceEnvironment = {}): Promise<ServiceCommandInfo | undefined> => {
+  let contents: string;
+  try {
+    contents = await readFile(serviceUnitPath(env), 'utf8');
+  } catch {
+    return undefined;
+  }
+  let argv: string[] = [];
+  if (servicePlatform(env) === 'launchd') {
+    const section = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(contents);
+    if (!section?.[1]) {
+      return undefined;
+    }
+    argv = [...section[1].matchAll(/<string>([\s\S]*?)<\/string>/g)].map((match) => unxml(match[1] ?? ''));
+  } else {
+    const line = /^ExecStart=(.*)$/m.exec(contents);
+    if (!line?.[1]) {
+      return undefined;
+    }
+    // Written as systemdArgument(JSON.stringify(arg)): reverse the `%%`
+    // and `$$` specifier escapes, then undo the JSON quoting.
+    argv = (line[1].match(/"(?:[^"\\]|\\.)*"/g) ?? [])
+      .map((token) => JSON.parse(token.replace(/\$\$/g, '$').replace(/%%/g, '%')) as string);
+  }
+  if (argv.length === 0) {
+    return undefined;
+  }
+  const scriptPath = argv.slice(1).find((argument) => !argument.startsWith('-'));
+  const configIndex = argv.indexOf('--config');
+  const configPath = configIndex !== -1 ? argv[configIndex + 1] : undefined;
+  return {
+    argv,
+    ...(argv[0] !== undefined ? { execPath: argv[0] } : {}),
+    ...(scriptPath !== undefined ? { scriptPath } : {}),
+    ...(configPath !== undefined ? { configPath } : {}),
+  };
+};
+
 export const installService = async (
   env: ServiceEnvironment = {},
   options: ServiceInstallOptions = {},
