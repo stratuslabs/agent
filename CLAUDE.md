@@ -101,10 +101,12 @@ hand and by review:
   means an optional property is added with a conditional spread —
   `...(x ? { x } : {})` — never assigned `undefined`. `any` appears
   nowhere in src; narrow from `unknown` instead.
-- **Tools throw plain `Error`s; the executor converts.** `ToolResult`s
-  are built only through `successResult`/`failureResult` from
-  `@stratusagent/executors`, never hand-rolled `{ ok, error }`; HTTP
-  failures throw `ApiError(status, code, message)`. Error text a user
+- **Tools throw plain `Error`s; the executor converts.** In any package
+  that can depend on `@stratusagent/executors`, build `ToolResult`s
+  through its `successResult`/`failureResult`, never hand-rolled
+  `{ ok, error }` — `core` is the one exception, since `executors`
+  depends on it and core stays dependency-free. HTTP failures throw
+  `ApiError(status, code, message)`. Error text a user
   will read is a full sentence that names the fix:
   `No schedule of yours has id ${id}. schedule.list shows what exists.`
 - **Comments explain why, and cite the incident when there is one.**

@@ -18,8 +18,9 @@ permission engine then judges each command.
    positional argument, not just the destructive flags. `pwd`, `whoami`, and
    `uname` round it out.
 
-Anything else asks, and in [`headless` mode](./approvals.md) anything else is
-refused with the command in the log.
+Anything else asks, and in [`headless` mode](./approvals.md) anything else
+is refused — the log records the refusal and the scope it fell outside,
+never the command itself (see below).
 
 **A control operator disqualifies the whole command**, whatever it starts
 with: `|`, `&`, `;`, a newline, backticks, `$( )`, subshells, redirection.

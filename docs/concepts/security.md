@@ -27,8 +27,11 @@ gets to make. ([Configuration](../reference/config.md))
 
 ## What an agent can reach
 
-- **Two gates on every capability**: a trusted config enables the plugin,
-  and the agent's own soul lists what it may call.
+- **Two gates on every plugin-provided capability**: a trusted config
+  enables the plugin, and the agent's own soul lists what it may call.
+  The built-ins (echo, memory, delegation, schedules) register without a
+  plugin, and a soul that omits `tools:` gets every registered tool — an
+  empty `plugins` block is not an empty toolbox.
   ([Plugins](./plugins.md), [Tools](../guides/tools.md))
 - **The daemon runs only `safe` tools unattended**; everything else is
   refused or asked of a configured human. ([Approvals](../guides/approvals.md))
