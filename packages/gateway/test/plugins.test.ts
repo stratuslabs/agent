@@ -297,3 +297,54 @@ test('a contested bare alias disappears from every listing, plugins() included',
     await gateway.stop();
   }
 });
+
+test('a tool a plugin registers after load — discovery on reconnect — is reported with its provenance, not as the kernel’s', async () => {
+  const home = await newHome();
+  let view: { register(tool: unknown): void } | undefined;
+  const host = await hostFor({
+    'stratus-plugin-bridge': {
+      manifest: {
+        stratus: { pluginVersion: 1, contributes: { toolsDiscovered: [{ namespace: 'mcp.*', risk: 'gated' }] } },
+      },
+      module: {
+        createPlugin: () => ({
+          name: 'bridge',
+          setup(context: { tools: { register(tool: unknown): void } }) {
+            view = context.tools;
+            context.tools.register({ name: 'mcp.linear.create_issue', async execute() { return null; } });
+          },
+        }),
+      },
+    },
+  });
+
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    plugins: { 'stratus-plugin-bridge': { enabled: true } },
+    pluginHost: host,
+    log: () => {},
+    warn: () => {},
+  });
+
+  await gateway.start();
+  try {
+    // The bridge's server reconnects and advertises a name it did not at
+    // startup. Provenance is derived per read from the plugin's live
+    // records, so the catalog must say whose code this is — a snapshot
+    // taken at load would report it as the kernel's.
+    view!.register({ name: 'mcp.linear.list_projects', async execute() { return null; } });
+
+    const late = gateway.tools().find((tool) => tool.name === 'mcp.linear.list_projects');
+    assert.equal(late?.package, 'stratus-plugin-bridge');
+    assert.equal(late?.trusted, false);
+    assert.equal(late?.risk, 'gated');
+    const record = gateway.plugins().find((plugin) => plugin.package === 'stratus-plugin-bridge');
+    assert.deepEqual(
+      record?.tools?.map((tool) => tool.name).sort(),
+      ['mcp.linear.create_issue', 'mcp.linear.list_projects'],
+    );
+  } finally {
+    await gateway.stop();
+  }
+});

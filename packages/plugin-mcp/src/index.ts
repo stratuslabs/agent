@@ -45,6 +45,14 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_CALL_TIMEOUT_MS = 60_000;
 const RECONNECT_INITIAL_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 60_000;
+/**
+ * How many pages of `tools/list` discovery will follow. The per-request
+ * timeout bounds each page, not the walk — a server that always answers
+ * with a nextCursor would otherwise hold `setup()`, and with it the
+ * daemon's start, forever. Which is exactly the kind of say-so this
+ * package's trust model exists to not extend to a remote server.
+ */
+const MAX_TOOL_LIST_PAGES = 100;
 
 /** What one configured server looks like once its block has been read. */
 export interface McpServerSpec {
@@ -124,6 +132,16 @@ const asStringRecord = (value: unknown, where: string): Record<string, string> =
 const asTimeout = (value: unknown, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 
+const asStringArray = (value: unknown, where: string): string[] | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+    throw new McpConfigError(`${where} must be an array of strings.`);
+  }
+  return value as string[];
+};
+
 /**
  * Resolve one server block into a spec, or refuse it. Refusals here are
  * configuration errors and fail the plugin at load — a mistyped block is
@@ -156,15 +174,27 @@ const resolveServerSpec = (
     }
   }
 
+  // A setting on the wrong transport kind is refused, not quietly unused:
+  // an operator who wrote `headers` for a server that turned out to be
+  // stdio believes a bearer token is being sent, and the mistyped grant
+  // that silently does nothing is the failure mode the toolRisks parser
+  // already refuses by design.
+  for (const key of ['args', 'cwd', 'env', 'passEnv'] as const) {
+    if (url !== undefined && block[key] !== undefined) {
+      throw new McpConfigError(`${where}.${key} only applies to a stdio server ("command"); this server sets "url".`);
+    }
+  }
+  if (command !== undefined && block.headers !== undefined) {
+    throw new McpConfigError(`${where}.headers only applies to an HTTP server ("url"); this server sets "command".`);
+  }
+
   // The replacement-environment treatment: the child gets exactly what was
   // granted — the harmless default inheritance, names the operator
   // forwarded, values the operator set — and nothing else. The daemon's
   // environment holds every key an operator exported, and a subprocess MCP
   // server is a subprocess: ANTHROPIC_API_KEY must not be there to read.
   const env: Record<string, string> = {};
-  const passEnv = Array.isArray(block.passEnv)
-    ? block.passEnv.filter((entry): entry is string => typeof entry === 'string')
-    : [...DEFAULT_SUBPROCESS_PASS_ENV];
+  const passEnv = asStringArray(block.passEnv, `${where}.passEnv`) ?? [...DEFAULT_SUBPROCESS_PASS_ENV];
   for (const key of passEnv) {
     const value = processEnv[key];
     if (value !== undefined) {
@@ -176,9 +206,7 @@ const resolveServerSpec = (
   return {
     name,
     ...(command !== undefined ? { command } : {}),
-    args: Array.isArray(block.args)
-      ? block.args.filter((entry): entry is string => typeof entry === 'string')
-      : [],
+    args: asStringArray(block.args, `${where}.args`) ?? [],
     ...(typeof block.cwd === 'string' && block.cwd.length > 0 ? { cwd: block.cwd } : {}),
     env,
     ...(url !== undefined ? { url } : {}),
@@ -289,7 +317,14 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
   const listAllTools = async (client: Client, spec: McpServerSpec): Promise<AdvertisedTool[]> => {
     const tools: AdvertisedTool[] = [];
     let cursor: string | undefined;
+    let pages = 0;
     do {
+      pages += 1;
+      if (pages > MAX_TOOL_LIST_PAGES) {
+        throw new Error(
+          `MCP server ${spec.name} returned more than ${MAX_TOOL_LIST_PAGES} pages of tools/list; refusing discovery rather than following its cursors forever.`,
+        );
+      }
       const page = await client.listTools(cursor ? { cursor } : undefined, { timeout: spec.connectTimeoutMs });
       tools.push(...page.tools);
       cursor = page.nextCursor;
@@ -399,6 +434,15 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
     state.connecting = true;
     try {
       const transport = await (options.transportFor ?? buildTransport)(state.spec);
+      // `disposed` is re-checked after every await from here on: dispose()
+      // closes state.client, and a connect still in flight when it runs —
+      // one server's load failing while another is mid-handshake — would
+      // otherwise finish afterwards and strand a connected client, which
+      // for a stdio server is an orphaned subprocess holding granted env.
+      if (disposed) {
+        await transport.close().catch(() => {});
+        return;
+      }
       const client = new Client({ name: '@stratusagent/plugin-mcp', version: '0.7.0' });
       client.onclose = () => {
         if (disposed || state.client !== client) {
@@ -412,6 +456,9 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
       await client.connect(transport, { timeout: state.spec.connectTimeoutMs });
       try {
         const advertised = await listAllTools(client, state.spec);
+        if (disposed) {
+          throw new Error(`disposed while discovering ${state.spec.name}`);
+        }
         syncTools(state, advertised, firstConnect);
       } catch (error) {
         // The client is connected but not yet stored, so nothing else will

@@ -59,6 +59,12 @@ const extensionFor = (mimeType: string | undefined): string => {
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
+// Distinguishes every written file within one process. A timestamp alone
+// is not enough: two calls in the same millisecond (parallel tool calls in
+// one turn) would produce the same path, and the first result's `files`
+// entry would silently point at the second call's bytes.
+let fileSerial = 0;
+
 export interface NormalizeOptions {
   /** The bridged server's config key — part of where a binary block lands. */
   server: string;
@@ -97,11 +103,24 @@ export const normalizeCallResult = async (
   options: NormalizeOptions,
 ): Promise<JsonValue> => {
   const shaped = isObject(result) ? result : {};
+  const content = Array.isArray(shaped.content) ? shaped.content : [];
   const texts: string[] = [];
   const files: string[] = [];
   const resources: JsonObject[] = [];
 
-  const writeBlock = async (data: unknown, mimeType: unknown, index: number): Promise<void> => {
+  // Settled before anything touches the disk: a failing result's binary
+  // blocks would otherwise land as server-controlled files in the
+  // workspace that nothing references, delivers, or cleans up.
+  if (shaped.isError === true) {
+    const message = content
+      .filter(isObject)
+      .filter((block) => block.type === 'text' && typeof block.text === 'string')
+      .map((block) => block.text as string)
+      .join('\n\n');
+    throw new Error(message || `MCP server ${options.server} reported an error for ${options.tool} with no message.`);
+  }
+
+  const writeBlock = async (data: unknown, mimeType: unknown): Promise<void> => {
     if (typeof data !== 'string') {
       return;
     }
@@ -112,16 +131,20 @@ export const normalizeCallResult = async (
     const directory = path.join(options.workspaceRoot, options.agentId, 'mcp', options.server);
     await mkdir(directory, { recursive: true });
     const stamp = (options.now ?? Date.now)();
+    fileSerial += 1;
+    // The tool name is the server's own string, so it is folded to the
+    // name-segment shape before it becomes part of a path: interpolated
+    // raw, a tool named `../../…` would be an arbitrary-directory write
+    // steered by whoever runs the server.
     const file = path.join(
       directory,
-      `${options.tool}-${stamp}-${index}.${extensionFor(typeof mimeType === 'string' ? mimeType : undefined)}`,
+      `${sanitizeToolSegment(options.tool) ?? 'tool'}-${stamp}-${fileSerial}.${extensionFor(typeof mimeType === 'string' ? mimeType : undefined)}`,
     );
     await writeFile(file, Buffer.from(data, 'base64'));
     files.push(file);
   };
 
-  const content = Array.isArray(shaped.content) ? shaped.content : [];
-  for (const [index, block] of content.entries()) {
+  for (const block of content) {
     if (!isObject(block)) {
       continue;
     }
@@ -133,7 +156,7 @@ export const normalizeCallResult = async (
         break;
       case 'image':
       case 'audio':
-        await writeBlock(block.data, block.mimeType, index);
+        await writeBlock(block.data, block.mimeType);
         break;
       case 'resource': {
         const resource = isObject(block.resource) ? block.resource : {};
@@ -141,7 +164,7 @@ export const normalizeCallResult = async (
           const uri = typeof resource.uri === 'string' ? resource.uri : undefined;
           texts.push(uri ? `${uri}:\n${resource.text}` : resource.text);
         } else {
-          await writeBlock(resource.blob, resource.mimeType, index);
+          await writeBlock(resource.blob, resource.mimeType);
         }
         break;
       }
@@ -158,10 +181,6 @@ export const normalizeCallResult = async (
       default:
         break;
     }
-  }
-
-  if (shaped.isError === true) {
-    throw new Error(texts.join('\n\n') || `MCP server ${options.server} reported an error for ${options.tool} with no message.`);
   }
 
   const structured = isObject(shaped.structuredContent) ? (shaped.structuredContent as JsonObject) : undefined;

@@ -94,6 +94,11 @@ this package's code:
 | `connectTimeoutMs` | both | Per-connect budget (default 15000), so an unreachable server cannot stall startup. |
 | `callTimeoutMs` | both | Per-call budget (default 60000). |
 
+A setting on the wrong transport kind — `headers` on a stdio server, `env`
+on an HTTP one — is refused at load rather than silently ignored, and so is
+a `passEnv` that is not an array of names: a grant an operator believes is
+in effect must never quietly be nothing.
+
 **The stdio environment is replaced, not extended.** A subprocess MCP
 server is a subprocess, and gets the same treatment `tool-shell`'s commands
 do: exactly what this config granted — the harmless default inheritance,

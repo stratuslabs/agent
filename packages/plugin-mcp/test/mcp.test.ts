@@ -6,6 +6,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { z } from 'zod';
@@ -23,7 +25,7 @@ import {
 } from '@stratusagent/core';
 import { ManifestBoundToolRegistry, parsePluginManifest } from '@stratusagent/plugins';
 
-import { createMcpPlugin, sanitizeToolSegment, type McpPluginOptions } from '../src/index.ts';
+import { createMcpPlugin, normalizeCallResult, sanitizeToolSegment, type McpPluginOptions } from '../src/index.ts';
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -372,6 +374,93 @@ test('a server name that cannot be a name segment is refused as configuration', 
     /exactly one of "command" \(stdio\) or "url"/,
   );
   assert.throws(() => createMcpPlugin({}), /needs a "servers" object/);
+});
+
+test('a mistyped grant is refused, never silently ignored', () => {
+  // A passEnv that is not an array of names would silently fall back to
+  // the default list — the server starts without its token and fails
+  // somewhere far from the actual mistake.
+  assert.throws(
+    () => createMcpPlugin({ servers: { s: { command: 'srv', passEnv: 'GITHUB_TOKEN' } } }),
+    /passEnv must be an array of strings/,
+  );
+  assert.throws(
+    () => createMcpPlugin({ servers: { s: { command: 'srv', args: [1] } } }),
+    /args must be an array of strings/,
+  );
+  // A setting on the wrong transport kind is a belief about the server
+  // that is not true — headers an operator thinks carry a bearer token,
+  // env they think reaches a subprocess.
+  assert.throws(
+    () => createMcpPlugin({ servers: { s: { command: 'srv', headers: { Authorization: 'Bearer x' } } } }),
+    /headers only applies to an HTTP server/,
+  );
+  assert.throws(
+    () => createMcpPlugin({ servers: { s: { url: 'http://127.0.0.1:9/', env: { KEY: 'v' } } } }),
+    /env only applies to a stdio server/,
+  );
+});
+
+test('a server that pages tools/list forever is refused as unreachable instead of holding setup', async () => {
+  const transportFor = async (): Promise<Transport> => {
+    const server = new Server({ name: 'pager', version: '1.0.0' }, { capabilities: { tools: {} } });
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [], nextCursor: 'again' }));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    return clientTransport;
+  };
+  const warnings: string[] = [];
+  const plugin = createMcpPlugin(
+    { servers: { pager: { url: 'http://127.0.0.1:9/unused' } } },
+    { transportFor, warn: (message) => warnings.push(message), log: () => {}, reconnectDelayMs: () => 3_600_000 },
+  );
+  const target = new ToolRegistry();
+  await loadThroughView(plugin, target);
+  try {
+    assert.equal(target.list().length, 0);
+    assert.match(warnings.find((message) => message.includes('pager')) ?? '', /pages of tools\/list/);
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('a binary block cannot steer the written path: the server-side tool name is folded before it names a file', async () => {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-traversal-'));
+  const output = await normalizeCallResult(
+    { content: [{ type: 'image', data: Buffer.from('x').toString('base64'), mimeType: 'image/png' }] },
+    { server: 'linear', tool: '../../../escape', agentId: 'ava', workspaceRoot },
+  ) as JsonObject;
+  const [file] = output.files as string[];
+  const directory = path.join(workspaceRoot, 'ava', 'mcp', 'linear');
+  assert.ok(file!.startsWith(directory + path.sep), `stayed inside the server directory: ${file}`);
+  assert.ok(path.basename(file!).startsWith('escape-'));
+});
+
+test('two writes in the same millisecond get distinct files', async () => {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-serial-'));
+  const block = { content: [{ type: 'image', data: Buffer.from('x').toString('base64'), mimeType: 'image/png' }] };
+  const context = { server: 'linear', tool: 'chart', agentId: 'ava', workspaceRoot, now: () => 42 };
+  const first = await normalizeCallResult(block, context) as JsonObject;
+  const second = await normalizeCallResult(block, context) as JsonObject;
+  assert.notEqual((first.files as string[])[0], (second.files as string[])[0]);
+});
+
+test('a failing result writes nothing: isError is settled before any block touches the disk', async () => {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-iserror-'));
+  await assert.rejects(
+    normalizeCallResult(
+      {
+        isError: true,
+        content: [
+          { type: 'image', data: Buffer.from('x').toString('base64'), mimeType: 'image/png' },
+          { type: 'text', text: 'it broke' },
+        ],
+      },
+      { server: 'linear', tool: 'chart', agentId: 'ava', workspaceRoot },
+    ),
+    /it broke/,
+  );
+  await assert.rejects(readdir(path.join(workspaceRoot, 'ava', 'mcp', 'linear')), /ENOENT/);
 });
 
 test('sanitizeToolSegment folds foreign names into the tool-name shape', () => {
