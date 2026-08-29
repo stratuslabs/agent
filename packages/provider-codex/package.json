@@ -1,0 +1,52 @@
+{
+  "name": "@stratusagent/provider-codex",
+  "version": "0.8.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types"
+  },
+  "engines": {
+    "node": ">=22.13 <23 || >=23.4"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "^0.151.0",
+    "@stratusagent/core": "workspace:*",
+    "@stratusagent/providers": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3"
+  },
+  "description": "ChatGPT/Codex runtime for Stratus Agent: runs turns through the OpenAI Codex harness with kernel tools served over a loopback MCP endpoint",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "codex",
+    "chatgpt",
+    "subscription"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/provider-codex"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
