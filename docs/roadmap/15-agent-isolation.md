@@ -96,7 +96,16 @@ before it.
   therefore come with a supervisor-wide session → agent index, written at
   create (where a duplicate is refused), consulted by every lookup that
   arrives without an agent. Without it, sharding quietly turns "which
-  conversation" into a guess.
+  conversation" into a guess. And the index alone is not enough, because
+  the session surface is fleet-wide in more places than the point lookup:
+  `countByStatus` and `lastActivityByAgent` feed the health and roster
+  views, the unfiltered `list` is the fleet listing, and restart recovery
+  walks `listIdsByStatus` to resume parked approvals and fail abandoned
+  turns. So the sharded stores sit behind one aggregate `SessionStore`
+  facade that answers all of these across every agent — by fan-out, or by
+  carrying status and last-activity columns on the index — because a
+  recovery sweep that walks only whichever store happened to be open is
+  an agent whose parked approval never resumes.
 - The gateway may still be one process after this layer alone — the win is
   that cross-agent reads become *impossible to write accidentally*: a store
   is opened on an agent's path, so there is no query that could return
@@ -234,7 +243,10 @@ step needs, which is the evidence the seams were right.
   `GET /sessions/:id` — no agent in hand — resolves through the index to
   the right store, identically in both isolation modes. A migration that
   surfaces a pre-existing duplicate fails loudly at startup, naming both
-  agents, rather than picking one.
+  agents, rather than picking one. The fleet-wide reads answer across
+  every sharded store — status counts, per-agent activity, the unfiltered
+  listing, and the restart recovery sweep — tested with two agents where
+  one's parked session would be missed by a single-store walk.
 - With state sharded, the fleet-wide schedule surface is unchanged: every
   agent's schedules still fire, all appear in `stratus schedules`, and a
   bare-id cancel still lands — destination-grant revocation included —
