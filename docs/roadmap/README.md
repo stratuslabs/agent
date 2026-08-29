@@ -24,6 +24,7 @@ Steps are ordered by dependency, not by calendar. Numbers are stable identifiers
 | 12 | [Plugin discovery and distribution](./12-plugin-registry.md) | Not started | Finding, installing, and trusting third-party plugins |
 | 13 | [Web search: the contract the ecosystem implements](./13-search.md) | Not started | One `web.search` shape every backend obeys, so swapping vendors changes no soul |
 | 14 | [Memory: recall the agent performs, not recall that happens to it](./14-memory.md) | Shipped — `search`, `forget`, and bounded `list` on the store contract, the derived FTS5 index with the consumed-offset + prefix-digest watermark, `memory.recall` and `memory.forget` (tombstoning, `safe`), per-entry and per-read byte caps, the alias-aware legacy merge, and prompt injection as a bounded recent slice; the dashboard memory view deferred to a follow-up | Durable, searchable memory an agent writes and reads deliberately |
+| 15 | [Agent isolation: per-agent state, process-per-agent, containerized execution](./15-agent-isolation.md) | Not started | The agent as a boundary: state, credentials, and execution that are structurally its own |
 
 ## Phases
 
@@ -33,6 +34,7 @@ Steps are ordered by dependency, not by calendar. Numbers are stable identifiers
 - **Phase 4 — the management app (step 07).** The macOS app makes agent creation and settings a visual experience instead of a CLI one.
 - **Phase 5 — deployment profiles (step 08).** The single-tenant VM and hosted multi-tenant deployments, both as configurations.
 - **Phase 6 — the ecosystem (steps 11–12).** The MCP bridge makes every server anyone has already written available to a Stratus agent; discovery and distribution let third parties ship plugins of their own.
+- **Phase 7 — the boundary (step 15).** Isolation under the policy layer: per-agent state that makes "sessions never cross" structural, an agent runtime per process so one compromised or crashed agent stays one agent's problem, and containerized command execution as a configuration. Layer A (per-agent state) can land any time after 14; the rest is independent of phases 4–6 and informs 08's tenant-isolation question.
 
 ## Ground rules
 
