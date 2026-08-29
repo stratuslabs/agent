@@ -28,8 +28,8 @@ stratus chat      # talk; the conversation persists
 ```
 
 No API key or provider sign-in yet? `stratus run "say hello"` works
-offline on the built-in demo provider. Needs Node 22.13+ — details in
-[Installation](docs/start/installation.md).
+offline on the built-in demo provider. Needs Node 22.13+ (on the 23.x
+line, 23.4+) — details in [Installation](docs/start/installation.md).
 
 ## What your agents can do
 
