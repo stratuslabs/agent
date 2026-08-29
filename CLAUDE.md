@@ -96,7 +96,9 @@ hand and by review:
   registries and stores, runners and executors (`AgentRunner`,
   `LocalCommandExecutor`, `BrowserSessionPool`) — and for error types:
   an error is `class X extends Error` that sets `this.name` in its
-  constructor and is exported from the barrel. Plain values and
+  constructor, exported from the barrel when callers are meant to catch
+  it by type (some, like `ApiError` and `McpConfigError`, deliberately
+  stay internal). Plain values and
   stateless behavior come from a `create*` (construct a live thing) or
   `define*` (canonicalize a definition literal) factory returning a
   plain object.
