@@ -119,10 +119,10 @@ test('memory persists per agent across sessions and channels', async () => {
   // Another agent never sees it.
   await runner.run({ sessionId: 'channel-slack-2', agent: other, userMessage: 'hi' });
 
-  const entries = await memory.list(agent.id);
+  const { entries } = await memory.list(agent.id);
   assert.equal(entries.length, 1);
   assert.equal(entries[0]?.content, 'The user prefers dark mode.');
-  assert.deepEqual(await memory.list(other.id), []);
+  assert.deepEqual((await memory.list(other.id)).entries, []);
 
   const lastTwoRequests = seenMemory.slice(-2);
   assert.deepEqual(lastTwoRequests[0], ['The user prefers dark mode.']);
@@ -313,7 +313,7 @@ test('per-agent tool allowlists stop agents using tools they were not given', as
   });
 
   assert.equal(session.status, 'completed');
-  assert.deepEqual(await memory.list(restricted.id), []);
+  assert.deepEqual((await memory.list(restricted.id)).entries, []);
 });
 
 test('router sends inputs to the right agent with a fallback', () => {

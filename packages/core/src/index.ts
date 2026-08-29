@@ -377,32 +377,266 @@ export interface MemoryEntry {
   metadata?: JsonObject;
 }
 
+/**
+ * A memory entry as the operator's audit read returns it: tombstoned entries
+ * stay visible there, marked with when the agent dropped them. The paths that
+ * build a prompt (`list`, `search`) never return a tombstoned entry.
+ */
+export interface MemoryAuditEntry extends MemoryEntry {
+  forgottenAt?: string;
+}
+
+/** Per-entry write cap, in UTF-8 bytes. `append` refuses larger, never truncates. */
+export const MEMORY_ENTRY_MAX_BYTES = 4096;
+/**
+ * Aggregate content budget for a bounded read, in UTF-8 bytes. Applied by the
+ * store — a caller-chosen `limit` cannot be a safety property — and sized so
+ * several cap-size entries still fit (see `MEMORY_ENTRY_MAX_BYTES`).
+ */
+export const MEMORY_READ_MAX_BYTES = 16384;
+/** Results a `search` returns when the caller names no limit. */
+export const MEMORY_RECALL_DEFAULT_LIMIT = 10;
+/** Ceiling a `search` limit is clamped to, whatever the caller asked for. */
+export const MEMORY_RECALL_MAX_LIMIT = 50;
+/** How many recent entries the runner injects into the system prompt. */
+export const MEMORY_INJECTION_LIMIT = 20;
+
+const utf8Encoder = new TextEncoder();
+
+/** UTF-8 size of an entry's content — the unit both memory caps are stated in. */
+export const memoryContentByteLength = (content: string): number => utf8Encoder.encode(content).length;
+
+/** Refuses (never truncates) content over the per-entry cap: a half-stored fact is worse than a refused one. */
+export const assertMemoryContentWithinCap = (content: string): void => {
+  const bytes = memoryContentByteLength(content);
+  if (bytes > MEMORY_ENTRY_MAX_BYTES) {
+    throw new Error(
+      `Memory entries are capped at ${MEMORY_ENTRY_MAX_BYTES} UTF-8 bytes and this fact is ${bytes}. Nothing was stored — remember a shorter fact instead.`,
+    );
+  }
+};
+
+/**
+ * The tokenizer both store implementations share: NFC-normalized,
+ * case-folded, split on anything that is not a Unicode letter or digit.
+ * Search matching is defined on these tokens — `Postgres` finds `postgres`,
+ * `postgres` does not find `postgresql` — so an implementation that
+ * tokenizes differently is wrong, not different.
+ */
+export const tokenizeMemoryText = (text: string): string[] =>
+  text.normalize('NFC').toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+
+/**
+ * Whether content matches a tokenized query: every query token must be
+ * present as a whole token. A query that tokenized to nothing matches
+ * nothing — recall with no searchable terms is a question that was not
+ * asked, not a request for everything.
+ */
+export const memoryQueryMatches = (content: string, queryTokens: readonly string[]): boolean => {
+  if (queryTokens.length === 0) {
+    return false;
+  }
+  const tokens = new Set(tokenizeMemoryText(content));
+  return queryTokens.every((token) => tokens.has(token));
+};
+
+/**
+ * Recall order — newest first, ties on `createdAt` broken by entry id
+ * ascending. The tie-break is not about frequency: without one, two
+ * implementations ordering equal keys differently are both conforming.
+ * `createdAt` values are ISO-8601 UTC strings, so plain string comparison
+ * is chronological comparison.
+ */
+export const compareMemoryRecallOrder = (a: MemoryEntry, b: MemoryEntry): number => {
+  if (a.createdAt !== b.createdAt) {
+    return a.createdAt < b.createdAt ? 1 : -1;
+  }
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+};
+
+/** Chronological order (oldest first), same tie-break — how a bounded `list` presents its slice. */
+export const compareMemoryChronology = (a: MemoryEntry, b: MemoryEntry): number => {
+  if (a.createdAt !== b.createdAt) {
+    return a.createdAt < b.createdAt ? -1 : 1;
+  }
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+};
+
+export interface MemoryReadResult {
+  entries: MemoryEntry[];
+  /** True when live entries beyond these existed — the entry limit or the byte budget bound, whichever bit first. */
+  truncated: boolean;
+}
+
+export interface MemoryListOptions {
+  /**
+   * Bound the read to the most recent live entries. A bounded read also
+   * stops at `MEMORY_READ_MAX_BYTES` of content, whichever binds first,
+   * and marks the result `truncated`. Omitted, the read is the host's
+   * unbounded one (counting, audit-adjacent display) — the paths that
+   * feed a model always pass a bound.
+   */
+  limit?: number;
+}
+
+/** Clamp a caller-chosen search limit into the store's own bounds. */
+export const clampMemoryRecallLimit = (limit?: number): number => {
+  if (limit === undefined || Number.isNaN(limit)) {
+    return MEMORY_RECALL_DEFAULT_LIMIT;
+  }
+  // Infinity means "as many as allowed" and clamps to the ceiling like any
+  // other over-large number, rather than falling back to the default.
+  return Math.min(MEMORY_RECALL_MAX_LIMIT, Math.max(1, Math.floor(limit)));
+};
+
+/**
+ * Apply the bounded-read rule both implementations share: sort candidates
+ * into recall order (newest first, ties by id), then keep entries until the
+ * entry limit or the byte budget binds. The winners when more match than
+ * `limit` are decided here, once — an implementation choosing differently
+ * would be a divergence, not a preference.
+ */
+export const boundMemoryRead = (
+  candidates: readonly MemoryEntry[],
+  limit: number,
+  maxBytes: number = MEMORY_READ_MAX_BYTES,
+): MemoryReadResult => {
+  const ordered = [...candidates].sort(compareMemoryRecallOrder);
+  const entries: MemoryEntry[] = [];
+  let bytes = 0;
+  let truncated = false;
+  for (const entry of ordered) {
+    if (entries.length >= limit) {
+      truncated = true;
+      break;
+    }
+    const size = memoryContentByteLength(entry.content);
+    // An entry no budget could ever admit — hand-written, or stored before
+    // the per-entry cap existed — is skipped rather than allowed to starve
+    // everything ranked behind it: breaking here would return an empty
+    // read while dozens of small live facts exist.
+    if (size > maxBytes) {
+      truncated = true;
+      continue;
+    }
+    if (bytes + size > maxBytes) {
+      truncated = true;
+      break;
+    }
+    entries.push(entry);
+    bytes += size;
+  }
+  return { entries, truncated };
+};
+
+/**
+ * The bounded `list` both implementations share: select the winners by
+ * `boundMemoryRead`, present them oldest first. Selection order and
+ * presentation order are different things; conflating them is the bug this
+ * helper exists so nobody writes three times.
+ */
+export const boundMemoryList = (candidates: readonly MemoryEntry[], limit: number): MemoryReadResult => {
+  const bounded = boundMemoryRead(candidates, Math.max(1, Math.floor(limit)));
+  bounded.entries.sort(compareMemoryChronology);
+  return bounded;
+};
+
+/**
+ * Durable, searchable memory an agent writes and reads deliberately. The
+ * per-agent key is the access boundary — every method takes the agent id the
+ * caller resolved from the session, never one captured at startup.
+ *
+ * The contract is deliberately over-specified because two implementations
+ * exist (in-memory here, FTS5-backed in `@stratusagent/state`) and anything
+ * left to the implementation is a guaranteed divergence:
+ *
+ * - `search` matches when every query token is present (case-insensitive,
+ *   NFC-normalized, on `tokenizeMemoryText`'s boundaries). The query is
+ *   literal text, never search syntax: no input is a syntax error.
+ * - `search` returns newest first; a bounded `list` selects the most recent
+ *   live entries and presents them oldest first. Ties on `createdAt` break
+ *   by entry id, ascending, everywhere.
+ * - `list` and `search` return live entries only, bounded by
+ *   `MEMORY_READ_MAX_BYTES` when a limit is in play; `forget` tombstones
+ *   rather than deletes, and `audit` is where tombstoned entries remain
+ *   visible to an operator.
+ */
 export interface AgentMemoryStore {
+  /** Refuses content over `MEMORY_ENTRY_MAX_BYTES` rather than truncating it. */
   append(agentId: string, content: string, metadata?: JsonObject): Promise<MemoryEntry>;
-  list(agentId: string): Promise<MemoryEntry[]>;
+  /** Live entries, oldest first. See `MemoryListOptions` for the bounded form. */
+  list(agentId: string, options?: MemoryListOptions): Promise<MemoryReadResult>;
+  /** Live entries matching the literal query, newest first, bounded. */
+  search(agentId: string, query: string, limit?: number): Promise<MemoryReadResult>;
+  /** Tombstones a live entry. False when no live entry of this agent has that id. */
+  forget(agentId: string, entryId: string): Promise<boolean>;
+  /** The operator's audit read: every entry, tombstoned included, oldest first. */
+  audit(agentId: string): Promise<MemoryAuditEntry[]>;
 }
 
 export class InMemoryAgentMemoryStore implements AgentMemoryStore {
-  private entries = new Map<string, MemoryEntry[]>();
+  private entries = new Map<string, MemoryAuditEntry[]>();
   private counter = 0;
+  private readonly now: () => Date;
+
+  // `now` is a test seam: the ordering tie-break only shows itself when two
+  // entries share a createdAt, which a real clock makes non-deterministic.
+  constructor(options: { now?: () => Date } = {}) {
+    this.now = options.now ?? (() => new Date());
+  }
 
   async append(agentId: string, content: string, metadata?: JsonObject): Promise<MemoryEntry> {
+    assertMemoryContentWithinCap(content);
     this.counter += 1;
-    const entry: MemoryEntry = {
+    const entry: MemoryAuditEntry = {
       id: `${agentId}:memory:${this.counter}`,
       agentId,
       content,
-      createdAt: new Date().toISOString(),
+      createdAt: this.now().toISOString(),
       ...(metadata ? { metadata } : {}),
     };
     const existing = this.entries.get(agentId) ?? [];
     existing.push(entry);
     this.entries.set(agentId, existing);
-    return entry;
+    return { ...entry };
   }
 
-  async list(agentId: string): Promise<MemoryEntry[]> {
-    return [...(this.entries.get(agentId) ?? [])];
+  private live(agentId: string): MemoryEntry[] {
+    return (this.entries.get(agentId) ?? [])
+      .filter((entry) => entry.forgottenAt === undefined)
+      .map(({ forgottenAt: _unused, ...entry }) => entry);
+  }
+
+  async list(agentId: string, options: MemoryListOptions = {}): Promise<MemoryReadResult> {
+    const live = this.live(agentId);
+    if (options.limit === undefined) {
+      return { entries: live.sort(compareMemoryChronology), truncated: false };
+    }
+    return boundMemoryList(live, options.limit);
+  }
+
+  async search(agentId: string, query: string, limit?: number): Promise<MemoryReadResult> {
+    const tokens = tokenizeMemoryText(query);
+    if (tokens.length === 0) {
+      return { entries: [], truncated: false };
+    }
+    const matches = this.live(agentId).filter((entry) => memoryQueryMatches(entry.content, tokens));
+    return boundMemoryRead(matches, clampMemoryRecallLimit(limit));
+  }
+
+  async forget(agentId: string, entryId: string): Promise<boolean> {
+    const entry = (this.entries.get(agentId) ?? []).find(
+      (candidate) => candidate.id === entryId && candidate.forgottenAt === undefined,
+    );
+    if (!entry) {
+      return false;
+    }
+    entry.forgottenAt = this.now().toISOString();
+    return true;
+  }
+
+  async audit(agentId: string): Promise<MemoryAuditEntry[]> {
+    return (this.entries.get(agentId) ?? []).map((entry) => ({ ...entry })).sort(compareMemoryChronology);
   }
 }
 
@@ -1560,7 +1794,13 @@ export class AgentRunner {
           continue;
         }
 
-        const memory = this.memory ? await this.memory.list(session.agent.id) : [];
+        // A bounded slice — the most recent entries, chronological — not the
+        // whole store. Everything older reaches the model through
+        // `memory.recall`; injecting it all is what gave the store a horizon
+        // measured in weeks.
+        const memory = this.memory
+          ? (await this.memory.list(session.agent.id, { limit: MEMORY_INJECTION_LIMIT })).entries
+          : [];
 
         // Deltas re-emit on the bus through a serial chain that is drained
         // before the final provider.response goes out — a delta arriving

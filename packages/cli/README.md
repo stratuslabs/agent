@@ -235,12 +235,12 @@ them instead — see [Asking a human](#asking-a-human-remote-approval).
 
 A tool that declares no risk counts as `gated`, never `safe` — forgetting to
 classify something should cost a prompt, not an unattended command. Most
-built-in tools (`demo.echo`, `memory.remember`, `agent.delegate`,
-`schedule.list`, `schedule.cancel`) are `safe`; the built-in exceptions are
-`schedule.every`, `schedule.at`, and `message.send`, which are `gated`
-because they act past the end of the turn — see
-[Proactive agents](#proactive-schedules-and-outbound-messages). Anything you
-install is where this starts to bite, which is what the
+built-in tools (`demo.echo`, `memory.remember`, `memory.recall`,
+`memory.forget`, `agent.delegate`, `schedule.list`, `schedule.cancel`) are
+`safe`; the built-in exceptions are `schedule.every`, `schedule.at`, and
+`message.send`, which are `gated` because they act past the end of the turn —
+see [Proactive agents](#proactive-schedules-and-outbound-messages). Anything
+you install is where this starts to bite, which is what the
 [Tools](#tools-what-an-agent-can-actually-do) section below is about.
 
 A **shell** is the exception to the whole paragraph, because its risk is in
@@ -370,7 +370,8 @@ created before this shipped needs it enabled once, in its App Manifest.
 
 ## Tools: what an agent can actually do
 
-Out of the box an agent can echo, remember, and delegate. Everything else —
+Out of the box an agent can echo, remember, recall and forget its own
+memories, and delegate. Everything else —
 files, a shell, the web, a browser — arrives as a **plugin**: one package you
 install, list, and enable.
 
@@ -776,7 +777,9 @@ conversation keeps it across daemon restarts.
 The log is a **trace, not a second transcript**: it records that a tool ran and
 that a session completed, with the tool's name, the agent, and the session id.
 Prompts, replies, and tool inputs are not written — what was said lives in the
-session store instead.
+session store instead. A memory write or forget also records the **entry id**
+it touched (never the fact itself), so "when did the agent learn this" has an
+answer.
 
 One exception worth knowing before you paste a log anywhere. A failed session
 records the **provider's error text verbatim**, and providers routinely quote
@@ -861,7 +864,7 @@ provider: anthropic
 model: claude-opus-5
 tools:
   - demo.echo
-  - memory.remember
+  - memory.*
 skills:
   - code-review
 ---
@@ -869,7 +872,31 @@ skills:
 You are a sharp, warm generalist. Answer first, explain second...
 ```
 
-Agents remember: facts saved with the built-in `memory.remember` tool persist to `~/.stratus/memory.jsonl`, keyed to the agent — so the Ava you talk to tomorrow remembers today, from any directory.
+Agents remember: facts saved with the built-in `memory.remember` tool persist
+to `~/.stratus/memory.jsonl`, keyed to the agent — so the Ava you talk to
+tomorrow remembers today, from any directory. Recall is something the agent
+does, not only something done to it: the system prompt carries the most
+recent facts (up to 20, within a byte budget), and everything older is
+reachable through `memory.recall`, a full-text search over the agent's own
+store — plain words in, matching facts out, newest first; a query like `C++`
+or an unmatched quote is a search, never an error. `memory.forget` retires a
+fact by id: it stops reaching prompts and recall, but stays in the file as a
+tombstone line, so you can still see what an agent chose to drop. A single
+fact is capped at 4 KiB — an oversized `memory.remember` is refused outright
+rather than stored truncated.
+
+One thing to check on souls written before recall existed: a `tools:`
+allowlist naming exactly `memory.remember` lets the agent keep saving facts
+but not search them, and with the prompt now carrying only the recent slice,
+its older memories are out of reach. Add `memory.recall` and `memory.forget`
+— or just `memory.*`, as the example above does. A soul with no `tools:`
+list is unaffected; omitted means every registered tool.
+
+The JSONL is the record and you may edit it: add a line by hand and it is
+recallable; fix a typo and nothing goes stale. Search is served from a
+derived FTS index the CLI writes alongside, `~/.stratus/memory.jsonl.index`
+— safe to delete at any time, it is rebuilt from the JSONL on the next
+recall.
 
 **Ids are not labels.** Frontmatter may set `id:` explicitly, and it keys the
 agent's sessions, memory, credentials, Slack tokens, and every per-agent path
