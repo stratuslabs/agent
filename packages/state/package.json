@@ -27,6 +27,7 @@
     "@stratusagent/executor-local": "workspace:*",
     "@stratusagent/provider-anthropic": "workspace:*",
     "@stratusagent/provider-claude-code": "workspace:*",
+    "@stratusagent/provider-codex": "workspace:*",
     "@stratusagent/providers": "workspace:*"
   },
   "devDependencies": {

@@ -19,6 +19,7 @@ them individually:
 - `@stratusagent/providers`, helpers for building model providers
 - `@stratusagent/provider-anthropic`, the Claude provider on the official Anthropic SDK
 - `@stratusagent/provider-claude-code`, the Claude subscription runtime on the Claude Agent SDK
+- `@stratusagent/provider-codex`, the ChatGPT/Codex runtime on the OpenAI Codex SDK, with kernel tools served over a loopback MCP endpoint
 - `@stratusagent/executors`, helpers for execution behavior
 - `@stratusagent/executor-local`, a concrete local child-process executor adapter
 - `@stratusagent/plugins`, the plugin host: reads a plugin's manifest without importing it, holds `setup()` to what that manifest declared, and turns a config block into running capability
@@ -285,6 +286,17 @@ export STRATUS_MODEL=gpt-4.1-mini
 stratus run "say hello"
 ```
 
+And so does Codex, on a ChatGPT subscription (`codex login` on the same
+machine) or an OpenAI API key (`CODEX_API_KEY`) — `stratus setup` records
+which. Codex is a harness with its own loop, not another chat-completions
+endpoint; Stratus disables its native shell and web tools and serves the
+agent's own tools to it under kernel policy (`packages/provider-codex/README.md`
+has the details):
+
+```bash
+stratus run --provider codex "say hello"
+```
+
 Or with a config file `stratus.config.json` (start from `stratus.config.json.example`):
 
 ```json
@@ -356,6 +368,7 @@ stratus run "Say hello"
 stratus run --provider anthropic "Say hello"
 stratus run --soul ./examples/souls/ava.md "Say hello"
 stratus run --provider openai --model gpt-4.1-mini "Say hello"
+stratus run --provider codex "Say hello"
 stratus agents
 stratus dashboard
 stratus dashboard --port 4123 --host 127.0.0.1 --no-open
@@ -390,8 +403,8 @@ Current options:
 
 - `--prompt`, `-p`, pass the prompt explicitly
 - `--stdin`, read the prompt from stdin
-- `--provider`, choose `anthropic`, `openai`, or `demo`
-- `--model`, set the model for real providers (anthropic defaults to `claude-opus-5`)
+- `--provider`, choose `anthropic`, `openai`, `codex`, or `demo`
+- `--model`, set the model for real providers (anthropic defaults to `claude-opus-5`, codex to `gpt-5.5`)
 - `--base-url`, override the provider API base URL
 - `--soul`, run as the agent defined by a soul file (also `STRATUS_SOUL` or the config `soul` key)
 - `--config`, load provider settings from a JSON config file
@@ -427,6 +440,7 @@ packages/
   plugins/
   provider-anthropic/
   provider-claude-code/
+  provider-codex/
   providers/
   state/
   tool-browser/

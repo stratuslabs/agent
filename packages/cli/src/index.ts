@@ -55,6 +55,7 @@ import {
   hasHostedToolSideEffects,
   type ClaudeCodeToolExecutor,
 } from '@stratusagent/provider-claude-code';
+import { DEFAULT_CODEX_MODEL } from '@stratusagent/provider-codex';
 import {
   agentIdWithSuffix,
   canonicalDestination,
@@ -114,6 +115,7 @@ import {
   readTrustedConfigBlock,
   saveCredentials,
   servedRuntimes,
+  CREDENTIAL_PROVIDER_NAMES,
   verifyProviderKey,
   stratusHomePath,
   withLegacyDefaultMemories,
@@ -444,7 +446,7 @@ export type ParsedCommand =
 
 type CliConfigFile = StratusConfigFile;
 
-export const CLI_VERSION = '0.7.0';
+export const CLI_VERSION = '0.8.0';
 
 const DASHBOARD_TITLE = 'Stratus Agent Dashboard';
 
@@ -581,8 +583,8 @@ Agent options:
 Options:
   --prompt, -p     Prompt to send to the local agent loop
   --stdin          Read the prompt from stdin
-  --provider       Provider to use: anthropic, openai, or demo
-  --model          Model name for real providers (anthropic default: ${DEFAULT_ANTHROPIC_MODEL}, openai default: gpt-4.1-mini)
+  --provider       Provider to use: anthropic, openai, codex, or demo
+  --model          Model name for real providers (anthropic default: ${DEFAULT_ANTHROPIC_MODEL}, openai default: gpt-4.1-mini, codex default: ${DEFAULT_CODEX_MODEL})
   --base-url       Override the provider API base URL
   --soul           Run as the agent defined by a soul file (markdown + frontmatter, see examples/souls)
   --config         Config file path (run: load settings from it, setup: write it)
@@ -2629,19 +2631,25 @@ export const runSetup = async (
   });
 
   const defaultModelFor = (provider: CliProviderName): string =>
-    provider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_ANTHROPIC_MODEL;
+    provider === 'openai'
+      ? DEFAULT_OPENAI_MODEL
+      : provider === 'codex'
+        ? DEFAULT_CODEX_MODEL
+        : DEFAULT_ANTHROPIC_MODEL;
   // Widened to CliProviderName only so setup can ask about the provider it
   // currently has selected, `demo` included; the rule itself is the shared one.
   const defaultKeyEnvFor = (provider: CliProviderName): string =>
-    defaultApiKeyEnvName(provider === 'openai' ? 'openai' : 'anthropic');
+    defaultApiKeyEnvName(provider === 'demo' ? 'anthropic' : provider);
 
-  const credentialLabel = (credential: StoredCredential): string =>
-    credential.type === 'oauth_token' ? 'Claude subscription' : 'API key';
+  const credentialLabel = (provider: CredentialProviderName, credential: StoredCredential): string =>
+    credential.type === 'oauth_token'
+      ? (provider === 'codex' ? 'ChatGPT sign-in' : 'Claude subscription')
+      : 'API key';
 
   const providerSignInStatus = (provider: CredentialProviderName): string => {
     const credential = state.credentials[provider];
     if (credential) {
-      return `signed in (${credentialLabel(credential)})`;
+      return `signed in (${credentialLabel(provider, credential)})`;
     }
     if (readNonEmptyString(processEnv[defaultKeyEnvFor(provider)])) {
       return `using ${defaultKeyEnvFor(provider)} from your environment`;
@@ -2651,10 +2659,10 @@ export const runSetup = async (
 
   const providersSummary = (): string => {
     const parts: string[] = [];
-    for (const provider of ['anthropic', 'openai'] as const) {
+    for (const provider of CREDENTIAL_PROVIDER_NAMES) {
       const credential = state.credentials[provider];
       if (credential) {
-        parts.push(`${provider} (${credentialLabel(credential)})`);
+        parts.push(`${provider} (${credentialLabel(provider, credential)})`);
       } else if (readNonEmptyString(processEnv[defaultKeyEnvFor(provider)])) {
         parts.push(`${provider} (env key)`);
       }
@@ -2683,7 +2691,9 @@ export const runSetup = async (
     const credential = state.credentials[state.provider];
     if (credential) {
       return credential.type === 'oauth_token'
-        ? 'signed in with your Claude subscription'
+        ? (state.provider === 'codex'
+            ? 'using your ChatGPT (codex login) sign-in'
+            : 'signed in with your Claude subscription')
         : 'signed in with an API key';
     }
     const keyEnv = state.apiKeyEnv ?? defaultKeyEnvFor(state.provider);
@@ -2822,6 +2832,62 @@ export const runSetup = async (
     }
   };
 
+  const signInCodex = async (): Promise<void> => {
+    const signedIn = state.credentials.codex !== undefined;
+    const answer = await prompter.select('How should Stratus connect to Codex?', [
+      'ChatGPT subscription — uses this machine\'s `codex login` sign-in, no per-token cost',
+      'OpenAI API key — pay per use (platform.openai.com)',
+      'Skip for now',
+      ...(signedIn ? ['Sign out'] : []),
+    ]);
+
+    if (signedIn && answer.kind === 'index' && answer.index === 3) {
+      delete state.credentials.codex;
+      state.credentialsDirty = true;
+      writeLine(streams.stdout, 'Signed out of Codex. (A `codex login` sign-in, if any, stays with codex itself — run `codex logout` to clear it.)');
+      return;
+    }
+
+    if (answer.kind !== 'index' || answer.index === 2) {
+      return;
+    }
+
+    if (answer.index === 1) {
+      const key = await prompter.askSecret('Paste your OpenAI API key (Enter to skip; input is hidden): ');
+      if (!key) {
+        writeLine(streams.stdout, 'Skipped — you can sign in any time by re-running this menu.');
+        return;
+      }
+      writeLine(streams.stdout, 'Checking the key against the OpenAI API…');
+      const verdict = await verifyProviderKey('codex', key, undefined, env.fetch ?? globalThis.fetch);
+      if (verdict.status === 'ok') {
+        storeCredential('codex', { type: 'api_key', value: key });
+        writeLine(streams.stdout, '✓ Key verified — Codex runs will bill this OpenAI API key.');
+      } else if (verdict.status === 'rejected') {
+        writeLine(streams.stdout, `✗ OpenAI rejected that key (${verdict.detail}). It was NOT saved — check platform.openai.com and try again from this menu.`);
+      } else {
+        storeCredential('codex', { type: 'api_key', value: key });
+        writeLine(streams.stdout, `! Could not reach the OpenAI API to verify (${verdict.detail}). Saved the key anyway — it will be checked on your first run.`);
+      }
+      return;
+    }
+
+    // Default: the machine's own ChatGPT sign-in. Codex keeps those tokens
+    // in its own auth store; Stratus records only that this machine uses
+    // it, so nothing secret is written here.
+    writeLine(streams.stdout, 'Your ChatGPT plan covers usage made through Codex.');
+    writeLine(streams.stdout, 'If you have not signed in yet, run this in another terminal on this machine:');
+    writeLine(streams.stdout, '  codex login');
+    writeLine(streams.stdout, '(requires the Codex CLI: npm install -g @openai/codex)');
+    const confirmed = await prompter.select('Use this machine\'s codex sign-in?', ['Yes — codex is (or will be) signed in here', 'Skip for now']);
+    if (confirmed.kind !== 'index' || confirmed.index !== 0) {
+      writeLine(streams.stdout, 'Skipped — you can sign in any time by re-running this menu.');
+      return;
+    }
+    storeCredential('codex', { type: 'oauth_token', value: 'chatgpt' });
+    writeLine(streams.stdout, '✓ Recorded — Codex runs use this machine\'s ChatGPT sign-in. It is verified on your first run.');
+  };
+
   // Changing the default provider invalidates settings that were chosen
   // for the old one: the model and apiKeyEnv are cleared (defaults take
   // over), while the openai base URL is kept — it belongs to the openai
@@ -2886,17 +2952,26 @@ export const runSetup = async (
     const answer = await prompter.select('Providers — sign in to one or more:', [
       `Claude (Anthropic) — ${providerSignInStatus('anthropic')}`,
       `OpenAI-compatible — ${providerSignInStatus('openai')}`,
+      `Codex (ChatGPT) — ${providerSignInStatus('codex')}`,
       'Demo — built-in fake model, offline, no account',
       'Back',
     ]);
 
-    if (answer.kind !== 'index' || answer.index === 3) {
+    if (answer.kind !== 'index' || answer.index === 4) {
+      return;
+    }
+
+    if (answer.index === 3) {
+      await switchDefaultProvider('demo');
+      writeLine(streams.stdout, 'Demo selected — no sign-in needed. Mention "echo" or "tool" in a prompt to see tool calls.');
       return;
     }
 
     if (answer.index === 2) {
-      await switchDefaultProvider('demo');
-      writeLine(streams.stdout, 'Demo selected — no sign-in needed. Mention "echo" or "tool" in a prompt to see tool calls.');
+      await signInCodex();
+      if (state.credentials.codex) {
+        await maybeSwitchDefault('codex');
+      }
       return;
     }
 
@@ -2955,10 +3030,10 @@ export const runSetup = async (
       if (typed.includes(':')) {
         const [providerPart, ...idParts] = typed.split(':');
         const id = idParts.join(':').trim();
-        if ((providerPart === 'anthropic' || providerPart === 'openai') && id) {
+        if ((providerPart === 'anthropic' || providerPart === 'openai' || providerPart === 'codex') && id) {
           return { provider: providerPart, id };
         }
-        writeLine(streams.stdout, 'Use provider:model, e.g. anthropic:claude-opus-5.');
+        writeLine(streams.stdout, 'Use provider:model, e.g. anthropic:claude-opus-5 or codex:gpt-5.5.');
         return undefined;
       }
       // A typed id that appears in the collected list belongs to that
@@ -3108,8 +3183,10 @@ export const runSetup = async (
       ?? readNonEmptyString(processEnv[defaultKeyEnvFor(fallbackProvider)]);
     const credential = envKey ? undefined : state.credentials[fallbackProvider];
     const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);
-    const authToken = credential?.type === 'oauth_token' ? credential.value : undefined;
-    if (!apiKey && !authToken) {
+    // A codex oauth entry is the subscription marker, not a token to send.
+    const codexSubscription = fallbackProvider === 'codex' && !apiKey && credential?.type === 'oauth_token';
+    const authToken = fallbackProvider !== 'codex' && credential?.type === 'oauth_token' ? credential.value : undefined;
+    if (!apiKey && !authToken && !codexSubscription) {
       return undefined;
     }
     return {
@@ -3122,13 +3199,17 @@ export const runSetup = async (
               ?? (state.provider === 'openai' ? state.baseUrl : undefined)
               ?? DEFAULT_OPENAI_BASE_URL,
           }
-        : (() => {
-            const url = (fallbackProvider === state.provider ? state.baseUrl : undefined)
-              ?? (credential?.type === 'api_key' ? credential.baseUrl : undefined);
-            return url ? { baseUrl: url } : {};
-          })()),
+        // The codex harness owns its endpoints; only anthropic can carry one.
+        : fallbackProvider === 'codex'
+          ? {}
+          : (() => {
+              const url = (fallbackProvider === state.provider ? state.baseUrl : undefined)
+                ?? (credential?.type === 'api_key' ? credential.baseUrl : undefined);
+              return url ? { baseUrl: url } : {};
+            })()),
       ...(apiKey ? { apiKey } : {}),
       ...(authToken ? { authToken } : {}),
+      ...(codexSubscription ? { codexSubscription: true as const } : {}),
     };
   };
 
@@ -3174,6 +3255,26 @@ export const runSetup = async (
         ...(anthropicUrl ? { baseUrl: anthropicUrl } : {}),
         ...(apiKey ? { apiKey } : {}),
         ...(authToken ? { authToken } : {}),
+        ...(state.systemPrompt ? { systemPrompt: state.systemPrompt } : {}),
+        ...(env.fetch ? { fetch: env.fetch } : {}),
+        ...(soul ? { soul } : {}),
+        ...(fallback ? { fallback } : {}),
+      };
+    }
+
+    if (state.provider === 'codex') {
+      const apiKey = envKey ?? (credential?.type === 'api_key' ? credential.value : undefined);
+      // The subscription marker means the machine's own codex sign-in
+      // serves the run — nothing more to resolve here.
+      if (!apiKey && credential?.type !== 'oauth_token') {
+        writeLine(streams.stdout, 'You are not signed in yet — pick option 1 first (or export CODEX_API_KEY).');
+        return undefined;
+      }
+      const fallback = buildTestFallback();
+      return {
+        provider: 'codex',
+        model,
+        ...(apiKey ? { apiKey } : {}),
         ...(state.systemPrompt ? { systemPrompt: state.systemPrompt } : {}),
         ...(env.fetch ? { fetch: env.fetch } : {}),
         ...(soul ? { soul } : {}),
@@ -4237,9 +4338,11 @@ export const collectDoctorReport = async (
   const usesAuthToken = resolved?.provider === 'anthropic' && resolved.authToken !== undefined;
   const fallback = resolved && resolved.provider !== 'demo' ? resolved.fallback : undefined;
 
-  for (const target of ['anthropic', 'openai'] as const) {
+  for (const target of CREDENTIAL_PROVIDER_NAMES) {
     const stored = credentials[target];
-    const label = stored?.type === 'oauth_token' ? 'Claude subscription (Pro/Max)' : 'API key';
+    const label = stored?.type === 'oauth_token'
+      ? (target === 'codex' ? 'ChatGPT sign-in (codex login)' : 'Claude subscription (Pro/Max)')
+      : 'API key';
     const isDefault = resolved?.provider === target;
     const isFallback = fallback?.provider === target;
 
@@ -4255,7 +4358,7 @@ export const collectDoctorReport = async (
       continue;
     }
 
-    const envVar = isDefault ? usedKeyEnvVar : (target === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY');
+    const envVar = isDefault ? usedKeyEnvVar : defaultApiKeyEnvName(target);
     const viaEnv = isDefault
       ? usedKeyEnvVar !== undefined
       : fallback?.apiKey !== undefined && fallback.apiKey === readNonEmptyString(processEnv[String(envVar)]);

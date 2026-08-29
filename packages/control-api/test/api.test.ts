@@ -1697,3 +1697,38 @@ test('schedules are listable and cancellable over the API', async () => {
     await harness.stop();
   }
 });
+
+test('a codex sign-in is storable both ways and reachable through every credential route', async () => {
+  const harness = await startApi();
+  try {
+    // The ChatGPT marker: an oauth_token for codex is accepted — runtime
+    // resolution reads it as "this machine uses `codex login`" — while the
+    // same type stays refused for openai (asserted in the test above).
+    const marker = await harness.call('/api/v1/credentials/codex', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'oauth_token', value: 'chatgpt' }),
+    });
+    assert.equal(marker.status, 200);
+
+    // The listing carries a codex row; without it an implemented provider
+    // is simply unreachable from the dashboard.
+    const listed = await json<{ providers: Array<{ provider: string; stored: boolean; type?: string }> }>(
+      await harness.call('/api/v1/credentials'),
+    );
+    const codexRow = listed.providers.find((entry) => entry.provider === 'codex');
+    assert.deepEqual(codexRow, { provider: 'codex', stored: true, type: 'oauth_token' });
+
+    // A ChatGPT sign-in has no key to check: the verify route says so
+    // instead of condemning a credential that works once saved.
+    const verify = await json<{ status: string; detail?: string }>(await harness.call('/api/v1/credentials/verify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'codex', type: 'oauth_token', key: 'chatgpt' }),
+    }));
+    assert.equal(verify.status, 'unreachable');
+    assert.match(verify.detail ?? '', /codex login/);
+  } finally {
+    await harness.stop();
+  }
+});

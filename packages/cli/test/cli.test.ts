@@ -145,6 +145,17 @@ test('parseCommand accepts real-provider flags', () => {
   });
 });
 
+test('parseCommand accepts the codex provider', () => {
+  assert.deepEqual(parseCommand(['run', '--provider', 'codex', 'hello']), {
+    command: 'run',
+    prompt: 'hello',
+    provider: 'codex',
+    format: 'text',
+    events: true,
+    approvals: 'always',
+  });
+});
+
 test('parseCommand accepts approvals and max-turns flags', () => {
   assert.deepEqual(parseCommand(['run', '--approvals', 'never', '--max-turns', '3', 'hello']), {
     command: 'run',
@@ -1864,7 +1875,7 @@ test('setup demo path can test run inline before saving', async () => {
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '3\n', '6\n', '7\n']),
+      setupInput: Readable.from(['1\n', '4\n', '6\n', '7\n']),
     },
   });
 
@@ -1889,7 +1900,7 @@ test('setup warns when exported env vars override the saved config', async () =>
       homeDir: home,
       processEnv: { STRATUS_PROVIDER: 'openai' },
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '3\n', '7\n']),
+      setupInput: Readable.from(['1\n', '4\n', '7\n']),
     },
   });
 
@@ -2097,7 +2108,7 @@ test('setup honors STRATUS_CONFIG and --config for the write target', async () =
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '3\n', '7\n']),
+      setupInput: Readable.from(['1\n', '4\n', '7\n']),
     },
   });
   assert.match(viaFlag.output.stdout, /stratus run --config \.\/custom\.json "say hello"/);
@@ -2487,7 +2498,7 @@ Be warm.
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '3\n', '7\n']),
+      setupInput: Readable.from(['1\n', '4\n', '7\n']),
     },
   });
 
@@ -2955,7 +2966,7 @@ test('setup warns when a project config shadows the global file it wrote', async
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '3\n', '7\n']),
+      setupInput: Readable.from(['1\n', '4\n', '7\n']),
     },
   });
 

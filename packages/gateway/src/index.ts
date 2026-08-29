@@ -1399,12 +1399,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // recognised as streaming gets no watchdog at all once a session
     // switches to it, so a stall there would run to the provider's own
     // ten-minute timer instead of the idle timeout the operator set.
-    fallback.provider === 'anthropic' && Boolean(fallback.apiKey || fallback.authToken);
+    (fallback.provider === 'anthropic' && Boolean(fallback.apiKey || fallback.authToken))
+    // The codex harness streams item snapshots in every auth mode.
+    || fallback.provider === 'codex';
 
   const streamsDeltas = (config: RuntimeConfig): boolean =>
     // Both Anthropic modes stream now: an API key through the Messages
-    // API, a subscription token through the Agent SDK's partial messages.
-    config.provider === 'anthropic' && Boolean(config.apiKey || config.authToken);
+    // API, a subscription token through the Agent SDK's partial messages —
+    // and the codex harness streams item snapshots in every auth mode.
+    (config.provider === 'anthropic' && Boolean(config.apiKey || config.authToken))
+    || config.provider === 'codex';
 
   /**
    * Progress-based abort, armed only while the turn is actually awaiting a
