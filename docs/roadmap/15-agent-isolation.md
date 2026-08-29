@@ -76,7 +76,17 @@ before it.
   repointing a store constructor at a path the migration did not populate
   is how workspace contents and persistent approvals would silently
   vanish, which is exactly the defect class this layer exists to end.
-  Schedules (rows in the same database) migrate with their sessions.
+- **Schedules deliberately do not shard.** A schedule row is fleet
+  infrastructure, not agent state: the scheduler ticks in the gateway,
+  `GET /schedules` is by its own comment the *fleet's* audit list, and
+  `DELETE /schedules/:id` addresses a bare schedule id whose cancellation
+  revokes the standing destination grant riding on the row. Scatter the
+  rows across per-agent databases and a schedule outside whichever file
+  happens to be open neither fires, nor appears in the audit, nor can be
+  cancelled — a standing grant outliving its operator's reach, which is
+  the precise failure [10](./10-proactive.md) built that surface to
+  prevent. The rows migrate to a fleet-level store the gateway — later,
+  the supervisor — owns, keyed by agent id exactly as today.
 - **One session index survives the sharding.** Session ids are
   caller-chosen, and the control API resolves them *without* an agent id —
   `GET /sessions/:id`, a message to an existing session — which is
@@ -216,6 +226,10 @@ step needs, which is the evidence the seams were right.
   the right store, identically in both isolation modes. A migration that
   surfaces a pre-existing duplicate fails loudly at startup, naming both
   agents, rather than picking one.
+- With state sharded, the fleet-wide schedule surface is unchanged: every
+  agent's schedules still fire, all appear in `stratus schedules`, and a
+  bare-id cancel still lands — destination-grant revocation included —
+  exactly as against the shared database.
 - `kill -9` on one agent's runtime mid-turn: the turn fails honestly (the
   abandoned-turn sweep already reports this), the agent restarts, its
   parked approvals recover, and a concurrent turn on another agent
