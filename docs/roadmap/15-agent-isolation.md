@@ -29,15 +29,15 @@ agent, talked into something by a page it fetched, running in a process that
 holds every agent's provider keys and one shared `sessions.db`. Today the
 blast radius of one compromised agent is the fleet.
 
-The neighbors have staked out the corners of this space. OpenClaw is the
-shared-process, app-level-checks model — where Stratus is today, with
-tighter policy. NanoClaw is container-first: the whole agent lives in a
-container and sees only what is mounted. Hermes sits between: profiles give
-each agent instance its own process, config, and memory, with pluggable
-execution backends from local to Docker. This step lands Stratus at the
-Hermes point *with one gateway still coordinating the fleet* — which
-profiles-as-separate-installs cannot do — and makes the NanoClaw posture a
-configuration rather than a rewrite.
+Three corners of this design space are well explored. **Shared process with
+app-level checks** is where Stratus is today, with tighter policy than most.
+**Container-first** puts the whole agent inside a container that sees only
+what is mounted. **Process-per-agent** sits between: each agent instance gets
+its own process, config, and memory, with pluggable execution backends from
+local to Docker. This step lands Stratus at the middle point *with one gateway
+still coordinating the fleet* — which profiles-as-separate-installs cannot
+do — and makes the container-first posture a configuration rather than a
+rewrite.
 
 It also pre-decides half of [08](./08-deployment-profiles.md): the hosted
 profile's open question — key-prefix namespaces vs. process-per-tenant —
@@ -165,8 +165,8 @@ before it.
   *reach* is precisely the deferred hardening (per-agent OS users,
   `sandbox-exec`) or an `isolation: container` third mode that runs the
   whole runtime — not just its commands — inside layer C's container with
-  only `agents/<id>/` mounted. That mode is the NanoClaw posture as one
-  more value of the same knob; it is held in the open questions rather
+  only `agents/<id>/` mounted. That mode is the container-first posture as
+  one more value of the same knob; it is held in the open questions rather
   than promised here, and the documentation this step lands must draw
   this line exactly where the mechanism does.
 - Per-agent crash containment: a runtime that OOMs or wedges is killed and
@@ -197,8 +197,8 @@ process boundary is what makes them *possible*; adding them is hardening a
 later step or a deployment recipe can take up); VM-per-agent; moving
 in-process tools (`tool-fs`, `tool-web`, `tool-browser`, memory) behind the
 executor seam — they run in the runtime process and stay contained by
-policy, exactly as Hermes's non-terminal tools do, and pretending layer C
-covers them would be a false promise; any change to kernel contracts —
+policy, which is the line every process-per-agent design draws, and
+pretending layer C covers them would be a false promise; any change to kernel contracts —
 `Executor`, `Tool`, and the event stream already carry everything this
 step needs, which is the evidence the seams were right.
 

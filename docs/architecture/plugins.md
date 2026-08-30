@@ -18,10 +18,10 @@ lacks is the procedure. Shipping a rubric as a tool would be a function that
 returns a paragraph; shipping a browser as a skill would be instructions for
 something the agent cannot do.
 
-This is the vocabulary [OpenClaw](https://docs.openclaw.ai/tools) and
-[Hermes](https://github.com/NousResearch/hermes-agent) settled on, and it is
-worth matching rather than inventing: the developers we want have read their
-docs already.
+This is the vocabulary the surrounding ecosystem has converged on, and it is
+worth matching rather than inventing: the developers we want have read somebody
+else's agent documentation already, and a synonym coined here is a word they
+have to learn for no benefit.
 
 **"Tool pack" is retired.** `@stratusagent/tool-fs` is a *plugin* contributing
 the `fs` *toolset*.
@@ -145,7 +145,7 @@ mean something. Toolset is the noun that glob names.
 
 Two plugins may contribute the same skill id — a `pr-review` from a vendor and
 one from your own team. The qualified form is `<package>:<skill>`
-(`stratus-plugin-github:pr-review`), following Hermes. The qualifier is the
+(`stratus-plugin-github:pr-review`). The qualifier is the
 **package name verbatim**, which is verbose on purpose: a normalized short id
 would be a second identifier keying access, and `@acme/stratus-plugin-github`
 and `stratus-plugin-github` would normalize to the same `github` while being two
@@ -194,9 +194,9 @@ A `"stratus"` field in `package.json`:
 The point of a manifest separate from the code is that **the daemon can see
 what a plugin contributes, and validate its configuration, without importing
 it**. A misconfigured or over-reaching plugin fails at config validation, not
-at the first tool call in the middle of somebody's turn. OpenClaw gets this
-property from a separate `openclaw.plugin.json`; a field in `package.json` is
-the same property with one fewer file to drift.
+at the first tool call in the middle of somebody's turn. A dedicated manifest
+file beside `package.json` would get the same property; a field *in*
+`package.json` gets it with one fewer file to drift.
 
 `contributes.tools[].risk` is a **declaration, not a decision** — see the trust
 model.
@@ -350,8 +350,8 @@ narrow. They are not a sandbox, and this document does not claim one:
   that list is read only from a **trusted** config. This is the rule already
   established for the `api` and `approvals` blocks: an auto-discovered
   project-local `stratus.config.json` decides nothing that can execute code.
-  Hermes states the reason exactly right — it "stops third-party code from
-  running without your explicit consent."
+  The reason is worth stating plainly: it stops third-party code from running
+  without the operator's explicit consent.
 - **The manifest is validated before the module is imported.** Reading what a
   plugin claims must never require running what it does.
 - **`setup()` registers through a manifest-bound view, never the raw
