@@ -287,6 +287,21 @@ Records are durable session state, so they survive a restart and a resumed
 session adds to what it already had. A failed run keeps the tokens it spent
 before it failed.
 
+**What each provider can tell you differs, and the records say so rather than
+smoothing it over.** The two API providers report one record per turn, with
+the model the API says served it. The two harness providers own their own
+inner loops, so one turn produces several records: `claude-code` reports one
+per model the loop touched — a sub-agent on a cheaper model shows up as its
+own row — and `codex` reports one per completed codex turn against the
+configured model, because codex publishes no per-model breakdown. A codex
+turn that *fails* reports nothing at all: its failure event carries no counts,
+which is a limit of that harness rather than a claim that the turn was free.
+
+Subscription-billed providers report tokens too, even though the operator is
+not billed per token for them. That is deliberate: it is how you compare what
+a run *would* cost across providers, and a session that fell back mid-run
+makes that a live question rather than a hypothetical.
+
 ### Two invariants worth stating
 
 - **Channel tokens have their own door.** Slack app and bot tokens are

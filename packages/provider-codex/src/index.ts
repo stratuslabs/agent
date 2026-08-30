@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 
 import {
   renderSystemPromptSections,
+  uncachedInputTokens,
   type ExecutionContext,
   type JsonObject,
   type JsonValue,
@@ -310,6 +311,20 @@ export interface CodexThreadEvent {
   error?: { message?: string };
   /** On a top-level `error` event. */
   message?: string;
+  /**
+   * On `turn.completed`: what that turn consumed. Per turn rather than
+   * cumulative across the thread, so each event is reported as it arrives.
+   *
+   * `input_tokens` is the OpenAI-family all-inclusive prompt count — the
+   * cache figures below are counted inside it — so the kernel's exclusive
+   * `inputTokens` is what remains after both come out.
+   */
+  usage?: {
+    input_tokens?: number;
+    cached_input_tokens?: number;
+    cache_write_input_tokens?: number;
+    output_tokens?: number;
+  };
   item?: {
     id?: string;
     type?: string;
@@ -674,9 +689,53 @@ export const createCodexProvider = ({
     }
     const kernelNameFor = (wireName: string): string => wireToKernel.get(wireName) ?? wireName;
 
+    /**
+     * Report one completed codex turn's tokens through the request's sink.
+     *
+     * Reported as each turn completes rather than once at the end: a resume
+     * that failed and replayed runs two of them, and the tokens of the
+     * abandoned attempt were still spent. The model is the one configured
+     * for the thread — codex reports no per-model breakdown, and this
+     * provider pins a single model per turn, so there is nothing to guess.
+     *
+     * The subtraction assumes codex follows its API's accounting, where the
+     * cache counts sit *inside* the prompt count. `uncachedInputTokens`
+     * floors the result at zero, so a wrong reading costs a small undercount
+     * rather than a negative number.
+     */
+    const reportUsage = (usage: CodexThreadEvent['usage']): void => {
+      const onUsage = request.onUsage;
+      if (!onUsage || !usage) {
+        return;
+      }
+      const inputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : undefined;
+      const outputTokens = typeof usage.output_tokens === 'number' ? usage.output_tokens : undefined;
+      const cacheReadTokens = typeof usage.cached_input_tokens === 'number' ? usage.cached_input_tokens : undefined;
+      const cacheWriteTokens = typeof usage.cache_write_input_tokens === 'number'
+        ? usage.cache_write_input_tokens
+        : undefined;
+      if ([inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens].every((value) => value === undefined)) {
+        return;
+      }
+      onUsage({
+        provider: name,
+        model,
+        ...(inputTokens !== undefined
+          ? { inputTokens: uncachedInputTokens(inputTokens, cacheReadTokens, cacheWriteTokens) }
+          : {}),
+        ...(outputTokens !== undefined ? { outputTokens } : {}),
+        ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+        ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+      });
+    };
+
     const forwardEvent = async (event: CodexThreadEvent): Promise<void> => {
       if (event.type === 'thread.started' && typeof event.thread_id === 'string' && event.thread_id.length > 0) {
         rememberThreadId(request.session, event.thread_id);
+        return;
+      }
+      if (event.type === 'turn.completed') {
+        reportUsage(event.usage);
         return;
       }
       if (event.type === 'turn.failed') {

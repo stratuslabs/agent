@@ -153,6 +153,19 @@ export const bridgeKernelTools = (
 };
 
 /**
+ * One model's token totals for a `query()` call, as the SDK's `ModelUsage`
+ * reports them. The three input counts are Anthropic's disjoint buckets,
+ * summed per model — the same shape `TokenUsage` took from that API — so
+ * nothing is normalized on the way through.
+ */
+export interface ClaudeCodeModelUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+}
+
+/**
  * The slice of the Agent SDK's message stream this provider consumes.
  * Kept loose so tests can inject a plain async generator.
  */
@@ -161,6 +174,17 @@ export interface ClaudeCodeStreamMessage {
   subtype?: string;
   result?: string;
   is_error?: boolean;
+  /**
+   * On a `result` message: per-model totals for every model call the query
+   * pipeline made — the main loop, sub-agents, and internal calls such as
+   * compaction. The SDK names this the field to use for token accounting,
+   * and it is the only place a harness turn's several calls are visible at
+   * all: they never cross the provider interface. Present on an error
+   * result too, which is how a failed run's tokens still get reported.
+   *
+   * Keyed by the model string the pipeline used.
+   */
+  modelUsage?: Record<string, ClaudeCodeModelUsage>;
   /**
    * The SDK's own session id, carried on every message it emits — the
    * init system message, each assistant message, the result. Reading it
@@ -468,6 +492,49 @@ export const createClaudeCodeProvider = ({
     }
     const kernelNameFor = (wireName: string): string => wireToKernel.get(wireName) ?? wireName;
 
+    /**
+     * Report one attempt's per-model totals through the request's usage
+     * sink, one call per model.
+     *
+     * Per model rather than summed, because a harness turn routinely spends
+     * against several — a sub-agent on a cheaper one, a compaction pass on
+     * another — and a thousand tokens of one model is not a thousand of
+     * another. The key is the model string the pipeline actually used; the
+     * SDK's `canonicalModel` is its own pricing normalization, and pricing
+     * is deliberately not this layer's business.
+     *
+     * An all-zero entry is dropped. The SDK zeroes `modelUsage` on a
+     * crash-or-startup-error result, and a model that truly consumed nothing
+     * never ran — so a zeroed row is a placeholder rather than a
+     * measurement, and recording it would state a cost of zero for a call
+     * nobody can see.
+     */
+    const reportUsage = (byModel: Record<string, ClaudeCodeModelUsage> | undefined): void => {
+      const onUsage = request.onUsage;
+      if (!onUsage || !byModel) {
+        return;
+      }
+      for (const [reportedModel, usage] of Object.entries(byModel)) {
+        const counts = {
+          ...(typeof usage.inputTokens === 'number' ? { inputTokens: usage.inputTokens } : {}),
+          ...(typeof usage.outputTokens === 'number' ? { outputTokens: usage.outputTokens } : {}),
+          ...(typeof usage.cacheReadInputTokens === 'number' ? { cacheReadTokens: usage.cacheReadInputTokens } : {}),
+          ...(typeof usage.cacheCreationInputTokens === 'number'
+            ? { cacheWriteTokens: usage.cacheCreationInputTokens }
+            : {}),
+        };
+        const values = Object.values(counts);
+        if (values.length === 0 || values.every((value) => value === 0)) {
+          continue;
+        }
+        onUsage({
+          provider: name,
+          ...(reportedModel.length > 0 ? { model: reportedModel } : {}),
+          ...counts,
+        });
+      }
+    };
+
     // Resume the SDK's own session when this conversation already has one.
     // The alternative — replaying a flattened transcript every turn — re-
     // sends the whole history on each request and leaves the SDK no way to
@@ -476,45 +543,62 @@ export const createClaudeCodeProvider = ({
     const attempt = async (resume: string | undefined): Promise<void> => {
       const attemptOptions: Options = { ...options, ...(resume ? { resume } : {}) };
       resetIdleTimer();
-      for await (const message of queryFn({
-        prompt: resume ? latestUserMessagePrompt(request) : renderTranscriptPrompt(request),
-        options: attemptOptions,
-      })) {
-        resetIdleTimer();
-        // Every message carries it, so the id is captured whether the turn
-        // succeeds or not — a session that fails mid-turn is still the
-        // session the next turn should continue.
-        if (message.session_id) {
-          rememberSdkSessionId(request.session, message.session_id);
-        }
-        if (message.type === 'stream_event') {
-          // AWAIT the sink per fragment, the same backpressure the API
-          // provider gives it: a throttled consumer pauses this loop
-          // rather than queueing the rest of the turn behind itself.
-          //
-          // With the clock stopped, because that pause is the consumer's
-          // time and not the SDK's silence. Counting it as idleness would
-          // abort a healthy query for honouring the contract this await
-          // exists to keep — the same distinction the gateway watchdog
-          // draws when it excludes subscriber time.
-          suspendIdleTimer();
-          try {
-            await forwardDelta(message, request.onDelta, toolNamesByIndex, kernelNameFor);
-          } finally {
-            resetIdleTimer();
+      // The LATEST result's totals, not a sum across results: the SDK
+      // documents `modelUsage` as the running total for the query() call, so
+      // adding two results together would double-count the first.
+      let attemptUsage: Record<string, ClaudeCodeModelUsage> | undefined;
+      try {
+        for await (const message of queryFn({
+          prompt: resume ? latestUserMessagePrompt(request) : renderTranscriptPrompt(request),
+          options: attemptOptions,
+        })) {
+          resetIdleTimer();
+          // Every message carries it, so the id is captured whether the turn
+          // succeeds or not — a session that fails mid-turn is still the
+          // session the next turn should continue.
+          if (message.session_id) {
+            rememberSdkSessionId(request.session, message.session_id);
           }
-          continue;
+          if (message.type === 'stream_event') {
+            // AWAIT the sink per fragment, the same backpressure the API
+            // provider gives it: a throttled consumer pauses this loop
+            // rather than queueing the rest of the turn behind itself.
+            //
+            // With the clock stopped, because that pause is the consumer's
+            // time and not the SDK's silence. Counting it as idleness would
+            // abort a healthy query for honouring the contract this await
+            // exists to keep — the same distinction the gateway watchdog
+            // draws when it excludes subscriber time.
+            suspendIdleTimer();
+            try {
+              await forwardDelta(message, request.onDelta, toolNamesByIndex, kernelNameFor);
+            } finally {
+              resetIdleTimer();
+            }
+            continue;
+          }
+          if (message.type !== 'result') {
+            continue;
+          }
+          // Captured before the failure branch below: an error result carries
+          // the tokens the run spent before it broke, and those were spent.
+          if (message.modelUsage) {
+            attemptUsage = message.modelUsage;
+          }
+          if (message.subtype === 'success' && !message.is_error) {
+            resultText = message.result;
+            continue;
+          }
+          throw new Error(
+            `Claude Code run failed (${message.subtype ?? 'unknown error'})${message.result ? `: ${message.result}` : ''}`,
+          );
         }
-        if (message.type !== 'result') {
-          continue;
-        }
-        if (message.subtype === 'success' && !message.is_error) {
-          resultText = message.result;
-          continue;
-        }
-        throw new Error(
-          `Claude Code run failed (${message.subtype ?? 'unknown error'})${message.result ? `: ${message.result}` : ''}`,
-        );
+      } finally {
+        // In a finally so a thrown attempt still reports: the SDK put the
+        // counts on the error result, and a failed harness turn that
+        // reported nothing would leave the run unreconcilable against
+        // Anthropic's own numbers — the only external check this has.
+        reportUsage(attemptUsage);
       }
     };
 
