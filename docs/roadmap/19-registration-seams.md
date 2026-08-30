@@ -57,8 +57,12 @@ Finishable on its own, proved from inside this repository.
   plugin handed a raw registry can register something it never declared. A
   plugin that declares a channel and registers a provider is a load-time error.
 - **Collision behavior**, decided and tested: two plugins registering the same
-  provider name, or a second channel for one agent, fail at load. A tool name
-  is unique per install and these are no different.
+  provider name fail at load, as a duplicate tool name does.
+
+  **Channels key on (agent, channel kind), not on agent alone.** One agent
+  reachable on both Slack and Discord is not a collision — it is
+  [20](./20-channel-discord.md)'s acceptance criterion. What collides is two
+  registrations of the *same* kind for the same agent.
 - **A scoped `CredentialResolver` and the plugin's own config block on the
   context**, so an honest plugin declares what it needs by name instead of
   reaching into ambient environment. Stated plainly because `stratus-v2.md`

@@ -49,7 +49,8 @@ not the gate on each slice:
 1. **Roster and health** — the screen that makes the daemon legible at all.
 2. **Sessions and approvals** — the two that need the event stream, together
    because they share it.
-3. **Schedules and memory** — the two that need new read endpoints.
+3. **Schedules and memory** — memory is the one needing a new read endpoint;
+   `GET /schedules` already exists in `control-api` and this slice consumes it.
 4. **Template-backed creation and editing** — last, because it depends on
    [16](./16-templates.md) landing.
 

@@ -48,7 +48,20 @@ harness-internal calls, resumed sessions, and fallback attempts:
 
 **In:**
 
-- **`usage?: TokenUsage` on `ProviderResponse`**, optional, with a shape that
+- **A usage *sink*, not only a field on the response.** A single `usage` on
+  `ProviderResponse` cannot carry what this step requires, for two reasons
+  that both come from the harness providers: their inner loops make several
+  model calls that never cross the provider interface, so only the last one
+  could be reported; and a call that *fails* returns no `ProviderResponse` at
+  all, so its tokens — which were still spent — have no carrier.
+
+  `ProviderRequest` already solves exactly this shape for streaming, with an
+  optional per-request delta sink, and the same pattern applies: an optional
+  per-request **usage sink** the adapter calls as each internal attempt
+  completes. The response field stays for the simple providers where one
+  request is one call; the sink is what makes the harness paths and the
+  retries reportable.
+- **`usage?: TokenUsage`** on the response, optional, with a shape that
   is the intersection every provider actually reports: input tokens, output
   tokens, and the two cache counters where the provider distinguishes them.
   Absent when the provider does not report — never zero, because zero is a
@@ -84,6 +97,13 @@ harness-internal calls, resumed sessions, and fallback attempts:
   Stratus turn, and each carries its own model.
 - **Persistence with the session**, so a past session's usage survives a
   restart and the console can show it, grouped as stored.
+- **Every record carries the turn it belongs to.** Without it, a durable
+  session resumed across many turns accumulates records that are
+  indistinguishable once two of them share a provider and model — and
+  ordering does not recover the boundaries, because a harness turn
+  contributes several records of its own. Per-turn accounting is promised
+  here and needed by [17](./17-fleet-console.md), so the turn id is part of
+  the record rather than something to reconstruct.
 
 **Out:**
 

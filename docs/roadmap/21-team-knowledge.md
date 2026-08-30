@@ -44,10 +44,16 @@ mechanisms that disagree.
     be worth not re-deriving. Cheap to measure and needs no extra model call.
     Alone it encodes expensive one-offs that never recur.
   - **Recurrence** — the same shape of work has happened before. Alone it
-    encodes trivia. [14](./14-memory.md)'s FTS5 index over past sessions is
-    the machinery for detecting it, and detection belongs in the maintenance
-    pass below rather than in the turn: an agent mid-task sees only its own
-    turn, while a pass over the corpus sees the pattern.
+    encodes trivia. Detection belongs in the maintenance pass below rather
+    than in the turn: an agent mid-task sees only its own turn, while a pass
+    over the corpus sees the pattern.
+
+    **There is no corpus to search yet, and this step has to supply one.**
+    [14](./14-memory.md)'s FTS5 index is built from remembered memory
+    entries, not from session transcripts — so work that was never written
+    to memory is invisible to it, which is most work. Recurrence detection
+    needs session history it can search, and defining that access is part of
+    this step rather than an assumption it can make.
   - **Agreement** — whether other agents already do this, and whether they do
     it the same way. Convergence is a strong promote signal. **Divergence is
     a signal not to promote**: if one agent posts deploy summaries as bullets
@@ -84,10 +90,15 @@ mechanisms that disagree.
   worth.
 
   The maintenance pass is the first-pass reviewer: it accepts mechanical
-  revisions on its own — a typo, a dead link, a renamed tool, a reordered
-  step — and **escalates anything that changes behavior**: a new tool, a
-  widened scope, or any procedure touching a `gated` or `dangerous`
-  capability. That escalation rule is what keeps the lane scalable; without
+  revisions on its own — and the bar for "mechanical" has to be *provably no
+  change in behavior*, which is narrower than it first looks. A typo or a
+  dead link qualifies. **A renamed tool and a reordered step do not**: the
+  rename points the procedure at a different tool, and reordering dependent
+  steps changes what the procedure does. Both are behavior changes wearing
+  cosmetic clothes, and both go to a human.
+
+  Everything else **escalates**: a new tool, a widened scope, or any
+  procedure touching a `gated` or `dangerous` capability. That escalation rule is what keeps the lane scalable; without
   it a human reviews everything and stops reviewing anything.
 - **Roster-scoped memory as a second scope, not a replacement.** Agent-scoped
   memory stays exactly as 14 built it. A shared scope is additive, written

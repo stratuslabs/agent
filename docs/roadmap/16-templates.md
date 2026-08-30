@@ -47,6 +47,15 @@ least of what the product does.
   enables a plugin with different settings, those two differ, and the one the
   operator must approve is the one that will be true afterwards.
 
+  **A glob is disclosed as a glob, not expanded and forgotten.** A template
+  granting `web.*` authorizes every tool in that namespace *including ones
+  registered later*, by an unpinned plugin update the operator never reviewed.
+  Listing only what resolves today shows a narrower grant than the soul
+  actually carries. Either the summary names the wildcard and says what it
+  will keep admitting, or templates carry literal tool names — the second is
+  safer and the first is probably what people want; decide before the first
+  template ships one.
+
   **The summary is computed once, in `@stratusagent/state`, not by the CLI.**
   [17](./17-fleet-console.md) renders this same flow through the API, and two
   implementations of "what will this grant" is two answers to the only question
@@ -73,6 +82,14 @@ least of what the product does.
 - **Missing prerequisites are reported, not silently skipped.** A template
   naming a plugin that is not installed says so, with the install command,
   and creates nothing until it is resolved.
+- **A template cannot create a schedule, and says what it needs instead.** A
+  schedule is a durable record created through `schedule.every`, which is
+  `gated` because its cadence, prompt, and destination are a decision — not
+  something a bundle writes. A template whose agent is only useful on a
+  schedule (see [26](./26-fleet-introspection.md)) therefore ends its flow by
+  *proposing* one for the operator to approve, as a separate reviewed step.
+  The alternative — a template that quietly inserts schedule rows — would put
+  unattended recurring work behind a bundle nobody read as such.
 
 **Out:**
 

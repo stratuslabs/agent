@@ -38,14 +38,25 @@ surface when nobody has opened the console in a week.
 - **Aggregates by default, not content.** These answer *how many, how old,
   which agent, what status*. A count of stuck sessions is an operational fact;
   their transcripts are other agents' conversations.
-- **`gated`, and out of every template's default allowlist.** This is the most
-  privileged read in the system — the one place an agent sees across the whole
-  fleet — and it should be an operator's deliberate grant.
+- **`gated`, and in no template's allowlist except the fleet-watcher's.** This
+  is the most privileged read in the system — the one place an agent sees
+  across the whole fleet — so it is an operator's deliberate grant, and the
+  fleet-watcher below is the single template that asks for it, visibly, in the
+  review [16](./16-templates.md) puts in front of them.
 - **Everything resolves through the existing seams.** The control API and
   `@stratusagent/state` already answer these questions for the console; these
   tools are a second consumer of the same rules, never a second implementation.
-- **A template in [16](./16-templates.md)** wiring the toolset, a schedule, and
-  `message.send` into a working fleet-watcher a person can edit.
+- **A template in [16](./16-templates.md)** wiring the toolset and
+  `message.send` into a fleet-watcher a person can edit.
+
+  **The schedule is not part of the template, and cannot be.** A template is
+  soul frontmatter plus plugin configuration; a schedule is a durable database
+  record created through `schedule.every`, which is `gated` precisely because
+  its cadence, prompt, and destination are a decision. So the template ships
+  the agent and the flow ends with a reviewed schedule creation — an explicit
+  step the operator approves, not a row a template wrote. That is a
+  requirement on [16](./16-templates.md) as much as on this step: a template
+  whose usefulness depends on a schedule needs somewhere to say so.
 
 **Out:**
 

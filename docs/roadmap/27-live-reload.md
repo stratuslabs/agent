@@ -33,7 +33,7 @@ half: prose read from disk, no code imported, nothing holding a socket.
 
 - **Skills reload without a restart**, through the same shape `reloadRoster()`
   established: a callable seam on the gateway, exposed over the control API,
-  and re-run by `stratus skills install` so the ordinary path needs no second
+  and re-run by `stratus skill add` so the ordinary path needs no second
   step.
 - **Reload swaps rather than merges.** `SkillRegistry.register` throws on a
   duplicate id, so a naive second pass fails on every skill already loaded. A
@@ -45,7 +45,15 @@ half: prose read from disk, no code imported, nothing holding a socket.
   worse than a stale one.
 - **An announced restart path for plugins**: a gateway operation that says a
   restart is coming, stops accepting new turns, lets in-flight turns finish
-  within a bounded window, then exits for the service manager to restart. What
+  within a bounded window, then restarts.
+
+  **It has to restart itself, or arrange to be restarted.** A clean exit does
+  not come back: the systemd unit uses `Restart=on-failure` and the LaunchAgent
+  keys `KeepAlive` on launchd's unsuccessful-exit condition, so a graceful exit
+  leaves the fleet stopped — always in the foreground and under `--no-login`,
+  and by default under the service manager. Either the operation re-executes
+  the daemon itself or it exits with a status the service definitions treat as
+  restartable, and whichever is chosen has to hold on both platforms. What
   the daemon already does well on the way back up — durable sessions, approval
   restart-recovery, the scheduler's catch-up sweep, channel reconnect — is what
   makes this survivable; the missing half is doing it deliberately rather than
@@ -113,6 +121,6 @@ half: prose read from disk, no code imported, nothing holding a socket.
 - **How long is the drain window?** Too short and it is a crash with extra
   steps; too long and an operator waits on one stuck turn. Probably bounded
   with a forced exit, and probably configurable.
-- **Should `stratus skills install` reload by default, or print the command?**
+- **Should `stratus skill add` reload by default, or print the command?**
   Reloading by default is what people want and makes a local install change a
   running fleet, which is a surprise on a shared machine.

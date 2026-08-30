@@ -41,7 +41,9 @@ distribution stays deferred.
   that survives should be a decision with a reason, not an accident.
 - **Install from the ecosystem** — a skill from a git repository or the
   existing index lands in `~/.stratus/skills/` under its id. `stratus skills
-  install` largely exists; this is about the sources it accepts.
+  `stratus skill add` already does this, accepting a GitHub repo, a git URL,
+  or a local path — so this step is about conformance and validation on that
+  shipped path rather than a new command.
 - **Strict validation at install, and a refusal that names the problem.**
   Nothing installs that does not conform. This matches how the plugin manifest
   is already treated — validated before the module is imported — and it buys
@@ -101,8 +103,8 @@ distribution stays deferred.
 - **Do we differ from the spec anywhere that matters?** Unknown until the
   conformance pass runs, and the answer decides whether this step is an
   afternoon or a fortnight.
-- **Is `stratus skills install <ecosystem-ref>` worth it, or is `git clone` into
-  the directory enough?** The command is friendlier and is one more surface to
+- **Does `stratus skill add` need an ecosystem-aware source form**, or is a
+  git URL enough? The command is friendlier and is one more surface to
   keep current against somebody else's index.
 - **Do we publish our own skills outward?** `stratuslabs/skill-*` already exists
   outside this repository. Making them discoverable in the shared index costs
