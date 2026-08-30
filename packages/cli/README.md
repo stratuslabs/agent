@@ -11,6 +11,10 @@ put them in Slack — from one command.
 
 ## Install
 
+<!-- Same pin, same reason as the banner above: the commit that added the
+     GIF. Re-recording it means updating this pin to the new commit. -->
+![stratus agent new creates an agent, stratus run drives a full agent loop through the demo.echo tool, and stratus agents lists the roster with each agent's avatar palette](https://raw.githubusercontent.com/stratuslabs/agent/0838ca49bfa4af6e0642e38a0c77784123f39329/docs/assets/stratus-demo.gif)
+
 ```bash
 npm install -g @stratusagent/cli
 stratus setup
