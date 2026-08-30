@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { ProviderRequest } from '@stratusagent/core';
+import type { ProviderCallUsage, ProviderRequest } from '@stratusagent/core';
 import {
   createOpenAICompatibleProvider,
   createProviderRegistry,
@@ -721,4 +721,42 @@ test('normalizeProviderResponse carries usage through', () => {
   });
 
   assert.deepEqual(normalized.usage, { provider: 'fixture', inputTokens: 3 });
+});
+
+test('a paid 200 with nothing usable in it still reports its tokens through the sink', async () => {
+  // A billed completion whose only content is a tool call with a name the
+  // endpoint omitted: the builder produces no parts and the empty-response
+  // check throws, so the response field has no way to carry the count.
+  const provider = createOpenAIStub({
+    choices: [{ message: { content: '', tool_calls: [{ id: 'call-1', type: 'function', function: {} }] } }],
+    usage: { prompt_tokens: 900, completion_tokens: 15 },
+  });
+
+  const reported: ProviderCallUsage[] = [];
+  await assert.rejects(
+    () => provider.generate({ ...createRequest(), onUsage: (usage) => reported.push(usage) }),
+    /Provider returned an empty response/,
+  );
+
+  assert.deepEqual(reported, [
+    { provider: 'openai', model: 'gpt-4.1-mini', inputTokens: 900, outputTokens: 15 },
+  ]);
+});
+
+test('a successful call reports once, through the sink, and repeats it on the response', async () => {
+  const provider = createOpenAIStub({
+    choices: [{ message: { content: 'Hello.' } }],
+    usage: { prompt_tokens: 100, completion_tokens: 5 },
+  });
+
+  const reported: ProviderCallUsage[] = [];
+  const response = await provider.generate({
+    ...createRequest(),
+    onUsage: (usage) => reported.push(usage),
+  });
+
+  // Both channels carry the same call, which is safe because the kernel
+  // reads one or the other and never both.
+  assert.equal(reported.length, 1);
+  assert.deepEqual(reported[0], response.usage);
 });

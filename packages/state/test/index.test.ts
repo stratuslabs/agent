@@ -743,3 +743,84 @@ test('the fallback wrapper leaves usage that named itself alone', async () => {
 
   assert.deepEqual(response.usage, { provider: 'inner', model: 'm' });
 });
+
+test('a fallback that answers on its response is still counted after the primary used the sink', async () => {
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const session = {
+    id: 'rescued',
+    agent: { id: 'a', name: 'A' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  };
+
+  // A harness primary: reports the attempt it paid for, then fails.
+  const primary = {
+    name: 'primary',
+    async generate({ onUsage }: { onUsage?: (usage: { provider?: string; inputTokens?: number }) => void }) {
+      onUsage?.({ provider: 'primary', inputTokens: 5 });
+      throw new Error('primary down');
+    },
+  };
+  // A single-call fallback: answers on the response, the way an API adapter
+  // does. Sink exclusivity is per generate and both providers share this
+  // one, so without the wrapper forwarding it the turn that actually
+  // succeeded would go uncounted while the attempt that failed did not.
+  const fallback = {
+    name: 'fallback',
+    async generate() {
+      return {
+        parts: [{ type: 'text' as const, text: 'rescued' }],
+        usage: { provider: 'fallback', model: 'fallback-1', outputTokens: 9 },
+      };
+    },
+  };
+
+  const reported: Array<{ provider?: string }> = [];
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, () => {});
+  await wrapped.generate({ session, onUsage: (usage: { provider?: string }) => reported.push(usage) } as never);
+
+  assert.deepEqual(reported, [
+    { provider: 'primary', inputTokens: 5 },
+    { provider: 'fallback', model: 'fallback-1', outputTokens: 9 },
+  ]);
+});
+
+test('a fallback that uses the sink itself is not also counted from its response', async () => {
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const session = {
+    id: 'no-double',
+    agent: { id: 'a', name: 'A' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  };
+
+  const primary = {
+    name: 'primary',
+    async generate() {
+      throw new Error('primary down');
+    },
+  };
+  // An adapter using both channels for the same call. Forwarding is scoped
+  // by whether the fallback used the sink, so its last call is recorded
+  // once — the same rule the kernel applies one level up.
+  const fallback = {
+    name: 'fallback',
+    async generate({ onUsage }: { onUsage?: (usage: { provider?: string; inputTokens?: number }) => void }) {
+      onUsage?.({ provider: 'fallback', inputTokens: 3 });
+      return {
+        parts: [{ type: 'text' as const, text: 'ok' }],
+        usage: { provider: 'fallback', inputTokens: 3 },
+      };
+    },
+  };
+
+  const reported: Array<{ provider?: string }> = [];
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, () => {});
+  await wrapped.generate({ session, onUsage: (usage: { provider?: string }) => reported.push(usage) } as never);
+
+  assert.deepEqual(reported, [{ provider: 'fallback', inputTokens: 3 }]);
+});

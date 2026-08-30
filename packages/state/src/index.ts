@@ -11,6 +11,7 @@ import type {
   JsonValue,
   MemoryEntry,
   ModelProvider,
+  ProviderCallUsage,
   ProviderRequest,
   ProviderResponse,
   Session,
@@ -2442,31 +2443,58 @@ export const createFallbackWrappedProvider = (
 };
 
 /**
- * Run the fallback with its own name filled in on any usage that arrives
- * without one.
+ * Run the fallback, with its own name filled in on any usage that arrives
+ * without one and its response usage forwarded through the sink.
  *
- * The kernel attributes an unnamed count to the provider it asked, and the
- * provider it asked is this wrapper — which answers to the *primary's* name
- * for the life of the session. So a fallback adapter that does not name
- * itself would have its tokens filed under the model that failed, in the one
- * case the whole attribution requirement exists for. Every adapter in this
- * repository names itself and never reaches the `??` below; a third-party
- * one that does not still gets the truth.
+ * Two separate corrections, both forced by this wrapper answering to the
+ * *primary's* name for the life of the session:
+ *
+ * **The name.** The kernel attributes an unnamed count to the provider it
+ * asked, and the provider it asked is this wrapper. So a fallback adapter
+ * that does not name itself would have its tokens filed under the model that
+ * failed, in the one case the whole attribution requirement exists for.
+ * Every adapter in this repository names itself and never reaches the `??`;
+ * a third-party one that does not still gets the truth.
+ *
+ * **The channel.** Sink reporting is exclusive for a whole `generate`, and
+ * both providers share this one. A primary that reported a failed attempt
+ * through the sink before throwing has therefore already switched the kernel
+ * off the response field — so a single-call fallback answering with `usage`
+ * on its response would be silently dropped, recording the attempt that
+ * failed and not the turn that succeeded. Forwarding closes that, and cannot
+ * double-count: it happens only when the fallback did not use the sink
+ * itself, which is the same rule the kernel applies one level up.
  */
 const attributeUsage = async (
   fallback: ModelProvider,
   request: ProviderRequest,
 ): Promise<ProviderResponse> => {
   const onUsage = request.onUsage;
+  const attribute = (usage: ProviderCallUsage): ProviderCallUsage => ({
+    ...usage,
+    provider: usage.provider ?? fallback.name,
+  });
+
+  let fallbackReported = false;
   const response = await fallback.generate({
     ...request,
     ...(onUsage
-      ? { onUsage: (usage) => onUsage({ ...usage, provider: usage.provider ?? fallback.name }) }
+      ? {
+          onUsage: (usage) => {
+            fallbackReported = true;
+            onUsage(attribute(usage));
+          },
+        }
       : {}),
   });
-  return response.usage
-    ? { ...response, usage: { ...response.usage, provider: response.usage.provider ?? fallback.name } }
-    : response;
+
+  if (!response.usage) {
+    return response;
+  }
+  if (onUsage && !fallbackReported) {
+    onUsage(attribute(response.usage));
+  }
+  return { ...response, usage: attribute(response.usage) };
 };
 
 export const createRuntimeProvider = (

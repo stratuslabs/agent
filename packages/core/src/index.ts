@@ -858,9 +858,19 @@ export interface ProviderRequest {
    * a `finally` on its way out with an error must not be made to await. A host
    * that wants to do real work with a count queues it.
    *
-   * Reporting through this sink is exclusive for the call: a response's
-   * `usage` is ignored when the sink already fired, so an adapter that uses
-   * both does not have its final call counted twice.
+   * Reporting through this sink is exclusive **for the whole `generate`**,
+   * not per inner call: once anything has reported through it, the
+   * response's `usage` is ignored, so an adapter that uses both does not
+   * have its final call counted twice. The runner cannot scope that more
+   * finely, because it cannot see where one provider call ends and the next
+   * begins.
+   *
+   * The consequence binds anything that composes providers behind one
+   * `generate` — the fallback wrapper is the live example. If its primary
+   * reported a failed attempt through the sink and its fallback then answers
+   * with `usage` on the response, that response field is already excluded:
+   * the composing wrapper MUST forward it through the sink itself, or the
+   * turn that actually succeeded goes uncounted.
    */
   onUsage?: (usage: ProviderCallUsage) => void;
   /**
@@ -2146,10 +2156,17 @@ export class AgentRunner {
         // Copies all the way down — a fresh array of fresh records, not the
         // session's own. This is durable accounting state rather than a
         // per-event payload, so a subscriber that sorts the list, appends to
-        // it, or normalizes a count in place must not be editing the record.
-        // A shallow array copy is not enough: the record objects behind it
-        // are the ones the session holds, and `InMemorySessionStore` hands
-        // the very same objects back on the next read.
+        // it, or normalizes a count in place must not be reaching the stored
+        // record. A shallow array copy is not enough: the record objects
+        // behind it are the ones the session holds, and
+        // `InMemorySessionStore` hands the very same objects back on the
+        // next read.
+        //
+        // What this does NOT buy is isolation between subscribers. `emit`
+        // hands one event object to every handler in turn, so an earlier
+        // handler's edits are visible to later ones — true of `parts` on
+        // provider.response and of every other payload on this bus, and not
+        // a promise the bus has ever made. Copy before mutating.
         ...(session.usage && session.usage.length > 0
           ? { usage: session.usage.map((record) => ({ ...record })) }
           : {}),

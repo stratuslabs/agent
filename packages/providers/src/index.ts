@@ -393,6 +393,18 @@ export const createOpenAICompatibleProvider = ({
         throw new Error(payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`);
       }
 
+      // Reported through the sink BEFORE the empty-response check below.
+      // A 200 with `usage` and nothing usable in it — tool arguments that
+      // will not parse, content-filtered output — is a paid call that ends
+      // in a throw, and a throw returns no response for the count to ride
+      // on. The count also stays on the response for a host calling
+      // generate with no sink attached; the kernel reads one or the other,
+      // never both.
+      const usage = extractOpenAICompatibleUsage(payload, name, model);
+      if (usage) {
+        request.onUsage?.(usage);
+      }
+
       const builder = createProviderResponseBuilder();
 
       const text = extractOpenAICompatibleText(payload);
@@ -410,9 +422,6 @@ export const createOpenAICompatibleProvider = ({
         throw new Error('Provider returned an empty response.');
       }
 
-      // One request is one model call here, so the count rides the response
-      // and the request's usage sink stays unused.
-      const usage = extractOpenAICompatibleUsage(payload, name, model);
       return usage ? { ...result, usage } : result;
     },
   });

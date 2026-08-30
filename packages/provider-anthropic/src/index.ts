@@ -418,6 +418,21 @@ export const createAnthropicProvider = ({
         response = await client.messages.create(params, requestOptions);
       }
 
+      // Reported through the sink BEFORE anything that can reject the
+      // response. The call completed and was billed, and both checks below
+      // throw on outcomes that are still paid: a tool_use block whose input
+      // is not an object, and a turn whose thinking consumed the output
+      // budget without surfacing a part. Neither returns a response, so the
+      // sink is the only carrier those tokens have.
+      //
+      // The count also stays on the response for a host calling generate
+      // with no sink attached. The kernel reads one or the other, never
+      // both, so this cannot double-count.
+      const usage = extractUsage(response, name, model);
+      if (usage) {
+        request.onUsage?.(usage);
+      }
+
       const { text, calls } = extractParts(response.content, mapping);
 
       for (const call of calls) {
@@ -433,10 +448,6 @@ export const createAnthropicProvider = ({
         throw new Error('Claude returned an empty response.');
       }
 
-      // One request is one model call here, so the response field carries it
-      // and the request's sink stays unused — the kernel reads whichever the
-      // adapter chose, never both.
-      const usage = extractUsage(response, name, model);
       return usage ? { parts, usage } : { parts };
     },
   };
