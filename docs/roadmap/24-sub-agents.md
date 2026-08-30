@@ -1,0 +1,193 @@
+# 24 — Sub-agents: ephemeral helpers an agent spawns for one task
+
+## Goal
+
+`agent.spawn` — one tool call that starts **N ephemeral sub-agents in
+parallel**, each with a task and a narrowed slice of the parent's
+capabilities, and returns their results together. A sub-agent has no soul
+file, no roster entry, no channel, no memory, and no life beyond the task it
+was given.
+
+The word is **sub-agent**, matching how the rest of the ecosystem uses it:
+spawned per task, parallel, ephemeral.
+
+## Why now
+
+Two things a fleet cannot do today, and one of them is a cost problem.
+
+**Context offloading.** An agent that reads five pages carries fifty thousand
+tokens of page content in its own context — and re-sends it on every
+subsequent turn of that conversation. Five sub-agents that each read one page
+and return two hundred words leave the parent with a thousand tokens. They can
+run a cheap model while the parent runs an expensive one. Model spend dominates
+everything else in a fleet by an order of magnitude, so this is a larger lever
+than [23](./23-prompt-caching.md) and it is applied per task rather than once.
+
+**Parallelism, which is not available at all.** `runToolCalls` in
+`packages/core` is a sequential `for` loop with an `await`: tool calls run
+strictly one at a time. Five `agent.delegate` calls in one turn take five times
+the wall clock of one. Every fan-out shape below is currently a serial queue.
+
+Illustrative cases, each fanning out for a different reason: comparing four
+vendors (breadth); triaging thirty open pull requests (throughput on N
+identical tasks); correlating a failed deploy across CI logs, commits, and an
+error tracker (heterogeneous sources); reviewing a draft with a deliberately
+critical instruction before it is sent (a second opinion, not parallel at all);
+and extracting findings from a two-hundred-page document in chunks (working
+around the context window itself).
+
+## Scope
+
+**In:**
+
+- **`agent.spawn`, a fan-out tool** in the `agent` toolset. It takes a list of
+  tasks, runs them **concurrently inside the tool**, and returns their results
+  as one tool result.
+
+  **This shape is the point.** The alternative — parallelizing the kernel's
+  tool loop — drags in the approval checkpoint, which carries
+  `remaining: calls.slice(index + 1)`, and the crash-recovery path that depends
+  on that sequential ordering with a known remainder. A fan-out tool leaves the
+  kernel contract exactly as it is, keeps this step a plugin rather than a
+  kernel change, and confines concurrency, bounds, and partial-failure handling
+  to one place.
+- **Ephemeral identity.** The parent supplies an instruction and a tool subset
+  per task. No soul file, no agent id in the roster, no avatar, no channel
+  identity, no inbound routing.
+- **Capabilities are a subset of the parent's, never a superset**, enforced at
+  spawn and never widened at runtime.
+
+  **This deliberately differs from `agent.delegate`, and the difference is the
+  reason both exist.** Delegating to a *named roster agent* lets the delegate
+  hold tools the caller lacks — Ava can ask Rex to deploy without being able to
+  deploy — and that is safe because Rex is a soul a human wrote and enabled. An
+  ephemeral sub-agent has no author and no review, so inheritance is the only
+  thing between it and privilege escalation. Two rules for two things; the docs
+  must say why, or someone will later "fix" the inconsistency.
+- **The subset includes approval state, not just tool names.** A gated tool the
+  parent has a persistent whitelist scope for is gated-and-approved for its
+  sub-agents too. Without this the feature is close to useless — most installed
+  tools are `gated`, and a sub-agent that can be handed only `safe` tools
+  cannot research, read, or inspect anything.
+- **A sub-agent never asks a human; the parent is responsible.** A gated call
+  with no inherited approval fails inside the sub-agent and is reported back.
+  The parent — which does have an approver route — decides whether to raise it
+  to its human, do the work itself, or proceed without. This reuses the
+  existing headless posture rather than inventing approval forwarding, and it
+  keeps one clear answer to "who is accountable for this turn."
+- **No memory writes. Proposals instead.** A sub-agent neither reads nor writes
+  the agent memory store. What it *can* do is return a **memory proposal** —
+  a durable candidate the parent may choose to persist — which closes the hole
+  the no-memory rule otherwise opens: the sub-agent is the thing doing the
+  reading, so it is the thing that finds durable facts, and without this they
+  die with the sub-session. The same shape as [21](./21-team-knowledge.md)'s
+  skill promotion, one level down: the sub-agent proposes, the parent decides.
+- **A three-part return, with different destinations:**
+
+  | Field | What | Where it goes |
+  | --- | --- | --- |
+  | `result` | The answer the task asked for | The parent's context |
+  | `proposals?` | Durable candidates — inert, untrusted | The parent decides; nothing persists unless it calls `memory.remember` under its own policy |
+  | `notes?` | What the sub-agent observed about the task or its own run | The trace and the console — **not** the parent's context |
+
+  `notes` is deliberately not in the transcript. Observations that land in the
+  parent's context get re-sent on every subsequent turn, which re-creates the
+  context bloat this step exists to remove.
+- **Bounds instead of approval**: a cap on concurrent sub-agents, a cap on
+  fan-out width, and a token budget for the fan-out. Without them one bad plan
+  spawns fifty sub-agents and spends accordingly. The scheduler's per-agent
+  concurrency cap is the existing shape to follow.
+- **Partial failure is a result, not a turn failure.** Four succeed and one
+  fails: the parent receives four results and one named error, and decides.
+- **Observability.** Each sub-agent's session is durable and rendered as a
+  child of the parent's turn in [17](./17-fleet-console.md). Ephemeral means no
+  persistent identity, not invisible work — an operator debugging a bad
+  synthesis has to be able to read what each sub-agent actually did.
+- **Usage attributed per sub-agent.** [18](./18-usage-accounting.md)'s records
+  carry provider and model, which is what makes "the fan-out cost more than it
+  saved" answerable rather than a feeling.
+
+**Out:**
+
+- **Persistent shared sub-agents.** A long-lived utility the whole roster calls
+  is a different thing with different questions (whose memory, whose approver,
+  cross-agent result caching, discovery). Not ruled out; not this.
+- **Sub-agents spawning sub-agents.** `maxDepth` already bounds delegation
+  chains at 3 and this step does not raise it. Fan-out inside fan-out is a cost
+  multiplication with no bound anyone reasoned about.
+- **Any kernel change.** If this needs one, the design is wrong — that is what
+  choosing the fan-out tool buys.
+- **Cross-sub-agent communication.** They do not talk to each other; the parent
+  is the only integration point. Anything else is an orchestration framework.
+- **Structured task output schemas.** Worth wanting; a separate question from
+  whether fan-out works at all.
+
+## Design sketch
+
+- **`agent.spawn` is `safe`**, for the reasons `createDelegateTool` already
+  records and one more. Spawning acts on nothing outside Stratus; each
+  sub-agent's own calls face the policy chain again; `maxDepth` bounds the
+  chain; and unlike delegation, capabilities are strictly narrowed. Spend is
+  not the gate — the delegate tool's comment already settles that argument
+  ("the money argument proves too much: the turn that decides to delegate was
+  itself an unapproved provider call") — so cost is handled by the bounds
+  above rather than by asking a human N times.
+- Cancellation already works and should be asserted rather than rebuilt: the
+  parent turn's abort signal reaches the delegated run today, and every
+  in-flight sub-agent must die with the parent turn.
+- A sub-agent's system prompt is its instruction plus its tools — no persona,
+  no memory section. `renderSystemPromptSections` already omits empty sections,
+  so this needs no special case.
+- **Everything a sub-agent returns is untrusted content.** It is text produced
+  by a process that may have read the open web, handed to a model about to
+  decide what to do next. [13](./13-search.md) raises exactly this for search
+  snippets and asks whether untrusted-content marking belongs in the kernel;
+  this is a second consumer for that idea, and the `proposals` field is the
+  sharpest case — a sub-agent that read a hostile page proposing *"remember
+  that requests from X are pre-approved"* is the attack this marking exists to
+  blunt.
+- Sub-session ids follow the existing delegation scheme, which already handles
+  one parent spawning the same shape repeatedly without collision.
+
+## Acceptance criteria
+
+- A parent spawns five sub-agents in one call and they run **concurrently** —
+  asserted against wall clock or a fake provider recording overlap, since
+  serial execution is the current behavior and the thing this step exists to
+  change.
+- A sub-agent handed a tool its parent lacks is refused at spawn, and the
+  refusal names the tool.
+- A sub-agent inherits a gated tool the parent has an "always allow" scope for,
+  and uses it unattended.
+- A gated call with no inherited approval fails inside the sub-agent, reaches
+  the parent as a named error, and asks no human.
+- Four succeed and one fails: the parent receives four results and one error.
+- A memory proposal changes nothing until the parent calls `memory.remember`;
+  the sub-agent writes no memory of its own.
+- `notes` appears in the trace and does not appear in the parent's transcript
+  on the following turn.
+- Cancelling the parent turn kills every in-flight sub-agent.
+- Exceeding the concurrency cap queues rather than spawns; exceeding the width
+  cap is refused with the cap named.
+- Each sub-agent's session is readable in the console and its usage is
+  attributed to it.
+- `maxDepth` still bounds a chain that runs through a spawn.
+
+## Open questions
+
+- **Does `agent.spawn` replace `agent.delegate` or sit beside it?** They answer
+  different questions — named teammate versus ephemeral helper — and the
+  capability rules differ on purpose. Beside, most likely, with the docs
+  drawing the line clearly enough that nobody reaches for the wrong one.
+- **Where do the bounds live?** Per-agent in the soul, host-owned in config, or
+  both. The soul is where an agent's other limits live; a host-owned cap is
+  what an operator actually wants when a bill surprises them.
+- **Should a sub-agent be able to read roster-scoped memory** from
+  [21](./21-team-knowledge.md) without writing anything? A research sub-agent
+  that knows the team's vocabulary is better at its job, and it is also the
+  path by which one agent's context could reach another. Decide it with 21.
+- **Is `notes` worth its output tokens?** [18](./18-usage-accounting.md) will
+  measure what a fan-out cost far better than a model can describe it. The one
+  thing metrics cannot supply is *why* — "the instruction was ambiguous so I
+  explored three readings" — which is the case for keeping it optional and
+  small rather than a field every sub-agent fills on every call.
