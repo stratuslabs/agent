@@ -39,10 +39,34 @@ least of what the product does.
   research agent (`web.*`, skills), an on-call/triage agent (`fs.read`,
   `web.fetch`, schedules), a shell-capable operator agent (`shell.run` under
   command scopes), and a memory-heavy assistant.
-- **The review step is the product.** `stratus agent new --template X` prints
-  what the bundle grants — every tool, its risk level, every credential it will
-  ask for, every plugin it enables — and requires confirmation. `--yes` exists
-  for scripting and is not the documented path.
+- **The review step is the product, and it shows the *effective* result.**
+  `stratus agent new --template X` prints what the bundle grants — every tool,
+  its risk level, every credential it will ask for, every plugin it enables —
+  and requires confirmation. What it prints is the **diff against the config
+  that exists**, not the template's requested values: on a host that already
+  enables a plugin with different settings, those two differ, and the one the
+  operator must approve is the one that will be true afterwards.
+
+  **The summary is computed once, in `@stratusagent/state`, not by the CLI.**
+  [17](./17-fleet-console.md) renders this same flow through the API, and two
+  implementations of "what will this grant" is two answers to the only question
+  the review step asks. `--yes` exists for scripting and is not the documented
+  path.
+- **Merge and conflict, decided rather than discovered.** A template's
+  `plugins` entries meet configuration that already exists, so: an entry that
+  is absent is added; an entry already present with compatible settings is
+  **reused, not rewritten**; an entry present with a value the template
+  contradicts is a **conflict that stops the operation and names both values**,
+  because silently keeping either one makes the reviewed summary a lie.
+- **Soul and configuration commit together or not at all.** A template that
+  wrote a soul and then failed on the config leaves an agent whose allowlist
+  references tools nothing enables — the exact half-configured state this step
+  exists to prevent. Write to temporaries, then commit; on any failure, remove
+  what was written.
+- **Concurrent creation is serialized.** The CLI and the dashboard can both
+  create an agent, and both read-modify-write the same config file. Take the
+  same lock; last-writer-wins on a config file is how an operator loses a
+  plugin entry they never touched.
 - **Templates name credentials; they never carry them.** A template that needs
   a key names it and the flow tells the operator how to provide it. A template
   is a file that gets copied around and read out of a repository.
@@ -86,6 +110,16 @@ least of what the product does.
   whose manifest lies about risk shows the floored value.
 - A template naming an uninstalled plugin fails with the install command and
   creates no partial agent — no soul file, no config entry.
+- A template whose plugin settings conflict with existing config stops, names
+  both values, and changes nothing.
+- A template whose plugin settings match existing config reuses the entry and
+  does not rewrite it.
+- An induced failure between the soul write and the config write leaves neither
+  — asserted by a test that forces it, not by inspection.
+- Two creations racing on the same config file both succeed, and the file
+  contains both agents' plugin entries.
+- The summary the CLI prints and the summary the API returns for the same
+  template on the same host are identical, because they are the same code.
 - A template naming a credential the operator has not provided creates the
   agent and reports the missing credential; the agent's other tools work.
 - `--yes` produces byte-identical output to the interactive path.

@@ -40,6 +40,19 @@ bundle, which is a flow with a UI shape, not just a CLI one.
 - **Agent creation and editing**, including the 16 template flow with its
   review step rendered rather than printed.
 
+**Delivered in vertical slices.** The list above is a product epic, and
+several of its read endpoints do not exist yet — which is how a step becomes a
+long-lived branch that lands nothing for two months. Each slice is
+independently releasable, and the acceptance criteria below are the milestone,
+not the gate on each slice:
+
+1. **Roster and health** — the screen that makes the daemon legible at all.
+2. **Sessions and approvals** — the two that need the event stream, together
+   because they share it.
+3. **Schedules and memory** — the two that need new read endpoints.
+4. **Template-backed creation and editing** — last, because it depends on
+   [16](./16-templates.md) landing.
+
 **Out:**
 
 - A second copy of any rule. Everything on every screen resolves through the
@@ -93,6 +106,9 @@ bundle, which is a flow with a UI shape, not just a CLI one.
   useful. The caution is the documented one: `session.failed` persists provider
   error text verbatim, so a log view is not automatically safe to screen-share
   and must not be presented as though it were.
-- **How much of 16's review step is duplicated here?** Rendering it twice is
-  two things to keep honest. Possibly the summary should be computed by the API
-  and rendered by both.
+- ~~How much of 16's review step is duplicated here?~~ **Decided:** the
+  summary is computed once in `@stratusagent/state` and rendered by both the
+  CLI and this console. Two implementations of "what will this grant" is two
+  answers to the only question the review step asks, and the divergence would
+  surface as an operator approving one thing and getting another. 16 owns the
+  computation; this step owns the rendering.

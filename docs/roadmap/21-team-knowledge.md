@@ -44,10 +44,49 @@ mechanisms that disagree.
 - **Roster-scoped memory as a second scope, not a replacement.** Agent-scoped
   memory stays exactly as 14 built it. A shared scope is additive, written
   deliberately, and readable by agents whose souls opt in.
+- **Scope, principal, and authorship are three things and get three
+  representations.** `AgentMemoryStore` takes an `agentId` on every method, and
+  the temptation is to express the shared scope as a synthetic agent id through
+  the same parameter. That makes one string carry three jobs — *where the entry
+  lives*, *who is asking*, and *who wrote it* — and the second and third are
+  exactly what authorization and attribution need to be separate. So the store
+  takes an explicit scope:
+
+  ```ts
+  type MemoryScope =
+    | { type: 'agent'; agentId: string }
+    | { type: 'roster'; rosterId: string };
+  ```
+
+  with the acting agent passed alongside it wherever authorization or
+  attribution is required.
+- **Authorization lives in the host and tool layer, never in the store.** After
+  [19](./19-registration-seams.md) an `AgentMemoryStore` can be a third-party
+  plugin, and a design where each store re-implements the opt-in check is a
+  design where one plugin gets it wrong and nobody notices. The store persists
+  and retrieves; whether this agent may read or write this scope is decided
+  before the call.
 - **Writing to the shared scope is `gated`.** Agent-scoped `memory.remember` is
   `safe` because an agent editing its own notes acts on nothing outside itself.
   Writing something every teammate will read is a different act, and the risk
   model grades acting on the world.
+- **A complete mutation policy, decided before implementation**, because a
+  shared tombstone is a fleet-wide effect and "who may cause it" cannot be left
+  to the first PR:
+  - **Forgetting a shared entry is `gated`**, on the same reasoning as writing
+    one.
+  - **An agent may forget a shared entry it wrote.** Any opted-in agent
+    forgetting any other agent's entry is refused — a roster where one agent
+    can silently retract another's contribution is not a roster of separate
+    identities, and the approval prompt is not a sufficient substitute for the
+    author's own judgement.
+  - **The operator has an administrative path** — through
+    [17](./17-fleet-console.md) — that can forget any shared entry regardless
+    of author. Somebody has to be able to remove a bad fact, and it is the
+    human.
+  - **Editing is forget-plus-write, and the editor becomes the author of the
+    new entry.** No in-place mutation, so the audit trail stays append-only and
+    attribution never silently transfers.
 - **Opt-in per soul, both directions.** An agent reads the shared scope only if
   its soul says so, and writes only if its soul says so. A roster where every
   agent silently reads a common pool is not a roster of separate identities.
@@ -99,7 +138,15 @@ mechanisms that disagree.
 - Rejecting leaves no trace on any skill path.
 - An agent that does not opt in to the shared scope cannot read it or write to
   it, at both gates.
-- A shared write is refused in `headless` mode and asks in `remote` mode.
+- A shared write is refused in `headless` mode and asks in `remote` mode, and
+  so is a shared forget.
+- An agent forgetting a shared entry it wrote succeeds; the same agent
+  attempting to forget another agent's shared entry is refused, and the refusal
+  names the reason rather than reporting "not found".
+- The operator's administrative path forgets an entry regardless of author.
+- A memory-store plugin that performs no authorization of its own is still
+  safe, because the check ran before the call — asserted with a store that
+  deliberately checks nothing.
 - Two agents both opted in: one writes, the other recalls it; a third that did
   not opt in does not.
 - Agent-scoped memory is byte-identical in behavior to before this step —
@@ -117,7 +164,13 @@ mechanisms that disagree.
 - **Does an agent see its own pending proposals?** Arguing yes: it stops it
   proposing the same thing four times. Arguing no: pending proposals in context
   are an agent acting on unreviewed procedure, one step removed.
-- **Is shared memory one scope or several?** One roster-wide pool is simple and
-  will be wrong for any deployment with two teams of agents. Named scopes with
-  soul-level membership is the obvious generalization and is probably not
-  needed until somebody has that deployment.
+- **Is shared memory one scope or several?** The `rosterId` in `MemoryScope`
+  leaves room for several without committing to them. One roster-wide pool is
+  what ships; named scopes with soul-level membership are the generalization,
+  and are probably not needed until somebody runs two teams of agents on one
+  daemon.
+- **Does the shared scope survive [15](./15-agent-isolation.md) layer A?**
+  Per-agent state makes agent-scoped storage structurally separate, and a
+  roster-scoped store is by definition the thing that crosses that boundary. It
+  is a deliberate, narrow, opt-in crossing rather than a leak — but 15 should
+  know it exists before it draws its lines.
