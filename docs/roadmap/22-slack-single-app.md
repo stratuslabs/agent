@@ -2,9 +2,13 @@
 
 ## Goal
 
-A second identity mode in `@stratusagent/channel-slack`: one Slack app,
-installed once, carrying every agent in the roster — for workspaces where an
-app per agent is not something an administrator will approve.
+A second identity mode in `@stratusagent/channel-slack`: **one Slack app
+carrying every agent in the roster**, rather than one app per agent.
+
+The adapter today assumes the app *is* the agent — one token pair, one socket,
+one identity. This makes that an assumption rather than a requirement, so a
+single app can present several agents and route inbound messages to the right
+one.
 
 ## Why now
 
@@ -13,19 +17,28 @@ the best identity available: a real avatar, real presence, real DMs, and
 `@Ava` resolving to Ava. It is the right default and this step does not
 replace it.
 
-What it costs is the largest setup cost in the product, and the cost is
-multiplied by roster size rather than paid once. A five-agent roster is five
-Slack apps to create, five manifests to configure, five admin approvals in a
-workspace that may not grant them, five token pairs to store, and five Socket
-Mode connections for one daemon to hold. Plenty of organizations will approve
-one app and not five, and for them the roster is currently unreachable rather
-than merely inconvenient.
+What it costs is paid per agent rather than once. A five-agent roster is five
+Slack apps to create, five manifests to configure, five workspace approvals,
+five token pairs to store, and five Socket Mode connections for one daemon to
+hold. Tolerable for someone setting up their own roster; a wall for two cases
+the current mode cannot serve at all:
 
-That is a channel-contract question, not a deployment workaround. What a single
-Slack app can express about many agents *is* what a roster looks like to those
-workspaces, and the answer has to live in the adapter — an integration that
-solved it outside would be a second Slack implementation whose identity model
-diverged from the first.
+- **Workspaces that will approve one app and not five.** Plenty of
+  organizations restrict who may install a Slack app. For them the roster is
+  unreachable rather than merely inconvenient.
+- **Anyone handing Stratus to somebody else as a product.** A distributor
+  publishes *one* app, under their own name, that a customer installs once —
+  and it has to carry that customer's whole roster, because asking a customer
+  to create five Slack apps is not a setup flow anybody completes. This is
+  true for any party building a product on Stratus, and the adapter is the
+  only place it can be solved: working around it downstream would mean a
+  second Slack implementation whose identity model diverged from this one,
+  and then two kinds of deployment would disagree about what an agent looks
+  like in Slack.
+
+So the question is a channel-contract one. **What a single Slack app can
+express about many agents is what a roster looks like** wherever app-per-agent
+is not available, and that belongs in `channel-slack`.
 
 ## Scope
 
@@ -56,8 +69,13 @@ diverged from the first.
 - Programmatic creation of Slack apps. Whatever an operator does once in
   Slack's UI is not this repository's business, and an install flow is not
   a channel adapter's job.
-- Distribution-listing concerns. This step makes the adapter capable of running
-  a roster on one app; who publishes an app and where is a separate decision.
+- **Owning, publishing, or distributing an app.** This step makes the adapter
+  *capable* of running a roster on one app. Who publishes that app, whose name
+  is on it, how a workspace installs it, and where its per-workspace tokens
+  live are the distributor's business. The adapter takes a token pair and
+  serves a roster with it; where the pair came from is not its concern.
+- **An OAuth install flow.** Same boundary — the adapter consumes credentials,
+  acquiring them is upstream of it.
 - Any change to how channel tokens are held. They remain gateway
   infrastructure secrets under `channels.slack.*`, never reachable through the
   agent-scoped resolver. A single token pair serving several agents makes that
