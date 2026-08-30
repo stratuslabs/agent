@@ -71,6 +71,8 @@ harness-internal calls, resumed sessions, and fallback attempts:
 
   ```ts
   interface UsageRecord {
+    /** The Stratus turn these tokens belong to. */
+    turnId: string;
     provider: string;
     model?: string;
     inputTokens?: number;

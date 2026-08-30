@@ -38,11 +38,26 @@ surface when nobody has opened the console in a week.
 - **Aggregates by default, not content.** These answer *how many, how old,
   which agent, what status*. A count of stuck sessions is an operational fact;
   their transcripts are other agents' conversations.
-- **`gated`, and in no template's allowlist except the fleet-watcher's.** This
-  is the most privileged read in the system — the one place an agent sees
-  across the whole fleet — so it is an operator's deliberate grant, and the
-  fleet-watcher below is the single template that asks for it, visibly, in the
-  review [16](./16-templates.md) puts in front of them.
+- **`safe`, and gated by the allowlist rather than by an approval prompt.**
+  This looks wrong for the most privileged read in the system and is the only
+  workable answer. `gated` would make the fleet-watcher impossible in the
+  configuration it exists for: in `headless` — what every installed service
+  runs — a gated call is refused unless it matches a **command** scope or a
+  schedule's **destination** pre-authorization, and a fleet read has neither.
+  There is no durable per-tool grant to fall back on. So a `gated` `fleet.*`
+  would be refused on every unattended firing, and the digest would never be
+  produced.
+
+  `safe` is also the honest reading of the existing risk model, which grades
+  *acting on the world*: these tools act on nothing, reach nothing outside
+  Stratus, and mutate nothing — the same argument `agent.delegate` already
+  records for being `safe` despite starting work as another agent.
+
+  **What actually gates it is the two-gate model**: the operator installs the
+  plugin, and a soul must list `fleet.*` for an agent to reach it. The
+  fleet-watcher template is the one template that asks, and it asks visibly in
+  the review [16](./16-templates.md) puts in front of an operator. No other
+  template carries it.
 - **Everything resolves through the existing seams.** The control API and
   `@stratusagent/state` already answer these questions for the console; these
   tools are a second consumer of the same rules, never a second implementation.

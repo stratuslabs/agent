@@ -204,8 +204,9 @@ mechanisms that disagree.
   rather than a proposal.
 - A proposed revision leaves the live skill byte-identical until accepted; the
   proposing agent's next run loads the old body.
-- A mechanical revision (a renamed tool) is accepted by the maintenance pass;
-  one adding a tool escalates to a human.
+- A mechanical revision (a typo, a dead link) is accepted by the maintenance
+  pass; **a renamed tool and a reordered step escalate**, along with anything
+  adding a tool or widening scope.
 - A revision never appears in the approvals queue, and a parked approval never
   appears in the revision lane.
 - The maintenance pass proposes a consolidation of two overlapping skills and

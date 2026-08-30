@@ -97,10 +97,20 @@ around the context window itself).
   thing between it and privilege escalation. Two rules for two things; the docs
   must say why, or someone will later "fix" the inconsistency.
 - **The subset includes approval state, not just tool names.** A gated tool the
-  parent has a persistent whitelist scope for is gated-and-approved for its
-  sub-agents too. Without this the feature is close to useless — most installed
-  tools are `gated`, and a sub-agent that can be handed only `safe` tools
-  cannot research, read, or inspect anything.
+  parent holds a durable **command scope** for is inherited with it — the
+  shell whitelist in `~/.stratus/agents/<id>.whitelist.json` travels with the
+  slice.
+
+  **That is not enough on its own, and the spec should not pretend otherwise.**
+  There is no durable per-*tool* grant in the permission engine: the tool-wide
+  "always allow" is session-scoped, and the persistent whitelist holds command
+  scopes, not tool names. So in `headless` a sub-agent handed a `gated` tool
+  with no command and no destination is refused, and most installed tools are
+  `gated` — which would leave sub-agents unable to research, read, or inspect
+  anything unattended. Either this step limits sub-agents to `safe` tools and
+  inherited command scopes and says so plainly, or a durable per-tool grant has
+  to exist first. It does not exist today, and assuming it would make the whole
+  step untestable in the mode it will actually run in.
 - **A sub-agent never asks a human; the parent is responsible.** A gated call
   with no inherited approval fails inside the sub-agent and is reported back.
   The parent — which does have an approver route — decides whether to raise it
@@ -233,6 +243,13 @@ around the context window itself).
   looser and degrades gracefully when ignored. The answer probably depends on
   whether structured outputs are reliable across every provider a fleet might
   run, which is worth checking rather than assuming.
+- **Does a durable per-tool grant need to exist before this ships?** The scope
+  section above names the gap: without one, sub-agents are limited to `safe`
+  tools and inherited command scopes in `headless`, which is the mode that
+  matters. Adding one is a permission-engine change with its own security
+  argument — a standing per-agent yes to a tool is a different object from a
+  standing yes to a command shape — and it may deserve its own step rather
+  than riding along here.
 - **Where do the bounds live?** Per-agent in the soul, host-owned in config, or
   both. The soul is where an agent's other limits live; a host-owned cap is
   what an operator actually wants when a bill surprises them.
