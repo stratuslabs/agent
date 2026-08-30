@@ -110,7 +110,7 @@ every morning" is a procedure, not a prompt.
 **Out:** cross-agent schedules (an agent scheduling work for another agent —
 delegation already covers the useful half); calendar integration; heartbeats as
 a *health* mechanism, which is monitoring and belongs with 08. Note that the
-other kind of heartbeat — the OpenClaw/Hermes-style attention loop, "wake up
+other kind of heartbeat — the attention loop, "wake up
 every half hour, look at your checklist, speak only if something needs saying"
 — is *not* excluded, because it needs no machinery of its own: it is exactly a
 `schedule.every` whose prompt says to look around, and silence is the free
@@ -199,9 +199,10 @@ deleted, since each is the kind of question a reader re-asks.
 - **Session per firing — decided per firing**, with the schedule id in
   metadata. A year-long session is a compaction problem nobody asked for, and
   it is a provider-replay-cache problem too. Cross-firing continuity is what
-  agent memory is for ([14](./14-memory.md)); OpenClaw walked the other path
-  first, hit the token cost, and grew isolated sessions plus a side "scratch"
-  store — which is this design, arrived at the expensive way.
+  agent memory is for ([14](./14-memory.md)). The other path is well travelled
+  and ends in the same place: one long-lived session per schedule hits the
+  token cost, then grows isolated sessions plus a side "scratch" store — which
+  is this design, arrived at the expensive way.
 - **Edits — decided: schedules are immutable.** Editing is cancel-plus-create,
   so there is no edit operation at all in this step; the approval scope's
   lifecycle is exactly the row's lifecycle, and the cost is one extra
