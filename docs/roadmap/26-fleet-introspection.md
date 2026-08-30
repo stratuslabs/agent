@@ -53,6 +53,13 @@ surface when nobody has opened the console in a week.
   Stratus, and mutate nothing — the same argument `agent.delegate` already
   records for being `safe` despite starting work as another agent.
 
+  **[28](./28-standing-grants.md) makes `gated` workable here for the first
+  time**, so this is worth re-deciding rather than inheriting: a standing grant
+  an operator gave in front of the request is arguably a better record of
+  intent than an allowlist entry. The argument for `safe` does not depend on
+  the gap and should be re-read on its own terms; the argument against is that
+  the most privileged read in the system deserves the more deliberate act.
+
   **What actually gates it is the two-gate model**: the operator installs the
   plugin, and a soul must list `fleet.*` for an agent to reach it. The
   fleet-watcher template is the one template that asks, and it asks visibly in
