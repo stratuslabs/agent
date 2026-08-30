@@ -39,8 +39,56 @@ mechanisms that disagree.
   nowhere until a human accepts it. Accepting writes it to
   `~/.stratus/skills/` as an ordinary skill, indistinguishable afterwards from
   one somebody typed.
+- **Three signals decide what gets proposed, and none of them works alone.**
+  - **Complexity** — a task that took many tool calls was expensive enough to
+    be worth not re-deriving. Cheap to measure and needs no extra model call.
+    Alone it encodes expensive one-offs that never recur.
+  - **Recurrence** — the same shape of work has happened before. Alone it
+    encodes trivia. [14](./14-memory.md)'s FTS5 index over past sessions is
+    the machinery for detecting it, and detection belongs in the maintenance
+    pass below rather than in the turn: an agent mid-task sees only its own
+    turn, while a pass over the corpus sees the pattern.
+  - **Agreement** — whether other agents already do this, and whether they do
+    it the same way. Convergence is a strong promote signal. **Divergence is
+    a signal not to promote**: if one agent posts deploy summaries as bullets
+    in one channel and another as a table in a second, the procedure is
+    contextual rather than shared, and flattening it would make both worse.
+
+  Divergence is worth surfacing rather than silently dropping — *your agents
+  do this two different ways, pick one* is a question only a roster can ask,
+  and it is a better prompt to a human than any proposal.
 - **A review surface for proposals** in [17](./17-fleet-console.md) — read the
   proposed body, see what it was derived from, accept, edit, or reject.
+- **A maintenance pass over the skill corpus, in scope from the start.**
+  Promotion without maintenance produces sprawl: overlapping near-duplicates,
+  each partly wrong, and an agent that loads the wrong one. The pass runs in
+  the background and does four things — detect recurrence for proposals,
+  consolidate overlapping skills, flag stale ones (a skill naming a tool that
+  no longer exists, or derived from work nobody does any more), and report
+  what it did. It proposes; it does not silently rewrite.
+
+  This is not optional polish. Every implementation of a promotion loop that
+  has run for a while has needed one, and building it after the sprawl exists
+  means cleaning up rather than preventing.
+- **A revision lane for skill improvement, separate from approvals.** A skill
+  that turns out to be wrong, incomplete, or stale should be improvable
+  without a human retyping it. The agent proposes a **revision** — a diff
+  against the current skill — and the live skill keeps running unchanged until
+  the revision is accepted. Nothing is patched mid-turn, so what was reviewed
+  stays what ran.
+
+  **The lane is deliberately not the approvals queue.** Approvals are
+  synchronous and turn-blocking: a turn is parked and a human is being waited
+  on right now. A revision blocks nothing. Mixing them trains people to
+  ignore the queue that matters, which costs more than the convenience is
+  worth.
+
+  The maintenance pass is the first-pass reviewer: it accepts mechanical
+  revisions on its own — a typo, a dead link, a renamed tool, a reordered
+  step — and **escalates anything that changes behavior**: a new tool, a
+  widened scope, or any procedure touching a `gated` or `dangerous`
+  capability. That escalation rule is what keeps the lane scalable; without
+  it a human reviews everything and stops reviewing anything.
 - **Roster-scoped memory as a second scope, not a replacement.** Agent-scoped
   memory stays exactly as 14 built it. A shared scope is additive, written
   deliberately, and readable by agents whose souls opt in.
@@ -97,9 +145,10 @@ mechanisms that disagree.
   own procedures and immediately follows them is a system whose behavior nobody
   approved, and the whole permission model here is built on the opposite
   premise. The review step is the feature.
-- **Skills that rewrite themselves during use.** Same reason, worse: a skill
-  that changes as it runs cannot be reviewed at all, because what was reviewed
-  is not what ran.
+- **Skills that rewrite themselves during use.** The revision lane above is
+  the supported path and the distinction is the whole point: a skill that
+  mutates while running cannot be reviewed at all, because what was reviewed
+  is not what ran. Proposing a revision is fine; applying one mid-turn is not.
 - **Cross-*deployment* sharing.** A skill leaving this machine is distribution,
   which is [12](./12-plugin-registry.md).
 - **Embeddings or semantic retrieval** for the shared scope. Same store shape
@@ -138,6 +187,18 @@ mechanisms that disagree.
 - Rejecting leaves no trace on any skill path.
 - An agent that does not opt in to the shared scope cannot read it or write to
   it, at both gates.
+- A proposal fires on a task that is both complex and recurrent, and does not
+  fire on a complex one-off or on a recurring trivial one.
+- Two agents doing the same work differently produce a surfaced divergence
+  rather than a proposal.
+- A proposed revision leaves the live skill byte-identical until accepted; the
+  proposing agent's next run loads the old body.
+- A mechanical revision (a renamed tool) is accepted by the maintenance pass;
+  one adding a tool escalates to a human.
+- A revision never appears in the approvals queue, and a parked approval never
+  appears in the revision lane.
+- The maintenance pass proposes a consolidation of two overlapping skills and
+  rewrites neither until accepted.
 - A shared write is refused in `headless` mode and asks in `remote` mode, and
   so is a shared forget.
 - An agent forgetting a shared entry it wrote succeeds; the same agent
@@ -156,11 +217,15 @@ mechanisms that disagree.
 
 ## Open questions
 
-- **What triggers a proposal?** An explicit tool the agent calls
-  (`skill.propose`) is legible and depends on the agent noticing. A
-  post-session pass over what happened catches more and is a second model call
-  per session with a quality problem of its own. Leaning explicit first,
-  because a proposal nobody reviews is worse than no proposal.
+- **How much of the trigger is mechanical?** Complexity is countable; recurrence
+  needs a similarity judgement over past sessions, which is a model call in the
+  maintenance pass and has a quality problem of its own. An explicit
+  `skill.propose` an agent can call stays useful either way, as the path for a
+  procedure the agent knows is worth keeping and the counters missed.
+- **Does the maintenance pass need its own agent, or is it a scheduled turn?**
+  [10](./10-proactive.md) already ships durable schedules, so a soul with a
+  schedule may be the whole mechanism. That would make this a template rather
+  than a subsystem, which is the cheaper answer if it holds.
 - **Does an agent see its own pending proposals?** Arguing yes: it stops it
   proposing the same thing four times. Arguing no: pending proposals in context
   are an agent acting on unreviewed procedure, one step removed.
