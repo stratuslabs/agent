@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { MemoryEntry, ProviderRequest, Session, ToolCall, ToolResult } from '@stratusagent/core';
+import type {
+  MemoryEntry,
+  ProviderCallUsage,
+  ProviderRequest,
+  Session,
+  ToolCall,
+  ToolResult,
+} from '@stratusagent/core';
 import {
   bridgeKernelTools,
   createClaudeCodeProvider,
@@ -684,4 +691,159 @@ test('a slow consumer of the retry reset does not abort the replay', async () =>
 
   assert.deepEqual(attempts, ['sdk-gone', undefined], 'the replay must have run');
   assert.deepEqual(response.parts, [{ type: 'text', text: 'replayed' }]);
+});
+
+test('a turn reports each model the inner loop used, separately', async () => {
+  // Three model calls against two models inside one Stratus turn — the case
+  // that cannot ride on the response, because only the last of them would
+  // ever cross the provider interface.
+  const { queryFn } = createFakeQuery([
+    { type: 'assistant' },
+    {
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      result: 'Done.',
+      modelUsage: {
+        'claude-opus-5': {
+          inputTokens: 300,
+          outputTokens: 120,
+          cacheReadInputTokens: 9000,
+          cacheCreationInputTokens: 400,
+        },
+        'claude-haiku-4-5': { inputTokens: 50, outputTokens: 10 },
+      },
+    },
+  ]);
+
+  const reported: ProviderCallUsage[] = [];
+  const provider = createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn });
+  await provider.generate({
+    session: createSession(),
+    onUsage: (usage) => reported.push(usage),
+  } as ProviderRequest);
+
+  assert.deepEqual(reported, [
+    {
+      provider: 'claude-code',
+      model: 'claude-opus-5',
+      inputTokens: 300,
+      outputTokens: 120,
+      cacheReadTokens: 9000,
+      cacheWriteTokens: 400,
+    },
+    { provider: 'claude-code', model: 'claude-haiku-4-5', inputTokens: 50, outputTokens: 10 },
+  ]);
+});
+
+test('a run that fails still reports what it spent before it broke', async () => {
+  const { queryFn } = createFakeQuery([
+    {
+      type: 'result',
+      subtype: 'error_during_execution',
+      is_error: true,
+      result: 'boom',
+      modelUsage: { 'claude-opus-5': { inputTokens: 90, outputTokens: 4 } },
+    },
+  ]);
+
+  const reported: ProviderCallUsage[] = [];
+  const provider = createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn });
+
+  await assert.rejects(
+    provider.generate({
+      session: createSession(),
+      onUsage: (usage) => reported.push(usage),
+    } as ProviderRequest),
+    /Claude Code run failed/,
+  );
+
+  // A failed call returns no response to carry a count, and the tokens were
+  // spent regardless. Losing them makes the total unreconcilable against
+  // Anthropic's own reporting, which is the only external check it has.
+  assert.deepEqual(reported, [{ provider: 'claude-code', model: 'claude-opus-5', inputTokens: 90, outputTokens: 4 }]);
+});
+
+test('a failed resume reports the abandoned attempt and the replay separately', async () => {
+  const queryFn: ClaudeCodeQueryFn = (params) => {
+    const resume = (params.options as { resume?: string }).resume;
+    return (async function* (): AsyncGenerator<ClaudeCodeStreamMessage> {
+      if (resume) {
+        yield {
+          type: 'result',
+          subtype: 'error_during_execution',
+          is_error: true,
+          modelUsage: { 'claude-opus-5': { inputTokens: 15 } },
+        };
+        return;
+      }
+      yield {
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'Recovered.',
+        session_id: 'sdk-new',
+        modelUsage: { 'claude-opus-5': { inputTokens: 700, outputTokens: 30 } },
+      };
+    })();
+  };
+
+  const reported: ProviderCallUsage[] = [];
+  const provider = createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn });
+  await provider.generate({
+    session: createSession({ metadata: { [SDK_SESSION_METADATA_KEY]: 'sdk-gone' } }),
+    onUsage: (usage) => reported.push(usage),
+  } as ProviderRequest);
+
+  // Two records, not one: the replay is a second, more expensive call, and
+  // the attempt it replaced still cost what it cost.
+  assert.deepEqual(reported, [
+    { provider: 'claude-code', model: 'claude-opus-5', inputTokens: 15 },
+    { provider: 'claude-code', model: 'claude-opus-5', inputTokens: 700, outputTokens: 30 },
+  ]);
+});
+
+test('a zeroed modelUsage row is dropped rather than recorded as a free call', async () => {
+  // The SDK zeroes modelUsage on a crash-or-startup-error result. A model
+  // that truly consumed nothing never ran, so the row is a placeholder — and
+  // recording it would state a cost of zero for a call nobody can see.
+  const { queryFn } = createFakeQuery([
+    {
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      result: 'Done.',
+      modelUsage: {
+        'claude-opus-5': { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+        'claude-haiku-4-5': { inputTokens: 0, outputTokens: 7 },
+      },
+    },
+  ]);
+
+  const reported: ProviderCallUsage[] = [];
+  const provider = createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn });
+  await provider.generate({
+    session: createSession(),
+    onUsage: (usage) => reported.push(usage),
+  } as ProviderRequest);
+
+  assert.deepEqual(reported, [
+    { provider: 'claude-code', model: 'claude-haiku-4-5', inputTokens: 0, outputTokens: 7 },
+  ]);
+});
+
+test('a run whose result carries no modelUsage reports nothing', async () => {
+  const { queryFn } = createFakeQuery([
+    { type: 'result', subtype: 'success', is_error: false, result: 'Done.' },
+  ]);
+
+  const reported: ProviderCallUsage[] = [];
+  const provider = createClaudeCodeProvider({ authToken: 'sk-ant-oat-test', queryFn });
+  const response = await provider.generate({
+    session: createSession(),
+    onUsage: (usage) => reported.push(usage),
+  } as ProviderRequest);
+
+  assert.deepEqual(reported, []);
+  assert.equal(response.usage, undefined);
 });
