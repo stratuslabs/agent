@@ -41,6 +41,7 @@ Two consequences for what ranks first:
 | 20 | [Discord channel: the second adapter](./20-channel-discord.md) | Not started — **Next** | A second surface, and the proof that `@stratusagent/channels` is a contract rather than a Slack-shaped hole |
 | 21 | [Team knowledge: shared skills and roster-scoped memory](./21-team-knowledge.md) | Not started — **Next** | One agent learns a procedure, a human reviews it, the whole roster has it — and an explicit answer for what memory is shared and what stays private |
 | 22 | [Slack single-app mode: the whole roster on one app](./22-slack-single-app.md) | Not started — **Next** | A second identity mode in `channel-slack`, for workspaces where one app per agent is not something an admin will approve |
+| 23 | [Prompt caching: stop paying full price for the same prefix every turn](./23-prompt-caching.md) | Not started — **Now** | `cache_control` on the stable prefix, and a system-prompt order where volatile sections trail stable ones |
 
 ## Sequencing
 
@@ -49,6 +50,7 @@ Two consequences for what ranks first:
 - **16 — templates.** The highest-leverage item on this page. It removes the onboarding cost *without weakening either gate*, which is the only acceptable way to remove it: a template answers both gates as one bundle somebody reviewed, rather than removing either gate.
 - **17 — fleet console.** The API and the dashboard both exist; this makes the dashboard the surface rather than a viewer, for the operator who is never going to run `stratus schedules` at a prompt.
 - **13 — `web.search`.** An agent that can fetch a URL but cannot find one is a capability that invites fabrication, which is 13's own framing and it is right. Contract here, backends in the ecosystem.
+- **23 — prompt caching.** There is no `cache_control` anywhere in `provider-anthropic`, so every turn re-pays full input price for a persona, a skills block, and a tool list that did not change — for a fleet of always-on agents, the largest line in the bill. It also needs a fix in `core`: `renderSystemPromptSections` emits `persona, memory, skills`, putting the one volatile section *before* a stable one, so a memory write invalidates the skills block behind it. Paired with 18, which is what makes the result measurable.
 - **18 — usage accounting.** A small kernel change with an outsized reach: the vendor SDKs return token usage and the adapters discard it, so today no part of the system can answer what a run cost. Budget caps, per-agent cost reporting, and the console's session view all need this first, and none of them can be built until it exists.
 
 ### Next — compound what a fleet can do
