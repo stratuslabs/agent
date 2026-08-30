@@ -21,6 +21,8 @@ lives.
 
 ## Quickstart
 
+<img src="docs/assets/stratus-demo.gif" alt="Terminal recording: stratus agent new creates an agent, stratus run drives a full agent loop through the demo.echo tool, and stratus agents lists the roster with each agent's avatar palette" width="100%" />
+
 ```bash
 npm install -g @stratusagent/cli
 stratus setup     # sign in, create your first agent, connect Slack — one menu
