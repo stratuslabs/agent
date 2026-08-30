@@ -11,6 +11,8 @@ import type {
   JsonValue,
   MemoryEntry,
   ModelProvider,
+  ProviderRequest,
+  ProviderResponse,
   Session,
   SkillRegistry,
 } from '@stratusagent/core';
@@ -2434,9 +2436,37 @@ export const createFallbackWrappedProvider = (
           }
         }
       }
-      return fallback.generate(request);
+      return attributeUsage(fallback, request);
     },
   };
+};
+
+/**
+ * Run the fallback with its own name filled in on any usage that arrives
+ * without one.
+ *
+ * The kernel attributes an unnamed count to the provider it asked, and the
+ * provider it asked is this wrapper — which answers to the *primary's* name
+ * for the life of the session. So a fallback adapter that does not name
+ * itself would have its tokens filed under the model that failed, in the one
+ * case the whole attribution requirement exists for. Every adapter in this
+ * repository names itself and never reaches the `??` below; a third-party
+ * one that does not still gets the truth.
+ */
+const attributeUsage = async (
+  fallback: ModelProvider,
+  request: ProviderRequest,
+): Promise<ProviderResponse> => {
+  const onUsage = request.onUsage;
+  const response = await fallback.generate({
+    ...request,
+    ...(onUsage
+      ? { onUsage: (usage) => onUsage({ ...usage, provider: usage.provider ?? fallback.name }) }
+      : {}),
+  });
+  return response.usage
+    ? { ...response, usage: { ...response.usage, provider: response.usage.provider ?? fallback.name } }
+    : response;
 };
 
 export const createRuntimeProvider = (

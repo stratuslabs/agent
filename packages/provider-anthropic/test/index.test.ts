@@ -599,3 +599,53 @@ test('streaming forwards thinking progress without exposing the reasoning', asyn
     { type: 'text', text: 'the answer' },
   ]);
 });
+
+test('generate reports the API usage in the kernel buckets, untouched', async () => {
+  const { fetchImpl } = createMockFetch([
+    {
+      ...apiMessage([{ type: 'text', text: 'Hi.' }]),
+      model: 'claude-opus-5-20260101',
+      usage: {
+        input_tokens: 40,
+        output_tokens: 12,
+        cache_read_input_tokens: 900,
+        cache_creation_input_tokens: 300,
+      },
+    },
+  ]);
+
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const response = await provider.generate({ session: createSession() });
+
+  // The Messages API already reports the three input buckets as disjoint
+  // counts, so nothing is subtracted here — and the model is the one the API
+  // says served, not the alias that was asked for.
+  assert.deepEqual(response.usage, {
+    provider: 'anthropic',
+    model: 'claude-opus-5-20260101',
+    inputTokens: 40,
+    outputTokens: 12,
+    cacheReadTokens: 900,
+    cacheWriteTokens: 300,
+  });
+});
+
+test('a cache bucket the API leaves null is absent rather than zero', async () => {
+  const { fetchImpl } = createMockFetch([
+    {
+      ...apiMessage([{ type: 'text', text: 'Hi.' }]),
+      usage: {
+        input_tokens: 40,
+        output_tokens: 12,
+        cache_read_input_tokens: null,
+        cache_creation_input_tokens: null,
+      },
+    },
+  ]);
+
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const response = await provider.generate({ session: createSession() });
+
+  assert.deepEqual(Object.keys(response.usage ?? {}), ['provider', 'model', 'inputTokens', 'outputTokens']);
+  assert.equal(response.usage?.model, DEFAULT_ANTHROPIC_MODEL);
+});

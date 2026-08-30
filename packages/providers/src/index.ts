@@ -1,8 +1,10 @@
 import {
   renderSystemPromptSections,
+  uncachedInputTokens,
   type ExecutionContext,
   type JsonObject,
   type ModelProvider,
+  type ProviderCallUsage,
   type ProviderPart,
   type ProviderRequest,
   type ProviderResponse,
@@ -116,6 +118,19 @@ interface OpenAICompatibleResponse {
       tool_calls?: OpenAICompatibleToolCall[];
     };
   }>;
+  /**
+   * Optional on purpose: `usage` is not in the subset every
+   * OpenAI-compatible endpoint implements, and a local server that omits it
+   * must report nothing rather than a zero.
+   */
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    /** Cached prompt tokens, a SUBSET of `prompt_tokens`. */
+    prompt_tokens_details?: { cached_tokens?: number };
+  };
+  /** The model that actually served the request; endpoints may rename it. */
+  model?: string;
   error?: {
     message?: string;
   };
@@ -175,7 +190,11 @@ export const normalizeProviderResponse = (input: ProviderResponseInput): Provide
   }
 
   if (isProviderResponse(input)) {
-    return providerResponse(...input.parts);
+    // Parts are re-normalized; `usage` rides through untouched. Dropping it
+    // would leave a scripted or static provider unable to report a count at
+    // all, which is exactly what the usage tests need one to do.
+    const normalized = providerResponse(...input.parts);
+    return input.usage ? { ...normalized, usage: input.usage } : normalized;
   }
 
   const parts: ProviderPart[] = [];
@@ -391,9 +410,46 @@ export const createOpenAICompatibleProvider = ({
         throw new Error('Provider returned an empty response.');
       }
 
-      return result;
+      // One request is one model call here, so the count rides the response
+      // and the request's usage sink stays unused.
+      const usage = extractOpenAICompatibleUsage(payload, name, model);
+      return usage ? { ...result, usage } : result;
     },
   });
+};
+
+/**
+ * The response's token counts in the kernel's four buckets, or undefined
+ * when the endpoint reported none.
+ *
+ * `prompt_tokens` counts cached tokens too, while `TokenUsage.inputTokens`
+ * is the full-rate bucket alone — so the cached count comes out of it,
+ * through the kernel's own `uncachedInputTokens` rather than a subtraction
+ * spelled out again here. There is no cache-write bucket on this wire
+ * format: these endpoints cache implicitly and bill nothing for the write,
+ * so `cacheWriteTokens` stays absent rather than becoming a zero.
+ */
+const extractOpenAICompatibleUsage = (
+  payload: OpenAICompatibleResponse,
+  providerName: string,
+  model: string,
+): ProviderCallUsage | undefined => {
+  const usage = payload.usage;
+  const promptTokens = typeof usage?.prompt_tokens === 'number' ? usage.prompt_tokens : undefined;
+  const completionTokens = typeof usage?.completion_tokens === 'number' ? usage.completion_tokens : undefined;
+  const cachedTokens = typeof usage?.prompt_tokens_details?.cached_tokens === 'number'
+    ? usage.prompt_tokens_details.cached_tokens
+    : undefined;
+  if (promptTokens === undefined && completionTokens === undefined && cachedTokens === undefined) {
+    return undefined;
+  }
+  return {
+    provider: providerName,
+    model: typeof payload.model === 'string' && payload.model.length > 0 ? payload.model : model,
+    ...(promptTokens !== undefined ? { inputTokens: uncachedInputTokens(promptTokens, cachedTokens) } : {}),
+    ...(completionTokens !== undefined ? { outputTokens: completionTokens } : {}),
+    ...(cachedTokens !== undefined ? { cacheReadTokens: cachedTokens } : {}),
+  };
 };
 
 interface OpenAICompatibleToolNameMapping {

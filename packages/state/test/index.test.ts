@@ -671,3 +671,75 @@ test('a codex fallback with an endpoint-bound key is quietly skipped, never unbo
   assert.equal(resolved.provider, 'openai');
   assert.equal(resolved.fallback, undefined, 'a bound codex key must not serve a fallback that cannot honor the binding');
 });
+
+test('the fallback wrapper names the fallback on usage that arrived unnamed', async () => {
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const session = {
+    id: 'unnamed',
+    agent: { id: 'a', name: 'A' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  };
+
+  const primary = {
+    name: 'primary',
+    async generate() {
+      throw new Error('primary down');
+    },
+  };
+  // An adapter that does not name itself. The wrapper answers to the
+  // primary's name for the life of the session, so without this the kernel
+  // would file the fallback model's tokens under the model that failed —
+  // in the one case attribution exists for.
+  const fallback = {
+    name: 'fallback',
+    async generate({ onUsage }: { onUsage?: (usage: { inputTokens?: number; provider?: string }) => void }) {
+      onUsage?.({ inputTokens: 5 });
+      return { parts: [{ type: 'text' as const, text: 'rescued' }], usage: { outputTokens: 7 } };
+    },
+  };
+
+  const reported: Array<{ provider?: string }> = [];
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, () => {});
+  const response = await wrapped.generate({
+    session,
+    onUsage: (usage: { provider?: string }) => reported.push(usage),
+  } as never);
+
+  assert.deepEqual(reported, [{ inputTokens: 5, provider: 'fallback' }]);
+  assert.deepEqual(response.usage, { outputTokens: 7, provider: 'fallback' });
+});
+
+test('the fallback wrapper leaves usage that named itself alone', async () => {
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const session = {
+    id: 'named',
+    agent: { id: 'a', name: 'A' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  };
+
+  const primary = {
+    name: 'primary',
+    async generate() {
+      throw new Error('primary down');
+    },
+  };
+  const fallback = {
+    name: 'fallback',
+    async generate() {
+      // A harness fallback reporting per-model calls of its own: the name it
+      // supplies is the one that has to survive.
+      return { parts: [{ type: 'text' as const, text: 'ok' }], usage: { provider: 'inner', model: 'm' } };
+    },
+  };
+
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, () => {});
+  const response = await wrapped.generate({ session } as never);
+
+  assert.deepEqual(response.usage, { provider: 'inner', model: 'm' });
+});
