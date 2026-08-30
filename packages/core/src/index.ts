@@ -2143,10 +2143,16 @@ export class AgentRunner {
       await this.bus.emit({
         type: 'session.completed',
         sessionId: session.id,
-        // A copy of the array, not the session's own: this is durable
-        // accounting state rather than a per-event payload, and a subscriber
-        // that sorted or appended to it would be editing the record.
-        ...(session.usage && session.usage.length > 0 ? { usage: [...session.usage] } : {}),
+        // Copies all the way down — a fresh array of fresh records, not the
+        // session's own. This is durable accounting state rather than a
+        // per-event payload, so a subscriber that sorts the list, appends to
+        // it, or normalizes a count in place must not be editing the record.
+        // A shallow array copy is not enough: the record objects behind it
+        // are the ones the session holds, and `InMemorySessionStore` hands
+        // the very same objects back on the next read.
+        ...(session.usage && session.usage.length > 0
+          ? { usage: session.usage.map((record) => ({ ...record })) }
+          : {}),
       });
       return session;
     } catch (caught) {

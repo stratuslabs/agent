@@ -69,6 +69,37 @@ test('a session against a provider reporting known counts emits exactly those co
   assert.deepEqual(completions, [session.usage]);
 });
 
+test('a subscriber cannot edit the session\'s records through the completion event', async () => {
+  const store = new InMemorySessionStore();
+  const bus = new EventBus();
+  bus.subscribe((event) => {
+    if (event.type === 'session.completed' && event.usage) {
+      // A consumer normalizing what it was handed. The records are durable
+      // accounting state, so this must reach nothing — not the session the
+      // runner returns, not the next subscriber, and not the store, which
+      // hands back the very same objects on the next read.
+      event.usage.push({ turnId: 'forged', provider: 'nobody' });
+      const first = event.usage[0];
+      if (first) {
+        first.inputTokens = 999_999;
+      }
+    }
+  });
+
+  const session = await new AgentRunner({
+    provider: createReportingProvider('fake', [
+      { text: 'done', usage: { provider: 'fake', model: 'fake-1', inputTokens: 120 } },
+    ]),
+    store,
+    bus,
+  }).run({ sessionId: 'usage-11', agent: AGENT, userMessage: 'hello' });
+
+  assert.deepEqual(session.usage, [
+    { turnId: 'usage-11:turn:1', provider: 'fake', model: 'fake-1', inputTokens: 120 },
+  ]);
+  assert.deepEqual((await store.get('usage-11'))?.usage, session.usage);
+});
+
 test('a two-call session emits both records, one per Stratus turn', async () => {
   const bus = new EventBus();
   const completions = createCompletionSink(bus);
