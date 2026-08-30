@@ -54,6 +54,15 @@ around the context window itself).
 - **Ephemeral identity.** The parent supplies an instruction and a tool subset
   per task. No soul file, no agent id in the roster, no avatar, no channel
   identity, no inbound routing.
+- **A provider-resolution rule, because delegation's does not apply.**
+  `DelegateDispatch` exists so the gateway can run a delegated turn on *the
+  target's* resolved provider and credentials rather than the caller's — it
+  looks the target up in the roster. An ephemeral sub-agent is not in the
+  roster, so there is nothing to look up. The rule: **a sub-agent inherits the
+  parent's provider and credentials, and the parent may name a cheaper model
+  per task.** The second half is not a convenience — running sub-agents on a
+  cheap model while the parent runs an expensive one is most of the cost
+  argument above, and without it this step saves context but not money.
 - **Capabilities are a subset of the parent's, never a superset**, enforced at
   spawn and never widened at runtime.
 
@@ -93,16 +102,33 @@ around the context window itself).
   `notes` is deliberately not in the transcript. Observations that land in the
   parent's context get re-sent on every subsequent turn, which re-creates the
   context bloat this step exists to remove.
+
+  **How a sub-agent expresses the three parts needs a convention, and there is
+  no obvious one.** `agent.delegate` returns the last non-empty assistant
+  message as text, which has nowhere to put a proposal or a note. The options
+  are a structured output schema, or a documented convention the sub-agent's
+  instruction asks it to follow. Whichever is chosen, `result` must survive a
+  sub-agent that ignores the convention entirely — a helper that just answers
+  in prose is the common case and must not fail.
+- **Three outcomes, distinguished.** Delegation returns the string
+  `'(no reply)'` when a run produced no assistant text — fine for one call a
+  human reads, wrong for a fan-out of twenty where the parent has to decide
+  what to do next. A sub-agent result is one of: **returned a result**,
+  **ran and produced nothing**, or **errored**, and the parent can tell which.
 - **Bounds instead of approval**: a cap on concurrent sub-agents, a cap on
   fan-out width, and a token budget for the fan-out. Without them one bad plan
   spawns fifty sub-agents and spends accordingly. The scheduler's per-agent
   concurrency cap is the existing shape to follow.
 - **Partial failure is a result, not a turn failure.** Four succeed and one
   fails: the parent receives four results and one named error, and decides.
-- **Observability.** Each sub-agent's session is durable and rendered as a
-  child of the parent's turn in [17](./17-fleet-console.md). Ephemeral means no
-  persistent identity, not invisible work — an operator debugging a bad
-  synthesis has to be able to read what each sub-agent actually did.
+- **Observability, mostly inherited.** Each sub-agent's session is durable and
+  rendered as a child of the parent's turn in [17](./17-fleet-console.md).
+  Ephemeral means no persistent identity, not invisible work — an operator
+  debugging a bad synthesis has to be able to read what each sub-agent did.
+  The mechanism already exists and should be reused rather than rebuilt:
+  delegation threads `delegationDepth`, `delegatedBy`, and a transitively
+  carried `rootSessionId` into every sub-session, so a whole tree already
+  traces back to one root.
 - **Usage attributed per sub-agent.** [18](./18-usage-accounting.md)'s records
   carry provider and model, which is what makes "the fan-out cost more than it
   saved" answerable rather than a feeling.
@@ -179,6 +205,11 @@ around the context window itself).
   different questions — named teammate versus ephemeral helper — and the
   capability rules differ on purpose. Beside, most likely, with the docs
   drawing the line clearly enough that nobody reaches for the wrong one.
+- **Structured output or a prose convention for `proposals` and `notes`?** A
+  schema is precise and constrains what a sub-agent can say; a convention is
+  looser and degrades gracefully when ignored. The answer probably depends on
+  whether structured outputs are reliable across every provider a fleet might
+  run, which is worth checking rather than assuming.
 - **Where do the bounds live?** Per-agent in the soul, host-owned in config, or
   both. The soul is where an agent's other limits live; a host-owned cap is
   what an operator actually wants when a bill surprises them.
