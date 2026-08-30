@@ -58,9 +58,21 @@ rather than through it.
   shell can run." A durable tool grant for `shell.run` would be exactly the
   standing yes that comment exists to prevent. Shell keeps command scopes;
   everything else gets tool grants; nothing gets both.
-- **Never for `dangerous`.** `browser.act` is always a human, in every mode,
-  because a click submits and buys and deletes and nothing undoes it. A
-  standing grant is the one thing that would quietly turn that off.
+- **Never for `dangerous` — and this is a deliberate tightening, not a
+  preserved invariant.** Today the tool-wide "always" has no risk guard, so a
+  `dangerous` tool can already receive a session-scoped grant; "always a human,
+  in every mode" is really *always a human the first time, and not necessarily
+  again within that session*. Making that grant durable would stretch a
+  once-per-session concession into a permanent one, which is a different
+  decision than the one anybody made. If a standing grant for `dangerous` is
+  wanted later it should be argued for on its own, not inherited from this
+  step.
+
+  The narrower question — whether `browser.act` should be `dangerous` at all —
+  is a real one and is not settled here. `dangerous` currently stands in for
+  *no scope model exists for this*, rather than *this is categorically worse
+  than a shell*, and a scope model would move it to `gated`. That belongs with
+  the tool, not with this step.
 - **Not a config key.** A grant is something an operator answered in front of a
   specific request, with the risk in front of them. A list in a config file is
   a different object with different provenance, and if that is wanted it is
