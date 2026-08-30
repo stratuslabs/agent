@@ -127,6 +127,17 @@ export interface Session {
   updatedAt: string;
   metadata?: JsonObject;
   lastError?: string;
+  /**
+   * What this conversation has consumed, one record per provider call, in the
+   * order the calls completed. Absent until something reports.
+   *
+   * Durable state like the messages: it round-trips through the session
+   * store, so a past session's usage survives a restart and a resumed session
+   * *adds* to what it already had rather than starting over. The stored form
+   * is the records — a total is derived by whoever wants one
+   * (`totalTokenUsage`), never written here.
+   */
+  usage?: UsageRecord[];
 }
 
 export interface ToolCall {
@@ -681,6 +692,135 @@ export const scopeCredentials = (
   },
 });
 
+/**
+ * What one provider call consumed, in the four buckets every vendor
+ * distinguishes and a price table charges separately for.
+ *
+ * Every count is optional and **absent means "not reported"**, never zero:
+ * zero is a measurement, and a fabricated one would let a consumer state a
+ * cost for a provider that said nothing about it.
+ *
+ * The buckets are **disjoint**. `inputTokens` is prompt input billed at the
+ * full rate — cache reads and cache writes are counted in their own fields
+ * and never again here. That is Anthropic's own shape; vendors that report
+ * an all-inclusive prompt count (the OpenAI family's `prompt_tokens`, which
+ * includes its cached tokens) are normalized to it by their adapter, with
+ * `uncachedInputTokens` doing the subtraction so the rule has one
+ * implementation. Records from two providers are directly comparable
+ * because of it, which is the whole point of preserving attribution.
+ */
+export interface TokenUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+}
+
+/**
+ * One provider call's usage as the adapter reports it — the counts plus the
+ * attribution only the adapter knows.
+ *
+ * `provider` defaults to the name of the provider the runner asked, which is
+ * right for a plain adapter and **wrong under the fallback wrapper**: that
+ * wrapper answers to the primary's name for the life of the session, so a
+ * call the fallback actually served would be attributed to the primary. Every
+ * adapter in this repository sets it explicitly, and the wrapper fills it in
+ * for adapters that do not.
+ *
+ * `model` is absent rather than guessed when a harness switched models
+ * internally and did not say which one ran.
+ */
+export interface ProviderCallUsage extends TokenUsage {
+  provider?: string;
+  model?: string;
+}
+
+/**
+ * One provider call's usage, attributed. This is the *stored* form: a
+ * session keeps the records, never a summed scalar.
+ *
+ * A thousand tokens of one model is not a thousand of another, input and
+ * output are priced differently, cache reads and writes differ again, and
+ * the fallback wrapper can cross providers inside one session. Collapsing
+ * any of those at write time throws away what no downstream consumer can
+ * reconstruct — so nothing is collapsed. `totalTokenUsage` derives a
+ * convenience total, and that total is a view.
+ */
+export interface UsageRecord extends TokenUsage {
+  /**
+   * The Stratus turn these tokens belong to — one pass through the runner,
+   * which is one provider call for the kernel-loop adapters and several for
+   * a harness provider running its own inner loop.
+   *
+   * Part of the record rather than something to reconstruct: ordering does
+   * not recover the boundaries once a harness turn contributes several
+   * records of its own, and a durable session resumed across many turns
+   * accumulates records that are otherwise indistinguishable the moment two
+   * share a provider and model.
+   */
+  turnId: string;
+  provider: string;
+  model?: string;
+}
+
+/**
+ * `TokenUsage.inputTokens` for a vendor that reports its prompt count
+ * *inclusive* of the cache buckets, normalized to the exclusive form the
+ * field promises.
+ *
+ * Floored at zero: the subtraction rests on a reading of each vendor's
+ * accounting, and a negative token count would be a worse answer than a
+ * slightly low one.
+ */
+export const uncachedInputTokens = (total: number, ...cached: Array<number | undefined>): number =>
+  Math.max(0, total - cached.reduce<number>((sum, value) => sum + (value ?? 0), 0));
+
+const TOKEN_USAGE_KEYS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'] as const;
+
+/**
+ * The counts a provider actually reported, with nothing else carried over.
+ *
+ * A key present but `undefined` says exactly what an absent key says, and
+ * only one of the two survives a round trip through JSON — so the written
+ * record keeps the absent form. Absence is load-bearing here.
+ */
+const definedTokenCounts = (usage: TokenUsage): TokenUsage => {
+  const counts: TokenUsage = {};
+  for (const key of TOKEN_USAGE_KEYS) {
+    const value = usage[key];
+    if (value !== undefined) {
+      counts[key] = value;
+    }
+  }
+  return counts;
+};
+
+/**
+ * The sum of a record set, as the convenience view a session may expose.
+ *
+ * Absence propagates: a bucket no record reported stays absent, so a total
+ * never claims a zero nobody measured. Undefined when the records report
+ * nothing at all.
+ */
+export const totalTokenUsage = (records: readonly TokenUsage[]): TokenUsage | undefined => {
+  const total: TokenUsage = {};
+  let reported = false;
+  for (const key of TOKEN_USAGE_KEYS) {
+    let sum: number | undefined;
+    for (const record of records) {
+      const value = record[key];
+      if (value !== undefined) {
+        sum = (sum ?? 0) + value;
+      }
+    }
+    if (sum !== undefined) {
+      total[key] = sum;
+      reported = true;
+    }
+  }
+  return reported ? total : undefined;
+};
+
 export interface ProviderRequest {
   session: Session;
   tools?: ToolDescriptor[];
@@ -703,6 +843,37 @@ export interface ProviderRequest {
    */
   onDelta?: (delta: ProviderDelta) => void | Promise<void>;
   /**
+   * Usage sink. An adapter calls this once per *provider call* — one request
+   * to one model — as each completes, including calls made inside a harness
+   * provider's own loop and calls that went on to fail.
+   *
+   * `ProviderResponse.usage` cannot carry those two cases, which is why this
+   * exists: a harness makes several model calls that never cross this
+   * interface, so only the last could be reported on the response; and a call
+   * that throws returns no response at all, while its tokens were still
+   * spent.
+   *
+   * **Synchronous and non-blocking**, unlike `onDelta`: there is no
+   * backpressure to apply to a token count, and an adapter reporting one from
+   * a `finally` on its way out with an error must not be made to await. A host
+   * that wants to do real work with a count queues it.
+   *
+   * Reporting through this sink is exclusive **for the whole `generate`**,
+   * not per inner call: once anything has reported through it, the
+   * response's `usage` is ignored, so an adapter that uses both does not
+   * have its final call counted twice. The runner cannot scope that more
+   * finely, because it cannot see where one provider call ends and the next
+   * begins.
+   *
+   * The consequence binds anything that composes providers behind one
+   * `generate` — the fallback wrapper is the live example. If its primary
+   * reported a failed attempt through the sink and its fallback then answers
+   * with `usage` on the response, that response field is already excluded:
+   * the composing wrapper MUST forward it through the sink itself, or the
+   * turn that actually succeeded goes uncounted.
+   */
+  onUsage?: (usage: ProviderCallUsage) => void;
+  /**
    * Abort signal for the turn. Adapters MUST cancel their underlying
    * operation (HTTP request, SDK query) when it fires — racing the promise
    * is not cancellation; the underlying work has to stop.
@@ -712,6 +883,14 @@ export interface ProviderRequest {
 
 export interface ProviderResponse {
   parts: ProviderPart[];
+  /**
+   * What this call consumed, for an adapter where one request is one model
+   * call. Absent when the provider reports nothing — never a zero.
+   *
+   * The simple half of the usage contract; `ProviderRequest.onUsage` is the
+   * other, and an adapter that reported through the sink leaves this alone.
+   */
+  usage?: ProviderCallUsage;
 }
 
 export interface ModelProvider {
@@ -973,7 +1152,21 @@ export type StratusEvent =
       /** Who decided, when a person did. Channel-native id (a Slack user). */
       actor?: string;
     }
-  | { type: 'session.completed'; sessionId: string }
+  | {
+      type: 'session.completed';
+      sessionId: string;
+      /**
+       * The session's usage records — every provider call it has ever made,
+       * not only this run's, because that is the stored form and a resumed
+       * session's earlier turns are just as real. Absent when nothing
+       * reported; a consumer must not read that as zero.
+       *
+       * A failed run's records are not lost by being missing here: they are
+       * saved onto the session before `session.failed` goes out, and
+       * `GET /sessions/:id` carries them.
+       */
+      usage?: UsageRecord[];
+    }
   | { type: 'session.failed'; sessionId: string; error: string };
 
 export type EventHandler = (event: StratusEvent) => void | Promise<void>;
@@ -1723,6 +1916,43 @@ export class AgentRunner {
   }
 
   /**
+   * The id for the next Stratus turn that spends tokens.
+   *
+   * Ordinals count the turns that *recorded* usage rather than loop
+   * iterations, which is what makes deriving them safe: a turn that reported
+   * nothing leaves no record behind, so its ordinal was never taken and the
+   * next turn cannot collide with it. Derived from the stored records rather
+   * than held in a counter so a session resumed in another process continues
+   * the numbering instead of restarting it and merging two turns under one
+   * id.
+   */
+  private nextTurnId(session: Session): string {
+    const turns = new Set((session.usage ?? []).map((record) => record.turnId));
+    return `${session.id}:turn:${turns.size + 1}`;
+  }
+
+  /**
+   * Record one provider call against the session, attributed.
+   *
+   * Accumulation lives here rather than in each adapter for the usual
+   * reason: four copies of a summing rule is four places for a fallback or a
+   * retried call to be counted once, twice, or not at all.
+   */
+  private recordUsage(session: Session, turnId: string, usage: ProviderCallUsage): void {
+    const record: UsageRecord = {
+      turnId,
+      // The adapter's own name wins. `provider.name` is the fallback
+      // wrapper's under a configured fallback, and that name is the
+      // primary's for the life of the session — so trusting it would file
+      // the fallback model's tokens under the provider that failed.
+      provider: usage.provider ?? this.options.provider.name,
+      ...(usage.model !== undefined ? { model: usage.model } : {}),
+      ...definedTokenCounts(usage),
+    };
+    (session.usage ??= []).push(record);
+  }
+
+  /**
    * The allowlist entries this session's agent is held to, or undefined for
    * no limit. Entries, not a name set: `fs.*` is an entry, and matching is
    * `matchesToolAllowlist`'s job rather than each caller's.
@@ -1843,14 +2073,35 @@ export class AgentRunner {
           return emission;
         };
 
+        // One Stratus turn: one id, however many provider calls the adapter
+        // makes underneath it. Allocated before the call because the sink
+        // fires during it.
+        const turnId = this.nextTurnId(session);
+        // Sink-reported usage is exclusive for the call. An adapter that
+        // reports its internal attempts through the sink has already counted
+        // the last one, and reading the response's field as well would bill
+        // that attempt twice.
+        let sinkReported = false;
+        const onUsage = (usage: ProviderCallUsage): void => {
+          sinkReported = true;
+          this.recordUsage(session, turnId, usage);
+        };
+
         const response = await this.options.provider.generate({
           session,
           ...(tools.length > 0 ? { tools } : {}),
           ...(memory.length > 0 ? { memory } : {}),
           ...(enabledSkills.length > 0 ? { skills: enabledSkills } : {}),
           ...(this.streaming ? { onDelta } : {}),
+          onUsage,
           ...(signal ? { signal } : {}),
         });
+        // Recorded before the abort check, deliberately: a turn cancelled
+        // between the response arriving and this loop noticing still spent
+        // those tokens, and the catch below saves the session.
+        if (!sinkReported && response.usage) {
+          this.recordUsage(session, turnId, response.usage);
+        }
         throwIfAborted(signal);
         await deltaChain;
 
@@ -1899,7 +2150,27 @@ export class AgentRunner {
       const stored = await this.store.get(session.id);
       session = stored ?? session;
       await this.bus.emit({ type: 'session.updated', sessionId: session.id, status: session.status });
-      await this.bus.emit({ type: 'session.completed', sessionId: session.id });
+      await this.bus.emit({
+        type: 'session.completed',
+        sessionId: session.id,
+        // Copies all the way down — a fresh array of fresh records, not the
+        // session's own. This is durable accounting state rather than a
+        // per-event payload, so a subscriber that sorts the list, appends to
+        // it, or normalizes a count in place must not be reaching the stored
+        // record. A shallow array copy is not enough: the record objects
+        // behind it are the ones the session holds, and
+        // `InMemorySessionStore` hands the very same objects back on the
+        // next read.
+        //
+        // What this does NOT buy is isolation between subscribers. `emit`
+        // hands one event object to every handler in turn, so an earlier
+        // handler's edits are visible to later ones — true of `parts` on
+        // provider.response and of every other payload on this bus, and not
+        // a promise the bus has ever made. Copy before mutating.
+        ...(session.usage && session.usage.length > 0
+          ? { usage: session.usage.map((record) => ({ ...record })) }
+          : {}),
+      });
       return session;
     } catch (caught) {
       // An abort can surface first from any layer (the provider's cancelled

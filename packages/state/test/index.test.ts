@@ -671,3 +671,156 @@ test('a codex fallback with an endpoint-bound key is quietly skipped, never unbo
   assert.equal(resolved.provider, 'openai');
   assert.equal(resolved.fallback, undefined, 'a bound codex key must not serve a fallback that cannot honor the binding');
 });
+
+test('the fallback wrapper names the fallback on usage that arrived unnamed', async () => {
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const session = {
+    id: 'unnamed',
+    agent: { id: 'a', name: 'A' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  };
+
+  const primary = {
+    name: 'primary',
+    async generate() {
+      throw new Error('primary down');
+    },
+  };
+  // An adapter that does not name itself. The wrapper answers to the
+  // primary's name for the life of the session, so without this the kernel
+  // would file the fallback model's tokens under the model that failed —
+  // in the one case attribution exists for.
+  const fallback = {
+    name: 'fallback',
+    async generate({ onUsage }: { onUsage?: (usage: { inputTokens?: number; provider?: string }) => void }) {
+      onUsage?.({ inputTokens: 5 });
+      return { parts: [{ type: 'text' as const, text: 'rescued' }], usage: { outputTokens: 7 } };
+    },
+  };
+
+  const reported: Array<{ provider?: string }> = [];
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, () => {});
+  const response = await wrapped.generate({
+    session,
+    onUsage: (usage: { provider?: string }) => reported.push(usage),
+  } as never);
+
+  assert.deepEqual(reported, [{ inputTokens: 5, provider: 'fallback' }]);
+  assert.deepEqual(response.usage, { outputTokens: 7, provider: 'fallback' });
+});
+
+test('the fallback wrapper leaves usage that named itself alone', async () => {
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const session = {
+    id: 'named',
+    agent: { id: 'a', name: 'A' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  };
+
+  const primary = {
+    name: 'primary',
+    async generate() {
+      throw new Error('primary down');
+    },
+  };
+  const fallback = {
+    name: 'fallback',
+    async generate() {
+      // A harness fallback reporting per-model calls of its own: the name it
+      // supplies is the one that has to survive.
+      return { parts: [{ type: 'text' as const, text: 'ok' }], usage: { provider: 'inner', model: 'm' } };
+    },
+  };
+
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, () => {});
+  const response = await wrapped.generate({ session } as never);
+
+  assert.deepEqual(response.usage, { provider: 'inner', model: 'm' });
+});
+
+test('a fallback that answers on its response is still counted after the primary used the sink', async () => {
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const session = {
+    id: 'rescued',
+    agent: { id: 'a', name: 'A' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  };
+
+  // A harness primary: reports the attempt it paid for, then fails.
+  const primary = {
+    name: 'primary',
+    async generate({ onUsage }: { onUsage?: (usage: { provider?: string; inputTokens?: number }) => void }) {
+      onUsage?.({ provider: 'primary', inputTokens: 5 });
+      throw new Error('primary down');
+    },
+  };
+  // A single-call fallback: answers on the response, the way an API adapter
+  // does. Sink exclusivity is per generate and both providers share this
+  // one, so without the wrapper forwarding it the turn that actually
+  // succeeded would go uncounted while the attempt that failed did not.
+  const fallback = {
+    name: 'fallback',
+    async generate() {
+      return {
+        parts: [{ type: 'text' as const, text: 'rescued' }],
+        usage: { provider: 'fallback', model: 'fallback-1', outputTokens: 9 },
+      };
+    },
+  };
+
+  const reported: Array<{ provider?: string }> = [];
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, () => {});
+  await wrapped.generate({ session, onUsage: (usage: { provider?: string }) => reported.push(usage) } as never);
+
+  assert.deepEqual(reported, [
+    { provider: 'primary', inputTokens: 5 },
+    { provider: 'fallback', model: 'fallback-1', outputTokens: 9 },
+  ]);
+});
+
+test('a fallback that uses the sink itself is not also counted from its response', async () => {
+  const { createFallbackWrappedProvider } = await import('../src/index.ts');
+  const session = {
+    id: 'no-double',
+    agent: { id: 'a', name: 'A' },
+    status: 'running' as const,
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  };
+
+  const primary = {
+    name: 'primary',
+    async generate() {
+      throw new Error('primary down');
+    },
+  };
+  // An adapter using both channels for the same call. Forwarding is scoped
+  // by whether the fallback used the sink, so its last call is recorded
+  // once — the same rule the kernel applies one level up.
+  const fallback = {
+    name: 'fallback',
+    async generate({ onUsage }: { onUsage?: (usage: { provider?: string; inputTokens?: number }) => void }) {
+      onUsage?.({ provider: 'fallback', inputTokens: 3 });
+      return {
+        parts: [{ type: 'text' as const, text: 'ok' }],
+        usage: { provider: 'fallback', inputTokens: 3 },
+      };
+    },
+  };
+
+  const reported: Array<{ provider?: string }> = [];
+  const wrapped = createFallbackWrappedProvider(primary as never, fallback as never, () => {});
+  await wrapped.generate({ session, onUsage: (usage: { provider?: string }) => reported.push(usage) } as never);
+
+  assert.deepEqual(reported, [{ provider: 'fallback', inputTokens: 3 }]);
+});
