@@ -227,8 +227,11 @@ const STRINGIFIED_NOTHING = new Set(['undefined', 'null', 'NaN', '[object Object
  *
  * `agentId` is the agent the id addresses, when the caller knows it — every
  * client convention embeds it, so its length is part of the budget rather
- * than something the bound gets to cap. Omitted, the bound is
- * {@link MAX_SESSION_ID_LENGTH} alone.
+ * than something the bound gets to cap. The allowance applies only to an id
+ * that actually contains it, since those are the characters being paid for;
+ * a bare UUID and an unrelated string are both held to
+ * {@link MAX_SESSION_ID_LENGTH} alone, as they are when `agentId` is
+ * omitted.
  *
  * Shape is deliberately not enforced. Every id above is a legitimate
  * address, and no pattern admitting all of them excludes `undefined` — so
@@ -238,7 +241,12 @@ const STRINGIFIED_NOTHING = new Set(['undefined', 'null', 'NaN', '[object Object
  */
 export const isValidSessionId = (id: string, agentId?: string): boolean =>
   isAddressableId(id)
-  && id.length <= MAX_SESSION_ID_LENGTH + (agentId?.length ?? 0)
+  // The allowance is for an id that actually *spends* those characters on
+  // the agent id. Granting it merely because the request names a long-id
+  // agent would let that agent's existence buy an unrelated caller 300 more
+  // characters of junk — the durable-garbage case the bound is here to stop.
+  && id.length <= MAX_SESSION_ID_LENGTH
+    + (agentId !== undefined && id.includes(agentId) ? agentId.length : 0)
   && !STRINGIFIED_NOTHING.has(id);
 
 /**

@@ -639,6 +639,11 @@ test('a session id may open a conversation only when it is a single addressable 
     isValidSessionId(`${'b'.repeat(MAX_SESSION_ID_LENGTH + 1)}:${longAgentId}`, longAgentId),
     false,
   );
+  // And only an id that actually spends characters on the agent id gets the
+  // allowance. Otherwise a long-id agent's mere existence would buy any
+  // caller naming it 300 more characters of durable junk.
+  assert.equal(isValidSessionId('z'.repeat(MAX_SESSION_ID_LENGTH + 1), longAgentId), false);
+  assert.equal(isValidSessionId(`web:${longAgentId}:${'z'.repeat(150)}`, longAgentId), true);
 
   for (const id of [
     '',

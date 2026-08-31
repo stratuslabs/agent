@@ -270,12 +270,14 @@ JavaScript prints when an id was never computed — `undefined`, `null`, `NaN`,
 named `undefined`.
 
 Length is bounded too, at 200 characters **on top of the agent id the session
-names**. Budgeted that way rather than flat because every convention above
-embeds the agent id and agent ids have no length bound of their own — a flat
-cap would cap them through the back door, leaving a long-id agent on the
-roster and unable to hold a conversation. The allowance is spent against an
-`agentId` already checked against the roster, so it cannot be inflated by
-asking for it.
+id contains**. Budgeted that way rather than flat because every convention
+above embeds the agent id and agent ids have no length bound of their own — a
+flat cap would cap them through the back door, leaving a long-id agent on the
+roster and unable to hold a conversation. Two things keep the allowance from
+becoming a loophole: it is measured against an `agentId` already checked
+against the roster, and it applies only to an id that actually contains that
+agent id. A bare UUID, or any id that does not embed it, is held to the flat
+200 whichever agent the request names.
 
 Shape beyond that is deliberately not enforced: the ids in circulation are
 colon-joined addresses (`web:<agentId>:<uuid>`,
