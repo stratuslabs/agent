@@ -4,7 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 
 import { describeSchedule, formatSoul, isValidAgentId, parseSoul, type ParsedSoul } from '@stratusagent/agents';
 import type { JsonObject } from '@stratusagent/core';
-import type { Gateway } from '@stratusagent/gateway';
+import { isScheduleSessionId, SCHEDULE_SESSION_ID_PREFIX, type Gateway } from '@stratusagent/gateway';
 import { redactAnthropicRawTurns } from '@stratusagent/provider-anthropic';
 import {
   claimSoulFile,
@@ -659,6 +659,21 @@ export const routes: Route[] = [
       const body = await readJsonObject(context.request);
       const message = requireString(body, 'message');
       const agentId = optionalString(body, 'agentId');
+
+      // The gateway refuses this at its own door and nothing is created —
+      // but it refuses by rejecting the dispatch, which nobody is awaiting,
+      // so the caller was handed a 202 and a turn id for a turn that could
+      // never run. Preflighted here for the same reason the two checks
+      // below are: a refusal the caller can see beats one only the event
+      // stream carries.
+      if (isScheduleSessionId(sessionId)) {
+        throw new ApiError(
+          400,
+          'session_id_reserved',
+          `Session ids beginning with "${SCHEDULE_SESSION_ID_PREFIX}" belong to scheduled firings and cannot be dispatched externally. `
+            + 'Use your own id for a conversation; `GET /schedules` lists the schedules whose firings own those.',
+        );
+      }
 
       const existing = await context.gateway.store.get(sessionId);
       if (!existing && agentId === undefined) {
