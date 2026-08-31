@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { Readable } from 'node:stream';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 import {
   createFileMemoryStore,
   unsupportedNodeMessage,
+  filterSqliteExperimentalWarning,
+  withoutSqliteExperimentalWarning,
   CLI_VERSION,
   createLogWriter,
   currentLogPosition,
@@ -104,6 +106,47 @@ test('the CLI refuses Node versions below the floor its manifests declare', () =
   for (const version of ['', 'nightly', 'v-broken']) {
     assert.equal(unsupportedNodeMessage(version), undefined);
   }
+});
+
+const experimentalWarning = (message: string): Error =>
+  Object.assign(new Error(message), { name: 'ExperimentalWarning' });
+
+test('the node:sqlite experimental warning is dropped and every other warning still prints', () => {
+  const seen: string[] = [];
+  const filtered = withoutSqliteExperimentalWarning([(warning) => seen.push(warning.message)]);
+
+  // The exact text Node emits on the import, and the variant that names the
+  // flag — both are the same dependency the supported Node range exists for.
+  filtered(experimentalWarning('SQLite is an experimental feature and might change at any time'));
+  filtered(experimentalWarning('The `node:sqlite` module is experimental'));
+  assert.deepEqual(seen, []);
+
+  // Anything else is ours to act on, so it reaches the listeners intact.
+  filtered(experimentalWarning('Type Stripping is an experimental feature'));
+  filtered(Object.assign(new Error('util.isArray is deprecated'), { name: 'DeprecationWarning' }));
+  filtered(new Error('something else entirely'));
+  assert.deepEqual(seen, [
+    'Type Stripping is an experimental feature',
+    'util.isArray is deprecated',
+    'something else entirely',
+  ]);
+});
+
+test('filtering replaces the default warning listener rather than stacking on it', () => {
+  const emitter = new EventEmitter();
+  const printed: string[] = [];
+  // Standing in for Node's own printer, which is an ordinary listener: left
+  // in place, it would print the warning the filter exists to drop.
+  emitter.on('warning', (warning: Error) => printed.push(warning.message));
+
+  filterSqliteExperimentalWarning(emitter);
+  assert.equal(emitter.listenerCount('warning'), 1, 'the default listener was replaced, not joined');
+
+  emitter.emit('warning', experimentalWarning('SQLite is an experimental feature and might change at any time'));
+  assert.deepEqual(printed, []);
+
+  emitter.emit('warning', new Error('a warning worth reading'));
+  assert.deepEqual(printed, ['a warning worth reading']);
 });
 
 test('parseCommand accepts positional prompts', () => {

@@ -567,6 +567,48 @@ export const unsupportedNodeMessage = (version: string): string | undefined => {
     + 'Upgrade with `brew install node` on macOS, or your package manager or nvm on Linux.';
 };
 
+/**
+ * The warning listeners to install in place of Node's default one, so the
+ * `node:sqlite` ExperimentalWarning stops being the first thing the CLI
+ * prints.
+ *
+ * The session store imports `node:sqlite`, which is experimental on every
+ * Node release this supports — that is exactly why
+ * {@link SUPPORTED_NODE_RANGE} is written the way it is — so the warning
+ * announces a dependency the project chose deliberately and a user can do
+ * nothing about. It landed above `stratusd ready` on every `stratus serve`,
+ * and on `stratus schedules`.
+ *
+ * Filtered rather than silenced wholesale (`--no-warnings` would be the
+ * blunt version): every other warning still reaches stderr through the
+ * listeners passed in, because a deprecation in our own dependencies is
+ * ours to act on.
+ */
+export const withoutSqliteExperimentalWarning = (
+  listeners: readonly ((warning: Error) => void)[],
+): ((warning: Error) => void) => (warning) => {
+  if (warning.name === 'ExperimentalWarning' && /\bSQLite\b/i.test(warning.message)) {
+    return;
+  }
+  for (const listener of listeners) {
+    listener(warning);
+  }
+};
+
+/**
+ * Swap Node's default warning printer for the filtered one above.
+ *
+ * Node installs its printer as an ordinary `warning` listener, so adding
+ * one alongside it would print twice rather than filter; the default has to
+ * come off and be handed to the replacement. Called once from the binary,
+ * before anything imports the session store.
+ */
+export const filterSqliteExperimentalWarning = (process_: NodeJS.EventEmitter = process): void => {
+  const existing = process_.listeners('warning') as ((warning: Error) => void)[];
+  process_.removeAllListeners('warning');
+  process_.on('warning', withoutSqliteExperimentalWarning(existing));
+};
+
 const HELP_TEXT = `Stratus Agent CLI
 
 Usage:
