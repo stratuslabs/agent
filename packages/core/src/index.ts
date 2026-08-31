@@ -1640,23 +1640,55 @@ export interface SystemPromptOptions {
 }
 
 /**
- * Every section that belongs in an agent's system prompt, in order, empty
- * ones omitted. Returned as sections rather than one string because wire
- * formats differ — Anthropic takes one system string, the OpenAI dialect a
- * message per section — and the contract is the content, not the joining.
+ * Which part of what an agent is told a section is.
+ *
+ * The distinction a caller actually needs is stable versus volatile:
+ * `preamble`, `persona`, and `skills` are byte-identical across every turn of
+ * an agent's life, while `memory` is rewritten whenever the agent remembers
+ * anything. A provider that caches its request prefix has to place those two
+ * groups differently, and it cannot tell them apart from rendered strings.
  */
+export type SystemPromptSectionKind = 'preamble' | 'persona' | 'memory' | 'skills';
+
+export interface SystemPromptSection {
+  kind: SystemPromptSectionKind;
+  text: string;
+}
+
+/**
+ * Every section that belongs in an agent's system prompt, in order, empty
+ * ones omitted, each labelled with what it is.
+ *
+ * Sections rather than one string because wire formats differ — Anthropic
+ * takes one system string, the OpenAI dialect a message per section — and the
+ * contract is the content, not the joining. Labelled because *placement*
+ * differs too: an adapter that caches its prefix sends the volatile section
+ * somewhere else entirely, and reordering here to suit it would change the
+ * prompt for every other provider to no purpose.
+ *
+ * The order is the order. This is the one rule about what an agent is told;
+ * `renderSystemPromptSections` is the same rule with the labels dropped.
+ */
+export const renderSystemPromptParts = (
+  request: Pick<ProviderRequest, 'session' | 'memory' | 'skills'>,
+  options: SystemPromptOptions = {},
+): SystemPromptSection[] => {
+  const sections: Array<{ kind: SystemPromptSectionKind; text: string | undefined }> = [
+    { kind: 'preamble', text: options.preamble },
+    { kind: 'persona', text: renderPersonaSection(request.session.agent, { fallback: options.fallbackPersona ?? false }) },
+    { kind: 'memory', text: renderMemorySection(request.memory) },
+    { kind: 'skills', text: renderSkillsSection(request.skills) },
+  ];
+  return sections.filter(
+    (section): section is SystemPromptSection => section.text !== undefined && section.text.length > 0,
+  );
+};
+
+/** The sections as plain strings, in the same order. */
 export const renderSystemPromptSections = (
   request: Pick<ProviderRequest, 'session' | 'memory' | 'skills'>,
   options: SystemPromptOptions = {},
-): string[] => {
-  const sections = [
-    options.preamble,
-    renderPersonaSection(request.session.agent, { fallback: options.fallbackPersona ?? false }),
-    renderMemorySection(request.memory),
-    renderSkillsSection(request.skills),
-  ];
-  return sections.filter((section): section is string => section !== undefined && section.length > 0);
-};
+): string[] => renderSystemPromptParts(request, options).map((section) => section.text);
 
 /** The sections joined the way single-string providers send them. */
 export const renderSystemPrompt = (

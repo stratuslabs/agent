@@ -4,8 +4,8 @@ Agents remember: facts saved with the built-in `memory.remember` tool
 persist to `~/.stratus/memory.jsonl`, keyed to the agent — so the Ava you
 talk to tomorrow remembers today, from any directory, in every channel.
 
-Recall is something the agent does, not only something done to it: the
-system prompt carries the most recent facts (up to 20, within a byte
+Recall is something the agent does, not only something done to it: every
+request carries the most recent facts (up to 20, within a byte
 budget), and everything older is reachable through `memory.recall`, a
 full-text search over the agent's own store — plain words in, matching
 facts out, newest first; a query like `C++` or an unmatched quote is a
@@ -14,6 +14,25 @@ reaching prompts and recall, but stays in the file as a tombstone line, so
 you can still see what an agent chose to drop. A single fact is capped at
 4 KiB — an oversized `memory.remember` is refused outright rather than
 stored truncated.
+
+## Where remembered facts travel in a request
+
+Facts reach the model as operator-authored context, never as something a
+conversation could forge. Against the Anthropic API they ride at the **tail**
+of the request as a system message rather than inside the system prompt;
+everywhere else they sit in the system prompt as they always have.
+
+The reason is cost. Prompt caching is a prefix match, so anything that changes
+invalidates everything after it — and memory is the one part of what an agent
+is told that changes, rewritten the moment it remembers anything. Held in the
+system prompt, a single new fact would re-charge full input price for the
+persona, the skills list, and the tool definitions behind it, on every turn
+for the rest of the conversation. At the tail it invalidates nothing.
+
+What does **not** change is the trust boundary. Remembered text is written by
+the agent and can contain whatever a tool read off the network, so it stays on
+the operator channel — a `system` message — and never becomes part of a user
+turn, where anything that writes to the agent's input could forge it.
 
 ## The file is yours
 
