@@ -283,13 +283,20 @@ const sealedStdioEnv = (granted: Record<string, string>): Record<string, string>
  * The extra sentence an ENOENT deserves when the server's own `passEnv`
  * withheld `PATH`.
  *
- * A relative command is resolved against the child's `PATH`, and since
+ * A bare command is resolved against the child's `PATH`, and since
  * {@link sealedStdioEnv} stopped the transport from supplying one of its
  * own, `passEnv: ["HOME"]` turns `command: "npx"` into a bare `spawn npx
  * ENOENT` — which reads as a missing binary and sends the operator looking
- * in the wrong place. Only for that combination: an ENOENT with `PATH`
- * granted really is a missing binary, and saying otherwise would be noise
- * on the common case.
+ * in the wrong place.
+ *
+ * Stated as something to check rather than as the cause, because this
+ * cannot tell the two apart: the same ENOENT is what a misspelled or
+ * genuinely absent executable produces, and an absent `PATH` is not even
+ * decisive on its own — `execvp` falls back to a system default path
+ * (typically `/bin:/usr/bin`), so a command living there still resolves.
+ * Only for the combination that makes the question worth raising: an ENOENT
+ * with `PATH` granted really is a missing binary, and saying anything there
+ * would be noise on the common case.
  */
 const missingPathHint = (spec: McpServerSpec, error: unknown): string => {
   const enoent = (error as { code?: string } | undefined)?.code === 'ENOENT'
@@ -302,7 +309,8 @@ const missingPathHint = (spec: McpServerSpec, error: unknown): string => {
   ) {
     return '';
   }
-  return `Its passEnv does not grant PATH, so "${spec.command}" cannot be resolved — grant PATH, or give an absolute path. `;
+  return `Its passEnv does not grant PATH, so "${spec.command}" is resolved only against the system default path — `
+    + 'if that is not where it lives, grant PATH or give an absolute command. ';
 };
 
 const buildTransport = (spec: McpServerSpec): Transport => {

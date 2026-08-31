@@ -113,8 +113,11 @@ handed, so the bridge refuses each of those names explicitly unless this
 config granted it — otherwise `passEnv: []` would still hand a third-party
 server the account the daemon runs as. **Consequence for a narrowed
 `passEnv`:** a `command` without a `/` is resolved against the child's
-`PATH`, so a grant that omits `PATH` needs an absolute command. The
-unreachable-server log line says so when that is what happened.
+`PATH`, so a grant that omits `PATH` leaves only the system default path
+(typically `/bin:/usr/bin`) to find it in — give an absolute command, or
+grant `PATH`. The unreachable-server log line raises that as something to
+check when the command is bare and `PATH` was not granted; it cannot tell
+that case apart from a command that simply is not installed.
 
 OAuth-authenticated HTTP servers are not modeled yet; a static bearer in
 `headers` is what exists today.

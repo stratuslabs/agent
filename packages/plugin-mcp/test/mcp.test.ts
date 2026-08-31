@@ -883,6 +883,10 @@ test('a server whose passEnv withheld PATH is told that, not left with a bare EN
 
   const unreachable = warnings.find((message) => message.includes('is unreachable'));
   assert.ok(unreachable, 'the server should be reported unreachable, not fail the plugin');
+  // Phrased as something to check, not as the cause: the same ENOENT is what
+  // a misspelled command produces, and execvp falls back to a system default
+  // path when PATH is absent, so a missing PATH is not decisive on its own.
   assert.match(unreachable, /passEnv does not grant PATH/);
-  assert.match(unreachable, /grant PATH, or give an absolute path/);
+  assert.match(unreachable, /resolved only against the system default path/);
+  assert.match(unreachable, /grant PATH or give an absolute command/);
 });
