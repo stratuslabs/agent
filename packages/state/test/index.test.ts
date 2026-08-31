@@ -824,3 +824,54 @@ test('a fallback that uses the sink itself is not also counted from its response
 
   assert.deepEqual(reported, [{ provider: 'fallback', inputTokens: 3 }]);
 });
+
+test('promptCache settings reach the anthropic runtime, and only it', async () => {
+  const { validateConfigFile } = await import('../src/index.ts');
+
+  const parsed = validateConfigFile(
+    { provider: 'anthropic', model: 'claude-opus-5', promptCache: false, promptCacheTtl: '1h' },
+    'test config',
+  );
+  // `false` is the whole point of the key, so it must survive a truthiness
+  // check that would drop it.
+  assert.equal(parsed.promptCache, false);
+  assert.equal(parsed.promptCacheTtl, '1h');
+
+  // A nonsense TTL is ignored rather than passed to the wire, like every
+  // other wrong-shaped value this validator sees.
+  assert.equal(
+    validateConfigFile({ promptCacheTtl: '30m' }, 'test config').promptCacheTtl,
+    undefined,
+  );
+  assert.equal(
+    validateConfigFile({ promptCache: 'yes' }, 'test config').promptCache,
+    undefined,
+  );
+});
+
+test('an anthropic fallback inherits the primary\'s cache settings', async () => {
+  const { resolveRuntimeConfig } = await import('../src/index.ts');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cachefb-'));
+  const configPath = path.join(home, 'stratus.config.json');
+  await writeFile(configPath, JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    fallbackModel: 'claude-sonnet-5',
+    promptCache: false,
+    promptCacheTtl: '1h',
+  }));
+
+  const config = await resolveRuntimeConfig({ configPath }, {
+    homeDir: home,
+    cwd: home,
+    processEnv: { ANTHROPIC_API_KEY: 'test-key' },
+  });
+
+  assert.equal(config.provider, 'anthropic');
+  assert.equal((config as { promptCache?: boolean }).promptCache, false);
+  // Without this the operator who turned caching off still pays the write
+  // surcharge on every rescued turn — the one thing the setting exists to
+  // prevent.
+  assert.equal(config.fallback?.promptCache, false);
+  assert.equal(config.fallback?.promptCacheTtl, '1h');
+});
