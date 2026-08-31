@@ -317,8 +317,11 @@ different lifetimes, and which one the approver got depends on the tool:**
   remembers a *command scope*, durable and per agent. Approving `git push
   origin main` persists `git push` minus its destructive forms, so `git push
   --force` still asks. That grant survives restarts.
-- For **every other tool**, it is remembered against the tool name for the
-  rest of **that session only**, and is gone when the session ends.
+- For **every other tool**, it is remembered against the tool name in memory,
+  and lasts until the session ends **or the daemon restarts, whichever comes
+  first**. Sessions are durable and restarts are not; a session resumed in a
+  new process asks again, so this is strictly weaker than "for this
+  conversation".
 
 There is a third outcome behind the same answer: a command this daemon's
 parser cannot reduce to a scope — a pipe, a subshell, an unbalanced quote —
@@ -326,9 +329,10 @@ is approved *once*, because widening to the bare tool would hand the agent
 every command for the rest of the session. The call runs; the grant is not
 remembered.
 
-A client that renders `always` as one button is therefore promising something
-whose duration it cannot know — and **nothing in this API tells it which it
-got**. `POST /approvals` answers `{ ok: true }`, and the
+So one grant is written to disk beside the agent's soul and the other lives
+in a `Set` for as long as the process does. A client that renders `always` as
+one button is therefore promising something whose duration it cannot know —
+and **nothing in this API tells it which it got**. `POST /approvals` answers `{ ok: true }`, and the
 `tool.approval-resolved` event carries the `answer` that was submitted plus a
 `reason` of `decided`, `timeout`, `cancelled`, or `undeliverable` — which is
 why the request stopped being pending, not how long the grant lasts. The
