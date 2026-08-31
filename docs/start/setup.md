@@ -50,7 +50,11 @@ digits to jump, Esc to go back.
   not always-on, and every Slack app you connected above stays silent until
   `stratusd` runs. Save & finish installs it (see
   [Always on](../guides/always-on.md)); choose *do not run it for me* and
-  setup removes any service it previously installed.
+  setup removes any service it previously installed. If that install fails,
+  setup **exits non-zero** — it still saves everything and prints what went
+  wrong, but a daemon that will not come up at login is not a successful
+  setup, and `stratus service install` answers the same way for the same
+  failure.
 - **Test run** — say hello with the current settings before saving anything.
 - **Save & finish** — writes everything, offers any optional package your
   choices imply, then installs the always-on service.
@@ -87,8 +91,10 @@ Three things about it worth knowing:
   those packages already present. A package installed *after* a daemon starts
   is invisible to it; that ordering is the whole reason the offer lives here
   rather than in a closing hint.
-- **A failed install never fails setup.** Your config and credentials are
-  already written; you get npm's exit code and the command to run yourself.
+- **A failed package install never fails setup.** Your config and credentials
+  are already written; you get npm's exit code and the command to run
+  yourself, and setup's own exit code is unaffected. The always-on *service*
+  install is the exception, and the bullet above says why.
 
 Setup only suggests `stratus dashboard` at the end when it can actually
 work — a machine that skipped or failed that install is not told to run a

@@ -2033,6 +2033,46 @@ test('setup does not suggest the dashboard it could not install', async () => {
   assert.match(output.stdout, /Wrote /);
 });
 
+test('setup exits non-zero when the always-on install it ran failed', async () => {
+  const failingServiceRunner = async () => ({
+    code: 1,
+    stdout: '',
+    stderr: 'Failed to connect to bus: No medium found',
+  });
+
+  const setupWith = async (serviceRunner: typeof stubServiceRunner): Promise<{ code: number; stderr: string; stdout: string }> => {
+    const { streams, output } = createStreams();
+    const code = await runCli({
+      argv: ['setup'],
+      streams,
+      env: {
+        cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+        homeDir: await mkdtemp(path.join(os.tmpdir(), 'stratus-home-')),
+        processEnv: {},
+        serviceRunner,
+        packageResolver: () => true,
+        // Save & finish.
+        setupInput: Readable.from(['7\n']),
+      },
+    });
+    return { code, stderr: output.stderr, stdout: output.stdout };
+  };
+
+  const failed = await setupWith(failingServiceRunner);
+  // `stratus service install` answers 1 for this exact failure. Setup runs
+  // the same install as its last step, and a daemon that will not come up at
+  // login is not a successful setup — a script driving setup reads only this.
+  assert.equal(failed.code, 1);
+  // Still saved, and still says so: the exit code is the only thing that
+  // changed, because everything else was on disk before the install ran.
+  assert.match(failed.stdout, /Wrote /);
+  assert.match(failed.stderr, /Setup is saved either way/);
+
+  const succeeded = await setupWith(stubServiceRunner);
+  assert.equal(succeeded.code, 0);
+  assert.doesNotMatch(succeeded.stderr, /Setup is saved either way/);
+});
+
 test('setup skips the offer for packages that are already installed', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
 
@@ -6079,7 +6119,7 @@ test('the unit keeps the node flags the entrypoint needs', async () => {
   assert.doesNotMatch(unit, /--inspect/);
 });
 
-test('a service install that throws does not fail setup', async () => {
+test('a service install that throws is reported, not crashed through, and setup still saves', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   // A file where the LaunchAgents/systemd directory belongs: mkdir rejects,
@@ -6100,7 +6140,12 @@ test('a service install that throws does not fail setup', async () => {
     },
   });
 
-  assert.equal(exitCode, 0, 'the optional service must not take setup down with it');
+  // The optional service must not take setup DOWN with it — the rejection
+  // used to escape and abort the run after the config was already written.
+  // It still must not: setup completes, reports, and saves. What it does not
+  // do is call that a success, because the daemon will not come up at login
+  // and `stratus service install` answers 1 for the same failure.
+  assert.equal(exitCode, 1);
   assert.match(output.stderr, /Could not install the always-on service/);
   assert.match(output.stderr, /Setup is saved either way/);
   // And the settings it had already written are still there.

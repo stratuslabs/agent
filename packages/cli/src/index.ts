@@ -3949,7 +3949,22 @@ export const runSetup = async (
     }
   };
 
-  const save = async (): Promise<void> => {
+  /**
+   * Write everything the menu decided, then report whether the always-on
+   * install it performed succeeded.
+   *
+   * A boolean rather than a throw: the install is the one optional part of
+   * setup and everything else is already on disk by the time it runs, so
+   * failing outright would lose the saved config to a service that can be
+   * installed later. The exit code carries it instead — the same answer
+   * `stratus service install` gives for the identical failure, which is what
+   * a script driving setup has to be able to see.
+   */
+  const save = async (): Promise<boolean> => {
+    // The always-on install is the only step here that can fail without
+    // taking the rest of setup with it, so it is the only one the exit code
+    // has to carry.
+    let serviceInstallFailed = false;
     const config: Record<string, string> = { provider: state.provider };
     if (state.provider !== 'demo') {
       config.model = state.model ?? defaultModelFor(state.provider);
@@ -4069,6 +4084,7 @@ export const runSetup = async (
       }
       if (!result.ok) {
         writeLine(streams.stderr, `Setup is saved either way — start the daemon yourself with \`${serveCommand()}\`.`);
+        serviceInstallFailed = true;
       }
     }
     writeLine(streams.stdout);
@@ -4121,6 +4137,7 @@ export const runSetup = async (
     if (dashboardReady) {
       writeLine(streams.stdout, '  stratus dashboard');
     }
+    return !serviceInstallFailed;
   };
 
   try {
@@ -4164,8 +4181,12 @@ export const runSetup = async (
       }
     }
 
-    await save();
-    return 0;
+    // Non-zero when the always-on install failed, matching `stratus service
+    // install`. Everything setup saved is still saved, and the output above
+    // says so — but a daemon that will not come up at login is not a
+    // successful setup, and a script that only reads the exit code had no
+    // way to tell.
+    return (await save()) ? 0 : 1;
   } finally {
     prompter.close();
   }
