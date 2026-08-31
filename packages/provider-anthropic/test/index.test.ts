@@ -80,7 +80,7 @@ test('sanitizeAnthropicToolName replaces unsupported characters', () => {
   assert.equal(sanitizeAnthropicToolName(''), 'tool');
 });
 
-test('generate sends persona and memory as the system prompt', async () => {
+test('generate sends the persona in the system block and memory at the tail', async () => {
   const { fetchImpl, requests } = createMockFetch([
     apiMessage([{ type: 'text', text: 'Hi! Lovely to meet you.' }]),
   ]);
@@ -102,9 +102,17 @@ test('generate sends persona and memory as the system prompt', async () => {
 
   const body = requests[0]!.body;
   assert.equal(body.model, DEFAULT_ANTHROPIC_MODEL);
-  assert.match(body.system, /You are Ava\. Be warm and concise\./);
-  assert.match(body.system, /The user prefers short answers\./);
-  assert.deepEqual(body.messages, [{ role: 'user', content: [{ type: 'text', text: 'Hello there' }] }]);
+  // The stable sections travel as one system block, joined exactly as they
+  // always were, carrying the single cache breakpoint.
+  assert.match(body.system[0].text, /You are Ava\. Be warm and concise\./);
+  assert.deepEqual(body.system[0].cache_control, { type: 'ephemeral', ttl: '5m' });
+  // Memory is the volatile section, so it rides at the tail as a system
+  // message rather than inside the cached head.
+  assert.doesNotMatch(body.system[0].text, /The user prefers short answers\./);
+  assert.deepEqual(body.messages, [
+    { role: 'user', content: [{ type: 'text', text: 'Hello there' }] },
+    { role: 'system', content: 'Things you remember from previous conversations (your own long-term memory):\n- The user prefers short answers.' },
+  ]);
   assert.equal(requests[0]!.headers['x-api-key'], 'test-key');
 });
 
@@ -695,4 +703,129 @@ test('a successful call reports once, through the sink, and repeats it on the re
   // host calling generate with no sink attached gets.
   assert.equal(reported.length, 1);
   assert.deepEqual(reported[0], response.usage);
+});
+
+/** Two turns of the same conversation, second one carrying a new memory. */
+const cachedHeadOf = (body: Record<string, any>): string => body.system[0].text;
+
+test('a memory write leaves the cached head byte-identical', async () => {
+  // The whole point of the step. If a remembered fact changes the system
+  // block, every turn after it re-pays full input price for a persona and a
+  // skills list that did not change.
+  const { fetchImpl, requests } = createMockFetch([
+    apiMessage([{ type: 'text', text: 'One.' }]),
+    apiMessage([{ type: 'text', text: 'Two.' }]),
+  ]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const entry = (content: string): MemoryEntry => ({
+    id: `ava:memory:${content.length}`,
+    agentId: 'ava',
+    content,
+    createdAt: new Date().toISOString(),
+  });
+
+  await provider.generate({ session: createSession(), memory: [entry('First fact.')] });
+  await provider.generate({
+    session: createSession(),
+    memory: [entry('First fact.'), entry('A fact learned since.')],
+    skills: [{ id: 'triage', name: 'Triage', description: 'Use when triaging.' }],
+  } as ProviderRequest);
+
+  assert.notEqual(cachedHeadOf(requests[1]!.body), undefined);
+  // The head grew only because a skill was enabled — the memory write did not
+  // touch it, and the newly remembered fact is at the tail instead.
+  assert.match(cachedHeadOf(requests[1]!.body), /You are Ava/);
+  assert.doesNotMatch(cachedHeadOf(requests[1]!.body), /A fact learned since/);
+  assert.match(String(requests[1]!.body.messages.at(-1).content), /A fact learned since/);
+});
+
+test('the tool list is byte-identical after a tool is re-registered', async () => {
+  // The MCP reconnect case: a bridge unregisters and re-registers its tools,
+  // which moves them to the end of the registry's insertion order. Unsorted,
+  // that silently kills every cache hit for the rest of the daemon's life.
+  const { fetchImpl, requests } = createMockFetch([
+    apiMessage([{ type: 'text', text: 'One.' }]),
+    apiMessage([{ type: 'text', text: 'Two.' }]),
+  ]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const echo = { name: 'demo.echo', description: 'Echo.', parameters: { type: 'object', properties: {} } };
+  const notes = { name: 'mcp.notes.read', description: 'Read.', parameters: { type: 'object', properties: {} } };
+
+  await provider.generate({ session: createSession(), tools: [echo, notes] } as ProviderRequest);
+  await provider.generate({ session: createSession(), tools: [notes, echo] } as ProviderRequest);
+
+  assert.deepEqual(requests[0]!.body.tools, requests[1]!.body.tools);
+  assert.deepEqual(
+    requests[0]!.body.tools.map((tool: { name: string }) => tool.name),
+    ['demo_echo', 'mcp_notes_read'],
+  );
+});
+
+test('prompt caching can be turned off, and the TTL chosen', async () => {
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'Hi.' }])]);
+  const off = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, promptCache: false });
+  await off.generate({ session: createSession() });
+  assert.equal(requests[0]!.body.system[0].cache_control, undefined);
+
+  const hourly = createAnthropicProvider({
+    apiKey: 'test-key',
+    fetch: createMockFetch([apiMessage([{ type: 'text', text: 'Hi.' }])]).fetchImpl,
+    promptCacheTtl: '1h',
+  });
+  const response = await hourly.generate({ session: createSession() });
+  assert.equal(response.parts.length, 1);
+});
+
+test('a model that rejects a system message falls back, and does not pay for it twice', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  let calls = 0;
+  const fetchImpl = (async (_input: any, init?: any) => {
+    bodies.push(JSON.parse(init?.body ?? '{}'));
+    calls += 1;
+    // Sonnet 5 rejects a mid-conversation system message. Only the first
+    // attempt of the first turn should ever see it.
+    if (bodies.at(-1)?.messages?.at(-1)?.role === 'system') {
+      return new Response(
+        JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: "messages: role 'system' is not supported on this model" } }),
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    return new Response(JSON.stringify(apiMessage([{ type: 'text', text: 'Hi.' }])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, maxTokens: 64 });
+  const memory: MemoryEntry[] = [
+    { id: 'm1', agentId: 'ava', content: 'Remembered.', createdAt: new Date().toISOString() },
+  ];
+
+  const first = await provider.generate({ session: createSession(), memory });
+  assert.deepEqual(first.parts, [{ type: 'text', text: 'Hi.' }]);
+  // Rejected, then retried with memory back in the system block.
+  assert.equal(calls, 2);
+  assert.match(bodies[1]!.system[0].text, /Remembered\./);
+
+  // The rejection is remembered for the life of the provider, so the next
+  // turn costs one request rather than two.
+  await provider.generate({ session: createSession(), memory });
+  assert.equal(calls, 3);
+  assert.match(bodies[2]!.system[0].text, /Remembered\./);
+});
+
+test('an unrelated 400 is not swallowed by the system-message fallback', async () => {
+  const fetchImpl = (async () => new Response(
+    JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'max_tokens: must be greater than 0' } }),
+    { status: 400, headers: { 'content-type': 'application/json' } },
+  )) as typeof fetch;
+
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  await assert.rejects(
+    provider.generate({
+      session: createSession(),
+      memory: [{ id: 'm1', agentId: 'ava', content: 'x', createdAt: new Date().toISOString() }],
+    }),
+    /max_tokens/,
+  );
 });

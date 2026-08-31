@@ -84,7 +84,12 @@ The last two are why this spec's design changed; see below.
   reconnect re-registers discovered tools and moves them to the end. That
   silently disables caching for the rest of the daemon's life, and is
   invisible without 18's counters.
-- **A per-agent cache setting**, defaulting to on at the 5-minute TTL.
+- **A cache setting**, defaulting to on at the 5-minute TTL. Daemon-wide
+  (`promptCache` / `promptCacheTtl` in the config file) in this step; the
+  per-soul override is a follow-up, because the case that needs it — a
+  once-a-day schedule beside conversational agents on one daemon — is a
+  roster shape rather than a deployment one, and a soul key is where it
+  belongs.
 - **Reporting whether it worked.** Already shipped: 18 records
   `cacheReadTokens` and `cacheWriteTokens` per provider call.
 

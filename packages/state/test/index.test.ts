@@ -824,3 +824,27 @@ test('a fallback that uses the sink itself is not also counted from its response
 
   assert.deepEqual(reported, [{ provider: 'fallback', inputTokens: 3 }]);
 });
+
+test('promptCache settings reach the anthropic runtime, and only it', async () => {
+  const { validateConfigFile } = await import('../src/index.ts');
+
+  const parsed = validateConfigFile(
+    { provider: 'anthropic', model: 'claude-opus-5', promptCache: false, promptCacheTtl: '1h' },
+    'test config',
+  );
+  // `false` is the whole point of the key, so it must survive a truthiness
+  // check that would drop it.
+  assert.equal(parsed.promptCache, false);
+  assert.equal(parsed.promptCacheTtl, '1h');
+
+  // A nonsense TTL is ignored rather than passed to the wire, like every
+  // other wrong-shaped value this validator sees.
+  assert.equal(
+    validateConfigFile({ promptCacheTtl: '30m' }, 'test config').promptCacheTtl,
+    undefined,
+  );
+  assert.equal(
+    validateConfigFile({ promptCache: 'yes' }, 'test config').promptCache,
+    undefined,
+  );
+});
