@@ -49,10 +49,14 @@ Three reasons, in order of weight:
    The Electron path does need a change: `launchdPlist` emits no
    `EnvironmentVariables` key, so `ELECTRON_RUN_AS_NODE=1` cannot be set at
    all.
-2. **It decouples the daemon from the UI shell.** The daemon outlives the app
-   and must survive it being quit, moved, or updated. Pointing launchd at a
-   helper inside an app bundle couples two lifetimes that have no reason to be
-   coupled.
+2. **It lets the daemon be decoupled from the UI shell** — though the choice
+   of runtime alone does not decouple it. The daemon outlives the app and must
+   survive it being quit, moved, or updated, and `serviceDefinition` writes
+   absolute paths into the plist, so a runtime left *inside* `.app` breaks the
+   moment the bundle is dragged, run from a mounted DMG, or replaced by an
+   update. Stock Node makes the fix available — copy the runtime to a stable
+   directory outside the bundle and point the unit there — where an Electron
+   helper binary would have to stay where Electron is.
 3. **Size.** 48 MB for `node-v22.22.2-darwin-arm64.tar.gz` against a 216 MB
    Electron binary.
 
@@ -153,10 +157,14 @@ them: `POST /agents`, `GET /catalog/models`, `POST /credentials/verify`,
 `PUT /credentials/:provider`, `PUT /credentials/channels/:channel`,
 `GET,PUT /config`.
 
-**Not covered:** templates. [16](./16-templates.md) has not started, and
-`control-api` has no template endpoint. The onboarding flow 07 describes
-depends on both, which makes 16 the critical path rather than any part of the
-app.
+**Not covered:** template-backed creation, which is what 07's onboarding
+actually uses. [16](./16-templates.md) has not started, and `control-api` has
+no template endpoint of any kind. It needs two: a read, and an **atomic
+apply** — `POST /agents` accepts only `instructions`, `name`, `provider`, and
+`model`, so a client applying a template would write a soul and then write
+config separately, which is precisely the half-configured state 16 forbids.
+That makes 16 the critical path, and a wider one than a read endpoint would
+be, rather than any part of the app.
 
 ## Method
 

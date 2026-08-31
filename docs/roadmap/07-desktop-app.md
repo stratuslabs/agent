@@ -41,12 +41,17 @@ running so there is something to manage.
 Two supporting facts, both established by the runtime spike
 ([07-runtime-spike.md](./07-runtime-spike.md)):
 
-- **The V1 credential and agent-creation surface already exists.** `POST
-  /agents`, `/catalog/models`, `/credentials/verify`, `PUT /credentials/:provider`,
-  and `PUT /credentials/channels/:channel` cover it with no new endpoints.
+- **The sign-in surface already exists.** `/catalog/models`,
+  `/credentials/verify`, `PUT /credentials/:provider`, and
+  `PUT /credentials/channels/:channel` cover every sign-in this step needs,
+  and `POST /agents` creates a plain agent. What they do **not** cover is
+  template-backed creation, which is the flow this step's onboarding actually
+  uses — see [Depends on](#depends-on). Read the two together: connecting
+  accounts needs no API work, and creating an agent from a template needs two
+  endpoints that do not exist.
 - **The kernel is trivially shippable.** Its dependency tree has zero native
-  modules and zero install scripts, and runs unchanged from a relocated path.
-  A prebuilt tree inside the app bundle is a copy, not a build.
+  modules and zero install scripts, and runs unchanged from a relocated path —
+  which is what lets the app install it by copying rather than building.
 
 ## Scope
 
@@ -60,8 +65,9 @@ Two supporting facts, both established by the runtime spike
   session list.
   The template's model is a default the user may change; the model, name, and
   channel are theirs to pick. This is the one screen worth designing bespoke.
-- **Silent bootstrap.** The app ships its own Node and a prebuilt package tree,
-  writes the LaunchAgent, starts `stratusd`, and health-checks it. No npm at
+- **Silent bootstrap.** The app carries its own Node and a prebuilt package
+  tree, **installs both to a stable path outside the app bundle**, writes the
+  LaunchAgent against that path, starts `stratusd`, and health-checks it. No npm at
   runtime, no network needed for packages, nothing for the user to install.
 - **Provider sign-in without a terminal**, across the four real paths — a
   Claude API key, a Claude subscription, a ChatGPT subscription, and an
@@ -106,8 +112,18 @@ Two supporting facts, both established by the runtime spike
   code that opens a window and spawns a process. The Swift app in
   `stratuslabs/os` is not a starting point — 36 of its 56 UI files import its
   own Swift runtime, and it has no client for this API at all.
-- **The app bundle is the installer.** CI resolves the package tree against a
-  lockfile and copies it into the bundle; the app never runs a package manager.
+- **The app bundle is the installer, and installing is not the same as
+  carrying.** CI resolves the package tree against a lockfile and copies it
+  into the bundle; the app never runs a package manager. But the bundle is a
+  thing a user drags between folders, runs once from a mounted DMG, and
+  replaces wholesale on update, while `serviceDefinition` writes the
+  interpreter and entrypoint into the plist as **absolute paths**. A daemon
+  pointed inside the bundle therefore breaks on any of those. So first run
+  copies the runtime out to a stable versioned directory under
+  `~/Library/Application Support/`, and the LaunchAgent names that — never a
+  path inside `.app`. An update installs the new runtime beside the old one
+  and rewrites the unit, which is the operation `stratus update` already
+  performs and `readServiceCommand` already exists to make safe.
   This buys determinism — the user gets the tree that was tested, not whatever
   the registry resolves that day — and costs a release to ship a kernel fix.
 - **The daemon runs on a Node the app ships**, passed as `execPath` to the
@@ -158,6 +174,10 @@ Two supporting facts, both established by the runtime spike
   daemon is always up.
 - Each of the four sign-in paths completes without a terminal, and a key is
   verified before it is stored.
+- Moving `Stratus.app` to another folder, and updating it, both leave the
+  daemon running and restartable — because no path in the LaunchAgent points
+  inside the bundle. Asserted by moving the app and rebooting, not by reading
+  the plist.
 - The app's own code contains no provider, tool, or loop code, and imports
   none — asserted against the app artifact, not the bundle, which necessarily
   ships the kernel as its daemon payload.
