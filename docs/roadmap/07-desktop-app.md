@@ -19,6 +19,11 @@ described: *"its stated job — creating and managing agents visually — is wha
 objection stands, and this rewrite does not argue with it. It changes what the
 step is for.
 
+It stays unscheduled. What this rewrite buys is a step that is *scoped* — one
+whose runtime questions are answered and whose remaining blockers are named —
+so that choosing it becomes a decision about priority rather than the start of
+a research project.
+
 The job is not "manage agents visually." It is **reach the people who will
 never run `npm install -g`.** Everything the product does today is gated behind
 a terminal: installing Node, installing the CLI, `stratus setup`, and — for the
