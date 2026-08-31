@@ -4,11 +4,13 @@ import type {
   ContentBlockParam,
   MessageParam,
   Tool as AnthropicTool,
+  Usage,
 } from '@anthropic-ai/sdk/resources/messages/messages';
 import {
   renderSystemPrompt,
   type JsonObject,
   type ModelProvider,
+  type ProviderCallUsage,
   type ProviderRequest,
   type Session,
   type ToolCall,
@@ -289,6 +291,46 @@ const extractParts = (
 };
 
 /**
+ * The turn's token usage, in the kernel's four buckets.
+ *
+ * No normalization is needed: the Messages API already reports the three
+ * input buckets as disjoint counts ("total input tokens is the summation of
+ * `input_tokens`, `cache_creation_input_tokens`, and
+ * `cache_read_input_tokens`"), which is the shape `TokenUsage` took from it.
+ *
+ * A count the API omits — the cache fields are nullable, and are null on a
+ * request that used no caching — stays absent rather than becoming a zero,
+ * and a response carrying no counts at all reports nothing rather than a
+ * record made only of attribution.
+ */
+const extractUsage = (
+  response: { usage?: Usage | null; model?: string },
+  providerName: string,
+  model: string,
+): ProviderCallUsage | undefined => {
+  const usage = response.usage;
+  const count = (value: number | null | undefined): number | undefined =>
+    typeof value === 'number' ? value : undefined;
+  const inputTokens = count(usage?.input_tokens);
+  const outputTokens = count(usage?.output_tokens);
+  const cacheReadTokens = count(usage?.cache_read_input_tokens);
+  const cacheWriteTokens = count(usage?.cache_creation_input_tokens);
+  if ([inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens].every((value) => value === undefined)) {
+    return undefined;
+  }
+  return {
+    provider: providerName,
+    // The model the API says served the request, which is the one to
+    // attribute an alias ("claude-opus-latest") to.
+    model: typeof response.model === 'string' && response.model.length > 0 ? response.model : model,
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+  };
+};
+
+/**
  * Model provider backed by Anthropic's Claude API via the official SDK.
  * Supports multi-turn tool calling, renders the agent's persona and
  * long-term memory as the system prompt, and preserves Claude's thinking
@@ -376,6 +418,21 @@ export const createAnthropicProvider = ({
         response = await client.messages.create(params, requestOptions);
       }
 
+      // Reported through the sink BEFORE anything that can reject the
+      // response. The call completed and was billed, and both checks below
+      // throw on outcomes that are still paid: a tool_use block whose input
+      // is not an object, and a turn whose thinking consumed the output
+      // budget without surfacing a part. Neither returns a response, so the
+      // sink is the only carrier those tokens have.
+      //
+      // The count also stays on the response for a host calling generate
+      // with no sink attached. The kernel reads one or the other, never
+      // both, so this cannot double-count.
+      const usage = extractUsage(response, name, model);
+      if (usage) {
+        request.onUsage?.(usage);
+      }
+
       const { text, calls } = extractParts(response.content, mapping);
 
       for (const call of calls) {
@@ -391,7 +448,7 @@ export const createAnthropicProvider = ({
         throw new Error('Claude returned an empty response.');
       }
 
-      return { parts };
+      return usage ? { parts, usage } : { parts };
     },
   };
 };

@@ -4595,6 +4595,21 @@ test('the structured log names the memory entry a write or forget touched — an
   assert.deepEqual(recalled, { tool: 'memory.recall', ok: true });
 });
 
+test('the structured log does not grow a usage line when a session completes', () => {
+  // Usage accounting is not a prompt and not a reply, so a count would be
+  // loggable in principle — but the log is a trace, and expanding it is a
+  // separate decision from measuring what a run cost. The records live on
+  // the session and reach a reader through the control API.
+  assert.equal(
+    eventDetail({
+      type: 'session.completed',
+      sessionId: 'sess-1',
+      usage: [{ turnId: 'sess-1:turn:1', provider: 'anthropic', model: 'claude-opus-5', inputTokens: 40 }],
+    }),
+    undefined,
+  );
+});
+
 test('logs filters by agent and can emit the raw records', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const dir = path.join(home, '.stratus', 'logs');

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { MemoryEntry, ProviderRequest, Session } from '@stratusagent/core';
+import type { MemoryEntry, ProviderCallUsage, ProviderRequest, Session } from '@stratusagent/core';
 import {
   createAnthropicProvider,
   DEFAULT_ANTHROPIC_MODEL,
@@ -598,4 +598,101 @@ test('streaming forwards thinking progress without exposing the reasoning', asyn
     { type: 'thinking' },
     { type: 'text', text: 'the answer' },
   ]);
+});
+
+test('generate reports the API usage in the kernel buckets, untouched', async () => {
+  const { fetchImpl } = createMockFetch([
+    {
+      ...apiMessage([{ type: 'text', text: 'Hi.' }]),
+      model: 'claude-opus-5-20260101',
+      usage: {
+        input_tokens: 40,
+        output_tokens: 12,
+        cache_read_input_tokens: 900,
+        cache_creation_input_tokens: 300,
+      },
+    },
+  ]);
+
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const response = await provider.generate({ session: createSession() });
+
+  // The Messages API already reports the three input buckets as disjoint
+  // counts, so nothing is subtracted here — and the model is the one the API
+  // says served, not the alias that was asked for.
+  assert.deepEqual(response.usage, {
+    provider: 'anthropic',
+    model: 'claude-opus-5-20260101',
+    inputTokens: 40,
+    outputTokens: 12,
+    cacheReadTokens: 900,
+    cacheWriteTokens: 300,
+  });
+});
+
+test('a cache bucket the API leaves null is absent rather than zero', async () => {
+  const { fetchImpl } = createMockFetch([
+    {
+      ...apiMessage([{ type: 'text', text: 'Hi.' }]),
+      usage: {
+        input_tokens: 40,
+        output_tokens: 12,
+        cache_read_input_tokens: null,
+        cache_creation_input_tokens: null,
+      },
+    },
+  ]);
+
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const response = await provider.generate({ session: createSession() });
+
+  assert.deepEqual(Object.keys(response.usage ?? {}), ['provider', 'model', 'inputTokens', 'outputTokens']);
+  assert.equal(response.usage?.model, DEFAULT_ANTHROPIC_MODEL);
+});
+
+test('a paid call that surfaces no parts still reports its tokens through the sink', async () => {
+  // Adaptive thinking can consume the whole output budget without producing
+  // a text or tool_use block. The API call completed and was billed, and the
+  // empty-response check below throws — so the response field has no way to
+  // carry the count and the sink is the only carrier left.
+  const { fetchImpl } = createMockFetch([
+    {
+      ...apiMessage([]),
+      usage: { input_tokens: 8000, output_tokens: 4096 },
+    },
+  ]);
+
+  const reported: ProviderCallUsage[] = [];
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+
+  await assert.rejects(
+    provider.generate({
+      session: createSession(),
+      onUsage: (usage) => reported.push(usage),
+    } as ProviderRequest),
+    /Claude returned an empty response/,
+  );
+
+  assert.deepEqual(reported, [
+    { provider: 'anthropic', model: DEFAULT_ANTHROPIC_MODEL, inputTokens: 8000, outputTokens: 4096 },
+  ]);
+});
+
+test('a successful call reports once, through the sink, and repeats it on the response', async () => {
+  const { fetchImpl } = createMockFetch([
+    { ...apiMessage([{ type: 'text', text: 'Hi.' }]), usage: { input_tokens: 40, output_tokens: 12 } },
+  ]);
+
+  const reported: ProviderCallUsage[] = [];
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const response = await provider.generate({
+    session: createSession(),
+    onUsage: (usage) => reported.push(usage),
+  } as ProviderRequest);
+
+  // Both channels carry the same call, which is safe because the kernel
+  // reads one or the other and never both — the response field is what a
+  // host calling generate with no sink attached gets.
+  assert.equal(reported.length, 1);
+  assert.deepEqual(reported[0], response.usage);
 });

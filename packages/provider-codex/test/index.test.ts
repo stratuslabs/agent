@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { MemoryEntry, ProviderRequest, Session, ToolCall, ToolResult } from '@stratusagent/core';
+import type {
+  MemoryEntry,
+  ProviderCallUsage,
+  ProviderRequest,
+  Session,
+  ToolCall,
+  ToolResult,
+} from '@stratusagent/core';
 import { hasHostedToolSideEffects } from '@stratusagent/providers';
 import {
   CODEX_THREAD_METADATA_KEY,
@@ -726,4 +733,83 @@ test('the MCP endpoint speaks the initialize/list/call slice codex uses', async 
   } finally {
     await server.close();
   }
+});
+
+test('a completed turn reports its tokens with the cached counts taken out of input', async () => {
+  const { runTurn } = createFakeRunTurn([
+    { type: 'thread.started', thread_id: 'thread-1' },
+    { type: 'item.completed', item: { id: 'msg-1', type: 'agent_message', text: 'Done.' } },
+    {
+      type: 'turn.completed',
+      usage: {
+        input_tokens: 1000,
+        cached_input_tokens: 600,
+        cache_write_input_tokens: 100,
+        output_tokens: 40,
+      },
+    },
+  ]);
+
+  const reported: ProviderCallUsage[] = [];
+  const provider = createCodexProvider({ runTurn });
+  await provider.generate({
+    session: createSession(),
+    onUsage: (usage) => reported.push(usage),
+  } as ProviderRequest);
+
+  // 1000 prompt tokens of which 600 were cache hits and 100 were cache
+  // writes leaves 300 billed at the full input rate. The two cache figures
+  // keep their own buckets, where a price table charges them differently.
+  assert.deepEqual(reported, [
+    {
+      provider: 'codex',
+      model: DEFAULT_CODEX_MODEL,
+      inputTokens: 300,
+      outputTokens: 40,
+      cacheReadTokens: 600,
+      cacheWriteTokens: 100,
+    },
+  ]);
+});
+
+test('a codex turn that reports no usage produces no record', async () => {
+  const { runTurn } = createFakeRunTurn(successEvents('Done.'));
+
+  const reported: ProviderCallUsage[] = [];
+  const provider = createCodexProvider({ runTurn });
+  const response = await provider.generate({
+    session: createSession(),
+    onUsage: (usage) => reported.push(usage),
+  } as ProviderRequest);
+
+  assert.deepEqual(reported, []);
+  assert.equal(response.usage, undefined);
+});
+
+test('a failed codex resume reports the abandoned turn and the replay separately', async () => {
+  const runTurn: CodexRunTurn = (params) => (async function* (): AsyncGenerator<CodexThreadEvent> {
+    if (params.resumeThreadId) {
+      yield { type: 'turn.completed', usage: { input_tokens: 20, output_tokens: 1 } };
+      yield { type: 'turn.failed', error: { message: 'thread not found' } };
+      return;
+    }
+    yield { type: 'thread.started', thread_id: 'thread-new' };
+    yield { type: 'item.completed', item: { id: 'msg-1', type: 'agent_message', text: 'Recovered.' } };
+    yield { type: 'turn.completed', usage: { input_tokens: 900, output_tokens: 60 } };
+  })();
+
+  const reported: ProviderCallUsage[] = [];
+  const provider = createCodexProvider({ runTurn });
+  const response = await provider.generate({
+    session: createSession({ metadata: { [CODEX_THREAD_METADATA_KEY]: 'thread-gone' } }),
+    onUsage: (usage) => reported.push(usage),
+  } as ProviderRequest);
+
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Recovered.' }]);
+  // Two records: the replay is a second, more expensive call, and the
+  // attempt it replaced still cost what it cost.
+  assert.deepEqual(reported, [
+    { provider: 'codex', model: DEFAULT_CODEX_MODEL, inputTokens: 20, outputTokens: 1 },
+    { provider: 'codex', model: DEFAULT_CODEX_MODEL, inputTokens: 900, outputTokens: 60 },
+  ]);
 });

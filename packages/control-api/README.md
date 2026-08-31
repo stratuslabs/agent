@@ -100,7 +100,7 @@ log, and an address bar is one that gets noticed when it changes.
 | PUT | `/agents/:id` | Edit a soul, by field or as raw markdown |
 | POST | `/roster/reload` | Re-read the agents directory and the configured default soul |
 | GET | `/sessions?agent=&limit=` | Durable sessions, newest first. `limit` bounds the result — the table grows for the life of an install |
-| GET | `/sessions/:id` | One session, provider replay state stripped |
+| GET | `/sessions/:id` | One session, provider replay state stripped — including `usage`, the token records of every provider call it has made |
 | POST | `/sessions/:id/messages` | Dispatch a message; returns `202 { sessionId, turnId }` |
 | GET | `/approvals` | Calls parked on a human right now |
 | POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }` |
@@ -240,6 +240,68 @@ What counts as "recently active" is the client's decision, so this reports a
 timestamp and a count and never a verdict. A daemon that baked a window in
 would need upgrading to change it.
 
+### Usage is a set of records, never a total
+
+`GET /sessions/:id` carries `usage`: one record per provider call, in the
+order the calls completed.
+
+```jsonc
+{
+  "usage": [
+    { "turnId": "s-42:turn:1", "provider": "anthropic", "model": "claude-opus-5",
+      "inputTokens": 40, "outputTokens": 210, "cacheReadTokens": 9100, "cacheWriteTokens": 300 },
+    { "turnId": "s-42:turn:2", "provider": "openai", "model": "gpt-5.5",
+      "inputTokens": 12, "outputTokens": 88 }
+  ]
+}
+```
+
+**Tokens, not money.** Turning these into a cost is a projection against a
+price table that is per-model, per-vendor, and per-contract — one living here
+would be wrong here, silently, and stale within a quarter. What this surface
+owes a projection is the attribution to do the conversion correctly, which is
+why nothing is summed away: a thousand tokens of one model is not a thousand
+of another, the four buckets are priced differently from each other, and a
+session that fell back mid-run crosses *providers*. Sum the records if you
+want a total; the total is a view, and this is the stored form.
+
+The four counts are **disjoint**: `inputTokens` is prompt input billed at the
+full rate, with cache reads and cache writes counted in their own fields and
+never again in it. Adapters whose vendor reports an all-inclusive prompt count
+normalize to this shape, so records from two providers are comparable.
+
+**An absent count means the provider reported none — not zero.** A local
+OpenAI-compatible server that omits `usage` produces a session with no
+records at all, and a turn that cost real money would look free if a consumer
+read that absence as a measurement. `usage` itself is absent until something
+reports.
+
+`turnId` is the Stratus turn the tokens belong to — one pass through the
+runner, which is one provider call for the API providers and several for a
+harness provider running its own inner loop. It is on the record rather than
+reconstructed from ordering, because ordering cannot recover the boundaries
+once one turn contributes several records. It is **not** the `turnId` on an
+event envelope, which is assigned per dispatch by this API.
+
+Records are durable session state, so they survive a restart and a resumed
+session adds to what it already had. A failed run keeps the tokens it spent
+before it failed.
+
+**What each provider can tell you differs, and the records say so rather than
+smoothing it over.** The two API providers report one record per turn, with
+the model the API says served it. The two harness providers own their own
+inner loops, so one turn produces several records: `claude-code` reports one
+per model the loop touched — a sub-agent on a cheaper model shows up as its
+own row — and `codex` reports one per completed codex turn against the
+configured model, because codex publishes no per-model breakdown. A codex
+turn that *fails* reports nothing at all: its failure event carries no counts,
+which is a limit of that harness rather than a claim that the turn was free.
+
+Subscription-billed providers report tokens too, even though the operator is
+not billed per token for them. That is deliberate: it is how you compare what
+a run *would* cost across providers, and a session that fell back mid-run
+makes that a live question rather than a hypothetical.
+
 ### Two invariants worth stating
 
 - **Channel tokens have their own door.** Slack app and bot tokens are
@@ -297,6 +359,14 @@ carries none and should not grow one: a session processes several messages in
 sequence, and without this a client that queued one has no way to tell its own
 deltas from the next caller's. The id is assigned at dispatch and returned by
 `POST /sessions/:id/messages`.
+
+`session.completed` carries the session's `usage` records in the same shape
+`GET /sessions/:id` returns — the whole set, not just this run's, because that
+is the stored form and a resumed session's earlier turns are just as real. It
+is absent when nothing reported, and a client must not read that as zero. A
+run that *fails* emits `session.failed` without them; its records are still
+saved on the session, so read them back rather than treating a failure as
+free.
 
 Deltas are dropped for a client whose socket has backed up past 1 MB, and only
 deltas: losing a token from a reply is a cosmetic gap, while losing a

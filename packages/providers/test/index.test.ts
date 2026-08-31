@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { ProviderRequest } from '@stratusagent/core';
+import type { ProviderCallUsage, ProviderRequest } from '@stratusagent/core';
 import {
   createOpenAICompatibleProvider,
   createProviderRegistry,
@@ -664,4 +664,99 @@ test('a caller abort is never reported as a provider timeout', async () => {
     () => provider.generate({ ...createRequest(), signal: controller.signal }),
     (error: Error) => error.name === 'AbortError',
   );
+});
+
+/** A chat-completions endpoint answering with one fixed payload. */
+const createOpenAIStub = (payload: Record<string, unknown>) =>
+  createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(payload),
+    }) as Response,
+  });
+
+test('createOpenAICompatibleProvider takes cached tokens out of the input bucket', async () => {
+  const provider = createOpenAIStub({
+    model: 'gpt-4.1-mini-2025-04-14',
+    choices: [{ message: { content: 'Hello.' } }],
+    usage: {
+      prompt_tokens: 1000,
+      completion_tokens: 25,
+      prompt_tokens_details: { cached_tokens: 800 },
+    },
+  });
+
+  const response = await provider.generate(createRequest());
+
+  // `prompt_tokens` counts the cached tokens too, and `inputTokens` is the
+  // full-rate bucket alone — 1000 prompt tokens of which 800 were cache hits
+  // is 200 paid at the input rate, not 1000.
+  assert.deepEqual(response.usage, {
+    provider: 'openai',
+    model: 'gpt-4.1-mini-2025-04-14',
+    inputTokens: 200,
+    outputTokens: 25,
+    cacheReadTokens: 800,
+  });
+});
+
+test('createOpenAICompatibleProvider reports nothing for an endpoint that omits usage', async () => {
+  const provider = createOpenAIStub({ choices: [{ message: { content: 'Hello.' } }] });
+
+  const response = await provider.generate(createRequest());
+
+  // Plenty of compatible servers omit `usage` entirely. Absent is the honest
+  // answer; a zeroed record would let a consumer report a free turn.
+  assert.equal(response.usage, undefined);
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Hello.' }]);
+});
+
+test('normalizeProviderResponse carries usage through', () => {
+  const normalized = normalizeProviderResponse({
+    parts: [{ type: 'text', text: 'hi' }],
+    usage: { provider: 'fixture', inputTokens: 3 },
+  });
+
+  assert.deepEqual(normalized.usage, { provider: 'fixture', inputTokens: 3 });
+});
+
+test('a paid 200 with nothing usable in it still reports its tokens through the sink', async () => {
+  // A billed completion whose only content is a tool call with a name the
+  // endpoint omitted: the builder produces no parts and the empty-response
+  // check throws, so the response field has no way to carry the count.
+  const provider = createOpenAIStub({
+    choices: [{ message: { content: '', tool_calls: [{ id: 'call-1', type: 'function', function: {} }] } }],
+    usage: { prompt_tokens: 900, completion_tokens: 15 },
+  });
+
+  const reported: ProviderCallUsage[] = [];
+  await assert.rejects(
+    () => provider.generate({ ...createRequest(), onUsage: (usage) => reported.push(usage) }),
+    /Provider returned an empty response/,
+  );
+
+  assert.deepEqual(reported, [
+    { provider: 'openai', model: 'gpt-4.1-mini', inputTokens: 900, outputTokens: 15 },
+  ]);
+});
+
+test('a successful call reports once, through the sink, and repeats it on the response', async () => {
+  const provider = createOpenAIStub({
+    choices: [{ message: { content: 'Hello.' } }],
+    usage: { prompt_tokens: 100, completion_tokens: 5 },
+  });
+
+  const reported: ProviderCallUsage[] = [];
+  const response = await provider.generate({
+    ...createRequest(),
+    onUsage: (usage) => reported.push(usage),
+  });
+
+  // Both channels carry the same call, which is safe because the kernel
+  // reads one or the other and never both.
+  assert.equal(reported.length, 1);
+  assert.deepEqual(reported[0], response.usage);
 });

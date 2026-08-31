@@ -3181,3 +3181,34 @@ test('session counts come from the database, not from listing every session', as
   assert.deepEqual(empty.countByStatus(), {});
   empty.close();
 });
+
+test('a session\'s usage survives a restart and reads back as stored', async () => {
+  const home = await newHome();
+  const dbPath = path.join(home, 'state', 'sessions.db');
+  const usage = [
+    { turnId: 's1:turn:1', provider: 'anthropic', model: 'claude-opus-5', inputTokens: 40, cacheReadTokens: 900 },
+    { turnId: 's1:turn:2', provider: 'openai', model: 'gpt-5.5', inputTokens: 12, outputTokens: 3 },
+  ];
+
+  const store = new SqliteSessionStore(dbPath);
+  const session = await store.create({
+    id: 's1',
+    agent: { id: 'a', name: 'A' },
+    status: 'running',
+    messages: [],
+  });
+  session.usage = usage;
+  session.status = 'completed';
+  await store.save(session);
+  store.close();
+
+  // A second connection to the same file is the restart: nothing in this
+  // process is carrying the records.
+  const reopened = new SqliteSessionStore(dbPath);
+  const restored = await reopened.get('s1');
+  reopened.close();
+
+  // Grouped as stored — two providers and two models still separable, not a
+  // total that arrived pre-collapsed.
+  assert.deepEqual(restored?.usage, usage);
+});
