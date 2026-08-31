@@ -106,6 +106,16 @@ do: exactly what this config granted — the harmless default inheritance,
 where `ANTHROPIC_API_KEY` and every other exported key lives, is not there
 to read.
 
+That includes the transport's own idea of what a server needs. The MCP
+SDK's stdio client spawns with a default set of its own (`HOME`, `LOGNAME`,
+`PATH`, `SHELL`, `TERM`, `USER` on POSIX) merged under whatever it is
+handed, so the bridge refuses each of those names explicitly unless this
+config granted it — otherwise `passEnv: []` would still hand a third-party
+server the account the daemon runs as. **Consequence for a narrowed
+`passEnv`:** a `command` without a `/` is resolved against the child's
+`PATH`, so a grant that omits `PATH` needs an absolute command. The
+unreachable-server log line says so when that is what happened.
+
 OAuth-authenticated HTTP servers are not modeled yet; a static bearer in
 `headers` is what exists today.
 

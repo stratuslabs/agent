@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { DEFAULT_INHERITED_ENV_VARS } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -26,7 +27,13 @@ import {
 } from '@stratusagent/core';
 import { ManifestBoundToolRegistry, parsePluginManifest } from '@stratusagent/plugins';
 
-import { createMcpPlugin, normalizeCallResult, sanitizeToolSegment, type McpPluginOptions } from '../src/index.ts';
+import {
+  createMcpPlugin,
+  normalizeCallResult,
+  sanitizeToolSegment,
+  sealedStdioEnv,
+  type McpPluginOptions,
+} from '../src/index.ts';
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -831,4 +838,51 @@ test('a stdio server runs under the scrubbed environment: granted names arrive, 
   } finally {
     await plugin.dispose?.();
   }
+});
+
+test('a stdio server gets what the operator granted, and the transport inherits nothing on its own', () => {
+  // StdioClientTransport spawns with { ...getDefaultEnvironment(), ...env },
+  // so a scrubbed env is a floor the caller cannot lower by passing one. A
+  // server mounted with `passEnv: []` received all six of the SDK's names
+  // anyway, while tool-shell — same shared constant, direct spawn — did not.
+  const sealed = sealedStdioEnv({ LINEAR_API_KEY: 'lin_api_test' });
+
+  assert.equal(sealed.LINEAR_API_KEY, 'lin_api_test');
+  for (const name of DEFAULT_INHERITED_ENV_VARS) {
+    assert.ok(name in sealed, `${name} must be answered here, not left to the transport`);
+    // Dropped by spawn rather than set empty: a server seeing no USER is not
+    // the same as one seeing an empty USER.
+    assert.equal(sealed[name], undefined, `${name} was not granted`);
+  }
+
+  // A granted name keeps its value and is never refused — the common case,
+  // since PATH and HOME are both in DEFAULT_SUBPROCESS_PASS_ENV and on the
+  // transport's list.
+  const withPath = sealedStdioEnv({ PATH: '/usr/bin', HOME: '/home/agent' });
+  assert.equal(withPath.PATH, '/usr/bin');
+  assert.equal(withPath.HOME, '/home/agent');
+  assert.equal(withPath.SHELL, undefined);
+});
+
+test('a server whose passEnv withheld PATH is told that, not left with a bare ENOENT', async () => {
+  const warnings: string[] = [];
+  const plugin = createMcpPlugin(
+    {
+      enabled: true,
+      servers: {
+        // A relative command with nothing granted: the transport no longer
+        // supplies a PATH of its own, so this cannot resolve.
+        sealed: { command: 'definitely-not-on-any-path', passEnv: [] },
+      },
+    },
+    { warn: (message: string) => warnings.push(message) },
+  );
+
+  await plugin.setup?.({ bus: new EventBus(), tools: new ToolRegistry() } as never);
+  await plugin.dispose?.();
+
+  const unreachable = warnings.find((message) => message.includes('is unreachable'));
+  assert.ok(unreachable, 'the server should be reported unreachable, not fail the plugin');
+  assert.match(unreachable, /passEnv does not grant PATH/);
+  assert.match(unreachable, /grant PATH, or give an absolute path/);
 });

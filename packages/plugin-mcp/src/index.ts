@@ -1,5 +1,5 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { DEFAULT_INHERITED_ENV_VARS, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
@@ -23,6 +23,7 @@ import {
 } from './normalize.ts';
 
 export { bridgedToolName, normalizeCallResult, sanitizeToolSegment, SERVER_NAME_PATTERN } from './normalize.ts';
+export { sealedStdioEnv };
 
 /**
  * The MCP bridge: mounts Model Context Protocol servers as Stratus tools.
@@ -247,13 +248,70 @@ const isConnectionFailure = (error: unknown): boolean =>
   || (error instanceof McpError && error.code === ErrorCode.ConnectionClosed)
   || error instanceof TypeError;
 
+/**
+ * The granted environment, plus an explicit refusal of every name the
+ * transport would otherwise inherit on its own.
+ *
+ * `StdioClientTransport` spawns with `{ ...getDefaultEnvironment(), ...env }`
+ * — the SDK's own idea of what a server needs (on POSIX: HOME, LOGNAME,
+ * PATH, SHELL, TERM, USER). That spread is a floor a caller cannot lower by
+ * passing a scrubbed `env`, so a server mounted with `passEnv: []` still
+ * received all six: the operator was told they get a sealed environment and
+ * did not. None of the six is a secret, but which of them a third-party
+ * server learns is the operator's decision, and `tool-shell` — which spawns
+ * directly and shares `DEFAULT_SUBPROCESS_PASS_ENV` so that "what does a
+ * child see" has one answer — already honours it.
+ *
+ * A key mapped to `undefined` is dropped by `spawn` rather than set empty,
+ * which is the difference between a server seeing no `USER` and seeing an
+ * empty one. Read from the SDK's own list rather than a copy of it, so a
+ * name it adds later is refused by the same code.
+ */
+const sealedStdioEnv = (granted: Record<string, string>): Record<string, string> => {
+  const sealed: Record<string, string | undefined> = {};
+  for (const name of DEFAULT_INHERITED_ENV_VARS) {
+    if (!(name in granted)) {
+      sealed[name] = undefined;
+    }
+  }
+  // The cast is the SDK's types not describing the drop-on-undefined
+  // behaviour its own spawn relies on; the values are deliberate.
+  return { ...sealed, ...granted } as Record<string, string>;
+};
+
+/**
+ * The extra sentence an ENOENT deserves when the server's own `passEnv`
+ * withheld `PATH`.
+ *
+ * A relative command is resolved against the child's `PATH`, and since
+ * {@link sealedStdioEnv} stopped the transport from supplying one of its
+ * own, `passEnv: ["HOME"]` turns `command: "npx"` into a bare `spawn npx
+ * ENOENT` — which reads as a missing binary and sends the operator looking
+ * in the wrong place. Only for that combination: an ENOENT with `PATH`
+ * granted really is a missing binary, and saying otherwise would be noise
+ * on the common case.
+ */
+const missingPathHint = (spec: McpServerSpec, error: unknown): string => {
+  const enoent = (error as { code?: string } | undefined)?.code === 'ENOENT'
+    || (error instanceof Error && error.message.includes('ENOENT'));
+  if (
+    !enoent
+    || spec.command === undefined
+    || spec.command.includes('/')
+    || spec.env.PATH !== undefined
+  ) {
+    return '';
+  }
+  return `Its passEnv does not grant PATH, so "${spec.command}" cannot be resolved — grant PATH, or give an absolute path. `;
+};
+
 const buildTransport = (spec: McpServerSpec): Transport => {
   if (spec.command !== undefined) {
     return new StdioClientTransport({
       command: spec.command,
       args: spec.args,
       ...(spec.cwd !== undefined ? { cwd: spec.cwd } : {}),
-      env: spec.env,
+      env: sealedStdioEnv(spec.env),
     });
   }
   // The assertion papers over the SDK's own optional-property types not
@@ -624,6 +682,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
             `mcp server ${state.spec.name} is unreachable — starting without its tools; they register when it comes back. `
             + `Check ${state.spec.command !== undefined ? `the command (${state.spec.command})` : `the endpoint (${state.spec.url})`} `
             + `under plugins["@stratusagent/plugin-mcp"].servers.${state.spec.name}. `
+            + missingPathHint(state.spec, error)
             + `(${error instanceof Error ? error.message : String(error)})`,
           );
           scheduleReconnect(state);
