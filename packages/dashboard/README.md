@@ -14,10 +14,9 @@ single-use sign-in link, and opens your browser at it.
 ## Why it is a separate package
 
 The control API has three consumers and only one of them is a web page. The
-macOS app (roadmap step 07) is deliberately *not* a chat app, and a headless
-VM deployment wants the API with no UI at all. Keeping the UI here means both
-of those install the API alone, and this package can grow without weighting
-them.
+desktop app (roadmap step 07) ships its own UI, and a headless VM deployment
+wants the API with no UI at all. Keeping the UI here means both of those
+install the API alone, and this package can grow without weighting them.
 
 The API auto-loads it: if this package resolves, the dashboard is served. Pass
 `ui: false` to `createControlApi` to run the API bare on a machine that has it
