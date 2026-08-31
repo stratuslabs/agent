@@ -240,6 +240,28 @@ What counts as "recently active" is the client's decision, so this reports a
 timestamp and a count and never a verdict. A daemon that baked a window in
 would need upgrading to change it.
 
+### The client mints the session id
+
+There is no `POST /sessions`. A conversation begins the first time
+`POST /sessions/:id/messages` is called with an id the store does not have,
+and that call must carry `agentId` — there is no stored agent to recover one
+from, so it answers `400 agent_required` without it. Every later message to
+the same id resumes that conversation; passing an `agentId` that disagrees
+with the stored one answers `409 session_agent_mismatch`, because sessions
+never cross agent identities.
+
+Mint the id the way the dashboard does — a UUID the client generates — and
+keep it for the life of the conversation. The daemon does not hand one out,
+so a client that waits for the server to name a session waits forever.
+
+The consequence to design around: an id the daemon has never seen is a *new
+conversation*, not a 404. A client that sends a placeholder, an undefined
+variable, or a mistyped id gets `202` and a durable conversation under that
+name — the dashboard shipped exactly that bug once, posting to
+`/sessions/undefined/messages`. Unlike `agentId`, which is checked against the
+roster and answers `404 agent_not_found` on a typo, the session id is accepted
+as given.
+
 ### Usage is a set of records, never a total
 
 `GET /sessions/:id` carries `usage`: one record per provider call, in the
