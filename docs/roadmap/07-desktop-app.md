@@ -115,11 +115,19 @@ Two supporting facts, both established by the runtime spike
   but because a background daemon cannot depend on a Node that may be absent,
   too old, or an nvm directory that disappears — a failure `readServiceCommand`
   already exists to detect.
-- **Auth is the bearer token.** A desktop app can read
-  `~/.stratus/gateway-token`, which a browser cannot, so it skips the one-time
-  token exchange entirely. Bearer requests are exempt from origin binding by
-  design. The event stream is the exception: a renderer cannot set headers on a
-  WebSocket upgrade, so it opens from the main process.
+- **Auth is the bearer token, and the main process is the only thing that
+  holds it.** A desktop app can read `~/.stratus/gateway-token`, which a
+  browser cannot, so it skips the one-time token exchange entirely — but the
+  *renderer* cannot use it. A packaged renderer's origin is not the daemon's,
+  so an `Authorization` header makes every call a preflighted cross-origin
+  request, and the control API has no `OPTIONS` route and emits no
+  `Access-Control-*` headers: the preflight fails and onboarding never reaches
+  the API at all. So **every** control API call — HTTP and WebSocket alike —
+  is made from the main process, and the renderer reaches it over IPC.
+  Relaxing the API's origin posture instead would be the wrong repair: that
+  posture is a deliberate security invariant, and this one is not a browser.
+  Keeping the token in the main process is the better outcome anyway — it
+  never enters a web context.
 - **Heavy providers are on-demand packs, and that needs a seam first.** The
   Codex and Claude Code SDKs carry ~536 MB of platform binaries between them
   for sign-ins most users will not choose, so they are fetched and
@@ -142,8 +150,12 @@ Two supporting facts, both established by the runtime spike
 - Every file the app writes is byte-compatible with the CLI: `stratus agents`
   lists the agent the app created, and the two can be used interchangeably
   without either corrupting the other's state.
-- The daemon survives logout, login, and reboot, and the menu bar reflects a
-  daemon killed out of band within seconds.
+- The daemon survives logout and log back in, and the menu bar reflects a
+  daemon killed out of band within seconds. **After a reboot it returns at the
+  next login, not at power-on** — a LaunchAgent is tied to a login session, as
+  `installService` already tells the operator, so unattended reboot recovery
+  needs automatic login and the app must say so rather than implying the
+  daemon is always up.
 - Each of the four sign-in paths completes without a terminal, and a key is
   verified before it is stored.
 - The app's own code contains no provider, tool, or loop code, and imports
