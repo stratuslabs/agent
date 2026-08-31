@@ -156,12 +156,15 @@ const createAnthropicTools = (
  */
 interface PromptPlacement {
   system: TextBlockParam[];
+  /** The tool list, possibly carrying the breakpoint; see `buildPrompt`. */
+  tools: AnthropicTool[];
   memoryMessage: string | undefined;
 }
 
 const buildPrompt = (
   request: ProviderRequest,
   systemPrompt: string | undefined,
+  tools: AnthropicTool[],
   options: { cache: boolean; ttl: '5m' | '1h'; memoryAtTail: boolean },
 ): PromptPlacement => {
   const parts = renderSystemPromptParts(request, {
@@ -169,21 +172,29 @@ const buildPrompt = (
   });
   const memory = options.memoryAtTail ? parts.find((part) => part.kind === 'memory') : undefined;
   const stable = memory ? parts.filter((part) => part.kind !== 'memory') : parts;
-  if (stable.length === 0) {
-    return { system: [], memoryMessage: memory?.text };
-  }
-  const block: TextBlockParam = { type: 'text', text: stable.map((part) => part.text).join('\n\n') };
-  // One breakpoint on the last system block, which caches the tool
-  // definitions with it: the wire order is tools -> system -> messages, so a
-  // marker here covers everything ahead of the conversation. Leaves three of
-  // the four the request is allowed for whatever wants one later.
+  const system: TextBlockParam[] = stable.length > 0
+    ? [{ type: 'text', text: stable.map((part) => part.text).join('\n\n') }]
+    : [];
+
+  // The whole breakpoint policy, in one place, because it is one decision:
+  // *where does the stable head end*. The wire order is tools -> system ->
+  // messages, so a marker on the last system block covers the tool
+  // definitions with it — one breakpoint, leaving three of the four the
+  // request is allowed for whatever wants one later.
+  //
+  // An agent with tools but nothing to say — no preamble, no instructions,
+  // no skills — has no system block to carry that marker, and its tool
+  // schemas are often the largest stable thing in the request. So the
+  // breakpoint falls back to the last tool. Never both: two markers on one
+  // contiguous prefix spend a slot to cache the same bytes twice.
   //
   // Annotating a prefix below the model's cacheable minimum is a silent
   // no-op, not an error, so there is nothing to check for first.
-  if (options.cache) {
-    block.cache_control = { type: 'ephemeral', ttl: options.ttl };
+  const head = system.at(-1) ?? tools.at(-1);
+  if (options.cache && head) {
+    head.cache_control = { type: 'ephemeral', ttl: options.ttl };
   }
-  return { system: [block], memoryMessage: memory?.text };
+  return { system, tools, memoryMessage: memory?.text };
 };
 
 /**
@@ -471,7 +482,10 @@ export const createAnthropicProvider = ({
       const tailTakesSystem = messages.at(-1)?.role === 'user';
 
       const buildParams = (memoryAtTail: boolean) => {
-        const prompt = buildPrompt(request, systemPrompt, {
+        // A fresh copy of each tool per attempt: `buildPrompt` may annotate
+        // the last one, and a retry that reused the same objects would carry
+        // the previous attempt's marker.
+        const prompt = buildPrompt(request, systemPrompt, tools.map((tool) => ({ ...tool })), {
           cache: promptCache,
           ttl: promptCacheTtl,
           memoryAtTail,
@@ -480,7 +494,7 @@ export const createAnthropicProvider = ({
           model,
           max_tokens: maxTokens,
           ...(prompt.system.length > 0 ? { system: prompt.system } : {}),
-          ...(tools.length > 0 ? { tools } : {}),
+          ...(prompt.tools.length > 0 ? { tools: prompt.tools } : {}),
           // Claude Opus 5 thinks adaptively when `thinking` is omitted.
           ...(thinking === 'disabled' ? { thinking: { type: 'disabled' as const } } : {}),
           messages: prompt.memoryMessage === undefined

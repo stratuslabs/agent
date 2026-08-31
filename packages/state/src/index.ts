@@ -247,6 +247,14 @@ export interface FallbackRuntime {
    * fallback without one is skipped, not discovered broken mid-rescue.
    */
   codexSubscription?: true;
+  /**
+   * The primary's caching settings, carried so an Anthropic fallback honors
+   * them too. Without this an operator who turned caching off would still
+   * pay the write surcharge on every rescued turn — the one setting whose
+   * whole purpose is not paying it.
+   */
+  promptCache?: boolean;
+  promptCacheTtl?: '5m' | '1h';
 }
 
 export type RuntimeConfig =
@@ -2302,6 +2310,11 @@ export const resolveRuntimeConfig = async (
         resolved.fallback = {
           provider: fallbackProvider,
           model: fileConfig.fallbackModel,
+          // One operator setting for the daemon, so it applies to whichever
+          // Anthropic model ends up serving the turn. Inert on the other two
+          // providers, which do not build their own requests.
+          ...(fileConfig.promptCache !== undefined ? { promptCache: fileConfig.promptCache } : {}),
+          ...(fileConfig.promptCacheTtl ? { promptCacheTtl: fileConfig.promptCacheTtl } : {}),
           ...(fallbackProvider === 'openai'
             ? {
                 baseUrl: fallbackBoundUrl

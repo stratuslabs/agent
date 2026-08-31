@@ -829,3 +829,76 @@ test('an unrelated 400 is not swallowed by the system-message fallback', async (
     /max_tokens/,
   );
 });
+
+test('an agent with tools but nothing to say caches its tool list', async () => {
+  // No preamble, no instructions, no skills — so there is no system block to
+  // carry the breakpoint, and the tool schemas are the largest stable thing
+  // in the request. Without the fallback below they would be re-sent at full
+  // price on every turn of the agent's life.
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'Hi.' }])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+
+  await provider.generate({
+    session: createSession({ agent: { id: 'bare', name: 'Bare' } }),
+    tools: [
+      { name: 'a.one', description: 'One.', parameters: { type: 'object', properties: {} } },
+      { name: 'b.two', description: 'Two.', parameters: { type: 'object', properties: {} } },
+    ],
+  } as ProviderRequest);
+
+  const body = requests[0]!.body;
+  assert.equal(body.system, undefined);
+  assert.equal(body.tools[0].cache_control, undefined);
+  assert.deepEqual(body.tools.at(-1).cache_control, { type: 'ephemeral', ttl: '5m' });
+});
+
+test('the breakpoint is never placed twice on one contiguous prefix', async () => {
+  // A marker on the last system block already covers the tools ahead of it,
+  // so a second one on the last tool would spend a slot to cache the same
+  // bytes twice.
+  const { fetchImpl, requests } = createMockFetch([apiMessage([{ type: 'text', text: 'Hi.' }])]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+
+  await provider.generate({
+    session: createSession(),
+    tools: [{ name: 'a.one', description: 'One.', parameters: { type: 'object', properties: {} } }],
+  } as ProviderRequest);
+
+  const body = requests[0]!.body;
+  assert.deepEqual(body.system[0].cache_control, { type: 'ephemeral', ttl: '5m' });
+  assert.equal(body.tools.at(-1).cache_control, undefined);
+});
+
+test('a retry does not carry the previous attempt\'s tool breakpoint', async () => {
+  // The fallback path rebuilds the request. Tools are copied per attempt, so
+  // an annotation from the rejected attempt cannot leak into the retry and
+  // leave two markers on one prefix.
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_input: any, init?: any) => {
+    const body = JSON.parse(init?.body ?? '{}');
+    bodies.push(body);
+    if (body.messages?.at(-1)?.role === 'system') {
+      return new Response(
+        JSON.stringify({ type: 'error', error: { message: "role 'system' is not supported on this model" } }),
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    return new Response(JSON.stringify(apiMessage([{ type: 'text', text: 'Hi.' }])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  await provider.generate({
+    session: createSession({ agent: { id: 'bare', name: 'Bare' } }),
+    tools: [{ name: 'a.one', description: 'One.', parameters: { type: 'object', properties: {} } }],
+    memory: [{ id: 'm1', agentId: 'bare', content: 'Remembered.', createdAt: new Date().toISOString() }],
+  } as ProviderRequest);
+
+  // The retry moved memory into a system block, so the breakpoint belongs
+  // there — and must no longer be on the tool it fell back to first.
+  const retry = bodies[1]!;
+  assert.deepEqual(retry.system[0].cache_control, { type: 'ephemeral', ttl: '5m' });
+  assert.equal(retry.tools.at(-1).cache_control, undefined);
+});
