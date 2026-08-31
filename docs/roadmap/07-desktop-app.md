@@ -65,6 +65,19 @@ Two supporting facts, both established by the runtime spike
   session list.
   The template's model is a default the user may change; the model, name, and
   channel are theirs to pick. This is the one screen worth designing bespoke.
+
+  **A template that turns on a plugin needs the daemon restarted before that
+  turn, and the app is what restarts it.** Souls hot-reload — `POST
+  /roster/reload` is why a new agent is dispatchable immediately — but plugins
+  do not: `runServe` reads the `plugins` config once and hands that snapshot
+  to `createGateway`, and [27](./27-live-reload.md) keeps the plugin restart
+  deliberately. So a fresh install whose template enables a plugin would run
+  its verification turn against a daemon that has never registered the tools
+  the template just granted, and the turn would fail on the exact capability
+  it exists to prove. The wizard therefore restarts the daemon and waits for
+  health after applying a template that changed plugin configuration, before
+  dispatching. Owning that restart is this step's job rather than an
+  imposition on it — no other surface can do it.
 - **Silent bootstrap.** The app carries its own Node and a prebuilt package
   tree, **installs both to a stable path outside the app bundle**, writes the
   LaunchAgent against that path, starts `stratusd`, and health-checks it. No npm at
@@ -178,6 +191,9 @@ Two supporting facts, both established by the runtime spike
   daemon running and restartable — because no path in the LaunchAgent points
   inside the bundle. Asserted by moving the app and rebooting, not by reading
   the plist.
+- A template that enables a plugin absent at install time still produces a
+  passing verification turn *using a tool that plugin contributed* — the case
+  that fails if the daemon is not restarted between apply and dispatch.
 - The app's own code contains no provider, tool, or loop code, and imports
   none — asserted against the app artifact, not the bundle, which necessarily
   ships the kernel as its daemon payload.
