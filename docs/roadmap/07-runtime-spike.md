@@ -100,8 +100,16 @@ size conversation: an Electron shell is a rounding error beside it.
 
 Dropping those two providers leaves **~45 MB**, which with a 48 MB Node makes
 a lean bundle around **95 MB** that needs no network at all on first run.
-Both providers should become on-demand packs, and the CLI should stop
-depending on them unconditionally — a change that benefits npm users equally.
+
+**Dropping them is not a dependency edit.** `@stratusagent/state` declares
+both as unconditional dependencies and imports `createClaudeCodeProvider` and
+`createCodexProvider` at the top of `src/index.ts`, and the CLI imports `state`
+at startup — so removing only the CLI's direct dependencies leaves the same
+`ERR_MODULE_NOT_FOUND`, raised before the app could fetch the missing pack.
+Making these on-demand packs means moving provider construction behind a
+dynamic seam in `state` and dropping the transitive dependencies with it. That
+is real work in the kernel, it is a prerequisite for the lean bundle rather
+than a consequence of it, and it benefits npm users equally.
 
 ## Sign-in paths, and why none needs a terminal
 

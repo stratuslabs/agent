@@ -8,8 +8,11 @@ is a **distribution and lifecycle vehicle**, not a second management surface:
 it owns installation, the daemon's life, sign-ins, and updates, and it renders
 its own UI against the control API ([05](./05-control-api.md)).
 
-It contains no agent loop, no provider code, and no tool code. The kernel it
-installs is the same TypeScript one everything else runs.
+The bundle holds two artifacts and the distinction is load-bearing: the
+**app** — the UI, the bootstrap, the updater — and the **daemon payload**, the
+kernel's package tree vendored unmodified. The app contains no agent loop, no
+provider, and no tool code; the payload is nothing but those, and is never
+edited here. Every rule below about "no runtime" is about the app.
 
 ## Why now
 
@@ -50,7 +53,11 @@ Two supporting facts, both established by the runtime spike
 **In:**
 
 - **First-run onboarding.** Pick a template ([16](./16-templates.md)), choose a
-  provider and sign in, name the agent, and land on a working conversation.
+  provider and sign in, name the agent, and watch one verification turn
+  succeed — a single dispatched message and its reply, shown as the closing
+  step of the wizard. That is how "it works" is proved without shipping a chat
+  surface, and it is deliberately not one: no history, no second message, no
+  session list.
   The template's model is a default the user may change; the model, name, and
   channel are theirs to pick. This is the one screen worth designing bespoke.
 - **Silent bootstrap.** The app ships its own Node and a prebuilt package tree,
@@ -68,10 +75,15 @@ Two supporting facts, both established by the runtime spike
 
 **Out:**
 
-- **Any runtime.** No agent loop, no provider, no tool, no policy. The only
-  network calls are the control API, the vendor sign-in CLIs, the update feed,
-  and the provider packs. This is a review-level check and a real one.
-- **Chat, sessions, approvals, memory, schedules, cost.** All of it is 17's,
+- **Any runtime in the app.** No agent loop, no provider, no tool, no policy
+  in the app's own code, and its only network calls are the control API, the
+  vendor sign-in CLIs, the update feed, and the provider packs. The daemon
+  payload is exempt by definition — it *is* the runtime — which is why the two
+  are named separately above and why the check below is scoped to the app.
+- **Chat as a surface.** The verification turn above is a wizard step, not a
+  conversation the user can continue; talking to an agent stays the CLI's,
+  Slack's, and 17's. Sessions, approvals, memory, schedules, and cost too — all
+  of it is 17's,
   and all of it is deliberately deferred here — not because the app should
   never have it, but because a first version that also has it ships later and
   proves less. The API makes each one additive.
@@ -108,16 +120,23 @@ Two supporting facts, both established by the runtime spike
   token exchange entirely. Bearer requests are exempt from origin binding by
   design. The event stream is the exception: a renderer cannot set headers on a
   WebSocket upgrade, so it opens from the main process.
-- **Heavy providers are on-demand packs.** The Codex and Claude Code SDKs carry
-  ~536 MB of platform binaries between them for sign-ins most users will not
-  choose. They are fetched and hash-verified only when picked, which also means
-  `@stratusagent/cli` should stop depending on them unconditionally.
+- **Heavy providers are on-demand packs, and that needs a seam first.** The
+  Codex and Claude Code SDKs carry ~536 MB of platform binaries between them
+  for sign-ins most users will not choose, so they are fetched and
+  hash-verified only when picked. Dropping them from `@stratusagent/cli` is not
+  enough to make that work: `@stratusagent/state` declares both as
+  unconditional dependencies and imports `createClaudeCodeProvider` and
+  `createCodexProvider` at module top level, and the CLI imports `state` at
+  startup — so an absent pack is `ERR_MODULE_NOT_FOUND` before anything can
+  fetch it. Provider construction has to move behind a dynamic seam in `state`,
+  and the transitive dependencies drop with it. That is a prerequisite of the
+  lean bundle rather than a detail of it.
 
 ## Acceptance criteria
 
-- On a Mac with no Node, no CLI, and no Homebrew: download, open, and reach a
-  conversation with a working agent in under two minutes, measured end to end,
-  with no terminal opened.
+- On a Mac with no Node, no CLI, and no Homebrew: download, open, and see the
+  first agent answer its verification turn in under two minutes, measured end
+  to end, with no terminal opened.
 - First run completes with the network unplugged after download, up to the
   point where a provider sign-in needs it.
 - Every file the app writes is byte-compatible with the CLI: `stratus agents`
@@ -127,8 +146,9 @@ Two supporting facts, both established by the runtime spike
   daemon killed out of band within seconds.
 - Each of the four sign-in paths completes without a terminal, and a key is
   verified before it is stored.
-- The app binary contains no provider, tool, or loop code — asserted by review
-  and by the absence of those packages from the bundle's tree.
+- The app's own code contains no provider, tool, or loop code, and imports
+  none — asserted against the app artifact, not the bundle, which necessarily
+  ships the kernel as its daemon payload.
 - A downloaded, notarized build opens on a clean Mac with no Gatekeeper
   warning.
 
