@@ -77,10 +77,19 @@ Two supporting facts, both established by the runtime spike
   it exists to prove. The wizard therefore restarts the daemon and waits for
   health after applying a template that changed plugin configuration, before
   dispatching. Owning that restart is this step's job rather than an
-  imposition on it — no other surface can do it.
+  imposition on it — no other surface can do it. A restart re-reads
+  configuration; it cannot make an absent package resolvable, which is why the
+  payload vendors the templates' plugins rather than relying on this.
 - **Silent bootstrap.** The app carries its own Node and a prebuilt package
   tree, **installs both to a stable path outside the app bundle**, writes the
-  LaunchAgent against that path, starts `stratusd`, and health-checks it. No npm at
+  LaunchAgent against that path, starts `stratusd`, and health-checks it. The
+  tree vendors **every plugin the shipped templates name** — [16](./16-templates.md)
+  aborts creation when a template names a plugin that is not installed, and an
+  onboarding wizard has nowhere to send someone holding an install command. A
+  template whose plugin is too heavy to vendor is either not offered on first
+  run or its plugin is fetched as a pack first, on the provider-pack path;
+  `tool-browser` is the one that forces that choice, since it pulls
+  `playwright-core` and a browser download behind it. No npm at
   runtime, no network needed for packages, nothing for the user to install.
 - **Provider sign-in without a terminal**, across the four real paths — a
   Claude API key, a Claude subscription, a ChatGPT subscription, and an
@@ -191,9 +200,11 @@ Two supporting facts, both established by the runtime spike
   daemon running and restartable — because no path in the LaunchAgent points
   inside the bundle. Asserted by moving the app and rebooting, not by reading
   the plist.
-- A template that enables a plugin absent at install time still produces a
-  passing verification turn *using a tool that plugin contributed* — the case
-  that fails if the daemon is not restarted between apply and dispatch.
+- A template that turns on a plugin **vendored but not yet enabled** still
+  produces a passing verification turn *using a tool that plugin contributed*
+  — the case that fails if the daemon is not restarted between apply and
+  dispatch. A template naming a plugin the payload does not carry never
+  reaches onboarding at all, because 16 would refuse it.
 - The app's own code contains no provider, tool, or loop code, and imports
   none — asserted against the app artifact, not the bundle, which necessarily
   ships the kernel as its daemon payload.
