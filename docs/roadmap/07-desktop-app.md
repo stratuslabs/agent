@@ -168,9 +168,23 @@ Two supporting facts, both established by the runtime spike
 
 - **[16](./16-templates.md)** — the onboarding is a template picker, and the
   format does not exist yet. This is the long pole, not the app.
-- **A template read endpoint in `control-api`.** There is none today. 16
-  computes the summary in `@stratusagent/state` precisely so the CLI and 17 can
-  both render it; this app is the third renderer and needs it over HTTP.
+- **Two template endpoints in `control-api`, not one.** There are none today.
+
+  **A read**, because 16 computes the summary in `@stratusagent/state`
+  precisely so the CLI and 17 can both render it, and this app is the third
+  renderer and needs it over HTTP.
+
+  **An atomic apply**, because the client cannot assemble one out of the calls
+  that exist. `POST /agents` takes `instructions`, `name`, `provider`, and
+  `model` and nothing else — no `tools`, `skills`, or `credentials`, and no
+  `plugins` configuration — so applying a template would mean a soul write
+  followed by a separate config write, from a client, with a window between
+  them. 16 requires the opposite in as many words: soul and configuration
+  commit together or not at all, and concurrent creations serialize on the
+  same lock. A client-side pair satisfies neither, and this spec also forbids
+  the app writing `~/.stratus` behind the API's back — so the operation that
+  previews a template and applies it as one committed unit has to live on the
+  server, next to the computation 16 already puts there.
 
 ## Open questions
 
