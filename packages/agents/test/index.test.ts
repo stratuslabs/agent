@@ -624,6 +624,22 @@ test('a session id may open a conversation only when it is a single addressable 
     assert.equal(isValidSessionId(id), true, `${id.slice(0, 40)} is an address`);
   }
 
+  // Agent ids are deliberately unbounded, and every client convention embeds
+  // one — so the budget is spent on top of the agent id, not shared with it.
+  // A flat cap refused every dashboard conversation for an agent whose id ran
+  // past 159 characters: still on the roster, no longer chattable.
+  const longAgentId = 'a'.repeat(300);
+  assert.equal(isValidAgentId(longAgentId), true, 'a long explicit agent id is valid');
+  const dashboardId = `web:${longAgentId}:2f1c9c66-0b1e-4a5f-9a3a-1d6b0c2f4e77`;
+  assert.equal(isValidSessionId(dashboardId, longAgentId), true);
+  // Without the agent id there is no budget for it, and the same id is over.
+  assert.equal(isValidSessionId(dashboardId), false);
+  // The budget is spent on top of the agent id, not unbounded by it.
+  assert.equal(
+    isValidSessionId(`${'b'.repeat(MAX_SESSION_ID_LENGTH + 1)}:${longAgentId}`, longAgentId),
+    false,
+  );
+
   for (const id of [
     '',
     ' ',

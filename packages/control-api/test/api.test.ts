@@ -238,7 +238,7 @@ test('a malformed session id cannot open a conversation, and an existing one is 
     // a QA pass, and `undefined` reached it from the dashboard in real use:
     // an unknown id starts a conversation rather than answering 404, so a
     // placeholder becomes a durable row nobody meant to create.
-    for (const id of ['undefined', 'null', '%20', '.hidden', '..%2F..%2Fetc%2Fpasswd', 'a'.repeat(201)]) {
+    for (const id of ['undefined', 'null', '%20', '.hidden', '..%2F..%2Fetc%2Fpasswd', 'a'.repeat(1000)]) {
       const refused = await harness.call(`/api/v1/sessions/${id}/messages`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -259,6 +259,24 @@ test('a malformed session id cannot open a conversation, and an existing one is 
       });
       assert.equal(accepted.status, 202, `${id} is an address, not a mistake`);
     }
+
+    // An agent id has no length bound on purpose, and the dashboard mints
+    // `web:<agentId>:<uuid>` — so a flat cap on the session id caps the agent
+    // id through the back door, leaving a long-id agent on the roster and
+    // unable to hold a conversation. The budget is spent on top of the agent
+    // id it names.
+    const longAgentId = 'a'.repeat(300);
+    await writeSoul(harness.home, 'long.md', `---\nname: Long\nid: ${longAgentId}\n---\n\nYou are Long.\n`);
+    await harness.gateway.reloadRoster();
+    const longAgentSession = await harness.call(
+      `/api/v1/sessions/${encodeURIComponent(`web:${longAgentId}:2f1c9c66-0b1e-4a5f-9a3a-1d6b0c2f4e77`)}/messages`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: 'hello', agentId: longAgentId }),
+      },
+    );
+    assert.equal(longAgentSession.status, 202, 'a long-id agent must still be able to start a conversation');
 
     // A row that predates the rule addresses a real conversation. Refusing
     // it would lock its owner out of their own history to enforce something

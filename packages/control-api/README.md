@@ -263,11 +263,19 @@ does not exist yet.
 
 What *is* checked, on a new id only, is that it could be an address at all:
 `400 invalid_session_id` for an empty id, one that is not its own trimmed
-self, a leading dot, a path separator or control character, anything past 200
-characters, and the strings JavaScript prints when an id was never computed —
-`undefined`, `null`, `NaN`, `[object Object]`. The dashboard shipped the first
-of those, posting to `/sessions/undefined/messages` and creating a durable
-conversation literally named `undefined`.
+self, a leading dot, a path separator or control character, and the strings
+JavaScript prints when an id was never computed — `undefined`, `null`, `NaN`,
+`[object Object]`. The dashboard shipped the first of those, posting to
+`/sessions/undefined/messages` and creating a durable conversation literally
+named `undefined`.
+
+Length is bounded too, at 200 characters **on top of the agent id the session
+names**. Budgeted that way rather than flat because every convention above
+embeds the agent id and agent ids have no length bound of their own — a flat
+cap would cap them through the back door, leaving a long-id agent on the
+roster and unable to hold a conversation. The allowance is spent against an
+`agentId` already checked against the roster, so it cannot be inflated by
+asking for it.
 
 Shape beyond that is deliberately not enforced: the ids in circulation are
 colon-joined addresses (`web:<agentId>:<uuid>`,

@@ -173,15 +173,23 @@ const isAddressableId = (id: string): boolean =>
 export const isValidAgentId = (id: string): boolean => isAddressableId(id);
 
 /**
- * How long a session id may be when a caller mints a *new* one.
+ * How much of a new session id is the *client's* to spend, on top of the
+ * agent id it addresses.
  *
- * Generous rather than tight: the ids in circulation are colon-joined
- * addresses, not names — `web:<agentId>:<uuid>` from the dashboard, a
- * channel key of `<channel>:<agentId>:<team>:<conversation>:<thread>`, a
- * bare UUID from the CLI — and the longest of those runs past a hundred
- * characters with an agent id at full length. This bounds what a client can
- * write into a table that grows for the life of an install; it is not an
- * opinion about what an id should look like.
+ * Every id in circulation is a colon-joined address that embeds the agent
+ * id — `web:<agentId>:<uuid>` from the dashboard, a channel key of
+ * `<channel>:<agentId>:<team>:<conversation>:<thread>`, with a bare UUID
+ * from the CLI the one exception. So a flat cap is the wrong shape: agent
+ * ids are deliberately unbounded (see {@link isValidAgentId}), and a flat
+ * 200 refused every dashboard conversation for an agent whose id ran past
+ * 159 characters — an agent that stays on the roster and simply stops being
+ * chattable, which is the quiet-breakage failure the unbounded rule exists
+ * to avoid.
+ *
+ * Budgeting the composition instead keeps the bound meaningful without
+ * capping the agent id through the back door. It cannot be gamed to widen
+ * itself: the allowance comes from an agent id already checked against the
+ * roster, not from the caller's own string.
  */
 export const MAX_SESSION_ID_LENGTH = 200;
 
@@ -217,15 +225,20 @@ const STRINGIFIED_NOTHING = new Set(['undefined', 'null', 'NaN', '[object Object
  * {@link MAX_AGENT_ID_LENGTH}, which is why the length bound lives here and
  * not in {@link isValidAgentId}.
  *
+ * `agentId` is the agent the id addresses, when the caller knows it — every
+ * client convention embeds it, so its length is part of the budget rather
+ * than something the bound gets to cap. Omitted, the bound is
+ * {@link MAX_SESSION_ID_LENGTH} alone.
+ *
  * Shape is deliberately not enforced. Every id above is a legitimate
  * address, and no pattern admitting all of them excludes `undefined` — so
  * the safety rule, a bound, and {@link STRINGIFIED_NOTHING} are what catch
  * the real mistakes. Rejected, never sanitized: trimming an id hands the
  * caller back a conversation at an address it never asked for.
  */
-export const isValidSessionId = (id: string): boolean =>
+export const isValidSessionId = (id: string, agentId?: string): boolean =>
   isAddressableId(id)
-  && id.length <= MAX_SESSION_ID_LENGTH
+  && id.length <= MAX_SESSION_ID_LENGTH + (agentId?.length ?? 0)
   && !STRINGIFIED_NOTHING.has(id);
 
 /**
