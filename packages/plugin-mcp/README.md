@@ -113,11 +113,19 @@ handed, so the bridge refuses each of those names explicitly unless this
 config granted it — otherwise `passEnv: []` would still hand a third-party
 server the account the daemon runs as. **Consequence for a narrowed
 `passEnv`:** a `command` without a `/` is resolved against the child's
-`PATH`, so a grant that omits `PATH` leaves only the system default path
-(typically `/bin:/usr/bin`) to find it in — give an absolute command, or
-grant `PATH`. The unreachable-server log line raises that as something to
-check when the command is bare and `PATH` was not granted; it cannot tell
-that case apart from a command that simply is not installed.
+`PATH`, and the child's `PATH` is only what this config granted — so a
+server whose `passEnv` omits `PATH` **must give `command` as an absolute
+path**, and one that does not is refused at load with a message saying so,
+rather than failing at connect as a bare `ENOENT` that reads like a missing
+binary.
+
+Refused rather than diagnosed at runtime because the runtime signal cannot
+be trusted to mean what it says. On Windows the SDK spawns through
+`cross-spawn`, whose resolver hands an absent `PATH` to `which`, and `which`
+falls back to `process.env.PATH` — the daemon's own. A bare command would
+resolve against exactly the environment this config declined to grant. Same
+rule as a malformed `passEnv`: a grant an operator believes is in effect
+must never quietly be nothing.
 
 OAuth-authenticated HTTP servers are not modeled yet; a static bearer in
 `headers` is what exists today.

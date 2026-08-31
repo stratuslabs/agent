@@ -864,29 +864,39 @@ test('a stdio server gets what the operator granted, and the transport inherits 
   assert.equal(withPath.SHELL, undefined);
 });
 
-test('a server whose passEnv withheld PATH is told that, not left with a bare ENOENT', async () => {
-  const warnings: string[] = [];
-  const plugin = createMcpPlugin(
-    {
-      enabled: true,
-      servers: {
-        // A relative command with nothing granted: the transport no longer
-        // supplies a PATH of its own, so this cannot resolve.
-        sealed: { command: 'definitely-not-on-any-path', passEnv: [] },
-      },
+test('a bare command with no PATH granted is refused at load, not left to resolve somewhere', async () => {
+  // The child's PATH is only what the config granted, so a bare command has
+  // no search path — and the runtime signal cannot be trusted to say so: on
+  // Windows the SDK spawns through cross-spawn, whose resolver hands an
+  // absent PATH to `which`, which falls back to the daemon's own PATH. So a
+  // bare command would resolve against exactly the environment this config
+  // declined to grant.
+  await assert.rejects(
+    async () => {
+      const plugin = createMcpPlugin({
+        enabled: true,
+        servers: { sealed: { command: 'npx', passEnv: [] } },
+      });
+      await plugin.setup?.({ bus: new EventBus(), tools: new ToolRegistry() } as never);
     },
-    { warn: (message: string) => warnings.push(message) },
+    /passEnv does not grant PATH/,
   );
 
-  await plugin.setup?.({ bus: new EventBus(), tools: new ToolRegistry() } as never);
-  await plugin.dispose?.();
+  // An absolute command needs no search path, so it is fine with none.
+  const absolute = createMcpPlugin({
+    enabled: true,
+    servers: { sealed: { command: '/usr/bin/definitely-not-installed', passEnv: [] } },
+  }, { warn: () => {} });
+  await absolute.setup?.({ bus: new EventBus(), tools: new ToolRegistry() } as never);
+  await absolute.dispose?.();
 
-  const unreachable = warnings.find((message) => message.includes('is unreachable'));
-  assert.ok(unreachable, 'the server should be reported unreachable, not fail the plugin');
-  // Phrased as something to check, not as the cause: the same ENOENT is what
-  // a misspelled command produces, and execvp falls back to a system default
-  // path when PATH is absent, so a missing PATH is not decisive on its own.
-  assert.match(unreachable, /passEnv does not grant PATH/);
-  assert.match(unreachable, /resolved only against the system default path/);
-  assert.match(unreachable, /grant PATH or give an absolute command/);
+  // And granting PATH keeps a bare command working, whatever the case.
+  for (const key of ['PATH', 'Path']) {
+    const granted = createMcpPlugin({
+      enabled: true,
+      servers: { sealed: { command: 'definitely-not-on-any-path', env: { [key]: '/usr/bin' }, passEnv: [] } },
+    }, { warn: () => {} });
+    await granted.setup?.({ bus: new EventBus(), tools: new ToolRegistry() } as never);
+    await granted.dispose?.();
+  }
 });

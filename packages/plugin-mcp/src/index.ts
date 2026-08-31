@@ -154,6 +154,16 @@ const asStringArray = (value: unknown, where: string): string[] | undefined => {
  * configuration errors and fail the plugin at load — a mistyped block is
  * the operator's to fix, unlike a server that is merely down.
  */
+/**
+ * The granted `PATH`, whatever case the operator spelled it in.
+ *
+ * Case-insensitive because Windows treats environment names that way and
+ * `Path` is what it actually uses — a check keyed to `PATH` alone would
+ * refuse a Windows config that granted the variable perfectly well.
+ */
+const pathGrant = (env: Record<string, string>): string | undefined =>
+  Object.entries(env).find(([key]) => key.toLowerCase() === 'path')?.[1];
+
 const resolveServerSpec = (
   name: string,
   block: unknown,
@@ -209,6 +219,25 @@ const resolveServerSpec = (
     }
   }
   Object.assign(env, asStringRecord(block.env, `${where}.env`));
+
+  // A bare command is resolved against the child's PATH, and the child's
+  // PATH is now only what this config granted — so without one there is no
+  // search path to find it in, and the failure would arrive at connect time
+  // as a bare ENOENT that reads like a missing binary.
+  //
+  // Refused here rather than diagnosed there, because the runtime signal
+  // cannot be trusted to mean what it says: on Windows the SDK spawns
+  // through cross-spawn, whose resolver hands an absent PATH to `which`,
+  // and `which` falls back to `process.env.PATH` — the daemon's own. So a
+  // bare command would still resolve against exactly the environment this
+  // config declined to grant. Same rule as a malformed `passEnv`: a grant
+  // an operator believes is in effect must never quietly be nothing.
+  if (command !== undefined && !/[/\\]/.test(command) && pathGrant(env) === undefined) {
+    throw new McpConfigError(
+      `${where}.command is "${command}", which has to be found on PATH, but ${where}.passEnv does not grant PATH. `
+        + 'Grant PATH, or give the command as an absolute path.',
+    );
+  }
 
   return {
     name,
@@ -277,40 +306,6 @@ const sealedStdioEnv = (granted: Record<string, string>): Record<string, string>
   // The cast is the SDK's types not describing the drop-on-undefined
   // behaviour its own spawn relies on; the values are deliberate.
   return { ...sealed, ...granted } as Record<string, string>;
-};
-
-/**
- * The extra sentence an ENOENT deserves when the server's own `passEnv`
- * withheld `PATH`.
- *
- * A bare command is resolved against the child's `PATH`, and since
- * {@link sealedStdioEnv} stopped the transport from supplying one of its
- * own, `passEnv: ["HOME"]` turns `command: "npx"` into a bare `spawn npx
- * ENOENT` — which reads as a missing binary and sends the operator looking
- * in the wrong place.
- *
- * Stated as something to check rather than as the cause, because this
- * cannot tell the two apart: the same ENOENT is what a misspelled or
- * genuinely absent executable produces, and an absent `PATH` is not even
- * decisive on its own — `execvp` falls back to a system default path
- * (typically `/bin:/usr/bin`), so a command living there still resolves.
- * Only for the combination that makes the question worth raising: an ENOENT
- * with `PATH` granted really is a missing binary, and saying anything there
- * would be noise on the common case.
- */
-const missingPathHint = (spec: McpServerSpec, error: unknown): string => {
-  const enoent = (error as { code?: string } | undefined)?.code === 'ENOENT'
-    || (error instanceof Error && error.message.includes('ENOENT'));
-  if (
-    !enoent
-    || spec.command === undefined
-    || spec.command.includes('/')
-    || spec.env.PATH !== undefined
-  ) {
-    return '';
-  }
-  return `Its passEnv does not grant PATH, so "${spec.command}" is resolved only against the system default path — `
-    + 'if that is not where it lives, grant PATH or give an absolute command. ';
 };
 
 const buildTransport = (spec: McpServerSpec): Transport => {
@@ -690,7 +685,6 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
             `mcp server ${state.spec.name} is unreachable — starting without its tools; they register when it comes back. `
             + `Check ${state.spec.command !== undefined ? `the command (${state.spec.command})` : `the endpoint (${state.spec.url})`} `
             + `under plugins["@stratusagent/plugin-mcp"].servers.${state.spec.name}. `
-            + missingPathHint(state.spec, error)
             + `(${error instanceof Error ? error.message : String(error)})`,
           );
           scheduleReconnect(state);
