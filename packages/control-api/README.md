@@ -255,12 +255,27 @@ keep it for the life of the conversation. The daemon does not hand one out,
 so a client that waits for the server to name a session waits forever.
 
 The consequence to design around: an id the daemon has never seen is a *new
-conversation*, not a 404. A client that sends a placeholder, an undefined
-variable, or a mistyped id gets `202` and a durable conversation under that
-name — the dashboard shipped exactly that bug once, posting to
-`/sessions/undefined/messages`. Unlike `agentId`, which is checked against the
-roster and answers `404 agent_not_found` on a typo, the session id is accepted
-as given.
+conversation*, not a 404. A mistyped id gets `202` and a durable conversation
+under that name, because there is nothing to distinguish it from a client
+opening its second chat. Unlike `agentId`, which is checked against the roster
+and answers `404 agent_not_found` on a typo, a session id names something that
+does not exist yet.
+
+What *is* checked, on a new id only, is that it could be an address at all:
+`400 invalid_session_id` for an empty id, one that is not its own trimmed
+self, a leading dot, a path separator or control character, anything past 200
+characters, and the strings JavaScript prints when an id was never computed —
+`undefined`, `null`, `NaN`, `[object Object]`. The dashboard shipped the first
+of those, posting to `/sessions/undefined/messages` and creating a durable
+conversation literally named `undefined`.
+
+Shape beyond that is deliberately not enforced: the ids in circulation are
+colon-joined addresses (`web:<agentId>:<uuid>`,
+`<channel>:<agentId>:<team>:<conversation>:<thread>`, a bare UUID), and no
+pattern admitting all of them would have excluded `undefined` anyway. **An id
+already in the store is never re-judged** — it addresses a real conversation
+whatever shape it is, and a rule written afterwards does not get to lock its
+owner out of their own history.
 
 ### Usage is a set of records, never a total
 

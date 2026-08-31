@@ -121,7 +121,30 @@ export const MAX_AGENT_ID_LENGTH = 64;
  * a leading dot hides the file or walks up out of it (`..`), and a control
  * character is not typeable back.
  */
-const PATH_UNSAFE_AGENT_ID = /[/\\]|[\u0000-\u001f\u007f]/;
+const PATH_UNSAFE_ID = /[/\\]|[\u0000-\u001f\u007f]/;
+
+/**
+ * The safety half of every id rule here, shared because agent ids and
+ * session ids answer it identically and a second copy would drift from the
+ * first the next time one of them learned something.
+ *
+ * Safety only: what an id may never be. Shape — the slug pattern, a length
+ * bound — is per-kind and stays with the kind, because the reasons differ.
+ */
+const isAddressableId = (id: string): boolean =>
+  id.length > 0
+  // Invisible leading or trailing space cannot be typed back reliably, so
+  // an id that is not its own trimmed self is a mistake, not a legacy.
+  && id === id.trim()
+  && !id.startsWith('.')
+  && !PATH_UNSAFE_ID.test(id)
+  // An id keys plain objects too — `credentials.channels.slack[id]` among
+  // them — where an inherited name is not a free slot. `toString` reads as
+  // already connected with nothing stored, and `__proto__` assigns through
+  // to the prototype, so the write lands nowhere and `JSON.stringify` drops
+  // it. `in {}` names exactly that set, and names it by the property it
+  // has rather than by a list to keep in step.
+  && !(id in {});
 
 /**
  * Whether `id` is safe to key an agent's resources and paths by.
@@ -147,20 +170,63 @@ const PATH_UNSAFE_AGENT_ID = /[/\\]|[\u0000-\u001f\u007f]/;
  * Rejected, never sanitized: rewriting `../../escape` into `escape` hands
  * back an agent nobody asked for, keyed to resources nobody named.
  */
-export const isValidAgentId = (id: string): boolean =>
-  id.length > 0
-  // Invisible leading or trailing space cannot be typed back reliably, so
-  // an id that is not its own trimmed self is a mistake, not a legacy.
-  && id === id.trim()
-  && !id.startsWith('.')
-  && !PATH_UNSAFE_AGENT_ID.test(id)
-  // An id keys plain objects too — `credentials.channels.slack[id]` among
-  // them — where an inherited name is not a free slot. `toString` reads as
-  // already connected with nothing stored, and `__proto__` assigns through
-  // to the prototype, so the write lands nowhere and `JSON.stringify` drops
-  // it. `in {}` names exactly that set, and names it by the property it
-  // has rather than by a list to keep in step.
-  && !(id in {});
+export const isValidAgentId = (id: string): boolean => isAddressableId(id);
+
+/**
+ * How long a session id may be when a caller mints a *new* one.
+ *
+ * Generous rather than tight: the ids in circulation are colon-joined
+ * addresses, not names — `web:<agentId>:<uuid>` from the dashboard, a
+ * channel key of `<channel>:<agentId>:<team>:<conversation>:<thread>`, a
+ * bare UUID from the CLI — and the longest of those runs past a hundred
+ * characters with an agent id at full length. This bounds what a client can
+ * write into a table that grows for the life of an install; it is not an
+ * opinion about what an id should look like.
+ */
+export const MAX_SESSION_ID_LENGTH = 200;
+
+/**
+ * Ids that are a client's bug rendered as text, not an address anyone chose.
+ *
+ * Each is what JavaScript prints when an id was never computed — an
+ * unresolved variable, a null field, arithmetic that went sideways, an
+ * object concatenated into a template. The dashboard shipped the first one:
+ * `/sessions/undefined/messages`, accepted, and a durable conversation
+ * literally named `undefined`.
+ *
+ * A blocklist rather than a pattern, because these are safe, well-formed
+ * strings — nothing about their *shape* is wrong, which is exactly why no
+ * shape rule catches them. Kept to the strings the language itself
+ * produces: guessing at what else looks like a mistake would start refusing
+ * ids people meant.
+ */
+const STRINGIFIED_NOTHING = new Set(['undefined', 'null', 'NaN', '[object Object]']);
+
+/**
+ * Whether `id` may open a *new* conversation.
+ *
+ * Session ids are client-minted and a `POST` to an unknown one creates it,
+ * so this is the only thing standing between an HTTP caller and a durable
+ * row. `undefined`, `null`, and a bare space have all reached the session
+ * table through that door — the dashboard shipped the first of them.
+ *
+ * **Checked where an id is minted, never where one is used.** An id already
+ * in the store addresses a real conversation, whatever shape it is, and
+ * re-validating on read would lock someone out of their own history to
+ * enforce a rule that postdates it. Same reasoning as
+ * {@link MAX_AGENT_ID_LENGTH}, which is why the length bound lives here and
+ * not in {@link isValidAgentId}.
+ *
+ * Shape is deliberately not enforced. Every id above is a legitimate
+ * address, and no pattern admitting all of them excludes `undefined` — so
+ * the safety rule, a bound, and {@link STRINGIFIED_NOTHING} are what catch
+ * the real mistakes. Rejected, never sanitized: trimming an id hands the
+ * caller back a conversation at an address it never asked for.
+ */
+export const isValidSessionId = (id: string): boolean =>
+  isAddressableId(id)
+  && id.length <= MAX_SESSION_ID_LENGTH
+  && !STRINGIFIED_NOTHING.has(id);
 
 /**
  * A freshly minted id, bounded — `base` trimmed so that appending `suffix`

@@ -231,6 +231,55 @@ test('a message returns its turn id, and a new session must name an agent', asyn
   }
 });
 
+test('a malformed session id cannot open a conversation, and an existing one is never re-judged', async () => {
+  const harness = await startApi();
+  try {
+    // Every one of these reached the session table through this door during
+    // a QA pass, and `undefined` reached it from the dashboard in real use:
+    // an unknown id starts a conversation rather than answering 404, so a
+    // placeholder becomes a durable row nobody meant to create.
+    for (const id of ['undefined', 'null', '%20', '.hidden', '..%2F..%2Fetc%2Fpasswd', 'a'.repeat(201)]) {
+      const refused = await harness.call(`/api/v1/sessions/${id}/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: 'hello', agentId: 'stratus' }),
+      });
+      assert.equal(refused.status, 400, `${id} should not open a conversation`);
+      assert.equal((await json<{ error: { code: string } }>(refused)).error.code, 'invalid_session_id');
+    }
+
+    // The ids clients actually mint stay welcome — colon-joined addresses,
+    // not slugs. A rule that took these out would take the dashboard and
+    // every channel session with it.
+    for (const id of ['web:stratus:2f1c9c66-0b1e-4a5f-9a3a-1d6b0c2f4e77', 'slack:stratus:T01:C02:1699999999.0001']) {
+      const accepted = await harness.call(`/api/v1/sessions/${id}/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: 'hello', agentId: 'stratus' }),
+      });
+      assert.equal(accepted.status, 202, `${id} is an address, not a mistake`);
+    }
+
+    // A row that predates the rule addresses a real conversation. Refusing
+    // it would lock its owner out of their own history to enforce something
+    // written after it was created.
+    await harness.gateway.store.create({
+      id: 'undefined',
+      agent: { id: 'stratus', name: 'Stratus' },
+      status: 'completed',
+      messages: [{ id: 'm-1', role: 'user', content: 'hello', createdAt: '2026-08-19T00:00:00.000Z' }],
+    });
+    const resumed = await harness.call('/api/v1/sessions/undefined/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hello', agentId: 'stratus' }),
+    });
+    assert.equal(resumed.status, 202);
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('a parked approval is listed and resolvable, and a late second click is refused', async () => {
   const harness = await startApi({ approvals: true });
   const transport = harness.transport;

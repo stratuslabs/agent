@@ -2,7 +2,15 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 
-import { describeSchedule, formatSoul, isValidAgentId, parseSoul, type ParsedSoul } from '@stratusagent/agents';
+import {
+  describeSchedule,
+  formatSoul,
+  isValidAgentId,
+  isValidSessionId,
+  MAX_SESSION_ID_LENGTH,
+  parseSoul,
+  type ParsedSoul,
+} from '@stratusagent/agents';
 import type { JsonObject } from '@stratusagent/core';
 import type { Gateway } from '@stratusagent/gateway';
 import { redactAnthropicRawTurns } from '@stratusagent/provider-anthropic';
@@ -661,6 +669,19 @@ export const routes: Route[] = [
       const agentId = optionalString(body, 'agentId');
 
       const existing = await context.gateway.store.get(sessionId);
+      // Only a NEW id is held to the rule. An id already in the store
+      // addresses a real conversation whatever shape it is, and refusing it
+      // here would lock a caller out of its own history over a rule that
+      // postdates the row.
+      if (!existing && !isValidSessionId(sessionId)) {
+        throw new ApiError(
+          400,
+          'invalid_session_id',
+          'That session id cannot start a conversation: an id must be a single addressable segment — no path separators or control characters, '
+            + `no leading dot, no surrounding whitespace, and at most ${MAX_SESSION_ID_LENGTH} characters. `
+            + 'Mint one per conversation the way the dashboard does, as web:<agentId>:<uuid>.',
+        );
+      }
       if (!existing && agentId === undefined) {
         throw new ApiError(
           400,
