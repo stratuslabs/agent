@@ -58,13 +58,27 @@ Two supporting facts, both established by the runtime spike
 **In:**
 
 - **First-run onboarding.** Pick a template ([16](./16-templates.md)), choose a
-  provider and sign in, name the agent, and watch one verification turn
-  succeed — a single dispatched message and its reply, shown as the closing
-  step of the wizard. That is how "it works" is proved without shipping a chat
+  provider and sign in, name the agent, **approve what the template grants**,
+  and watch one verification turn succeed — a single dispatched message and
+  its reply, shown as the closing step of the wizard. That is how "it works" is proved without shipping a chat
   surface, and it is deliberately not one: no history, no second message, no
   session list.
   The template's model is a default the user may change; the model, name, and
   channel are theirs to pick. This is the one screen worth designing bespoke.
+
+  **The grant review is not a step the wizard may skip.** 16 calls it the
+  product: before anything is written, the operator sees every tool with its
+  resolved risk, every credential the bundle will ask for, and every plugin it
+  enables — as the diff against the configuration that exists, not the
+  template's requested values — and confirms. A wizard that applied a template
+  without it would delete the gate 16 exists to preserve while keeping its
+  name, which is the one outcome that spec rules out. So the apply endpoint
+  takes a confirmation, the app renders the summary rather than computing one
+  (16 owns the computation in `@stratusagent/state`; the CLI, [17](./17-fleet-console.md),
+  and this app are three renderers of it), and there is no `--yes` equivalent
+  here — that flag exists for scripting, and a first-run wizard is the
+  opposite of scripting. Whatever 16 decides about disclosing a glob as a
+  glob, this renders that decision; it does not re-derive it.
 
   **A template that turns on a plugin needs the daemon restarted before that
   turn, and the app is what restarts it.** Souls hot-reload — `POST
@@ -200,6 +214,11 @@ Two supporting facts, both established by the runtime spike
   daemon running and restartable — because no path in the LaunchAgent points
   inside the bundle. Asserted by moving the app and rebooting, not by reading
   the plist.
+- Onboarding cannot apply a template without the operator confirming a
+  summary that lists every tool with its resolved risk, every credential
+  requested, and every plugin change — and the summary the app shows is
+  identical to what `stratus agent new --template X` prints for the same
+  template on the same host, because it is the same computation.
 - A template that turns on a plugin **vendored but not yet enabled** still
   produces a passing verification turn *using a tool that plugin contributed*
   — the case that fails if the daemon is not restarted between apply and
