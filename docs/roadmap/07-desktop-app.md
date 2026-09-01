@@ -79,10 +79,18 @@ Two supporting facts, both established by the runtime spike
   aborts creation when a template names a plugin that is not installed, and an
   onboarding wizard has nowhere to send someone holding an install command. A
   template whose plugin is too heavy to vendor is either not offered on first
-  run or its plugin is fetched as a pack first, on the provider-pack path;
-  `tool-browser` is the one that forces that choice, since it pulls
-  `playwright-core` and a browser download behind it. No npm at
-  runtime, no network needed for packages, nothing for the user to install.
+  run or its plugin is fetched as a pack first, on the provider-pack path.
+
+  **Vendoring a plugin is not the same as making it work**, and
+  `tool-browser` is the case that separates them. It is *cheap* to vendor —
+  `playwright-core` is a few megabytes and, as its README says, "downloads no
+  browser" — so the package sails through 16's installed check and every
+  `browser.*` call then fails anyway, because the browser is one the operator
+  already has, one they name with `executablePath`, or one they fetched with
+  `npx playwright install chromium`. A browser-backed template therefore needs
+  the pack to carry and configure an executable, or detection of a supported
+  installed browser, or not to be offered on first run. No npm at runtime, no
+  network needed for packages, nothing for the user to install.
 - **Provider sign-in without a terminal**, across the four real paths — a
   Claude API key, a Claude subscription, a ChatGPT subscription, and an
   OpenAI-compatible key. Subscription sign-ins spawn the vendor CLI as a child
@@ -275,10 +283,15 @@ specifies the sequence should start here.
   stops the service first — so an ordinary command from a separately
   installed newer build stamps the state while this app's older daemon keeps
   running and writing the previous schema. Nothing the app can do alone
-  prevents that, because the app is not the process doing the migrating. The
-  migrating build has to stop or fence an active daemon first, whoever owns
-  it. Without this, the acceptance criterion above forbids a corruption the
-  stated dependencies still permit.
+  prevents that, because the app is not the process doing the migrating.
+
+  **And the daemon is not the only writer.** The version guard runs once, at
+  startup, so a `stratus chat` or `stratus run` that was already going when a
+  newer build migrated keeps writing the format it started with — the same
+  hazard, in a process no service manager owns and nothing can restart. The
+  protocol has to fence *every* active state-writing process, not just
+  `stratusd`. Without it, the acceptance criterion above forbids a corruption
+  the stated dependencies still permit.
 - **Two template endpoints in `control-api`, not one.** There are none today.
 
   **A read**, because 16 computes the summary in `@stratusagent/state`
