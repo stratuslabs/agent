@@ -103,19 +103,32 @@ Two supporting facts, both established by the runtime spike
   health after applying a template that changed plugin configuration, before
   dispatching.
 
-  **The wizard resolves approvals for that one turn, and only that turn.** A
-  fresh daemon runs `headless`, which rejects a `gated` call outright —
-  *"nobody is available to approve it"* — and the templates worth shipping
-  grant gated tools: a research agent's `web.fetch`, a triage agent's, an
-  operator agent's `shell.run`. So the promised verification turn would fail
-  on every template that does something. `headless` is the correct default
-  and the wrong description of this moment: it means nobody is present to
-  ask, and during onboarding somebody demonstrably is, watching the screen.
-  So the wizard answers that one call and no other. This is a deliberate and
-  narrow exception to approvals being 17's — a single prompt for a single
-  turn, not the approvals queue — and the alternative is worse: a first-run
-  demo restricted to capabilities that need no permission, which is a demo of
-  nothing the product is for. Owning that restart is this step's job rather than an
+  **The verification turn runs under `remote`, and the wizard answers the one
+  approval it parks.** A fresh daemon runs `headless`, which rejects a
+  `gated` call outright — *"nobody is available to approve it"* — and the
+  templates worth shipping grant gated tools: a research agent's `web.fetch`,
+  an operator agent's `shell.run`. So the promised turn would fail on every
+  template that does something.
+
+  Wanting the wizard to "just answer it" is not enough, because `headless`
+  returns false directly and never parks anything for a client to resolve.
+  The mode that does is `remote`: the call parks on a published request, and
+  `GET`/`POST /approvals` — which 05 already ships, and which
+  [17](./17-fleet-console.md) is built on for exactly the case where the
+  approver is not in Slack — lists and answers it. `runServe` resolves the
+  mode once at startup, so this is a restart rather than a toggle, and it
+  composes with the restart the template already forces: the wizard brings
+  the daemon up in `remote` for the verification turn, answers the single
+  parked call, and **restores `headless` afterwards**. Onboarding must not
+  leave a daemon that asks a UI nobody has open.
+
+  `headless` is the right default and the wrong description of this one
+  moment: it means nobody is present to ask, and during onboarding somebody
+  demonstrably is, one step after approving the grant summary. The exception
+  is deliberate and bounded to that turn — not the approvals queue, which
+  stays 17's. The alternative is worse: a first-run demo restricted to
+  capabilities that need no permission, which is a demo of nothing the
+  product is for. Owning that restart is this step's job rather than an
   imposition on it — no other surface can do it. A restart re-reads
   configuration; it cannot make an absent package resolvable, which is why the
   payload vendors the templates' plugins rather than relying on this.
@@ -265,8 +278,9 @@ Two supporting facts, both established by the runtime spike
   identical to what `stratus agent new --template X` prints for the same
   template on the same host, because it is the same computation.
 - A template granting a `gated` tool completes its verification turn on a
-  fresh install, with the wizard resolving the one approval — the case that
-  fails outright under the `headless` default a new daemon starts with.
+  fresh install — the case that fails outright under the `headless` default a
+  new daemon starts with — and the daemon is back in `headless` when
+  onboarding finishes, asserted rather than assumed.
 - A template that turns on a plugin **vendored but not yet enabled** still
   produces a passing verification turn *using a tool that plugin contributed*
   — the case that fails if the daemon is not restarted between apply and
