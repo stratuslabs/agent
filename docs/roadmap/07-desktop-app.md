@@ -210,9 +210,15 @@ Two supporting facts, both established by the runtime spike
   to end, with no terminal opened.
 - First run completes with the network unplugged after download, up to the
   point where a provider sign-in needs it.
-- Every file the app writes is byte-compatible with the CLI: `stratus agents`
-  lists the agent the app created, and the two can be used interchangeably
-  without either corrupting the other's state.
+- Every file the app writes is byte-compatible with the CLI **at the same
+  state schema version**: `stratus agents` lists the agent the app created,
+  and the two can be used interchangeably. Across versions they cannot, by
+  design — the build with the newer `STATE_SCHEMA_VERSION` migrates
+  `~/.stratus` and stamps it, and the older one then *refuses to run its
+  daemon* rather than reading state it does not understand. So the criterion
+  is that the app **detects and explains** that refusal, naming which install
+  is behind; a user who upgraded the CLI must not be left looking at a dead
+  daemon and an app that cannot say why.
 - The daemon survives logout and log back in, and the menu bar reflects a
   daemon killed out of band within seconds. **After a reboot it returns at the
   next login, not at power-on** — a LaunchAgent is tied to a login session, as
@@ -269,12 +275,23 @@ Two supporting facts, both established by the runtime spike
 
 ## Open questions
 
-- **Two installs, one `~/.stratus`.** Someone who has the app and later runs
-  `npm install -g @stratusagent/cli` gets two versions over one state
-  directory. The token file already survives two daemons racing; a `sessions.db`
-  schema difference does not. This is what makes the state-file compatibility
-  contract (`docs/architecture/state-files.md`, still unwritten) load-bearing
-  rather than nice to have.
+- **Two installs, one `~/.stratus`, and this one is not hypothetical.**
+  Someone who has the app and later runs `npm install -g @stratusagent/cli`
+  gets two builds over one state directory, and `@stratusagent/state` already
+  decides what happens: whichever build is newer migrates and stamps the
+  state, and the older one throws rather than starting, because *"the daemon
+  refuses to run against a HIGHER version than it understands"*. That is the
+  right behavior — it refuses instead of corrupting — but it means the two
+  installs are only interchangeable while their schema versions agree, and
+  nothing today coordinates that.
+
+  What is undecided is the coordination, not the safety: whether the app
+  pins its payload to a schema version and refuses to install over newer
+  state, whether it offers to update the payload when it finds state ahead
+  of it, or whether the state-file compatibility contract
+  (`docs/architecture/state-files.md`, still unwritten) is where this gets
+  settled for both surfaces at once. The last is the most likely and is why
+  that document is load-bearing rather than nice to have.
 - **Does onboarding lead with the demo provider?** Landing on a working
   conversation before asking for a sign-in is the only version of the
   two-minute claim that does not depend on a vendor's console. The cost is that
