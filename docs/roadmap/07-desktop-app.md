@@ -100,10 +100,22 @@ Two supporting facts, both established by the runtime spike
   template whose plugin is too heavy to vendor is either not offered on first
   run or its plugin is fetched as a pack first, on the provider-pack path.
 
+  **The health check has to identify the process, not just the port.** A
+  `stratus serve` someone started by hand owns the same default port, the same
+  `~/.stratus`, and the same gateway token, and `installService`'s
+  `launchctl bootout` clears a previous launchd *job*, not a process nobody
+  registered. The API's `listen` rejects on `EADDRINUSE`, so the app's own job
+  dies on start and `KeepAlive` retries it — while `/health` answers happily
+  from the other process, carrying no pid and no executable path to tell the
+  two apart, and `~/.stratus/gateway.json` already points there. Bootstrap
+  would report success over a crash-looping job, and every later start, stop,
+  and restart would aim at something else. So the app correlates what answers
+  with what it launched, and adopts or refuses a foreign daemon deliberately.
+
   **Every optional peer of the CLI is a payload decision, and each absence is
-  silent by design.** This is the second rule, separate from the plugins: a
-  payload resolved from the CLI's dependency tree plus what the templates name
-  gets *none* of them, because that is what optional means. `package.json`
+  silent by design.** A rule separate from the plugins above, and missed for
+  the same reason: a payload resolved from the CLI's dependency tree plus what
+  the templates name gets *none* of them, because that is what optional means. `package.json`
   declares three, and they fail differently:
 
   - **`@stratusagent/control-api` — required, and its absence is the worst
@@ -151,6 +163,18 @@ Two supporting facts, both established by the runtime spike
 - **Daemon lifecycle.** Menu-bar presence with health, start/stop/restart,
   install/uninstall the LaunchAgent, and an honest state when the daemon is
   down.
+
+  **Including removal, which on macOS means dragging the app to the Trash and
+  running no code at all.** The menu's uninstall action only exists while the
+  app does. And the decision that makes moves and updates safe — runtime,
+  payload, and LaunchAgent all live *outside* the bundle — is exactly what
+  makes removal leak: launchd keeps running a daemon that still holds provider
+  credentials and still answers in Slack, for a product the user believes they
+  deleted. So this step owes an uninstall contract, and the honest options are
+  few: a launchd job that notices its payload is gone and unloads itself, or a
+  visible uninstaller the app points at, or an explicit decision that removal
+  is a menu action and the app says so before it is ever dragged anywhere. No
+  contract at all is the one answer that is wrong.
 - **Updates.** Signed, notarized, auto-updating, with the package tree updated
   as part of the app rather than separately.
 
@@ -361,6 +385,15 @@ specifies the sequence should start here.
   criterion is conditional on that spike rather than asserted over it: if
   `setup-token` demands a terminal, it is four paths and an honest message on
   the fifth.
+- Onboarding does not report a running daemon on the strength of a healthy
+  port. Asserted with a hand-started `stratus serve` already holding it: the
+  app must notice that the daemon answering is not the one its LaunchAgent
+  launched — and adopt it or refuse — rather than proceeding while its own job
+  crash-loops behind a green check.
+- Removing the app stops the daemon, or tells the user plainly how to. Asserted
+  by dragging `Stratus.app` to the Trash and confirming that nothing is left
+  connected to Slack and answering on the API port, since no app code runs on
+  that path.
 - Moving `Stratus.app` to another folder, and updating it, both leave the
   daemon running and restartable — because no path in the LaunchAgent points
   inside the bundle. Asserted by moving the app and rebooting, not by reading
