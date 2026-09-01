@@ -596,17 +596,44 @@ export const withoutSqliteExperimentalWarning = (
 };
 
 /**
+ * The name Node gives its own `warning` printer. Matched rather than assumed
+ * so that a Node which renames it simply stops being filtered — the warning
+ * comes back, which is noise, where guessing wrong would rewrite somebody
+ * else's listener.
+ */
+const NODE_DEFAULT_WARNING_LISTENER = 'onWarning';
+
+/**
  * Swap Node's default warning printer for the filtered one above.
  *
- * Node installs its printer as an ordinary `warning` listener, so adding
- * one alongside it would print twice rather than filter; the default has to
- * come off and be handed to the replacement. Called once from the binary,
- * before anything imports the session store.
+ * Node installs its printer as an ordinary `warning` listener, so adding one
+ * alongside it would print twice rather than filter; the default has to come
+ * off and be handed to the replacement.
+ *
+ * **Only ever Node's own printer.** Wrapping a listener somebody else
+ * registered changes it in two ways that are not ours to change: `listeners()`
+ * hands back the *unwrapped* function for a `once` listener, so re-registering
+ * it makes it permanent — it then runs for every later warning instead of one
+ * — and a caller that keeps a reference can no longer `process.off('warning',
+ * theirs)`, because what is registered is this wrapper. So when anything other
+ * than the default is present — a `--require` preload, an embedding host — this
+ * does nothing at all and the warning stays. A host that took an interest in
+ * warnings owns them.
+ *
+ * Called once from the binary, before anything imports the session store.
  */
 export const filterSqliteExperimentalWarning = (process_: NodeJS.EventEmitter = process): void => {
-  const existing = process_.listeners('warning') as ((warning: Error) => void)[];
+  // rawListeners, not listeners: the wrapper is the registration, and only it
+  // carries the once-ness. It matters even here, where the guard below means
+  // the sole listener is Node's own — the next reader should not have to know
+  // that to see why this is safe.
+  const existing = process_.rawListeners('warning') as ((warning: Error) => void)[];
+  const [only] = existing;
+  if (existing.length !== 1 || only?.name !== NODE_DEFAULT_WARNING_LISTENER) {
+    return;
+  }
   process_.removeAllListeners('warning');
-  process_.on('warning', withoutSqliteExperimentalWarning(existing));
+  process_.on('warning', withoutSqliteExperimentalWarning([only]));
 };
 
 const HELP_TEXT = `Stratus Agent CLI

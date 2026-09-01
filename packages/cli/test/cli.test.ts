@@ -135,9 +135,9 @@ test('the node:sqlite experimental warning is dropped and every other warning st
 test('filtering replaces the default warning listener rather than stacking on it', () => {
   const emitter = new EventEmitter();
   const printed: string[] = [];
-  // Standing in for Node's own printer, which is an ordinary listener: left
-  // in place, it would print the warning the filter exists to drop.
-  emitter.on('warning', (warning: Error) => printed.push(warning.message));
+  // Standing in for Node's own printer, which is an ordinary listener under
+  // this name: left in place, it would print the warning the filter drops.
+  emitter.on('warning', function onWarning(warning: Error) { printed.push(warning.message); });
 
   filterSqliteExperimentalWarning(emitter);
   assert.equal(emitter.listenerCount('warning'), 1, 'the default listener was replaced, not joined');
@@ -147,6 +147,43 @@ test('filtering replaces the default warning listener rather than stacking on it
 
   emitter.emit('warning', new Error('a warning worth reading'));
   assert.deepEqual(printed, ['a warning worth reading']);
+});
+
+test('a warning listener somebody else registered is left exactly as they registered it', () => {
+  // Wrapping a foreign listener changes it in two ways that are not ours to
+  // change, so the filter declines to act at all when one is present.
+
+  // A `once` listener: `listeners()` hands back the unwrapped function, so
+  // re-registering it would make it permanent.
+  const withOnce = new EventEmitter();
+  let onceFired = 0;
+  withOnce.once('warning', function onWarning() { onceFired += 1; });
+  filterSqliteExperimentalWarning(withOnce);
+  withOnce.emit('warning', new Error('a'));
+  withOnce.emit('warning', new Error('b'));
+  withOnce.emit('warning', new Error('c'));
+  assert.equal(onceFired, 1, 'a once listener must still fire exactly once');
+
+  // An ordinary listener a caller still holds a reference to: it must remain
+  // detachable with `off`, which it is not once a wrapper stands in for it.
+  const withOwn = new EventEmitter();
+  const seen: string[] = [];
+  const theirs = (warning: Error): void => { seen.push(warning.message); };
+  withOwn.on('warning', theirs);
+  filterSqliteExperimentalWarning(withOwn);
+  withOwn.off('warning', theirs);
+  withOwn.emit('warning', new Error('after they detached it'));
+  assert.deepEqual(seen, [], 'their own reference still detaches their listener');
+
+  // Two listeners — the default plus a preload's — is also hands-off.
+  const both = new EventEmitter();
+  const heard: string[] = [];
+  both.on('warning', function onWarning() { heard.push('default'); });
+  both.on('warning', () => heard.push('preload'));
+  filterSqliteExperimentalWarning(both);
+  assert.equal(both.listenerCount('warning'), 2, 'left alone');
+  both.emit('warning', experimentalWarning('SQLite is an experimental feature and might change at any time'));
+  assert.deepEqual(heard, ['default', 'preload'], 'unfiltered, because the set is not ours to rewrite');
 });
 
 test('parseCommand accepts positional prompts', () => {
