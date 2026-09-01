@@ -170,6 +170,15 @@ specifies the sequence should start here.
 - **A daemon left in `remote` with nobody watching is a broken install.**
   Whatever changes the mode has to restore it on *every* exit — cancelled,
   crashed, or abandoned — and recover on next start, not only on success.
+- **Channel credentials are a startup snapshot too, and binding one is
+  ordered after creation.** `PUT /credentials/channels/slack` refuses an agent
+  that is not already on the roster — deliberately, so a typo cannot store real
+  Slack secrets against an agent that never comes online — so the bind can only
+  happen after the agent exists. By then the running daemon has already read
+  `loadChannelCredentials` once and built its Slack adapter from that snapshot,
+  so storing the tokens does not connect the new agent. A flow that offers a
+  channel during onboarding has to account for the reconnect, the same way it
+  accounts for a newly enabled plugin.
 - **Plugins are a startup snapshot; souls are not.** `runServe` reads the
   plugin config once and hands it to `createGateway`, while
   `POST /roster/reload` re-reads agents — which is why a new agent is

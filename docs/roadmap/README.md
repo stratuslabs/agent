@@ -92,9 +92,10 @@ Two consequences for what ranks first:
   Four shapes of work: **kernel** — every runtime import of the two optional
   providers out of `state` and the CLI, and a migration fencing protocol that
   stops or fences *any* active state-writing process, not only `stratusd`;
-  **API** — a template read and an atomic apply, since `POST /agents` carries
-  no allowlists or plugin configuration while [16](./16-templates.md) requires
-  the soul and the config to commit together; **an unrun spike** — whether
+  **API** — a template read, an atomic apply (since `POST /agents` carries no
+  allowlists or plugin configuration while [16](./16-templates.md) requires the
+  soul and the config to commit together), and a sign-in capability descriptor,
+  because the API can perform a sign-in but cannot describe one; **an unrun spike** — whether
   `claude setup-token` can be captured without a TTY, which decides one of the
   five sign-in paths; and **the onboarding sequence itself**, deliberately
   unwritten after a detailed version was specified and falsified repeatedly
