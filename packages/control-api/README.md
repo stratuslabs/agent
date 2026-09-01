@@ -103,7 +103,7 @@ log, and an address bar is one that gets noticed when it changes.
 | GET | `/sessions/:id` | One session, provider replay state stripped — including `usage`, the token records of every provider call it has made |
 | POST | `/sessions/:id/messages` | Dispatch a message; returns `202 { sessionId, turnId }`. A `schedule:`-prefixed id answers `400 session_id_reserved` — those belong to scheduled firings |
 | GET | `/approvals` | Calls parked on a human right now |
-| POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }` |
+| POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }`, where `answer` is `once`, `always`, or `deny` — see [below](#always-does-not-mean-one-thing) |
 | GET | `/schedules` | Every schedule the fleet has set — cadence, prompt, pre-authorized destination, next firing. The audit list: each row with a destination is a standing permission to speak |
 | DELETE | `/schedules/:id` | Cancel a schedule. Also revokes the destination grant riding on the row — a still-running firing's next send is gated normally. 404 when no such schedule exists |
 | GET | `/catalog/models` | Models the stored sign-ins can actually reach, listed live |
@@ -348,6 +348,47 @@ Subscription-billed providers report tokens too, even though the operator is
 not billed per token for them. That is deliberate: it is how you compare what
 a run *would* cost across providers, and a session that fell back mid-run
 makes that a live question rather than a hypothetical.
+
+### `always` does not mean one thing
+
+`POST /approvals` takes `answer` as exactly `once`, `always`, or `deny`;
+anything else is `400 invalid_answer`. `actor` is optional and records who
+decided — a channel-native id, such as a Slack user. A request that has
+already been decided, has expired, or whose turn was cancelled answers `409
+approval_not_pending` rather than silently doing nothing twice.
+
+`once` and `deny` mean what they say, for this call. **`always` has two
+different lifetimes, and which one the approver got depends on the tool:**
+
+- For a tool whose call carries a **command** — `shell.run` today — it
+  remembers a *command scope*, durable and per agent. Approving `git push
+  origin main` persists `git push` minus its destructive forms, so `git push
+  --force` still asks. That grant survives restarts.
+- For **every other tool**, it is remembered against the tool name in memory,
+  and lasts until the session ends **or the daemon restarts, whichever comes
+  first**. Sessions are durable and restarts are not; a session resumed in a
+  new process asks again, so this is strictly weaker than "for this
+  conversation".
+
+There is a third outcome behind the same answer: a command this daemon's
+parser cannot reduce to a scope — a pipe, a subshell, an unbalanced quote —
+is approved *once*, because widening to the bare tool would hand the agent
+every command for the rest of the session. The call runs; the grant is not
+remembered.
+
+So one grant is written to disk beside the agent's soul and the other lives
+in a `Set` for as long as the process does. A client that renders `always` as
+one button is therefore promising something whose duration it cannot know —
+and **nothing in this API tells it which it got**. `POST /approvals` answers `{ ok: true }`, and the
+`tool.approval-resolved` event carries the `answer` that was submitted plus a
+`reason` of `decided`, `timeout`, `cancelled`, or `undeliverable` — which is
+why the request stopped being pending, not how long the grant lasts. The
+daemon logs the difference (a remembered command scope is logged as one); an
+API client cannot see it.
+
+So word the button for the weaker guarantee. "Allow" is honest for both
+lifetimes; "always allow" is only true for the command-scope case, and a
+client cannot tell in advance that it is in that case.
 
 ### Two invariants worth stating
 
