@@ -117,7 +117,12 @@ app could fetch the missing pack.
 
 Making these on-demand packs therefore means a dynamic seam in `state` **and**
 moving the CLI's own imports behind it, with the dependencies dropped from both
-manifests. That is real work in the kernel, it is a prerequisite for the lean
+manifests. And the seam has to catch **every runtime import, not every
+provider construction**: `state` imports `DEFAULT_CODEX_MODEL` as well as
+`createCodexProvider` and resolves default models with it, so deferring the
+factory while leaving the constant changes nothing. Either both packages lose
+every runtime import from `state` and the CLI, or those defaults move into a
+package that stays bundled. That is real work in the kernel, it is a prerequisite for the lean
 bundle rather than a consequence of it, and it benefits npm users equally.
 
 ## Sign-in paths, and why none needs a terminal

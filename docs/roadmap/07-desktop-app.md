@@ -217,11 +217,18 @@ specifies the sequence should start here.
   fetch it. **And `state` is not the only importer:** `cli/src/index.ts`
   itself imports `createClaudeCodeProvider`, `hasHostedToolSideEffects`, and
   `ClaudeCodeToolExecutor` from one and `DEFAULT_CODEX_MODEL` from the other,
-  at module top level — a bare constant is enough to pull the package. So the
-  seam has to cover both: provider construction moves behind a dynamic import
-  in `state`, the CLI's own direct imports move with it, and the
-  dependencies drop from both manifests. That is a prerequisite of the lean
-  bundle rather than a detail of it.
+  at module top level.
+
+  **The seam is every runtime import, not every provider construction.** A
+  bare constant pulls the package just as surely as a factory does, and both
+  files have one: `state` imports `DEFAULT_CODEX_MODEL` alongside
+  `createCodexProvider` and resolves default models with it. So deferring
+  construction while leaving the constant behind changes nothing — the daemon
+  still fails at load. Either both packages lose *every* runtime import from
+  `state` and the CLI, or the defaults move into a package that stays
+  bundled. That is a prerequisite of the lean bundle rather than a detail of
+  it. (`provider-anthropic` is unaffected: it stays bundled, so
+  `DEFAULT_ANTHROPIC_MODEL` can keep its ordinary import.)
 
 ## Acceptance criteria
 
