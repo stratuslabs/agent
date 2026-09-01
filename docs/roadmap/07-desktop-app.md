@@ -118,9 +118,23 @@ Two supporting facts, both established by the runtime spike
   approver is not in Slack — lists and answers it. `runServe` resolves the
   mode once at startup, so this is a restart rather than a toggle, and it
   composes with the restart the template already forces: the wizard brings
-  the daemon up in `remote` for the verification turn, answers the single
-  parked call, and **restores `headless` afterwards**. Onboarding must not
-  leave a daemon that asks a UI nobody has open.
+  the daemon up in `remote` for the verification turn, **shows the operator
+  the parked call and takes an explicit Allow once / Deny**, and then
+  **restores `headless`**. Onboarding must not leave a daemon that asks a UI
+  nobody has open.
+
+  **The wizard must not answer that call on the operator's behalf, and the
+  reason is the whole design of 03.** The allowlist and the invocation are
+  *separate gates* — "the kernel's per-agent tool allowlist stays the first
+  gate; this engine governs *invocations* of allowed tools" — and
+  `PendingApproval` carries `call.input`, the concrete arguments, precisely
+  so a human sees what is about to run. The grant summary approved a
+  capability; it did not approve a command the model had not yet chosen. An
+  auto-answered request would execute a model-selected `shell.run` or
+  `web.fetch` that nobody saw, which is the same gate-deleted-while-keeping-
+  its-name failure the review step exists to prevent — committed here in the
+  one place a human is definitely watching. So the wizard renders the
+  invocation the way the Slack adapter does and waits.
 
   `headless` is the right default and the wrong description of this one
   moment: it means nobody is present to ask, and during onboarding somebody
@@ -301,6 +315,15 @@ Two supporting facts, both established by the runtime spike
 
 - **[16](./16-templates.md)** — the onboarding is a template picker, and the
   format does not exist yet. This is the long pole, not the app.
+- **A migration fencing protocol in the CLI**, not only in this app. A newer
+  CLI migrates state from its general startup path, and only `stratus update`
+  stops the service first — so an ordinary command from a separately
+  installed newer build stamps the state while this app's older daemon keeps
+  running and writing the previous schema. Nothing the app can do alone
+  prevents that, because the app is not the process doing the migrating. The
+  migrating build has to stop or fence an active daemon first, whoever owns
+  it. Without this, the acceptance criterion above forbids a corruption the
+  stated dependencies still permit.
 - **Two template endpoints in `control-api`, not one.** There are none today.
 
   **A read**, because 16 computes the summary in `@stratusagent/state`
@@ -332,13 +355,15 @@ Two supporting facts, both established by the runtime spike
   installs are only interchangeable while their schema versions agree, and
   nothing today coordinates that.
 
-  What is undecided is the coordination, not the safety: whether the app
-  pins its payload to a schema version and refuses to install over newer
-  state, whether it offers to update the payload when it finds state ahead
-  of it, or whether the state-file compatibility contract
-  (`docs/architecture/state-files.md`, still unwritten) is where this gets
-  settled for both surfaces at once. The last is the most likely and is why
-  that document is load-bearing rather than nice to have.
+  **No app-only choice closes this**, which is why it is a dependency below
+  rather than an open question here. A newer CLI migrates from its general
+  startup path on an ordinary command, before this app is asked anything, so
+  pinning the payload, refusing to install over newer state, or offering to
+  update all fail the same way: the older daemon is already running and keeps
+  writing its schema. Fencing has to happen on the side doing the migrating.
+  What remains genuinely open is only where the protocol is written down —
+  most likely `docs/architecture/state-files.md`, still unwritten, which is
+  why that document keeps turning up as load-bearing.
 - **Does onboarding lead with the demo provider?** Landing on a working
   conversation before asking for a sign-in is the only version of the
   two-minute claim that does not depend on a vendor's console. The cost is that
