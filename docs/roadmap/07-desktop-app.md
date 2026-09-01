@@ -228,8 +228,8 @@ specifies the sequence should start here.
   point where a provider sign-in needs it.
 - Every file the app writes is byte-compatible with the CLI **at the same
   state schema version**: `stratus agents` lists the agent the app created,
-  and the two can be used interchangeably. Across versions they cannot, by
-  design — the build with the newer `STATE_SCHEMA_VERSION` migrates
+  and the two can be used interchangeably **for reading and writing state**.
+  Across versions they cannot, by design — the build with the newer `STATE_SCHEMA_VERSION` migrates
   `~/.stratus` and stamps it, and the older one refuses to *start* against
   state it does not understand.
 
@@ -246,6 +246,19 @@ specifies the sequence should start here.
   explain** the resulting state, naming which install is behind — a user who
   upgraded their CLI must not be left with a silently divergent daemon, nor
   with a dead one and an app that cannot say why.
+
+  **Lifecycle commands are a separate question, and they are not
+  interchangeable at all.** There is one LaunchAgent: `service.ts` writes
+  `~/Library/LaunchAgents/com.stratusagent.stratusd.plist` under the fixed
+  label `com.stratusagent.stratusd`, `installService` boots out and replaces
+  whatever job is already there, and `uninstallService` removes the unit
+  outright. So `stratus service install` or `stratus update` from a global
+  CLI silently repoints the daemon at that CLI's Node and entrypoint, and an
+  app update or uninstall can remove a unit the CLI installed. Schema fencing
+  does not touch this: it is an ownership collision over a single shared
+  resource, not a versioning one. Who owns the unit when both are installed
+  has to be decided — the criterion here is only that the app never silently
+  takes it, and says what it found when the unit is not the one it wrote.
 - The daemon survives logout and log back in, and the menu bar reflects a
   daemon killed out of band within seconds. **After a reboot it returns at the
   next login, not at power-on** — a LaunchAgent is tied to a login session, as
