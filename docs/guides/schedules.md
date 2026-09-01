@@ -44,7 +44,11 @@ destination, because that is what is being approved. See
 - **Each firing is its own session** (`schedule:<id>:<slot>`), dispatched
   through the same path a channel message takes, marked `scheduled: true`
   in metadata. Continuity across firings is what
-  [agent memory](../concepts/memory.md) is for.
+  [agent memory](../concepts/memory.md) is for. That prefix is **reserved**:
+  a firing's session carries the destination grant approved with the
+  schedule, so nothing outside the scheduler may dispatch into one. The
+  daemon refuses it, and the control API answers `400 session_id_reserved`
+  rather than accepting a turn that could never run.
 - **Schedules are immutable.** Editing is cancel-plus-create, so the
   approval's scope is exactly the row's lifetime.
 - **A destination is validated at creation** — the agent's Slack app must
