@@ -57,95 +57,21 @@ Two supporting facts, both established by the runtime spike
 
 **In:**
 
-- **First-run onboarding.** Pick a template ([16](./16-templates.md)), choose a
-  provider and sign in, name the agent, **approve what the template grants**,
-  and watch one verification turn succeed — a single dispatched message and
-  its reply, shown as the closing step of the wizard. That is how "it works" is proved without shipping a chat
-  surface, and it is deliberately not one: no history, no second message, no
-  session list.
-  The template's model is a default the user may change; the model, name, and
-  channel are theirs to pick. This is the one screen worth designing bespoke.
+- **First-run onboarding**, as a [16](./16-templates.md) template picker: pick
+  a template, choose a provider and sign in, name the agent, review what the
+  bundle grants, and land on a created, running agent. The template's model is
+  a default the user may change; the model, name, and channel are theirs to
+  pick. This is the one screen worth designing bespoke.
 
-  **The grant review is not a step the wizard may skip.** 16 calls it the
-  product: before anything is written, the operator sees every tool with its
-  resolved risk, every credential the bundle will ask for, and every plugin it
-  enables — as the diff against the configuration that exists, not the
-  template's requested values — and confirms. A wizard that applied a template
-  without it would delete the gate 16 exists to preserve while keeping its
-  name, which is the one outcome that spec rules out. So the apply endpoint
-  takes a confirmation, the app renders the summary rather than computing one
-  (16 owns the computation in `@stratusagent/state`; the CLI, [17](./17-fleet-console.md),
-  and this app are three renderers of it), and there is no `--yes` equivalent
-  here — that flag exists for scripting, and a first-run wizard is the
-  opposite of scripting. Whatever 16 decides about disclosing a glob as a
-  glob, this renders that decision; it does not re-derive it.
+  **The sequence is deliberately left unspecified here.** An earlier revision
+  of this step specified it in detail and was wrong repeatedly — thirteen
+  review rounds, four of them finding defects in the fix for the round before,
+  including one that would have had the wizard auto-approve a tool invocation
+  no human had seen. What that review did establish is a set of constraints
+  the real design has to satisfy, and those are recorded below because they
+  are the durable part. Writing the flow itself is work for whoever schedules
+  this step, with the constraints in hand.
 
-  **The confirmation is bound to the summary it answers.** A review is an
-  interactive pause, and no server holds a creation lock across one — 16's
-  lock serializes the *write*, not the minutes a person spends reading. So
-  between preview and apply, another client can enable a plugin, change its
-  settings, or install one, and a bare "yes" would then commit an effective
-  result the operator never saw. The apply request therefore carries a digest
-  of the inputs the preview was computed from, and the server recomputes and
-  **refuses with a fresh summary** when they no longer match, rather than
-  applying. Without that, the mandatory review is defeated by timing rather
-  than by bypass — which is the same gate deleted more quietly.
-
-  **A template that turns on a plugin needs the daemon restarted before that
-  turn, and the app is what restarts it.** Souls hot-reload — `POST
-  /roster/reload` is why a new agent is dispatchable immediately — but plugins
-  do not: `runServe` reads the `plugins` config once and hands that snapshot
-  to `createGateway`, and [27](./27-live-reload.md) keeps the plugin restart
-  deliberately. So a fresh install whose template enables a plugin would run
-  its verification turn against a daemon that has never registered the tools
-  the template just granted, and the turn would fail on the exact capability
-  it exists to prove. The wizard therefore restarts the daemon and waits for
-  health after applying a template that changed plugin configuration, before
-  dispatching.
-
-  **The verification turn runs under `remote`, and the wizard answers the one
-  approval it parks.** A fresh daemon runs `headless`, which rejects a
-  `gated` call outright — *"nobody is available to approve it"* — and the
-  templates worth shipping grant gated tools: a research agent's `web.fetch`,
-  an operator agent's `shell.run`. So the promised turn would fail on every
-  template that does something.
-
-  Wanting the wizard to "just answer it" is not enough, because `headless`
-  returns false directly and never parks anything for a client to resolve.
-  The mode that does is `remote`: the call parks on a published request, and
-  `GET`/`POST /approvals` — which 05 already ships, and which
-  [17](./17-fleet-console.md) is built on for exactly the case where the
-  approver is not in Slack — lists and answers it. `runServe` resolves the
-  mode once at startup, so this is a restart rather than a toggle, and it
-  composes with the restart the template already forces: the wizard brings
-  the daemon up in `remote` for the verification turn, **shows the operator
-  the parked call and takes an explicit Allow once / Deny**, and then
-  **restores `headless`**. Onboarding must not leave a daemon that asks a UI
-  nobody has open.
-
-  **The wizard must not answer that call on the operator's behalf, and the
-  reason is the whole design of 03.** The allowlist and the invocation are
-  *separate gates* — "the kernel's per-agent tool allowlist stays the first
-  gate; this engine governs *invocations* of allowed tools" — and
-  `PendingApproval` carries `call.input`, the concrete arguments, precisely
-  so a human sees what is about to run. The grant summary approved a
-  capability; it did not approve a command the model had not yet chosen. An
-  auto-answered request would execute a model-selected `shell.run` or
-  `web.fetch` that nobody saw, which is the same gate-deleted-while-keeping-
-  its-name failure the review step exists to prevent — committed here in the
-  one place a human is definitely watching. So the wizard renders the
-  invocation the way the Slack adapter does and waits.
-
-  `headless` is the right default and the wrong description of this one
-  moment: it means nobody is present to ask, and during onboarding somebody
-  demonstrably is, one step after approving the grant summary. The exception
-  is deliberate and bounded to that turn — not the approvals queue, which
-  stays 17's. The alternative is worse: a first-run demo restricted to
-  capabilities that need no permission, which is a demo of nothing the
-  product is for. Owning that restart is this step's job rather than an
-  imposition on it — no other surface can do it. A restart re-reads
-  configuration; it cannot make an absent package resolvable, which is why the
-  payload vendors the templates' plugins rather than relying on this.
 - **Silent bootstrap.** The app carries its own Node and a prebuilt package
   tree, **installs both to a stable path outside the app bundle**, writes the
   LaunchAgent against that path, starts `stratusd`, and health-checks it. The
@@ -174,13 +100,10 @@ Two supporting facts, both established by the runtime spike
   vendor sign-in CLIs, the update feed, and the provider packs. The daemon
   payload is exempt by definition — it *is* the runtime — which is why the two
   are named separately above and why the check below is scoped to the app.
-- **Chat as a surface.** The verification turn above is a wizard step, not a
-  conversation the user can continue; talking to an agent stays the CLI's,
-  Slack's, and 17's. Sessions, memory, schedules, and cost too — all
-  of it is 17's,
-  and all of it is deliberately deferred here — not because the app should
-  never have it, but because a first version that also has it ships later and
-  proves less. The API makes each one additive.
+- **Chat as a surface.** Talking to an agent stays the CLI's, Slack's, and
+  17's. Sessions, memory, schedules, and cost too — all of it is 17's, and all
+  of it is deliberately deferred here: a first version that also has it ships
+  later and proves less. The API makes each one additive.
 - **Reusing `@stratusagent/dashboard`.** The app has its own UI in its own
   repository. `dashboard` keeps its no-build-step, no-dependency posture, which
   a desktop UI would otherwise erode.
@@ -188,6 +111,44 @@ Two supporting facts, both established by the runtime spike
 - **A second copy of any rule.** Every screen resolves through the control API,
   which resolves through `@stratusagent/state`. Same constraint 17 carries, and
   the app is now the third consumer that would break it.
+
+## Constraints the onboarding design must satisfy
+
+Not a design. These are facts about the system this step runs on, each one
+established by reading the code rather than by reasoning about it, and each
+one something a plausible-looking onboarding flow gets wrong. Whoever
+specifies the sequence should start here.
+
+- **The allowlist and the invocation are separate gates.** 03 states it:
+  *"the kernel's per-agent tool allowlist stays the first gate; this engine
+  governs invocations of allowed tools."* `PendingApproval` carries
+  `call.input` so a human sees the concrete arguments. Approving a template's
+  grant is not approving a command the model has not yet chosen, and nothing
+  in this app may answer a parked request on the operator's behalf.
+- **A fresh daemon is `headless`, which refuses gated calls outright** rather
+  than parking them — *"nobody is available to approve it"*. Every template
+  worth shipping grants gated tools, so any flow that exercises a template's
+  capability has to account for this. `remote` is the mode that parks a call
+  for a client to answer, and `runServe` resolves the mode once at startup, so
+  changing it is a restart rather than a toggle.
+- **A turn can park more than once.** `runToolCalls` iterates every call in a
+  response and applies the policy to each, and it runs at more than one point
+  in the turn loop, so later model iterations park again. Any approval
+  handling is a loop until the session completes, not a single answer.
+- **A daemon left in `remote` with nobody watching is a broken install.**
+  Whatever changes the mode has to restore it on *every* exit — cancelled,
+  crashed, or abandoned — and recover on next start, not only on success.
+- **Plugins are a startup snapshot; souls are not.** `runServe` reads the
+  plugin config once and hands it to `createGateway`, while
+  `POST /roster/reload` re-reads agents — which is why a new agent is
+  dispatchable immediately and a newly enabled plugin is not.
+- **A missing plugin is not a restart away.** 16 refuses to create anything
+  when a template names an uninstalled plugin, and no restart makes an absent
+  package resolvable, so the payload has to carry what the shipped templates
+  name.
+- **The review is bound to what it reviewed.** 16's lock serializes the write,
+  not the minutes a person spends reading, so an apply has to carry a digest
+  of the previewed inputs and be refused when they have changed.
 
 ## Design sketch
 
@@ -251,9 +212,10 @@ Two supporting facts, both established by the runtime spike
 
 ## Acceptance criteria
 
-- On a Mac with no Node, no CLI, and no Homebrew: download, open, and see the
-  first agent answer its verification turn in under two minutes, measured end
-  to end, with no terminal opened.
+- On a Mac with no Node, no CLI, and no Homebrew: download, open, and reach a
+  created, running agent in under two minutes, measured end to end, with no
+  terminal opened. What "running" is demonstrated *by* is the onboarding
+  design's to settle; the budget is not.
 - First run completes with the network unplugged after download, up to the
   point where a provider sign-in needs it.
 - Every file the app writes is byte-compatible with the CLI **at the same
@@ -296,15 +258,8 @@ Two supporting facts, both established by the runtime spike
   requested, and every plugin change — and the summary the app shows is
   identical to what `stratus agent new --template X` prints for the same
   template on the same host, because it is the same computation.
-- A template granting a `gated` tool completes its verification turn on a
-  fresh install — the case that fails outright under the `headless` default a
-  new daemon starts with — and the daemon is back in `headless` when
-  onboarding finishes, asserted rather than assumed.
-- A template that turns on a plugin **vendored but not yet enabled** still
-  produces a passing verification turn *using a tool that plugin contributed*
-  — the case that fails if the daemon is not restarted between apply and
-  dispatch. A template naming a plugin the payload does not carry never
-  reaches onboarding at all, because 16 would refuse it.
+- A template naming a plugin the payload does not carry never reaches
+  onboarding, because 16 would refuse to create anything from it.
 - The app's own code contains no provider, tool, or loop code, and imports
   none — asserted against the app artifact, not the bundle, which necessarily
   ships the kernel as its daemon payload.

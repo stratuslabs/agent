@@ -86,16 +86,18 @@ Two consequences for what ranks first:
   people every path into this product currently loses at a terminal. The
   runtime questions are settled in
   [07-runtime-spike.md](./07-runtime-spike.md) — a shipped Node, a prebuilt
-  package tree, no package manager at first run — so what remains is mostly
-  unblocked. Two things are not. The onboarding screen waits on
-  [16](./16-templates.md) and on two endpoints the API does not have: a
-  template read, and an atomic apply, since `POST /agents` carries no
-  allowlists and no plugin configuration while 16 requires the soul and the
-  config to commit together. And one of the four sign-in paths waits on a
-  spike the container could not run: whether `claude setup-token` can be
-  captured without a TTY, which is what makes the Claude subscription
-  terminal-free or not. It is scoped so that it can start when it is chosen,
-  not because it is scheduled.
+  package tree, no package manager at first run — and the distribution,
+  packaging and lifecycle half is scoped to that standard. Three things are
+  not. The onboarding screen waits on [16](./16-templates.md) and on two
+  endpoints the API does not have: a template read, and an atomic apply, since
+  `POST /agents` carries no allowlists and no plugin configuration while 16
+  requires the soul and the config to commit together. One of the four sign-in
+  paths waits on a spike the container could not run: whether `claude
+  setup-token` can be captured without a TTY. And **the onboarding sequence
+  itself is deliberately unwritten** — a detailed version was specified and
+  falsified repeatedly under review, so the step records the constraints any
+  design must satisfy and leaves the design to whoever schedules it. It is
+  scoped so that it can start when it is chosen, not because it is scheduled.
 - **[12](./12-plugin-registry.md) — plugin registry.** Deferred, and now narrower. Discovery and distribution for an ecosystem that does not exist yet is a platform built for nobody; the trigger to revisit is third-party plugins existing that we did not write, and [19](./19-registration-seams.md) is a prerequisite either way — there is no point distributing channel or provider plugins that nothing can register.
 
   **Skills are the half that was never really deferred**, because that reasoning does not apply to them: the standard exists, the ecosystem exists, and somebody else already built the distribution. That is [25](./25-skills-interop.md), and it needs no registry of ours at all.
