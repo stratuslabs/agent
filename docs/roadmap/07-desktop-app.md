@@ -63,6 +63,17 @@ Two supporting facts, both established by the runtime spike
   a default the user may change; the model, name, and channel are theirs to
   pick. This is the one screen worth designing bespoke.
 
+  **That override is a change to 16's contract, not a liberty this step
+  takes.** 16 renders exactly two per-agent values — the id and the display
+  name — and keeps everything else literal *"so what the operator reviewed is
+  what lands on disk"*. A model the user picked is neither literal nor one of
+  those two, so it has to become an **explicit reviewed input**: carried into
+  the preview, shown in the summary, and covered by the digest the apply
+  refuses on. Otherwise the operator approves one bundle and installs
+  another, which is the property 16's literalness exists to protect. Listed
+  in [Depends on](#depends-on); picking a model in a wizard is not worth
+  weakening that rule for, and does not have to.
+
   **The sequence is deliberately left unspecified here.** An earlier revision
   of this step specified it in detail and was wrong repeatedly — thirteen
   review rounds, four of them finding defects in the fix for the round before,
@@ -282,11 +293,14 @@ specifies the sequence should start here.
 - Moving `Stratus.app` to another folder, and updating it, both leave the
   daemon running and restartable — because no path in the LaunchAgent points
   inside the bundle. Asserted by moving the app and rebooting, not by reading
-  the plist. **An install that fetched a provider pack stays working across
-  that update too**: the update installs a new versioned runtime directory, so
-  a pack living in the old tree would leave the daemon unable to resolve a
-  provider the config still names. Retained, migrated, or refetched is a
-  choice — having no answer is not, and it is part of where packs live below.
+  the plist. **An install that fetched anything on demand stays working across
+  that update too** — a provider pack, a template's plugin pack, or a browser
+  executable a `browser.*` template needed. The update installs a new
+  versioned runtime directory, so any of them left in the old tree leaves the
+  daemon unable to resolve something the persisted config still names, and the
+  agent without capabilities its operator reviewed and approved. Retained,
+  migrated, or refetched is a choice — having no answer is not, and it is part
+  of where packs live below.
 - A template whose effective result changed between preview and confirmation
   is refused, and the operator is shown the new summary rather than the old
   one being applied — asserted by mutating the config between the two calls.
@@ -294,6 +308,7 @@ specifies the sequence should start here.
   summary that lists every tool with its resolved risk, every credential
   requested, and every plugin change — and the summary the app shows is
   identical to what `stratus agent new --template X` prints for the same
+  overrides on the same
   template on the same host, because it is the same computation.
 - A template naming a plugin the payload does not carry never reaches
   onboarding, because 16 would refuse to create anything from it.
@@ -307,6 +322,12 @@ specifies the sequence should start here.
 
 - **[16](./16-templates.md)** — the onboarding is a template picker, and the
   format does not exist yet. This is the long pole, not the app.
+- **16's contract extended to carry provider and model overrides** as explicit
+  reviewed inputs. Today it renders only the id and the display name and keeps
+  the rest literal, which a wizard offering a model picker contradicts. The
+  extension is small and keeps the property intact — the override is previewed,
+  summarised, and digest-bound like everything else — but it is a change to
+  another step's format, not something this one can assume.
 - **A migration fencing protocol in the CLI**, not only in this app. A newer
   CLI migrates state from its general startup path, and only `stratus update`
   stops the service first — so an ordinary command from a separately
