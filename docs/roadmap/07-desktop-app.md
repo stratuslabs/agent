@@ -51,8 +51,10 @@ Two supporting facts, both established by the runtime spike
   — so a fresh install learns nothing from it. Which providers take an API key
   versus a subscription, and which vendor command a subscription spawns, is
   knowledge only the CLI holds today, and an app that hardcoded it would be
-  the second copy this step's Out list forbids. That descriptor is in
-  [Depends on](#depends-on). What they also do **not** cover is
+  the second copy this step's Out list forbids. **The same is true of a
+  channel**: the bind route takes two Slack tokens and says nothing about the
+  manifest, scopes, or steps that produce them. That descriptor — both sides
+  of it — is in [Depends on](#depends-on). What they also do **not** cover is
   template-backed creation, which is the flow this step's onboarding actually
   uses — see [Depends on](#depends-on). Read the two together: connecting
   accounts needs no API work, and creating an agent from a template needs two
@@ -457,14 +459,32 @@ specifies the sequence should start here.
   protocol has to fence *every* active state-writing process, not just
   `stratusd`. Without it, the acceptance criterion above forbids a corruption
   the stated dependencies still permit.
-- **A sign-in capability descriptor in `control-api`.** The wizard has to know
-  which providers accept an API key, which accept a subscription, and which
-  vendor command a subscription sign-in spawns. No endpoint answers that:
-  `GET /credentials` reports presence and stored type, `/catalog/models` needs
-  a credential before it says anything, and the rest of the knowledge lives in
-  the CLI's setup menus. Either it becomes a descriptor both surfaces read, or
-  the app carries a copy that drifts the first time a provider gains an auth
-  method — which is the failure this step's Out list names.
+- **A capability descriptor in `control-api`, covering sign-ins *and* channel
+  setup.** Two sides of one defect: the API can *perform* either and can
+  *describe* neither.
+
+  **Sign-ins.** The wizard has to know which providers accept an API key,
+  which accept a subscription, and which vendor command a subscription sign-in
+  spawns. No endpoint answers that: `GET /credentials` reports presence and
+  stored type, `/catalog/models` needs a credential before it says anything,
+  and the rest of the knowledge lives in the CLI's setup menus.
+
+  **Channel setup, which is the same shape and easy to miss because the bind
+  route looks complete.** `PUT /credentials/channels/slack` takes `agentId`,
+  `appToken`, and `botToken` and never says where those come from, and
+  `GET /credentials` returns only `channels: { slack: [agentIds] }` — which
+  agents have tokens, nothing about getting one. Everything a first-time user
+  actually needs is in the CLI: the app manifest, the bot scopes and events
+  the adapter requires, the ordered steps through Slack's UI, and even the
+  `xapp-`/`xoxb-` prefix checks that catch a pasted wrong token before it is
+  stored. `slackAppManifest` is already exported and already pinned by a test
+  to the manifest `channel-slack` ships, so the duplication hazard here is
+  understood in the code — an app in a separate repository hardcoding the same
+  contract would be the third copy.
+
+  Either both become descriptors the surfaces read, or the app carries copies
+  that drift the first time a provider gains an auth method or the adapter
+  needs a new scope — which is the failure this step's Out list names.
 - **Two template endpoints in `control-api`, not one.** There are none today.
 
   **A read**, because 16 computes the summary in `@stratusagent/state`

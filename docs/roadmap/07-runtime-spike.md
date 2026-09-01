@@ -189,12 +189,15 @@ them: `POST /agents`, `GET /catalog/models`, `POST /credentials/verify`,
 `PUT /credentials/:provider`, `PUT /credentials/channels/:channel`,
 `GET,PUT /config`.
 
-**Not covered:** three things. First, *describing* a sign-in — the endpoints
-above store and verify a credential, but `GET /credentials` reports only
-presence and `/catalog/models` returns nothing without one, so a fresh install
-cannot learn which providers accept a key versus a subscription without
-copying the CLI's table. Second, template-backed creation, which is what 07's
-onboarding actually uses. [16](./16-templates.md) has not started, and `control-api` has
+**Not covered:** three things. First, *describing what to ask for* — the
+endpoints above store and verify a credential, but `GET /credentials` reports
+only presence and `/catalog/models` returns nothing without one, so a fresh
+install cannot learn which providers accept a key versus a subscription without
+copying the CLI's table. Channel setup has the identical gap behind a
+friendlier face: the bind route takes two Slack tokens and describes neither
+the manifest, the scopes, nor the steps that produce them, all of which are
+CLI-only. Second, template-backed creation, which is what 07's onboarding
+actually uses. [16](./16-templates.md) has not started, and `control-api` has
 no template endpoint of any kind. It needs two: a read, and an **atomic
 apply** — `POST /agents` accepts only `instructions`, `name`, `provider`, and
 `model`, so a client applying a template would write a soul and then write
