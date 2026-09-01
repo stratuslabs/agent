@@ -4,6 +4,9 @@ import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontex
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
+import { accessSync, constants, statSync } from 'node:fs';
+import { join } from 'node:path';
+
 import {
   DEFAULT_SUBPROCESS_PASS_ENV,
   type ExecutionContext,
@@ -23,7 +26,7 @@ import {
 } from './normalize.ts';
 
 export { bridgedToolName, normalizeCallResult, sanitizeToolSegment, SERVER_NAME_PATTERN } from './normalize.ts';
-export { sealedStdioEnv, pathGrant };
+export { sealedStdioEnv, pathGrant, resolveCommandPath };
 
 /**
  * The MCP bridge: mounts Model Context Protocol servers as Stratus tools.
@@ -381,10 +384,135 @@ const sealedStdioEnv = (
   return merged as Record<string, string>;
 };
 
+/**
+ * The extensions Windows treats as executable when `PATHEXT` was not
+ * granted. A constant rather than the daemon's own `PATHEXT`, for the same
+ * reason `pathGrant` refuses an empty `PATH`: a value this config did not
+ * grant is not part of the search it declared.
+ */
+const WINDOWS_DEFAULT_PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC';
+
+/**
+ * The granted search path as directories, in order.
+ *
+ * An empty entry is dropped rather than read as the current directory the
+ * way a shell would. The daemon's working directory is precisely what this
+ * resolver exists to keep out of the search, and an operator who does want
+ * a directory searched can name it.
+ */
+const searchEntries = (search: string, platform: NodeJS.Platform): string[] => search
+  .split(platform === 'win32' ? ';' : ':')
+  // cross-spawn's resolver strips these, and a quoted entry is common enough
+  // in a Windows `Path` that leaving the quotes on would drop the directory.
+  .map((entry) => (platform === 'win32' ? entry.replace(/^"|"$/g, '') : entry))
+  .filter((entry) => entry.length > 0);
+
+/**
+ * The filenames a command could have inside one directory.
+ *
+ * On POSIX, itself. On Windows the extension is what makes a file runnable,
+ * so every `PATHEXT` entry is a candidate — and a command that already
+ * carries a dot is tried as written first, which is what `cmd.exe` and
+ * `which` both do.
+ */
+const commandCandidates = (
+  command: string,
+  platform: NodeJS.Platform,
+  pathext: string | undefined,
+): string[] => {
+  if (platform !== 'win32') {
+    return [command];
+  }
+  const extensions = (pathext ?? WINDOWS_DEFAULT_PATHEXT).split(';').filter((ext) => ext.length > 0);
+  return command.includes('.')
+    ? [command, ...extensions.map((ext) => `${command}${ext}`)]
+    : extensions.map((ext) => `${command}${ext}`);
+};
+
+/** Whether a candidate is a file this platform would actually run. */
+const isRunnableFile = (candidate: string, platform: NodeJS.Platform): boolean => {
+  try {
+    if (!statSync(candidate).isFile()) {
+      return false;
+    }
+    // Windows has no execute bit; the extension decided it, in the candidate
+    // list above.
+    if (platform === 'win32') {
+      return true;
+    }
+    accessSync(candidate, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * A bare command resolved to a path against the granted search path, by us
+ * rather than by the spawn.
+ *
+ * `StdioClientTransport` spawns through `cross-spawn`, whose Windows
+ * resolver puts `process.cwd()` at the front of the search path ahead of
+ * anything the operator granted — `which/which.js` says so in its own
+ * comment, "windows always checks the cwd first". The daemon's working
+ * directory is not a grant, and an `npx.cmd` dropped into it would run in
+ * place of the one on the granted `PATH`.
+ *
+ * Handing the transport a path it does not have to search removes that. It
+ * is done on every platform rather than behind a Windows branch, so that
+ * the resolution Windows depends on is the one CI exercises, and so that
+ * "what does this command resolve to" has one answer instead of two.
+ */
+const resolveCommandPath = (
+  command: string,
+  granted: Record<string, string>,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined => {
+  const search = pathGrant(granted, platform);
+  if (search === undefined) {
+    return undefined;
+  }
+  const pathext = platform === 'win32' ? grantedEntry(granted, 'PATHEXT', platform)?.[1] : undefined;
+  for (const entry of searchEntries(search, platform)) {
+    for (const candidate of commandCandidates(command, platform, pathext)) {
+      const full = join(entry, candidate);
+      if (isRunnableFile(full, platform)) {
+        return full;
+      }
+    }
+  }
+  return undefined;
+};
+
+/**
+ * The executable to spawn: what the operator wrote when it names a path,
+ * and otherwise whatever the granted search path resolves it to.
+ *
+ * A plain `Error` rather than `McpConfigError`, because the two mean
+ * different things to `setup`: a config that cannot become correct fails
+ * the plugin, while a binary that is not installed *yet* leaves the daemon
+ * serving every other agent. This is the second kind — the reconnect loop
+ * builds a fresh transport each attempt, so a server whose package finishes
+ * installing is picked up without a daemon restart.
+ */
+const stdioCommand = (command: string, granted: Record<string, string>): string => {
+  if (/[/\\]/.test(command)) {
+    return command;
+  }
+  const resolved = resolveCommandPath(command, granted);
+  if (resolved === undefined) {
+    throw new Error(
+      `Command "${command}" was not found on the PATH this server was granted. `
+        + 'Grant a PATH that contains it, or give the command as an absolute path.',
+    );
+  }
+  return resolved;
+};
+
 const buildTransport = (spec: McpServerSpec): Transport => {
   if (spec.command !== undefined) {
     return new StdioClientTransport({
-      command: spec.command,
+      command: stdioCommand(spec.command, spec.env),
       args: spec.args,
       ...(spec.cwd !== undefined ? { cwd: spec.cwd } : {}),
       env: sealedStdioEnv(spec.env),

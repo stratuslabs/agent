@@ -140,6 +140,27 @@ resolve against exactly the environment this config declined to grant. Same
 rule as a malformed `passEnv`: a grant an operator believes is in effect
 must never quietly be nothing.
 
+**A bare `command` is resolved here, not by the spawn.** The granted `PATH`
+is searched in order and the transport is handed the path that came back,
+because the resolver underneath it does not search only what was granted:
+`cross-spawn` puts `process.cwd()` at the front on Windows — "windows always
+checks the cwd first", says `which`'s own comment — and an empty `PATH`
+entry means the current directory on either platform. The daemon's working
+directory is not a grant, and an `npx.cmd` dropped into it would run in
+place of the one on the granted `PATH`. So an empty entry is dropped rather
+than searched, `PATHEXT` is read from the grant and otherwise from the
+Windows default set (never from the daemon's own, for the same reason
+`PATH: ""` does not count), and the resolution runs on every platform rather
+than behind a Windows branch — the lookup Windows depends on is then the one
+the tests exercise. A `command` that names a path (`/opt/bin/srv`,
+`.\srv.exe`) is taken as written and searched for nowhere.
+
+A bare command the granted `PATH` does not contain is **not** a config
+failure: the daemon goes on serving every other agent and the server is
+retried like any other one that is not up, because a package still
+installing is not a broken config. Only a config that cannot become correct
+— a bare command with no `PATH` granted at all — is refused at load.
+
 OAuth-authenticated HTTP servers are not modeled yet; a static bearer in
 `headers` is what exists today.
 
