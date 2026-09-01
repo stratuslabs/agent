@@ -298,6 +298,63 @@ test('a malformed session id cannot open a conversation, and an existing one is 
   }
 });
 
+test('a session id reserved for scheduled firings is refused where the caller can see it', async () => {
+  const harness = await startApi();
+  try {
+    // The gateway already refuses this, so nothing is ever created — but it
+    // refuses by rejecting a dispatch nobody awaits, which reached the
+    // caller as 202 plus a turn id for a turn that could never run.
+    const refused = await harness.call('/api/v1/sessions/schedule:forged:2026-01-01T00:00:00.000Z/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'pretend to be a firing', agentId: 'stratus' }),
+    });
+    assert.equal(refused.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(refused)).error.code, 'session_id_reserved');
+
+    // And still nothing created, which was always true and stays the point.
+    const listed = await json<{ sessions: Array<{ id: string }> }>(await harness.call('/api/v1/sessions'));
+    assert.equal(listed.sessions.some((session) => session.id.startsWith('schedule:')), false);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('the reserved-prefix refusal outranks the other two, so the caller is told the useful thing', async () => {
+  // Two preflights reached this handler from separate changes, thirteen lines
+  // apart, and git merged them without ever running them together. Their
+  // ORDER is the behaviour: a `schedule:` id is well-formed and passes the
+  // shape rule, so if that ran first the caller would be told its id was
+  // malformed rather than that the prefix belongs to the scheduler.
+  const harness = await startApi();
+  try {
+    // Reserved beats the shape rule, even when the id is also over-long.
+    const both = await harness.call(`/api/v1/sessions/schedule:${'a'.repeat(1000)}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hello', agentId: 'stratus' }),
+    });
+    assert.equal(both.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(both)).error.code, 'session_id_reserved');
+
+    // And beats agent_required, which sits between them: naming no agent does
+    // not turn a reserved id into a missing-agent problem.
+    const noAgent = await harness.call('/api/v1/sessions/schedule:forged:2026-01-01T00:00:00.000Z/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hello' }),
+    });
+    assert.equal(noAgent.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(noAgent)).error.code, 'session_id_reserved');
+
+    // Nothing reserved was created by either attempt.
+    const listed = await json<{ sessions: Array<{ id: string }> }>(await harness.call('/api/v1/sessions'));
+    assert.equal(listed.sessions.some((session) => session.id.startsWith('schedule:')), false);
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('a parked approval is listed and resolvable, and a late second click is refused', async () => {
   const harness = await startApi({ approvals: true });
   const transport = harness.transport;

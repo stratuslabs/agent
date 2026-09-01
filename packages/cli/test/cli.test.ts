@@ -1487,7 +1487,10 @@ test('runCli chat survives a failed turn and keeps the conversation going', asyn
 
 test('runCli persists agent memory across runs through memory.remember', async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
-  const systemPrompts: string[] = [];
+  // The whole request, not just `system`: what this test cares about is that
+  // a remembered fact reaches the model, and which part of the request
+  // carries it is the adapter's business (and its own tests').
+  const sentRequests: string[] = [];
   let firstRunCalls = 0;
 
   const firstRun = await runCli({
@@ -1499,7 +1502,7 @@ test('runCli persists agent memory across runs through memory.remember', async (
       processEnv: { ANTHROPIC_API_KEY: 'test-key' },
       fetch: (async (_url: unknown, init?: { body?: unknown }) => {
         const body = JSON.parse(String(init?.body ?? '{}'));
-        systemPrompts.push(String(body.system ?? ''));
+        sentRequests.push(JSON.stringify(body));
         firstRunCalls += 1;
         const content = firstRunCalls === 1
           ? [{
@@ -1542,7 +1545,7 @@ test('runCli persists agent memory across runs through memory.remember', async (
       processEnv: { ANTHROPIC_API_KEY: 'test-key' },
       fetch: (async (_url: unknown, init?: { body?: unknown }) => {
         const body = JSON.parse(String(init?.body ?? '{}'));
-        systemPrompts.push(String(body.system ?? ''));
+        sentRequests.push(JSON.stringify(body));
         return new Response(JSON.stringify({
           id: 'msg_2',
           type: 'message',
@@ -1558,7 +1561,7 @@ test('runCli persists agent memory across runs through memory.remember', async (
   });
 
   assert.equal(secondRun, 0);
-  assert.match(systemPrompts.at(-1) ?? '', /The user prefers short answers\./);
+  assert.match(sentRequests.at(-1) ?? '', /The user prefers short answers\./);
 });
 
 test('the built-in Stratus agent recalls memories saved under legacy default agent ids', async () => {
@@ -1576,7 +1579,7 @@ test('the built-in Stratus agent recalls memories saved under legacy default age
     ].join('\n'),
   );
 
-  let system = '';
+  let sent = '';
   const exitCode = await runCli({
     argv: ['run', '--prompt', 'hi', '--provider', 'anthropic'],
     streams: createStreams().streams,
@@ -1585,7 +1588,7 @@ test('the built-in Stratus agent recalls memories saved under legacy default age
       homeDir: home,
       processEnv: { ANTHROPIC_API_KEY: 'test-key' },
       fetch: (async (_url: unknown, init?: { body?: unknown }) => {
-        system = String(JSON.parse(String(init?.body ?? '{}')).system ?? '');
+        sent = String(init?.body ?? '');
         return new Response(JSON.stringify({
           id: 'msg_legacy',
           type: 'message',
@@ -1601,9 +1604,11 @@ test('the built-in Stratus agent recalls memories saved under legacy default age
   });
 
   assert.equal(exitCode, 0);
-  assert.match(system, /allergic to peanuts/);
-  assert.match(system, /works in UTC\+2/);
-  assert.doesNotMatch(system, /must stay private/);
+  assert.match(sent, /allergic to peanuts/);
+  assert.match(sent, /works in UTC\+2/);
+  // Stronger than it was: a forgotten fact must not appear anywhere in the
+  // request, not merely outside the system field.
+  assert.doesNotMatch(sent, /must stay private/);
 });
 
 test('an unnamed soul keeps the same generated identity across invocations', async () => {

@@ -101,7 +101,7 @@ log, and an address bar is one that gets noticed when it changes.
 | POST | `/roster/reload` | Re-read the agents directory and the configured default soul |
 | GET | `/sessions?agent=&limit=` | Durable sessions, newest first. `limit` bounds the result — the table grows for the life of an install |
 | GET | `/sessions/:id` | One session, provider replay state stripped — including `usage`, the token records of every provider call it has made |
-| POST | `/sessions/:id/messages` | Dispatch a message; returns `202 { sessionId, turnId }` |
+| POST | `/sessions/:id/messages` | Dispatch a message; returns `202 { sessionId, turnId }`. A `schedule:`-prefixed id answers `400 session_id_reserved` — those belong to scheduled firings |
 | GET | `/approvals` | Calls parked on a human right now |
 | POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }` |
 | GET | `/schedules` | Every schedule the fleet has set — cadence, prompt, pre-authorized destination, next firing. The audit list: each row with a destination is a standing permission to speak |

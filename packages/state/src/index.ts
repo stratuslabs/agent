@@ -202,6 +202,14 @@ export interface StratusConfigFile {
   fallbackProvider?: StratusProviderName;
   /** Base URL for an openai-compatible fallback (e.g. a local model). */
   fallbackBaseUrl?: string;
+  /**
+   * Mark the stable head of each Anthropic request cacheable. Default true.
+   * Turn it off for a fleet whose agents take one turn per burst and never
+   * read a cached prefix back — there, the write premium is a pure surcharge.
+   */
+  promptCache?: boolean;
+  /** Cache entry lifetime: '5m' (default) or '1h'. */
+  promptCacheTtl?: '5m' | '1h';
   /** Unattended-approval policy for `stratus serve`. */
   approvals?: ApprovalsConfig;
   /** Control API binding for `stratus serve`. */
@@ -239,6 +247,14 @@ export interface FallbackRuntime {
    * fallback without one is skipped, not discovered broken mid-rescue.
    */
   codexSubscription?: true;
+  /**
+   * The primary's caching settings, carried so an Anthropic fallback honors
+   * them too. Without this an operator who turned caching off would still
+   * pay the write surcharge on every rescued turn — the one setting whose
+   * whole purpose is not paying it.
+   */
+  promptCache?: boolean;
+  promptCacheTtl?: '5m' | '1h';
 }
 
 export type RuntimeConfig =
@@ -280,6 +296,10 @@ export type RuntimeConfig =
        * test.
        */
       queryFn?: ClaudeCodeQueryFn;
+      /** See StratusConfigFile.promptCache. Absent means the adapter's default (on). */
+      promptCache?: boolean;
+      /** See StratusConfigFile.promptCacheTtl. Absent means the adapter's default ('5m'). */
+      promptCacheTtl?: '5m' | '1h';
       soul?: ParsedSoul;
       /** Absolute path the soul was loaded from, for callers that re-read it. */
       soulPath?: string;
@@ -1069,6 +1089,14 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   }
   if (typeof config.fallbackBaseUrl === 'string' && config.fallbackBaseUrl.length > 0) {
     resolved.fallbackBaseUrl = config.fallbackBaseUrl;
+  }
+  // Checked against `false` rather than truthiness: this key's whole purpose
+  // is turning a default-on behavior off.
+  if (typeof config.promptCache === 'boolean') {
+    resolved.promptCache = config.promptCache;
+  }
+  if (config.promptCacheTtl === '5m' || config.promptCacheTtl === '1h') {
+    resolved.promptCacheTtl = config.promptCacheTtl;
   }
   const approvals = parseApprovalsConfig(config.approvals, configPath);
   if (approvals) {
@@ -2168,6 +2196,13 @@ export const resolveRuntimeConfig = async (
         ...(baseUrl ? { baseUrl: String(baseUrl) } : {}),
         ...(apiKey ? { apiKey: String(apiKey) } : {}),
         ...(authToken ? { authToken } : {}),
+        // Caching settings ride only on this variant: it is the one adapter
+        // where Stratus builds the request. The harness providers assemble
+        // their own prompts inside their SDKs, and the OpenAI-compatible
+        // dialect is a different mechanism behind too many vendors to answer
+        // with one switch.
+        ...(fileConfig.promptCache !== undefined ? { promptCache: fileConfig.promptCache } : {}),
+        ...(fileConfig.promptCacheTtl ? { promptCacheTtl: fileConfig.promptCacheTtl } : {}),
         ...(envApiKeyEntry ? { apiKeyEnvVar: envApiKeyEntry.name } : {}),
       }
     : provider === 'codex'
@@ -2275,6 +2310,11 @@ export const resolveRuntimeConfig = async (
         resolved.fallback = {
           provider: fallbackProvider,
           model: fileConfig.fallbackModel,
+          // One operator setting for the daemon, so it applies to whichever
+          // Anthropic model ends up serving the turn. Inert on the other two
+          // providers, which do not build their own requests.
+          ...(fileConfig.promptCache !== undefined ? { promptCache: fileConfig.promptCache } : {}),
+          ...(fileConfig.promptCacheTtl ? { promptCacheTtl: fileConfig.promptCacheTtl } : {}),
           ...(fallbackProvider === 'openai'
             ? {
                 baseUrl: fallbackBoundUrl
@@ -2557,6 +2597,8 @@ export const createRuntimeProvider = (
       ...(config.authToken ? { authToken: config.authToken } : {}),
       ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
       ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
+      ...(config.promptCache !== undefined ? { promptCache: config.promptCache } : {}),
+      ...(config.promptCacheTtl ? { promptCacheTtl: config.promptCacheTtl } : {}),
       ...(config.fetch ? { fetch: config.fetch } : {}),
     });
   }
