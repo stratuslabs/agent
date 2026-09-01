@@ -32,6 +32,7 @@ import {
   normalizeCallResult,
   sanitizeToolSegment,
   sealedStdioEnv,
+  pathGrant,
   type McpPluginOptions,
 } from '../src/index.ts';
 
@@ -890,13 +891,26 @@ test('a bare command with no PATH granted is refused at load, not left to resolv
   await absolute.setup?.({ bus: new EventBus(), tools: new ToolRegistry() } as never);
   await absolute.dispose?.();
 
-  // And granting PATH keeps a bare command working, whatever the case.
-  for (const key of ['PATH', 'Path']) {
-    const granted = createMcpPlugin({
-      enabled: true,
-      servers: { sealed: { command: 'definitely-not-on-any-path', env: { [key]: '/usr/bin' }, passEnv: [] } },
-    }, { warn: () => {} });
-    await granted.setup?.({ bus: new EventBus(), tools: new ToolRegistry() } as never);
-    await granted.dispose?.();
-  }
+  // Granting PATH keeps a bare command working.
+  const granted = createMcpPlugin({
+    enabled: true,
+    servers: { sealed: { command: 'definitely-not-on-any-path', env: { PATH: '/usr/bin' }, passEnv: [] } },
+  }, { warn: () => {} });
+  await granted.setup?.({ bus: new EventBus(), tools: new ToolRegistry() } as never);
+  await granted.dispose?.();
+});
+
+test('the search-path grant is spelled the way the platform spells it', () => {
+  // Windows names are case-insensitive and `Path` is the spelling it uses, so
+  // refusing that there would reject a config that granted the variable fine.
+  assert.equal(pathGrant({ Path: '/custom/bin' }, 'win32'), '/custom/bin');
+  assert.equal(pathGrant({ PATH: '/custom/bin' }, 'win32'), '/custom/bin');
+
+  // POSIX names are case-sensitive and only PATH drives executable lookup.
+  // Accepting `Path` there would pass a grant that does nothing: the child is
+  // handed `Path`, `PATH` is sealed away as ungranted, and a bare command has
+  // no search path at all — defeating the refusal this feeds.
+  assert.equal(pathGrant({ PATH: '/custom/bin' }, 'linux'), '/custom/bin');
+  assert.equal(pathGrant({ Path: '/custom/bin' }, 'linux'), undefined);
+  assert.equal(sealedStdioEnv({ Path: '/custom/bin' }).PATH, undefined);
 });

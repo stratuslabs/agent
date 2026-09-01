@@ -23,7 +23,7 @@ import {
 } from './normalize.ts';
 
 export { bridgedToolName, normalizeCallResult, sanitizeToolSegment, SERVER_NAME_PATTERN } from './normalize.ts';
-export { sealedStdioEnv };
+export { sealedStdioEnv, pathGrant };
 
 /**
  * The MCP bridge: mounts Model Context Protocol servers as Stratus tools.
@@ -155,14 +155,29 @@ const asStringArray = (value: unknown, where: string): string[] | undefined => {
  * the operator's to fix, unlike a server that is merely down.
  */
 /**
- * The granted `PATH`, whatever case the operator spelled it in.
+ * The granted search path, looked up the way the *platform* spells it.
  *
- * Case-insensitive because Windows treats environment names that way and
- * `Path` is what it actually uses — a check keyed to `PATH` alone would
- * refuse a Windows config that granted the variable perfectly well.
+ * Case-insensitive on Windows only, because that is where it is true.
+ * Windows environment names are case-insensitive and `Path` is the spelling
+ * it actually uses, so a check keyed to `PATH` alone would refuse a Windows
+ * config that granted the variable perfectly well.
+ *
+ * POSIX names are case-sensitive, and only `PATH` controls executable
+ * lookup. Accepting `Path` there would pass a grant that does nothing: the
+ * child is handed `Path`, `PATH` is sealed away as ungranted, and a bare
+ * command has no search path at all — which is precisely the state the
+ * refusal below exists to prevent. A generous read of the spelling would
+ * have defeated the check it guards.
+ *
+ * `platform` is a parameter so the Windows branch can be tested from
+ * anywhere; nothing passes it in production.
  */
-const pathGrant = (env: Record<string, string>): string | undefined =>
-  Object.entries(env).find(([key]) => key.toLowerCase() === 'path')?.[1];
+const pathGrant = (
+  env: Record<string, string>,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined => (platform === 'win32'
+  ? Object.entries(env).find(([key]) => key.toLowerCase() === 'path')?.[1]
+  : env.PATH);
 
 const resolveServerSpec = (
   name: string,

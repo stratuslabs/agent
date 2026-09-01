@@ -117,7 +117,9 @@ server the account the daemon runs as. **Consequence for a narrowed
 server whose `passEnv` omits `PATH` **must give `command` as an absolute
 path**, and one that does not is refused at load with a message saying so,
 rather than failing at connect as a bare `ENOENT` that reads like a missing
-binary.
+binary. The grant is spelled the way the platform spells it: `Path` counts
+on Windows, where environment names are case-insensitive, and does not on
+POSIX, where only `PATH` drives executable lookup.
 
 Refused rather than diagnosed at runtime because the runtime signal cannot
 be trusted to mean what it says. On Windows the SDK spawns through
