@@ -106,6 +106,40 @@ do: exactly what this config granted — the harmless default inheritance,
 where `ANTHROPIC_API_KEY` and every other exported key lives, is not there
 to read.
 
+That includes the transport's own idea of what a server needs. The MCP
+SDK's stdio client spawns with a default set of its own (`HOME`, `LOGNAME`,
+`PATH`, `SHELL`, `TERM`, `USER` on POSIX) merged under whatever it is
+handed, so the bridge refuses each of those names explicitly unless this
+config granted it — otherwise `passEnv: []` would still hand a third-party
+server the account the daemon runs as. **Consequence for a narrowed
+`passEnv`:** a `command` without a `/` is resolved against the child's
+`PATH`, and the child's `PATH` is only what this config granted — so a
+server whose `passEnv` omits `PATH` **must give `command` as an absolute
+path**, and one that does not is refused at load with a message saying so,
+rather than failing at connect as a bare `ENOENT` that reads like a missing
+binary. An **empty** grant does not count either: `which` treats a falsy
+search path as none and falls back to the daemon's own, so `PATH: ""` would
+resolve a bare command against exactly the environment the config declined
+to grant.
+
+Grants are spelled the way the platform spells them — `Path` counts on
+Windows, where environment names are case-insensitive, and does not on
+POSIX, where only `PATH` drives lookup. On Windows every name the transport
+would inherit is canonicalized onto the transport's own spelling before its
+defaults are merged under it, which is what stops the daemon's uppercase
+copy from shadowing a mixed-case grant: **for each of those names, exactly
+one entry leaves this package, carrying the granted value or nothing.** That
+applies to `USERPROFILE`, `APPDATA` and the rest as much as to `PATH` — a
+grant that only half-applies is the failure this is guarding.
+
+Refused rather than diagnosed at runtime because the runtime signal cannot
+be trusted to mean what it says. On Windows the SDK spawns through
+`cross-spawn`, whose resolver hands an absent `PATH` to `which`, and `which`
+falls back to `process.env.PATH` — the daemon's own. A bare command would
+resolve against exactly the environment this config declined to grant. Same
+rule as a malformed `passEnv`: a grant an operator believes is in effect
+must never quietly be nothing.
+
 OAuth-authenticated HTTP servers are not modeled yet; a static bearer in
 `headers` is what exists today.
 

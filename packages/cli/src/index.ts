@@ -567,6 +567,75 @@ export const unsupportedNodeMessage = (version: string): string | undefined => {
     + 'Upgrade with `brew install node` on macOS, or your package manager or nvm on Linux.';
 };
 
+/**
+ * The warning listeners to install in place of Node's default one, so the
+ * `node:sqlite` ExperimentalWarning stops being the first thing the CLI
+ * prints.
+ *
+ * The session store imports `node:sqlite`, which is experimental on every
+ * Node release this supports — that is exactly why
+ * {@link SUPPORTED_NODE_RANGE} is written the way it is — so the warning
+ * announces a dependency the project chose deliberately and a user can do
+ * nothing about. It landed above `stratusd ready` on every `stratus serve`,
+ * and on `stratus schedules`.
+ *
+ * Filtered rather than silenced wholesale (`--no-warnings` would be the
+ * blunt version): every other warning still reaches stderr through the
+ * listeners passed in, because a deprecation in our own dependencies is
+ * ours to act on.
+ */
+export const withoutSqliteExperimentalWarning = (
+  listeners: readonly ((warning: Error) => void)[],
+): ((warning: Error) => void) => (warning) => {
+  if (warning.name === 'ExperimentalWarning' && /\bSQLite\b/i.test(warning.message)) {
+    return;
+  }
+  for (const listener of listeners) {
+    listener(warning);
+  }
+};
+
+/**
+ * The name Node gives its own `warning` printer. Matched rather than assumed
+ * so that a Node which renames it simply stops being filtered — the warning
+ * comes back, which is noise, where guessing wrong would rewrite somebody
+ * else's listener.
+ */
+const NODE_DEFAULT_WARNING_LISTENER = 'onWarning';
+
+/**
+ * Swap Node's default warning printer for the filtered one above.
+ *
+ * Node installs its printer as an ordinary `warning` listener, so adding one
+ * alongside it would print twice rather than filter; the default has to come
+ * off and be handed to the replacement.
+ *
+ * **Only ever Node's own printer.** Wrapping a listener somebody else
+ * registered changes it in two ways that are not ours to change: `listeners()`
+ * hands back the *unwrapped* function for a `once` listener, so re-registering
+ * it makes it permanent — it then runs for every later warning instead of one
+ * — and a caller that keeps a reference can no longer `process.off('warning',
+ * theirs)`, because what is registered is this wrapper. So when anything other
+ * than the default is present — a `--require` preload, an embedding host — this
+ * does nothing at all and the warning stays. A host that took an interest in
+ * warnings owns them.
+ *
+ * Called once from the binary, before anything imports the session store.
+ */
+export const filterSqliteExperimentalWarning = (process_: NodeJS.EventEmitter = process): void => {
+  // rawListeners, not listeners: the wrapper is the registration, and only it
+  // carries the once-ness. It matters even here, where the guard below means
+  // the sole listener is Node's own — the next reader should not have to know
+  // that to see why this is safe.
+  const existing = process_.rawListeners('warning') as ((warning: Error) => void)[];
+  const [only] = existing;
+  if (existing.length !== 1 || only?.name !== NODE_DEFAULT_WARNING_LISTENER) {
+    return;
+  }
+  process_.removeAllListeners('warning');
+  process_.on('warning', withoutSqliteExperimentalWarning([only]));
+};
+
 const HELP_TEXT = `Stratus Agent CLI
 
 Usage:
@@ -3907,7 +3976,22 @@ export const runSetup = async (
     }
   };
 
-  const save = async (): Promise<void> => {
+  /**
+   * Write everything the menu decided, then report whether the always-on
+   * install it performed succeeded.
+   *
+   * A boolean rather than a throw: the install is the one optional part of
+   * setup and everything else is already on disk by the time it runs, so
+   * failing outright would lose the saved config to a service that can be
+   * installed later. The exit code carries it instead — the same answer
+   * `stratus service install` gives for the identical failure, which is what
+   * a script driving setup has to be able to see.
+   */
+  const save = async (): Promise<boolean> => {
+    // The always-on install is the only step here that can fail without
+    // taking the rest of setup with it, so it is the only one the exit code
+    // has to carry.
+    let serviceInstallFailed = false;
     const config: Record<string, string> = { provider: state.provider };
     if (state.provider !== 'demo') {
       config.model = state.model ?? defaultModelFor(state.provider);
@@ -4027,6 +4111,7 @@ export const runSetup = async (
       }
       if (!result.ok) {
         writeLine(streams.stderr, `Setup is saved either way — start the daemon yourself with \`${serveCommand()}\`.`);
+        serviceInstallFailed = true;
       }
     }
     writeLine(streams.stdout);
@@ -4079,6 +4164,7 @@ export const runSetup = async (
     if (dashboardReady) {
       writeLine(streams.stdout, '  stratus dashboard');
     }
+    return !serviceInstallFailed;
   };
 
   try {
@@ -4122,8 +4208,12 @@ export const runSetup = async (
       }
     }
 
-    await save();
-    return 0;
+    // Non-zero when the always-on install failed, matching `stratus service
+    // install`. Everything setup saved is still saved, and the output above
+    // says so — but a daemon that will not come up at login is not a
+    // successful setup, and a script that only reads the exit code had no
+    // way to tell.
+    return (await save()) ? 0 : 1;
   } finally {
     prompter.close();
   }
