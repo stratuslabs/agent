@@ -100,6 +100,17 @@ Two supporting facts, both established by the runtime spike
   template whose plugin is too heavy to vendor is either not offered on first
   run or its plugin is fetched as a pack first, on the provider-pack path.
 
+  **The adapter for every channel the app offers is payload too**, and it is a
+  separate omission from the plugins rather than a case of them.
+  `@stratusagent/channel-slack` is an *optional peer dependency* of the CLI,
+  and `loadSlackAdapter` returns undefined when the package is absent, so
+  `stratus serve` skips Slack without failing. A payload built from what the
+  templates name therefore satisfies 16 and still leaves a user who picked
+  Slack with tokens stored and nothing to carry them. `stratus doctor` already
+  reports this exact state — *"Slack tokens are stored for N agent(s) but
+  @stratusagent/channel-slack is not installed, so `stratus serve` skips
+  them"* — which is the sign it is a trap the product has already hit once.
+
   **Vendoring a plugin is not the same as making it work**, and
   `tool-browser` is the case that separates them. It is *cheap* to vendor —
   `playwright-core` is a few megabytes and, as its README says, "downloads no
@@ -179,6 +190,17 @@ specifies the sequence should start here.
   so storing the tokens does not connect the new agent. A flow that offers a
   channel during onboarding has to account for the reconnect, the same way it
   accounts for a newly enabled plugin.
+- **Storing a channel token is not verifying it, and nothing reports whether
+  the channel came up.** The bind route checks that three fields are strings
+  and writes them; there is no channel equivalent of `/credentials/verify`.
+  The adapter then treats a failed connection as survivable *by design* —
+  `socket.start()` throwing is caught and warned past, so that "one broken app
+  must not take the rest of the fleet down" — and `/health` reports agents,
+  sessions, approvals, and runtimes, and nothing about channels. So a wrong or
+  under-scoped token ends onboarding with the daemon healthy, the agent
+  created, and the chosen channel silently dead. A flow that offers a channel
+  either verifies it or stops claiming it is connected; what it cannot do is
+  infer either from the calls succeeding.
 - **Plugins are a startup snapshot; souls are not.** `runServe` reads the
   plugin config once and hands it to `createGateway`, while
   `POST /roster/reload` re-reads agents — which is why a new agent is
@@ -267,9 +289,11 @@ specifies the sequence should start here.
 - First run completes with the network unplugged after download, up to the
   point where a provider sign-in needs it — which means **every template
   offered on first run has its plugins, and any browser executable they need,
-  in the payload**. The fetch-as-a-pack path exists for what is too heavy to
-  bundle, and a template depending on it is not a first-run template: offering
-  one would trade the offline guarantee for a menu entry.
+  in the payload**, and **the payload carries the adapter for every channel the
+  app offers**, which is not a per-template question. The fetch-as-a-pack path
+  exists for what is too heavy to bundle, and a template depending on it is not
+  a first-run template: offering one would trade the offline guarantee for a
+  menu entry.
 - Every file the app writes is byte-compatible with the CLI **at the same
   state schema version**: `stratus agents` lists the agent the app created,
   and the two can be used interchangeably **for reading and writing state**.
@@ -389,6 +413,14 @@ specifies the sequence should start here.
   the app writing `~/.stratus` behind the API's back — so the operation that
   previews a template and applies it as one committed unit has to live on the
   server, next to the computation 16 already puts there.
+- **Some way to observe whether a bound channel connected** — a channel
+  verification the app can call, or channel state on `/health`; which of the
+  two is the API's decision, not this step's. Nothing today distinguishes a
+  working Slack app from a wrong token: the bind stores without checking, the
+  adapter survives a failed connection on purpose, and `/health` carries no
+  channel field. Only the branch that promises a *connected* channel needs
+  this. A flow that stores the tokens and says plainly that it has done no
+  more than that is unblocked — and is the fallback if this does not land.
 
 ## Open questions
 

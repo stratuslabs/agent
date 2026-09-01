@@ -172,7 +172,7 @@ them: `POST /agents`, `GET /catalog/models`, `POST /credentials/verify`,
 `PUT /credentials/:provider`, `PUT /credentials/channels/:channel`,
 `GET,PUT /config`.
 
-**Not covered:** two things. First, *describing* a sign-in — the endpoints
+**Not covered:** three things. First, *describing* a sign-in — the endpoints
 above store and verify a credential, but `GET /credentials` reports only
 presence and `/catalog/models` returns nothing without one, so a fresh install
 cannot learn which providers accept a key versus a subscription without
@@ -184,6 +184,14 @@ apply** — `POST /agents` accepts only `instructions`, `name`, `provider`, and
 config separately, which is precisely the half-configured state 16 forbids.
 That makes 16 the critical path, and a wider one than a read endpoint would
 be, rather than any part of the app.
+
+Third, *observing a channel*. `PUT /credentials/channels/:channel` stores the
+tokens after checking only that they are strings, the Slack adapter catches a
+failed `socket.start()` and continues so that one broken app cannot take the
+fleet down, and `/health` reports agents, sessions, approvals, and runtimes
+and nothing about channels. So the API can bind a channel and cannot say
+whether the binding works — which an onboarding flow offering a channel needs
+before it calls itself finished.
 
 ## Method
 

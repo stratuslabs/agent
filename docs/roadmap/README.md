@@ -94,8 +94,10 @@ Two consequences for what ranks first:
   stops or fences *any* active state-writing process, not only `stratusd`;
   **API** — a template read, an atomic apply (since `POST /agents` carries no
   allowlists or plugin configuration while [16](./16-templates.md) requires the
-  soul and the config to commit together), and a sign-in capability descriptor,
-  because the API can perform a sign-in but cannot describe one; **an unrun spike** — whether
+  soul and the config to commit together), a sign-in capability descriptor,
+  because the API can perform a sign-in but cannot describe one, and some way
+  to observe whether a bound channel connected, because storing a channel token
+  neither checks it nor shows up anywhere; **an unrun spike** — whether
   `claude setup-token` can be captured without a TTY, which decides one of the
   five sign-in paths; and **the onboarding sequence itself**, deliberately
   unwritten after a detailed version was specified and falsified repeatedly
