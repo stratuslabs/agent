@@ -256,7 +256,11 @@ specifies the sequence should start here.
   terminal opened. What "running" is demonstrated *by* is the onboarding
   design's to settle; the budget is not.
 - First run completes with the network unplugged after download, up to the
-  point where a provider sign-in needs it.
+  point where a provider sign-in needs it — which means **every template
+  offered on first run has its plugins, and any browser executable they need,
+  in the payload**. The fetch-as-a-pack path exists for what is too heavy to
+  bundle, and a template depending on it is not a first-run template: offering
+  one would trade the offline guarantee for a menu entry.
 - Every file the app writes is byte-compatible with the CLI **at the same
   state schema version**: `stratus agents` lists the agent the app created,
   and the two can be used interchangeably **for reading and writing state**.
