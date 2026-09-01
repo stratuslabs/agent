@@ -148,12 +148,26 @@ checks the cwd first", says `which`'s own comment — and an empty `PATH`
 entry means the current directory on either platform. The daemon's working
 directory is not a grant, and an `npx.cmd` dropped into it would run in
 place of the one on the granted `PATH`. So an empty entry is dropped rather
-than searched, `PATHEXT` is read from the grant and otherwise from the
-Windows default set (never from the daemon's own, for the same reason
-`PATH: ""` does not count), and the resolution runs on every platform rather
-than behind a Windows branch — the lookup Windows depends on is then the one
-the tests exercise. A `command` that names a path (`/opt/bin/srv`,
-`.\srv.exe`) is taken as written and searched for nowhere.
+than searched, and the resolution runs on every platform rather than behind
+a Windows branch — the lookup Windows depends on is then the one the tests
+exercise. A `command` that names a path (`/opt/bin/srv`, `.\srv.exe`) is
+taken as written and searched for nowhere.
+
+Everything else about the Windows search follows `which`, because replacing
+a lookup is not an occasion to change what it finds. Quotes come off an
+entry only as a **balanced pair** — a lone one is a malformed entry, and
+stripping it would search a directory the granted string does not name.
+`PATHEXT` decides what is runnable, read from the grant and otherwise from
+`which`'s own fallback, `.EXE;.CMD;.BAT;.COM`; the daemon's `PATHEXT` is
+never read, for the same reason `PATH: ""` does not count as a grant, and
+Windows' wider default is not used either, since it would make a bare
+command resolve to file types that resolve to nothing today. A `command`
+that already carries an extension is tried as written first, but only when
+`PATHEXT` permits that extension — otherwise a `srv.js` under
+`PATHEXT: ".EXE"` would mask the `srv.js.EXE` beside it that Windows would
+actually run. One deliberate difference: an empty entry *inside* `PATHEXT`
+(`".EXE;"`) makes `isexe` treat every extension as executable, and does not
+here. A grant is not widened by the punctuation that ends it.
 
 A **relative** entry is honoured, and it means what it has always meant:
 `PATH: "bin"` on a server with a `cwd` is `<cwd>/bin`, the shape running

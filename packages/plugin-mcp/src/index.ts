@@ -385,12 +385,17 @@ const sealedStdioEnv = (
 };
 
 /**
- * The extensions Windows treats as executable when `PATHEXT` was not
- * granted. A constant rather than the daemon's own `PATHEXT`, for the same
- * reason `pathGrant` refuses an empty `PATH`: a value this config did not
- * grant is not part of the search it declared.
+ * What counts as executable on Windows when `PATHEXT` was not granted.
+ *
+ * A constant rather than the daemon's own `PATHEXT`, for the same reason
+ * `pathGrant` refuses an empty `PATH`: a value this config did not grant is
+ * not part of the search it declared. And this constant specifically,
+ * because it is the fallback `which` already uses — a wider one (Windows'
+ * own default adds `.VBS`, `.JS`, `.WS`, `.MSC`) would make a bare command
+ * resolve to file types that resolve to nothing today. Replacing a lookup
+ * is not an occasion to widen what it will run.
  */
-const WINDOWS_DEFAULT_PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC';
+const WHICH_FALLBACK_PATHEXT = '.EXE;.CMD;.BAT;.COM';
 
 /**
  * The granted search path as directories, in order.
@@ -405,9 +410,12 @@ const WINDOWS_DEFAULT_PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC';
  */
 const searchEntries = (search: string, platform: NodeJS.Platform): string[] => search
   .split(platform === 'win32' ? ';' : ':')
-  // cross-spawn's resolver strips these, and a quoted entry is common enough
-  // in a Windows `Path` that leaving the quotes on would drop the directory.
-  .map((entry) => (platform === 'win32' ? entry.replace(/^"|"$/g, '') : entry))
+  // A *balanced* pair only, the way `which` does it (`/^".*"$/`). A lone
+  // leading or trailing quote is a malformed entry, and stripping it would
+  // silently search a directory the granted string does not name — which is
+  // the same substitution this whole resolver exists to prevent, arrived at
+  // from the other side.
+  .map((entry) => (platform === 'win32' && /^".*"$/.test(entry) ? entry.slice(1, -1) : entry))
   .filter((entry) => entry.length > 0);
 
 /**
@@ -426,10 +434,22 @@ const commandCandidates = (
   if (platform !== 'win32') {
     return [command];
   }
-  const extensions = (pathext ?? WINDOWS_DEFAULT_PATHEXT).split(';').filter((ext) => ext.length > 0);
-  return command.includes('.')
-    ? [command, ...extensions.map((ext) => `${command}${ext}`)]
-    : extensions.map((ext) => `${command}${ext}`);
+  const extensions = (pathext ?? WHICH_FALLBACK_PATHEXT).split(';').filter((ext) => ext.length > 0);
+  const suffixed = extensions.map((ext) => `${command}${ext}`);
+  // Tried as written first only when what it already carries is an extension
+  // `PATHEXT` permits. `which` unshifts the unsuffixed candidate whenever the
+  // command holds a dot, but `isexe` then checks that candidate's extension
+  // against `PATHEXT` like any other — so a `srv.js` under `PATHEXT: ".EXE"`
+  // is not runnable there either, and taking it here would let a file
+  // Windows would refuse mask the `srv.js.EXE` beside it that it would run.
+  //
+  // One knowing divergence: `isexe` reads an empty entry *inside* `PATHEXT`
+  // as "every extension is executable". Empty entries are dropped here, so
+  // `PATHEXT: ".EXE;"` still permits only `.EXE`. A grant is not widened by
+  // the punctuation that ends it.
+  return extensions.some((ext) => command.toLowerCase().endsWith(ext.toLowerCase()))
+    ? [command, ...suffixed]
+    : suffixed;
 };
 
 /** Whether a candidate is a file this platform would actually run. */

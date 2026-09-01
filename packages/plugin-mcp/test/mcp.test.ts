@@ -1034,8 +1034,39 @@ test('a bare command resolves inside the granted search path and nowhere else', 
     resolveCommandPath('srv', { PATH: granted, PATHEXT: '.EXE;.CMD' }, 'win32'),
     path.join(granted, 'srv.CMD'),
   );
-  // A quoted entry is a directory, not a directory whose name has quotes.
+  // A quoted entry is a directory, not a directory whose name has quotes —
+  // but only a *balanced* pair, the way `which` reads it. A lone quote is a
+  // malformed entry, and stripping it would search a directory the granted
+  // string does not name.
   assert.equal(resolveCommandPath('srv', { PATH: `"${granted}"` }, 'win32'), path.join(granted, 'srv.CMD'));
+  assert.equal(resolveCommandPath('srv', { PATH: `"${granted}` }, 'win32'), undefined);
+  assert.equal(resolveCommandPath('srv', { PATH: `${granted}"` }, 'win32'), undefined);
+
+  // An extension the granted PATHEXT does not permit is not runnable, even
+  // when the command names it outright — `isexe` checks the unsuffixed
+  // candidate too, so taking it here would let a file Windows would refuse
+  // mask the one beside it that it would run.
+  await writeFile(path.join(granted, 'srv.js'), '\n');
+  assert.equal(resolveCommandPath('srv.js', { PATH: granted, PATHEXT: '.EXE' }, 'win32'), undefined);
+  assert.equal(
+    resolveCommandPath('srv.js', { PATH: granted, PATHEXT: '.JS' }, 'win32'),
+    path.join(granted, 'srv.js'),
+  );
+  await writeFile(path.join(granted, 'srv.js.EXE'), '\n');
+  assert.equal(
+    resolveCommandPath('srv.js', { PATH: granted, PATHEXT: '.EXE' }, 'win32'),
+    path.join(granted, 'srv.js.EXE'),
+  );
+
+  // Ungranted, the fallback is the one `which` already uses. A wider set
+  // would make a bare command resolve to file types that resolve to nothing
+  // today: replacing a lookup is not an occasion to widen what it will run.
+  await writeFile(path.join(granted, 'scripted.VBS'), '\n');
+  assert.equal(resolveCommandPath('scripted', { PATH: granted }, 'win32'), undefined);
+  assert.equal(
+    resolveCommandPath('scripted', { PATH: granted, PATHEXT: '.VBS' }, 'win32'),
+    path.join(granted, 'scripted.VBS'),
+  );
 
   // POSIX: the execute bit is what makes a candidate runnable, so a
   // same-named file earlier on the path that cannot be run is passed over
