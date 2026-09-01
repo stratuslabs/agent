@@ -100,16 +100,34 @@ Two supporting facts, both established by the runtime spike
   template whose plugin is too heavy to vendor is either not offered on first
   run or its plugin is fetched as a pack first, on the provider-pack path.
 
-  **The adapter for every channel the app offers is payload too**, and it is a
-  separate omission from the plugins rather than a case of them.
-  `@stratusagent/channel-slack` is an *optional peer dependency* of the CLI,
-  and `loadSlackAdapter` returns undefined when the package is absent, so
-  `stratus serve` skips Slack without failing. A payload built from what the
-  templates name therefore satisfies 16 and still leaves a user who picked
-  Slack with tokens stored and nothing to carry them. `stratus doctor` already
-  reports this exact state — *"Slack tokens are stored for N agent(s) but
-  @stratusagent/channel-slack is not installed, so `stratus serve` skips
-  them"* — which is the sign it is a trap the product has already hit once.
+  **Every optional peer of the CLI is a payload decision, and each absence is
+  silent by design.** This is the second rule, separate from the plugins: a
+  payload resolved from the CLI's dependency tree plus what the templates name
+  gets *none* of them, because that is what optional means. `package.json`
+  declares three, and they fail differently:
+
+  - **`@stratusagent/control-api` — required, and its absence is the worst
+    failure in this list.** `runServe` defaults `apiWanted` to true but only
+    warns when someone asked for the API *explicitly*
+    (`command.api === true || apiConfig.enabled === true`). The app never
+    passes `--api`, so on its path `loadControlApi()` returns undefined and
+    the daemon starts serving no HTTP and no WebSocket, **saying nothing at
+    all**. Every design decision below routes through this API from the main
+    process, so a payload without it produces an app whose health check has
+    nothing to reach and whose onboarding calls have nowhere to go.
+  - **`@stratusagent/channel-slack` — required for any channel the app
+    offers.** `loadSlackAdapter` returns undefined when it is absent and
+    `stratus serve` skips Slack without failing, so a user who picked Slack
+    ends up with tokens stored and nothing carrying them. `stratus doctor`
+    already reports exactly this state — *"Slack tokens are stored for N
+    agent(s) but @stratusagent/channel-slack is not installed"* — which is
+    the sign it is a trap the product has hit before.
+  - **`@stratusagent/dashboard` — a real choice, not an oversight.** The app
+    has its own UI and does not serve this page; the CLI treats the pair as
+    "the control API is the port and the dashboard is the page served on it",
+    so omitting it means `stratus dashboard` cannot work from the app's tree.
+    Whichever way it goes, it is decided here rather than falling out of how
+    the payload happened to resolve.
 
   **Vendoring a plugin is not the same as making it work**, and
   `tool-browser` is the case that separates them. It is *cheap* to vendor —
@@ -289,11 +307,15 @@ specifies the sequence should start here.
 - First run completes with the network unplugged after download, up to the
   point where a provider sign-in needs it — which means **every template
   offered on first run has its plugins, and any browser executable they need,
-  in the payload**, and **the payload carries the adapter for every channel the
-  app offers**, which is not a per-template question. The fetch-as-a-pack path
-  exists for what is too heavy to bundle, and a template depending on it is not
-  a first-run template: offering one would trade the offline guarantee for a
-  menu entry.
+  in the payload**, and **the payload carries every optional peer the app
+  needs — `control-api` first, then the adapter for every channel it offers**,
+  which is not a per-template question. Asserted by building the payload and
+  starting the daemon from it, not by reading the build: an absent control API
+  produces a daemon that serves nothing and warns about nothing, so what is
+  asserted is that the app's own health check reaches it. The fetch-as-a-pack
+  path exists for what is too heavy to bundle, and a template depending on it
+  is not a first-run template: offering one would trade the offline guarantee
+  for a menu entry.
 - Every file the app writes is byte-compatible with the CLI **at the same
   state schema version**: `stratus agents` lists the agent the app created,
   and the two can be used interchangeably **for reading and writing state**.

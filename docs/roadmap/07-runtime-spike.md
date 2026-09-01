@@ -82,6 +82,15 @@ the registry resolves on the day they install, first run needs no network for
 packages, and no install script ever executes on a customer's machine. The
 cost is that a kernel fix ships as an app release.
 
+**Both properties were measured on the CLI's tree, which is not the payload.**
+The CLI declares `control-api`, `channel-slack`, and `dashboard` as *optional*
+peers, so resolving from it installs none of them — and 07 needs at least the
+first two. They bring dependencies this measurement never saw: `ws` (which
+carries `bufferutil` and `utf-8-validate` as optional native accelerators) and
+the Slack SDK. Neither is expected to change the answer, and neither was
+tested. Re-establish the zero-`.node` and relocation results against the
+actual payload rather than inheriting them from this one.
+
 ## The finding that reframes app size
 
 `@stratusagent/cli` depends unconditionally on `provider-codex` and
