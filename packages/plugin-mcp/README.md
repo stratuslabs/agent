@@ -117,9 +117,18 @@ server the account the daemon runs as. **Consequence for a narrowed
 server whose `passEnv` omits `PATH` **must give `command` as an absolute
 path**, and one that does not is refused at load with a message saying so,
 rather than failing at connect as a bare `ENOENT` that reads like a missing
-binary. The grant is spelled the way the platform spells it: `Path` counts
-on Windows, where environment names are case-insensitive, and does not on
-POSIX, where only `PATH` drives executable lookup.
+binary. An **empty** grant does not count either: `which` treats a falsy
+search path as none and falls back to the daemon's own, so `PATH: ""` would
+resolve a bare command against exactly the environment the config declined
+to grant.
+
+The grant is spelled the way the platform spells it — `Path` counts on
+Windows, where environment names are case-insensitive, and does not on
+POSIX, where only `PATH` drives lookup — and on Windows it is canonicalized
+onto `PATH` before the transport merges its own defaults under it. That last
+step is what stops the SDK's uppercase daemon `PATH` from shadowing a
+granted `Path`: exactly one spelling of the variable leaves this package,
+carrying the granted value or nothing.
 
 Refused rather than diagnosed at runtime because the runtime signal cannot
 be trusted to mean what it says. On Windows the SDK spawns through

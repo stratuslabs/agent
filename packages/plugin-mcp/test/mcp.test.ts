@@ -900,6 +900,45 @@ test('a bare command with no PATH granted is refused at load, not left to resolv
   await granted.dispose?.();
 });
 
+test('exactly one usable search path leaves the seal, whatever the grant looked like', () => {
+  // An invariant test rather than a case list, because this has now been
+  // wrong in three different ways and each fix addressed only the shape that
+  // was reported. What must hold, on both platforms: the key the transport
+  // merges under is present, it carries the granted value or nothing, and it
+  // is never empty and never the daemon's.
+  const grants: Array<Record<string, string>> = [
+    {},
+    { PATH: '/granted' },
+    { Path: '/granted' },
+    { PATH: '' },
+    { Path: '' },
+    { PATH: '/upper', Path: '/mixed' },
+    { LINEAR_API_KEY: 'k' },
+  ];
+
+  for (const platform of ['win32', 'linux'] as const) {
+    for (const granted of grants) {
+      const sealed = sealedStdioEnv(granted, platform);
+      assert.ok('PATH' in sealed, `${platform} ${JSON.stringify(granted)}: PATH must be answered`);
+      assert.notEqual(sealed.PATH, '', 'an empty search path is a fallback to the daemon, never a grant');
+
+      if (platform === 'win32') {
+        // One spelling only: a second is the same variable, and which one the
+        // runtime picks is not ours to guess.
+        const spellings = Object.keys(sealed).filter((key) => key.toLowerCase() === 'path');
+        assert.deepEqual(spellings, ['PATH'], `win32 ${JSON.stringify(granted)}: one spelling`);
+      }
+
+      const expected = pathGrant(granted, platform);
+      assert.equal(sealed.PATH, expected, `${platform} ${JSON.stringify(granted)}: the granted value or nothing`);
+    }
+  }
+
+  // The two shapes that were live leaks, named so a regression is legible.
+  assert.equal(sealedStdioEnv({ Path: 'C:\\mcp-bin' }, 'win32').PATH, 'C:\\mcp-bin');
+  assert.equal(sealedStdioEnv({ PATH: '' }, 'linux').PATH, undefined);
+});
+
 test('the search-path grant is spelled the way the platform spells it', () => {
   // Windows names are case-insensitive and `Path` is the spelling it uses, so
   // refusing that there would reject a config that granted the variable fine.
@@ -915,12 +954,14 @@ test('the search-path grant is spelled the way the platform spells it', () => {
   assert.equal(sealedStdioEnv({ Path: '/custom/bin' }, 'linux').PATH, undefined);
 
   // The seal has to ask the same question the grant check asks. On Windows a
-  // granted `Path` IS PATH, so sealing an uppercase `PATH: undefined` beside
-  // it would have the seal contradicting the grant it just accepted — two
-  // spellings of one variable, one of them a refusal.
+  // granted `Path` IS PATH — so rather than either sealing an uppercase
+  // refusal beside it (the seal contradicting the grant) or leaving the
+  // grant alone (the transport's own uppercase default then shadowing it),
+  // the grant is canonicalized onto the one spelling the transport merges
+  // under. Both of the other two shapes were live bugs.
   const windows = sealedStdioEnv({ Path: '/custom/bin' }, 'win32');
-  assert.equal(windows.Path, '/custom/bin');
-  assert.equal('PATH' in windows, false, 'no second spelling of the same variable');
+  assert.equal(windows.PATH, '/custom/bin', 'the grant, under the transport\'s spelling');
+  assert.equal('Path' in windows, false, 'no second spelling of the same variable');
 
   // On POSIX they are genuinely different names, so the ungranted PATH is
   // still sealed away and only the useless `Path` survives — which is what

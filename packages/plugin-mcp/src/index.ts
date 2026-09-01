@@ -180,10 +180,21 @@ const grantedEntry = (
   ? Object.entries(granted).find(([key]) => key.toLowerCase() === name.toLowerCase())
   : (name in granted ? [name, granted[name] as string] : undefined));
 
+/**
+ * The granted search path, or undefined when there is not a usable one.
+ *
+ * Empty counts as absent. `which` takes a falsy `path` as no path and falls
+ * back to `process.env.PATH` — the daemon's own — so an empty grant would
+ * resolve a bare command against exactly the environment this config
+ * declined to grant, which is the leak the seal exists to close.
+ */
 const pathGrant = (
   env: Record<string, string>,
   platform: NodeJS.Platform = process.platform,
-): string | undefined => grantedEntry(env, 'PATH', platform)?.[1];
+): string | undefined => {
+  const value = grantedEntry(env, 'PATH', platform)?.[1];
+  return value !== undefined && value.length > 0 ? value : undefined;
+};
 
 const resolveServerSpec = (
   name: string,
@@ -332,9 +343,32 @@ const sealedStdioEnv = (
       sealed[name] = undefined;
     }
   }
+  const merged: Record<string, string | undefined> = { ...sealed, ...granted };
+
+  // The invariant this function exists for, stated once instead of patched
+  // per symptom: **exactly one search-path entry leaves here, spelled the way
+  // the transport spells it, holding the granted value or nothing.**
+  //
+  // The transport merges `{ ...getDefaultEnvironment(), ...ours }`, and its
+  // list spells the name `PATH`. So `PATH` is the only key that can override
+  // the daemon's copy or seal it away; any other casing is either a different
+  // variable (POSIX, harmless) or a second spelling of the same one (Windows),
+  // and a second spelling leaves the runtime to pick — which it does by
+  // lexicographic order, handing back the daemon's `PATH` over a granted
+  // `Path`. Both of the ways this has been wrong were a missing entry here:
+  // once a refusal beside a grant, once a grant with no refusal to override.
+  if (platform === 'win32') {
+    for (const key of Object.keys(merged)) {
+      if (key !== 'PATH' && key.toLowerCase() === 'path') {
+        delete merged[key];
+      }
+    }
+  }
+  merged.PATH = pathGrant(granted, platform);
+
   // The cast is the SDK's types not describing the drop-on-undefined
   // behaviour its own spawn relies on; the values are deliberate.
-  return { ...sealed, ...granted } as Record<string, string>;
+  return merged as Record<string, string>;
 };
 
 const buildTransport = (spec: McpServerSpec): Transport => {
