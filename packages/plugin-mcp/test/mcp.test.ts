@@ -900,6 +900,41 @@ test('a bare command with no PATH granted is refused at load, not left to resolv
   await granted.dispose?.();
 });
 
+test('every inherited name leaves the seal once, in the transport\'s spelling', () => {
+  // The rule is not about PATH. It holds for every name the transport would
+  // inherit, and it was written for PATH alone once already — which is how a
+  // granted `UserProfile` ended up with no `USERPROFILE` entry to override
+  // the daemon's copy with.
+  //
+  // The loop walks the SDK's own list, which is fixed to the host platform at
+  // module load: the POSIX names here, the Windows ones on a Windows runner.
+  // So this exercises the canonicalization mechanism through whichever names
+  // exist, which is the part that is ours; which names the SDK lists is not.
+  for (const name of DEFAULT_INHERITED_ENV_VARS) {
+    const mixed = `${name[0]}${name.slice(1).toLowerCase()}`;
+
+    // Windows: one spelling, canonical, carrying the grant.
+    const win = sealedStdioEnv({ [mixed]: '/granted' }, 'win32');
+    const winSpellings = Object.keys(win).filter((key) => key.toLowerCase() === name.toLowerCase());
+    assert.deepEqual(winSpellings, [name], `win32 ${mixed}: one canonical spelling`);
+    assert.equal(win[name], name === 'PATH' ? '/granted' : '/granted');
+
+    // POSIX: a different casing is a different variable, so the inherited
+    // name stays sealed and the operator's odd one is simply theirs.
+    const posix = sealedStdioEnv({ [mixed]: '/granted' }, 'linux');
+    if (mixed !== name) {
+      assert.equal(posix[name], undefined, `linux ${mixed}: ${name} stays sealed`);
+      assert.equal(posix[mixed], '/granted');
+    }
+
+    // Ungranted, either way: answered with a refusal rather than left out.
+    for (const platform of ['win32', 'linux'] as const) {
+      assert.ok(name in sealedStdioEnv({}, platform), `${platform}: ${name} must be answered`);
+      assert.equal(sealedStdioEnv({}, platform)[name], undefined);
+    }
+  }
+});
+
 test('exactly one usable search path leaves the seal, whatever the grant looked like', () => {
   // An invariant test rather than a case list, because this has now been
   // wrong in three different ways and each fix addressed only the shape that

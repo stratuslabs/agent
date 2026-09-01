@@ -346,25 +346,35 @@ const sealedStdioEnv = (
   const merged: Record<string, string | undefined> = { ...sealed, ...granted };
 
   // The invariant this function exists for, stated once instead of patched
-  // per symptom: **exactly one search-path entry leaves here, spelled the way
-  // the transport spells it, holding the granted value or nothing.**
+  // per symptom: **for every name the transport would inherit, exactly one
+  // entry leaves here, spelled the way the transport spells it, holding the
+  // granted value or nothing.**
   //
-  // The transport merges `{ ...getDefaultEnvironment(), ...ours }`, and its
-  // list spells the name `PATH`. So `PATH` is the only key that can override
-  // the daemon's copy or seal it away; any other casing is either a different
-  // variable (POSIX, harmless) or a second spelling of the same one (Windows),
-  // and a second spelling leaves the runtime to pick — which it does by
-  // lexicographic order, handing back the daemon's `PATH` over a granted
-  // `Path`. Both of the ways this has been wrong were a missing entry here:
-  // once a refusal beside a grant, once a grant with no refusal to override.
-  if (platform === 'win32') {
-    for (const key of Object.keys(merged)) {
-      if (key !== 'PATH' && key.toLowerCase() === 'path') {
-        delete merged[key];
+  // The transport merges `{ ...getDefaultEnvironment(), ...ours }` using the
+  // spellings in its own list. So only that spelling can override the
+  // daemon's copy or seal it away; any other casing is either a different
+  // variable (POSIX, harmless) or a second spelling of the same one
+  // (Windows), and a second spelling leaves the runtime to pick — which it
+  // does by lexicographic order, handing the daemon's `USERPROFILE` back over
+  // a granted `UserProfile`. Every way this has been wrong was a missing or
+  // mis-spelled entry here: a refusal beside a grant, a grant with no refusal
+  // to override, and the rule written for `PATH` alone when it holds for the
+  // whole set.
+  for (const name of DEFAULT_INHERITED_ENV_VARS) {
+    if (platform === 'win32') {
+      // A second casing of a name Windows treats as one variable.
+      for (const key of Object.keys(merged)) {
+        if (key !== name && key.toLowerCase() === name.toLowerCase()) {
+          delete merged[key];
+        }
       }
     }
+    // PATH carries the extra rule that an empty grant is not a search path;
+    // every other name is worth exactly what the operator wrote.
+    merged[name] = name === 'PATH'
+      ? pathGrant(granted, platform)
+      : grantedEntry(granted, name, platform)?.[1];
   }
-  merged.PATH = pathGrant(granted, platform);
 
   // The cast is the SDK's types not describing the drop-on-undefined
   // behaviour its own spawn relies on; the values are deliberate.

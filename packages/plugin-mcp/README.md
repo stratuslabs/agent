@@ -122,13 +122,15 @@ search path as none and falls back to the daemon's own, so `PATH: ""` would
 resolve a bare command against exactly the environment the config declined
 to grant.
 
-The grant is spelled the way the platform spells it — `Path` counts on
+Grants are spelled the way the platform spells them — `Path` counts on
 Windows, where environment names are case-insensitive, and does not on
-POSIX, where only `PATH` drives lookup — and on Windows it is canonicalized
-onto `PATH` before the transport merges its own defaults under it. That last
-step is what stops the SDK's uppercase daemon `PATH` from shadowing a
-granted `Path`: exactly one spelling of the variable leaves this package,
-carrying the granted value or nothing.
+POSIX, where only `PATH` drives lookup. On Windows every name the transport
+would inherit is canonicalized onto the transport's own spelling before its
+defaults are merged under it, which is what stops the daemon's uppercase
+copy from shadowing a mixed-case grant: **for each of those names, exactly
+one entry leaves this package, carrying the granted value or nothing.** That
+applies to `USERPROFILE`, `APPDATA` and the rest as much as to `PATH` — a
+grant that only half-applies is the failure this is guarding.
 
 Refused rather than diagnosed at runtime because the runtime signal cannot
 be trusted to mean what it says. On Windows the SDK spawns through
