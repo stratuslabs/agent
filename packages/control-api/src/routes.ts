@@ -2,7 +2,15 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 
-import { describeSchedule, formatSoul, isValidAgentId, parseSoul, type ParsedSoul } from '@stratusagent/agents';
+import {
+  describeSchedule,
+  formatSoul,
+  isValidAgentId,
+  isValidSessionId,
+  MAX_SESSION_ID_LENGTH,
+  parseSoul,
+  type ParsedSoul,
+} from '@stratusagent/agents';
 import type { JsonObject } from '@stratusagent/core';
 import { isScheduleSessionId, SCHEDULE_SESSION_ID_PREFIX, type Gateway } from '@stratusagent/gateway';
 import { redactAnthropicRawTurns } from '@stratusagent/provider-anthropic';
@@ -687,6 +695,23 @@ export const routes: Route[] = [
         // Caught here so a typo answers 404 rather than being accepted and
         // then failing where only the event stream can see it.
         throw new ApiError(404, 'agent_not_found', `No agent with id ${agentId}.`);
+      }
+      // After the agent checks, deliberately: the length budget spends the
+      // agent id this session addresses, and that only means anything once
+      // the id is known to be a real one off the roster.
+      //
+      // Only a NEW id is held to the rule. An id already in the store
+      // addresses a real conversation whatever shape it is, and refusing it
+      // here would lock a caller out of its own history over a rule that
+      // postdates the row.
+      if (!existing && !isValidSessionId(sessionId, agentId)) {
+        throw new ApiError(
+          400,
+          'invalid_session_id',
+          'That session id cannot start a conversation: an id must be a single addressable segment — no path separators or control characters, '
+            + `no leading dot, no surrounding whitespace, and at most ${MAX_SESSION_ID_LENGTH} characters beyond the agent id it names. `
+            + 'Mint one per conversation the way the dashboard does, as web:<agentId>:<uuid>.',
+        );
       }
       if (existing && agentId !== undefined && existing.agent.id !== agentId) {
         // The gateway refuses this too. Checked here so the caller gets a

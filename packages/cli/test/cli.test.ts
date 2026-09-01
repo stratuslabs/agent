@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { Readable } from 'node:stream';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 import {
   createFileMemoryStore,
   unsupportedNodeMessage,
+  filterSqliteExperimentalWarning,
+  withoutSqliteExperimentalWarning,
   CLI_VERSION,
   createLogWriter,
   currentLogPosition,
@@ -104,6 +106,84 @@ test('the CLI refuses Node versions below the floor its manifests declare', () =
   for (const version of ['', 'nightly', 'v-broken']) {
     assert.equal(unsupportedNodeMessage(version), undefined);
   }
+});
+
+const experimentalWarning = (message: string): Error =>
+  Object.assign(new Error(message), { name: 'ExperimentalWarning' });
+
+test('the node:sqlite experimental warning is dropped and every other warning still prints', () => {
+  const seen: string[] = [];
+  const filtered = withoutSqliteExperimentalWarning([(warning) => seen.push(warning.message)]);
+
+  // The exact text Node emits on the import, and the variant that names the
+  // flag — both are the same dependency the supported Node range exists for.
+  filtered(experimentalWarning('SQLite is an experimental feature and might change at any time'));
+  filtered(experimentalWarning('The `node:sqlite` module is experimental'));
+  assert.deepEqual(seen, []);
+
+  // Anything else is ours to act on, so it reaches the listeners intact.
+  filtered(experimentalWarning('Type Stripping is an experimental feature'));
+  filtered(Object.assign(new Error('util.isArray is deprecated'), { name: 'DeprecationWarning' }));
+  filtered(new Error('something else entirely'));
+  assert.deepEqual(seen, [
+    'Type Stripping is an experimental feature',
+    'util.isArray is deprecated',
+    'something else entirely',
+  ]);
+});
+
+test('filtering replaces the default warning listener rather than stacking on it', () => {
+  const emitter = new EventEmitter();
+  const printed: string[] = [];
+  // Standing in for Node's own printer, which is an ordinary listener under
+  // this name: left in place, it would print the warning the filter drops.
+  emitter.on('warning', function onWarning(warning: Error) { printed.push(warning.message); });
+
+  filterSqliteExperimentalWarning(emitter);
+  assert.equal(emitter.listenerCount('warning'), 1, 'the default listener was replaced, not joined');
+
+  emitter.emit('warning', experimentalWarning('SQLite is an experimental feature and might change at any time'));
+  assert.deepEqual(printed, []);
+
+  emitter.emit('warning', new Error('a warning worth reading'));
+  assert.deepEqual(printed, ['a warning worth reading']);
+});
+
+test('a warning listener somebody else registered is left exactly as they registered it', () => {
+  // Wrapping a foreign listener changes it in two ways that are not ours to
+  // change, so the filter declines to act at all when one is present.
+
+  // A `once` listener: `listeners()` hands back the unwrapped function, so
+  // re-registering it would make it permanent.
+  const withOnce = new EventEmitter();
+  let onceFired = 0;
+  withOnce.once('warning', function onWarning() { onceFired += 1; });
+  filterSqliteExperimentalWarning(withOnce);
+  withOnce.emit('warning', new Error('a'));
+  withOnce.emit('warning', new Error('b'));
+  withOnce.emit('warning', new Error('c'));
+  assert.equal(onceFired, 1, 'a once listener must still fire exactly once');
+
+  // An ordinary listener a caller still holds a reference to: it must remain
+  // detachable with `off`, which it is not once a wrapper stands in for it.
+  const withOwn = new EventEmitter();
+  const seen: string[] = [];
+  const theirs = (warning: Error): void => { seen.push(warning.message); };
+  withOwn.on('warning', theirs);
+  filterSqliteExperimentalWarning(withOwn);
+  withOwn.off('warning', theirs);
+  withOwn.emit('warning', new Error('after they detached it'));
+  assert.deepEqual(seen, [], 'their own reference still detaches their listener');
+
+  // Two listeners — the default plus a preload's — is also hands-off.
+  const both = new EventEmitter();
+  const heard: string[] = [];
+  both.on('warning', function onWarning() { heard.push('default'); });
+  both.on('warning', () => heard.push('preload'));
+  filterSqliteExperimentalWarning(both);
+  assert.equal(both.listenerCount('warning'), 2, 'left alone');
+  both.emit('warning', experimentalWarning('SQLite is an experimental feature and might change at any time'));
+  assert.deepEqual(heard, ['default', 'preload'], 'unfiltered, because the set is not ours to rewrite');
 });
 
 test('parseCommand accepts positional prompts', () => {
@@ -1993,6 +2073,46 @@ test('setup does not suggest the dashboard it could not install', async () => {
   assert.doesNotMatch(output.stdout, /^ {2}stratus dashboard$/m);
   // ...and setup still saved.
   assert.match(output.stdout, /Wrote /);
+});
+
+test('setup exits non-zero when the always-on install it ran failed', async () => {
+  const failingServiceRunner = async () => ({
+    code: 1,
+    stdout: '',
+    stderr: 'Failed to connect to bus: No medium found',
+  });
+
+  const setupWith = async (serviceRunner: typeof stubServiceRunner): Promise<{ code: number; stderr: string; stdout: string }> => {
+    const { streams, output } = createStreams();
+    const code = await runCli({
+      argv: ['setup'],
+      streams,
+      env: {
+        cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')),
+        homeDir: await mkdtemp(path.join(os.tmpdir(), 'stratus-home-')),
+        processEnv: {},
+        serviceRunner,
+        packageResolver: () => true,
+        // Save & finish.
+        setupInput: Readable.from(['7\n']),
+      },
+    });
+    return { code, stderr: output.stderr, stdout: output.stdout };
+  };
+
+  const failed = await setupWith(failingServiceRunner);
+  // `stratus service install` answers 1 for this exact failure. Setup runs
+  // the same install as its last step, and a daemon that will not come up at
+  // login is not a successful setup — a script driving setup reads only this.
+  assert.equal(failed.code, 1);
+  // Still saved, and still says so: the exit code is the only thing that
+  // changed, because everything else was on disk before the install ran.
+  assert.match(failed.stdout, /Wrote /);
+  assert.match(failed.stderr, /Setup is saved either way/);
+
+  const succeeded = await setupWith(stubServiceRunner);
+  assert.equal(succeeded.code, 0);
+  assert.doesNotMatch(succeeded.stderr, /Setup is saved either way/);
 });
 
 test('setup skips the offer for packages that are already installed', async () => {
@@ -6041,7 +6161,7 @@ test('the unit keeps the node flags the entrypoint needs', async () => {
   assert.doesNotMatch(unit, /--inspect/);
 });
 
-test('a service install that throws does not fail setup', async () => {
+test('a service install that throws is reported, not crashed through, and setup still saves', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   // A file where the LaunchAgents/systemd directory belongs: mkdir rejects,
@@ -6062,7 +6182,12 @@ test('a service install that throws does not fail setup', async () => {
     },
   });
 
-  assert.equal(exitCode, 0, 'the optional service must not take setup down with it');
+  // The optional service must not take setup DOWN with it — the rejection
+  // used to escape and abort the run after the config was already written.
+  // It still must not: setup completes, reports, and saves. What it does not
+  // do is call that a success, because the daemon will not come up at login
+  // and `stratus service install` answers 1 for the same failure.
+  assert.equal(exitCode, 1);
   assert.match(output.stderr, /Could not install the always-on service/);
   assert.match(output.stderr, /Setup is saved either way/);
   // And the settings it had already written are still there.

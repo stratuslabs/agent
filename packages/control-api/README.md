@@ -240,6 +240,53 @@ What counts as "recently active" is the client's decision, so this reports a
 timestamp and a count and never a verdict. A daemon that baked a window in
 would need upgrading to change it.
 
+### The client mints the session id
+
+There is no `POST /sessions`. A conversation begins the first time
+`POST /sessions/:id/messages` is called with an id the store does not have,
+and that call must carry `agentId` — there is no stored agent to recover one
+from, so it answers `400 agent_required` without it. Every later message to
+the same id resumes that conversation; passing an `agentId` that disagrees
+with the stored one answers `409 session_agent_mismatch`, because sessions
+never cross agent identities.
+
+Mint the id the way the dashboard does — a UUID the client generates — and
+keep it for the life of the conversation. The daemon does not hand one out,
+so a client that waits for the server to name a session waits forever.
+
+The consequence to design around: an id the daemon has never seen is a *new
+conversation*, not a 404. A mistyped id gets `202` and a durable conversation
+under that name, because there is nothing to distinguish it from a client
+opening its second chat. Unlike `agentId`, which is checked against the roster
+and answers `404 agent_not_found` on a typo, a session id names something that
+does not exist yet.
+
+What *is* checked, on a new id only, is that it could be an address at all:
+`400 invalid_session_id` for an empty id, one that is not its own trimmed
+self, a leading dot, a path separator or control character, and the strings
+JavaScript prints when an id was never computed — `undefined`, `null`, `NaN`,
+`[object Object]`. The dashboard shipped the first of those, posting to
+`/sessions/undefined/messages` and creating a durable conversation literally
+named `undefined`.
+
+Length is bounded too, at 200 characters **on top of the agent id the session
+id contains**. Budgeted that way rather than flat because every convention
+above embeds the agent id and agent ids have no length bound of their own — a
+flat cap would cap them through the back door, leaving a long-id agent on the
+roster and unable to hold a conversation. Two things keep the allowance from
+becoming a loophole: it is measured against an `agentId` already checked
+against the roster, and it applies only to an id that actually contains that
+agent id. A bare UUID, or any id that does not embed it, is held to the flat
+200 whichever agent the request names.
+
+Shape beyond that is deliberately not enforced: the ids in circulation are
+colon-joined addresses (`web:<agentId>:<uuid>`,
+`<channel>:<agentId>:<team>:<conversation>:<thread>`, a bare UUID), and no
+pattern admitting all of them would have excluded `undefined` anyway. **An id
+already in the store is never re-judged** — it addresses a real conversation
+whatever shape it is, and a rule written afterwards does not get to lock its
+owner out of their own history.
+
 ### Usage is a set of records, never a total
 
 `GET /sessions/:id` carries `usage`: one record per provider call, in the
