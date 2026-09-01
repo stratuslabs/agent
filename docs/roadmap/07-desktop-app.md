@@ -226,9 +226,14 @@ Two supporting facts, both established by the runtime spike
   unconditional dependencies and imports `createClaudeCodeProvider` and
   `createCodexProvider` at module top level, and the CLI imports `state` at
   startup — so an absent pack is `ERR_MODULE_NOT_FOUND` before anything can
-  fetch it. Provider construction has to move behind a dynamic seam in `state`,
-  and the transitive dependencies drop with it. That is a prerequisite of the
-  lean bundle rather than a detail of it.
+  fetch it. **And `state` is not the only importer:** `cli/src/index.ts`
+  itself imports `createClaudeCodeProvider`, `hasHostedToolSideEffects`, and
+  `ClaudeCodeToolExecutor` from one and `DEFAULT_CODEX_MODEL` from the other,
+  at module top level — a bare constant is enough to pull the package. So the
+  seam has to cover both: provider construction moves behind a dynamic import
+  in `state`, the CLI's own direct imports move with it, and the
+  dependencies drop from both manifests. That is a prerequisite of the lean
+  bundle rather than a detail of it.
 
 ## Acceptance criteria
 
