@@ -334,7 +334,11 @@ specifies the sequence should start here.
   needs automatic login and the app must say so rather than implying the
   daemon is always up.
 - Each of the five sign-in paths completes without a terminal, and a key is
-  verified before it is stored.
+  verified before it is stored — **except that the Claude subscription path
+  holds this only if the unrun spike in `Depends on` says it can.** The
+  criterion is conditional on that spike rather than asserted over it: if
+  `setup-token` demands a terminal, it is four paths and an honest message on
+  the fifth.
 - Moving `Stratus.app` to another folder, and updating it, both leave the
   daemon running and restartable — because no path in the LaunchAgent points
   inside the bundle. Asserted by moving the app and rebooting, not by reading
@@ -421,6 +425,25 @@ specifies the sequence should start here.
   channel field. Only the branch that promises a *connected* channel needs
   this. A flow that stores the tokens and says plainly that it has done no
   more than that is unblocked — and is the fallback if this does not land.
+- **A spike this container could not run: whether `claude setup-token` prints
+  capturably when stdout is not a TTY.** It gates the Claude subscription
+  path, one of the five, and it needs a real Mac and a live subscription.
+
+  **A TTY requirement is not a small fix, which is why this is a dependency
+  rather than a detail.** Node has no built-in pty, so giving the child one
+  means a native addon — and that costs precisely the property the payload
+  rests on: the spike measured **zero `.node` files** in the tree and
+  concluded *"nothing is compiled against a Node ABI, so the tree is not
+  coupled to the Node version that runs it."* A pty would couple it, and the
+  relocation and signing results would have to be re-established against the
+  exact Node build shipped.
+
+  So the fallback is stated rather than discovered: if `setup-token` needs a
+  terminal, the Claude *subscription* path is not terminal-free in V1 and the
+  app says so, offering the Claude API key path — which works today and is
+  already one of the five. Losing an authentication mode is bad; a native
+  addon smuggled into the payload to save it is worse, and quietly breaking
+  the two-minute claim is worst.
 
 ## Open questions
 

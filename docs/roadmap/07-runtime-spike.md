@@ -160,6 +160,14 @@ prints capturably when stdout is not a TTY, and whether it needs an
 interactive terminal. Neither could be exercised here without a live
 subscription. Spike it on a real Mac before committing onboarding to it.
 
+**And know what an interactive-terminal answer would cost before running
+it.** Node has no built-in pty, so supplying one means a native addon — which
+contradicts the measurement above: this tree has zero `.node` files and is
+therefore not coupled to a Node ABI, and adding one would couple it and
+invalidate the relocation result. A terminal-bound `setup-token` is better
+answered by dropping the subscription path's terminal-free claim than by
+taking a native dependency to keep it.
+
 **Do not reimplement Claude Code's OAuth client.** Anthropic does not offer
 third-party OAuth applications for Claude subscriptions, so borrowing its
 client id is both a terms problem and fragile — a rotated id would break every
