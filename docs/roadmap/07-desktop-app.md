@@ -101,7 +101,21 @@ Two supporting facts, both established by the runtime spike
   the template just granted, and the turn would fail on the exact capability
   it exists to prove. The wizard therefore restarts the daemon and waits for
   health after applying a template that changed plugin configuration, before
-  dispatching. Owning that restart is this step's job rather than an
+  dispatching.
+
+  **The wizard resolves approvals for that one turn, and only that turn.** A
+  fresh daemon runs `headless`, which rejects a `gated` call outright —
+  *"nobody is available to approve it"* — and the templates worth shipping
+  grant gated tools: a research agent's `web.fetch`, a triage agent's, an
+  operator agent's `shell.run`. So the promised verification turn would fail
+  on every template that does something. `headless` is the correct default
+  and the wrong description of this moment: it means nobody is present to
+  ask, and during onboarding somebody demonstrably is, watching the screen.
+  So the wizard answers that one call and no other. This is a deliberate and
+  narrow exception to approvals being 17's — a single prompt for a single
+  turn, not the approvals queue — and the alternative is worse: a first-run
+  demo restricted to capabilities that need no permission, which is a demo of
+  nothing the product is for. Owning that restart is this step's job rather than an
   imposition on it — no other surface can do it. A restart re-reads
   configuration; it cannot make an absent package resolvable, which is why the
   payload vendors the templates' plugins rather than relying on this.
@@ -135,7 +149,7 @@ Two supporting facts, both established by the runtime spike
   are named separately above and why the check below is scoped to the app.
 - **Chat as a surface.** The verification turn above is a wizard step, not a
   conversation the user can continue; talking to an agent stays the CLI's,
-  Slack's, and 17's. Sessions, approvals, memory, schedules, and cost too — all
+  Slack's, and 17's. Sessions, memory, schedules, and cost too — all
   of it is 17's,
   and all of it is deliberately deferred here — not because the app should
   never have it, but because a first version that also has it ships later and
@@ -214,11 +228,22 @@ Two supporting facts, both established by the runtime spike
   state schema version**: `stratus agents` lists the agent the app created,
   and the two can be used interchangeably. Across versions they cannot, by
   design — the build with the newer `STATE_SCHEMA_VERSION` migrates
-  `~/.stratus` and stamps it, and the older one then *refuses to run its
-  daemon* rather than reading state it does not understand. So the criterion
-  is that the app **detects and explains** that refusal, naming which install
-  is behind; a user who upgraded the CLI must not be left looking at a dead
-  daemon and an app that cannot say why.
+  `~/.stratus` and stamps it, and the older one refuses to *start* against
+  state it does not understand.
+
+  **Refusing to start is not the same as stopping, and the gap is the
+  dangerous case.** Migrations run from the CLI's general startup path, not
+  only from `stratus update` — which is deliberate, since state that migrates
+  only sometimes is worse than state that never migrates — and only `update`
+  stops the service first. So any command from a newer CLI can stamp the
+  state while the app's older daemon is still running, and that daemon keeps
+  serving and keeps writing in the schema it knows. The next-startup refusal
+  never fires, because it never restarts. So the criterion is two things: the
+  coordination must **stop or fence a running older daemon before migrating**
+  rather than relying on its next start, and the app must **detect and
+  explain** the resulting state, naming which install is behind — a user who
+  upgraded their CLI must not be left with a silently divergent daemon, nor
+  with a dead one and an app that cannot say why.
 - The daemon survives logout and log back in, and the menu bar reflects a
   daemon killed out of band within seconds. **After a reboot it returns at the
   next login, not at power-on** — a LaunchAgent is tied to a login session, as
@@ -239,6 +264,9 @@ Two supporting facts, both established by the runtime spike
   requested, and every plugin change — and the summary the app shows is
   identical to what `stratus agent new --template X` prints for the same
   template on the same host, because it is the same computation.
+- A template granting a `gated` tool completes its verification turn on a
+  fresh install, with the wizard resolving the one approval — the case that
+  fails outright under the `headless` default a new daemon starts with.
 - A template that turns on a plugin **vendored but not yet enabled** still
   produces a passing verification turn *using a tool that plugin contributed*
   — the case that fails if the daemon is not restarted between apply and
