@@ -41,10 +41,18 @@ running so there is something to manage.
 Two supporting facts, both established by the runtime spike
 ([07-runtime-spike.md](./07-runtime-spike.md)):
 
-- **The sign-in surface already exists.** `/catalog/models`,
-  `/credentials/verify`, `PUT /credentials/:provider`, and
-  `PUT /credentials/channels/:channel` cover every sign-in this step needs,
-  and `POST /agents` creates a plain agent. What they do **not** cover is
+- **The sign-in surface exists for *performing* a sign-in, not for describing
+  one.** `/credentials/verify`, `PUT /credentials/:provider`, and
+  `PUT /credentials/channels/:channel` store and check a credential once the
+  wizard knows what to ask for, and `POST /agents` creates a plain agent.
+  Nothing says *what to ask for*: `GET /credentials` reports only which
+  providers exist and what is already stored, and `/catalog/models` skips a
+  provider with no credential at all — `if (!apiKey && !credential) continue`
+  — so a fresh install learns nothing from it. Which providers take an API key
+  versus a subscription, and which vendor command a subscription spawns, is
+  knowledge only the CLI holds today, and an app that hardcoded it would be
+  the second copy this step's Out list forbids. That descriptor is in
+  [Depends on](#depends-on). What they also do **not** cover is
   template-backed creation, which is the flow this step's onboarding actually
   uses — see [Depends on](#depends-on). Read the two together: connecting
   accounts needs no API work, and creating an agent from a template needs two
@@ -342,6 +350,14 @@ specifies the sequence should start here.
   protocol has to fence *every* active state-writing process, not just
   `stratusd`. Without it, the acceptance criterion above forbids a corruption
   the stated dependencies still permit.
+- **A sign-in capability descriptor in `control-api`.** The wizard has to know
+  which providers accept an API key, which accept a subscription, and which
+  vendor command a subscription sign-in spawns. No endpoint answers that:
+  `GET /credentials` reports presence and stored type, `/catalog/models` needs
+  a credential before it says anything, and the rest of the knowledge lives in
+  the CLI's setup menus. Either it becomes a descriptor both surfaces read, or
+  the app carries a copy that drifts the first time a provider gains an auth
+  method — which is the failure this step's Out list names.
 - **Two template endpoints in `control-api`, not one.** There are none today.
 
   **A read**, because 16 computes the summary in `@stratusagent/state`
