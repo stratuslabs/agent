@@ -80,6 +80,17 @@ Two supporting facts, both established by the runtime spike
   opposite of scripting. Whatever 16 decides about disclosing a glob as a
   glob, this renders that decision; it does not re-derive it.
 
+  **The confirmation is bound to the summary it answers.** A review is an
+  interactive pause, and no server holds a creation lock across one — 16's
+  lock serializes the *write*, not the minutes a person spends reading. So
+  between preview and apply, another client can enable a plugin, change its
+  settings, or install one, and a bare "yes" would then commit an effective
+  result the operator never saw. The apply request therefore carries a digest
+  of the inputs the preview was computed from, and the server recomputes and
+  **refuses with a fresh summary** when they no longer match, rather than
+  applying. Without that, the mandatory review is defeated by timing rather
+  than by bypass — which is the same gate deleted more quietly.
+
   **A template that turns on a plugin needs the daemon restarted before that
   turn, and the app is what restarts it.** Souls hot-reload — `POST
   /roster/reload` is why a new agent is dispatchable immediately — but plugins
@@ -214,6 +225,9 @@ Two supporting facts, both established by the runtime spike
   daemon running and restartable — because no path in the LaunchAgent points
   inside the bundle. Asserted by moving the app and rebooting, not by reading
   the plist.
+- A template whose effective result changed between preview and confirmation
+  is refused, and the operator is shown the new summary rather than the old
+  one being applied — asserted by mutating the config between the two calls.
 - Onboarding cannot apply a template without the operator confirming a
   summary that lists every tool with its resolved risk, every credential
   requested, and every plugin change — and the summary the app shows is
@@ -240,8 +254,9 @@ Two supporting facts, both established by the runtime spike
   precisely so the CLI and 17 can both render it, and this app is the third
   renderer and needs it over HTTP.
 
-  **An atomic apply**, because the client cannot assemble one out of the calls
-  that exist. `POST /agents` takes `instructions`, `name`, `provider`, and
+  **An atomic apply that takes the reviewed digest**, because the client
+  cannot assemble one out of the calls that exist — and because a confirmation
+  unbound from what was confirmed is not a gate. `POST /agents` takes `instructions`, `name`, `provider`, and
   `model` and nothing else — no `tools`, `skills`, or `credentials`, and no
   `plugins` configuration — so applying a template would mean a soul write
   followed by a separate config write, from a client, with a window between
