@@ -130,7 +130,12 @@ The four real sign-ins are distinct credential paths, not naming variants —
 | Claude API key | `anthropic` | `api_key` | paste, verified live |
 | Claude Pro/Max | `anthropic` | `oauth_token` | `claude setup-token` |
 | ChatGPT Plus/Pro | `codex` | `oauth_token` | `codex login` |
+| OpenAI key billing Codex | `codex` | `api_key` | paste, verified live |
 | OpenAI or compatible | `openai` | `api_key` + `baseUrl` | paste, verified live |
+
+The two OpenAI rows are different sign-ins, not one written twice: the CLI's
+Codex menu offers an API key that stores under `credentials.codex` and bills
+Codex runs, and `openai` is the separate provider that accepts a `baseUrl`.
 
 A ChatGPT subscription *is* how the `codex` provider authenticates; the stored
 value is *"a subscription marker, not a secret… its value is never read or

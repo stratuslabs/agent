@@ -91,7 +91,7 @@ Two consequences for what ranks first:
   not. The onboarding screen waits on [16](./16-templates.md) and on two
   endpoints the API does not have: a template read, and an atomic apply, since
   `POST /agents` carries no allowlists and no plugin configuration while 16
-  requires the soul and the config to commit together. One of the four sign-in
+  requires the soul and the config to commit together. One of the five sign-in
   paths waits on a spike the container could not run: whether `claude
   setup-token` can be captured without a TTY. And **the onboarding sequence
   itself is deliberately unwritten** — a detailed version was specified and

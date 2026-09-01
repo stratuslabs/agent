@@ -91,9 +91,14 @@ Two supporting facts, both established by the runtime spike
   the pack to carry and configure an executable, or detection of a supported
   installed browser, or not to be offered on first run. No npm at runtime, no
   network needed for packages, nothing for the user to install.
-- **Provider sign-in without a terminal**, across the four real paths — a
-  Claude API key, a Claude subscription, a ChatGPT subscription, and an
-  OpenAI-compatible key. Subscription sign-ins spawn the vendor CLI as a child
+- **Provider sign-in without a terminal**, across the five real paths — a
+  Claude API key, a Claude subscription, a ChatGPT subscription, an OpenAI
+  API key billing the *Codex* harness, and an OpenAI-compatible key on the
+  `openai` provider. The last two are distinct sign-ins, not one: the CLI's
+  Codex menu offers an API key that stores under `credentials.codex` and
+  bills Codex runs, while `openai` is the separate provider that takes a
+  `baseUrl`. An app offering only four of these removes an authentication
+  mode that works today. Subscription sign-ins spawn the vendor CLI as a child
   process, so the browser opens and the terminal never does.
 - **Daemon lifecycle.** Menu-bar presence with health, start/stop/restart,
   install/uninstall the LaunchAgent, and an honest state when the daemon is
@@ -265,12 +270,16 @@ specifies the sequence should start here.
   `installService` already tells the operator, so unattended reboot recovery
   needs automatic login and the app must say so rather than implying the
   daemon is always up.
-- Each of the four sign-in paths completes without a terminal, and a key is
+- Each of the five sign-in paths completes without a terminal, and a key is
   verified before it is stored.
 - Moving `Stratus.app` to another folder, and updating it, both leave the
   daemon running and restartable — because no path in the LaunchAgent points
   inside the bundle. Asserted by moving the app and rebooting, not by reading
-  the plist.
+  the plist. **An install that fetched a provider pack stays working across
+  that update too**: the update installs a new versioned runtime directory, so
+  a pack living in the old tree would leave the daemon unable to resolve a
+  provider the config still names. Retained, migrated, or refetched is a
+  choice — having no answer is not, and it is part of where packs live below.
 - A template whose effective result changed between preview and confirmation
   is refused, and the operator is shown the new summary rather than the old
   one being applied — asserted by mutating the config between the two calls.
