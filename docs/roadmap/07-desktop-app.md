@@ -390,10 +390,21 @@ specifies the sequence should start here.
   app must notice that the daemon answering is not the one its LaunchAgent
   launched — and adopt it or refuse — rather than proceeding while its own job
   crash-loops behind a green check.
-- Removing the app stops the daemon, or tells the user plainly how to. Asserted
-  by dragging `Stratus.app` to the Trash and confirming that nothing is left
-  connected to Slack and answering on the API port, since no app code runs on
-  that path.
+- Removal leaves nothing running that the user does not know about. **Which
+  assertion this is depends on the uninstall contract chosen above, and each
+  branch has one that can fail:**
+
+  *If removal is self-cleaning* — drag `Stratus.app` to the Trash, change
+  nothing else, and assert that nothing answers on the API port and nothing
+  remains connected to Slack.
+
+  *If removal requires an in-app action* — assert that the requirement is
+  stated where a user meets it without going looking for it, **before** they
+  would drag anything; that following it leaves nothing answering or
+  connected; and that dragging the app to the Trash *without* following it
+  leaves the surviving daemon discoverable, naming what is still running and
+  how to stop it. A contract that is only written down in a document the user
+  never opens is the no-contract case wearing a better name.
 - Moving `Stratus.app` to another folder, and updating it, both leave the
   daemon running and restartable — because no path in the LaunchAgent points
   inside the bundle. Asserted by moving the app and rebooting, not by reading
