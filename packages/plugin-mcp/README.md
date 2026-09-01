@@ -155,6 +155,17 @@ than behind a Windows branch — the lookup Windows depends on is then the one
 the tests exercise. A `command` that names a path (`/opt/bin/srv`,
 `.\srv.exe`) is taken as written and searched for nowhere.
 
+A **relative** entry is honoured, and it means what it has always meant:
+`PATH: "bin"` on a server with a `cwd` is `<cwd>/bin`, the shape running
+`npx` out of a project checkout takes. It is resolved against the directory
+the server will actually run in — its `cwd`, or the daemon's when it sets
+none — and what the transport is handed is absolute, so the file this
+package checked and the file the spawn starts are the same file. That is a
+different call from the empty entry, deliberately: `./node_modules/.bin` is
+a directory somebody chose, while a zero-length entry is what a stray colon
+leaves behind — and the default grant, `passEnv: ["PATH"]`, copies the
+daemon's own `PATH` verbatim, trailing colon included.
+
 A bare command the granted `PATH` does not contain is **not** a config
 failure: the daemon goes on serving every other agent and the server is
 retried like any other one that is not up, because a package still

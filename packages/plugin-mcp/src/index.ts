@@ -5,7 +5,7 @@ import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 import { accessSync, constants, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import {
   DEFAULT_SUBPROCESS_PASS_ENV,
@@ -395,10 +395,13 @@ const WINDOWS_DEFAULT_PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC';
 /**
  * The granted search path as directories, in order.
  *
- * An empty entry is dropped rather than read as the current directory the
- * way a shell would. The daemon's working directory is precisely what this
- * resolver exists to keep out of the search, and an operator who does want
- * a directory searched can name it.
+ * An empty entry is dropped rather than read as the working directory the
+ * way a shell would. That is not the same call as dropping a relative entry,
+ * which is honoured: `./node_modules/.bin` is a directory somebody chose,
+ * while a zero-length entry is what a stray colon produces — and the default
+ * grant is `passEnv: ['PATH']`, which copies the daemon's own PATH verbatim,
+ * trailing colon included. Nobody decided that one, which makes it the same
+ * shape of hole as Windows searching the cwd without being asked.
  */
 const searchEntries = (search: string, platform: NodeJS.Platform): string[] => search
   .split(platform === 'win32' ? ';' : ':')
@@ -467,6 +470,7 @@ const resolveCommandPath = (
   command: string,
   granted: Record<string, string>,
   platform: NodeJS.Platform = process.platform,
+  base: string = process.cwd(),
 ): string | undefined => {
   const search = pathGrant(granted, platform);
   if (search === undefined) {
@@ -475,7 +479,13 @@ const resolveCommandPath = (
   const pathext = platform === 'win32' ? grantedEntry(granted, 'PATHEXT', platform)?.[1] : undefined;
   for (const entry of searchEntries(search, platform)) {
     for (const candidate of commandCandidates(command, platform, pathext)) {
-      const full = join(entry, candidate);
+      // Absolute out, resolved against the directory the child will actually
+      // run in. Both halves matter and neither is optional: a relative entry
+      // stat'd against the daemon's directory asks about a different file
+      // than the one the spawn would find, and a relative path *returned*
+      // gets re-read against the server's `cwd` — so the file checked here
+      // and the file spawned there would be two different files.
+      const full = join(resolve(base, entry), candidate);
       if (isRunnableFile(full, platform)) {
         return full;
       }
@@ -495,11 +505,18 @@ const resolveCommandPath = (
  * builds a fresh transport each attempt, so a server whose package finishes
  * installing is picked up without a daemon restart.
  */
-const stdioCommand = (command: string, granted: Record<string, string>): string => {
+const stdioCommand = (
+  command: string,
+  granted: Record<string, string>,
+  cwd: string | undefined,
+): string => {
   if (/[/\\]/.test(command)) {
     return command;
   }
-  const resolved = resolveCommandPath(command, granted);
+  // The child's own working directory, which is what a relative search-path
+  // entry is relative to. Undefined means the server inherits the daemon's,
+  // so that is the base then — the same directory `spawn` would use.
+  const resolved = resolveCommandPath(command, granted, process.platform, cwd ?? process.cwd());
   if (resolved === undefined) {
     throw new Error(
       `Command "${command}" was not found on the PATH this server was granted. `
@@ -512,7 +529,7 @@ const stdioCommand = (command: string, granted: Record<string, string>): string 
 const buildTransport = (spec: McpServerSpec): Transport => {
   if (spec.command !== undefined) {
     return new StdioClientTransport({
-      command: stdioCommand(spec.command, spec.env),
+      command: stdioCommand(spec.command, spec.env, spec.cwd),
       args: spec.args,
       ...(spec.cwd !== undefined ? { cwd: spec.cwd } : {}),
       env: sealedStdioEnv(spec.env),

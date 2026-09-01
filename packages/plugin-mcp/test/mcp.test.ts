@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1055,6 +1055,21 @@ test('a bare command resolves inside the granted search path and nowhere else', 
   assert.equal(resolveCommandPath('srv', { PATH: `:${second}` }, 'linux'), path.join(second, 'srv'));
   assert.equal(resolveCommandPath('srv', { PATH: '' }, 'linux'), undefined);
   assert.equal(resolveCommandPath('srv', {}, 'linux'), undefined);
+
+  // A relative entry IS honoured — `./node_modules/.bin` is a directory
+  // somebody chose, unlike the zero-length one a stray colon leaves behind.
+  // It resolves against the directory the child will run in, and comes back
+  // absolute: a relative result would be re-read against the server's `cwd`,
+  // so the file checked here and the file spawned there could differ.
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-project-'));
+  await mkdir(path.join(project, 'bin'));
+  await writeFile(path.join(project, 'bin', 'srv'), '#!/bin/sh\n');
+  await chmod(path.join(project, 'bin', 'srv'), 0o755);
+  assert.equal(
+    resolveCommandPath('srv', { PATH: 'bin' }, 'linux', project),
+    path.join(project, 'bin', 'srv'),
+  );
+  assert.equal(resolveCommandPath('srv', { PATH: 'bin' }, 'linux', second), undefined);
 });
 
 test('an empty search-path entry is not the working directory, end to end', async () => {
@@ -1110,6 +1125,37 @@ test('a command missing from the granted path leaves the daemon serving, not the
       warnings.some((message) => /was not found on the PATH this server was granted/.test(message)),
       `the warning names the fix; got ${JSON.stringify(warnings)}`,
     );
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('a relative search-path entry is the server\'s working directory, not the daemon\'s', async () => {
+  // The mismatch a self-written resolver introduces if it forgets which
+  // directory it is standing in: cross-spawn chdirs to the server's `cwd`
+  // before resolving, so `PATH: "bin"` alongside `cwd` has always meant
+  // `<cwd>/bin` — the shape `npx` from a project checkout takes. Statting it
+  // against the daemon's directory instead asks about a different file, and
+  // answering with a relative path lets the spawn re-resolve it against a
+  // third one.
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-proj-'));
+  await mkdir(path.join(project, 'bin'));
+  const shim = path.join(project, 'bin', 'srv');
+  await writeFile(
+    shim,
+    `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} `
+      + `${JSON.stringify(path.join(packageRoot, 'fixtures', 'env-echo-server.mjs'))}\n`,
+  );
+  await chmod(shim, 0o755);
+
+  const plugin = createMcpPlugin(
+    { servers: { envy: { command: 'srv', cwd: project, env: { PATH: 'bin' }, passEnv: [] } } },
+    { warn: () => {}, log: () => {} },
+  );
+  const target = new ToolRegistry();
+  try {
+    await loadThroughView(plugin, target);
+    assert.ok(target.get('mcp.envy.read_env'), 'the entry resolved against the server\'s own directory');
   } finally {
     await plugin.dispose?.();
   }
