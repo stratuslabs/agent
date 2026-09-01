@@ -172,12 +172,18 @@ const asStringArray = (value: unknown, where: string): string[] | undefined => {
  * `platform` is a parameter so the Windows branch can be tested from
  * anywhere; nothing passes it in production.
  */
+const grantedEntry = (
+  granted: Record<string, string>,
+  name: string,
+  platform: NodeJS.Platform,
+): [string, string] | undefined => (platform === 'win32'
+  ? Object.entries(granted).find(([key]) => key.toLowerCase() === name.toLowerCase())
+  : (name in granted ? [name, granted[name] as string] : undefined));
+
 const pathGrant = (
   env: Record<string, string>,
   platform: NodeJS.Platform = process.platform,
-): string | undefined => (platform === 'win32'
-  ? Object.entries(env).find(([key]) => key.toLowerCase() === 'path')?.[1]
-  : env.PATH);
+): string | undefined => grantedEntry(env, 'PATH', platform)?.[1];
 
 const resolveServerSpec = (
   name: string,
@@ -311,10 +317,18 @@ const isConnectionFailure = (error: unknown): boolean =>
  * empty one. Read from the SDK's own list rather than a copy of it, so a
  * name it adds later is refused by the same code.
  */
-const sealedStdioEnv = (granted: Record<string, string>): Record<string, string> => {
+const sealedStdioEnv = (
+  granted: Record<string, string>,
+  platform: NodeJS.Platform = process.platform,
+): Record<string, string> => {
   const sealed: Record<string, string | undefined> = {};
   for (const name of DEFAULT_INHERITED_ENV_VARS) {
-    if (!(name in granted)) {
+    // Asked through the same rule the grant check uses. These two must agree
+    // about what "granted" means: when they disagreed, a Windows config
+    // granting `Path` passed the check and was then sealed against by an
+    // uppercase `PATH: undefined` for the same variable — the seal
+    // contradicting the grant it had just accepted.
+    if (grantedEntry(granted, name, platform) === undefined) {
       sealed[name] = undefined;
     }
   }

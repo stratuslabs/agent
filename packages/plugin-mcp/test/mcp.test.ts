@@ -912,5 +912,21 @@ test('the search-path grant is spelled the way the platform spells it', () => {
   // no search path at all — defeating the refusal this feeds.
   assert.equal(pathGrant({ PATH: '/custom/bin' }, 'linux'), '/custom/bin');
   assert.equal(pathGrant({ Path: '/custom/bin' }, 'linux'), undefined);
-  assert.equal(sealedStdioEnv({ Path: '/custom/bin' }).PATH, undefined);
+  assert.equal(sealedStdioEnv({ Path: '/custom/bin' }, 'linux').PATH, undefined);
+
+  // The seal has to ask the same question the grant check asks. On Windows a
+  // granted `Path` IS PATH, so sealing an uppercase `PATH: undefined` beside
+  // it would have the seal contradicting the grant it just accepted — two
+  // spellings of one variable, one of them a refusal.
+  const windows = sealedStdioEnv({ Path: '/custom/bin' }, 'win32');
+  assert.equal(windows.Path, '/custom/bin');
+  assert.equal('PATH' in windows, false, 'no second spelling of the same variable');
+
+  // On POSIX they are genuinely different names, so the ungranted PATH is
+  // still sealed away and only the useless `Path` survives — which is what
+  // makes the load-time refusal fire for a bare command.
+  const posix = sealedStdioEnv({ Path: '/custom/bin' }, 'linux');
+  assert.equal(posix.Path, '/custom/bin');
+  assert.equal(posix.PATH, undefined);
+  assert.equal('PATH' in posix, true, 'sealed, not simply absent');
 });
