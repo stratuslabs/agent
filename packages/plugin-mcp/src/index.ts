@@ -25,6 +25,14 @@ import {
   SERVER_NAME_PATTERN,
 } from './normalize.ts';
 
+/**
+ * What this client tells an MCP server it is. Moves with the package
+ * manifests on a release, like CLI_VERSION and CONTROL_API_VERSION — a
+ * server that logs or keys compatibility on clientInfo.version otherwise
+ * goes on seeing the release this literal was last touched at.
+ */
+const PLUGIN_MCP_VERSION = '0.10.0';
+
 export { bridgedToolName, normalizeCallResult, sanitizeToolSegment, SERVER_NAME_PATTERN } from './normalize.ts';
 export { sealedStdioEnv, pathGrant, resolveCommandPath };
 
@@ -851,7 +859,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
       // so dispose() can cut a handshake short instead of waiting for
       // these awaits to notice `disposed` on their own.
       state.pending = transport;
-      const client = new Client({ name: '@stratusagent/plugin-mcp', version: '0.9.0' });
+      const client = new Client({ name: '@stratusagent/plugin-mcp', version: PLUGIN_MCP_VERSION });
       // A close that lands before this client is published cannot be
       // dropped: the identity guard below would discard it, and connect()
       // would then mark an already-closed client connected — leaving the
