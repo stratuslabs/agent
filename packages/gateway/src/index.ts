@@ -38,6 +38,7 @@ import {
   ROOT_SESSION_ID_METADATA_KEY,
   SCHEDULE_ID_METADATA_KEY,
   SCHEDULED_TURN_METADATA_KEY,
+  withoutDelegation,
   type ParsedSoul,
   type ScheduleDestination,
   type ScheduleRecord,
@@ -1805,6 +1806,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         // Refresh the stored definition before resuming, so the turn runs
         // with the current instructions, tools, and credentials.
         existing.agent = agent;
+        // A sub-session reached here is being continued from outside — a
+        // delegation never resumes its own child; its ids are minted once.
+        // The delegating turn is over, so the markers come off: what is
+        // now an ordinary conversation must not be closed as an orphan if
+        // a later turn of it parks and the daemon dies.
+        if (isDelegatedSession(existing) && existing.metadata) {
+          existing.metadata = withoutDelegation(existing.metadata);
+        }
         await store.save(existing);
         return runner.resume({ sessionId: input.sessionId, userMessage: input.userMessage, signal });
       }

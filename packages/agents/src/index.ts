@@ -842,11 +842,42 @@ export const ROOT_SESSION_ID_METADATA_KEY = 'rootSessionId';
 export const DELEGATION_DEPTH_METADATA_KEY = 'delegationDepth';
 
 /**
+ * The segment `agent.delegate` mints into every sub-session's id —
+ * `<parent>:delegate:<agent>:<depth>:<suffix>`. The second half of what
+ * identifies a sub-session, beside the metadata above: the gateway refuses
+ * the metadata keys at its public door, but rows written before it did
+ * cannot be told apart by their metadata alone, and a caller who wrote
+ * `delegatedBy` onto a session of its own would not also have minted an
+ * id in this shape.
+ */
+export const DELEGATED_SESSION_ID_MARKER = ':delegate:';
+
+/**
  * Whether this session is a delegated sub-session — one whose reply is
  * consumed by a parent turn's `agent.delegate` call and by nothing else.
+ * Both halves are required: the metadata `agent.delegate` writes, and the
+ * id shape it mints.
  */
-export const isDelegatedSession = (session: Pick<Session, 'metadata'>): boolean =>
-  typeof session.metadata?.[DELEGATED_BY_METADATA_KEY] === 'string';
+export const isDelegatedSession = (session: Pick<Session, 'id' | 'metadata'>): boolean =>
+  typeof session.metadata?.[DELEGATED_BY_METADATA_KEY] === 'string'
+  && session.id.includes(DELEGATED_SESSION_ID_MARKER);
+
+/**
+ * `metadata` with the delegation markers removed — what a sub-session
+ * carries once it has been addressed from outside. The delegation ended
+ * with the turn that awaited it; a conversation somebody continues on the
+ * same id afterwards is an ordinary one, and must not be closed as an
+ * orphan by a later restart.
+ */
+export const withoutDelegation = (metadata: JsonObject): JsonObject => {
+  const {
+    [DELEGATED_BY_METADATA_KEY]: _delegatedBy,
+    [ROOT_SESSION_ID_METADATA_KEY]: _root,
+    [DELEGATION_DEPTH_METADATA_KEY]: _depth,
+    ...rest
+  } = metadata;
+  return rest;
+};
 
 /**
  * Runs a delegated sub-session. A plain runner works when every agent
@@ -940,7 +971,7 @@ export const createDelegateTool = ({
 
     delegationCount += 1;
     const result = await runDelegated({
-      sessionId: `${session.id}:delegate:${target.id}:${depth + 1}:${uniqueSuffix()}`,
+      sessionId: `${session.id}${DELEGATED_SESSION_ID_MARKER}${target.id}:${depth + 1}:${uniqueSuffix()}`,
       agent: target,
       userMessage: prompt,
       metadata: {

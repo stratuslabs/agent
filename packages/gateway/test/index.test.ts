@@ -3349,3 +3349,89 @@ test('a dispatch may not supply the metadata keys the daemon writes for itself',
     await gateway.stop();
   }
 });
+
+test('a sub-session continued from outside stops being a delegation', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await writeSoul(home, 'juno.md', '---\nname: Juno\nprovider: demo\n---\n\nYou are Juno.\n');
+  const dbPath = path.join(home, 'sessions.db');
+
+  // A finished delegation, as agent.delegate leaves one — and as its
+  // result reported the id to whoever might message it next.
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  const childId = 'orchestrator:delegate:juno:1:1-abcdefgh';
+  await seed.create({
+    id: childId,
+    agent: { id: 'juno', name: 'Juno' },
+    status: 'completed',
+    messages: [
+      { id: 'm1', role: 'user', content: 'do it', createdAt: now },
+      { id: 'm2', role: 'assistant', content: 'done', createdAt: now },
+    ],
+    metadata: { delegationDepth: 1, delegatedBy: 'ava', rootSessionId: 'orchestrator', channel: 'web' },
+  });
+  seed.close();
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  await gateway.start();
+  try {
+    const continued = await gateway.dispatch({ sessionId: childId, userMessage: 'and now?' });
+    assert.equal(continued.status, 'completed');
+    // The markers are gone and the caller's own metadata is untouched: a
+    // later turn of this conversation that parks is an ordinary parked
+    // turn, not an orphan for the next restart to fail.
+    assert.equal(continued.metadata?.delegatedBy, undefined);
+    assert.equal(continued.metadata?.rootSessionId, undefined);
+    assert.equal(continued.metadata?.delegationDepth, undefined);
+    assert.equal(continued.metadata?.channel, 'web');
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a parked session is only an orphan when both halves say it was delegated', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  const dbPath = path.join(home, 'sessions.db');
+
+  // A row from before the public door refused the daemon's own keys: an
+  // ordinary conversation whose caller wrote `delegatedBy` into its
+  // metadata. Nothing minted its id, so it is not a sub-session, and the
+  // restart owes it the recovery any parked turn gets.
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'web:ava:legacy-forged',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+    ],
+    metadata: {
+      delegatedBy: 'somebody',
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  seed.close();
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const recovered = nextEvent(gateway.bus, 'session.completed');
+  await gateway.start();
+  try {
+    await settles(recovered, 'the recovered turn');
+  } finally {
+    await gateway.stop();
+  }
+  const after = new SqliteSessionStore(dbPath);
+  const session = await after.get('web:ava:legacy-forged');
+  after.close();
+  assert.equal(session?.status, 'completed');
+  assert.notEqual(session?.lastError, ORPHANED_DELEGATION_ERROR);
+});
