@@ -12,6 +12,7 @@ import {
   ToolRegistry,
   createSkillReadTool,
   missingSkillRequirements,
+  PENDING_APPROVAL_METADATA_KEY,
   readPendingApproval,
   type AgentDefinition,
   type ApprovalAnswer,
@@ -31,6 +32,7 @@ import {
   createRecallTool,
   createRememberTool,
   createScheduleTools,
+  isDelegatedSession,
   type ParsedSoul,
   type ScheduleDestination,
   type ScheduleRecord,
@@ -699,6 +701,21 @@ interface AgentSource {
  */
 export const ABANDONED_TURN_ERROR =
   'stratusd stopped while this turn was still running; it was not resumed. Send the message again.';
+
+/**
+ * Recorded on a delegated sub-session that was parked on a human when the
+ * previous process died.
+ *
+ * Its parent — the turn whose `agent.delegate` call was awaiting the reply
+ * — was running, so the restart fails it as abandoned (above). Recovering
+ * the child anyway would re-ask a person to approve a call whose result no
+ * turn will ever read, and then run it: a command executed, tokens spent,
+ * and a reply delivered to nobody. Distinguishable from the parent's error
+ * because the remedy differs — there is no message to send again here;
+ * the parent's is the one to repeat.
+ */
+export const ORPHANED_DELEGATION_ERROR =
+  'stratusd stopped while the turn that delegated this one was still running; the delegation was not resumed. Send the original message again.';
 
 /**
  * The always-on Stratus process. One gateway holds the roster, the durable
@@ -1802,6 +1819,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         if (!session) {
           return;
         }
+        // A delegated sub-session is only ever awaited by its parent's
+        // `agent.delegate` call, and that parent was running when the last
+        // process died — it is in the abandoned sweep, not in this one.
+        // Nothing will read the reply, so the parked call is not re-asked:
+        // a person would be approving a command that runs for no one.
+        if (isDelegatedSession(session)) {
+          log(`${sessionId}: parked on ${readPendingApproval(session)?.call.toolName ?? 'a tool'} for a delegating turn the last stratusd was still running; failing it`);
+          await failOrphanedDelegation(session);
+          return;
+        }
         const record = readPendingApproval(session);
         // A wait that outlived its window while the daemon was down is
         // honoured, not restarted: the request really did go unanswered for
@@ -1840,6 +1867,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         warn(`could not recover parked session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
       }
     });
+
+  /**
+   * Closes an orphaned sub-session the way the abandoned sweep closes its
+   * parent: durably failed, with the checkpoint retired so no later sweep
+   * can find a call to re-enter, and announced where surfaces can hear it.
+   */
+  const failOrphanedDelegation = async (session: Session): Promise<void> => {
+    const metadata = { ...(session.metadata ?? {}) };
+    delete metadata[PENDING_APPROVAL_METADATA_KEY];
+    session.metadata = metadata;
+    session.status = 'failed';
+    session.lastError = ORPHANED_DELEGATION_ERROR;
+    await store.save(session);
+    await bus.emit({ type: 'session.updated', sessionId: session.id, status: 'failed' });
+    await bus.emit({ type: 'session.failed', sessionId: session.id, error: ORPHANED_DELEGATION_ERROR });
+  };
 
   /**
    * Turns the last process was still running when it stopped being able to

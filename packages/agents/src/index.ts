@@ -744,6 +744,23 @@ export const createForgetTool = (store: AgentMemoryStore): Tool => ({
 export const DELEGATE_TOOL_NAME = 'agent.delegate';
 
 /**
+ * Metadata a delegated sub-session carries: which agent delegated, and the
+ * session at the root of the chain. Written by `agent.delegate` and read by
+ * the gateway's restart sweep, which is why the keys are named here rather
+ * than spelled twice — a sub-session's parent is a turn in some other
+ * process's memory, and after a restart nothing can consume its reply.
+ */
+export const DELEGATED_BY_METADATA_KEY = 'delegatedBy';
+export const ROOT_SESSION_ID_METADATA_KEY = 'rootSessionId';
+
+/**
+ * Whether this session is a delegated sub-session — one whose reply is
+ * consumed by a parent turn's `agent.delegate` call and by nothing else.
+ */
+export const isDelegatedSession = (session: Pick<Session, 'metadata'>): boolean =>
+  typeof session.metadata?.[DELEGATED_BY_METADATA_KEY] === 'string';
+
+/**
  * Runs a delegated sub-session. A plain runner works when every agent
  * shares one provider; a host with per-agent provider routing (the
  * gateway) supplies its own dispatcher so the target runs on the
@@ -840,9 +857,9 @@ export const createDelegateTool = ({
       userMessage: prompt,
       metadata: {
         delegationDepth: depth + 1,
-        delegatedBy: session.agent.id,
-        rootSessionId: typeof session.metadata?.rootSessionId === 'string'
-          ? session.metadata.rootSessionId
+        [DELEGATED_BY_METADATA_KEY]: session.agent.id,
+        [ROOT_SESSION_ID_METADATA_KEY]: typeof session.metadata?.[ROOT_SESSION_ID_METADATA_KEY] === 'string'
+          ? session.metadata[ROOT_SESSION_ID_METADATA_KEY]
           : session.id,
       },
       // A cancelled parent turn cancels the delegated run with it —

@@ -12,6 +12,7 @@ import {
 } from '@stratusagent/core';
 import {
   ABANDONED_TURN_ERROR,
+  ORPHANED_DELEGATION_ERROR,
   createGateway,
   SqliteSessionStore,
   type ApprovalTransport,
@@ -3211,4 +3212,96 @@ test('a session\'s usage survives a restart and reads back as stored', async () 
   // Grouped as stored — two providers and two models still separable, not a
   // total that arrived pre-collapsed.
   assert.deepEqual(restored?.usage, usage);
+});
+
+test('a delegated sub-session parked when the daemon died is failed, not re-asked', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const dbPath = path.join(home, 'sessions.db');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'juno.md', '---\nname: Juno\nprovider: demo\n---\n\nYou are Juno.\n');
+
+  // Exactly what a kill leaves behind when an orchestrator's agent.delegate
+  // call is awaiting a sub-session that is itself parked on a human: the
+  // parent still `running` (it is inside its tool call), the child
+  // checkpointed on the gated call — and the child carrying the delegation
+  // metadata `agent.delegate` stamps on it.
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'orchestrator',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [
+      { id: 'm1', role: 'user', content: 'have juno do it', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'd1', toolName: 'agent.delegate', input: { agent: 'juno', prompt: 'do it' } }] },
+    ],
+  });
+  const childId = 'orchestrator:delegate:juno:1:1-abcdefgh';
+  await seed.create({
+    id: childId,
+    agent: { id: 'juno', name: 'Juno' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'do it', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'side effect' } }] },
+    ],
+    metadata: {
+      delegationDepth: 1,
+      delegatedBy: 'ava',
+      rootSessionId: 'orchestrator',
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'side effect' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  seed.close();
+
+  // The default policy approves everything, so a re-asked child would run
+  // its call and complete — which is exactly the outcome this test exists
+  // to rule out.
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const events: StratusEvent[] = [];
+  const failed = new Set<string>();
+  const bothClosed = new Promise<void>((resolve) => {
+    gateway.bus.subscribe((event) => {
+      events.push(event);
+      if (event.type === 'session.failed') {
+        failed.add(event.sessionId);
+        if (failed.has('orchestrator') && failed.has(childId)) {
+          resolve();
+        }
+      }
+    });
+  });
+  await gateway.start();
+  try {
+    await settles(bothClosed, 'both halves of the delegation being closed out');
+  } finally {
+    // Whatever the gate says: a gateway left running holds the process
+    // open, and a hung suite reads as broken infrastructure, not a defect.
+    await gateway.stop();
+  }
+
+  const after = new SqliteSessionStore(dbPath);
+  const parent = await after.get('orchestrator');
+  const child = await after.get(childId);
+  after.close();
+
+  assert.equal(parent?.status, 'failed');
+  assert.equal(parent?.lastError, ABANDONED_TURN_ERROR);
+  // The child is closed the same way its parent is, with a reason of its
+  // own — not asked again, not run, and no longer a checkpoint for a later
+  // sweep to pick up.
+  assert.equal(child?.status, 'failed');
+  assert.equal(child?.lastError, ORPHANED_DELEGATION_ERROR);
+  assert.equal(child?.metadata?.[PENDING_APPROVAL_METADATA_KEY], undefined);
+  assert.equal(
+    events.some((event) => event.type === 'tool.called' && event.sessionId === childId),
+    false,
+    'the orphaned call never executed',
+  );
+  assert.equal((child?.messages ?? []).some((message) => message.toolResult !== undefined), false);
 });
