@@ -32,7 +32,12 @@ import {
   createRecallTool,
   createRememberTool,
   createScheduleTools,
+  DELEGATED_BY_METADATA_KEY,
+  DELEGATION_DEPTH_METADATA_KEY,
   isDelegatedSession,
+  ROOT_SESSION_ID_METADATA_KEY,
+  SCHEDULE_ID_METADATA_KEY,
+  SCHEDULED_TURN_METADATA_KEY,
   type ParsedSoul,
   type ScheduleDestination,
   type ScheduleRecord,
@@ -716,6 +721,41 @@ export const ABANDONED_TURN_ERROR =
  * because the remedy differs — there is no message to send again here;
  * the parent's is the one to repeat.
  */
+/**
+ * Session metadata keys the daemon writes for itself, which no external
+ * dispatch may supply.
+ *
+ * Metadata is one bag: the keys a channel attaches to say where a turn is
+ * happening sit beside the ones the kernel, the scheduler, the fallback
+ * wrapper, and `agent.delegate` write to remember what a session *is* —
+ * and the control API forwards a caller's `metadata` into a new session as
+ * given. A caller who can write `delegatedBy` can have the restart sweep
+ * fail its own parked turn as an orphan; one who can write `fallbackActive`
+ * bills its conversation to the fallback model from the first turn. The
+ * scheduler already refused to trust its own keys for exactly this reason
+ * (see `activeFirings`); the durable ones cannot be re-derived in memory,
+ * so they are refused at the door instead.
+ */
+export const RESERVED_SESSION_METADATA_KEYS: readonly string[] = [
+  PENDING_APPROVAL_METADATA_KEY,
+  FALLBACK_ACTIVE_METADATA_KEY,
+  DELEGATED_BY_METADATA_KEY,
+  ROOT_SESSION_ID_METADATA_KEY,
+  DELEGATION_DEPTH_METADATA_KEY,
+  SCHEDULED_TURN_METADATA_KEY,
+  SCHEDULE_ID_METADATA_KEY,
+];
+
+/**
+ * The first reserved key `metadata` carries, or undefined when it carries
+ * none. Exported so the control API can refuse the request where the
+ * caller can see it, with the same rule the gateway applies at dispatch.
+ */
+export const reservedSessionMetadataKey = (metadata: JsonObject | undefined): string | undefined =>
+  metadata === undefined
+    ? undefined
+    : RESERVED_SESSION_METADATA_KEYS.find((key) => Object.prototype.hasOwnProperty.call(metadata, key));
+
 export const ORPHANED_DELEGATION_ERROR =
   'stratusd stopped while the turn that delegated this one was still running; the delegation was not resumed. Send the original message again.';
 
@@ -2038,6 +2078,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (isScheduleSessionId(input.sessionId)) {
       throw new Error(
         `Session ids beginning with "${SCHEDULE_SESSION_ID_PREFIX}" are reserved for scheduled firings and cannot be dispatched externally.`,
+      );
+    }
+
+    // The daemon's own bookkeeping keys, by the same logic as the reserved
+    // id namespace above: what the runner, the scheduler, and delegation
+    // record about a session must be something only they can have written.
+    const reserved = reservedSessionMetadataKey(input.metadata);
+    if (reserved !== undefined) {
+      throw new Error(
+        `Session metadata key "${reserved}" is reserved for the daemon's own records and cannot be supplied by a dispatch. Reserved keys: ${RESERVED_SESSION_METADATA_KEYS.join(', ')}.`,
       );
     }
 

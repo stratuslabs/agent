@@ -839,6 +839,7 @@ export const DELEGATE_TOOL_NAME = 'agent.delegate';
  */
 export const DELEGATED_BY_METADATA_KEY = 'delegatedBy';
 export const ROOT_SESSION_ID_METADATA_KEY = 'rootSessionId';
+export const DELEGATION_DEPTH_METADATA_KEY = 'delegationDepth';
 
 /**
  * Whether this session is a delegated sub-session — one whose reply is
@@ -922,8 +923,8 @@ export const createDelegateTool = ({
       throw new Error('agent.delegate requires "agent" and "prompt" strings.');
     }
 
-    const depth = typeof session.metadata?.delegationDepth === 'number'
-      ? session.metadata.delegationDepth
+    const depth = typeof session.metadata?.[DELEGATION_DEPTH_METADATA_KEY] === 'number'
+      ? session.metadata[DELEGATION_DEPTH_METADATA_KEY]
       : 0;
     if (depth >= maxDepth) {
       throw new Error(`Delegation depth limit reached (${maxDepth}).`);
@@ -943,7 +944,7 @@ export const createDelegateTool = ({
       agent: target,
       userMessage: prompt,
       metadata: {
-        delegationDepth: depth + 1,
+        [DELEGATION_DEPTH_METADATA_KEY]: depth + 1,
         [DELEGATED_BY_METADATA_KEY]: session.agent.id,
         [ROOT_SESSION_ID_METADATA_KEY]: typeof session.metadata?.[ROOT_SESSION_ID_METADATA_KEY] === 'string'
           ? session.metadata[ROOT_SESSION_ID_METADATA_KEY]

@@ -13,6 +13,7 @@ import {
 import {
   ABANDONED_TURN_ERROR,
   ORPHANED_DELEGATION_ERROR,
+  RESERVED_SESSION_METADATA_KEYS,
   createGateway,
   SqliteSessionStore,
   type ApprovalTransport,
@@ -3304,4 +3305,47 @@ test('a delegated sub-session parked when the daemon died is failed, not re-aske
     'the orphaned call never executed',
   );
   assert.equal((child?.messages ?? []).some((message) => message.toolResult !== undefined), false);
+});
+
+test('a dispatch may not supply the metadata keys the daemon writes for itself', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  const gateway = createGateway({ env, idleTimeoutMs: 0, selection: { provider: 'demo' } });
+  await gateway.start();
+  try {
+    // The one that matters most: a caller who can write `delegatedBy` onto
+    // an ordinary session has the restart sweep fail its parked turn as an
+    // orphan instead of recovering it. Refused at the door, naming the key.
+    await assert.rejects(
+      () => gateway.dispatch({
+        sessionId: 'forged-1',
+        agentId: 'ava',
+        userMessage: 'hi',
+        metadata: { delegatedBy: 'ava', channel: 'web' },
+      }),
+      /"delegatedBy" is reserved/,
+    );
+    assert.equal(await gateway.store.get('forged-1'), undefined, 'nothing was created');
+
+    // Every key in the list is refused, not just the one this was written for.
+    for (const key of RESERVED_SESSION_METADATA_KEYS) {
+      await assert.rejects(
+        () => gateway.dispatch({ sessionId: `forged-${key}`, agentId: 'ava', userMessage: 'hi', metadata: { [key]: true } }),
+        new RegExp(`"${key}" is reserved`),
+      );
+    }
+
+    // Ordinary caller metadata still rides along untouched.
+    const session = await gateway.dispatch({
+      sessionId: 'honest-1',
+      agentId: 'ava',
+      userMessage: 'hi',
+      metadata: { channel: 'web', thread: 'T1' },
+    });
+    assert.equal(session.metadata?.channel, 'web');
+    assert.equal(session.metadata?.thread, 'T1');
+  } finally {
+    await gateway.stop();
+  }
 });
