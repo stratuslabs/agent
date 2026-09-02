@@ -1892,6 +1892,19 @@ export class AgentRunner {
     // conversation stays resumable.
     this.reconcileInterruptedToolCalls(session);
 
+    // Every dangling call is now closed, the parked one included, so a
+    // checkpoint here describes a call the transcript has just answered.
+    // It has to go: `recoverPendingApproval` trusts the record over the
+    // transcript, and a daemon's parked sweep starts after its channels
+    // come up — so a message that resumes the session first would leave a
+    // record for the restart to re-enter, executing the call on a session
+    // that has since completed.
+    if (session.metadata?.[PENDING_APPROVAL_METADATA_KEY] !== undefined) {
+      const metadata = { ...session.metadata };
+      delete metadata[PENDING_APPROVAL_METADATA_KEY];
+      session.metadata = metadata;
+    }
+
     session.status = 'running';
     delete session.lastError;
     session.messages.push({

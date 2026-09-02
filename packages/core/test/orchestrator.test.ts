@@ -1735,3 +1735,60 @@ test('a recovered turn spends the provider budget it was already on', async () =
   // it does not get turns 1 through 3 over again.
   assert.equal(generates, 0, `expected no further provider turns, saw ${generates}`);
 });
+
+test('resuming a parked session retires its checkpoint along with the interrupted call', async () => {
+  // A daemon restart re-asks parked calls through recoverPendingApproval,
+  // but its channels are up before that sweep starts — so a message for the
+  // same session can resume() first. resume() closes the parked call as
+  // interrupted; the checkpoint has to go with it, or the sweep that lands
+  // behind the message finds a record for a call the transcript already
+  // answered and executes it on a session that has since completed.
+  const executed: string[] = [];
+  const tools = new ToolRegistry();
+  tools.register({
+    name: 'gated',
+    risk: 'gated',
+    async execute(input) {
+      executed.push(String((input as { text?: string }).text));
+      return null;
+    },
+  });
+  const provider: ModelProvider = {
+    name: 'text-only',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'done' }] };
+    },
+  };
+  const store = new InMemorySessionStore();
+  const now = new Date().toISOString();
+  await store.create({
+    id: 'parked-then-messaged',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'gated', input: { text: 'side effect' } }] },
+    ],
+    metadata: {
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'gated', input: { text: 'side effect' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+
+  const runner = new AgentRunner({ provider, tools, store });
+  await runner.initialize();
+
+  const resumed = await runner.resume({ sessionId: 'parked-then-messaged', userMessage: 'hello?' });
+  assert.equal(resumed.status, 'completed');
+  assert.equal(readPendingApproval(resumed), undefined, 'the checkpoint went with the call it described');
+  assert.deepEqual(executed, [], 'the interrupted call was closed, not run');
+
+  // The sweep that lost the race finds nothing to recover.
+  const recovered = await runner.recoverPendingApproval('parked-then-messaged');
+  assert.equal(recovered, undefined);
+  assert.deepEqual(executed, [], 'and nothing ran on the completed session');
+  assert.equal((await store.get('parked-then-messaged'))?.status, 'completed');
+});
