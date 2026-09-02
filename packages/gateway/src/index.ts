@@ -31,9 +31,11 @@ import {
   createMessageSendTool,
   createRecallTool,
   createRememberTool,
+  awaitsDelegatedReply,
   createScheduleTools,
   DELEGATED_BY_METADATA_KEY,
   DELEGATION_DEPTH_METADATA_KEY,
+  delegatingSessionIdOf,
   isDelegatedSession,
   ROOT_SESSION_ID_METADATA_KEY,
   SCHEDULE_ID_METADATA_KEY,
@@ -1883,13 +1885,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         // normally must not be rewritten as failed. The delegation metadata
         // is durable, so it proves what the session is, not what state it
         // is in; the status and the checkpoint say that.
-        if (isDelegatedSession(session)) {
-          if (session.status !== 'pending_approval' || !record) {
+        //
+        // And proven by the parent, not by the child's own shape: a caller
+        // could have named a session in the sub-session id shape and
+        // written the metadata keys (before the public door refused them),
+        // but only the runner writes an assistant `agent.delegate` call,
+        // and only a delegation in flight leaves one unanswered. A child
+        // whose parent cannot be found, or is not inside such a call, is
+        // recovered like any other parked turn — the conservative reading.
+        if (isDelegatedSession(session) && session.status === 'pending_approval' && record) {
+          const parentId = delegatingSessionIdOf(sessionId);
+          const parent = parentId !== undefined ? await store.get(parentId) : undefined;
+          if (parent && awaitsDelegatedReply(parent)) {
+            log(`${sessionId}: parked on ${record.call.toolName} for a delegating turn the last stratusd was still running; failing it`);
+            await failOrphanedDelegation(session);
             return;
           }
-          log(`${sessionId}: parked on ${record.call.toolName} for a delegating turn the last stratusd was still running; failing it`);
-          await failOrphanedDelegation(session);
-          return;
         }
         // A wait that outlived its window while the daemon was down is
         // honoured, not restarted: the request really did go unanswered for

@@ -863,6 +863,50 @@ export const isDelegatedSession = (session: Pick<Session, 'id' | 'metadata'>): b
   && session.id.includes(DELEGATED_SESSION_ID_MARKER);
 
 /**
+ * The id of the session whose `agent.delegate` call started this one, read
+ * off the id shape above — the text before the last marker, since a nested
+ * sub-session embeds its parent's id whole. Undefined for an id that was
+ * not minted that way.
+ */
+export const delegatingSessionIdOf = (sessionId: string): string | undefined => {
+  const at = sessionId.lastIndexOf(DELEGATED_SESSION_ID_MARKER);
+  return at > 0 ? sessionId.slice(0, at) : undefined;
+};
+
+/**
+ * Whether `parent` is still inside an `agent.delegate` call — one recorded
+ * in its transcript with no result behind it.
+ *
+ * The one thing about a delegation nothing outside the runner can forge:
+ * a caller can name a session in the sub-session id shape and write the
+ * metadata keys, but only the runner writes assistant tool calls, and only
+ * a delegation in flight leaves one dangling. Read against the transcript
+ * order so a re-used call id cannot make a later call look answered.
+ */
+export const awaitsDelegatedReply = (parent: Pick<Session, 'messages'>): boolean => {
+  const answered = new Map<string, number>();
+  for (const message of parent.messages) {
+    if (message.role === 'tool' && message.toolResult) {
+      answered.set(message.toolResult.callId, (answered.get(message.toolResult.callId) ?? 0) + 1);
+    }
+  }
+  const seen = new Map<string, number>();
+  for (const message of parent.messages) {
+    if (message.role !== 'assistant' || !message.toolCalls) {
+      continue;
+    }
+    for (const call of message.toolCalls) {
+      const occurrence = (seen.get(call.id) ?? 0) + 1;
+      seen.set(call.id, occurrence);
+      if (call.toolName === DELEGATE_TOOL_NAME && occurrence > (answered.get(call.id) ?? 0)) {
+        return true;
+      }
+    }
+  }
+  return false;
+};
+
+/**
  * `metadata` with the delegation markers removed — what a sub-session
  * carries once it has been addressed from outside. The delegation ended
  * with the turn that awaited it; a conversation somebody continues on the

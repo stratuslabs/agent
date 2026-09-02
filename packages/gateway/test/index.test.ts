@@ -3390,6 +3390,63 @@ test('a sub-session continued from outside stops being a delegation', async () =
   }
 });
 
+test('a parked session in the sub-session shape is only an orphan when its parent awaits it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  const dbPath = path.join(home, 'sessions.db');
+
+  // A legacy caller could have minted an id containing the marker and
+  // written the key, both accepted before the public door refused them.
+  // What it could not write is the parent's transcript: the session the id
+  // names as parent exists, but holds no agent.delegate call awaiting a
+  // reply, so this is an ordinary parked turn and is recovered as one.
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'web:ava:case',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'completed',
+    messages: [
+      { id: 'm1', role: 'user', content: 'earlier', createdAt: now },
+      { id: 'm2', role: 'assistant', content: 'sure', createdAt: now },
+    ],
+  });
+  await seed.create({
+    id: 'web:ava:case:delegate:notes',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+    ],
+    metadata: {
+      delegatedBy: 'somebody',
+      rootSessionId: 'web:ava:case',
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  seed.close();
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const recovered = nextEvent(gateway.bus, 'session.completed');
+  await gateway.start();
+  try {
+    await settles(recovered, 'the recovered turn');
+  } finally {
+    await gateway.stop();
+  }
+  const after = new SqliteSessionStore(dbPath);
+  const session = await after.get('web:ava:case:delegate:notes');
+  after.close();
+  assert.equal(session?.status, 'completed');
+  assert.notEqual(session?.lastError, ORPHANED_DELEGATION_ERROR);
+});
+
 test('a parked session is only an orphan when both halves say it was delegated', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
