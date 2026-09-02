@@ -31,12 +31,12 @@ import {
   createMessageSendTool,
   createRecallTool,
   createRememberTool,
-  awaitsDelegatedReply,
   createScheduleTools,
   DELEGATED_BY_METADATA_KEY,
   DELEGATION_DEPTH_METADATA_KEY,
   delegatingSessionIdOf,
   isDelegatedSession,
+  outstandingDelegationFor,
   ROOT_SESSION_ID_METADATA_KEY,
   SCHEDULE_ID_METADATA_KEY,
   SCHEDULED_TURN_METADATA_KEY,
@@ -1877,11 +1877,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * the bug this exists to stop. So it is read while nothing can dispatch,
    * and the sweep judges from the snapshot; a child whose parent is missing
    * or not inside such a call is left to ordinary recovery.
+   *
+   * Matched call by call, not parent by parent: the call that awaits a
+   * child names it (see `outstandingDelegationFor`), and a call can await
+   * only one. Two parked children claiming the same call — one of them a
+   * sub-session continued from outside under a version that kept its
+   * markers, parked again on something of its own — is an ambiguity this
+   * cannot settle, and both are left to ordinary recovery rather than one
+   * of them being failed for a delegation that was never its.
    */
   const listOrphanedDelegations = async (): Promise<Set<string>> => {
-    const orphaned = new Set<string>();
+    const claimants = new Map<string, string[]>();
     if (!store.listIdsByStatus) {
-      return orphaned;
+      return new Set();
     }
     for (const sessionId of await store.listIdsByStatus('pending_approval')) {
       const parentId = delegatingSessionIdOf(sessionId);
@@ -1893,11 +1901,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         continue;
       }
       const parent = await store.get(parentId);
-      if (parent && awaitsDelegatedReply(parent)) {
-        orphaned.add(sessionId);
+      const callId = parent ? outstandingDelegationFor(parent, session) : undefined;
+      if (callId !== undefined) {
+        const key = `${parentId}\u0000${callId}`;
+        claimants.set(key, [...(claimants.get(key) ?? []), sessionId]);
       }
     }
-    return orphaned;
+    return new Set([...claimants.values()].filter((ids) => ids.length === 1).map(([id]) => id!));
   };
 
   const recoverOne = (sessionId: string, orphaned: boolean): Promise<void> =>

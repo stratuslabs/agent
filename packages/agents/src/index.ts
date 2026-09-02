@@ -874,16 +874,29 @@ export const delegatingSessionIdOf = (sessionId: string): string | undefined => 
 };
 
 /**
- * Whether `parent` is still inside an `agent.delegate` call — one recorded
- * in its transcript with no result behind it.
+ * The id of the `agent.delegate` call in `parent` that is still awaiting
+ * `child`, or undefined when none is.
  *
  * The one thing about a delegation nothing outside the runner can forge:
  * a caller can name a session in the sub-session id shape and write the
  * metadata keys, but only the runner writes assistant tool calls, and only
- * a delegation in flight leaves one dangling. Read against the transcript
- * order so a re-used call id cannot make a later call look answered.
+ * a delegation in flight leaves one with no result behind it. Matched to
+ * the child and not merely counted, because a parent can be inside one
+ * delegation while an earlier sub-session of its — continued from outside
+ * under a version that kept the markers — is parked on something of its
+ * own. The call names its target and its prompt, and `agent.delegate`
+ * made the prompt the child's first user message. Read against the
+ * transcript order so a re-used call id cannot make a later call look
+ * answered.
  */
-export const awaitsDelegatedReply = (parent: Pick<Session, 'messages'>): boolean => {
+export const outstandingDelegationFor = (
+  parent: Pick<Session, 'messages'>,
+  child: Pick<Session, 'agent' | 'messages'>,
+): string | undefined => {
+  const firstMessage = child.messages.find((message) => message.role === 'user')?.content;
+  if (firstMessage === undefined) {
+    return undefined;
+  }
   const answered = new Map<string, number>();
   for (const message of parent.messages) {
     if (message.role === 'tool' && message.toolResult) {
@@ -898,12 +911,17 @@ export const awaitsDelegatedReply = (parent: Pick<Session, 'messages'>): boolean
     for (const call of message.toolCalls) {
       const occurrence = (seen.get(call.id) ?? 0) + 1;
       seen.set(call.id, occurrence);
-      if (call.toolName === DELEGATE_TOOL_NAME && occurrence > (answered.get(call.id) ?? 0)) {
-        return true;
+      if (call.toolName !== DELEGATE_TOOL_NAME || occurrence <= (answered.get(call.id) ?? 0)) {
+        continue;
+      }
+      const target = typeof call.input.agent === 'string' ? call.input.agent : '';
+      const prompt = typeof call.input.prompt === 'string' ? call.input.prompt.trim() : '';
+      if ((target === child.agent.id || target === child.agent.name) && prompt === firstMessage) {
+        return call.id;
       }
     }
   }
-  return false;
+  return undefined;
 };
 
 /**

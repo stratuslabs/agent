@@ -3468,6 +3468,88 @@ test('a message to the parent that lands before the sweep does not turn the orph
   assert.equal(events.some((event) => event.type === 'tool.called' && event.sessionId === childId), false, 'the orphaned call never executed');
 });
 
+test('only the child the outstanding delegation names is an orphan; a sibling parked on its own is recovered', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const dbPath = path.join(home, 'sessions.db');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'juno.md', '---\nname: Juno\nprovider: demo\n---\n\nYou are Juno.\n');
+
+  // The parent is inside its SECOND delegation to Juno. Its first one
+  // finished long ago, and that sub-session was continued from outside
+  // under a version that kept its markers; it is now parked on a turn of
+  // its own. Both children name this parent in their ids.
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'orchestrator',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [
+      { id: 'm1', role: 'user', content: 'have juno look', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'd1', toolName: 'agent.delegate', input: { agent: 'juno', prompt: 'look at it' } }] },
+      { id: 'm3', role: 'tool', name: 'agent.delegate', content: '{}', createdAt: now, toolResult: { callId: 'd1', toolName: 'agent.delegate', ok: true, output: { reply: 'looked' } } },
+      { id: 'm4', role: 'assistant', content: 'now the second thing', createdAt: now },
+      { id: 'm5', role: 'user', content: 'have juno do it', createdAt: now },
+      { id: 'm6', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'd2', toolName: 'agent.delegate', input: { agent: 'juno', prompt: 'do it' } }] },
+    ],
+  });
+  const parked = (id: string, firstMessage: string) => ({
+    id,
+    agent: { id: 'juno', name: 'Juno' },
+    status: 'pending_approval' as const,
+    messages: [
+      { id: 'm1', role: 'user' as const, content: firstMessage, createdAt: now },
+      { id: 'm2', role: 'assistant' as const, content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: id } }] },
+    ],
+    metadata: {
+      delegationDepth: 1,
+      delegatedBy: 'ava',
+      rootSessionId: 'orchestrator',
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: id } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  const genuine = 'orchestrator:delegate:juno:1:2-bbbbbbbb';
+  const continued = 'orchestrator:delegate:juno:1:1-aaaaaaaa';
+  await seed.create(parked(genuine, 'do it'));
+  await seed.create(parked(continued, 'look at it'));
+  seed.close();
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const settledIds = new Set<string>();
+  const bothSettled = new Promise<void>((resolve) => {
+    gateway.bus.subscribe((event) => {
+      if (event.type === 'session.failed' || event.type === 'session.completed') {
+        settledIds.add(event.sessionId);
+        if (settledIds.has(genuine) && settledIds.has(continued)) {
+          resolve();
+        }
+      }
+    });
+  });
+  await gateway.start();
+  try {
+    await settles(bothSettled, 'both children being settled');
+  } finally {
+    await gateway.stop();
+  }
+
+  const after = new SqliteSessionStore(dbPath);
+  const orphan = await after.get(genuine);
+  const sibling = await after.get(continued);
+  after.close();
+  assert.equal(orphan?.status, 'failed');
+  assert.equal(orphan?.lastError, ORPHANED_DELEGATION_ERROR);
+  // The sibling's delegation was answered long ago; what it is parked on
+  // is its own, and the restart owes it ordinary recovery.
+  assert.equal(sibling?.status, 'completed');
+  assert.notEqual(sibling?.lastError, ORPHANED_DELEGATION_ERROR);
+});
+
 test('a parked session in the sub-session shape is only an orphan when its parent awaits it', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
