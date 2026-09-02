@@ -5,7 +5,6 @@ import type {
   MessageParam,
   TextBlockParam,
   Tool as AnthropicTool,
-  Usage,
 } from '@anthropic-ai/sdk/resources/messages/messages';
 import {
   renderSystemPromptParts,
@@ -390,6 +389,19 @@ const extractParts = (
 };
 
 /**
+ * The counts a usage carrier may hold, each nullable. Structural rather than
+ * the SDK's `Usage` because a stream cut short reports a partial snapshot
+ * whose output count is deliberately withheld — see the streaming catch —
+ * and `Usage` says `output_tokens` is always a number.
+ */
+type UsageCounts = {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+};
+
+/**
  * The turn's token usage, in the kernel's four buckets.
  *
  * No normalization is needed: the Messages API already reports the three
@@ -403,7 +415,7 @@ const extractParts = (
  * record made only of attribution.
  */
 const extractUsage = (
-  response: { usage?: Usage | null; model?: string },
+  response: { usage?: UsageCounts | null; model?: string },
   providerName: string,
   model: string,
 ): ProviderCallUsage | undefined => {
@@ -518,33 +530,57 @@ export const createAnthropicProvider = ({
           // (a throttled Slack edit) pauses this consumer loop instead of
           // piling every remaining delta into an unbounded queue.
           const stream = client.messages.stream(attempt, requestOptions);
-          const onDelta = request.onDelta;
-          // Tool input streams as JSON fragments after the block's start
-          // event. Forwarding them keeps consumers (and activity watchdogs)
-          // fed while Claude spends time generating a large tool argument.
-          const toolNamesByIndex = new Map<number, string>();
-          for await (const event of stream) {
-            if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-              await onDelta({ type: 'text', text: event.delta.text });
-            } else if (
-              event.type === 'content_block_delta'
-              && (event.delta.type === 'thinking_delta' || event.delta.type === 'signature_delta')
-            ) {
-              // Adaptive thinking can run longer than an idle timeout before
-              // the first visible text; forward progress without content.
-              await onDelta({ type: 'thinking' });
-            } else if (event.type === 'content_block_delta' && event.delta.type === 'input_json_delta') {
-              const toolName = toolNamesByIndex.get(event.index);
-              if (toolName !== undefined) {
-                await onDelta({ type: 'tool-call', toolName, inputFragment: event.delta.partial_json });
+          try {
+            const onDelta = request.onDelta;
+            // Tool input streams as JSON fragments after the block's start
+            // event. Forwarding them keeps consumers (and activity watchdogs)
+            // fed while Claude spends time generating a large tool argument.
+            const toolNamesByIndex = new Map<number, string>();
+            for await (const event of stream) {
+              if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+                await onDelta({ type: 'text', text: event.delta.text });
+              } else if (
+                event.type === 'content_block_delta'
+                && (event.delta.type === 'thinking_delta' || event.delta.type === 'signature_delta')
+              ) {
+                // Adaptive thinking can run longer than an idle timeout before
+                // the first visible text; forward progress without content.
+                await onDelta({ type: 'thinking' });
+              } else if (event.type === 'content_block_delta' && event.delta.type === 'input_json_delta') {
+                const toolName = toolNamesByIndex.get(event.index);
+                if (toolName !== undefined) {
+                  await onDelta({ type: 'tool-call', toolName, inputFragment: event.delta.partial_json });
+                }
+              } else if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
+                const toolName = mapping.fromWire.get(event.content_block.name) ?? event.content_block.name;
+                toolNamesByIndex.set(event.index, toolName);
+                await onDelta({ type: 'tool-call', toolName });
               }
-            } else if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
-              const toolName = mapping.fromWire.get(event.content_block.name) ?? event.content_block.name;
-              toolNamesByIndex.set(event.index, toolName);
-              await onDelta({ type: 'tool-call', toolName });
             }
+            return await stream.finalMessage();
+          } catch (error) {
+            // A stream that ends before `message_stop` — the turn's signal
+            // fired (the gateway's idle watchdog, a cancelled turn) or the
+            // connection dropped — was still a billed request, and a rejection
+            // returns no response for its count to ride on. The SDK's running
+            // snapshot holds what `message_start` announced: the input side in
+            // full. Output tokens only arrive on `message_delta`, at the end,
+            // so a snapshot with no stop reason has not seen them and reports
+            // none rather than the placeholder `message_start` carries.
+            // Reported on the way out, because a rejection is the one exit
+            // nothing downstream can attribute.
+            const partial = stream.currentMessage;
+            if (partial) {
+              const usage = extractUsage({
+                usage: { ...partial.usage, output_tokens: partial.stop_reason ? partial.usage.output_tokens : null },
+                model: partial.model,
+              }, name, model);
+              if (usage) {
+                request.onUsage?.(usage);
+              }
+            }
+            throw error;
           }
-          return stream.finalMessage();
         }
         return client.messages.create(attempt, requestOptions);
       };

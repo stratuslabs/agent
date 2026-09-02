@@ -902,3 +902,110 @@ test('a retry does not carry the previous attempt\'s tool breakpoint', async () 
   assert.deepEqual(retry.system[0].cache_control, { type: 'ephemeral', ttl: '5m' });
   assert.equal(retry.tools.at(-1).cache_control, undefined);
 });
+
+/**
+ * A streaming response whose body carries `frames` and then either errors
+ * (`cut`) or waits on the request's signal — the two ways a stream ends
+ * before `message_stop`: the connection drops, or the turn is aborted.
+ */
+const partialSse = (frames: SseEvent[], mode: 'cut' | 'hang'): typeof fetch =>
+  (async (_input: unknown, init?: RequestInit) => {
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const frame of frames) {
+          controller.enqueue(encoder.encode(`event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`));
+        }
+        init?.signal?.addEventListener('abort', () => controller.error(new DOMException('aborted', 'AbortError')), { once: true });
+      },
+      // Only once the frames above have been read: erroring a stream drops
+      // whatever is still queued, and the point is that they arrived.
+      pull(controller) {
+        if (mode === 'cut') {
+          controller.error(new Error('connection reset'));
+        }
+      },
+    });
+    return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  }) as typeof fetch;
+
+const partialFrames: SseEvent[] = [
+  {
+    type: 'message_start',
+    message: {
+      id: 'msg_1', type: 'message', role: 'assistant', model: 'claude-served-1',
+      content: [], stop_reason: null, stop_sequence: null,
+      usage: { input_tokens: 900, output_tokens: 1, cache_read_input_tokens: 600, cache_creation_input_tokens: 0 },
+    },
+  },
+  { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Half an ans' } },
+];
+
+test('a stream cut before message_stop still reports the input it was billed for', async () => {
+  const reported: ProviderCallUsage[] = [];
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: partialSse(partialFrames, 'cut') });
+
+  await assert.rejects(
+    provider.generate({
+      session: createSession(),
+      onDelta: async () => {},
+      onUsage: (usage) => reported.push(usage),
+    } as ProviderRequest),
+  );
+
+  // The input side is what message_start announced, attributed to the model
+  // the API said served it. No output count: message_delta never arrived,
+  // and message_start's placeholder is not the number of tokens generated.
+  assert.deepEqual(reported, [
+    { provider: 'anthropic', model: 'claude-served-1', inputTokens: 900, cacheReadTokens: 600, cacheWriteTokens: 0 },
+  ]);
+});
+
+test('a stream aborted by the turn signal reports its partial usage before rejecting', async () => {
+  const controller = new AbortController();
+  const reported: ProviderCallUsage[] = [];
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: partialSse(partialFrames, 'hang') });
+
+  const generating = provider.generate({
+    session: createSession(),
+    signal: controller.signal,
+    onDelta: async (delta) => {
+      // The watchdog's shape: the first visible progress is the last, and
+      // the turn is aborted while the provider is still being awaited.
+      if (delta.type === 'text') {
+        controller.abort();
+      }
+    },
+    onUsage: (usage) => reported.push(usage),
+  } as ProviderRequest);
+
+  await assert.rejects(generating);
+  assert.equal(reported.length, 1);
+  assert.equal(reported[0]?.inputTokens, 900);
+  assert.equal(reported[0]?.outputTokens, undefined);
+});
+
+test('a stream that ends after message_delta keeps the final output count', async () => {
+  const reported: ProviderCallUsage[] = [];
+  const provider = createAnthropicProvider({
+    apiKey: 'test-key',
+    fetch: partialSse([
+      ...partialFrames,
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 37 } },
+    ], 'cut'),
+  });
+
+  await assert.rejects(
+    provider.generate({
+      session: createSession(),
+      onDelta: async () => {},
+      onUsage: (usage) => reported.push(usage),
+    } as ProviderRequest),
+  );
+
+  // message_delta carried the real output count and the stop reason with
+  // it; a stream cut after that point lost only the message_stop frame.
+  assert.equal(reported[0]?.outputTokens, 37);
+});
