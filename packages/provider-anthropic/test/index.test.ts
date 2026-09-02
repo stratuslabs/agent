@@ -904,11 +904,13 @@ test('a retry does not carry the previous attempt\'s tool breakpoint', async () 
 });
 
 /**
- * A streaming response whose body carries `frames` and then either errors
- * (`cut`) or waits on the request's signal — the two ways a stream ends
- * before `message_stop`: the connection drops, or the turn is aborted.
+ * A streaming response whose body carries `frames` and then errors (`cut`),
+ * ends cleanly (`close`), or waits on the request's signal (`hang`) — the
+ * three ways a stream ends before `message_stop`: the connection drops, a
+ * proxy closes a truncated body as though it were whole, or the turn is
+ * aborted.
  */
-const partialSse = (frames: SseEvent[], mode: 'cut' | 'hang'): typeof fetch =>
+const partialSse = (frames: SseEvent[], mode: 'cut' | 'hang' | 'close'): typeof fetch =>
   (async (_input: unknown, init?: RequestInit) => {
     const encoder = new TextEncoder();
     const body = new ReadableStream<Uint8Array>({
@@ -923,6 +925,8 @@ const partialSse = (frames: SseEvent[], mode: 'cut' | 'hang'): typeof fetch =>
       pull(controller) {
         if (mode === 'cut') {
           controller.error(new Error('connection reset'));
+        } else if (mode === 'close') {
+          controller.close();
         }
       },
     });
@@ -1008,4 +1012,25 @@ test('a stream that ends after message_delta keeps the final output count', asyn
   // message_delta carried the real output count and the stop reason with
   // it; a stream cut after that point lost only the message_stop frame.
   assert.equal(reported[0]?.outputTokens, 37);
+});
+
+test('a body that ends cleanly before message_stop still reports its input', async () => {
+  // A proxy that closes a truncated response without an error: the SDK
+  // sees a well-formed end of body, retires its running snapshot, and only
+  // then rejects for want of a finished message — so the count has to be
+  // captured while the events are flowing, not read back afterwards.
+  const reported: ProviderCallUsage[] = [];
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: partialSse(partialFrames, 'close') });
+
+  await assert.rejects(
+    provider.generate({
+      session: createSession(),
+      onDelta: async () => {},
+      onUsage: (usage) => reported.push(usage),
+    } as ProviderRequest),
+  );
+
+  assert.deepEqual(reported, [
+    { provider: 'anthropic', model: 'claude-served-1', inputTokens: 900, cacheReadTokens: 600, cacheWriteTokens: 0 },
+  ]);
 });

@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import type {
   ContentBlock,
   ContentBlockParam,
+  Message,
   MessageParam,
   TextBlockParam,
   Tool as AnthropicTool,
@@ -530,6 +531,16 @@ export const createAnthropicProvider = ({
           // (a throttled Slack edit) pauses this consumer loop instead of
           // piling every remaining delta into an unbounded queue.
           const stream = client.messages.stream(attempt, requestOptions);
+          // The running message as the SDK accumulates it, taken from its
+          // own event hook rather than read back after a failure: a body
+          // that ends cleanly before `message_stop` (a proxy closing a
+          // truncated response as though it were whole) looks to the SDK
+          // like a finished request, and it retires the snapshot before
+          // `finalMessage()` rejects for want of a message.
+          let latest: Message | undefined;
+          stream.on('streamEvent', (_event, snapshot) => {
+            latest = snapshot;
+          });
           try {
             const onDelta = request.onDelta;
             // Tool input streams as JSON fragments after the block's start
@@ -560,20 +571,20 @@ export const createAnthropicProvider = ({
             return await stream.finalMessage();
           } catch (error) {
             // A stream that ends before `message_stop` — the turn's signal
-            // fired (the gateway's idle watchdog, a cancelled turn) or the
-            // connection dropped — was still a billed request, and a rejection
-            // returns no response for its count to ride on. The SDK's running
-            // snapshot holds what `message_start` announced: the input side in
-            // full. Output tokens only arrive on `message_delta`, at the end,
-            // so a snapshot with no stop reason has not seen them and reports
-            // none rather than the placeholder `message_start` carries.
-            // Reported on the way out, because a rejection is the one exit
-            // nothing downstream can attribute.
-            const partial = stream.currentMessage;
-            if (partial) {
+            // fired (the gateway's idle watchdog, a cancelled turn), the
+            // connection dropped, or the body simply stopped — was still a
+            // billed request, and a rejection returns no response for its
+            // count to ride on. The snapshot holds what `message_start`
+            // announced: the input side in full. Output tokens only arrive
+            // on `message_delta`, at the end, so a snapshot with no stop
+            // reason has not seen them and reports none rather than the
+            // placeholder `message_start` carries. Reported on the way out,
+            // because a rejection is the one exit nothing downstream can
+            // attribute.
+            if (latest) {
               const usage = extractUsage({
-                usage: { ...partial.usage, output_tokens: partial.stop_reason ? partial.usage.output_tokens : null },
-                model: partial.model,
+                usage: { ...latest.usage, output_tokens: latest.stop_reason ? latest.usage.output_tokens : null },
+                model: latest.model,
               }, name, model);
               if (usage) {
                 request.onUsage?.(usage);
