@@ -12,6 +12,7 @@ import {
   ToolRegistry,
   createSkillReadTool,
   missingSkillRequirements,
+  PENDING_APPROVAL_METADATA_KEY,
   readPendingApproval,
   type AgentDefinition,
   type ApprovalAnswer,
@@ -31,6 +32,15 @@ import {
   createRecallTool,
   createRememberTool,
   createScheduleTools,
+  DELEGATED_BY_METADATA_KEY,
+  DELEGATION_DEPTH_METADATA_KEY,
+  delegatingSessionIdOf,
+  isDelegatedSession,
+  outstandingDelegationFor,
+  ROOT_SESSION_ID_METADATA_KEY,
+  SCHEDULE_ID_METADATA_KEY,
+  SCHEDULED_TURN_METADATA_KEY,
+  withoutDelegation,
   type ParsedSoul,
   type ScheduleDestination,
   type ScheduleRecord,
@@ -701,6 +711,56 @@ interface AgentSource {
  */
 export const ABANDONED_TURN_ERROR =
   'stratusd stopped while this turn was still running; it was not resumed. Send the message again.';
+
+/**
+ * Recorded on a delegated sub-session that was parked on a human when the
+ * previous process died.
+ *
+ * Its parent — the turn whose `agent.delegate` call was awaiting the reply
+ * — was running, so the restart fails it as abandoned (above). Recovering
+ * the child anyway would re-ask a person to approve a call whose result no
+ * turn will ever read, and then run it: a command executed, tokens spent,
+ * and a reply delivered to nobody. Distinguishable from the parent's error
+ * because the remedy differs — there is no message to send again here;
+ * the parent's is the one to repeat.
+ */
+/**
+ * Session metadata keys the daemon writes for itself, which no external
+ * dispatch may supply.
+ *
+ * Metadata is one bag: the keys a channel attaches to say where a turn is
+ * happening sit beside the ones the kernel, the scheduler, the fallback
+ * wrapper, and `agent.delegate` write to remember what a session *is* —
+ * and the control API forwards a caller's `metadata` into a new session as
+ * given. A caller who can write `delegatedBy` can have the restart sweep
+ * fail its own parked turn as an orphan; one who can write `fallbackActive`
+ * bills its conversation to the fallback model from the first turn. The
+ * scheduler already refused to trust its own keys for exactly this reason
+ * (see `activeFirings`); the durable ones cannot be re-derived in memory,
+ * so they are refused at the door instead.
+ */
+export const RESERVED_SESSION_METADATA_KEYS: readonly string[] = [
+  PENDING_APPROVAL_METADATA_KEY,
+  FALLBACK_ACTIVE_METADATA_KEY,
+  DELEGATED_BY_METADATA_KEY,
+  ROOT_SESSION_ID_METADATA_KEY,
+  DELEGATION_DEPTH_METADATA_KEY,
+  SCHEDULED_TURN_METADATA_KEY,
+  SCHEDULE_ID_METADATA_KEY,
+];
+
+/**
+ * The first reserved key `metadata` carries, or undefined when it carries
+ * none. Exported so the control API can refuse the request where the
+ * caller can see it, with the same rule the gateway applies at dispatch.
+ */
+export const reservedSessionMetadataKey = (metadata: JsonObject | undefined): string | undefined =>
+  metadata === undefined
+    ? undefined
+    : RESERVED_SESSION_METADATA_KEYS.find((key) => Object.prototype.hasOwnProperty.call(metadata, key));
+
+export const ORPHANED_DELEGATION_ERROR =
+  'stratusd stopped while the turn that delegated this one was still running; the delegation was not resumed. Send the original message again.';
 
 /**
  * The always-on Stratus process. One gateway holds the roster, the durable
@@ -1748,6 +1808,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         // Refresh the stored definition before resuming, so the turn runs
         // with the current instructions, tools, and credentials.
         existing.agent = agent;
+        // A sub-session reached here is being continued from outside — a
+        // delegation never resumes its own child; its ids are minted once.
+        // The delegating turn is over, so the markers come off: what is
+        // now an ordinary conversation must not be closed as an orphan if
+        // a later turn of it parks and the daemon dies.
+        if (isDelegatedSession(existing) && existing.metadata) {
+          existing.metadata = withoutDelegation(existing.metadata);
+        }
         await store.save(existing);
         return runner.resume({ sessionId: input.sessionId, userMessage: input.userMessage, signal });
       }
@@ -1775,7 +1843,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * one unrecoverable turn must not stop the daemon from serving, or from
    * recovering the others.
    */
-  const recoverParkedTurns = async (): Promise<void> => {
+  const recoverParkedTurns = async (orphaned: ReadonlySet<string>): Promise<void> => {
     if (!store.listIdsByStatus) {
       return;
     }
@@ -1791,10 +1859,58 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // answered — fifteen minutes later by default, and never at all with a
     // zero timeout. They are independent turns; only same-session work is
     // ordered, and onSessionChain already guarantees that.
-    await Promise.allSettled(parked.map((sessionId) => recoverOne(sessionId)));
+    await Promise.allSettled(parked.map((sessionId) => recoverOne(sessionId, orphaned.has(sessionId))));
   };
 
-  const recoverOne = (sessionId: string): Promise<void> =>
+  /**
+   * The parked sub-sessions whose delegating turn the last process was
+   * still inside — read BEFORE the channels start, for the same reason the
+   * abandoned list is.
+   *
+   * The proof is the parent's transcript: only the runner writes an
+   * assistant `agent.delegate` call, and only a delegation in flight leaves
+   * one with no result behind it. That evidence does not survive contact
+   * with a channel, though — a message for the parent arriving once the
+   * adapters are up resumes it, and the resume closes the dangling call as
+   * interrupted. Read live from the sweep, the parent would then look as if
+   * it awaited nothing and the child would be re-asked after all, which is
+   * the bug this exists to stop. So it is read while nothing can dispatch,
+   * and the sweep judges from the snapshot; a child whose parent is missing
+   * or not inside such a call is left to ordinary recovery.
+   *
+   * Matched call by call, not parent by parent: the call that awaits a
+   * child names it (see `outstandingDelegationFor`), and a call can await
+   * only one. Two parked children claiming the same call — one of them a
+   * sub-session continued from outside under a version that kept its
+   * markers, parked again on something of its own — is an ambiguity this
+   * cannot settle, and both are left to ordinary recovery rather than one
+   * of them being failed for a delegation that was never its.
+   */
+  const listOrphanedDelegations = async (): Promise<Set<string>> => {
+    const claimants = new Map<string, string[]>();
+    if (!store.listIdsByStatus) {
+      return new Set();
+    }
+    for (const sessionId of await store.listIdsByStatus('pending_approval')) {
+      const parentId = delegatingSessionIdOf(sessionId);
+      if (parentId === undefined) {
+        continue;
+      }
+      const session = await store.get(sessionId);
+      if (!session || !isDelegatedSession(session)) {
+        continue;
+      }
+      const parent = await store.get(parentId);
+      const callId = parent ? outstandingDelegationFor(parent, session) : undefined;
+      if (callId !== undefined) {
+        const key = `${parentId}\u0000${callId}`;
+        claimants.set(key, [...(claimants.get(key) ?? []), sessionId]);
+      }
+    }
+    return new Set([...claimants.values()].filter((ids) => ids.length === 1).map(([id]) => id!));
+  };
+
+  const recoverOne = (sessionId: string, orphaned: boolean): Promise<void> =>
     onSessionChain(sessionId, async () => {
       if (stopping) {
         return;
@@ -1805,6 +1921,27 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           return;
         }
         const record = readPendingApproval(session);
+        // A delegated sub-session is only ever awaited by its parent's
+        // `agent.delegate` call, and that parent was running when the last
+        // process died — it is in the abandoned sweep, not in this one.
+        // Nothing will read the reply, so the parked call is not re-asked:
+        // a person would be approving a command that runs for no one.
+        //
+        // Judged on the re-read, on the chain: the channels are up before
+        // this sweep starts, so a message for this id can have taken the
+        // chain first and moved the session on — and a turn that finished
+        // normally must not be rewritten as failed. The delegation metadata
+        // is durable, so it proves what the session is, not what state it
+        // is in; the status and the checkpoint say that.
+        //
+        // Whether it IS an orphan was decided before the channels started
+        // (`listOrphanedDelegations`), from the parent's transcript, which
+        // a message arriving since may already have rewritten.
+        if (orphaned && isDelegatedSession(session) && session.status === 'pending_approval' && record) {
+          log(`${sessionId}: parked on ${record.call.toolName} for a delegating turn the last stratusd was still running; failing it`);
+          await failOrphanedDelegation(session);
+          return;
+        }
         // A wait that outlived its window while the daemon was down is
         // honoured, not restarted: the request really did go unanswered for
         // the whole time it was configured to wait, and downtime is not a
@@ -1842,6 +1979,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         warn(`could not recover parked session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
       }
     });
+
+  /**
+   * Closes an orphaned sub-session the way the abandoned sweep closes its
+   * parent: durably failed, with the checkpoint retired so no later sweep
+   * can find a call to re-enter, and announced where surfaces can hear it.
+   */
+  const failOrphanedDelegation = async (session: Session): Promise<void> => {
+    const metadata = { ...(session.metadata ?? {}) };
+    delete metadata[PENDING_APPROVAL_METADATA_KEY];
+    session.metadata = metadata;
+    session.status = 'failed';
+    session.lastError = ORPHANED_DELEGATION_ERROR;
+    await store.save(session);
+    await bus.emit({ type: 'session.updated', sessionId: session.id, status: 'failed' });
+    await bus.emit({ type: 'session.failed', sessionId: session.id, error: ORPHANED_DELEGATION_ERROR });
+  };
 
   /**
    * Turns the last process was still running when it stopped being able to
@@ -1988,6 +2141,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       );
     }
 
+    // The daemon's own bookkeeping keys, by the same logic as the reserved
+    // id namespace above: what the runner, the scheduler, and delegation
+    // record about a session must be something only they can have written.
+    const reserved = reservedSessionMetadataKey(input.metadata);
+    if (reserved !== undefined) {
+      throw new Error(
+        `Session metadata key "${reserved}" is reserved for the daemon's own records and cannot be supplied by a dispatch. Reserved keys: ${RESERVED_SESSION_METADATA_KEYS.join(', ')}.`,
+      );
+    }
+
     const { turnId } = input;
     if (turnId === undefined) {
       return onSessionChain(input.sessionId, () => dispatchInternal(input));
@@ -2075,6 +2238,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Applied further down, once there is somewhere for the failure to
     // be heard.
     const abandoned = await listAbandonedTurns();
+    // Likewise: which parked sub-sessions have a parent still inside its
+    // agent.delegate call is only answerable while nothing can resume that
+    // parent. See listOrphanedDelegations.
+    const orphaned = await listOrphanedDelegations();
 
     // Channels come up after the roster so their first inbound message
     // already has agents to dispatch to. One failing adapter must not
@@ -2106,7 +2273,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // above already listening — but a turn parked behind a slow approver
     // must not hold up start(), or a daemon with one outstanding request
     // would refuse to finish booting.
-    void recoverParkedTurns().catch((error) => {
+    void recoverParkedTurns(orphaned).catch((error) => {
       warn(`recovering parked turns failed: ${error instanceof Error ? error.message : String(error)}`);
     });
 

@@ -118,6 +118,17 @@ warning naming the file.
   hears about it too: a turn that fails with nobody rendering it is
   reported where it was asked, rather than going quiet and reading as an
   agent that never replied.
+
+  A sub-session started by `agent.delegate` is the one parked turn that is
+  *not* resumed. Its reply is read by the delegating turn and nothing
+  else, and that turn was mid-flight — it is one of the sessions failed
+  above — so re-asking the question would have someone approve a command
+  that runs for no one. The sub-session comes back `failed` too, with a
+  reason naming the delegating turn, and the message to repeat is the one
+  that started the delegation. This applies only while the sub-session is
+  the delegation's: `agent.delegate` reports the sub-session's id, and a
+  message sent to that id afterwards continues it as an ordinary
+  conversation, whose parked turns are resumed like any other.
 - **A button left behind by a dead daemon corrects itself when clicked.** A
   normal shutdown retracts its buttons; a crash cannot, and the new process
   has no record of what the old one posted. Clicking such a prompt tells

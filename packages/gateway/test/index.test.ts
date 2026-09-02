@@ -12,6 +12,8 @@ import {
 } from '@stratusagent/core';
 import {
   ABANDONED_TURN_ERROR,
+  ORPHANED_DELEGATION_ERROR,
+  RESERVED_SESSION_METADATA_KEYS,
   createGateway,
   SqliteSessionStore,
   type ApprovalTransport,
@@ -3211,4 +3213,442 @@ test('a session\'s usage survives a restart and reads back as stored', async () 
   // Grouped as stored — two providers and two models still separable, not a
   // total that arrived pre-collapsed.
   assert.deepEqual(restored?.usage, usage);
+});
+
+test('a delegated sub-session parked when the daemon died is failed, not re-asked', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const dbPath = path.join(home, 'sessions.db');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'juno.md', '---\nname: Juno\nprovider: demo\n---\n\nYou are Juno.\n');
+
+  // Exactly what a kill leaves behind when an orchestrator's agent.delegate
+  // call is awaiting a sub-session that is itself parked on a human: the
+  // parent still `running` (it is inside its tool call), the child
+  // checkpointed on the gated call — and the child carrying the delegation
+  // metadata `agent.delegate` stamps on it.
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'orchestrator',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [
+      { id: 'm1', role: 'user', content: 'have juno do it', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'd1', toolName: 'agent.delegate', input: { agent: 'juno', prompt: 'do it' } }] },
+    ],
+  });
+  const childId = 'orchestrator:delegate:juno:1:1-abcdefgh';
+  await seed.create({
+    id: childId,
+    agent: { id: 'juno', name: 'Juno' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'do it', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'side effect' } }] },
+    ],
+    metadata: {
+      delegationDepth: 1,
+      delegatedBy: 'ava',
+      rootSessionId: 'orchestrator',
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'side effect' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  seed.close();
+
+  // The default policy approves everything, so a re-asked child would run
+  // its call and complete — which is exactly the outcome this test exists
+  // to rule out.
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const events: StratusEvent[] = [];
+  const failed = new Set<string>();
+  const bothClosed = new Promise<void>((resolve) => {
+    gateway.bus.subscribe((event) => {
+      events.push(event);
+      if (event.type === 'session.failed') {
+        failed.add(event.sessionId);
+        if (failed.has('orchestrator') && failed.has(childId)) {
+          resolve();
+        }
+      }
+    });
+  });
+  await gateway.start();
+  try {
+    await settles(bothClosed, 'both halves of the delegation being closed out');
+  } finally {
+    // Whatever the gate says: a gateway left running holds the process
+    // open, and a hung suite reads as broken infrastructure, not a defect.
+    await gateway.stop();
+  }
+
+  const after = new SqliteSessionStore(dbPath);
+  const parent = await after.get('orchestrator');
+  const child = await after.get(childId);
+  after.close();
+
+  assert.equal(parent?.status, 'failed');
+  assert.equal(parent?.lastError, ABANDONED_TURN_ERROR);
+  // The child is closed the same way its parent is, with a reason of its
+  // own — not asked again, not run, and no longer a checkpoint for a later
+  // sweep to pick up.
+  assert.equal(child?.status, 'failed');
+  assert.equal(child?.lastError, ORPHANED_DELEGATION_ERROR);
+  assert.equal(child?.metadata?.[PENDING_APPROVAL_METADATA_KEY], undefined);
+  assert.equal(
+    events.some((event) => event.type === 'tool.called' && event.sessionId === childId),
+    false,
+    'the orphaned call never executed',
+  );
+  assert.equal((child?.messages ?? []).some((message) => message.toolResult !== undefined), false);
+});
+
+test('a dispatch may not supply the metadata keys the daemon writes for itself', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  const gateway = createGateway({ env, idleTimeoutMs: 0, selection: { provider: 'demo' } });
+  await gateway.start();
+  try {
+    // The one that matters most: a caller who can write `delegatedBy` onto
+    // an ordinary session has the restart sweep fail its parked turn as an
+    // orphan instead of recovering it. Refused at the door, naming the key.
+    await assert.rejects(
+      () => gateway.dispatch({
+        sessionId: 'forged-1',
+        agentId: 'ava',
+        userMessage: 'hi',
+        metadata: { delegatedBy: 'ava', channel: 'web' },
+      }),
+      /"delegatedBy" is reserved/,
+    );
+    assert.equal(await gateway.store.get('forged-1'), undefined, 'nothing was created');
+
+    // Every key in the list is refused, not just the one this was written for.
+    for (const key of RESERVED_SESSION_METADATA_KEYS) {
+      await assert.rejects(
+        () => gateway.dispatch({ sessionId: `forged-${key}`, agentId: 'ava', userMessage: 'hi', metadata: { [key]: true } }),
+        new RegExp(`"${key}" is reserved`),
+      );
+    }
+
+    // Ordinary caller metadata still rides along untouched.
+    const session = await gateway.dispatch({
+      sessionId: 'honest-1',
+      agentId: 'ava',
+      userMessage: 'hi',
+      metadata: { channel: 'web', thread: 'T1' },
+    });
+    assert.equal(session.metadata?.channel, 'web');
+    assert.equal(session.metadata?.thread, 'T1');
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a sub-session continued from outside stops being a delegation', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await writeSoul(home, 'juno.md', '---\nname: Juno\nprovider: demo\n---\n\nYou are Juno.\n');
+  const dbPath = path.join(home, 'sessions.db');
+
+  // A finished delegation, as agent.delegate leaves one — and as its
+  // result reported the id to whoever might message it next.
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  const childId = 'orchestrator:delegate:juno:1:1-abcdefgh';
+  await seed.create({
+    id: childId,
+    agent: { id: 'juno', name: 'Juno' },
+    status: 'completed',
+    messages: [
+      { id: 'm1', role: 'user', content: 'do it', createdAt: now },
+      { id: 'm2', role: 'assistant', content: 'done', createdAt: now },
+    ],
+    metadata: { delegationDepth: 1, delegatedBy: 'ava', rootSessionId: 'orchestrator', channel: 'web' },
+  });
+  seed.close();
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  await gateway.start();
+  try {
+    const continued = await gateway.dispatch({ sessionId: childId, userMessage: 'and now?' });
+    assert.equal(continued.status, 'completed');
+    // The markers are gone and the caller's own metadata is untouched: a
+    // later turn of this conversation that parks is an ordinary parked
+    // turn, not an orphan for the next restart to fail.
+    assert.equal(continued.metadata?.delegatedBy, undefined);
+    assert.equal(continued.metadata?.rootSessionId, undefined);
+    assert.equal(continued.metadata?.delegationDepth, undefined);
+    assert.equal(continued.metadata?.channel, 'web');
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a message to the parent that lands before the sweep does not turn the orphan back into a live delegation', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const dbPath = path.join(home, 'sessions.db');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'juno.md', '---\nname: Juno\nprovider: demo\n---\n\nYou are Juno.\n');
+
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'orchestrator',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [
+      { id: 'm1', role: 'user', content: 'have juno do it', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'd1', toolName: 'agent.delegate', input: { agent: 'juno', prompt: 'do it' } }] },
+    ],
+  });
+  const childId = 'orchestrator:delegate:juno:1:1-abcdefgh';
+  await seed.create({
+    id: childId,
+    agent: { id: 'juno', name: 'Juno' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'do it', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'side effect' } }] },
+    ],
+    metadata: {
+      delegationDepth: 1,
+      delegatedBy: 'ava',
+      rootSessionId: 'orchestrator',
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'side effect' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  seed.close();
+
+  // A channel whose first act is a message to the parent, completed before
+  // start() returns — which is before the parked sweep begins. The resume
+  // reconciles the parent's dangling agent.delegate call as interrupted,
+  // so read live afterwards the parent awaits nothing; the child's reply
+  // still has no reader.
+  const parentPoked: GatewayChannelAdapter = {
+    name: 'poke',
+    async start(gateway) {
+      await gateway.dispatch({ sessionId: 'orchestrator', userMessage: 'still there?' });
+    },
+    async stop() {},
+  };
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' }, channels: [parentPoked] });
+  const events: StratusEvent[] = [];
+  const childClosed = new Promise<void>((resolve) => {
+    gateway.bus.subscribe((event) => {
+      events.push(event);
+      if ((event.type === 'session.failed' || event.type === 'session.completed') && event.sessionId === childId) {
+        resolve();
+      }
+    });
+  });
+  await gateway.start();
+  try {
+    await settles(childClosed, 'the child being closed out');
+  } finally {
+    await gateway.stop();
+  }
+
+  const after = new SqliteSessionStore(dbPath);
+  const child = await after.get(childId);
+  after.close();
+  assert.equal(child?.status, 'failed');
+  assert.equal(child?.lastError, ORPHANED_DELEGATION_ERROR);
+  assert.equal(events.some((event) => event.type === 'tool.called' && event.sessionId === childId), false, 'the orphaned call never executed');
+});
+
+test('only the child the outstanding delegation names is an orphan; a sibling parked on its own is recovered', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const dbPath = path.join(home, 'sessions.db');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'juno.md', '---\nname: Juno\nprovider: demo\n---\n\nYou are Juno.\n');
+
+  // The parent is inside its SECOND delegation to Juno. Its first one
+  // finished long ago, and that sub-session was continued from outside
+  // under a version that kept its markers; it is now parked on a turn of
+  // its own. Both children name this parent in their ids.
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'orchestrator',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [
+      { id: 'm1', role: 'user', content: 'have juno look', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'd1', toolName: 'agent.delegate', input: { agent: 'juno', prompt: 'look at it' } }] },
+      { id: 'm3', role: 'tool', name: 'agent.delegate', content: '{}', createdAt: now, toolResult: { callId: 'd1', toolName: 'agent.delegate', ok: true, output: { reply: 'looked' } } },
+      { id: 'm4', role: 'assistant', content: 'now the second thing', createdAt: now },
+      { id: 'm5', role: 'user', content: 'have juno do it', createdAt: now },
+      { id: 'm6', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'd2', toolName: 'agent.delegate', input: { agent: 'juno', prompt: 'do it' } }] },
+    ],
+  });
+  const parked = (id: string, firstMessage: string) => ({
+    id,
+    agent: { id: 'juno', name: 'Juno' },
+    status: 'pending_approval' as const,
+    messages: [
+      { id: 'm1', role: 'user' as const, content: firstMessage, createdAt: now },
+      { id: 'm2', role: 'assistant' as const, content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: id } }] },
+    ],
+    metadata: {
+      delegationDepth: 1,
+      delegatedBy: 'ava',
+      rootSessionId: 'orchestrator',
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: id } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  const genuine = 'orchestrator:delegate:juno:1:2-bbbbbbbb';
+  const continued = 'orchestrator:delegate:juno:1:1-aaaaaaaa';
+  await seed.create(parked(genuine, 'do it'));
+  await seed.create(parked(continued, 'look at it'));
+  seed.close();
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const settledIds = new Set<string>();
+  const bothSettled = new Promise<void>((resolve) => {
+    gateway.bus.subscribe((event) => {
+      if (event.type === 'session.failed' || event.type === 'session.completed') {
+        settledIds.add(event.sessionId);
+        if (settledIds.has(genuine) && settledIds.has(continued)) {
+          resolve();
+        }
+      }
+    });
+  });
+  await gateway.start();
+  try {
+    await settles(bothSettled, 'both children being settled');
+  } finally {
+    await gateway.stop();
+  }
+
+  const after = new SqliteSessionStore(dbPath);
+  const orphan = await after.get(genuine);
+  const sibling = await after.get(continued);
+  after.close();
+  assert.equal(orphan?.status, 'failed');
+  assert.equal(orphan?.lastError, ORPHANED_DELEGATION_ERROR);
+  // The sibling's delegation was answered long ago; what it is parked on
+  // is its own, and the restart owes it ordinary recovery.
+  assert.equal(sibling?.status, 'completed');
+  assert.notEqual(sibling?.lastError, ORPHANED_DELEGATION_ERROR);
+});
+
+test('a parked session in the sub-session shape is only an orphan when its parent awaits it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  const dbPath = path.join(home, 'sessions.db');
+
+  // A legacy caller could have minted an id containing the marker and
+  // written the key, both accepted before the public door refused them.
+  // What it could not write is the parent's transcript: the session the id
+  // names as parent exists, but holds no agent.delegate call awaiting a
+  // reply, so this is an ordinary parked turn and is recovered as one.
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'web:ava:case',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'completed',
+    messages: [
+      { id: 'm1', role: 'user', content: 'earlier', createdAt: now },
+      { id: 'm2', role: 'assistant', content: 'sure', createdAt: now },
+    ],
+  });
+  await seed.create({
+    id: 'web:ava:case:delegate:notes',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+    ],
+    metadata: {
+      delegatedBy: 'somebody',
+      rootSessionId: 'web:ava:case',
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  seed.close();
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const recovered = nextEvent(gateway.bus, 'session.completed');
+  await gateway.start();
+  try {
+    await settles(recovered, 'the recovered turn');
+  } finally {
+    await gateway.stop();
+  }
+  const after = new SqliteSessionStore(dbPath);
+  const session = await after.get('web:ava:case:delegate:notes');
+  after.close();
+  assert.equal(session?.status, 'completed');
+  assert.notEqual(session?.lastError, ORPHANED_DELEGATION_ERROR);
+});
+
+test('a parked session is only an orphan when both halves say it was delegated', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  const dbPath = path.join(home, 'sessions.db');
+
+  // A row from before the public door refused the daemon's own keys: an
+  // ordinary conversation whose caller wrote `delegatedBy` into its
+  // metadata. Nothing minted its id, so it is not a sub-session, and the
+  // restart owes it the recovery any parked turn gets.
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'web:ava:legacy-forged',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+    ],
+    metadata: {
+      delegatedBy: 'somebody',
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  seed.close();
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const recovered = nextEvent(gateway.bus, 'session.completed');
+  await gateway.start();
+  try {
+    await settles(recovered, 'the recovered turn');
+  } finally {
+    await gateway.stop();
+  }
+  const after = new SqliteSessionStore(dbPath);
+  const session = await after.get('web:ava:legacy-forged');
+  after.close();
+  assert.equal(session?.status, 'completed');
+  assert.notEqual(session?.lastError, ORPHANED_DELEGATION_ERROR);
 });

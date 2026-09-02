@@ -12,7 +12,13 @@ import {
   type ParsedSoul,
 } from '@stratusagent/agents';
 import type { JsonObject } from '@stratusagent/core';
-import { isScheduleSessionId, SCHEDULE_SESSION_ID_PREFIX, type Gateway } from '@stratusagent/gateway';
+import {
+  isScheduleSessionId,
+  RESERVED_SESSION_METADATA_KEYS,
+  reservedSessionMetadataKey,
+  SCHEDULE_SESSION_ID_PREFIX,
+  type Gateway,
+} from '@stratusagent/gateway';
 import { redactAnthropicRawTurns } from '@stratusagent/provider-anthropic';
 import {
   claimSoulFile,
@@ -724,6 +730,23 @@ export const routes: Route[] = [
         );
       }
 
+      const metadata = typeof body.metadata === 'object' && body.metadata !== null && !Array.isArray(body.metadata)
+        ? (body.metadata as JsonObject)
+        : undefined;
+      // The gateway refuses these at dispatch, for the same reason it
+      // refuses the reserved id namespace — and, as with that, by rejecting
+      // a dispatch nobody awaits. Preflighted here so the caller learns
+      // which key rather than receiving a 202 for a turn that never runs.
+      const reserved = reservedSessionMetadataKey(metadata);
+      if (reserved !== undefined) {
+        throw new ApiError(
+          400,
+          'metadata_reserved',
+          `Session metadata key "${reserved}" is reserved for the daemon's own records and cannot be supplied by a caller. `
+            + `Reserved keys: ${RESERVED_SESSION_METADATA_KEYS.join(', ')}.`,
+        );
+      }
+
       const turnId = randomUUID();
       // Armed before the dispatch, so a failure that arrives while the runner
       // is still unwinding is seen rather than missed.
@@ -737,9 +760,7 @@ export const routes: Route[] = [
           ...(agentId ? { agentId } : {}),
           userMessage: message,
           turnId,
-          ...(typeof body.metadata === 'object' && body.metadata !== null && !Array.isArray(body.metadata)
-            ? { metadata: body.metadata as JsonObject }
-            : {}),
+          ...(metadata !== undefined ? { metadata } : {}),
         })
         .catch(async (error: unknown) => {
           // A turn the runner actually ran reports its own failure. One that

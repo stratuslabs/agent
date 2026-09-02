@@ -1867,3 +1867,28 @@ test('a codex sign-in is storable both ways and reachable through every credenti
     await harness.stop();
   }
 });
+
+test('metadata carrying a key the daemon reserves is refused where the caller can see it', async () => {
+  const harness = await startApi();
+  try {
+    // The gateway refuses this at dispatch, but a dispatch nobody awaits
+    // refuses into the event stream; the caller would otherwise hold a 202
+    // and a turn id for a turn that never ran — and a caller who could
+    // write `delegatedBy` would have the restart sweep fail its own parked
+    // turn as an orphaned delegation.
+    const refused = await harness.call('/api/v1/sessions/forged-meta-1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hello', agentId: 'stratus', metadata: { delegatedBy: 'stratus', channel: 'web' } }),
+    });
+    assert.equal(refused.status, 400);
+    const body = await json<{ error: { code: string; message: string } }>(refused);
+    assert.equal(body.error.code, 'metadata_reserved');
+    assert.match(body.error.message, /"delegatedBy"/);
+
+    const listed = await json<{ sessions: Array<{ id: string }> }>(await harness.call('/api/v1/sessions'));
+    assert.equal(listed.sessions.some((session) => session.id === 'forged-meta-1'), false, 'nothing was created');
+  } finally {
+    await harness.stop();
+  }
+});

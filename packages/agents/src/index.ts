@@ -831,6 +831,117 @@ export const createForgetTool = (store: AgentMemoryStore): Tool => ({
 export const DELEGATE_TOOL_NAME = 'agent.delegate';
 
 /**
+ * Metadata a delegated sub-session carries: which agent delegated, and the
+ * session at the root of the chain. Written by `agent.delegate` and read by
+ * the gateway's restart sweep, which is why the keys are named here rather
+ * than spelled twice — a sub-session's parent is a turn in some other
+ * process's memory, and after a restart nothing can consume its reply.
+ */
+export const DELEGATED_BY_METADATA_KEY = 'delegatedBy';
+export const ROOT_SESSION_ID_METADATA_KEY = 'rootSessionId';
+export const DELEGATION_DEPTH_METADATA_KEY = 'delegationDepth';
+
+/**
+ * The segment `agent.delegate` mints into every sub-session's id —
+ * `<parent>:delegate:<agent>:<depth>:<suffix>`. The second half of what
+ * identifies a sub-session, beside the metadata above: the gateway refuses
+ * the metadata keys at its public door, but rows written before it did
+ * cannot be told apart by their metadata alone, and a caller who wrote
+ * `delegatedBy` onto a session of its own would not also have minted an
+ * id in this shape.
+ */
+export const DELEGATED_SESSION_ID_MARKER = ':delegate:';
+
+/**
+ * Whether this session is a delegated sub-session — one whose reply is
+ * consumed by a parent turn's `agent.delegate` call and by nothing else.
+ * Both halves are required: the metadata `agent.delegate` writes, and the
+ * id shape it mints.
+ */
+export const isDelegatedSession = (session: Pick<Session, 'id' | 'metadata'>): boolean =>
+  typeof session.metadata?.[DELEGATED_BY_METADATA_KEY] === 'string'
+  && session.id.includes(DELEGATED_SESSION_ID_MARKER);
+
+/**
+ * The id of the session whose `agent.delegate` call started this one, read
+ * off the id shape above — the text before the last marker, since a nested
+ * sub-session embeds its parent's id whole. Undefined for an id that was
+ * not minted that way.
+ */
+export const delegatingSessionIdOf = (sessionId: string): string | undefined => {
+  const at = sessionId.lastIndexOf(DELEGATED_SESSION_ID_MARKER);
+  return at > 0 ? sessionId.slice(0, at) : undefined;
+};
+
+/**
+ * The id of the `agent.delegate` call in `parent` that is still awaiting
+ * `child`, or undefined when none is.
+ *
+ * The one thing about a delegation nothing outside the runner can forge:
+ * a caller can name a session in the sub-session id shape and write the
+ * metadata keys, but only the runner writes assistant tool calls, and only
+ * a delegation in flight leaves one with no result behind it. Matched to
+ * the child and not merely counted, because a parent can be inside one
+ * delegation while an earlier sub-session of its — continued from outside
+ * under a version that kept the markers — is parked on something of its
+ * own. The call names its target and its prompt, and `agent.delegate`
+ * made the prompt the child's first user message. Read against the
+ * transcript order so a re-used call id cannot make a later call look
+ * answered.
+ */
+export const outstandingDelegationFor = (
+  parent: Pick<Session, 'messages'>,
+  child: Pick<Session, 'agent' | 'messages'>,
+): string | undefined => {
+  const firstMessage = child.messages.find((message) => message.role === 'user')?.content;
+  if (firstMessage === undefined) {
+    return undefined;
+  }
+  const answered = new Map<string, number>();
+  for (const message of parent.messages) {
+    if (message.role === 'tool' && message.toolResult) {
+      answered.set(message.toolResult.callId, (answered.get(message.toolResult.callId) ?? 0) + 1);
+    }
+  }
+  const seen = new Map<string, number>();
+  for (const message of parent.messages) {
+    if (message.role !== 'assistant' || !message.toolCalls) {
+      continue;
+    }
+    for (const call of message.toolCalls) {
+      const occurrence = (seen.get(call.id) ?? 0) + 1;
+      seen.set(call.id, occurrence);
+      if (call.toolName !== DELEGATE_TOOL_NAME || occurrence <= (answered.get(call.id) ?? 0)) {
+        continue;
+      }
+      const target = typeof call.input.agent === 'string' ? call.input.agent : '';
+      const prompt = typeof call.input.prompt === 'string' ? call.input.prompt.trim() : '';
+      if ((target === child.agent.id || target === child.agent.name) && prompt === firstMessage) {
+        return call.id;
+      }
+    }
+  }
+  return undefined;
+};
+
+/**
+ * `metadata` with the delegation markers removed — what a sub-session
+ * carries once it has been addressed from outside. The delegation ended
+ * with the turn that awaited it; a conversation somebody continues on the
+ * same id afterwards is an ordinary one, and must not be closed as an
+ * orphan by a later restart.
+ */
+export const withoutDelegation = (metadata: JsonObject): JsonObject => {
+  const {
+    [DELEGATED_BY_METADATA_KEY]: _delegatedBy,
+    [ROOT_SESSION_ID_METADATA_KEY]: _root,
+    [DELEGATION_DEPTH_METADATA_KEY]: _depth,
+    ...rest
+  } = metadata;
+  return rest;
+};
+
+/**
  * Runs a delegated sub-session. A plain runner works when every agent
  * shares one provider; a host with per-agent provider routing (the
  * gateway) supplies its own dispatcher so the target runs on the
@@ -905,8 +1016,8 @@ export const createDelegateTool = ({
       throw new Error('agent.delegate requires "agent" and "prompt" strings.');
     }
 
-    const depth = typeof session.metadata?.delegationDepth === 'number'
-      ? session.metadata.delegationDepth
+    const depth = typeof session.metadata?.[DELEGATION_DEPTH_METADATA_KEY] === 'number'
+      ? session.metadata[DELEGATION_DEPTH_METADATA_KEY]
       : 0;
     if (depth >= maxDepth) {
       throw new Error(`Delegation depth limit reached (${maxDepth}).`);
@@ -922,14 +1033,14 @@ export const createDelegateTool = ({
 
     delegationCount += 1;
     const result = await runDelegated({
-      sessionId: `${session.id}:delegate:${target.id}:${depth + 1}:${uniqueSuffix()}`,
+      sessionId: `${session.id}${DELEGATED_SESSION_ID_MARKER}${target.id}:${depth + 1}:${uniqueSuffix()}`,
       agent: target,
       userMessage: prompt,
       metadata: {
-        delegationDepth: depth + 1,
-        delegatedBy: session.agent.id,
-        rootSessionId: typeof session.metadata?.rootSessionId === 'string'
-          ? session.metadata.rootSessionId
+        [DELEGATION_DEPTH_METADATA_KEY]: depth + 1,
+        [DELEGATED_BY_METADATA_KEY]: session.agent.id,
+        [ROOT_SESSION_ID_METADATA_KEY]: typeof session.metadata?.[ROOT_SESSION_ID_METADATA_KEY] === 'string'
+          ? session.metadata[ROOT_SESSION_ID_METADATA_KEY]
           : session.id,
       },
       // A cancelled parent turn cancels the delegated run with it —
