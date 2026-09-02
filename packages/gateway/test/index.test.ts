@@ -3390,6 +3390,84 @@ test('a sub-session continued from outside stops being a delegation', async () =
   }
 });
 
+test('a message to the parent that lands before the sweep does not turn the orphan back into a live delegation', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const dbPath = path.join(home, 'sessions.db');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'juno.md', '---\nname: Juno\nprovider: demo\n---\n\nYou are Juno.\n');
+
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'orchestrator',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [
+      { id: 'm1', role: 'user', content: 'have juno do it', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'd1', toolName: 'agent.delegate', input: { agent: 'juno', prompt: 'do it' } }] },
+    ],
+  });
+  const childId = 'orchestrator:delegate:juno:1:1-abcdefgh';
+  await seed.create({
+    id: childId,
+    agent: { id: 'juno', name: 'Juno' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'do it', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'side effect' } }] },
+    ],
+    metadata: {
+      delegationDepth: 1,
+      delegatedBy: 'ava',
+      rootSessionId: 'orchestrator',
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'side effect' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  seed.close();
+
+  // A channel whose first act is a message to the parent, completed before
+  // start() returns — which is before the parked sweep begins. The resume
+  // reconciles the parent's dangling agent.delegate call as interrupted,
+  // so read live afterwards the parent awaits nothing; the child's reply
+  // still has no reader.
+  const parentPoked: GatewayChannelAdapter = {
+    name: 'poke',
+    async start(gateway) {
+      await gateway.dispatch({ sessionId: 'orchestrator', userMessage: 'still there?' });
+    },
+    async stop() {},
+  };
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' }, channels: [parentPoked] });
+  const events: StratusEvent[] = [];
+  const childClosed = new Promise<void>((resolve) => {
+    gateway.bus.subscribe((event) => {
+      events.push(event);
+      if ((event.type === 'session.failed' || event.type === 'session.completed') && event.sessionId === childId) {
+        resolve();
+      }
+    });
+  });
+  await gateway.start();
+  try {
+    await settles(childClosed, 'the child being closed out');
+  } finally {
+    await gateway.stop();
+  }
+
+  const after = new SqliteSessionStore(dbPath);
+  const child = await after.get(childId);
+  after.close();
+  assert.equal(child?.status, 'failed');
+  assert.equal(child?.lastError, ORPHANED_DELEGATION_ERROR);
+  assert.equal(events.some((event) => event.type === 'tool.called' && event.sessionId === childId), false, 'the orphaned call never executed');
+});
+
 test('a parked session in the sub-session shape is only an orphan when its parent awaits it', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };

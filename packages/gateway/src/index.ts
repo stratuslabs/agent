@@ -1843,7 +1843,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * one unrecoverable turn must not stop the daemon from serving, or from
    * recovering the others.
    */
-  const recoverParkedTurns = async (): Promise<void> => {
+  const recoverParkedTurns = async (orphaned: ReadonlySet<string>): Promise<void> => {
     if (!store.listIdsByStatus) {
       return;
     }
@@ -1859,10 +1859,48 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // answered — fifteen minutes later by default, and never at all with a
     // zero timeout. They are independent turns; only same-session work is
     // ordered, and onSessionChain already guarantees that.
-    await Promise.allSettled(parked.map((sessionId) => recoverOne(sessionId)));
+    await Promise.allSettled(parked.map((sessionId) => recoverOne(sessionId, orphaned.has(sessionId))));
   };
 
-  const recoverOne = (sessionId: string): Promise<void> =>
+  /**
+   * The parked sub-sessions whose delegating turn the last process was
+   * still inside — read BEFORE the channels start, for the same reason the
+   * abandoned list is.
+   *
+   * The proof is the parent's transcript: only the runner writes an
+   * assistant `agent.delegate` call, and only a delegation in flight leaves
+   * one with no result behind it. That evidence does not survive contact
+   * with a channel, though — a message for the parent arriving once the
+   * adapters are up resumes it, and the resume closes the dangling call as
+   * interrupted. Read live from the sweep, the parent would then look as if
+   * it awaited nothing and the child would be re-asked after all, which is
+   * the bug this exists to stop. So it is read while nothing can dispatch,
+   * and the sweep judges from the snapshot; a child whose parent is missing
+   * or not inside such a call is left to ordinary recovery.
+   */
+  const listOrphanedDelegations = async (): Promise<Set<string>> => {
+    const orphaned = new Set<string>();
+    if (!store.listIdsByStatus) {
+      return orphaned;
+    }
+    for (const sessionId of await store.listIdsByStatus('pending_approval')) {
+      const parentId = delegatingSessionIdOf(sessionId);
+      if (parentId === undefined) {
+        continue;
+      }
+      const session = await store.get(sessionId);
+      if (!session || !isDelegatedSession(session)) {
+        continue;
+      }
+      const parent = await store.get(parentId);
+      if (parent && awaitsDelegatedReply(parent)) {
+        orphaned.add(sessionId);
+      }
+    }
+    return orphaned;
+  };
+
+  const recoverOne = (sessionId: string, orphaned: boolean): Promise<void> =>
     onSessionChain(sessionId, async () => {
       if (stopping) {
         return;
@@ -1886,21 +1924,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         // is durable, so it proves what the session is, not what state it
         // is in; the status and the checkpoint say that.
         //
-        // And proven by the parent, not by the child's own shape: a caller
-        // could have named a session in the sub-session id shape and
-        // written the metadata keys (before the public door refused them),
-        // but only the runner writes an assistant `agent.delegate` call,
-        // and only a delegation in flight leaves one unanswered. A child
-        // whose parent cannot be found, or is not inside such a call, is
-        // recovered like any other parked turn — the conservative reading.
-        if (isDelegatedSession(session) && session.status === 'pending_approval' && record) {
-          const parentId = delegatingSessionIdOf(sessionId);
-          const parent = parentId !== undefined ? await store.get(parentId) : undefined;
-          if (parent && awaitsDelegatedReply(parent)) {
-            log(`${sessionId}: parked on ${record.call.toolName} for a delegating turn the last stratusd was still running; failing it`);
-            await failOrphanedDelegation(session);
-            return;
-          }
+        // Whether it IS an orphan was decided before the channels started
+        // (`listOrphanedDelegations`), from the parent's transcript, which
+        // a message arriving since may already have rewritten.
+        if (orphaned && isDelegatedSession(session) && session.status === 'pending_approval' && record) {
+          log(`${sessionId}: parked on ${record.call.toolName} for a delegating turn the last stratusd was still running; failing it`);
+          await failOrphanedDelegation(session);
+          return;
         }
         // A wait that outlived its window while the daemon was down is
         // honoured, not restarted: the request really did go unanswered for
@@ -2198,6 +2228,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // Applied further down, once there is somewhere for the failure to
     // be heard.
     const abandoned = await listAbandonedTurns();
+    // Likewise: which parked sub-sessions have a parent still inside its
+    // agent.delegate call is only answerable while nothing can resume that
+    // parent. See listOrphanedDelegations.
+    const orphaned = await listOrphanedDelegations();
 
     // Channels come up after the roster so their first inbound message
     // already has agents to dispatch to. One failing adapter must not
@@ -2229,7 +2263,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // above already listening — but a turn parked behind a slow approver
     // must not hold up start(), or a daemon with one outstanding request
     // would refuse to finish booting.
-    void recoverParkedTurns().catch((error) => {
+    void recoverParkedTurns(orphaned).catch((error) => {
       warn(`recovering parked turns failed: ${error instanceof Error ? error.message : String(error)}`);
     });
 
