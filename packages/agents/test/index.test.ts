@@ -21,6 +21,8 @@ import {
   agentIdWithSuffix,
   AGENT_ID_PATTERN,
   isValidAgentId,
+  isValidSessionId,
+  MAX_SESSION_ID_LENGTH,
   MAX_AGENT_ID_LENGTH,
 } from '../src/index.ts';
 
@@ -605,4 +607,71 @@ test('the length bound applies to minted ids, never to keyed ones', async () => 
 
   // Shape is still absolute, at any length.
   assert.throws(() => defineAgent({ name: 'Ava', id: `../../${overLong}` }), /Invalid agent id/);
+});
+
+test('a session id may open a conversation only when it is a single addressable segment', () => {
+  // The ids in circulation: colon-joined addresses from the dashboard, the
+  // channel adapters, and the CLI. Every one of them has to stay valid, and
+  // the pattern that admits them admits `undefined` too — which is why the
+  // rule is about safety and length rather than shape.
+  for (const id of [
+    'web:stratus:2f1c9c66-0b1e-4a5f-9a3a-1d6b0c2f4e77',
+    'slack:stratus:T01:C02:1699999999.0001',
+    'schedule:stratus:nightly',
+    '2f1c9c66-0b1e-4a5f-9a3a-1d6b0c2f4e77',
+    'a'.repeat(MAX_SESSION_ID_LENGTH),
+  ]) {
+    assert.equal(isValidSessionId(id), true, `${id.slice(0, 40)} is an address`);
+  }
+
+  // Agent ids are deliberately unbounded, and every client convention embeds
+  // one — so the budget is spent on top of the agent id, not shared with it.
+  // A flat cap refused every dashboard conversation for an agent whose id ran
+  // past 159 characters: still on the roster, no longer chattable.
+  const longAgentId = 'a'.repeat(300);
+  assert.equal(isValidAgentId(longAgentId), true, 'a long explicit agent id is valid');
+  const dashboardId = `web:${longAgentId}:2f1c9c66-0b1e-4a5f-9a3a-1d6b0c2f4e77`;
+  assert.equal(isValidSessionId(dashboardId, longAgentId), true);
+  // Without the agent id there is no budget for it, and the same id is over.
+  assert.equal(isValidSessionId(dashboardId), false);
+  // The budget is spent on top of the agent id, not unbounded by it.
+  assert.equal(
+    isValidSessionId(`${'b'.repeat(MAX_SESSION_ID_LENGTH + 1)}:${longAgentId}`, longAgentId),
+    false,
+  );
+  // And only an id that actually spends characters on the agent id gets the
+  // allowance. Otherwise a long-id agent's mere existence would buy any
+  // caller naming it 300 more characters of durable junk.
+  assert.equal(isValidSessionId('z'.repeat(MAX_SESSION_ID_LENGTH + 1), longAgentId), false);
+  assert.equal(isValidSessionId(`web:${longAgentId}:${'z'.repeat(150)}`, longAgentId), true);
+
+  for (const id of [
+    '',
+    ' ',
+    '  ',
+    ' leading',
+    'trailing ',
+    '.hidden',
+    '..',
+    '../../etc/passwd',
+    'back\\slash',
+    'null\u0000byte',
+    // An id keys plain objects, where an inherited name is not a free slot.
+    '__proto__',
+    'toString',
+    // A client's bug rendered as text. Safe, well-formed strings — which is
+    // why no shape rule catches them and a blocklist has to.
+    'undefined',
+    'null',
+    'NaN',
+    '[object Object]',
+    'a'.repeat(MAX_SESSION_ID_LENGTH + 1),
+  ]) {
+    assert.equal(isValidSessionId(id), false, `${JSON.stringify(id).slice(0, 40)} is not an address`);
+  }
+
+  // The length bound is the session rule's own. An agent id long enough to
+  // fail it is still a valid agent id, because that bound applies where an
+  // id is minted and agent ids predate it.
+  assert.equal(isValidAgentId('a'.repeat(MAX_SESSION_ID_LENGTH + 1)), true);
 });

@@ -48,6 +48,8 @@ import {
 export {
   SqliteScheduleStore,
   createSchedulerRuntime,
+  isScheduleSessionId,
+  SCHEDULE_SESSION_ID_PREFIX,
   type ScheduleStoreLike,
   type SchedulerLimits,
   type SchedulerRuntime,

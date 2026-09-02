@@ -231,6 +231,130 @@ test('a message returns its turn id, and a new session must name an agent', asyn
   }
 });
 
+test('a malformed session id cannot open a conversation, and an existing one is never re-judged', async () => {
+  const harness = await startApi();
+  try {
+    // Every one of these reached the session table through this door during
+    // a QA pass, and `undefined` reached it from the dashboard in real use:
+    // an unknown id starts a conversation rather than answering 404, so a
+    // placeholder becomes a durable row nobody meant to create.
+    for (const id of ['undefined', 'null', '%20', '.hidden', '..%2F..%2Fetc%2Fpasswd', 'a'.repeat(1000)]) {
+      const refused = await harness.call(`/api/v1/sessions/${id}/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: 'hello', agentId: 'stratus' }),
+      });
+      assert.equal(refused.status, 400, `${id} should not open a conversation`);
+      assert.equal((await json<{ error: { code: string } }>(refused)).error.code, 'invalid_session_id');
+    }
+
+    // The ids clients actually mint stay welcome — colon-joined addresses,
+    // not slugs. A rule that took these out would take the dashboard and
+    // every channel session with it.
+    for (const id of ['web:stratus:2f1c9c66-0b1e-4a5f-9a3a-1d6b0c2f4e77', 'slack:stratus:T01:C02:1699999999.0001']) {
+      const accepted = await harness.call(`/api/v1/sessions/${id}/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: 'hello', agentId: 'stratus' }),
+      });
+      assert.equal(accepted.status, 202, `${id} is an address, not a mistake`);
+    }
+
+    // An agent id has no length bound on purpose, and the dashboard mints
+    // `web:<agentId>:<uuid>` — so a flat cap on the session id caps the agent
+    // id through the back door, leaving a long-id agent on the roster and
+    // unable to hold a conversation. The budget is spent on top of the agent
+    // id it names.
+    const longAgentId = 'a'.repeat(300);
+    await writeSoul(harness.home, 'long.md', `---\nname: Long\nid: ${longAgentId}\n---\n\nYou are Long.\n`);
+    await harness.gateway.reloadRoster();
+    const longAgentSession = await harness.call(
+      `/api/v1/sessions/${encodeURIComponent(`web:${longAgentId}:2f1c9c66-0b1e-4a5f-9a3a-1d6b0c2f4e77`)}/messages`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: 'hello', agentId: longAgentId }),
+      },
+    );
+    assert.equal(longAgentSession.status, 202, 'a long-id agent must still be able to start a conversation');
+
+    // A row that predates the rule addresses a real conversation. Refusing
+    // it would lock its owner out of their own history to enforce something
+    // written after it was created.
+    await harness.gateway.store.create({
+      id: 'undefined',
+      agent: { id: 'stratus', name: 'Stratus' },
+      status: 'completed',
+      messages: [{ id: 'm-1', role: 'user', content: 'hello', createdAt: '2026-08-19T00:00:00.000Z' }],
+    });
+    const resumed = await harness.call('/api/v1/sessions/undefined/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hello', agentId: 'stratus' }),
+    });
+    assert.equal(resumed.status, 202);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('a session id reserved for scheduled firings is refused where the caller can see it', async () => {
+  const harness = await startApi();
+  try {
+    // The gateway already refuses this, so nothing is ever created — but it
+    // refuses by rejecting a dispatch nobody awaits, which reached the
+    // caller as 202 plus a turn id for a turn that could never run.
+    const refused = await harness.call('/api/v1/sessions/schedule:forged:2026-01-01T00:00:00.000Z/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'pretend to be a firing', agentId: 'stratus' }),
+    });
+    assert.equal(refused.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(refused)).error.code, 'session_id_reserved');
+
+    // And still nothing created, which was always true and stays the point.
+    const listed = await json<{ sessions: Array<{ id: string }> }>(await harness.call('/api/v1/sessions'));
+    assert.equal(listed.sessions.some((session) => session.id.startsWith('schedule:')), false);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('the reserved-prefix refusal outranks the other two, so the caller is told the useful thing', async () => {
+  // Two preflights reached this handler from separate changes, thirteen lines
+  // apart, and git merged them without ever running them together. Their
+  // ORDER is the behaviour: a `schedule:` id is well-formed and passes the
+  // shape rule, so if that ran first the caller would be told its id was
+  // malformed rather than that the prefix belongs to the scheduler.
+  const harness = await startApi();
+  try {
+    // Reserved beats the shape rule, even when the id is also over-long.
+    const both = await harness.call(`/api/v1/sessions/schedule:${'a'.repeat(1000)}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hello', agentId: 'stratus' }),
+    });
+    assert.equal(both.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(both)).error.code, 'session_id_reserved');
+
+    // And beats agent_required, which sits between them: naming no agent does
+    // not turn a reserved id into a missing-agent problem.
+    const noAgent = await harness.call('/api/v1/sessions/schedule:forged:2026-01-01T00:00:00.000Z/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hello' }),
+    });
+    assert.equal(noAgent.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(noAgent)).error.code, 'session_id_reserved');
+
+    // Nothing reserved was created by either attempt.
+    const listed = await json<{ sessions: Array<{ id: string }> }>(await harness.call('/api/v1/sessions'));
+    assert.equal(listed.sessions.some((session) => session.id.startsWith('schedule:')), false);
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('a parked approval is listed and resolvable, and a late second click is refused', async () => {
   const harness = await startApi({ approvals: true });
   const transport = harness.transport;

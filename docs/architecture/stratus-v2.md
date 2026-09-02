@@ -25,7 +25,7 @@ L1  PACKAGES     optional capability packages: providers, tool packs,
 L2  GATEWAY      stratusd (`stratus serve`) — the always-on process:
                  agent roster, durable sessions, channel adapters,
                  one HTTP + WebSocket control API
-L3  SURFACES     CLI, web dashboard, macOS app — thin clients of the
+L3  SURFACES     CLI, web dashboard, desktop app — thin clients of the
                  gateway API and the shared ~/.stratus state
 L4  DEPLOYMENT   recipes, not products: launchd on macOS, systemd/Docker
                  on Linux, multi-tenant hosted
@@ -109,7 +109,7 @@ Every surface is a thin client. None of them ever reimplements the loop.
 
 - **CLI** (exists): keeps its in-process mode for one-shots and `chat`; gains `serve` and, later, remote-client commands against a running gateway.
 - **Web dashboard**: replaces the smoke-test page with a real chat and monitoring UI over the control API.
-- **macOS app**: a SwiftUI **local management app**, not a chat runtime. Its job is the thing the CLI is worst at: letting a user create and manage agents visually — create an agent (a soul-file editor with name/avatar/personality), manage the roster, configure providers, models, and credentials, and start/stop/health-check the local `stratusd`. It reads and writes the same `~/.stratus` state the CLI uses, and talks to the gateway API when the daemon is running. Chat in the app can come later via the same API, but it is explicitly not the point.
+- **Desktop app**: a **distribution and lifecycle client**, not a management surface and not a chat runtime. Managing a fleet visually is the dashboard's job, on every platform; this one exists because everything above is currently reachable only through a terminal. It installs and supervises the daemon — shipping its own Node and a prebuilt package tree, writing the LaunchAgent, and updating itself — and it drives sign-ins so the vendor CLIs run as child processes rather than as instructions to a user. It holds no runtime of its own, and it reads and writes `~/.stratus` through the control API rather than by hand. See [roadmap 07](../roadmap/07-desktop-app.md).
 - **iOS**: out of scope entirely for now. Nothing here forecloses it — it would be another client of the same API — but we are not designing for it yet.
 
 ### L4 — Deployment recipes

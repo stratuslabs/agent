@@ -15,10 +15,11 @@ approvals are a Slack button or a log line, memory has no view at all —
 [14](./14-memory.md) shipped with its dashboard view explicitly deferred, and
 this is where that debt lands.
 
-It also cleans up after two decisions. [07](./07-macos-app.md) is dropped, and
-its stated job — creating and managing agents visually — has to live somewhere;
-this is where. And [16](./16-templates.md) makes agent creation a reviewable
-bundle, which is a flow with a UI shape, not just a CLI one.
+It also cleans up after two decisions. [07](./07-desktop-app.md) no longer
+claims this job: it was rewritten around installation and daemon lifecycle,
+and managing a fleet visually stays here, on every platform. And
+[16](./16-templates.md) makes agent creation a reviewable bundle, which is a
+flow with a UI shape, not just a CLI one.
 
 ## Scope
 

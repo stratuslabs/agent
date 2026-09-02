@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, readFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { DEFAULT_INHERITED_ENV_VARS } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -26,7 +27,15 @@ import {
 } from '@stratusagent/core';
 import { ManifestBoundToolRegistry, parsePluginManifest } from '@stratusagent/plugins';
 
-import { createMcpPlugin, normalizeCallResult, sanitizeToolSegment, type McpPluginOptions } from '../src/index.ts';
+import {
+  createMcpPlugin,
+  normalizeCallResult,
+  sanitizeToolSegment,
+  sealedStdioEnv,
+  pathGrant,
+  resolveCommandPath,
+  type McpPluginOptions,
+} from '../src/index.ts';
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -828,6 +837,356 @@ test('a stdio server runs under the scrubbed environment: granted names arrive, 
     assert.equal(seen.daemonSecret, null);
     assert.equal(seen.granted, 'yes');
     assert.notEqual(seen.path, null, 'the harmless default inheritance still arrives');
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('a stdio server gets what the operator granted, and the transport inherits nothing on its own', () => {
+  // StdioClientTransport spawns with { ...getDefaultEnvironment(), ...env },
+  // so a scrubbed env is a floor the caller cannot lower by passing one. A
+  // server mounted with `passEnv: []` received all six of the SDK's names
+  // anyway, while tool-shell — same shared constant, direct spawn — did not.
+  const sealed = sealedStdioEnv({ LINEAR_API_KEY: 'lin_api_test' });
+
+  assert.equal(sealed.LINEAR_API_KEY, 'lin_api_test');
+  for (const name of DEFAULT_INHERITED_ENV_VARS) {
+    assert.ok(name in sealed, `${name} must be answered here, not left to the transport`);
+    // Dropped by spawn rather than set empty: a server seeing no USER is not
+    // the same as one seeing an empty USER.
+    assert.equal(sealed[name], undefined, `${name} was not granted`);
+  }
+
+  // A granted name keeps its value and is never refused — the common case,
+  // since PATH and HOME are both in DEFAULT_SUBPROCESS_PASS_ENV and on the
+  // transport's list.
+  const withPath = sealedStdioEnv({ PATH: '/usr/bin', HOME: '/home/agent' });
+  assert.equal(withPath.PATH, '/usr/bin');
+  assert.equal(withPath.HOME, '/home/agent');
+  assert.equal(withPath.SHELL, undefined);
+});
+
+test('a bare command with no PATH granted is refused at load, not left to resolve somewhere', async () => {
+  // The child's PATH is only what the config granted, so a bare command has
+  // no search path — and the runtime signal cannot be trusted to say so: on
+  // Windows the SDK spawns through cross-spawn, whose resolver hands an
+  // absent PATH to `which`, which falls back to the daemon's own PATH. So a
+  // bare command would resolve against exactly the environment this config
+  // declined to grant.
+  await assert.rejects(
+    async () => {
+      const plugin = createMcpPlugin({
+        enabled: true,
+        servers: { sealed: { command: 'npx', passEnv: [] } },
+      });
+      await plugin.setup?.({ bus: new EventBus(), tools: new ToolRegistry() } as never);
+    },
+    /passEnv does not grant PATH/,
+  );
+
+  // An absolute command needs no search path, so it is fine with none.
+  const absolute = createMcpPlugin({
+    enabled: true,
+    servers: { sealed: { command: '/usr/bin/definitely-not-installed', passEnv: [] } },
+  }, { warn: () => {} });
+  await absolute.setup?.({ bus: new EventBus(), tools: new ToolRegistry() } as never);
+  await absolute.dispose?.();
+
+  // Granting PATH keeps a bare command working.
+  const granted = createMcpPlugin({
+    enabled: true,
+    servers: { sealed: { command: 'definitely-not-on-any-path', env: { PATH: '/usr/bin' }, passEnv: [] } },
+  }, { warn: () => {} });
+  await granted.setup?.({ bus: new EventBus(), tools: new ToolRegistry() } as never);
+  await granted.dispose?.();
+});
+
+test('every inherited name leaves the seal once, in the transport\'s spelling', () => {
+  // The rule is not about PATH. It holds for every name the transport would
+  // inherit, and it was written for PATH alone once already — which is how a
+  // granted `UserProfile` ended up with no `USERPROFILE` entry to override
+  // the daemon's copy with.
+  //
+  // The loop walks the SDK's own list, which is fixed to the host platform at
+  // module load: the POSIX names here, the Windows ones on a Windows runner.
+  // So this exercises the canonicalization mechanism through whichever names
+  // exist, which is the part that is ours; which names the SDK lists is not.
+  for (const name of DEFAULT_INHERITED_ENV_VARS) {
+    const mixed = `${name[0]}${name.slice(1).toLowerCase()}`;
+
+    // Windows: one spelling, canonical, carrying the grant.
+    const win = sealedStdioEnv({ [mixed]: '/granted' }, 'win32');
+    const winSpellings = Object.keys(win).filter((key) => key.toLowerCase() === name.toLowerCase());
+    assert.deepEqual(winSpellings, [name], `win32 ${mixed}: one canonical spelling`);
+    assert.equal(win[name], name === 'PATH' ? '/granted' : '/granted');
+
+    // POSIX: a different casing is a different variable, so the inherited
+    // name stays sealed and the operator's odd one is simply theirs.
+    const posix = sealedStdioEnv({ [mixed]: '/granted' }, 'linux');
+    if (mixed !== name) {
+      assert.equal(posix[name], undefined, `linux ${mixed}: ${name} stays sealed`);
+      assert.equal(posix[mixed], '/granted');
+    }
+
+    // Ungranted, either way: answered with a refusal rather than left out.
+    for (const platform of ['win32', 'linux'] as const) {
+      assert.ok(name in sealedStdioEnv({}, platform), `${platform}: ${name} must be answered`);
+      assert.equal(sealedStdioEnv({}, platform)[name], undefined);
+    }
+  }
+});
+
+test('exactly one usable search path leaves the seal, whatever the grant looked like', () => {
+  // An invariant test rather than a case list, because this has now been
+  // wrong in three different ways and each fix addressed only the shape that
+  // was reported. What must hold, on both platforms: the key the transport
+  // merges under is present, it carries the granted value or nothing, and it
+  // is never empty and never the daemon's.
+  const grants: Array<Record<string, string>> = [
+    {},
+    { PATH: '/granted' },
+    { Path: '/granted' },
+    { PATH: '' },
+    { Path: '' },
+    { PATH: '/upper', Path: '/mixed' },
+    { LINEAR_API_KEY: 'k' },
+  ];
+
+  for (const platform of ['win32', 'linux'] as const) {
+    for (const granted of grants) {
+      const sealed = sealedStdioEnv(granted, platform);
+      assert.ok('PATH' in sealed, `${platform} ${JSON.stringify(granted)}: PATH must be answered`);
+      assert.notEqual(sealed.PATH, '', 'an empty search path is a fallback to the daemon, never a grant');
+
+      if (platform === 'win32') {
+        // One spelling only: a second is the same variable, and which one the
+        // runtime picks is not ours to guess.
+        const spellings = Object.keys(sealed).filter((key) => key.toLowerCase() === 'path');
+        assert.deepEqual(spellings, ['PATH'], `win32 ${JSON.stringify(granted)}: one spelling`);
+      }
+
+      const expected = pathGrant(granted, platform);
+      assert.equal(sealed.PATH, expected, `${platform} ${JSON.stringify(granted)}: the granted value or nothing`);
+    }
+  }
+
+  // The two shapes that were live leaks, named so a regression is legible.
+  assert.equal(sealedStdioEnv({ Path: 'C:\\mcp-bin' }, 'win32').PATH, 'C:\\mcp-bin');
+  assert.equal(sealedStdioEnv({ PATH: '' }, 'linux').PATH, undefined);
+});
+
+test('the search-path grant is spelled the way the platform spells it', () => {
+  // Windows names are case-insensitive and `Path` is the spelling it uses, so
+  // refusing that there would reject a config that granted the variable fine.
+  assert.equal(pathGrant({ Path: '/custom/bin' }, 'win32'), '/custom/bin');
+  assert.equal(pathGrant({ PATH: '/custom/bin' }, 'win32'), '/custom/bin');
+
+  // POSIX names are case-sensitive and only PATH drives executable lookup.
+  // Accepting `Path` there would pass a grant that does nothing: the child is
+  // handed `Path`, `PATH` is sealed away as ungranted, and a bare command has
+  // no search path at all — defeating the refusal this feeds.
+  assert.equal(pathGrant({ PATH: '/custom/bin' }, 'linux'), '/custom/bin');
+  assert.equal(pathGrant({ Path: '/custom/bin' }, 'linux'), undefined);
+  assert.equal(sealedStdioEnv({ Path: '/custom/bin' }, 'linux').PATH, undefined);
+
+  // The seal has to ask the same question the grant check asks. On Windows a
+  // granted `Path` IS PATH — so rather than either sealing an uppercase
+  // refusal beside it (the seal contradicting the grant) or leaving the
+  // grant alone (the transport's own uppercase default then shadowing it),
+  // the grant is canonicalized onto the one spelling the transport merges
+  // under. Both of the other two shapes were live bugs.
+  const windows = sealedStdioEnv({ Path: '/custom/bin' }, 'win32');
+  assert.equal(windows.PATH, '/custom/bin', 'the grant, under the transport\'s spelling');
+  assert.equal('Path' in windows, false, 'no second spelling of the same variable');
+
+  // On POSIX they are genuinely different names, so the ungranted PATH is
+  // still sealed away and only the useless `Path` survives — which is what
+  // makes the load-time refusal fire for a bare command.
+  const posix = sealedStdioEnv({ Path: '/custom/bin' }, 'linux');
+  assert.equal(posix.Path, '/custom/bin');
+  assert.equal(posix.PATH, undefined);
+  assert.equal('PATH' in posix, true, 'sealed, not simply absent');
+});
+
+test('a bare command resolves inside the granted search path and nowhere else', async () => {
+  // cross-spawn's Windows resolver searches `process.cwd()` before anything
+  // the operator granted — `which/which.js` says so in its own comment. The
+  // daemon's working directory is not a grant, so the bridge resolves the
+  // command itself and hands the transport a path it need not search.
+  //
+  // The Windows rules are exercised from here through the `platform`
+  // parameter: what differs there is the candidate list and the absence of
+  // an execute bit, and neither needs a Windows kernel to check.
+  const granted = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-path-'));
+  const ungranted = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-nopath-'));
+  await writeFile(path.join(granted, 'srv.CMD'), '@echo off\n');
+  await writeFile(path.join(ungranted, 'other.CMD'), '@echo off\n');
+
+  assert.equal(resolveCommandPath('srv', { PATH: granted }, 'win32'), path.join(granted, 'srv.CMD'));
+  // A directory nobody granted is not searched, whatever is sitting in it.
+  assert.equal(resolveCommandPath('other', { PATH: granted }, 'win32'), undefined);
+  // Windows names are case-insensitive, and `Path` is the spelling it uses.
+  assert.equal(resolveCommandPath('srv', { Path: granted }, 'win32'), path.join(granted, 'srv.CMD'));
+  // PATHEXT decides what counts as runnable, and only a granted one is read:
+  // the daemon's own is not part of the search this config declared.
+  assert.equal(resolveCommandPath('srv', { PATH: granted, PATHEXT: '.EXE' }, 'win32'), undefined);
+  assert.equal(
+    resolveCommandPath('srv', { PATH: granted, PATHEXT: '.EXE;.CMD' }, 'win32'),
+    path.join(granted, 'srv.CMD'),
+  );
+  // A quoted entry is a directory, not a directory whose name has quotes —
+  // but only a *balanced* pair, the way `which` reads it. A lone quote is a
+  // malformed entry, and stripping it would search a directory the granted
+  // string does not name.
+  assert.equal(resolveCommandPath('srv', { PATH: `"${granted}"` }, 'win32'), path.join(granted, 'srv.CMD'));
+  assert.equal(resolveCommandPath('srv', { PATH: `"${granted}` }, 'win32'), undefined);
+  assert.equal(resolveCommandPath('srv', { PATH: `${granted}"` }, 'win32'), undefined);
+
+  // An extension the granted PATHEXT does not permit is not runnable, even
+  // when the command names it outright — `isexe` checks the unsuffixed
+  // candidate too, so taking it here would let a file Windows would refuse
+  // mask the one beside it that it would run.
+  await writeFile(path.join(granted, 'srv.js'), '\n');
+  assert.equal(resolveCommandPath('srv.js', { PATH: granted, PATHEXT: '.EXE' }, 'win32'), undefined);
+  assert.equal(
+    resolveCommandPath('srv.js', { PATH: granted, PATHEXT: '.JS' }, 'win32'),
+    path.join(granted, 'srv.js'),
+  );
+  await writeFile(path.join(granted, 'srv.js.EXE'), '\n');
+  assert.equal(
+    resolveCommandPath('srv.js', { PATH: granted, PATHEXT: '.EXE' }, 'win32'),
+    path.join(granted, 'srv.js.EXE'),
+  );
+
+  // Ungranted, the fallback is the one `which` already uses. A wider set
+  // would make a bare command resolve to file types that resolve to nothing
+  // today: replacing a lookup is not an occasion to widen what it will run.
+  await writeFile(path.join(granted, 'scripted.VBS'), '\n');
+  assert.equal(resolveCommandPath('scripted', { PATH: granted }, 'win32'), undefined);
+  assert.equal(
+    resolveCommandPath('scripted', { PATH: granted, PATHEXT: '.VBS' }, 'win32'),
+    path.join(granted, 'scripted.VBS'),
+  );
+
+  // POSIX: the execute bit is what makes a candidate runnable, so a
+  // same-named file earlier on the path that cannot be run is passed over
+  // rather than resolved to and then failing at spawn.
+  const first = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-first-'));
+  const second = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-second-'));
+  await writeFile(path.join(first, 'srv'), '#!/bin/sh\n');
+  await writeFile(path.join(second, 'srv'), '#!/bin/sh\n');
+  await chmod(path.join(second, 'srv'), 0o755);
+  assert.equal(resolveCommandPath('srv', { PATH: `${first}:${second}` }, 'linux'), path.join(second, 'srv'));
+
+  await chmod(path.join(first, 'srv'), 0o755);
+  assert.equal(resolveCommandPath('srv', { PATH: `${first}:${second}` }, 'linux'), path.join(first, 'srv'));
+
+  // An empty entry means the current directory to a shell. Here it means
+  // nothing: the cwd is the directory this whole resolver exists to exclude.
+  assert.equal(resolveCommandPath('srv', { PATH: `:${second}` }, 'linux'), path.join(second, 'srv'));
+  assert.equal(resolveCommandPath('srv', { PATH: '' }, 'linux'), undefined);
+  assert.equal(resolveCommandPath('srv', {}, 'linux'), undefined);
+
+  // A relative entry IS honoured — `./node_modules/.bin` is a directory
+  // somebody chose, unlike the zero-length one a stray colon leaves behind.
+  // It resolves against the directory the child will run in, and comes back
+  // absolute: a relative result would be re-read against the server's `cwd`,
+  // so the file checked here and the file spawned there could differ.
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-project-'));
+  await mkdir(path.join(project, 'bin'));
+  await writeFile(path.join(project, 'bin', 'srv'), '#!/bin/sh\n');
+  await chmod(path.join(project, 'bin', 'srv'), 0o755);
+  assert.equal(
+    resolveCommandPath('srv', { PATH: 'bin' }, 'linux', project),
+    path.join(project, 'bin', 'srv'),
+  );
+  assert.equal(resolveCommandPath('srv', { PATH: 'bin' }, 'linux', second), undefined);
+});
+
+test('an empty search-path entry is not the working directory, end to end', async () => {
+  // The POSIX shape of the same hole Windows has implicitly. `which` reads an
+  // empty PATH entry as the current directory — and cross-spawn chdirs to the
+  // server's own `cwd` before resolving — so a `srv` sitting in the working
+  // directory wins over the one in the directory the operator granted. Which
+  // shim actually ran is the observable: both start the same server, and each
+  // records itself first.
+  const bin = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-bin-'));
+  const work = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-cwd-'));
+  const ran = path.join(bin, 'ran');
+  const fixture = path.join(packageRoot, 'fixtures', 'env-echo-server.mjs');
+  for (const [dir, label] of [[bin, 'granted'], [work, 'cwd']] as const) {
+    const shim = path.join(dir, 'srv');
+    await writeFile(
+      shim,
+      `#!/bin/sh\nprintf '%s' ${JSON.stringify(label)} > ${JSON.stringify(ran)}\n`
+        + `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(fixture)}\n`,
+    );
+    await chmod(shim, 0o755);
+  }
+
+  const plugin = createMcpPlugin(
+    { servers: { envy: { command: 'srv', cwd: work, env: { PATH: `:${bin}` }, passEnv: [] } } },
+    { warn: () => {}, log: () => {} },
+  );
+  const target = new ToolRegistry();
+  try {
+    await loadThroughView(plugin, target);
+    assert.ok(target.get('mcp.envy.read_env'), 'the resolved path is one the spawn could actually run');
+    assert.equal(await readFile(ran, 'utf8'), 'granted', 'the granted directory was searched, the cwd was not');
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('a command missing from the granted path leaves the daemon serving, not the plugin failed', async () => {
+  // Not a config failure: the config is answerable, the binary just is not
+  // there yet. `McpConfigError` would take the whole plugin — and with it
+  // every other agent's tools — down over a package that has not finished
+  // installing.
+  const empty = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-empty-'));
+  const warnings: string[] = [];
+  const plugin = createMcpPlugin(
+    { servers: { missing: { command: 'not-installed', env: { PATH: empty }, passEnv: [] } } },
+    { warn: (message) => warnings.push(message), log: () => {} },
+  );
+  const target = new ToolRegistry();
+  try {
+    await loadThroughView(plugin, target);
+    assert.ok(
+      warnings.some((message) => /was not found on the PATH this server was granted/.test(message)),
+      `the warning names the fix; got ${JSON.stringify(warnings)}`,
+    );
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('a relative search-path entry is the server\'s working directory, not the daemon\'s', async () => {
+  // The mismatch a self-written resolver introduces if it forgets which
+  // directory it is standing in: cross-spawn chdirs to the server's `cwd`
+  // before resolving, so `PATH: "bin"` alongside `cwd` has always meant
+  // `<cwd>/bin` — the shape `npx` from a project checkout takes. Statting it
+  // against the daemon's directory instead asks about a different file, and
+  // answering with a relative path lets the spawn re-resolve it against a
+  // third one.
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-proj-'));
+  await mkdir(path.join(project, 'bin'));
+  const shim = path.join(project, 'bin', 'srv');
+  await writeFile(
+    shim,
+    `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} `
+      + `${JSON.stringify(path.join(packageRoot, 'fixtures', 'env-echo-server.mjs'))}\n`,
+  );
+  await chmod(shim, 0o755);
+
+  const plugin = createMcpPlugin(
+    { servers: { envy: { command: 'srv', cwd: project, env: { PATH: 'bin' }, passEnv: [] } } },
+    { warn: () => {}, log: () => {} },
+  );
+  const target = new ToolRegistry();
+  try {
+    await loadThroughView(plugin, target);
+    assert.ok(target.get('mcp.envy.read_env'), 'the entry resolved against the server\'s own directory');
   } finally {
     await plugin.dispose?.();
   }
