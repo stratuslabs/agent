@@ -1719,9 +1719,25 @@ export class RunAbortedError extends Error {
   }
 }
 
+/**
+ * The abort that stopped a run, as the runner records it.
+ *
+ * A signal carries whatever its controller aborted with. When that reason
+ * is a `RunAbortedError`, the aborter said why — the gateway's watchdog
+ * names the silence it timed out on — and that is the error the turn fails
+ * with, so `lastError` and `session.failed` read "no activity for 120000ms"
+ * rather than the bare "Run aborted" that a person cancelling also
+ * produces. The distinction used to exist only on the dispatch's rejection,
+ * which is the one place nothing durable or observable reads it from.
+ * Anything else on the signal — undefined, a DOMException, a string — is a
+ * caller that did not say, and the default stands.
+ */
+const abortErrorFor = (signal: AbortSignal | undefined): RunAbortedError =>
+  signal?.reason instanceof RunAbortedError ? signal.reason : new RunAbortedError();
+
 const throwIfAborted = (signal: AbortSignal | undefined): void => {
   if (signal?.aborted) {
-    throw new RunAbortedError();
+    throw abortErrorFor(signal);
   }
 };
 
@@ -2175,9 +2191,12 @@ export class AgentRunner {
     } catch (caught) {
       // An abort can surface first from any layer (the provider's cancelled
       // request, an executor, this loop's own checks) — normalize so an
-      // aborted turn is always distinguishable from a genuine failure.
-      const error = signal?.aborted && !(caught instanceof RunAbortedError)
-        ? new RunAbortedError()
+      // aborted turn is always distinguishable from a genuine failure, and
+      // so the aborter's own reason wins over whichever layer noticed first.
+      const error = signal?.aborted
+        ? (signal.reason instanceof RunAbortedError || !(caught instanceof RunAbortedError)
+            ? abortErrorFor(signal)
+            : caught)
         : caught;
       const lastError = error instanceof Error ? error.message : String(error);
       session.status = 'failed';

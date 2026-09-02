@@ -1448,10 +1448,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
 
     const controller = new AbortController();
-    let timedOut = false;
-    const onExternalAbort = (): void => controller.abort();
+    // The external reason travels: a caller that aborted with its own
+    // `RunAbortedError` gets it recorded on the session, like the watchdog's.
+    const onExternalAbort = (): void => controller.abort(external?.reason);
     if (external?.aborted) {
-      controller.abort();
+      controller.abort(external.reason);
     } else {
       external?.addEventListener('abort', onExternalAbort, { once: true });
     }
@@ -1492,9 +1493,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Deliberately not unref'd: while a provider await is in flight, this
       // timer is what guarantees the process can always make progress on it.
       timer = setTimeout(() => {
-        timedOut = true;
         warn(`watchdog: no activity on session ${sessionId} for ${effectiveIdleMs}ms; aborting the turn`);
-        controller.abort();
+        // The reason rides on the signal, because the runner is what fails
+        // the session: it writes `lastError` and emits `session.failed`
+        // before this wrapper ever sees the rejection. Rethrowing a better
+        // message from here reached the dispatcher and nobody else — the
+        // record and the event both said "Run aborted", which is also what
+        // a person cancelling looks like.
+        controller.abort(new RunAbortedError(`Run aborted: no activity for ${effectiveIdleMs}ms`));
       }, effectiveIdleMs);
     };
 
@@ -1581,11 +1587,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     try {
       return await run(controller.signal);
-    } catch (error) {
-      if (timedOut && error instanceof RunAbortedError) {
-        throw new RunAbortedError(`Run aborted: no activity for ${effectiveIdleMs}ms`);
-      }
-      throw error;
     } finally {
       suspendTimer();
       unsubscribeObserver();

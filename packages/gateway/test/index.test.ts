@@ -216,16 +216,26 @@ test('the watchdog aborts a stalled streaming turn and fails the session cleanly
 
   const env = { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-test' }, fetch: fetchImpl };
   const gateway = createGateway({ env, idleTimeoutMs: 300, warn: () => {} });
+  const failed = nextEvent(gateway.bus, 'session.failed');
   await gateway.start();
 
-  await assert.rejects(
-    () => gateway.dispatch({ sessionId: 'stalled-1', agentId: 'slow', userMessage: 'hang' }),
-    (error: Error) => error instanceof RunAbortedError && /no activity/.test(error.message),
-  );
+  try {
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'stalled-1', agentId: 'slow', userMessage: 'hang' }),
+      (error: Error) => error instanceof RunAbortedError && /no activity/.test(error.message),
+    );
 
-  const stored = await gateway.store.get('stalled-1');
-  assert.equal(stored?.status, 'failed');
-  await gateway.stop();
+    // The reason reaches the record and the event, not only the dispatcher:
+    // an operator reading the session, or a surface on the bus, can tell a
+    // watchdog abort from a person cancelling.
+    const stored = await gateway.store.get('stalled-1');
+    assert.equal(stored?.status, 'failed');
+    assert.equal(stored?.lastError, 'Run aborted: no activity for 300ms');
+    assert.equal((await failed).error, 'Run aborted: no activity for 300ms');
+  } finally {
+    // A failed assertion must not leave the gateway holding the process open.
+    await gateway.stop();
+  }
 });
 
 test('the idle watchdog stays off for non-streaming providers', async () => {
