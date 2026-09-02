@@ -25,15 +25,15 @@ Two consequences for what ranks first:
 | 04 | [Agent SDK tool bridge: tools + real history on the subscription path](./04-agent-sdk-bridge.md) | Shipped — tool bridge and dispatcher-side persistence (#31, #51), SDK-native history and parity tests (#54, #55), streaming deltas with the watchdog's tool-phase signal (#56), clean restart for turns no process can resume (#57); two Slack-adapter follow-ups named in the spec | Claude-subscription agents get full tool calling under kernel policy |
 | 05 | [Control API + web dashboard](./05-control-api.md) | Shipped — shared rules extracted from the CLI, gateway seams (turn ids, listable approvals, roster reload), `@stratusagent/control-api` with auth and the management group, and `@stratusagent/dashboard` on top of it; `/catalog/tools` landed with 06 | One API for every surface; a real chat/monitoring UI |
 | 06 | [Tools: fs, shell, browser, web](./06-tool-packs.md) | Shipped — the plugin host and manifest enforcement, `tool-fs`, `tool-shell`, `tool-web`, `tool-browser`, the shared egress policy, the command scopes 03 deferred, and `/catalog/tools` with the dashboard screen | Reusable capability plugins agents opt into by allowlist |
-| 07 | [macOS app: visual agent creation and management](./07-macos-app.md) | Not planned — see [Not planned](#not-planned) | Create and manage agents without the CLI |
+| 07 | [Desktop app: install to a running agent without a terminal](./07-desktop-app.md) | Scoped, mostly unblocked, not planned — see [Not planned](#not-planned) | A signed macOS download that reaches a working agent in under two minutes, with no terminal at any point |
 | 09 | [Skills: procedures an agent loads when it needs them](./09-skills.md) | Shipped — `SkillRegistry` and `skill.read` with the two-gate allowlist exemption, `skills:` in soul frontmatter, `~/.stratus/skills/` plus manifest-contributed plugin skills under qualified ids, the shared persona/memory/skills prompt renderer (the cleanup `stratus-v2.md` flagged), and the skills catalog in `/catalog/tools` | Agents that know *how*, without paying for every procedure every turn |
 | 10 | [Proactive agents: schedules and outbound messages](./10-proactive.md) | Shipped — durable per-agent schedules in the session database with a gateway tick scheduler (interval floor, per-agent concurrency cap, consume-before-dispatch double-run protection, one-catch-up restart sweep), the channel contract's addressable outbound seam with its first implementation in the Slack adapter, `message.send`, the (schedule, destination) approval scope in the permission engine, and `stratus schedules` / `GET,DELETE /schedules` for operators | Agents that act without being spoken to first |
 | 11 | [MCP bridge: mount any MCP server as Stratus tools](./11-mcp.md) | Shipped — `@stratusagent/plugin-mcp` (stdio + Streamable HTTP, discovery under the `mcp.*` namespace declaration, reconnect with backoff, scrubbed stdio env, images into the per-agent workspace), the registration view kept live after commit so reconnect-discovered tools register under the same gate, and the operator's per-tool `toolRisks` override as a host-owned config key | Every existing MCP server, under kernel policy |
 | 12 | [Plugin discovery and distribution](./12-plugin-registry.md) | Deferred — see [Not planned](#not-planned); skills split out to [25](./25-skills-interop.md) | Finding, installing, and trusting third-party **plugins** |
 | 14 | [Memory: recall the agent performs, not recall that happens to it](./14-memory.md) | Shipped — `search`, `forget`, and bounded `list` on the store contract, the derived FTS5 index with the consumed-offset + prefix-digest watermark, `memory.recall` and `memory.forget` (tombstoning, `safe`), per-entry and per-read byte caps, the alias-aware legacy merge, and prompt injection as a bounded recent slice; the dashboard memory view deferred to a follow-up | Durable, searchable memory an agent writes and reads deliberately |
 | 18 | [Usage accounting: `usage` on `ProviderResponse`](./18-usage-accounting.md) | Shipped — the kernel contract as a response field **plus** a per-request `onUsage` sink (#89), because one field carries neither a harness's several inner calls nor a call that threw; attributed `UsageRecord`s the runner accumulates and the session persists, emitted with `session.completed`; all four adapters populating them, the two harness runtimes reporting per model (#90); the fallback wrapper naming and forwarding what it serves. Of the spec's open questions: completion-only, as it leaned; `model` proved available everywhere; the per-agent daily rollup stays open, for the step that needs a cap | Token accounting the runner accumulates with provider and model intact — what every cost question and every budget cap needs first |
+| 23 | [Prompt caching: stop paying full price for the same prefix every turn](./23-prompt-caching.md) | Shipped (#98) — one `cache_control` breakpoint at the end of the stable head (the last system block, or the last tool for an agent with no system block), memory moved **out** of the system prompt to a `role: "system"` tail message with a remembered fallback for models that reject one, deterministic tool ordering against the MCP bridge's reconnect reshuffle, and `promptCache` / `promptCacheTtl` inherited by an Anthropic fallback. `core` grew a *tagged* view of the prompt sections rather than a new order, so the three providers that do not cache send what they always sent. The spec was corrected first, in its own commit: the cacheable minimum is 512 tokens on our default model and not monotonic, a cache read refreshes the entry for free (so 5 minutes, not an hour, is the default), and one breakpoint covers tools and system together. Per-soul override deferred | `cache_control` on the stable prefix, and the volatile section moved off it |
 | 16 | [Agent templates: a working teammate in one command](./16-templates.md) | Not started — **Now** | `stratus agent new --template triage` — soul, allowlist, and both configuration gates answered as one reviewable bundle |
-| 23 | [Prompt caching: stop paying full price for the same prefix every turn](./23-prompt-caching.md) | Not started — **Now** | `cache_control` on the stable prefix, and a system-prompt order where volatile sections trail stable ones |
 | 27 | [Live reload: install a skill without restarting the fleet](./27-live-reload.md) | Not started — **Now** | Skills reload live; plugins still restart, but announced and drained |
 | 17 | [Fleet console: the dashboard as the management surface](./17-fleet-console.md) | Not started — **Now** | Roster, health, live sessions, pending approvals, and memory for an operator who never opens a terminal |
 | 13 | [Web search: the contract the ecosystem implements](./13-search.md) | Not started — **Now** | One `web.search` shape every backend obeys, so swapping vendors changes no soul |
@@ -54,7 +54,6 @@ Two consequences for what ranks first:
 
 
 - **[16](./16-templates.md) — templates.** The highest-leverage item on this page. It removes the onboarding cost *without weakening either gate*, which is the only acceptable way to remove it: a template answers both gates as one bundle somebody reviewed, rather than removing either gate.
-- **[23](./23-prompt-caching.md) — prompt caching.** There is no `cache_control` anywhere in `provider-anthropic`, so every turn re-pays full input price for a persona, a skills block, and a tool list that did not change — for a fleet of always-on agents, the largest line in the bill. It also needs a fix in `core`: `renderSystemPromptSections` emits `persona, memory, skills`, putting the one volatile section *before* a stable one, so a memory write invalidates the skills block behind it. [18](./18-usage-accounting.md) shipped first and is what makes the result measurable.
 - **[27](./27-live-reload.md) — live reload.** Souls already hot-reload; skills and plugins do not, so installing either restarts the daemon — dropping every agent's channel connection at once for a change that concerned one agent. Skills are the case people meet on their second day and the easy half: prose read from disk, no code imported. Plugins keep their restart deliberately, but an announced and drained one.
 - **[17](./17-fleet-console.md) — fleet console.** The API and the dashboard both exist; this makes the dashboard the surface rather than a viewer, for the operator who is never going to run `stratus schedules` at a prompt.
 - **[13](./13-search.md) — `web.search`.** An agent that can fetch a URL but cannot find one is a capability that invites fabrication, which is 13's own framing and it is right. Contract here, backends in the ecosystem.
@@ -79,7 +78,32 @@ Two consequences for what ranks first:
 
 ### Not planned
 
-- **[07](./07-macos-app.md) — macOS app.** Its stated job — creating and managing agents visually — is what [17](./17-fleet-console.md) delivers, sooner and on every platform, against an API that already exists. A second native surface for the same job is hard to justify while that stays true. Not ruled out: worth revisiting if the console turns out not to reach the people it was meant for.
+- **[07](./07-desktop-app.md) — desktop app.** Rewritten and scoped rather
+  than revived. The step it used to be — a second native surface for managing
+  agents — is still [17](./17-fleet-console.md)'s job and is still not worth
+  duplicating; what it is now is a distribution and lifecycle vehicle for the
+  people every path into this product currently loses at a terminal. The
+  runtime questions are settled in
+  [07-runtime-spike.md](./07-runtime-spike.md) — a shipped Node, a prebuilt
+  package tree, no package manager at first run.
+
+  **What it still needs is not all in this step**, and the spec's `Depends on`
+  and `Open questions` carry the list rather than this bullet duplicating it.
+  Four shapes of work: **kernel** — every runtime import of the two optional
+  providers out of `state` and the CLI, and a migration fencing protocol that
+  stops or fences *any* active state-writing process, not only `stratusd`;
+  **API** — a template read, an atomic apply (since `POST /agents` carries no
+  allowlists or plugin configuration while [16](./16-templates.md) requires the
+  soul and the config to commit together), a capability descriptor covering
+  sign-ins and channel setup alike, because the API can perform either and
+  describe neither, and some way to observe whether a bound channel connected,
+  because storing a channel token neither checks it nor surfaces anywhere; **an unrun spike** — whether
+  `claude setup-token` can be captured without a TTY, which decides one of the
+  five sign-in paths; and **the onboarding sequence itself**, deliberately
+  unwritten after a detailed version was specified and falsified repeatedly
+  under review, leaving the constraints any design must satisfy in place of a
+  design. It is scoped so that it can start when it is chosen, not because it
+  is scheduled.
 - **[12](./12-plugin-registry.md) — plugin registry.** Deferred, and now narrower. Discovery and distribution for an ecosystem that does not exist yet is a platform built for nobody; the trigger to revisit is third-party plugins existing that we did not write, and [19](./19-registration-seams.md) is a prerequisite either way — there is no point distributing channel or provider plugins that nothing can register.
 
   **Skills are the half that was never really deferred**, because that reasoning does not apply to them: the standard exists, the ecosystem exists, and somebody else already built the distribution. That is [25](./25-skills-interop.md), and it needs no registry of ours at all.

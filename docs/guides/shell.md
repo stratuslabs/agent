@@ -5,6 +5,17 @@
 coarse to be safe or too coarse to be usable. The tool is `gated`, and the
 permission engine then judges each command.
 
+**This page is about the daemon**, which is where a command runs with nobody
+watching. At a terminal, `stratus run` and `stratus chat` judge the *call*
+rather than the command, exactly as [Approvals](./approvals.md) describes:
+`--approvals always` (the default) runs whatever the agent asks for,
+`--approvals ask` shows you the command and waits for y/N, and
+`--approvals never` refuses every call — including `git status`. So none of
+the safe list, the scopes, or the control-operator rules below apply to a
+one-shot at your own terminal, where you are the gate. Install the shell
+pack for a daemon and this page is the whole story; run it yourself and
+`--approvals` is.
+
 ## Which commands run unattended
 
 1. **Scopes approved this session**, then

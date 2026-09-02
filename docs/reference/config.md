@@ -40,6 +40,8 @@ use right now and which file or env var decided each setting.
 | `fallbackModel` | Model to retry with when the default model errors mid-run |
 | `fallbackProvider` | Provider serving the fallback model — defaults to the main provider |
 | `fallbackBaseUrl` | Base URL for an OpenAI-compatible fallback (e.g. a local model) |
+| `promptCache` | Cache the stable head of each Anthropic request. Default `true` — see below |
+| `promptCacheTtl` | How long a cache entry lives: `5m` (default) or `1h` |
 | `approvals` | Unattended-approval policy for `stratus serve` — trusted configs only, see below |
 | `api` | Control API binding for `stratus serve` — trusted configs only, see below |
 | `plugins` | Plugins to load, keyed by package name — trusted configs only, see below |
@@ -48,6 +50,36 @@ Credentials stored by setup live in `~/.stratus/credentials.json`
 (owner-read-only) and are **endpoint-bound**: a credential saved for one
 endpoint is never sent to an endpoint a project-local config selects. See
 [Security](../concepts/security.md).
+
+## Prompt caching
+
+`promptCache` marks the stable head of each Anthropic request — the tool
+definitions and the persona/skills system block — as cacheable. Those bytes
+are identical on every turn of an agent's life, and a cache read costs about a
+tenth of a full input token, so for an always-on roster this is usually the
+largest single line in the bill.
+
+**It is on by default, and there is one case where turning it off is right.**
+A cache write costs 1.25x an uncached read, and the second request is what
+pays it back. An agent that takes exactly one turn per burst — a schedule that
+fires, says one thing, and stops — never reads its prefix back and pays the
+premium every time. `"promptCache": false` is the honest setting there.
+
+`promptCacheTtl` is `5m` unless you say otherwise, and `5m` is right far more
+often than it looks. A cache *read* refreshes the entry's timer for free, so
+an agent holding a conversation keeps a 5-minute entry alive indefinitely. The
+gap that matters is between an agent's **bursts**, not between its turns —
+`1h` earns its doubled write price only when those bursts are 5 to 60 minutes
+apart.
+
+Both keys apply to the Anthropic provider only. The Claude Code and Codex
+runtimes assemble their own prompts inside their SDKs, and the
+OpenAI-compatible dialect caches by a different mechanism that varies per
+vendor.
+
+Whether it is working is not a guess: `GET /sessions/:id` reports
+`cacheReadTokens` per provider call. Zero across repeated turns of one
+conversation means something in the prefix is changing.
 
 ## Trusted-config-only blocks
 

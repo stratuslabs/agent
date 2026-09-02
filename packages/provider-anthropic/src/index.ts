@@ -3,11 +3,12 @@ import type {
   ContentBlock,
   ContentBlockParam,
   MessageParam,
+  TextBlockParam,
   Tool as AnthropicTool,
   Usage,
 } from '@anthropic-ai/sdk/resources/messages/messages';
 import {
-  renderSystemPrompt,
+  renderSystemPromptParts,
   type JsonObject,
   type ModelProvider,
   type ProviderCallUsage,
@@ -43,6 +44,27 @@ export interface AnthropicProviderConfig {
    * thinking off (e.g. for older models or latency-sensitive runs).
    */
   thinking?: 'default' | 'disabled';
+  /**
+   * Mark the stable head of each request cacheable — the tool definitions and
+   * the persona/skills system block, which are byte-identical across every
+   * turn of an agent's life. Default true.
+   *
+   * Off is the honest setting for an agent that takes exactly one turn per
+   * burst: a cache write costs 1.25x an uncached read, so a prefix that is
+   * never read back is a pure surcharge. Every agent that holds a
+   * conversation is cheaper with it on, because the second turn already pays
+   * the write back.
+   */
+  promptCache?: boolean;
+  /**
+   * How long a cache entry lives. Default '5m'.
+   *
+   * A read refreshes the entry's timer for free, so an agent mid-conversation
+   * keeps a 5-minute entry alive indefinitely and the hour's doubled write
+   * price buys nothing. '1h' is for an agent whose *bursts* are 5-60 minutes
+   * apart, which is a per-deployment fact this package cannot know.
+   */
+  promptCacheTtl?: '5m' | '1h';
   fetch?: typeof fetch;
 }
 
@@ -84,6 +106,28 @@ const createToolNameMapping = (tools: ToolDescriptor[] | undefined): ToolNameMap
 const toWireToolName = (name: string, mapping: ToolNameMapping): string =>
   mapping.toWire.get(name) ?? sanitizeAnthropicToolName(name);
 
+/**
+ * The request's tools in a fixed order, whatever order the registry handed
+ * them over in.
+ *
+ * A cached prefix is a byte match and tools render at position 0, so any
+ * reshuffle silently invalidates every entry — for the rest of the daemon's
+ * life, and invisibly without usage counters. Registry order is *insertion*
+ * order, which is not stable in practice: the MCP bridge unregisters and
+ * re-registers a server's tools on every reconnect, moving them to the end.
+ *
+ * Sorted before the wire-name mapping is built, not after, because the
+ * mapping's collision suffixes are assigned in iteration order too — two
+ * tools that sanitize to the same wire name would otherwise swap which one
+ * gets `_2`.
+ *
+ * A plain codepoint comparison rather than `localeCompare`: the point is a
+ * byte-identical result on every machine, and locale-aware collation is not
+ * that.
+ */
+const sortedToolDescriptors = (tools: ToolDescriptor[] | undefined): ToolDescriptor[] =>
+  [...(tools ?? [])].sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+
 const createAnthropicTools = (
   tools: ToolDescriptor[] | undefined,
   mapping: ToolNameMapping,
@@ -97,13 +141,68 @@ const createAnthropicTools = (
     };
   });
 
-// One shared reading of what an agent is told about itself — persona,
-// memory, skills — rendered by the kernel rather than per provider package.
-const createSystemPrompt = (
+/**
+ * Where each part of what an agent is told goes in this request.
+ *
+ * The kernel renders the sections (one shared reading of persona, memory and
+ * skills); this decides their placement, which is a wire-format question and
+ * so belongs here rather than in the renderer.
+ *
+ * `system` is a single text block holding the stable sections joined exactly
+ * as they have always been joined — one block, not one per section, so the
+ * bytes the model sees do not change and the single breakpoint has somewhere
+ * to sit. `memoryMessage`, when present, is the volatile section on its way
+ * to the tail of `messages` instead.
+ */
+interface PromptPlacement {
+  system: TextBlockParam[];
+  /** The tool list, possibly carrying the breakpoint; see `buildPrompt`. */
+  tools: AnthropicTool[];
+  memoryMessage: string | undefined;
+}
+
+const buildPrompt = (
   request: ProviderRequest,
   systemPrompt: string | undefined,
-): string | undefined =>
-  renderSystemPrompt(request, { ...(systemPrompt ? { preamble: systemPrompt } : {}) });
+  tools: AnthropicTool[],
+  options: { cache: boolean; ttl: '5m' | '1h'; memoryAtTail: boolean },
+): PromptPlacement => {
+  const parts = renderSystemPromptParts(request, {
+    ...(systemPrompt ? { preamble: systemPrompt } : {}),
+  });
+  const memory = options.memoryAtTail ? parts.find((part) => part.kind === 'memory') : undefined;
+  const stable = memory ? parts.filter((part) => part.kind !== 'memory') : parts;
+  const system: TextBlockParam[] = stable.length > 0
+    ? [{ type: 'text', text: stable.map((part) => part.text).join('\n\n') }]
+    : [];
+
+  // The whole breakpoint policy, in one place, because it is one decision:
+  // *where does the stable head end*. The wire order is tools -> system ->
+  // messages, so a marker on the last system block covers the tool
+  // definitions with it — one breakpoint, leaving three of the four the
+  // request is allowed for whatever wants one later.
+  //
+  // An agent with tools but nothing to say — no preamble, no instructions,
+  // no skills — has no system block to carry that marker, and its tool
+  // schemas are often the largest stable thing in the request. So the
+  // breakpoint falls back to the last tool. Never both: two markers on one
+  // contiguous prefix spend a slot to cache the same bytes twice.
+  //
+  // Annotating a prefix below the model's cacheable minimum is a silent
+  // no-op, not an error, so there is nothing to check for first.
+  const head = system.at(-1) ?? tools.at(-1);
+  if (options.cache && head) {
+    head.cache_control = { type: 'ephemeral', ttl: options.ttl };
+  }
+  return { system, tools, memoryMessage: memory?.text };
+};
+
+/**
+ * The 400 a model without mid-conversation system messages answers with.
+ * Matched on the API's own wording because the SDK gives no code for it.
+ */
+const rejectsSystemMessages = (error: unknown): boolean =>
+  error instanceof Anthropic.BadRequestError && /role .?system.? is not supported/i.test(error.message);
 
 type RawTurns = Record<string, ContentBlock[]>;
 
@@ -345,6 +444,8 @@ export const createAnthropicProvider = ({
   systemPrompt,
   baseUrl,
   thinking = 'default',
+  promptCache = true,
+  promptCacheTtl = '5m',
   fetch: fetchImpl,
 }: AnthropicProviderConfig): ModelProvider => {
   if (!apiKey && !authToken) {
@@ -359,63 +460,111 @@ export const createAnthropicProvider = ({
     ...(fetchImpl ? { fetch: fetchImpl } : {}),
   });
 
+  // Whether this model takes a mid-conversation system message. Assumed yes
+  // and demoted on the first rejection, for the life of the provider
+  // instance: the alternative is one wasted round trip per turn rather than
+  // one per process. Never promoted back — a model does not grow the feature
+  // mid-run, and retrying would reintroduce the cost this remembers away.
+  let memoryAtTailSupported = true;
+
   return {
     name,
     async generate(request: ProviderRequest) {
       const rawTurns = rawTurnsFrom(request.session);
-      const mapping = createToolNameMapping(request.tools);
-      const tools = createAnthropicTools(request.tools, mapping);
-      const system = createSystemPrompt(request, systemPrompt);
+      const descriptors = sortedToolDescriptors(request.tools);
+      const mapping = createToolNameMapping(descriptors);
+      const tools = createAnthropicTools(descriptors, mapping);
+      const messages = createAnthropicMessages(request, mapping, rawTurns);
+      // A system message has to follow a user turn. The kernel loop only
+      // calls a provider with a user message or tool results last, so this
+      // holds — but it is the API's rule, not ours, and a caller building
+      // its own history is not bound by our loop.
+      const tailTakesSystem = messages.at(-1)?.role === 'user';
 
-      const params = {
-        model,
-        max_tokens: maxTokens,
-        ...(system ? { system } : {}),
-        ...(tools.length > 0 ? { tools } : {}),
-        // Claude Opus 5 thinks adaptively when `thinking` is omitted.
-        ...(thinking === 'disabled' ? { thinking: { type: 'disabled' as const } } : {}),
-        messages: createAnthropicMessages(request, mapping, rawTurns),
+      const buildParams = (memoryAtTail: boolean) => {
+        // A fresh copy of each tool per attempt: `buildPrompt` may annotate
+        // the last one, and a retry that reused the same objects would carry
+        // the previous attempt's marker.
+        const prompt = buildPrompt(request, systemPrompt, tools.map((tool) => ({ ...tool })), {
+          cache: promptCache,
+          ttl: promptCacheTtl,
+          memoryAtTail,
+        });
+        return {
+          model,
+          max_tokens: maxTokens,
+          ...(prompt.system.length > 0 ? { system: prompt.system } : {}),
+          ...(prompt.tools.length > 0 ? { tools: prompt.tools } : {}),
+          // Claude Opus 5 thinks adaptively when `thinking` is omitted.
+          ...(thinking === 'disabled' ? { thinking: { type: 'disabled' as const } } : {}),
+          messages: prompt.memoryMessage === undefined
+            ? messages
+            : [...messages, { role: 'system' as const, content: prompt.memoryMessage }],
+        };
       };
+
+      // Memory rides at the tail so a remembered fact leaves the cached head
+      // byte-identical. Everything else about the request is the same either
+      // way, so the fallback below only has to rebuild this.
+      let params = buildParams(memoryAtTailSupported && tailTakesSystem);
       // The turn's abort signal cancels the underlying HTTP request — the
       // kernel contract is that aborting stops the work, not just the wait.
       const requestOptions = request.signal ? { signal: request.signal } : undefined;
 
-      let response;
-      if (request.onDelta) {
-        // Streaming path: iterate the stream and AWAIT the sink per
-        // fragment — the kernel contract's backpressure. A slow consumer
-        // (a throttled Slack edit) pauses this consumer loop instead of
-        // piling every remaining delta into an unbounded queue.
-        const stream = client.messages.stream(params, requestOptions);
-        const onDelta = request.onDelta;
-        // Tool input streams as JSON fragments after the block's start
-        // event. Forwarding them keeps consumers (and activity watchdogs)
-        // fed while Claude spends time generating a large tool argument.
-        const toolNamesByIndex = new Map<number, string>();
-        for await (const event of stream) {
-          if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-            await onDelta({ type: 'text', text: event.delta.text });
-          } else if (
-            event.type === 'content_block_delta'
-            && (event.delta.type === 'thinking_delta' || event.delta.type === 'signature_delta')
-          ) {
-            // Adaptive thinking can run longer than an idle timeout before
-            // the first visible text; forward progress without content.
-            await onDelta({ type: 'thinking' });
-          } else if (event.type === 'content_block_delta' && event.delta.type === 'input_json_delta') {
-            const toolName = toolNamesByIndex.get(event.index);
-            if (toolName !== undefined) {
-              await onDelta({ type: 'tool-call', toolName, inputFragment: event.delta.partial_json });
+      const send = async (attempt: typeof params) => {
+        if (request.onDelta) {
+          // Streaming path: iterate the stream and AWAIT the sink per
+          // fragment — the kernel contract's backpressure. A slow consumer
+          // (a throttled Slack edit) pauses this consumer loop instead of
+          // piling every remaining delta into an unbounded queue.
+          const stream = client.messages.stream(attempt, requestOptions);
+          const onDelta = request.onDelta;
+          // Tool input streams as JSON fragments after the block's start
+          // event. Forwarding them keeps consumers (and activity watchdogs)
+          // fed while Claude spends time generating a large tool argument.
+          const toolNamesByIndex = new Map<number, string>();
+          for await (const event of stream) {
+            if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+              await onDelta({ type: 'text', text: event.delta.text });
+            } else if (
+              event.type === 'content_block_delta'
+              && (event.delta.type === 'thinking_delta' || event.delta.type === 'signature_delta')
+            ) {
+              // Adaptive thinking can run longer than an idle timeout before
+              // the first visible text; forward progress without content.
+              await onDelta({ type: 'thinking' });
+            } else if (event.type === 'content_block_delta' && event.delta.type === 'input_json_delta') {
+              const toolName = toolNamesByIndex.get(event.index);
+              if (toolName !== undefined) {
+                await onDelta({ type: 'tool-call', toolName, inputFragment: event.delta.partial_json });
+              }
+            } else if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
+              const toolName = mapping.fromWire.get(event.content_block.name) ?? event.content_block.name;
+              toolNamesByIndex.set(event.index, toolName);
+              await onDelta({ type: 'tool-call', toolName });
             }
-          } else if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
-            const toolName = mapping.fromWire.get(event.content_block.name) ?? event.content_block.name;
-            toolNamesByIndex.set(event.index, toolName);
-            await onDelta({ type: 'tool-call', toolName });
           }
+          return stream.finalMessage();
         }
-        response = await stream.finalMessage();
-      } else {
-        response = await client.messages.create(params, requestOptions);
+        return client.messages.create(attempt, requestOptions);
+      };
+
+      let response;
+      try {
+        response = await send(params);
+      } catch (error) {
+        // The one recoverable rejection: this model has no mid-conversation
+        // system message, so memory has to go back in the system block. Only
+        // when we actually sent one — any other 400 is the caller's.
+        //
+        // No reset delta first: the API rejects the request before generating,
+        // so nothing has streamed for a consumer to discard.
+        if (params.messages.at(-1)?.role !== 'system' || !rejectsSystemMessages(error)) {
+          throw error;
+        }
+        memoryAtTailSupported = false;
+        params = buildParams(false);
+        response = await send(params);
       }
 
       // Reported through the sink BEFORE anything that can reject the

@@ -38,7 +38,10 @@ exist.
   does, and the confirmation screen is exactly the wrong place to disguise
   that.
 - **`stratus plugin list` / `remove`**, and the same over the control API so the
-  dashboard and macOS app can show installed plugins with their contributions.
+  dashboard ([17](./17-fleet-console.md)) can show installed plugins with their
+  contributions. This said "and macOS app" when written; [07](./07-desktop-app.md)
+  was rewritten as a distribution and lifecycle step and holds no management
+  screens.
 - **A curated index repo** (`stratuslabs/plugins`) once there are enough
   packages to be worth curating: metadata, categories, and the
   **trusted-publisher set** the risk floor reads. Trusted means we have looked

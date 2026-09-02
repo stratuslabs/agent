@@ -106,6 +106,86 @@ do: exactly what this config granted — the harmless default inheritance,
 where `ANTHROPIC_API_KEY` and every other exported key lives, is not there
 to read.
 
+That includes the transport's own idea of what a server needs. The MCP
+SDK's stdio client spawns with a default set of its own (`HOME`, `LOGNAME`,
+`PATH`, `SHELL`, `TERM`, `USER` on POSIX) merged under whatever it is
+handed, so the bridge refuses each of those names explicitly unless this
+config granted it — otherwise `passEnv: []` would still hand a third-party
+server the account the daemon runs as. **Consequence for a narrowed
+`passEnv`:** a `command` without a `/` is resolved against the child's
+`PATH`, and the child's `PATH` is only what this config granted — so a
+server whose `passEnv` omits `PATH` **must give `command` as an absolute
+path**, and one that does not is refused at load with a message saying so,
+rather than failing at connect as a bare `ENOENT` that reads like a missing
+binary. An **empty** grant does not count either: `which` treats a falsy
+search path as none and falls back to the daemon's own, so `PATH: ""` would
+resolve a bare command against exactly the environment the config declined
+to grant.
+
+Grants are spelled the way the platform spells them — `Path` counts on
+Windows, where environment names are case-insensitive, and does not on
+POSIX, where only `PATH` drives lookup. On Windows every name the transport
+would inherit is canonicalized onto the transport's own spelling before its
+defaults are merged under it, which is what stops the daemon's uppercase
+copy from shadowing a mixed-case grant: **for each of those names, exactly
+one entry leaves this package, carrying the granted value or nothing.** That
+applies to `USERPROFILE`, `APPDATA` and the rest as much as to `PATH` — a
+grant that only half-applies is the failure this is guarding.
+
+Refused rather than diagnosed at runtime because the runtime signal cannot
+be trusted to mean what it says. On Windows the SDK spawns through
+`cross-spawn`, whose resolver hands an absent `PATH` to `which`, and `which`
+falls back to `process.env.PATH` — the daemon's own. A bare command would
+resolve against exactly the environment this config declined to grant. Same
+rule as a malformed `passEnv`: a grant an operator believes is in effect
+must never quietly be nothing.
+
+**A bare `command` is resolved here, not by the spawn.** The granted `PATH`
+is searched in order and the transport is handed the path that came back,
+because the resolver underneath it does not search only what was granted:
+`cross-spawn` puts `process.cwd()` at the front on Windows — "windows always
+checks the cwd first", says `which`'s own comment — and an empty `PATH`
+entry means the current directory on either platform. The daemon's working
+directory is not a grant, and an `npx.cmd` dropped into it would run in
+place of the one on the granted `PATH`. So an empty entry is dropped rather
+than searched, and the resolution runs on every platform rather than behind
+a Windows branch — the lookup Windows depends on is then the one the tests
+exercise. A `command` that names a path (`/opt/bin/srv`, `.\srv.exe`) is
+taken as written and searched for nowhere.
+
+Everything else about the Windows search follows `which`, because replacing
+a lookup is not an occasion to change what it finds. Quotes come off an
+entry only as a **balanced pair** — a lone one is a malformed entry, and
+stripping it would search a directory the granted string does not name.
+`PATHEXT` decides what is runnable, read from the grant and otherwise from
+`which`'s own fallback, `.EXE;.CMD;.BAT;.COM`; the daemon's `PATHEXT` is
+never read, for the same reason `PATH: ""` does not count as a grant, and
+Windows' wider default is not used either, since it would make a bare
+command resolve to file types that resolve to nothing today. A `command`
+that already carries an extension is tried as written first, but only when
+`PATHEXT` permits that extension — otherwise a `srv.js` under
+`PATHEXT: ".EXE"` would mask the `srv.js.EXE` beside it that Windows would
+actually run. One deliberate difference: an empty entry *inside* `PATHEXT`
+(`".EXE;"`) makes `isexe` treat every extension as executable, and does not
+here. A grant is not widened by the punctuation that ends it.
+
+A **relative** entry is honoured, and it means what it has always meant:
+`PATH: "bin"` on a server with a `cwd` is `<cwd>/bin`, the shape running
+`npx` out of a project checkout takes. It is resolved against the directory
+the server will actually run in — its `cwd`, or the daemon's when it sets
+none — and what the transport is handed is absolute, so the file this
+package checked and the file the spawn starts are the same file. That is a
+different call from the empty entry, deliberately: `./node_modules/.bin` is
+a directory somebody chose, while a zero-length entry is what a stray colon
+leaves behind — and the default grant, `passEnv: ["PATH"]`, copies the
+daemon's own `PATH` verbatim, trailing colon included.
+
+A bare command the granted `PATH` does not contain is **not** a config
+failure: the daemon goes on serving every other agent and the server is
+retried like any other one that is not up, because a package still
+installing is not a broken config. Only a config that cannot become correct
+— a bare command with no `PATH` granted at all — is refused at load.
+
 OAuth-authenticated HTTP servers are not modeled yet; a static bearer in
 `headers` is what exists today.
 
