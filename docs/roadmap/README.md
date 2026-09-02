@@ -25,7 +25,7 @@ Two consequences for what ranks first:
 | 04 | [Agent SDK tool bridge: tools + real history on the subscription path](./04-agent-sdk-bridge.md) | Shipped — tool bridge and dispatcher-side persistence (#31, #51), SDK-native history and parity tests (#54, #55), streaming deltas with the watchdog's tool-phase signal (#56), clean restart for turns no process can resume (#57); two Slack-adapter follow-ups named in the spec | Claude-subscription agents get full tool calling under kernel policy |
 | 05 | [Control API + web dashboard](./05-control-api.md) | Shipped — shared rules extracted from the CLI, gateway seams (turn ids, listable approvals, roster reload), `@stratusagent/control-api` with auth and the management group, and `@stratusagent/dashboard` on top of it; `/catalog/tools` landed with 06 | One API for every surface; a real chat/monitoring UI |
 | 06 | [Tools: fs, shell, browser, web](./06-tool-packs.md) | Shipped — the plugin host and manifest enforcement, `tool-fs`, `tool-shell`, `tool-web`, `tool-browser`, the shared egress policy, the command scopes 03 deferred, and `/catalog/tools` with the dashboard screen | Reusable capability plugins agents opt into by allowlist |
-| 07 | [macOS app: visual agent creation and management](./07-macos-app.md) | Not planned — see [Not planned](#not-planned) | Create and manage agents without the CLI |
+| 07 | [Desktop app: install to a running agent without a terminal](./07-desktop-app.md) | Scoped, mostly unblocked, not planned — see [Not planned](#not-planned) | A signed macOS download that reaches a working agent in under two minutes, with no terminal at any point |
 | 09 | [Skills: procedures an agent loads when it needs them](./09-skills.md) | Shipped — `SkillRegistry` and `skill.read` with the two-gate allowlist exemption, `skills:` in soul frontmatter, `~/.stratus/skills/` plus manifest-contributed plugin skills under qualified ids, the shared persona/memory/skills prompt renderer (the cleanup `stratus-v2.md` flagged), and the skills catalog in `/catalog/tools` | Agents that know *how*, without paying for every procedure every turn |
 | 10 | [Proactive agents: schedules and outbound messages](./10-proactive.md) | Shipped — durable per-agent schedules in the session database with a gateway tick scheduler (interval floor, per-agent concurrency cap, consume-before-dispatch double-run protection, one-catch-up restart sweep), the channel contract's addressable outbound seam with its first implementation in the Slack adapter, `message.send`, the (schedule, destination) approval scope in the permission engine, and `stratus schedules` / `GET,DELETE /schedules` for operators | Agents that act without being spoken to first |
 | 11 | [MCP bridge: mount any MCP server as Stratus tools](./11-mcp.md) | Shipped — `@stratusagent/plugin-mcp` (stdio + Streamable HTTP, discovery under the `mcp.*` namespace declaration, reconnect with backoff, scrubbed stdio env, images into the per-agent workspace), the registration view kept live after commit so reconnect-discovered tools register under the same gate, and the operator's per-tool `toolRisks` override as a host-owned config key | Every existing MCP server, under kernel policy |
@@ -78,7 +78,32 @@ Two consequences for what ranks first:
 
 ### Not planned
 
-- **[07](./07-macos-app.md) — macOS app.** Its stated job — creating and managing agents visually — is what [17](./17-fleet-console.md) delivers, sooner and on every platform, against an API that already exists. A second native surface for the same job is hard to justify while that stays true. Not ruled out: worth revisiting if the console turns out not to reach the people it was meant for.
+- **[07](./07-desktop-app.md) — desktop app.** Rewritten and scoped rather
+  than revived. The step it used to be — a second native surface for managing
+  agents — is still [17](./17-fleet-console.md)'s job and is still not worth
+  duplicating; what it is now is a distribution and lifecycle vehicle for the
+  people every path into this product currently loses at a terminal. The
+  runtime questions are settled in
+  [07-runtime-spike.md](./07-runtime-spike.md) — a shipped Node, a prebuilt
+  package tree, no package manager at first run.
+
+  **What it still needs is not all in this step**, and the spec's `Depends on`
+  and `Open questions` carry the list rather than this bullet duplicating it.
+  Four shapes of work: **kernel** — every runtime import of the two optional
+  providers out of `state` and the CLI, and a migration fencing protocol that
+  stops or fences *any* active state-writing process, not only `stratusd`;
+  **API** — a template read, an atomic apply (since `POST /agents` carries no
+  allowlists or plugin configuration while [16](./16-templates.md) requires the
+  soul and the config to commit together), a capability descriptor covering
+  sign-ins and channel setup alike, because the API can perform either and
+  describe neither, and some way to observe whether a bound channel connected,
+  because storing a channel token neither checks it nor surfaces anywhere; **an unrun spike** — whether
+  `claude setup-token` can be captured without a TTY, which decides one of the
+  five sign-in paths; and **the onboarding sequence itself**, deliberately
+  unwritten after a detailed version was specified and falsified repeatedly
+  under review, leaving the constraints any design must satisfy in place of a
+  design. It is scoped so that it can start when it is chosen, not because it
+  is scheduled.
 - **[12](./12-plugin-registry.md) — plugin registry.** Deferred, and now narrower. Discovery and distribution for an ecosystem that does not exist yet is a platform built for nobody; the trigger to revisit is third-party plugins existing that we did not write, and [19](./19-registration-seams.md) is a prerequisite either way — there is no point distributing channel or provider plugins that nothing can register.
 
   **Skills are the half that was never really deferred**, because that reasoning does not apply to them: the standard exists, the ecosystem exists, and somebody else already built the distribution. That is [25](./25-skills-interop.md), and it needs no registry of ours at all.
