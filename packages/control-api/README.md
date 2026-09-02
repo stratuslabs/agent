@@ -317,6 +317,16 @@ full rate, with cache reads and cache writes counted in their own fields and
 never again in it. Adapters whose vendor reports an all-inclusive prompt count
 normalize to this shape, so records from two providers are comparable.
 
+**A turn that failed still keeps the tokens it spent.** A record is written
+for every provider call that reported a count, whether or not the turn went
+on to complete: a paid call that produced nothing usable, a primary attempt
+that failed over to the fallback, and a stream cut before it finished — by
+the idle watchdog, a cancelled turn, or a dropped connection. That last kind
+always carries the input side (`inputTokens` and the cache buckets, which the
+API announces when the stream opens); it carries `outputTokens` only when the
+stream reached the final `message_delta` frame that reports it, and omits
+the field otherwise — a stream cut earlier generated output nothing counted.
+
 **An absent count means the provider reported none — not zero.** A local
 OpenAI-compatible server that omits `usage` produces a session with no
 records at all, and a turn that cost real money would look free if a consumer
