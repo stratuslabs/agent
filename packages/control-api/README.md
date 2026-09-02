@@ -322,9 +322,10 @@ for every provider call that reported a count, whether or not the turn went
 on to complete: a paid call that produced nothing usable, a primary attempt
 that failed over to the fallback, and a stream cut before it finished — by
 the idle watchdog, a cancelled turn, or a dropped connection. That last kind
-carries the input side only (`inputTokens` and the cache buckets, which the
-API announces when the stream opens) and no `outputTokens`, because the
-output count arrives at the end of a stream that never got there.
+always carries the input side (`inputTokens` and the cache buckets, which the
+API announces when the stream opens); it carries `outputTokens` only when the
+stream reached the final `message_delta` frame that reports it, and omits
+the field otherwise — a stream cut earlier generated output nothing counted.
 
 **An absent count means the provider reported none — not zero.** A local
 OpenAI-compatible server that omits `usage` produces a session with no
