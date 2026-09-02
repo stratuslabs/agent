@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, readFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +33,7 @@ import {
   sanitizeToolSegment,
   sealedStdioEnv,
   pathGrant,
+  resolveCommandPath,
   type McpPluginOptions,
 } from '../src/index.ts';
 
@@ -1005,4 +1006,188 @@ test('the search-path grant is spelled the way the platform spells it', () => {
   assert.equal(posix.Path, '/custom/bin');
   assert.equal(posix.PATH, undefined);
   assert.equal('PATH' in posix, true, 'sealed, not simply absent');
+});
+
+test('a bare command resolves inside the granted search path and nowhere else', async () => {
+  // cross-spawn's Windows resolver searches `process.cwd()` before anything
+  // the operator granted — `which/which.js` says so in its own comment. The
+  // daemon's working directory is not a grant, so the bridge resolves the
+  // command itself and hands the transport a path it need not search.
+  //
+  // The Windows rules are exercised from here through the `platform`
+  // parameter: what differs there is the candidate list and the absence of
+  // an execute bit, and neither needs a Windows kernel to check.
+  const granted = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-path-'));
+  const ungranted = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-nopath-'));
+  await writeFile(path.join(granted, 'srv.CMD'), '@echo off\n');
+  await writeFile(path.join(ungranted, 'other.CMD'), '@echo off\n');
+
+  assert.equal(resolveCommandPath('srv', { PATH: granted }, 'win32'), path.join(granted, 'srv.CMD'));
+  // A directory nobody granted is not searched, whatever is sitting in it.
+  assert.equal(resolveCommandPath('other', { PATH: granted }, 'win32'), undefined);
+  // Windows names are case-insensitive, and `Path` is the spelling it uses.
+  assert.equal(resolveCommandPath('srv', { Path: granted }, 'win32'), path.join(granted, 'srv.CMD'));
+  // PATHEXT decides what counts as runnable, and only a granted one is read:
+  // the daemon's own is not part of the search this config declared.
+  assert.equal(resolveCommandPath('srv', { PATH: granted, PATHEXT: '.EXE' }, 'win32'), undefined);
+  assert.equal(
+    resolveCommandPath('srv', { PATH: granted, PATHEXT: '.EXE;.CMD' }, 'win32'),
+    path.join(granted, 'srv.CMD'),
+  );
+  // A quoted entry is a directory, not a directory whose name has quotes —
+  // but only a *balanced* pair, the way `which` reads it. A lone quote is a
+  // malformed entry, and stripping it would search a directory the granted
+  // string does not name.
+  assert.equal(resolveCommandPath('srv', { PATH: `"${granted}"` }, 'win32'), path.join(granted, 'srv.CMD'));
+  assert.equal(resolveCommandPath('srv', { PATH: `"${granted}` }, 'win32'), undefined);
+  assert.equal(resolveCommandPath('srv', { PATH: `${granted}"` }, 'win32'), undefined);
+
+  // An extension the granted PATHEXT does not permit is not runnable, even
+  // when the command names it outright — `isexe` checks the unsuffixed
+  // candidate too, so taking it here would let a file Windows would refuse
+  // mask the one beside it that it would run.
+  await writeFile(path.join(granted, 'srv.js'), '\n');
+  assert.equal(resolveCommandPath('srv.js', { PATH: granted, PATHEXT: '.EXE' }, 'win32'), undefined);
+  assert.equal(
+    resolveCommandPath('srv.js', { PATH: granted, PATHEXT: '.JS' }, 'win32'),
+    path.join(granted, 'srv.js'),
+  );
+  await writeFile(path.join(granted, 'srv.js.EXE'), '\n');
+  assert.equal(
+    resolveCommandPath('srv.js', { PATH: granted, PATHEXT: '.EXE' }, 'win32'),
+    path.join(granted, 'srv.js.EXE'),
+  );
+
+  // Ungranted, the fallback is the one `which` already uses. A wider set
+  // would make a bare command resolve to file types that resolve to nothing
+  // today: replacing a lookup is not an occasion to widen what it will run.
+  await writeFile(path.join(granted, 'scripted.VBS'), '\n');
+  assert.equal(resolveCommandPath('scripted', { PATH: granted }, 'win32'), undefined);
+  assert.equal(
+    resolveCommandPath('scripted', { PATH: granted, PATHEXT: '.VBS' }, 'win32'),
+    path.join(granted, 'scripted.VBS'),
+  );
+
+  // POSIX: the execute bit is what makes a candidate runnable, so a
+  // same-named file earlier on the path that cannot be run is passed over
+  // rather than resolved to and then failing at spawn.
+  const first = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-first-'));
+  const second = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-second-'));
+  await writeFile(path.join(first, 'srv'), '#!/bin/sh\n');
+  await writeFile(path.join(second, 'srv'), '#!/bin/sh\n');
+  await chmod(path.join(second, 'srv'), 0o755);
+  assert.equal(resolveCommandPath('srv', { PATH: `${first}:${second}` }, 'linux'), path.join(second, 'srv'));
+
+  await chmod(path.join(first, 'srv'), 0o755);
+  assert.equal(resolveCommandPath('srv', { PATH: `${first}:${second}` }, 'linux'), path.join(first, 'srv'));
+
+  // An empty entry means the current directory to a shell. Here it means
+  // nothing: the cwd is the directory this whole resolver exists to exclude.
+  assert.equal(resolveCommandPath('srv', { PATH: `:${second}` }, 'linux'), path.join(second, 'srv'));
+  assert.equal(resolveCommandPath('srv', { PATH: '' }, 'linux'), undefined);
+  assert.equal(resolveCommandPath('srv', {}, 'linux'), undefined);
+
+  // A relative entry IS honoured — `./node_modules/.bin` is a directory
+  // somebody chose, unlike the zero-length one a stray colon leaves behind.
+  // It resolves against the directory the child will run in, and comes back
+  // absolute: a relative result would be re-read against the server's `cwd`,
+  // so the file checked here and the file spawned there could differ.
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-project-'));
+  await mkdir(path.join(project, 'bin'));
+  await writeFile(path.join(project, 'bin', 'srv'), '#!/bin/sh\n');
+  await chmod(path.join(project, 'bin', 'srv'), 0o755);
+  assert.equal(
+    resolveCommandPath('srv', { PATH: 'bin' }, 'linux', project),
+    path.join(project, 'bin', 'srv'),
+  );
+  assert.equal(resolveCommandPath('srv', { PATH: 'bin' }, 'linux', second), undefined);
+});
+
+test('an empty search-path entry is not the working directory, end to end', async () => {
+  // The POSIX shape of the same hole Windows has implicitly. `which` reads an
+  // empty PATH entry as the current directory — and cross-spawn chdirs to the
+  // server's own `cwd` before resolving — so a `srv` sitting in the working
+  // directory wins over the one in the directory the operator granted. Which
+  // shim actually ran is the observable: both start the same server, and each
+  // records itself first.
+  const bin = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-bin-'));
+  const work = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-cwd-'));
+  const ran = path.join(bin, 'ran');
+  const fixture = path.join(packageRoot, 'fixtures', 'env-echo-server.mjs');
+  for (const [dir, label] of [[bin, 'granted'], [work, 'cwd']] as const) {
+    const shim = path.join(dir, 'srv');
+    await writeFile(
+      shim,
+      `#!/bin/sh\nprintf '%s' ${JSON.stringify(label)} > ${JSON.stringify(ran)}\n`
+        + `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(fixture)}\n`,
+    );
+    await chmod(shim, 0o755);
+  }
+
+  const plugin = createMcpPlugin(
+    { servers: { envy: { command: 'srv', cwd: work, env: { PATH: `:${bin}` }, passEnv: [] } } },
+    { warn: () => {}, log: () => {} },
+  );
+  const target = new ToolRegistry();
+  try {
+    await loadThroughView(plugin, target);
+    assert.ok(target.get('mcp.envy.read_env'), 'the resolved path is one the spawn could actually run');
+    assert.equal(await readFile(ran, 'utf8'), 'granted', 'the granted directory was searched, the cwd was not');
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('a command missing from the granted path leaves the daemon serving, not the plugin failed', async () => {
+  // Not a config failure: the config is answerable, the binary just is not
+  // there yet. `McpConfigError` would take the whole plugin — and with it
+  // every other agent's tools — down over a package that has not finished
+  // installing.
+  const empty = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-empty-'));
+  const warnings: string[] = [];
+  const plugin = createMcpPlugin(
+    { servers: { missing: { command: 'not-installed', env: { PATH: empty }, passEnv: [] } } },
+    { warn: (message) => warnings.push(message), log: () => {} },
+  );
+  const target = new ToolRegistry();
+  try {
+    await loadThroughView(plugin, target);
+    assert.ok(
+      warnings.some((message) => /was not found on the PATH this server was granted/.test(message)),
+      `the warning names the fix; got ${JSON.stringify(warnings)}`,
+    );
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('a relative search-path entry is the server\'s working directory, not the daemon\'s', async () => {
+  // The mismatch a self-written resolver introduces if it forgets which
+  // directory it is standing in: cross-spawn chdirs to the server's `cwd`
+  // before resolving, so `PATH: "bin"` alongside `cwd` has always meant
+  // `<cwd>/bin` — the shape `npx` from a project checkout takes. Statting it
+  // against the daemon's directory instead asks about a different file, and
+  // answering with a relative path lets the spawn re-resolve it against a
+  // third one.
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-proj-'));
+  await mkdir(path.join(project, 'bin'));
+  const shim = path.join(project, 'bin', 'srv');
+  await writeFile(
+    shim,
+    `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} `
+      + `${JSON.stringify(path.join(packageRoot, 'fixtures', 'env-echo-server.mjs'))}\n`,
+  );
+  await chmod(shim, 0o755);
+
+  const plugin = createMcpPlugin(
+    { servers: { envy: { command: 'srv', cwd: project, env: { PATH: 'bin' }, passEnv: [] } } },
+    { warn: () => {}, log: () => {} },
+  );
+  const target = new ToolRegistry();
+  try {
+    await loadThroughView(plugin, target);
+    assert.ok(target.get('mcp.envy.read_env'), 'the entry resolved against the server\'s own directory');
+  } finally {
+    await plugin.dispose?.();
+  }
 });
