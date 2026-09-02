@@ -1821,17 +1821,27 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         if (!session) {
           return;
         }
+        const record = readPendingApproval(session);
         // A delegated sub-session is only ever awaited by its parent's
         // `agent.delegate` call, and that parent was running when the last
         // process died — it is in the abandoned sweep, not in this one.
         // Nothing will read the reply, so the parked call is not re-asked:
         // a person would be approving a command that runs for no one.
+        //
+        // Judged on the re-read, on the chain: the channels are up before
+        // this sweep starts, so a message for this id can have taken the
+        // chain first and moved the session on — and a turn that finished
+        // normally must not be rewritten as failed. The delegation metadata
+        // is durable, so it proves what the session is, not what state it
+        // is in; the status and the checkpoint say that.
         if (isDelegatedSession(session)) {
-          log(`${sessionId}: parked on ${readPendingApproval(session)?.call.toolName ?? 'a tool'} for a delegating turn the last stratusd was still running; failing it`);
+          if (session.status !== 'pending_approval' || !record) {
+            return;
+          }
+          log(`${sessionId}: parked on ${record.call.toolName} for a delegating turn the last stratusd was still running; failing it`);
           await failOrphanedDelegation(session);
           return;
         }
-        const record = readPendingApproval(session);
         // A wait that outlived its window while the daemon was down is
         // honoured, not restarted: the request really did go unanswered for
         // the whole time it was configured to wait, and downtime is not a
