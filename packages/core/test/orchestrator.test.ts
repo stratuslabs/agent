@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   AgentRunner,
+  RunAbortedError,
   EventBus,
   InMemorySessionStore,
   PENDING_APPROVAL_METADATA_KEY,
@@ -663,6 +664,50 @@ test('aborting a run fails the session with a distinguishable reason', async () 
   const session = await store.get('abort-1');
   assert.equal(session?.status, 'failed');
   assert.equal(session?.lastError, 'Run aborted');
+});
+
+test('an abort that names its reason fails the session with that reason', async () => {
+  const controller = new AbortController();
+  const reason = new RunAbortedError('Run aborted: the host said why');
+  const provider: ModelProvider = {
+    name: 'stalls',
+    generate: ({ signal }) =>
+      new Promise((_resolve, reject) => {
+        // A provider that only notices the signal — with its own error, the
+        // way an HTTP client rejects — never the host's reason.
+        signal?.addEventListener('abort', () => reject(new Error('fetch aborted')), { once: true });
+        controller.abort(reason);
+      }),
+  };
+
+  const store = new InMemorySessionStore();
+  const runner = new AgentRunner({ provider, store });
+  await runner.initialize();
+  const failed = new Promise<string>((resolve) => {
+    runner.bus.subscribe((event) => {
+      if (event.type === 'session.failed') {
+        resolve(event.error);
+      }
+    });
+  });
+
+  await assert.rejects(
+    () =>
+      runner.run({
+        sessionId: 'abort-reason-1',
+        agent: { id: 'aborter', name: 'Aborter' },
+        userMessage: 'go',
+        signal: controller.signal,
+      }),
+    (error: unknown) => error === reason,
+  );
+
+  // The reason is what the record and the event carry — not the default,
+  // and not the provider's own wording of having been cancelled.
+  const session = await store.get('abort-reason-1');
+  assert.equal(session?.status, 'failed');
+  assert.equal(session?.lastError, 'Run aborted: the host said why');
+  assert.equal(await failed, 'Run aborted: the host said why');
 });
 
 test('approval policies receive the turn signal in their context', async () => {

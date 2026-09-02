@@ -218,16 +218,26 @@ test('the watchdog aborts a stalled streaming turn and fails the session cleanly
 
   const env = { homeDir: home, cwd: home, processEnv: { ANTHROPIC_API_KEY: 'sk-test' }, fetch: fetchImpl };
   const gateway = createGateway({ env, idleTimeoutMs: 300, warn: () => {} });
+  const failed = nextEvent(gateway.bus, 'session.failed');
   await gateway.start();
 
-  await assert.rejects(
-    () => gateway.dispatch({ sessionId: 'stalled-1', agentId: 'slow', userMessage: 'hang' }),
-    (error: Error) => error instanceof RunAbortedError && /no activity/.test(error.message),
-  );
+  try {
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'stalled-1', agentId: 'slow', userMessage: 'hang' }),
+      (error: Error) => error instanceof RunAbortedError && /no activity/.test(error.message),
+    );
 
-  const stored = await gateway.store.get('stalled-1');
-  assert.equal(stored?.status, 'failed');
-  await gateway.stop();
+    // The reason reaches the record and the event, not only the dispatcher:
+    // an operator reading the session, or a surface on the bus, can tell a
+    // watchdog abort from a person cancelling.
+    const stored = await gateway.store.get('stalled-1');
+    assert.equal(stored?.status, 'failed');
+    assert.equal(stored?.lastError, 'Run aborted: no activity for 300ms');
+    assert.equal((await failed).error, 'Run aborted: no activity for 300ms');
+  } finally {
+    // A failed assertion must not leave the gateway holding the process open.
+    await gateway.stop();
+  }
 });
 
 test('the idle watchdog stays off for non-streaming providers', async () => {
@@ -435,14 +445,21 @@ test('a queued dispatch whose signal aborted while waiting never mutates the ses
   const controller = new AbortController();
   const first = gateway.dispatch({ sessionId: 'q-1', agentId: 'ava', userMessage: 'first' });
   const second = gateway.dispatch({ sessionId: 'q-1', agentId: 'ava', userMessage: 'second', signal: controller.signal });
-  controller.abort(); // fires while `second` waits behind `first`
+  // Aborted with a reason, while `second` waits behind `first`: the refusal
+  // happens before the runner ever sees the signal, and it must still be
+  // the caller's own error that comes back, not a bare default.
+  const reason = new RunAbortedError('Run aborted: the caller gave up');
+  controller.abort(reason);
 
-  const settled = await first;
-  await assert.rejects(() => second, (error: Error) => error instanceof RunAbortedError);
-
-  assert.equal(settled.status, 'completed');
-  const stored = await gateway.store.get('q-1');
-  await gateway.stop();
+  let stored;
+  try {
+    const settled = await first;
+    await assert.rejects(() => second, (error: unknown) => error === reason);
+    assert.equal(settled.status, 'completed');
+    stored = await gateway.store.get('q-1');
+  } finally {
+    await gateway.stop();
+  }
   // The cancelled message never entered durable history and the session
   // was not marked failed by work that never ran.
   assert.deepEqual(stored?.messages.filter((m) => m.role === 'user').map((m) => m.content), ['first']);

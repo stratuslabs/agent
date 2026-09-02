@@ -73,4 +73,7 @@ reboot.
 - What it writes down, and how to read it from another terminal:
   [Logs](./logs.md)
 - `--idle-timeout <seconds>` — how long the watchdog lets a streaming
-  provider stay silent before aborting the turn (default 120)
+  provider stay silent before aborting the turn (default 120). An aborted
+  turn's session comes back `failed` with a reason that says so — `Run
+  aborted: no activity for 120000ms` — so it reads differently from a turn
+  a person cancelled, whose reason is the bare `Run aborted`.
