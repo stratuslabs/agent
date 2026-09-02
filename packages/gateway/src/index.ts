@@ -4,6 +4,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  abortErrorFor,
   AgentRegistry,
   AgentRunner,
   EventBus,
@@ -1699,7 +1700,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // load the session, append the cancelled user message, and save it as
     // failed — polluting future model history with input never processed.
     if (input.signal?.aborted) {
-      throw new RunAbortedError();
+      throw abortErrorFor(input.signal);
     }
 
     // A session pins its agent: when the caller names none, an existing
@@ -1742,7 +1743,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // Recheck before the runner touches durable state, or a dispatch
       // cancelled mid-preflight would still persist its user message.
       if (signal.aborted) {
-        throw new RunAbortedError();
+        throw abortErrorFor(signal);
       }
 
       if (existing) {

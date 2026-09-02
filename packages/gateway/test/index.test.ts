@@ -443,14 +443,21 @@ test('a queued dispatch whose signal aborted while waiting never mutates the ses
   const controller = new AbortController();
   const first = gateway.dispatch({ sessionId: 'q-1', agentId: 'ava', userMessage: 'first' });
   const second = gateway.dispatch({ sessionId: 'q-1', agentId: 'ava', userMessage: 'second', signal: controller.signal });
-  controller.abort(); // fires while `second` waits behind `first`
+  // Aborted with a reason, while `second` waits behind `first`: the refusal
+  // happens before the runner ever sees the signal, and it must still be
+  // the caller's own error that comes back, not a bare default.
+  const reason = new RunAbortedError('Run aborted: the caller gave up');
+  controller.abort(reason);
 
-  const settled = await first;
-  await assert.rejects(() => second, (error: Error) => error instanceof RunAbortedError);
-
-  assert.equal(settled.status, 'completed');
-  const stored = await gateway.store.get('q-1');
-  await gateway.stop();
+  let stored;
+  try {
+    const settled = await first;
+    await assert.rejects(() => second, (error: unknown) => error === reason);
+    assert.equal(settled.status, 'completed');
+    stored = await gateway.store.get('q-1');
+  } finally {
+    await gateway.stop();
+  }
   // The cancelled message never entered durable history and the session
   // was not marked failed by work that never ran.
   assert.deepEqual(stored?.messages.filter((m) => m.role === 'user').map((m) => m.content), ['first']);

@@ -1763,8 +1763,12 @@ export class RunAbortedError extends Error {
  * which is the one place nothing durable or observable reads it from.
  * Anything else on the signal — undefined, a DOMException, a string — is a
  * caller that did not say, and the default stands.
+ *
+ * Exported for hosts that check a signal before the runner ever sees it —
+ * the gateway refuses a dispatch whose signal fired while it was queued —
+ * so those refusals carry the same reason the runner would have recorded.
  */
-const abortErrorFor = (signal: AbortSignal | undefined): RunAbortedError =>
+export const abortErrorFor = (signal: AbortSignal | undefined): RunAbortedError =>
   signal?.reason instanceof RunAbortedError ? signal.reason : new RunAbortedError();
 
 const throwIfAborted = (signal: AbortSignal | undefined): void => {
