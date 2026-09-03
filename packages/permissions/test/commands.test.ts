@@ -253,6 +253,15 @@ test('a scope approved for a flag-first command covers that command', () => {
   // flag, and the safe list denies that letter — so this is not persisted,
   // and asks each time. The conservative side of the same rule.
   assert.equal(normalizeCommandScope(analyzeCommand('git -C repo branch --list')), undefined);
+  // And a subcommand's positive constraints reach past the prefix too:
+  // `git branch release` never persists a branch creation (the safe scope
+  // is list-only), so neither does the same command behind `--no-pager` —
+  // nor a flag the scope does not name, on the subcommand or after it.
+  assert.equal(normalizeCommandScope(analyzeCommand('git --no-pager branch release')), undefined);
+  assert.equal(normalizeCommandScope(analyzeCommand('git --no-pager branch --unset-upstream')), undefined);
+  assert.equal(normalizeCommandScope(analyzeCommand('git --no-pager tag v1.0')), undefined);
+  assert.equal(normalizeCommandScope(analyzeCommand('git --no-pager branch --list --sort=-committerdate')) !== undefined, true);
+  assert.deepEqual(normalizeCommandScope(analyzeCommand('git --no-pager remote -v'))?.args, ['--no-pager', 'remote', '-v']);
   // And a command the engine could never run unattended is not persisted at
   // all, whatever its prefix: a refspec delete, a safe-list-denied argument.
   assert.equal(normalizeCommandScope(analyzeCommand('git --no-pager push origin :main')), undefined);

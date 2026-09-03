@@ -444,6 +444,29 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
         return undefined;
       }
     }
+    // The positive constraints too. A safe scope that says what its
+    // subcommand may do — `git branch` is list-only, with the listing
+    // flags named — applies wherever that subcommand stands among the
+    // tokens, or `git --no-pager branch release` would persist the branch
+    // creation that `git branch release` never does. Which token is the
+    // subcommand is still unknowable in general; a name that turns out to
+    // be some flag's value costs a prompt, never a grant.
+    for (const scope of forBase) {
+      const subcommand = scope.args ?? [];
+      if (subcommand.length === 0 || (!scope.listOnly && !scope.allowedFlags)) {
+        continue;
+      }
+      const at = tokens.findIndex((token, index) =>
+        !token.startsWith('-') && subcommand.every((part, offset) => tokens[index + offset] === part));
+      if (at === -1) {
+        continue;
+      }
+      for (const token of tokens.slice(at + subcommand.length)) {
+        if (token.startsWith('-') ? scope.allowedFlags !== undefined && !allowsFlag(scope.allowedFlags, token) : scope.listOnly) {
+          return undefined;
+        }
+      }
+    }
     return {
       command: analysis.base,
       args: [...tokens],
