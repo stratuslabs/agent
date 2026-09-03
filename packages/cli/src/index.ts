@@ -7177,26 +7177,31 @@ const serveHeldHome = async (
   } finally {
     try {
       await gateway.stop();
+      // Writes are queued and dropped on the hot path so logging never sits
+      // on a streamed token. That makes the tail of the log the part most
+      // likely to be lost — and the tail is the shutdown reason, the last
+      // warning, the line explaining a restart.
+      await logWriter?.flush();
     } finally {
-      // The drain is over: a stop signal from here on is the process's to
-      // handle by default again — and a host that calls runServe repeatedly
-      // (the tests) must not accumulate handlers. Under its own finally
-      // because the listener is on the global process: a stop() that
-      // rejects (its last log line can throw through an injected stream)
-      // must not leave a settled handler behind to swallow the next signal.
+      // The shutdown is over, the flush included: a stop signal from here
+      // on is the process's to handle by default again — and a host that
+      // calls runServe repeatedly (the tests) must not accumulate handlers.
+      // Last, and under its own finally, because the listener is on the
+      // global process: taken off before the flush, a repeated signal
+      // landing during it would end the process by the default action
+      // (which a supervisor reports as a failure, and a service manager
+      // set to restart on failure would then bring back a daemon an
+      // operator just stopped); left on by a stop() that rejects (its last
+      // log line can throw through an injected stream), a settled handler
+      // would swallow the host's next signal.
       if (stopSignal) {
         process.off('SIGTERM', stopSignal);
         process.off('SIGINT', stopSignal);
       }
+      if (redirectTimer) {
+        clearInterval(redirectTimer);
+      }
     }
-    if (redirectTimer) {
-      clearInterval(redirectTimer);
-    }
-    // Writes are queued and dropped on the hot path so logging never sits
-    // on a streamed token. That makes the tail of the log the part most
-    // likely to be lost — and the tail is the shutdown reason, the last
-    // warning, the line explaining a restart.
-    await logWriter?.flush();
   }
 
   const bound = boundApiPort !== undefined && Number.isInteger(boundApiPort) && boundApiPort > 0

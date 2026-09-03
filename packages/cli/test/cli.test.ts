@@ -7834,6 +7834,9 @@ const getStatus = (url: string, token: string): Promise<number> =>
         response.on('end', () => resolve(response.statusCode ?? 0));
       },
     );
+    // Bounded per request: a replacement that accepts the connection and
+    // then stalls would otherwise hold this open past the caller's loop.
+    request.setTimeout(5_000, () => request.destroy(new Error('the health check timed out')));
     request.on('error', reject);
     request.end();
   });
