@@ -425,14 +425,20 @@ test('a transport error is logged, and the call it killed says why instead of on
   });
   const target = new ToolRegistry();
   const warnings: string[] = [];
-  const plugin = pluginFor(handle, {}, {
-    warn: (message) => warnings.push(message),
-    reconnectDelayMs: () => 3_600_000,
-    transportFor: async () => {
-      clientTransport = await handle.transportFor();
-      return clientTransport;
+  // A stdio server: the overflow is its reader's, and only its errors are
+  // read as one.
+  const plugin = createMcpPlugin(
+    { servers: { linear: { command: process.execPath } } },
+    {
+      warn: (message) => warnings.push(message),
+      log: () => {},
+      reconnectDelayMs: () => 3_600_000,
+      transportFor: async () => {
+        clientTransport = await handle.transportFor();
+        return clientTransport;
+      },
     },
-  });
+  );
   await loadThroughView(plugin, target);
   try {
     await assert.rejects(
@@ -485,7 +491,7 @@ test('a protocol-level client error is neither logged nor blamed for a later clo
     // This server is URL-backed: a SyntaxError here is a body that was not
     // JSON-RPC, and the stdout/stderr advice would be nonsense for it.
     clientTransport?.onerror?.(new SyntaxError('Unexpected token \'g\', "garbage: token=abc" is not valid JSON'));
-    const parse = warnings.find((message) => message.includes('transport error')) ?? '';
+    const parse = warnings.filter((message) => message.includes('transport error')).at(-1) ?? '';
     assert.match(parse, /answered with a body that is not valid JSON-RPC/);
     assert.equal(parse.includes('garbage'), false);
 
