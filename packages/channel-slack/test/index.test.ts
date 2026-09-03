@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import { EventBus, type ApprovalAnswer, type Session, type StratusEvent } from '@stratusagent/core';
 import type { GatewayLike } from '@stratusagent/channels';
@@ -153,6 +156,7 @@ const createStubGateway = (
   reply: (input: { sessionId: string; userMessage: string }) => Promise<Session> | Session,
 ): StubGateway => {
   const bus = new EventBus();
+  const activeTurns = new Map<string, string>();
   const gateway: StubGateway = {
     bus,
     dispatches: [],
@@ -183,8 +187,20 @@ const createStubGateway = (
         ...(input.agentId ? { agentId: input.agentId } : {}),
         userMessage: input.userMessage,
       });
-      return reply({ sessionId: input.sessionId, userMessage: input.userMessage });
+      // As the gateway does: the caller's turn id is the session's active
+      // turn for as long as the turn runs, and the session reports
+      // `running` as the turn begins.
+      if (input.turnId !== undefined) {
+        activeTurns.set(input.sessionId, input.turnId);
+      }
+      try {
+        await bus.emit({ type: 'session.updated', sessionId: input.sessionId, status: 'running' });
+        return await reply({ sessionId: input.sessionId, userMessage: input.userMessage });
+      } finally {
+        activeTurns.delete(input.sessionId);
+      }
     },
+    activeTurnId: (sessionId) => activeTurns.get(sessionId),
   };
   return gateway;
 };
@@ -1334,6 +1350,505 @@ test('a turn that failed with nobody rendering it is reported in its own thread'
   assert.equal(posted?.channel, 'C1');
   assert.equal(posted?.thread_ts, '100.1', 'the report belongs in the thread the turn came from');
   assert.match(posted?.text ?? '', /not resumed/);
+});
+
+test('a turn that finished with nobody rendering it has its reply posted in its own thread', async () => {
+  // The recovery case: parked on a human when the daemon died, re-asked
+  // after the restart, approved, and finished by a process that never
+  // opened a placeholder for it. The failure half of this has always been
+  // reported; the reply half went nowhere.
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },
+  ]);
+  gateway.sessionRouting = async (sessionId: string) =>
+    sessionId === 'slack:ava:T1:C1:100.1'
+      ? {
+          agentId: 'ava',
+          metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+          reply: 'Done — the deploy finished cleanly.',
+        }
+      : undefined;
+  await adapter.start(gateway);
+
+  await gateway.bus.emit({ type: 'session.completed', sessionId: 'slack:ava:T1:C1:100.1' });
+  await adapter.stop();
+
+  const posted = web.posts.at(-1);
+  assert.equal(posted?.channel, 'C1');
+  assert.equal(posted?.thread_ts, '100.1', 'the reply belongs in the thread the turn came from');
+  assert.equal(posted?.text, 'Done — the deploy finished cleanly.');
+});
+
+test('a completion the running turn is already rendering is not posted a second time', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the one reply'));
+  let routingReads = 0;
+  gateway.sessionRouting = async () => {
+    routingReads += 1;
+    return { agentId: 'ava', metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1' }, reply: 'the one reply' };
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> do the thing'));
+  await adapter.stop();
+
+  assert.equal(routingReads, 0, 'a rendered turn is the renderer\'s to finish');
+  const replies = [
+    ...web.posts.filter((entry) => /the one reply/.test(entry.text)),
+    ...web.updates.filter((entry) => /the one reply/.test(entry.text)),
+  ];
+  assert.equal(replies.length, 1, 'exactly one copy of the reply');
+});
+
+test('a recovered turn that finishes ahead of a queued message has its reply posted, and the message its own', async () => {
+  // The daemon restarts with a turn parked on a human in this thread; the
+  // recovery is re-asked and waits. A new message in the thread arrives
+  // meanwhile: its renderer is queued, its turn waits behind the recovery
+  // on the session chain. The recovery is then approved and finishes —
+  // with a renderer in the queue that has nothing to do with it.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    // The recovery finishes while this dispatch waits behind it — before
+    // the stub reports the queued turn `running` and answers it.
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the recovered reply',
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  const texts = [...web.posts, ...web.updates].map((entry) => entry.text);
+  assert.equal(texts.filter((text) => text === 'the recovered reply').length, 1, 'the recovery\'s reply was posted once');
+  assert.equal(texts.filter((text) => /the message's own reply/.test(text)).length, 1, 'the message got its own reply once');
+
+  // And in order: the placeholder the message posted first was handed to
+  // the recovery's reply (an edit keeps its place), and the message's own
+  // reply went into a fresh placeholder posted below it.
+  const placeholders = web.posts.filter((entry) => entry.text === '…');
+  assert.equal(placeholders.length, 2, 'the message opened a second placeholder below the recovered reply');
+  assert.equal(web.updates.find((entry) => entry.text === 'the recovered reply')?.ts, 'bot-ts-1');
+  assert.equal(web.updates.find((entry) => /the message's own reply/.test(entry.text))?.ts, 'bot-ts-2');
+});
+
+test('a recovered reply whose placeholder edit Slack refuses is posted as a message of its own, and the message keeps its placeholder', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const update = web.chat.update.bind(web.chat);
+  web.chat.update = async (args) => {
+    if (args.text === 'the recovered reply') {
+      throw new Error('message_not_found');
+    }
+    return update(args);
+  };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the recovered reply',
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  assert.equal(web.posts.filter((entry) => entry.text === 'the recovered reply').length, 1, 'the recovered reply was posted instead');
+  assert.equal(web.posts.filter((entry) => entry.text === '…').length, 1, 'the placeholder was not handed over, so none was reopened');
+  assert.equal(web.updates.find((entry) => /the message's own reply/.test(entry.text))?.ts, 'bot-ts-1');
+});
+
+test('what the recovery streamed into the queued placeholder does not follow it into the fresh one', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  // The queued turn's own streaming edit, once it lands in the fresh
+  // placeholder — the gate, with a way to lose.
+  let streamed!: (text: string) => void;
+  const streamedEdit = new Promise<string>((resolve) => { streamed = resolve; });
+  const update = web.chat.update.bind(web.chat);
+  web.chat.update = async (args) => {
+    if (args.ts === 'bot-ts-2') {
+      streamed(args.text);
+    }
+    return update(args);
+  };
+  const gateway = createStubGateway(async ({ sessionId }) => {
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'own partial' } });
+    const seen = await Promise.race([
+      streamedEdit,
+      new Promise<string>((resolve) => setTimeout(() => resolve('no streamed edit reached the fresh placeholder'), 2_000)),
+    ]);
+    assert.equal(seen, 'own partial', 'the fresh placeholder shows only this turn\'s stream');
+    return sessionWithReply(sessionId, 'the message\'s own reply');
+  });
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    // The recovery streams into the placeholder at the head of the queue
+    // — the queued message's — and then finishes.
+    await gateway.bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: 'recovered partial' } });
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the recovered reply',
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  assert.ok(!web.updates.some((entry) => entry.ts === 'bot-ts-2' && /recovered partial/.test(entry.text)), 'the recovery\'s stream never reached the fresh placeholder');
+  assert.equal(web.updates.find((entry) => entry.ts === 'bot-ts-2' && /the message's own reply/.test(entry.text))?.text, 'the message\'s own reply');
+});
+
+test('a handover whose fresh placeholder Slack refuses leaves the recovered reply standing, and the message posts its own', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const post = web.chat.postMessage.bind(web.chat);
+  let placeholders = 0;
+  web.chat.postMessage = async (args) => {
+    if (args.text === '…' && ++placeholders === 2) {
+      throw new Error('ratelimited');
+    }
+    return post(args);
+  };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the recovered reply',
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  const first = web.updates.filter((entry) => entry.ts === 'bot-ts-1').map((entry) => entry.text);
+  assert.deepEqual(first, ['the recovered reply'], 'nothing wrote over the reply the placeholder was handed to');
+  assert.equal(web.posts.filter((entry) => entry.text === 'the message\'s own reply').length, 1, 'the message posted its reply as a message of its own');
+});
+
+test('a turn another surface dispatched to the thread\'s session is not taken for the queued message\'s, and its reply is posted', async () => {
+  // The dashboard (or the control API) dispatches to this Slack thread's
+  // session; a Slack message arrives while that turn is in its preflight,
+  // so the message's renderer is queued before the foreign turn reports
+  // `running`. The foreign turn is not the renderer's, however it looks
+  // from the order of events, and its outcome belongs in the thread.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  const stubActiveTurn = gateway.activeTurnId!;
+  let foreign: string | undefined;
+  gateway.activeTurnId = (sessionId) => foreign ?? stubActiveTurn(sessionId);
+  gateway.dispatch = async (input) => {
+    // The foreign turn runs first on the session chain, under an id of its
+    // own, and finishes before the queued message's turn starts.
+    foreign = 'dashboard-turn';
+    await gateway.bus.emit({ type: 'session.updated', sessionId: input.sessionId, status: 'running' });
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    foreign = undefined;
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the dashboard turn\'s reply',
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  const texts = [...web.posts, ...web.updates].map((entry) => entry.text);
+  assert.equal(texts.filter((text) => text === 'the dashboard turn\'s reply').length, 1, 'the foreign turn\'s reply reached the thread once');
+  assert.equal(texts.filter((text) => /the message's own reply/.test(text)).length, 1, 'and the message got its own reply once');
+});
+
+test('two turns finishing ahead of a queued message each get their own place in the thread, in order', async () => {
+  // Two control-API turns on the thread's session finish back to back
+  // while a Slack message waits behind them: the first takes the queued
+  // placeholder, the second the one reopened after it, and the message's
+  // own reply lands in a third below both.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    return stubDispatch.call(gateway, input);
+  };
+  let outcomes = 0;
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: `outcome ${++outcomes}`,
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  const textsOn = (ts: string): string[] => web.updates.filter((entry) => entry.ts === ts).map((entry) => entry.text);
+  assert.equal(web.posts.filter((entry) => entry.text === '…').length, 3, 'a placeholder for each turn, in order');
+  assert.deepEqual(textsOn('bot-ts-1'), ['outcome 1']);
+  assert.deepEqual(textsOn('bot-ts-2'), ['outcome 2']);
+  assert.deepEqual(textsOn('bot-ts-3'), ['the message\'s own reply']);
+});
+
+test('a file a recovered turn produced follows its reply into the thread', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-recovered-file-'));
+  const shot = path.join(root, 'page.png');
+  await writeFile(shot, 'png bytes');
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },
+  ]);
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'Here is the screenshot.',
+  });
+  await adapter.start(gateway);
+
+  // The recovered turn's screenshot: a tool result nobody was rendering.
+  await gateway.bus.emit({
+    type: 'tool.completed',
+    sessionId: 'slack:ava:T1:C1:100.1',
+    result: { callId: 'c1', toolName: 'browser.screenshot', ok: true, output: { file: shot } },
+  });
+  await gateway.bus.emit({ type: 'session.completed', sessionId: 'slack:ava:T1:C1:100.1' });
+  await adapter.stop();
+
+  assert.equal(web.posts.at(-1)?.text, 'Here is the screenshot.');
+  assert.deepEqual(web.uploads.map((entry) => [entry.filename, entry.contents]), [['page.png', 'png bytes']]);
+});
+
+test('a handover arriving while a streamed edit is in flight and another is queued behind it still completes', async () => {
+  // The recovery streams into the queued placeholder; one edit is out to
+  // Slack and a second waits behind it when the recovery finishes. The
+  // handover has to let those edits through without waiting on an edit
+  // that is waiting on it.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  let releaseFirstEdit!: () => void;
+  const firstEditHeld = new Promise<void>((resolve) => { releaseFirstEdit = resolve; });
+  let firstEditStarted!: () => void;
+  const firstEditInFlight = new Promise<void>((resolve) => { firstEditStarted = resolve; });
+  const update = web.chat.update.bind(web.chat);
+  let edits = 0;
+  web.chat.update = async (args) => {
+    if (++edits === 1) {
+      firstEditStarted();
+      await firstEditHeld;
+    }
+    return update(args);
+  };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: 'recovered ' } });
+    await firstEditInFlight;
+    await gateway.bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: 'partial' } });
+    // Let the second edit's timer fire and queue behind the held one.
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    releaseFirstEdit();
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the recovered reply',
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+
+  // The gate, with a way to lose: a deadlocked handover never lets stop()
+  // drain, and 3s is far above anything this exchange does.
+  const stopped = await Promise.race([
+    adapter.stop().then(() => 'stopped'),
+    new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 3_000)),
+  ]);
+  assert.equal(stopped, 'stopped');
+  assert.equal(web.updates.find((entry) => entry.text === 'the recovered reply')?.ts, 'bot-ts-1');
+  assert.equal(web.updates.find((entry) => /the message's own reply/.test(entry.text))?.ts, 'bot-ts-2');
+});
+
+test('each unrendered turn\'s files go with its own reply, even when two finish back to back', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-two-files-'));
+  const first = path.join(root, 'first.png');
+  const second = path.join(root, 'second.png');
+  await writeFile(first, 'first bytes');
+  await writeFile(second, 'second bytes');
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },
+  ]);
+  const calls: string[] = [];
+  const post = web.chat.postMessage.bind(web.chat);
+  web.chat.postMessage = async (args) => {
+    calls.push(`post:${args.text}`);
+    return post(args);
+  };
+  const upload = web.files.uploadV2.bind(web.files);
+  let secondUploaded!: () => void;
+  const secondFileSent = new Promise<void>((resolve) => { secondUploaded = resolve; });
+  web.files.uploadV2 = async (args) => {
+    calls.push(`upload:${args.filename}`);
+    if (args.filename === 'second.png') {
+      secondUploaded();
+    }
+    return upload(args);
+  };
+  // The first outcome's routing read is held until the second turn has
+  // finished, so the second turn's file arrives while the first report is
+  // still waiting on it.
+  let releaseFirst!: () => void;
+  const firstHeld = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let outcomes = 0;
+  gateway.sessionRouting = async () => {
+    const outcome = ++outcomes;
+    if (outcome === 1) {
+      await firstHeld;
+    }
+    return {
+      agentId: 'ava',
+      metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+      reply: `reply ${outcome}`,
+    };
+  };
+  await adapter.start(gateway);
+  const sessionId = 'slack:ava:T1:C1:100.1';
+  await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'browser.screenshot', ok: true, output: { file: first } } });
+  await gateway.bus.emit({ type: 'session.completed', sessionId });
+  await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c2', toolName: 'browser.screenshot', ok: true, output: { file: second } } });
+  await gateway.bus.emit({ type: 'session.completed', sessionId });
+  // The gate, with a way to lose: the second turn finishes its own report
+  // while the first is held, or the bucket was drained by the first and
+  // this never happens (which the upload list below then shows).
+  await Promise.race([secondFileSent, new Promise<void>((resolve) => setTimeout(resolve, 2_000))]);
+  releaseFirst();
+  await adapter.stop();
+
+  // With each turn's files taken at its own outcome, the second turn
+  // posts and uploads while the first is still held; without it the first
+  // report drains the whole bucket and the second uploads nothing, so both
+  // uploads land after the first reply.
+  assert.deepEqual(calls.filter((call) => call.startsWith('upload:')), ['upload:second.png', 'upload:first.png']);
+  assert.ok(
+    calls.indexOf('upload:second.png') < calls.indexOf('post:reply 1'),
+    `the second turn's file went with its own reply, not the first's: ${calls.join(', ')}`,
+  );
+});
+
+test('a recovered turn that produced a file and no text still has the file posted', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-file-only-'));
+  const shot = path.join(root, 'only.png');
+  await writeFile(shot, 'only bytes');
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },
+  ]);
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+  });
+  await adapter.start(gateway);
+  const sessionId = 'slack:ava:T1:C1:100.1';
+  await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'browser.screenshot', ok: true, output: { file: shot } } });
+  await gateway.bus.emit({ type: 'session.completed', sessionId });
+  await adapter.stop();
+
+  assert.deepEqual(web.uploads.map((entry) => [entry.filename, entry.contents]), [['only.png', 'only bytes']]);
+  assert.equal(web.posts.length, 0, 'nothing to say, so nothing said');
+});
+
+test('a recovered reply too long for one message is posted in full even when one of its parts is refused', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },
+  ]);
+  const reply = `${'a'.repeat(3_000)}\n${'b'.repeat(3_000)}\n${'c'.repeat(3_000)}`;
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply,
+  });
+  // Slack refuses the second part only.
+  const post = web.chat.postMessage.bind(web.chat);
+  let parts = 0;
+  web.chat.postMessage = async (args) => {
+    parts += 1;
+    if (parts === 2) {
+      throw new Error('ratelimited');
+    }
+    return post(args);
+  };
+  await adapter.start(gateway);
+  await gateway.bus.emit({ type: 'session.completed', sessionId: 'slack:ava:T1:C1:100.1' });
+  await adapter.stop();
+
+  const posted = web.posts.map((entry) => entry.text);
+  assert.deepEqual(posted, ['a'.repeat(3_000), 'c'.repeat(3_000)], 'the parts after the refused one were still posted');
 });
 
 test('a failure the running turn is already rendering is not reported twice', async () => {
