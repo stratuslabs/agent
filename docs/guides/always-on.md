@@ -89,9 +89,10 @@ refusal then says so, since there is no address to name yet), and means a
 daemon that died released it with its file descriptors — there is no stale
 lock to clean up, and nothing a crash could leave half-written. The empty
 file stays between runs; the claim is the open descriptor, not the file's
-existence, and a file that is not a database any more is replaced rather
-than obeyed (under a sibling `stratusd.lock.repair`, so two daemons
-starting over the same damaged file cannot each replace it). `gateway.json`
+existence, and a file that is not a database any more is emptied in place
+rather than obeyed — never removed and recreated, so two daemons starting
+over the same damaged file still contend for the one inode and exactly one
+wins. `gateway.json`
 is read to name the holder — and, for a daemon from a release before the
 lock existed that is still serving across an upgrade, it is the evidence:
 a live pid whose address answers with this home's token refuses the start

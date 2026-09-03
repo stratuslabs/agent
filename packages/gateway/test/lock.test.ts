@@ -1,10 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-
-import { DatabaseSync } from 'node:sqlite';
 
 import { HomeClaimedError, claimHome, homeLockPath } from '../src/index.ts';
 
@@ -45,48 +43,30 @@ test('a lock file that is not a database any more is replaced, not obeyed', asyn
   const claim = claimHome(env);
   assert.throws(() => claimHome(env), HomeClaimedError, 'the rebuilt file is the lock');
   claim.release();
-  assert.equal(await readFile(homeLockPath(env), 'utf8'), '', 'replaced with an empty database file');
+  assert.equal(await readFile(homeLockPath(env), 'utf8'), '', 'emptied in place: a valid, empty database');
 });
 
-test('replacing a damaged lock file is serialized, so two starters cannot each claim their own', async () => {
+test('a damaged lock file is emptied where it stands, never replaced', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
-  const damaged = 'not a database at all\n';
-  await mkdir(path.dirname(homeLockPath(env)), { recursive: true });
-  await writeFile(homeLockPath(env), damaged);
-
-  // Another starter is mid-repair: it holds the sibling repair claim. This
-  // one must not remove the file it saw — by now that may be the fresh
-  // lock the other starter holds — and is refused as a daemon still
-  // starting instead.
-  const repairing = new DatabaseSync(`${homeLockPath(env)}.repair`);
-  repairing.exec('BEGIN EXCLUSIVE');
-  try {
-    assert.throws(() => claimHome(env), HomeClaimedError);
-    assert.equal(await readFile(homeLockPath(env), 'utf8'), damaged, 'nothing removed while another starter repairs');
-  } finally {
-    repairing.close();
-  }
-
-  // With the repair claim free, the replacement proceeds.
-  const claim = claimHome(env);
-  assert.equal(await readFile(homeLockPath(env), 'utf8'), '');
-  claim.release();
-});
-
-test('a damaged repair sibling is replaced too, not obeyed forever', async () => {
-  const home = await newHome();
-  const env = { homeDir: home, cwd: home, processEnv: {} };
-  // Both files damaged from outside. The sibling exists to serialize the
-  // repair; a sibling that cannot be claimed must not turn into a lock
-  // that refuses every start until somebody removes it by hand.
   await mkdir(path.dirname(homeLockPath(env)), { recursive: true });
   await writeFile(homeLockPath(env), 'not a database at all\n');
-  await writeFile(`${homeLockPath(env)}.repair`, 'nor this\n');
 
+  // The OS lock lives on the inode. A repair that removed and recreated
+  // the file would hand a starter acting on a stale read an inode of its
+  // own to hold beside the first's; emptied in place, two starters that
+  // read the same damage both empty the one file and then contend for the
+  // one lock. So the inode must survive the repair.
+  // Observed through a descriptor opened on the damaged file: a file that
+  // was unlinked and recreated leaves this descriptor's inode with no
+  // links, whatever number the new file was given.
+  const handle = await open(homeLockPath(env), 'r');
   const claim = claimHome(env);
-  assert.throws(() => claimHome(env), HomeClaimedError, 'the rebuilt lock is held');
-  claim.release();
-  assert.equal(await readFile(homeLockPath(env), 'utf8'), '');
-  assert.equal(await readFile(`${homeLockPath(env)}.repair`, 'utf8'), '');
+  try {
+    assert.equal((await handle.stat()).nlink, 1, 'the same inode, emptied — not a new file');
+    assert.equal(await readFile(homeLockPath(env), 'utf8'), '');
+  } finally {
+    claim.release();
+    await handle.close();
+  }
 });

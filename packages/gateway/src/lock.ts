@@ -1,12 +1,10 @@
-import { chmodSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, mkdirSync, truncateSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { stratusHomePath, type StateEnvironment } from '@stratusagent/state';
 
 const HOME_LOCK_FILENAME = 'stratusd.lock';
-/** Beside the lock, held only while a damaged lock file is being replaced. */
-const REPAIR_SUFFIX = '.repair';
 
 /** `~/.stratus/stratusd.lock` — held by the daemon serving that home. */
 export const homeLockPath = (env: StateEnvironment): string =>
@@ -70,89 +68,6 @@ const claimAt = (lockPath: string): DatabaseSync => {
 };
 
 /**
- * Replace a lock file that is not a database and claim the replacement —
- * under a second claim, on a sibling file, so only one starter does it.
- *
- * Two starters can both have read the same damaged file. Without this,
- * the first removes it and claims a fresh one, and the second, acting on
- * its own earlier error, removes *that* — the file the first now holds —
- * and claims yet another: two daemons on two inodes, one home. So the
- * repair is serialized on `<lock>.repair` (never written either), and the
- * lock is tried once more under it before anything is removed: a file
- * that is by then the fresh one is claimed, or refused because its holder
- * is the starter that got there first. The loser is refused as a daemon
- * still starting, which by then it is.
- */
-const replaceDamaged = (lockPath: string): DatabaseSync => {
-  const repair = claimRepair(lockPath);
-  try {
-    // Twice at most: once against the file as found, once against the
-    // file after this starter replaced it. Between the two, the inode is
-    // checked — a lock whose inode changed since it was read as damaged
-    // is a lock another starter has just replaced, and is claimed or
-    // refused as such rather than removed from under them.
-    let seen = inodeOf(lockPath);
-    for (const replaced of [false, true]) {
-      try {
-        return claimAt(lockPath);
-      } catch (error) {
-        if (isBusy(error)) {
-          throw new HomeClaimedError(lockPath);
-        }
-        if (replaced || !isNotADatabase(error)) {
-          throw error;
-        }
-      }
-      const now = inodeOf(lockPath);
-      if (now !== seen) {
-        seen = now;
-        continue;
-      }
-      rmSync(lockPath, { force: true });
-    }
-    throw new HomeClaimedError(lockPath);
-  } finally {
-    repair.close();
-  }
-};
-
-/**
- * The claim on the repair sibling. As disposable as the lock and written
- * just as never, so one that is not a database any more — both files
- * damaged together — is replaced the same way rather than refusing every
- * start until an operator removes it by hand. Two starters that reach
- * this over two damaged files at once may each hold a sibling of their
- * own; the inode check in `replaceDamaged` is what keeps one of them from
- * removing the lock the other has by then replaced and holds.
- */
-const claimRepair = (lockPath: string): DatabaseSync => {
-  const repairPath = `${lockPath}${REPAIR_SUFFIX}`;
-  for (const replaced of [false, true]) {
-    try {
-      return claimAt(repairPath);
-    } catch (error) {
-      if (isBusy(error)) {
-        throw new HomeClaimedError(lockPath);
-      }
-      if (replaced || !isNotADatabase(error)) {
-        throw error;
-      }
-      rmSync(repairPath, { force: true });
-    }
-  }
-  throw new HomeClaimedError(lockPath);
-};
-
-/** The inode at a path, or undefined for none — a path removed meanwhile. */
-const inodeOf = (file: string): number | undefined => {
-  try {
-    return statSync(file).ino;
-  } catch {
-    return undefined;
-  }
-};
-
-/**
  * Claim a home for one daemon, exclusively, for as long as the claim is
  * held.
  *
@@ -176,23 +91,44 @@ const inodeOf = (file: string): number | undefined => {
  *
  * The file is disposable, since nothing is ever written to it. One that is
  * not a database any more — damaged from outside, or left by something
- * that was not this — is replaced and claimed: nobody can be holding it,
- * because holding it needed the header this read refused.
+ * that was not this — is emptied in place and claimed: nobody can be
+ * holding it, because holding it needed the header this read refused.
+ * Emptied, never removed and recreated: the OS lock lives on the inode,
+ * and a starter that unlinked the file would hand every later starter an
+ * inode of its own to hold. Two starters that read the same damage both
+ * empty the same file — the second finds it already empty, which is a
+ * valid database — and then contend for the one lock, where exactly one
+ * wins. There is nothing to serialize and nothing that can be unlinked
+ * from under a holder.
  */
 export const claimHome = (env: StateEnvironment): HomeClaim => {
   const lockPath = homeLockPath(env);
   mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
-  let held: DatabaseSync;
-  try {
-    held = claimAt(lockPath);
-  } catch (error) {
-    if (isBusy(error)) {
-      throw new HomeClaimedError(lockPath);
+  let held: DatabaseSync | undefined;
+  // At most twice: the file as found, then the file emptied in place.
+  for (const emptied of [false, true]) {
+    try {
+      held = claimAt(lockPath);
+      break;
+    } catch (error) {
+      if (isBusy(error)) {
+        throw new HomeClaimedError(lockPath);
+      }
+      if (emptied || !isNotADatabase(error)) {
+        throw error;
+      }
+      try {
+        truncateSync(lockPath, 0);
+      } catch (truncateError) {
+        // Gone meanwhile: the claim below creates it afresh.
+        if ((truncateError as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw truncateError;
+        }
+      }
     }
-    if (!isNotADatabase(error)) {
-      throw error;
-    }
-    held = replaceDamaged(lockPath);
+  }
+  if (!held) {
+    throw new HomeClaimedError(lockPath);
   }
 
   let released = false;
@@ -202,7 +138,7 @@ export const claimHome = (env: StateEnvironment): HomeClaim => {
         return;
       }
       released = true;
-      held.close();
+      held!.close();
     },
   };
 };
