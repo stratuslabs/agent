@@ -37,10 +37,21 @@ const DROPPED_ELEMENTS = [
  */
 const INLINE_ELEMENTS = new Set([
   'a', 'abbr', 'b', 'bdi', 'bdo', 'big', 'cite', 'code', 'data', 'del', 'dfn',
-  'em', 'font', 'i', 'ins', 'kbd', 'mark', 'nobr', 'q', 'rp', 'rt', 'ruby',
+  'em', 'font', 'i', 'ins', 'kbd', 'mark', 'nobr', 'q', 'ruby',
   's', 'samp', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'time',
   'tt', 'u', 'var', 'wbr',
 ]);
+// `rt` and `rp` are deliberately absent, though they are inline elements.
+// They hold a ruby annotation — a pronunciation printed *above* the base
+// text, not beside it — so joining them produces a token the page never
+// shows: `<ruby>東京<rt>とうきょう</rt></ruby>` reads back as 東京とうきょう,
+// fusing a word with its own furigana. Separating loses nothing and fuses
+// nothing, which is the safer of the two ways to be wrong here; dropping
+// the annotation outright would read better still and would be a guess
+// about whether the pronunciation is content.
+//
+// `sub` and `sup` stay, and are the deliberate contrast: `H<sub>2</sub>O`
+// is one token and joining it is the whole point.
 
 const BLOCK_ELEMENTS = [
   'p', 'div', 'section', 'article', 'main', 'br', 'hr',

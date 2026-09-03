@@ -205,5 +205,11 @@ test('the extractor keeps prose and drops furniture', () => {
   // middle of the sentence.
   assert.equal(htmlToText('<!doctype html><p>hi</p>'), 'hi');
   assert.equal(htmlToText('<p>5 < 10 and 20 > 15</p>'), '5 < 10 and 20 > 15');
+  // A ruby annotation prints *above* its base text rather than beside it,
+  // so joining the two invents a token the page never shows — 東京 fused
+  // with its own furigana. `sub` and `sup` are the contrast, and stay
+  // joined: `H2O` is one token and that is the point.
+  assert.equal(htmlToText('<p><ruby>東京<rt>とうきょう</rt></ruby>へ行く</p>'), '東京 とうきょう へ行く');
+  assert.equal(htmlToText('<p>H<sub>2</sub>O and x<sup>2</sup></p>'), 'H2O and x2');
   assert.equal(htmlToText('<script>var x = "<p>trap</p>";</script><p>real</p>'), 'real');
 });

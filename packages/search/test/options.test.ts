@@ -189,6 +189,11 @@ test('a highlighted substring does not become two words, or a detached full stop
   // runs this way: an unneeded space is a blemish, a missing one is a word
   // nobody wrote.
   assert.equal(plainSnippet('<my-widget>Alpha</my-widget><my-widget>Beta</my-widget>'), 'Alpha Beta');
+  // A ruby annotation prints above its base text, so joining them fuses a
+  // word with its own pronunciation into a token the page never shows.
+  assert.equal(plainSnippet('<ruby>東京<rt>とうきょう</rt></ruby>へ行く'), '東京 とうきょう へ行く');
+  // …while `sub`/`sup` stay joined, which is the contrast: `H2O` is one token.
+  assert.equal(plainSnippet('H<sub>2</sub>O'), 'H2O');
 });
 
 test('a snippet that compares two numbers keeps the sentence between them', () => {
