@@ -441,3 +441,74 @@ test('a gateway whose host gave it no way back refuses to restart, and says so',
     await gateway.stop();
   }
 });
+
+test('a drain window above Node\'s maximum timer delay is clamped, not fired at once', async () => {
+  const home = await newHome();
+  const warnings: string[] = [];
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    log: () => {},
+    warn: (line) => warnings.push(line),
+    onRestart: () => {},
+  });
+  await gateway.start();
+  // Node treats a delay above 2^31-1 ms as roughly 1 ms, so an unclamped
+  // "very long" window would abort every running turn immediately.
+  const status = gateway.restart({ drainTimeoutMs: 10 * 365 * 24 * 60 * 60 * 1000 });
+  assert.equal(status.drainTimeoutMs, 2_147_483_647);
+  assert.ok(warnings.some((line) => /restart drain window .* above Node's maximum timer delay/.test(line)), warnings.join('\n'));
+  await gateway.stop();
+});
+
+test('a scheduled firing that ignores its abort does not hold the restart forever', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  // Never answers and never honours the signal: the worst a provider can
+  // do. The firing it serves is tracked by the scheduler's drain as well as
+  // the gateway's, and both have to give up for the restart to happen.
+  let firing!: () => void;
+  const firingStarted = new Promise<void>((resolve) => { firing = resolve; });
+  const fetchImpl = (() => new Promise<Response>(() => { firing(); })) as typeof fetch;
+
+  let handOff!: (outcome: RestartOutcome) => void;
+  const restarted = new Promise<RestartOutcome>((resolve) => { handOff = resolve; });
+  const warnings: string[] = [];
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    schedules: { minIntervalMs: 500, tickMs: 25 },
+    log: () => {},
+    warn: (line) => warnings.push(line),
+    onRestart: (outcome) => handOff(outcome),
+  });
+  await gateway.start();
+
+  const { SqliteScheduleStore, defaultSessionDbPath } = await import('../src/index.ts');
+  const scheduleStore = new SqliteScheduleStore(defaultSessionDbPath({ homeDir: home }));
+  scheduleStore.insert({
+    id: 'sched-stuck',
+    agentId: 'ava',
+    cadence: { kind: 'every', intervalMs: 600_000 },
+    prompt: 'do the scheduled thing',
+    createdAt: new Date().toISOString(),
+    nextFireAt: new Date(Date.now() - 5).toISOString(),
+  });
+  scheduleStore.close();
+  await firingStarted;
+
+  gateway.restart({ drainTimeoutMs: 50 });
+  // The gate has a way to lose: a restart still waiting on the firing
+  // after a bound far above its three windows is the hang this guards.
+  const outcome = await Promise.race([
+    restarted,
+    new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 5_000)),
+  ]);
+  assert.notEqual(outcome, 'hung', 'the restart waited on a firing that will never settle');
+  assert.deepEqual(outcome, { drained: false });
+  assert.ok(warnings.some((line) => /did not stop after being aborted/.test(line)), warnings.join('\n'));
+  assert.ok(warnings.some((line) => /a scheduled firing did not stop/.test(line)), warnings.join('\n'));
+  await gateway.stop();
+});

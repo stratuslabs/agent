@@ -85,8 +85,9 @@ than a surprise, and one that costs the fleet as little as it can.
    daemon finds a finished turn, not an abandoned one. A call parked on a
    human is denied as cancelled, exactly as a stop denies it.
 3. **Stop, then start again.** The process that received the restart drains,
-   closes its store, and then starts a fresh daemon as a child and waits for
-   it. It stays, rather than exiting: under systemd and launchd the process
+   closes its store, lets go of the [home claim](#one-daemon-per-home), and
+   then starts a fresh daemon as a child and waits for it. It stays, rather
+   than exiting: under systemd and launchd the process
    the manager started *is* the service, and its exit would end the job —
    so staying is what lets the same path hold under the service manager,
    in the foreground, and under `--no-login`, where a clean exit is never
@@ -116,6 +117,45 @@ LaunchAgent is the right choice.) The systemd equivalent is
 `loginctl enable-linger` on a machine you don't stay logged in to. Setup
 says both in the menu rather than leaving them to be discovered after a
 reboot.
+
+## One daemon per home
+
+`stratus serve` refuses to start while another daemon holds the same
+`~/.stratus`:
+
+```
+Error: stratusd is already running for this home (pid 4242, http://127.0.0.1:4123). ...
+```
+
+Two daemons on one home would share the session store and the schedule
+table with nothing coordinating them — each slot fires in whichever process
+claims it first, each start sweep re-asks the approvals the other is
+holding, and the newer one fails as abandoned the turns the older one is
+still running. The claim is `~/.stratus/stratusd.lock`, an SQLite file on
+which the daemon holds an exclusive transaction open — never writing it —
+from before it opens the store until after the store closes. That makes it
+atomic between two daemons starting together, keeps a daemon that is still
+draining its last turns holding the home against its replacement (the
+refusal then says so, since there is no address to name yet), and means a
+daemon that died released it with its file descriptors — there is no stale
+lock to clean up, and nothing a crash could leave half-written. The empty
+file stays between runs; the claim is the open descriptor, not the file's
+existence, and a file that is not a database any more is emptied in place
+rather than obeyed — never removed and recreated, so two daemons starting
+over the same damaged file still contend for the one inode and exactly one
+wins. `gateway.json`
+is read to name the holder — and, for a daemon from a release before the
+lock existed that is still serving across an upgrade, it is the evidence:
+a live pid whose address answers with this home's token refuses the start
+the same way.
+
+The control API is a required channel: a daemon that cannot bind its port
+stops instead of serving without one, with an error naming the port and
+the flags that change it. Either refusal under a service manager — the
+installed service starting while a hand-run `stratus serve` holds the
+home, or its port — is a restart loop until the other process stops,
+which is the case the redirect-log truncation in [Logs](./logs.md)
+bounds.
 
 ## While it runs
 

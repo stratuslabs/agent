@@ -32,7 +32,7 @@ import {
 // Type-only: the gateway itself is imported lazily (it pulls in node:sqlite
 // and the whole runner stack), and a serve-only policy seam must not make
 // `stratus run` pay for it.
-import type { ApprovalTransport, GatewayChannelAdapter, RestartOutcome } from '@stratusagent/gateway';
+import type { ApprovalTransport, GatewayChannelAdapter, HomeClaim, RestartOutcome } from '@stratusagent/gateway';
 import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
 import {
   createFileCommandWhitelist,
@@ -711,7 +711,9 @@ Commands:
   run              Execute one local Stratus Agent session
   serve            Run stratusd, the always-on gateway: durable sessions, the
                    whole roster live at once (each agent on its own provider),
-                   delegation, and a watchdog — Ctrl+C / SIGTERM drains cleanly
+                   delegation, and a watchdog — one per home (it refuses to
+                   start over a daemon already serving ~/.stratus), and
+                   Ctrl+C / SIGTERM drains cleanly
                    (--idle-timeout <seconds>, --approvals <headless|remote>,
                    --no-events, --no-log-file, --config <path>); everything it
                    says is also written to ~/.stratus/logs, which
@@ -6095,6 +6097,87 @@ const gatewayAnswering = async (
 };
 
 /**
+ * Whether a process with this pid exists. EPERM is an answer — the process
+ * is there, it is just not ours to signal.
+ */
+const processAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+};
+
+/**
+ * The error for a home another daemon holds (see `claimHome` in
+ * @stratusagent/gateway — the claim is what decides; this only says who).
+ *
+ * The discovery file names the holder when it has one to name: a daemon
+ * that has bound its API. Read for the message alone, and only trusted as
+ * far as a live pid — a daemon still starting has not written it, a
+ * daemon draining its last turn has already removed it, and a SIGKILLed
+ * one leaves it behind for the next pid to inherit. Not probed over HTTP:
+ * a `STRATUS_GATEWAY_TOKEN` exported for some remote gateway would answer
+ * 401 for the local one, and the claim needs no second opinion.
+ */
+/**
+ * `stratus serve` refused because another daemon holds the home. Its own
+ * type so `stratus dashboard` can tell "a daemon is there, wait for it to
+ * publish" from "the daemon could not start".
+ */
+class HomeHeldError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HomeHeldError';
+  }
+}
+
+/**
+ * Whether a daemon from before the lock existed is serving this home.
+ *
+ * Such a daemon — alive across an upgrade that did not stop it — never
+ * took the claim, so the claim alone cannot see it. The discovery file it
+ * published is its only trace, held to the two proofs the lock made
+ * unnecessary for everything since: the pid it names is alive, and its
+ * URL answers `/health` with this home's own token file — never the
+ * `STRATUS_GATEWAY_TOKEN` override, which names some other gateway and
+ * would make a live daemon read as absent. A stale file fails either
+ * proof and refuses nothing.
+ */
+const legacyDaemonServing = async (env: CliEnvironment): Promise<boolean> => {
+  const info = await readGatewayInfo(env);
+  if (info?.pid === undefined || info.pid === process.pid || !processAlive(info.pid)) {
+    return false;
+  }
+  const fetchImpl = env.fetch ?? globalThis.fetch;
+  if (typeof fetchImpl !== 'function') {
+    return false;
+  }
+  try {
+    const token = (await readFile(gatewayTokenPath(env), 'utf8')).trim();
+    const response = await fetchImpl(`${info.url}/api/v1/health`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(2_000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+};
+
+const describeHeldHome = async (env: CliEnvironment): Promise<string> => {
+  const info = await readGatewayInfo(env);
+  const holder = info?.pid !== undefined && processAlive(info.pid)
+    ? ` (pid ${info.pid}, ${info.url})`
+    : ' — one that is still starting, or still draining its last turns';
+  return `stratusd is already running for this home${holder}. Two daemons on one ~/.stratus `
+    + 'would each fire the other\'s schedules and re-ask its approvals. Stop it first: `stratus service stop` '
+    + 'if it is the installed service, otherwise Ctrl+C where it runs — and let it finish; it holds the home until '
+    + 'its last turn is written.';
+};
+
+/**
  * `stratus dashboard` — open the web UI against a running daemon, starting
  * one in the foreground when there is none.
  *
@@ -6123,53 +6206,75 @@ export const runDashboard = async (
   if (!base) {
     writeLine(streams.stdout, 'No daemon is running — starting one. It stops when you do.');
     writeLine(streams.stdout, 'Run `stratus service install` to keep one running instead.');
-    serving = runServe(
-      {
-        command: 'serve',
-        events: false,
-        // Explicitly on. A trusted config may set `api.enabled: false` — a
-        // reasonable thing for a headless box — but this command exists to
-        // open the dashboard, and honouring it here would start a daemon
-        // with no API and then time out waiting for the one it promised.
-        api: true,
-        ...(command.port !== undefined ? { apiPort: command.port } : {}),
-        // Passed whenever it was asked for, including when it is the default.
-        // `--host 127.0.0.1` against a config saying `0.0.0.0` is an operator
-        // narrowing the bind, and dropping it because it matched the default
-        // did the reverse of what they typed.
-        ...(command.host !== undefined ? { apiHost: command.host } : {}),
-      },
-      // The daemon's own chatter belongs on stderr here: stdout is where this
-      // command says where to point a browser, and interleaving the two makes
-      // the one line that matters hard to find.
-      { stdout: streams.stderr, stderr: streams.stderr },
-      { ...env, shutdownSignal: ownDaemon.signal },
-    );
 
-    // Attached now, not at the end. `runServe` can reject before it publishes
-    // anything — an unreadable roster, a session store that will not open —
-    // and a rejected promise nobody is watching for fifteen seconds is an
-    // unhandled rejection, which terminates the process instead of reaching
-    // the message below. Captured rather than swallowed, so the reason the
-    // daemon gave is the reason this command reports.
+    // One attempt at a daemon of our own. `runServe` can reject before it
+    // publishes anything — an unreadable roster, a session store that will
+    // not open — and a rejected promise nobody is watching for fifteen
+    // seconds is an unhandled rejection, which terminates the process
+    // instead of reaching the message below. Captured rather than
+    // swallowed, so the reason the daemon gave is the reason this command
+    // reports.
     let daemonFailure: unknown;
-    const daemonExit = serving.then(
-      () => undefined,
-      (error: unknown) => { daemonFailure = error; },
-    );
+    let daemonSettled = false;
+    let daemonExit: Promise<void> = Promise.resolve();
+    let attemptedAt = 0;
+    const attempt = (): void => {
+      daemonFailure = undefined;
+      daemonSettled = false;
+      attemptedAt = Date.now();
+      serving = runServe(
+        {
+          command: 'serve',
+          events: false,
+          // Explicitly on. A trusted config may set `api.enabled: false` —
+          // a reasonable thing for a headless box — but this command exists
+          // to open the dashboard, and honouring it here would start a
+          // daemon with no API and then time out waiting for the one it
+          // promised.
+          api: true,
+          ...(command.port !== undefined ? { apiPort: command.port } : {}),
+          // Passed whenever it was asked for, including when it is the
+          // default. `--host 127.0.0.1` against a config saying `0.0.0.0`
+          // is an operator narrowing the bind, and dropping it because it
+          // matched the default did the reverse of what they typed.
+          ...(command.host !== undefined ? { apiHost: command.host } : {}),
+        },
+        // The daemon's own chatter belongs on stderr here: stdout is where
+        // this command says where to point a browser, and interleaving the
+        // two makes the one line that matters hard to find.
+        { stdout: streams.stderr, stderr: streams.stderr },
+        { ...env, shutdownSignal: ownDaemon.signal },
+      );
+      daemonExit = serving.then(
+        () => { daemonSettled = true; },
+        (error: unknown) => { daemonFailure = error; daemonSettled = true; },
+      );
+    };
+    attempt();
 
-    // Gated on the daemon actually answering, not on a delay: it publishes
+    // Gated on a daemon actually answering, not on a delay: one publishes
     // where it bound the moment it binds, and anything less would be a race
-    // dressed up as a timeout. It also stops the moment the daemon gives up,
-    // rather than waiting out a timeout for a process that is already gone.
+    // dressed up as a timeout. It also stops the moment our daemon gives up
+    // — except when it gave up because another one holds the home. An
+    // installed service still starting has not published its address yet
+    // and is about to: that is the daemon to wait for. And a daemon still
+    // draining may simply exit, with nothing replacing it — so while the
+    // home is held, our own attempt is repeated about once a second, and
+    // takes the home the moment it is free.
     const startedBy = Date.now() + 15_000;
-    let daemonStopped = false;
-    void daemonExit.then(() => { daemonStopped = true; });
-    while (!base && !daemonStopped && Date.now() < startedBy) {
+    while (!base && Date.now() < startedBy) {
       const info = await readGatewayInfo(env);
       if (info && await gatewayAnswering(env, info.url, fetchImpl)) {
         base = info.url;
         break;
+      }
+      if (daemonSettled) {
+        if (!(daemonFailure instanceof HomeHeldError)) {
+          break;
+        }
+        if (Date.now() - attemptedAt >= 1_000) {
+          attempt();
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
@@ -6178,11 +6283,20 @@ export const runDashboard = async (
       await daemonExit;
       writeLine(
         streams.stderr,
-        daemonFailure
-          ? `Error: the daemon could not start: ${daemonFailure instanceof Error ? daemonFailure.message : String(daemonFailure)}`
-          : 'Error: the daemon did not start serving its control API. Is @stratusagent/control-api installed?',
+        daemonFailure instanceof HomeHeldError
+          ? 'Error: another daemon holds this home but never published its address. It may still be starting or '
+            + 'draining — try again in a moment, or check `stratus service status`.'
+          : daemonFailure
+            ? `Error: the daemon could not start: ${daemonFailure instanceof Error ? daemonFailure.message : String(daemonFailure)}`
+            : 'Error: the daemon did not start serving its control API. Is @stratusagent/control-api installed?',
       );
       return 1;
+    }
+    if (daemonFailure instanceof HomeHeldError) {
+      // The daemon that answered is the one that held the home. Ours never
+      // started, so there is nothing of ours to wait for or to stop: from
+      // here this is the found-a-running-daemon case.
+      serving = undefined;
     }
   }
 
@@ -6221,7 +6335,15 @@ export const runDashboard = async (
     await new Promise((resolve) => setTimeout(resolve, env.dashboardAutoShutdownMs));
     ownDaemon.abort();
   }
-  return serving;
+  // An attempt still in flight when the daemon answered may yet be refused
+  // — the holder published while ours was claiming. The dashboard found a
+  // daemon; that refusal is not its failure.
+  return serving.catch((error: unknown) => {
+    if (error instanceof HomeHeldError) {
+      return 0;
+    }
+    throw error;
+  });
 };
 
 /** Reports whether an optional package is installed. */
@@ -6273,6 +6395,7 @@ const loadSlackAdapter = async (): Promise<SlackAdapterFactory | undefined> => {
 };
 
 type ControlApiFactory = typeof import('@stratusagent/control-api').createControlApi;
+type GatewayFactory = typeof import('@stratusagent/gateway').createGateway;
 
 /**
  * Loads the optional control-API package, or undefined when it is not
@@ -6459,7 +6582,52 @@ export const runServe = async (
   // Loaded lazily: the gateway pulls in node:sqlite, which every other CLI
   // command neither needs nor should pay for (Node still prints an
   // experimental warning for it).
-  const { createGateway } = await import('@stratusagent/gateway');
+  const { createGateway, claimHome, HomeClaimedError } = await import('@stratusagent/gateway');
+
+  // Before anything of this daemon's is written or opened: a second daemon
+  // on this home is refused here, with no log line, no store, and no sweep
+  // or firing of its own.
+  let claim: HomeClaim;
+  try {
+    claim = claimHome(env);
+  } catch (error) {
+    if (error instanceof HomeClaimedError) {
+      throw new HomeHeldError(await describeHeldHome(env));
+    }
+    throw error;
+  }
+  let code: number;
+  try {
+    // The one daemon the claim cannot see: one that predates it.
+    if (await legacyDaemonServing(env)) {
+      throw new HomeHeldError(await describeHeldHome(env));
+    }
+    code = await serveHeldHome(command, streams, env, createGateway);
+  } finally {
+    // After everything: the store closed by stop(), or whatever a throw
+    // reached — a preflight that rejected before the gateway existed
+    // included, so a host that calls runServe again is not refused for a
+    // daemon that never started. And never sooner, so a replacement cannot
+    // open the store while this one still writes.
+    claim.release();
+  }
+  // An announced restart, once the home is let go — the replacement claims
+  // it next. A daemon the supervisor started asks it for the next one by
+  // exiting; the first daemon becomes the supervisor itself. Either way the
+  // process the service manager (or the terminal) started is what stays.
+  if (code === RESTART_EXIT_CODE && !readProcessEnv(env)[SUPERVISED_ENV]) {
+    return superviseRestarts(command, streams, env);
+  }
+  return code;
+};
+
+/** Everything `stratus serve` does once it holds the home. */
+const serveHeldHome = async (
+  command: ParsedServeCommand,
+  streams: CliStreams,
+  env: CliEnvironment,
+  createGateway: GatewayFactory,
+): Promise<number> => {
   // Under a service manager the daemon's stdout is gone, so everything it
   // says is also written to ~/.stratus/logs — that file is what `stratus
   // logs` reads, and the only record of an overnight run.
@@ -6761,41 +6929,45 @@ export const runServe = async (
 
   await gateway.start();
 
-  // The roster is only known once the gateway has loaded it, and in remote
-  // mode an agent no channel can ask for is the quietest failure this
-  // feature has: its gated calls park with nobody rendering them and wait
-  // out the whole timeout before being denied. No channel can detect this
-  // on its own — a request is a broadcast, and no adapter knows whether
-  // another one is about to answer — so it is reported here, where the
-  // roster and the channel list are both in view.
-  if (approvalMode === 'remote') {
-    const askable = new Set(slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : []);
-    const unreachable = gateway.agents().map((agent) => agent.id).filter((id) => !askable.has(id));
-    if (unreachable.length > 0) {
-      warn(
-        `no channel can ask for ${unreachable.join(', ')}, so their gated calls will wait out the `
-        + 'approval timeout and then be denied. Connect a Slack app for them, or run with --approvals headless.',
-      );
-    }
-  }
-
-  writeLine(streams.stdout, 'Press Ctrl+C to stop.');
-
-  // And periodically, for a long-running daemon that warns steadily
-  // without ever writing enough records to rotate. Unref'd, so it never
-  // holds the process open. Armed only once the daemon is actually
-  // serving: every step above can throw, and runServe is an exported
-  // function as much as a process entry point — in a host that survives
-  // the failure, a timer armed before the throw would outlive the call
-  // and go on truncating that environment's redirect logs. The finally
-  // below takes it down on every other exit path.
+  // Under one finally from here: a throw anywhere after the start — a
+  // host's writable refusing a line, say — must still stop the gateway
+  // before the claim on the home is released, or a live gateway would be
+  // left behind a lock the next daemon can take.
   let redirectTimer: NodeJS.Timeout | undefined;
-  if (logWriter) {
-    redirectTimer = setInterval(() => void truncateRedirectLogs(logsDirPath(env)), 5 * 60_000);
-    redirectTimer.unref?.();
-  }
-
   try {
+    // The roster is only known once the gateway has loaded it, and in remote
+    // mode an agent no channel can ask for is the quietest failure this
+    // feature has: its gated calls park with nobody rendering them and wait
+    // out the whole timeout before being denied. No channel can detect this
+    // on its own — a request is a broadcast, and no adapter knows whether
+    // another one is about to answer — so it is reported here, where the
+    // roster and the channel list are both in view.
+    if (approvalMode === 'remote') {
+      const askable = new Set(slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : []);
+      const unreachable = gateway.agents().map((agent) => agent.id).filter((id) => !askable.has(id));
+      if (unreachable.length > 0) {
+        warn(
+          `no channel can ask for ${unreachable.join(', ')}, so their gated calls will wait out the `
+          + 'approval timeout and then be denied. Connect a Slack app for them, or run with --approvals headless.',
+        );
+      }
+    }
+
+    writeLine(streams.stdout, 'Press Ctrl+C to stop.');
+
+    // And periodically, for a long-running daemon that warns steadily
+    // without ever writing enough records to rotate. Unref'd, so it never
+    // holds the process open. Armed only once the daemon is actually
+    // serving: every step above can throw, and runServe is an exported
+    // function as much as a process entry point — in a host that survives
+    // the failure, a timer armed before the throw would outlive the call
+    // and go on truncating that environment's redirect logs. The finally
+    // below takes it down on every other exit path.
+    if (logWriter) {
+      redirectTimer = setInterval(() => void truncateRedirectLogs(logsDirPath(env)), 5 * 60_000);
+      redirectTimer.unref?.();
+    }
+
     // Hold the event loop open until a shutdown request, then drain: new
     // dispatches are refused while in-flight turns finish.
     await new Promise<void>((resolve) => {
@@ -6823,8 +6995,9 @@ export const runServe = async (
 
     if (restart) {
       // Already stopped: the gateway drained and closed before handing the
-      // process over. Said here, while the structured log still takes
-      // writes — the next lines belong to a process that has none.
+      // process over, and the stop() below finds nothing to do. Said here,
+      // while the structured log still takes writes — the next lines
+      // belong to a process that has none.
       if (!restart.drained) {
         // A turn that ignored its abort is still running in this process,
         // possibly still writing sessions. Starting a fresh daemon beside
@@ -6836,9 +7009,9 @@ export const runServe = async (
       }
     } else {
       writeLine(streams.stdout, 'Stopping — draining in-flight turns.');
-      await gateway.stop();
     }
   } finally {
+    await gateway.stop();
     if (redirectTimer) {
       clearInterval(redirectTimer);
     }
@@ -6854,15 +7027,13 @@ export const runServe = async (
   }
   if (!restart.drained) {
     (env.exitProcess ?? process.exit)(RESTART_EXIT_CODE);
-    return RESTART_EXIT_CODE;
+    return 1;
   }
-  // A daemon the supervisor started asks it for the next one by exiting;
-  // the first daemon becomes the supervisor itself. Either way the process
-  // the service manager (or the terminal) started is the one that stays.
-  if (readProcessEnv(env)[SUPERVISED_ENV]) {
-    return RESTART_EXIT_CODE;
-  }
-  return superviseRestarts(command, streams, env);
+  // Asked to come back. Whether this process starts the next daemon or
+  // exits for its supervisor to is `runServe`'s decision, after the home
+  // is released: the claim is held until this returns, and a daemon
+  // started before that would be refused as a second one on the home.
+  return RESTART_EXIT_CODE;
 };
 
 export const runCli = async ({ argv, streams = process, env = {} }: CliRunOptions): Promise<number> => {

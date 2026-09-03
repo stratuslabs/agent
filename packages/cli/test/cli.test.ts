@@ -2,12 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import { EventEmitter, once } from 'node:events';
 import { request as httpRequest } from 'node:http';
 import { Readable } from 'node:stream';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { claimHome } from '@stratusagent/gateway';
 
 import {
   createFileMemoryStore,
@@ -7298,4 +7301,272 @@ test('a supervised daemon answers a restart by exiting with the restart status, 
 
   assert.equal(await serving, RESTART_EXIT_CODE);
   assert.equal(respawns, 0);
+});
+
+test('a second serve on a home whose daemon is serving is refused before it opens anything', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-twice-'));
+
+  await withServedApi(home, async ({ url }) => {
+    const { streams, output } = createStreams();
+    // A losing path: without the refusal a second daemon comes up on a free
+    // port and would hold the test open, so it is shut down after a moment
+    // and the exit code says which of the two happened.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2_000);
+    const code = await runCli({
+      argv: ['serve', '--no-events', '--api-port', '0'],
+      streams,
+      // A token exported for some remote gateway. It must not matter: the
+      // refusal is the home's own lock, not a probe of the local API that
+      // this token would fail with a 401.
+      env: { homeDir: home, cwd: home, processEnv: { STRATUS_GATEWAY_TOKEN: 'for-another-gateway' }, shutdownSignal: controller.signal },
+    });
+    clearTimeout(timer);
+
+    // Two daemons on one ~/.stratus share the session store and the
+    // schedule table with nothing coordinating them: the next slot fires
+    // in whichever claims it first. Reproduced against a running daemon —
+    // the second lost the port, kept serving with no channel, and the
+    // next scheduled firing ran in it where nobody could approve anything.
+    assert.equal(code, 1);
+    assert.match(output.stderr, new RegExp(`already running for this home \\(pid ${process.pid}, ${url.replace(/[.]/g, '\\.')}\\)`));
+    assert.match(output.stderr, /stratus service stop/);
+    assert.ok(!output.stdout.includes('control API on'), output.stdout);
+    // And the first daemon's discovery file still names the first daemon.
+    const info = JSON.parse(await readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8')) as { url: string };
+    assert.equal(info.url, url);
+  });
+});
+
+test('two daemons starting together on one home: exactly one serves', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-race-'));
+  // Neither has bound, so the discovery file exists for neither; only a
+  // claim taken before anything opens can settle this. Both are shut down
+  // after a moment — the loser has exited long before — and the exit codes
+  // say which happened.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2_000);
+  const start = () => {
+    const { streams, output } = createStreams();
+    return runCli({
+      argv: ['serve', '--no-events', '--api-port', '0'],
+      streams,
+      env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+    }).then((code) => ({ code, output }));
+  };
+  const [a, b] = await Promise.all([start(), start()]);
+  clearTimeout(timer);
+
+  assert.deepEqual([a.code, b.code].sort(), [0, 1]);
+  const loser = a.code === 1 ? a : b;
+  assert.match(loser.output.stderr, /already running for this home — one that is still starting, or still draining/);
+  assert.ok(!loser.output.stdout.includes('control API on'), loser.output.stdout);
+});
+
+test('a serve that fails before its gateway exists lets the home go', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-preflight-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A credentials file that is not an object fails the channel preflight,
+  // after the home is claimed and before any gateway exists.
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), '[]\n');
+
+  const failed = createStreams();
+  const code = await runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: failed.streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+  assert.equal(code, 1);
+  assert.match(failed.output.stderr, /Credentials file must contain a JSON object/);
+
+  // The claim went with the failure, not with the process: a host that
+  // calls runServe again — the dashboard, a test, an app — serves, and is
+  // not refused for a daemon that never started.
+  await rm(path.join(home, '.stratus', 'credentials.json'));
+  const { stderr } = await withServedApi(home, async () => {});
+  assert.doesNotMatch(stderr, /already running/);
+});
+
+test('a throw after the daemon started still stops it before the home is released', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-throw-'));
+  // A host's writable that refuses the line printed after the gateway is
+  // up. runServe rejects — and the gateway it started must not be left
+  // live behind a claim the next daemon can take.
+  let stderr = '';
+  const streams = {
+    stdout: {
+      write(chunk: string) {
+        if (chunk.includes('Press Ctrl+C')) {
+          throw new Error('stdout closed');
+        }
+        return true;
+      },
+    },
+    stderr: { write(chunk: string) { stderr += chunk; return true; } },
+  };
+  const code = await runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+  assert.equal(code, 1);
+  assert.match(stderr, /stdout closed/);
+  // Stopped, not abandoned: the shutdown reached the log before the claim
+  // was released.
+  const log = await readFile(path.join(home, '.stratus', 'logs', 'stratusd.jsonl'), 'utf8');
+  assert.match(log, /stratusd stopped/);
+  const claim = claimHome({ homeDir: home, cwd: home, processEnv: {} });
+  claim.release();
+});
+
+test('stratus dashboard waits for a daemon that holds the home but has not published yet', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-dash-held-'));
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  // The installed service is starting: it holds the home and has not bound
+  // its API. The dashboard's own daemon is refused — and that is the daemon
+  // to wait for, not a failure to report.
+  const holder = claimHome(env);
+  const { streams, output } = createStreams();
+  let openedUrl = '';
+  const dashboard = runCli({
+    argv: ['dashboard', '--port', '0'],
+    streams,
+    env: { ...env, openExternal: async (opened) => { openedUrl = opened; } },
+  });
+
+  // Long enough that the dashboard's own attempt has certainly been refused
+  // before the holder publishes; the assertion below has a losing path if
+  // it was not (the dashboard's own daemon would answer on another port).
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  holder.release();
+  await withServedApi(home, async ({ url }) => {
+    assert.equal(await dashboard, 0, output.stderr);
+    assert.ok(output.stdout.includes(`ready at ${url}`), output.stdout);
+    assert.ok(openedUrl.startsWith(`${url}/api/v1/auth/session?ott=`), openedUrl);
+    // Found, not started: the refused attempt is not reported as a failure.
+    assert.doesNotMatch(output.stderr, /already running/);
+  });
+});
+
+test('stratus dashboard starts its own daemon once a draining holder lets the home go', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-dash-drained-'));
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  // A daemon still draining holds the home with its address already
+  // withdrawn — and then exits, with no service manager to replace it.
+  // The dashboard's own attempt was refused while it held; it must be
+  // repeated once the home is free, not waited out.
+  const holder = claimHome(env);
+  const { streams, output } = createStreams();
+  const dashboard = runCli({
+    argv: ['dashboard', '--port', '0', '--no-open'],
+    streams,
+    env: { ...env, dashboardAutoShutdownMs: 200 },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  holder.release();
+
+  assert.equal(await dashboard, 0, output.stderr);
+  assert.match(output.stdout, /ready at http:\/\/127\.0\.0\.1:\d+/);
+  // Its own daemon, started on the retry — not one it found.
+  assert.match(output.stdout, /Press Ctrl\+C to stop the daemon/);
+  assert.doesNotMatch(output.stderr, /already running/);
+});
+
+test('a daemon from before the lock, still serving, refuses the next one through its discovery file', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-legacy-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A daemon started by the previous release never took the claim. What it
+  // left is its discovery file and its token, and a /health that answers
+  // to that token — the two proofs the lock cannot supply for it.
+  const token = 'legacy-token';
+  await writeFile(path.join(home, '.stratus', 'gateway-token'), `${token}\n`);
+  const legacy = createServer((request, response) => {
+    const authorized = request.headers.authorization === `Bearer ${token}`;
+    response.writeHead(request.url === '/api/v1/health' && authorized ? 200 : 401);
+    response.end();
+  });
+  await new Promise<void>((resolve) => legacy.listen(0, '127.0.0.1', resolve));
+  const { port } = legacy.address() as { port: number };
+  const url = `http://127.0.0.1:${port}`;
+  // A live process that is not this one, since a daemon is never its own
+  // predecessor.
+  const alive = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  await writeFile(
+    path.join(home, '.stratus', 'gateway.json'),
+    JSON.stringify({ url, host: '127.0.0.1', port, pid: alive.pid }),
+  );
+
+  try {
+    const { streams, output } = createStreams();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2_000);
+    const code = await runCli({
+      argv: ['serve', '--no-events', '--api-port', '0'],
+      streams,
+      // The override names some other gateway; the probe must use the
+      // home's own token file, or the legacy daemon reads as absent.
+      env: { homeDir: home, cwd: home, processEnv: { STRATUS_GATEWAY_TOKEN: 'for-another-gateway' }, shutdownSignal: controller.signal },
+    });
+    clearTimeout(timer);
+    assert.equal(code, 1);
+    assert.match(output.stderr, new RegExp(`already running for this home \\(pid ${alive.pid}, ${url.replace(/[.]/g, '\\.')}\\)`));
+    assert.ok(!output.stdout.includes('control API on'), output.stdout);
+    // And the home was let go: the claim taken for the check is released.
+    const claim = claimHome({ homeDir: home, cwd: home, processEnv: {} });
+    claim.release();
+  } finally {
+    alive.kill();
+    await new Promise<void>((resolve) => legacy.close(() => resolve()));
+  }
+});
+
+test('a discovery file left by a daemon that died does not refuse the next one', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-stale-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A SIGKILLed daemon removes nothing, and its pid is anyone's next. The
+  // refusal is the home's lock, which died with the daemon; the file is
+  // read only to name a holder, and a dead pid names nobody.
+  const gone = spawn(process.execPath, ['-e', '']);
+  await once(gone, 'exit');
+  await writeFile(
+    path.join(home, '.stratus', 'gateway.json'),
+    JSON.stringify({ url: 'http://127.0.0.1:1', host: '127.0.0.1', port: 1, pid: gone.pid }),
+  );
+
+  const { stderr } = await withServedApi(home, async ({ url }) => {
+    const info = JSON.parse(await readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8')) as { url: string; pid: number };
+    assert.equal(info.url, url);
+    assert.equal(info.pid, process.pid);
+  });
+  assert.doesNotMatch(stderr, /already running/);
+});
+
+test('serve stops rather than serve without the API it was asked for', async () => {
+  const held = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-port-a-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-port-b-'));
+
+  await withServedApi(held, async ({ url }) => {
+    const { port } = new URL(url);
+    const { streams, output } = createStreams();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2_000);
+    const code = await runCli({
+      argv: ['serve', '--no-events', '--api-port', port],
+      streams,
+      env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+    });
+    clearTimeout(timer);
+
+    // A different home, so the discovery file says nothing; the port is
+    // the only evidence. Serving on without the API used to be a warning
+    // — a daemon no `stratus` command could reach, whose home had no
+    // discovery file to say so.
+    assert.equal(code, 1);
+    assert.match(
+      output.stderr,
+      new RegExp(`Error: control-api could not start, and the gateway cannot serve without it: The control API could not listen on 127\\.0\\.0\\.1:${port}`),
+    );
+    assert.match(output.stderr, /--api-port <port>/);
+    assert.ok(!output.stdout.includes('Press Ctrl+C to stop.'), output.stdout);
+  });
 });
