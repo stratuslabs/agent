@@ -1869,6 +1869,81 @@ test('a recovered turn\'s file lands above the reply of the message queued behin
   assert.equal(web.uploads.length, 1);
 });
 
+test('a recovered turn claims the queued placeholder before its routing is read', async () => {
+  // Reading the routing of a turn nobody rendered is a store round trip,
+  // and the message queued behind it can finish inside that window. The
+  // placeholder has to be claimed when the outcome arrives, not when the
+  // lookup comes back, or the recovery's reply is posted below the newer
+  // turn's answer.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const order: string[] = [];
+  const post = web.chat.postMessage.bind(web.chat);
+  web.chat.postMessage = async (args) => {
+    order.push(`post:${args.text}`);
+    return post(args);
+  };
+  const update = web.chat.update.bind(web.chat);
+  web.chat.update = async (args) => {
+    order.push(`update:${args.ts}:${args.text}`);
+    return update(args);
+  };
+
+  let answerRouting!: () => void;
+  const routingHeld = new Promise<void>((resolve) => {
+    answerRouting = resolve;
+  });
+  const gateway = createStubGateway(({ sessionId }) => {
+    const session = sessionWithReply(sessionId, 'the message\'s own reply');
+    const messages = session.messages;
+    // The adapter reads the reply out of the session immediately before it
+    // finalizes the renderer, so this getter is the moment the queued turn
+    // starts finishing. Answering the routing on the next macrotask lets
+    // every microtask that finalize can make progress on run first: with
+    // no claim it finalizes outright, and with one it stops at the claim.
+    return {
+      ...session,
+      get messages() {
+        setImmediate(answerRouting);
+        return messages;
+      },
+    };
+  });
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    const stubActiveTurn = gateway.activeTurnId!;
+    gateway.activeTurnId = () => 'recovered-turn';
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    gateway.activeTurnId = stubActiveTurn;
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => {
+    await routingHeld;
+    return {
+      agentId: 'ava',
+      metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+      reply: 'the recovered reply',
+    };
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  // The recovery still got the placeholder that was posted first, and the
+  // message's own reply went into the one opened below it.
+  assert.ok(
+    order.includes('update:bot-ts-1:the recovered reply'),
+    `the recovery took the queued placeholder: ${order.join(', ')}`,
+  );
+  assert.equal(web.updates.find((entry) => entry.text === 'the message\'s own reply')?.ts, 'bot-ts-2');
+});
+
 test('a recovered turn that produced a file and no text still has the file posted', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-file-only-'));
   const shot = path.join(root, 'only.png');
