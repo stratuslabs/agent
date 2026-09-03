@@ -29,6 +29,14 @@ export interface WebPluginConfig extends JsonObject {
 const asNumber = (value: unknown, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 
+/**
+ * A per-call `maxBytes` may narrow the operator's cap, never raise it. A
+ * cap the model can lift is not one: a fetch of a 300 MB body asked for
+ * `maxBytes: 50000000`, got 50 MB of it, and took the daemon from 278 MB to
+ * 1.1 GB resident on the way.
+ */
+const narrowed = (requested: unknown, cap: number): number => Math.min(asNumber(requested, cap), cap);
+
 const settingsFor = (config: JsonObject, session: Session) => {
   // Per call, from the session: an agent allowed to reach an internal host
   // is a decision about that agent, and closing over it at setup would
@@ -157,7 +165,7 @@ const createFetchTool = (config: JsonObject): Tool => ({
     const settings = settingsFor(config, session);
     const response = await fetchThroughPolicy(url, {
       policy: settings.policy,
-      maxBytes: asNumber(input.maxBytes, settings.maxBytes),
+      maxBytes: narrowed(input.maxBytes, settings.maxBytes),
       timeoutMs: settings.timeoutMs,
       maxRedirects: settings.maxRedirects,
       userAgent: settings.userAgent,

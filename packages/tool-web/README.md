@@ -44,7 +44,7 @@ has approved that URL — not the redirect it answers with.
 | --- | --- | --- |
 | `allowedHosts` | none | Hosts exempt from the address check, by name or literal address. The narrow override: one internal service an agent is meant to reach. |
 | `allowPrivateAddresses` | `false` | Reach any non-global address. The trusted-workstation posture — it turns the SSRF protection off rather than adjusting it. |
-| `maxBytes` | `400000` | Stop reading here; the result says `truncated`. |
+| `maxBytes` | `400000` | Stop reading here; the result says `truncated`. A call's own `maxBytes` may ask for less, never more. |
 | `timeoutMs` | `20000` | Give up on the whole exchange — every redirect hop draws on the one budget. |
 | `maxRedirects` | `5` | Hops to follow before refusing. |
 | `userAgent` | `StratusAgent/0.5 …` | What to send. |

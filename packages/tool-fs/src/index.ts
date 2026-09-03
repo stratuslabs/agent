@@ -44,6 +44,15 @@ const asStrings = (value: JsonValue | undefined): string[] =>
 const asNumber = (value: JsonValue | undefined, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 
+/**
+ * A per-call limit may narrow the operator's cap, never raise it. The
+ * README calls `maxBytes` and `maxMatches` caps, and a cap the model can
+ * lift by naming a bigger number is a suggestion: one `fs.read` of a log
+ * file asked for `maxBytes: 1e10` and got the whole 6.7 MB of it into the
+ * transcript.
+ */
+const narrowed = (requested: JsonValue | undefined, cap: number): number => Math.min(asNumber(requested, cap), cap);
+
 const requireString = (input: JsonObject, key: string): string => {
   const value = input[key];
   if (typeof value !== 'string' || value.length === 0) {
@@ -138,7 +147,7 @@ const createReadTool = (config: JsonObject): Tool => ({
     const settings = settingsFor(config, session);
     const requested = requireString(input, 'path');
     const resolved = await resolveWithinRoots(settings.roots, requested, { home: settings.home });
-    const maxBytes = asNumber(input.maxBytes, settings.maxBytes);
+    const maxBytes = narrowed(input.maxBytes, settings.maxBytes);
     const result = await readContained(resolved, maxBytes);
     return {
       path: relativeTo(resolved.root, resolved.path),
@@ -294,7 +303,7 @@ const createSearchTool = (config: JsonObject): Tool => ({
     const query = requireString(input, 'query');
     const requested = typeof input.path === 'string' && input.path.length > 0 ? input.path : '.';
     const resolved = await resolveWithinRoots(settings.roots, requested, { home: settings.home });
-    const limit = asNumber(input.maxMatches, settings.maxMatches);
+    const limit = narrowed(input.maxMatches, settings.maxMatches);
     const pattern = matcherFor(query, {
       caseSensitive: input.caseSensitive === true,
       wholeWord: input.wholeWord === true,
