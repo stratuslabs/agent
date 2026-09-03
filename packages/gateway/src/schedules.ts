@@ -400,9 +400,17 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       // stalling the whole boot. (A concurrent cancel makes the claim
       // no-op, which is fine: skipped and gone both mean "not replayed".)
       const next = skipToFuture(record.cadence, slotDate, now);
-      log(`schedule ${record.id}: missed firing(s) while the daemon was down; skipping to ${next ? next.toISOString() : 'never'}`);
+      // Two ways here, and the line says which. A slot this daemon deferred
+      // under the per-agent cap has been due every tick since; its window
+      // closing is the running turn outlasting the cadence, not downtime —
+      // and the line that blamed downtime for it sent an operator to look
+      // for a restart that never happened.
+      const deferralKey = `${record.id}:${slot}`;
+      log(deferralsWarned.has(deferralKey)
+        ? `schedule ${record.id}: the firing deferred by the per-agent cap (slot ${slot}) outlasted its window; skipping to ${next ? next.toISOString() : 'never'}`
+        : `schedule ${record.id}: missed firing(s) while the daemon was down; skipping to ${next ? next.toISOString() : 'never'}`);
       store.claimSlot(withNextFire(record, next), slot);
-      deferralsWarned.delete(`${record.id}:${slot}`);
+      deferralsWarned.delete(deferralKey);
       return;
     }
 

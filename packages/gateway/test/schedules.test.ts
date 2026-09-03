@@ -286,6 +286,51 @@ test('the concurrency cap warns once per deferred slot, not once per tick', asyn
   store.close();
 });
 
+test('a deferred firing whose window passes is skipped with a line that says so, not one blaming downtime', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const lines: string[] = [];
+  const held = deferred<void>();
+  const skipped = deferred<void>();
+  let dispatches = 0;
+
+  const runtime = runtimeWith(store, {
+    log: (line) => {
+      lines.push(line);
+      if (/^schedule waiter: .*skipping to/.test(line)) {
+        skipped.resolve();
+      }
+    },
+    dispatch: async () => { dispatches += 1; if (dispatches === 1) { await held.promise; } },
+  });
+
+  // The holder fires and stays open; the waiter — same agent, short
+  // interval — is deferred under the cap, and its whole window passes
+  // while the holder runs. Reproduced against a running daemon with an
+  // `every 1m` firing that ran for two minutes: the deferred slot was
+  // skipped under "missed firing(s) while the daemon was down", and the
+  // daemon had not been down.
+  const due = new Date(Date.now() - 5).toISOString();
+  store.insert(record({ id: 'holder', agentId: 'ava', cadence: { kind: 'every', intervalMs: 3_600_000 }, nextFireAt: due }));
+  store.insert(record({ id: 'waiter', agentId: 'ava', cadence: { kind: 'every', intervalMs: 40 }, nextFireAt: due }));
+
+  await runtime.start();
+  await waitFor(() => dispatches === 1, 'the holder to be held');
+  try {
+    await skipped.promise;
+    assert.ok(
+      lines.some((line) => /^schedule waiter: the firing deferred by the per-agent cap \(slot .*\) outlasted its window; skipping to/.test(line)),
+      `expected the skip to name the deferral, got:\n${lines.join('\n')}`,
+    );
+    assert.ok(!lines.some((line) => /^schedule waiter: .*daemon was down/.test(line)), 'the daemon was never down');
+  } finally {
+    held.resolve();
+    runtime.stop();
+    await runtime.drain();
+    store.close();
+  }
+});
+
 test('a slightly-late recurring firing advances from its slot, not from now — no cadence drift', async () => {
   const home = await newHome();
   const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));

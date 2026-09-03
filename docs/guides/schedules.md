@@ -61,7 +61,10 @@ destination, because that is what is being approved. See
   catch-up — windows that passed entirely are skipped with a log line.
 - **Two limits hold unattended spend down**: an interval floor (default one
   minute) and a per-agent cap on concurrent scheduled turns (default one —
-  a firing that would exceed it waits for the next tick).
+  a firing that would exceed it waits, tick by tick, for the running turn
+  to finish, and fires late once it has; if its whole window passes first
+  it is skipped with a log line that says the cap deferred it, the same
+  rule as a window missed while the daemon was down).
 
 ## The operator's view
 
