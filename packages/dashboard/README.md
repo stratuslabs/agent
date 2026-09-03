@@ -80,4 +80,12 @@ signed in; a crash or a plain stop-and-start signs the browser out, and the
 page says so rather than rendering an empty roster that looks like a fleet
 that vanished. Run `stratus dashboard` again. If the socket drops without
 the daemon dying, the page reconnects on its own with a backoff and re-reads
-everything it missed.
+everything it missed — and it re-reads the moment the socket drops too, so
+an outage shows as the banner rather than as last-known numbers under a
+"reconnecting" dot.
+
+Refreshes that overlap settle latest-wins: one already in flight when a
+newer one starts is discarded when it lands, so a burst of events cannot
+leave the page holding an older answer. That is how an approval request
+went missing once — the refresh a `session.created` started was sent before
+the call was parked, and landed after the approval event's own refresh.

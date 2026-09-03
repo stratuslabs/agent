@@ -1,6 +1,7 @@
 import { api, connectEvents, ApiError } from './lib/api.js';
 import { clear, el } from './lib/dom.js';
 import { avatar } from './lib/avatar.js';
+import { createLatest } from './lib/latest.js';
 import { renderDashboard } from './views/dashboard.js';
 import { renderAgent } from './views/agent.js';
 import { renderSettings } from './views/settings.js';
@@ -93,18 +94,29 @@ const routeFromHash = () => {
  * memory) — so the page says exactly that instead of rendering an empty
  * roster that looks like a fleet that vanished.
  */
+// Overlapping refreshes settle latest-wins — see lib/latest.js for the
+// approval this lost.
+const coreRefresh = createLatest();
+
 export const refreshCore = async () => {
+  const ticket = coreRefresh.begin();
   try {
     const [health, agents, approvals] = await Promise.all([
       api.health(),
       api.agents(),
       api.approvals(),
     ]);
+    if (!coreRefresh.isCurrent(ticket)) {
+      return;
+    }
     store.health = health;
     store.agents = agents.agents ?? [];
     store.approvals = approvals.approvals ?? [];
     store.offlineSince = undefined;
   } catch (error) {
+    if (!coreRefresh.isCurrent(ticket)) {
+      return;
+    }
     if (error instanceof ApiError && error.status === 401) {
       store.route = { name: 'signed-out' };
     } else {
@@ -201,12 +213,12 @@ const handleEnvelope = (envelope) => {
 
   // Approvals and roster activity are shared state, so they refresh for
   // everyone rather than only for whoever is looking at the right screen.
+  // The whole core, not the approvals list alone: the "awaiting approval"
+  // count comes from /health, and a list refreshed on its own left the
+  // counter at zero next to a card that said one was waiting.
   const type = envelope.event.type;
   if (type === 'tool.approval-requested' || type === 'tool.approval-resolved') {
-    void api.approvals().then((listed) => {
-      store.approvals = listed.approvals ?? [];
-      render();
-    }).catch(() => {});
+    void refreshCore();
   }
   if (type === 'session.completed' || type === 'session.failed' || type === 'session.created') {
     void refreshCore();
@@ -354,6 +366,14 @@ connectEvents({
   onEnvelope: handleEnvelope,
   onStatus: (status) => {
     store.stream = status;
+    if (status === 'offline') {
+      // Ask now rather than wait for an event that will not come: with the
+      // daemon gone there are no events, so nothing else would notice, and
+      // the page kept its last numbers under a "reconnecting" dot through a
+      // whole outage. A failed refresh raises the offline banner; a 401
+      // after a restart signs the page out.
+      void refreshCore();
+    }
     if (status === 'live') {
       // Reconnected: whatever happened while the socket was down is only in
       // the store, so re-read rather than leaving a stale page behind.
