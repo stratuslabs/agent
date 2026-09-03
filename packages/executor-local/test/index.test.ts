@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import type { Session, Tool } from '@stratusagent/core';
 import {
@@ -229,17 +232,31 @@ test('a timeout settles even when an escaped grandchild still holds the output p
   // The grandchild starts `detached` — its own session, outside the group
   // the timeout kills — with the command's stdout inherited, and outlives
   // both the timeout and the test's patience. Before the fix, the call
-  // waited for it to exit on its own.
-  const grandchild = 'setTimeout(() => {}, 3000)';
+  // waited for it to exit on its own. It then writes to that inherited
+  // stdout and records how that went: a read end destroyed under it would
+  // make the write fail with EPIPE (SIGPIPE, for a process that has not
+  // ignored it), and the survivor is meant to survive.
+  //
+  // Wall-clock by necessity, so the margins are wide: the timeout is ten
+  // times a node startup, the survivor's write lands five timeouts later,
+  // and the call must settle well before that write.
+  const marker = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-executor-')), 'late-write');
+  const grandchild = `
+    setTimeout(() => {
+      process.stdout.write('late\\n', (error) => {
+        require('node:fs').writeFileSync(${JSON.stringify(marker)}, error ? 'failed: ' + error.code : 'written');
+      });
+    }, 2500);
+  `;
   const script = `
     const { spawn } = require('node:child_process');
     spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { detached: true, stdio: ['ignore', 'inherit', 'ignore'] }).unref();
-    setTimeout(() => {}, 3000);
+    setTimeout(() => {}, 5000);
   `;
   const tool = defineLocalCommandTool({
     name: 'escapee',
     createCommand() {
-      return { command: process.execPath, args: ['-e', script], timeoutMs: 100 };
+      return { command: process.execPath, args: ['-e', script], timeoutMs: 500 };
     },
   });
 
@@ -250,8 +267,18 @@ test('a timeout settles even when an escaped grandchild still holds the output p
   assert.equal(result.ok, false);
   const output = result.output as Record<string, unknown>;
   assert.equal(output.timedOut, true);
-  // Settled with the timeout, not with the grandchild's 3s lifetime.
+  // Settled with the timeout, not with the grandchild's lifetime.
   assert.ok(Date.now() - startedAt < 2000, `took ${Date.now() - startedAt}ms`);
+
+  // The gate is the marker the survivor writes after the call has settled;
+  // the loop is bounded so a survivor that died instead fails the test
+  // rather than hanging it.
+  let outcome = '';
+  for (let attempt = 0; attempt < 200 && outcome === ''; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    outcome = await readFile(marker, 'utf8').catch(() => '');
+  }
+  assert.equal(outcome, 'written');
 });
 
 test('cancellation settles the turn even when createCommand never resolves', async () => {
