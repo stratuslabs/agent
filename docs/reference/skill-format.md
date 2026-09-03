@@ -112,10 +112,15 @@ is a decision with a reason, not an accident:
    that changes nothing here would fail the point of conforming — which is
    that a skill from the ecosystem installs without editing. Strict where
    it matters, loud where it does not.
-2. **`name` is optional at load time.** Install requires it. Loading what
-   is already in `~/.stratus/skills/` — content that predates the spec —
-   falls back to the directory name rather than refusing to serve a skill
-   that worked yesterday. `stratus skill validate <id>` says what to add.
+2. **Loading is judged by the rule the content was written under.**
+   Install requires `name` and the spec's id rule; loading what is already
+   in `~/.stratus/skills/` — content that predates the spec — does not. A
+   skill without a `name` falls back to its directory name, and a
+   directory (or a plugin's declared id) that the earlier, looser rule
+   accepted — `old--id`, `trailing-`, one past 64 characters — is still
+   served, with a warning at load, rather than an upgrade silently taking
+   an enabled procedure away from an agent. A fresh install of either is
+   refused, and `stratus skill validate <id>` says what to add or rename.
 3. **A root-of-repository skill is not checked against its directory
    name.** Git puts a clone wherever it puts it; the skill's `name` is its
    identity and is what it installs under.

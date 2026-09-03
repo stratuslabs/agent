@@ -399,6 +399,53 @@ test('the spec form of the Stratus extensions reads: metadata.requires and metad
   assert.equal(validation.document?.version, '2.0.0');
 });
 
+test('a directory whose id predates the spec name rule still loads, with a warning; a fresh install of it is refused', async () => {
+  const homeDir = await freshHome();
+  const env = { homeDir };
+  const dir = skillsDirPath(env);
+  // Accepted by the rule before the spec's — and enabled by some soul,
+  // which an upgrade must not silently disappoint.
+  await mkdir(path.join(dir, 'old--id'), { recursive: true });
+  await writeFile(path.join(dir, 'old--id', 'SKILL.md'), skillFile('Use for old things.'));
+  await mkdir(path.join(dir, 'trailing-'), { recursive: true });
+  await writeFile(path.join(dir, 'trailing-', 'SKILL.md'), skillFile('Use for trailing things.'));
+
+  const registry = new SkillRegistry();
+  const warnings: string[] = [];
+  const loaded = await loadOperatorSkills(env, registry, (line) => warnings.push(line));
+  assert.deepEqual(loaded.map((skill) => skill.id), ['old--id', 'trailing-']);
+  assert.equal(registry.resolve('old--id')?.description, 'Use for old things.');
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0] ?? '', /"old--id" predates the Agent Skills name rule.*still served.*fresh install of it would be refused/);
+
+  // The same directory as a source: the strict rule applies to what
+  // would be installed, and the refusal says what to rename.
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilllegacy-'));
+  await mkdir(path.join(source, 'old--id'), { recursive: true });
+  await writeFile(path.join(source, 'old--id', 'SKILL.md'), specSkill('old--id', 'Use for old things.'));
+  const result = await installSkillsFromDirectory({ homeDir: await freshHome() }, source);
+  assert.deepEqual(result.installed, []);
+  assert.match(result.skipped[0]?.reason ?? '', /"old--id" is not a skill id/);
+});
+
+test('discovery checks a root skill against its directory name only when told the directory is the identity', async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillrootname-'));
+  const dir = path.join(parent, 'foo');
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'SKILL.md'), specSkill('bar', 'Use for bar.'));
+
+  // A checkout: the name is the identity, the directory is circumstance.
+  const checkout = await discoverSkillsInDirectory(dir);
+  assert.deepEqual(checkout.candidates.map((candidate) => candidate.id), ['bar']);
+
+  // The installed layout: a name that disagrees with the directory is the
+  // defect `stratus skill validate <id>` exists to report.
+  const installed = await discoverSkillsInDirectory(dir, { checkRootDirectoryName: true });
+  assert.deepEqual(installed.candidates, []);
+  assert.equal(installed.skipped[0]?.id, 'foo');
+  assert.match(installed.skipped[0]?.reason ?? '', /"bar" does not match the directory name "foo"/);
+});
+
 test('validateSkillDirectory and discovery agree: a directory without SKILL.md is an error, not a skill', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillempty-'));
   const validation = await validateSkillDirectory(dir);

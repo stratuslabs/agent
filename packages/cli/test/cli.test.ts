@@ -634,6 +634,25 @@ test('runCli skill validate reports what install would refuse and warn about, an
   assert.equal(await runCli({ argv: ['skill', 'validate', 'code-review'], streams: byId.streams, env }), 1);
   assert.match(byId.output.stdout, /^code-review: refused\n {2}error: frontmatter has no "name".*add: name: code-review/m);
 
+  // An installed directory is the layout the spec's directory rule is
+  // about: a name that disagrees with it (a hand edit, say) is reported
+  // under the directory's id, not waved through as a root skill.
+  const renamed = path.join(home, '.stratus', 'skills', 'foo');
+  await mkdir(renamed, { recursive: true });
+  await writeFile(path.join(renamed, 'SKILL.md'), '---\nname: bar\ndescription: Use for bar.\n---\n\nBody.\n');
+  const mismatch = createStreams();
+  assert.equal(await runCli({ argv: ['skill', 'validate', 'foo'], streams: mismatch.streams, env }), 1);
+  assert.match(mismatch.output.stdout, /^foo: refused\n {2}error: name "bar" does not match the directory name "foo"/m);
+
+  // A pre-spec directory id still resolves, so the operator is told what
+  // to rename rather than that nothing is installed under it.
+  const legacy = path.join(home, '.stratus', 'skills', 'old--id');
+  await mkdir(legacy, { recursive: true });
+  await writeFile(path.join(legacy, 'SKILL.md'), '---\nname: old--id\ndescription: Use for old things.\n---\n\nBody.\n');
+  const legacyRun = createStreams();
+  assert.equal(await runCli({ argv: ['skill', 'validate', 'old--id'], streams: legacyRun.streams, env }), 1);
+  assert.match(legacyRun.output.stdout, /^old--id: refused\n {2}error: name "old--id" is not a skill id/m);
+
   // Neither a directory nor an installed id.
   const missing = createStreams();
   assert.equal(await runCli({ argv: ['skill', 'validate', 'nope'], streams: missing.streams, env }), 1);

@@ -69,7 +69,7 @@ import {
   MEMORY_TOOL_NAME,
   formatSoul,
   generateAgentName,
-  isValidSkillId,
+  isLoadableSkillId,
   parseSoul,
   type ParsedSoul,
 } from '@stratusagent/agents';
@@ -5585,6 +5585,7 @@ export const runSkillValidate = async (
   env: CliEnvironment = {},
 ): Promise<number> => {
   let directory: string | undefined;
+  let installed = false;
   const localPath = path.resolve(readWorkingDirectory(env), command.target);
   try {
     if ((await stat(localPath)).isDirectory()) {
@@ -5593,11 +5594,14 @@ export const runSkillValidate = async (
   } catch {
     // Not a local directory; try it as an installed id.
   }
-  if (directory === undefined && isValidSkillId(command.target)) {
+  // The loader's rule for the lookup, so a directory that loads with a
+  // pre-spec id can be validated — and told what to rename.
+  if (directory === undefined && isLoadableSkillId(command.target)) {
     const installedPath = path.join(skillsDirPath(env), command.target);
     try {
       if ((await stat(installedPath)).isDirectory()) {
         directory = installedPath;
+        installed = true;
       }
     } catch {
       // Not installed either.
@@ -5611,7 +5615,13 @@ export const runSkillValidate = async (
     return 1;
   }
 
-  const { candidates, skipped } = await discoverSkillsInDirectory(directory);
+  // An installed directory IS the layout the spec's directory rule is
+  // about, so its name is checked; a path the author typed is a checkout
+  // or a container, judged as `skill add` would judge it.
+  const { candidates, skipped } = await discoverSkillsInDirectory(
+    directory,
+    installed ? { checkRootDirectoryName: true } : {},
+  );
   if (candidates.length === 0 && skipped.length === 0) {
     writeLine(streams.stderr, `Error: no skills found in ${directory}. A skill is a directory with a SKILL.md.`);
     return 1;

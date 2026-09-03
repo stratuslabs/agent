@@ -26,6 +26,7 @@ import {
 import {
   agentIdWithSuffix,
   createLazySkill,
+  isLoadableSkillId,
   SKILL_ID_RULE,
   validateSkillDocument,
   defineAgent,
@@ -1658,9 +1659,17 @@ export const loadOperatorSkills = async (
     }
     const id = entry.name;
     const skillPath = path.join(skillsDirPath(env), id, 'SKILL.md');
-    if (!isValidSkillId(id)) {
+    if (!isLoadableSkillId(id)) {
       warn(`skipping ${skillPath}: ${JSON.stringify(id)} is not a skill id. ${SKILL_ID_RULE}`);
       continue;
+    }
+    if (!isValidSkillId(id)) {
+      // Served, and said: the spec's rule is newer than this directory,
+      // and an upgrade must not silently take an enabled procedure away.
+      // A fresh install of it would be refused.
+      warn(
+        `${skillPath}: ${JSON.stringify(id)} predates the Agent Skills name rule (${SKILL_ID_RULE}) — still served, but a fresh install of it would be refused. Rename the directory, and its name:, to conform.`,
+      );
     }
     let document;
     try {
@@ -1798,6 +1807,15 @@ export interface DiscoverSkillsOptions {
    * accidentally one. Read only by the root-as-skill case.
    */
   rootId?: string;
+  /**
+   * Treat the root directory's own name as the skill's identity and check
+   * `name` against it, as for a skill inside a container. Off by default,
+   * because a source's root is usually a checkout, whose directory name is
+   * circumstance. On for a directory that *is* the installed layout —
+   * `~/.stratus/skills/<id>` — where a `name` that disagrees with the
+   * directory is exactly the defect to report.
+   */
+  checkRootDirectoryName?: boolean;
 }
 
 export interface InstallSkillsResult {
@@ -1857,9 +1875,10 @@ export const discoverSkillsInDirectory = async (
     // it happened to be checked out, so only the name is checked there,
     // and the caller-supplied root id is what a nameless one is told to
     // add.
+    const checkDirectory = !isRoot || options.checkRootDirectoryName === true;
     const validation = await validateSkillDirectory(
       directory,
-      isRoot ? { suggestedName: fallbackId } : { directoryName: fallbackId, suggestedName: fallbackId },
+      checkDirectory ? { directoryName: fallbackId, suggestedName: fallbackId } : { suggestedName: fallbackId },
     );
     if (validation.errors.length > 0 || validation.document?.name === undefined) {
       // Every error is a sentence naming its fix, so joined they read as

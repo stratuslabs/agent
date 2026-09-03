@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   createLazySkill,
   formatSoul,
+  isLoadableSkillId,
   isValidSkillId,
   parseSkillDocument,
   parseSoul,
@@ -279,6 +280,39 @@ test('skill ids follow the spec\'s name rule: hyphen-separated lowercase runs, a
   assert.equal(isValidSkillId('a'.repeat(SKILL_ID_MAX_LENGTH + 1)), false);
   assert.equal(isValidSkillId('a/b'), false);
   assert.equal(isValidSkillId(''), false);
+
+  // What is already on the machine is judged by the rule it was written
+  // under, so an upgrade never drops a directory that loaded yesterday.
+  assert.equal(isLoadableSkillId('double--hyphen'), true);
+  assert.equal(isLoadableSkillId('trailing-'), true);
+  assert.equal(isLoadableSkillId('a'.repeat(SKILL_ID_MAX_LENGTH + 1)), true);
+  assert.equal(isLoadableSkillId('Code-Review'), false);
+  assert.equal(isLoadableSkillId('-leading'), false);
+  assert.equal(isLoadableSkillId(''), false);
+});
+
+test('metadata keys are any string: quoted, or bare up to the colon', () => {
+  const document = parseSkillDocument(
+    '---\ndescription: d\nmetadata:\n  "vendor/key": one\n  \'123\': two\n  dotted.key: three\n  "quoted: colon": four\n---\n\nBody.',
+  );
+  assert.deepEqual(document.metadata, {
+    'vendor/key': 'one',
+    '123': 'two',
+    'dotted.key': 'three',
+    'quoted: colon': 'four',
+  });
+});
+
+test('the ceilings count characters, not UTF-16 units — an emoji is one', () => {
+  const parse = (frontmatter: string) => parseSkillDocument(`---\n${frontmatter}\n---\n\nBody.`);
+  // 600 emoji: 1200 UTF-16 units, 600 characters — under the ceiling, as
+  // the reference validator (Python len()) would count it.
+  const emoji = validateSkillDocument(parse(`name: x\ndescription: ${'😀'.repeat(600)}`));
+  assert.deepEqual(emoji.errors, []);
+  const over = validateSkillDocument(parse(`name: x\ndescription: ${'😀'.repeat(1025)}`));
+  assert.match(over.errors[0] ?? '', /description is 1025 characters/);
+  const compat = validateSkillDocument(parse(`name: x\ndescription: d\ncompatibility: ${'😀'.repeat(500)}`));
+  assert.deepEqual(compat.errors, []);
 });
 
 test('a lazy skill reads on demand and re-parses, so an edited body is picked up', async () => {

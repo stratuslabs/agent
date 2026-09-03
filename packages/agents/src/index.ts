@@ -471,13 +471,17 @@ const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): Parsed
       // One level of `key: value` pairs, every value a string — the
       // spec's shape for `metadata`. Anything deeper is not a string
       // value, and refusing it beats reading the wrong half of it.
-      const pair = /^\s+([A-Za-z][A-Za-z0-9_.-]*)\s*:\s*(.*)$/.exec(line);
-      if (!pair || pair[2] === undefined || unquote(pair[2]).length === 0) {
+      // Any string is a key — quoted (`"vendor/key": v`), or bare up to
+      // the first colon — since the spec types the map as string to
+      // string and says nothing about what a key looks like.
+      const pair = /^\s+(?:"([^"]*)"|'([^']*)'|([^\s"'#][^:]*?))\s*:\s*(.*)$/.exec(line);
+      const mapKey = pair?.[1] ?? pair?.[2] ?? pair?.[3]?.trim();
+      if (!pair || mapKey === undefined || mapKey.length === 0 || pair[4] === undefined || unquote(pair[4]).length === 0) {
         throw new Error(
           `${capitalize(shape.kind)} frontmatter metadata entries must be "key: value" strings, one per line: "${line.trim()}"`,
         );
       }
-      currentMap[pair[1] ?? ''] = unquote(pair[2]);
+      currentMap[mapKey] = unquote(pair[4]);
       continue;
     }
 
@@ -700,6 +704,21 @@ export const SKILL_ID_MAX_LENGTH = 64;
 export const isValidSkillId = (id: string): boolean =>
   id.length <= SKILL_ID_MAX_LENGTH && SKILL_ID_PATTERN.test(id);
 
+// The rule before the spec's: any lowercase kebab-ish run, doubled and
+// trailing hyphens and all, no length cap. What a directory or manifest
+// id that loaded yesterday was checked against.
+const LEGACY_SKILL_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+/**
+ * Whether an id that is already on this machine — a directory under
+ * `~/.stratus/skills/`, a plugin manifest's declared id — is served.
+ * Wider than `isValidSkillId` on purpose: the spec's rule arrived after
+ * some of these were written, and tightening the *loader* would silently
+ * drop an enabled procedure from an agent on upgrade. Installing and
+ * validating use the strict rule; loading uses this one, and warns.
+ */
+export const isLoadableSkillId = (id: string): boolean => LEGACY_SKILL_ID_PATTERN.test(id);
+
 /** What a skill id refusal says, everywhere one is refused. */
 export const SKILL_ID_RULE =
   'Skill ids are lowercase letters, digits, and single hyphens (web-research), at most 64 characters.';
@@ -838,6 +857,8 @@ export interface ValidateSkillDocumentOptions {
   suggestedName?: string;
 }
 
+const characterCount = (text: string): number => Array.from(text).length;
+
 /** What `validateSkillDocument` found: errors refuse an install, warnings ride along. */
 export interface SkillValidation {
   errors: string[];
@@ -881,14 +902,19 @@ export const validateSkillDocument = (
     );
   }
 
-  if (document.description.length > SKILL_DESCRIPTION_MAX_LENGTH) {
+  // Characters, as the spec and its Python reference count them — code
+  // points, not the UTF-16 units `.length` reports, which would count an
+  // emoji twice and refuse a description the reference validator passes.
+  const descriptionLength = characterCount(document.description);
+  if (descriptionLength > SKILL_DESCRIPTION_MAX_LENGTH) {
     errors.push(
-      `description is ${document.description.length} characters, past the spec's ceiling of ${SKILL_DESCRIPTION_MAX_LENGTH}. Say when to reach for the skill, and move the rest into the body.`,
+      `description is ${descriptionLength} characters, past the spec's ceiling of ${SKILL_DESCRIPTION_MAX_LENGTH}. Say when to reach for the skill, and move the rest into the body.`,
     );
   }
-  if (document.compatibility !== undefined && document.compatibility.length > SKILL_COMPATIBILITY_MAX_LENGTH) {
+  const compatibilityLength = document.compatibility !== undefined ? characterCount(document.compatibility) : 0;
+  if (compatibilityLength > SKILL_COMPATIBILITY_MAX_LENGTH) {
     errors.push(
-      `compatibility is ${document.compatibility.length} characters, past the spec's ceiling of ${SKILL_COMPATIBILITY_MAX_LENGTH}.`,
+      `compatibility is ${compatibilityLength} characters, past the spec's ceiling of ${SKILL_COMPATIBILITY_MAX_LENGTH}.`,
     );
   }
 
