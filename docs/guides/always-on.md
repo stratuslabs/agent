@@ -87,9 +87,11 @@ discovery file and is invisible to this check.
 
 The control API is a required channel: a daemon that cannot bind its port
 stops instead of serving without one, with an error naming the port and
-the flags that change it. Under a service manager that is a restart loop
-until the port frees, which is the case the redirect-log truncation in
-[Logs](./logs.md) bounds.
+the flags that change it. Either refusal under a service manager — the
+installed service starting while a hand-run `stratus serve` holds the
+home, or its port — is a restart loop until the other process stops,
+which is the case the redirect-log truncation in [Logs](./logs.md)
+bounds.
 
 ## While it runs
 
