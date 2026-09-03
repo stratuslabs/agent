@@ -316,19 +316,31 @@ const resolveServerSpec = (
  * to tear it down.
  */
 /**
- * The transport's error text, with the two the operator needs translated
- * and the rest bounded. The SDK's stdio reader refuses a single JSON-RPC
- * message over its buffer limit (10 MB unless the transport is built with
- * another) and closes the connection; its wording names the buffer, not
- * the reply that overflowed it, and nothing about it says the server has
- * to change. A line on stdout that is not JSON fails to parse with the
- * line quoted in the error — a server's stray logging, which belongs in
- * neither the daemon log nor an agent's error text. Anything else is cut
- * to a length that cannot be a payload.
+ * An error's text, cut to a length that cannot be a payload. Every error
+ * this plugin forwards to the host's log goes through here, because the
+ * SDK's messages carry bodies: a Streamable HTTP POST that fails quotes the
+ * whole response text, and the log this now reaches is `stratusd.jsonl`,
+ * which rotates at 8 MB and is what people paste into issues.
  */
-const TRANSPORT_ERROR_MAX_CHARS = 200;
+const ERROR_TEXT_MAX_CHARS = 200;
 
-const describeTransportError = (error: unknown): string => {
+const describeError = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.length > ERROR_TEXT_MAX_CHARS ? `${message.slice(0, ERROR_TEXT_MAX_CHARS)}…` : message;
+};
+
+/**
+ * The transport's error text, with the two the operator needs translated.
+ * The SDK's stdio reader refuses a single JSON-RPC message over its buffer
+ * limit (10 MB unless the transport is built with another) and closes the
+ * connection; its wording names the buffer, not the reply that overflowed
+ * it, and nothing about it says the server has to change. A reply that is
+ * not JSON fails to parse with the text quoted in the error — for a stdio
+ * server that is its stray logging on stdout, for an HTTP server a body
+ * that was not JSON-RPC — and neither belongs in the daemon log or an
+ * agent's error text.
+ */
+const describeTransportError = (error: unknown, spec: McpServerSpec): string => {
   const message = error instanceof Error ? error.message : String(error);
   const overflow = /ReadBuffer exceeded maximum size of (\d+) bytes/.exec(message);
   if (overflow) {
@@ -336,9 +348,11 @@ const describeTransportError = (error: unknown): string => {
       + 'A result that large has to come back smaller — paged, summarized, or written to a file.';
   }
   if (error instanceof SyntaxError) {
-    return 'the server wrote a line to stdout that is not JSON-RPC — its own logging belongs on stderr.';
+    return spec.command !== undefined
+      ? 'the server wrote a line to stdout that is not JSON-RPC — its own logging belongs on stderr.'
+      : 'the server answered with a body that is not valid JSON-RPC.';
   }
-  return message.length > TRANSPORT_ERROR_MAX_CHARS ? `${message.slice(0, TRANSPORT_ERROR_MAX_CHARS)}…` : message;
+  return describeError(error);
 };
 
 const isConnectionFailure = (error: unknown): boolean =>
@@ -841,7 +855,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
           throw error;
         }
         next.delete(registered);
-        warn(`mcp server ${state.spec.name}: ${registered} was not registered: ${error instanceof Error ? error.message : String(error)}`);
+        warn(`mcp server ${state.spec.name}: ${registered} was not registered: ${describeError(error)}`);
         continue;
       }
       if (!firstConnect) {
@@ -867,7 +881,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
     state.connected = false;
     warn(
       `mcp server ${state.spec.name} connection failed mid-call — its tools are unavailable until it reconnects: `
-      + `${cause instanceof Error ? cause.message : String(cause)}`,
+      + describeError(cause),
     );
     void client.close().catch(() => {});
     scheduleReconnect(state);
@@ -882,7 +896,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
     state.timer = setTimeout(() => {
       state.timer = undefined;
       void connect(state, false).catch((error) => {
-        warn(`mcp server ${state.spec.name} reconnect failed: ${error instanceof Error ? error.message : String(error)}`);
+        warn(`mcp server ${state.spec.name} reconnect failed: ${describeError(error)}`);
         scheduleReconnect(state);
       });
     }, delay);
@@ -927,7 +941,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         if (disposed) {
           return;
         }
-        const described = describeTransportError(error);
+        const described = describeTransportError(error, state.spec);
         state.lastTransportError = described;
         warn(`mcp server ${state.spec.name} transport error: ${described}`);
       };
@@ -1009,7 +1023,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
             `mcp server ${state.spec.name} is unreachable — starting without its tools; they register when it comes back. `
             + `Check ${state.spec.command !== undefined ? `the command (${state.spec.command})` : `the endpoint (${state.spec.url})`} `
             + `under plugins["@stratusagent/plugin-mcp"].servers.${state.spec.name}. `
-            + `(${error instanceof Error ? error.message : String(error)})`,
+            + `(${describeError(error)})`,
           );
           scheduleReconnect(state);
         }

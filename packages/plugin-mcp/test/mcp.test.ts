@@ -474,9 +474,11 @@ test('a protocol-level client error is neither logged nor blamed for a later clo
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(warnings.some((message) => message.includes('transport error')), false, warnings.join(' | '));
 
+    // This server is URL-backed: a SyntaxError here is a body that was not
+    // JSON-RPC, and the stdout/stderr advice would be nonsense for it.
     clientTransport?.onerror?.(new SyntaxError('Unexpected token \'g\', "garbage: token=abc" is not valid JSON'));
     const parse = warnings.find((message) => message.includes('transport error')) ?? '';
-    assert.match(parse, /a line to stdout that is not JSON-RPC/);
+    assert.match(parse, /answered with a body that is not valid JSON-RPC/);
     assert.equal(parse.includes('garbage'), false);
 
     // A round trip that completes clears the remembered error, so the
@@ -491,6 +493,90 @@ test('a protocol-level client error is neither logged nor blamed for a later clo
     assert.equal(warnings.some((message) => message.includes(payload.slice(0, 40))), false);
   } finally {
     await plugin.dispose?.();
+  }
+});
+
+test('a stdio server’s parse error names its stdout, and every error the log gets is bounded', async () => {
+  // The same SyntaxError from a stdio server is stray logging on stdout.
+  let stdioTransport: Transport | undefined;
+  const stdioHandle = fakeServer({ current: linearTools });
+  const stdioWarnings: string[] = [];
+  const stdioPlugin = createMcpPlugin(
+    { servers: { linear: { command: process.execPath } } },
+    {
+      transportFor: async () => {
+        stdioTransport = await stdioHandle.transportFor();
+        return stdioTransport;
+      },
+      warn: (message) => stdioWarnings.push(message),
+      log: () => {},
+      reconnectDelayMs: () => 3_600_000,
+    },
+  );
+  await loadThroughView(stdioPlugin, new ToolRegistry());
+  try {
+    stdioTransport?.onerror?.(new SyntaxError('Unexpected token \'g\', "garbage" is not valid JSON'));
+    const parse = stdioWarnings.find((message) => message.includes('transport error')) ?? '';
+    assert.match(parse, /wrote a line to stdout that is not JSON-RPC/);
+    assert.equal(parse.includes('garbage'), false);
+  } finally {
+    await stdioPlugin.dispose?.();
+  }
+
+  // The SDK quotes a failed POST's whole response body in the error; the
+  // reconnect and the unreachable-at-startup paths forward errors to the
+  // same log, so they are bounded too.
+  const body = 'Streamable HTTP error: Error POSTing to endpoint: ' + '<html>'.repeat(2000);
+  let dials = 0;
+  let signalReconnectFailed = () => {};
+  const reconnectFailed = new Promise<void>((resolve) => {
+    signalReconnectFailed = resolve;
+  });
+  const handle = fakeServer({ current: linearTools });
+  const warnings: string[] = [];
+  const plugin = pluginFor(handle, {}, {
+    reconnectDelayMs: () => 1,
+    transportFor: async () => {
+      dials += 1;
+      if (dials > 1) {
+        throw new Error(body);
+      }
+      return handle.transportFor();
+    },
+    warn: (message) => {
+      warnings.push(message);
+      if (message.includes('reconnect failed')) {
+        signalReconnectFailed();
+      }
+    },
+  });
+  await loadThroughView(plugin, new ToolRegistry());
+  const keepAlive = setInterval(() => {}, 50);
+  try {
+    await handle.closeCurrent();
+    await reconnectFailed;
+    const line = warnings.find((message) => message.includes('reconnect failed')) ?? '';
+    assert.ok(line.length < 400, `${line.length} chars`);
+    assert.ok(line.endsWith('…'));
+  } finally {
+    clearInterval(keepAlive);
+    await plugin.dispose?.();
+  }
+
+  const unreachableWarnings: string[] = [];
+  const unreachable = pluginFor(handle, {}, {
+    reconnectDelayMs: () => 3_600_000,
+    transportFor: async () => {
+      throw new Error(body);
+    },
+    warn: (message) => unreachableWarnings.push(message),
+  });
+  await loadThroughView(unreachable, new ToolRegistry());
+  try {
+    const line = unreachableWarnings.find((message) => message.includes('is unreachable')) ?? '';
+    assert.ok(line.length > 0 && line.length < 600, `${line.length} chars`);
+  } finally {
+    await unreachable.dispose?.();
   }
 });
 
