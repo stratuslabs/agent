@@ -15,6 +15,7 @@ import {
   ORPHANED_DELEGATION_ERROR,
   RESERVED_SESSION_METADATA_KEYS,
   createGateway,
+  SqliteScheduleStore,
   SqliteSessionStore,
   type ApprovalTransport,
   type GatewayChannelAdapter,
@@ -3668,4 +3669,73 @@ test('a parked session is only an orphan when both halves say it was delegated',
   after.close();
   assert.equal(session?.status, 'completed');
   assert.notEqual(session?.lastError, ORPHANED_DELEGATION_ERROR);
+});
+
+test('a one-shot whose parked firing is recovered after a restart is retired when that firing finishes', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const dbPath = path.join(home, 'sessions.db');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+
+  // What a kill leaves behind when a one-shot's firing was parked on a
+  // human: the row spent (its slot consumed before the dispatch), kept only
+  // as the approval's scope, and the firing's session checkpointed.
+  const firingId = 'schedule:once-1:2026-01-01T00:00:00.000Z';
+  const schedules = new SqliteScheduleStore(dbPath);
+  schedules.insert({
+    id: 'once-1',
+    agentId: 'ava',
+    cadence: { kind: 'at', at: '2026-01-01T00:00:00.000Z' },
+    prompt: 'do the thing',
+    createdAt: '2025-12-31T00:00:00.000Z',
+    lastFiredAt: '2026-01-01T00:00:00.100Z',
+    lastSessionId: firingId,
+  });
+  schedules.close();
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: firingId,
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'do the thing', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+    ],
+    metadata: {
+      scheduled: true,
+      scheduleId: 'once-1',
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  seed.close();
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const recovered = nextEvent(gateway.bus, 'session.completed');
+  await gateway.start();
+  try {
+    // The start sweep keeps the row while the firing is parked; the firing
+    // is then recovered and finishes in this process — which is exactly the
+    // process that has no firing promise to retire the row from.
+    await settles(recovered, 'the recovered firing');
+    // The retirement follows the runner's return, a step after the event
+    // above; wait for the row, with a way to lose.
+    const retired = new Promise<void>((resolve) => {
+      const check = (): void => {
+        if (gateway.schedules().length === 0) {
+          resolve();
+        } else {
+          setTimeout(check, 10);
+        }
+      };
+      check();
+    });
+    await settles(retired, 'the spent one-shot being retired with its firing');
+  } finally {
+    await gateway.stop();
+  }
 });

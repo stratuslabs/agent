@@ -51,6 +51,11 @@ destination, because that is what is being approved. See
   rather than accepting a turn that could never run.
 - **Schedules are immutable.** Editing is cancel-plus-create, so the
   approval's scope is exactly the row's lifetime.
+- **A one-shot's row lives exactly as long as its firing.** The slot is
+  spent before the firing starts and the row is retired when the firing
+  finishes — including a firing that was parked on a human when the daemon
+  stopped and finished after the restart. Until then it is listed without a
+  next firing, because it is still the scope of that approval.
 - **A destination is validated at creation** — the agent's Slack app must
   be able to see the conversation and be a member of it — so a schedule
   that could never report is refused while somebody is present to hear why,

@@ -234,6 +234,16 @@ export interface SchedulerRuntime {
   stop(): void;
   /** Settles when every firing this scheduler started has finished. */
   drain(): Promise<void>;
+  /**
+   * Retire a spent one-shot whose firing has just finished in THIS process
+   * without having been started by it — a firing parked on a human when
+   * the last daemon died and recovered by this one. The retirement that
+   * normally follows a firing rides on the firing's own promise, which
+   * died with that process; without this, the row stayed listed as a
+   * schedule until the next restart's sweep. A row that still has a slot,
+   * or is not a one-shot, is left alone.
+   */
+  retireSpentOneShot(scheduleId: string): void;
 }
 
 export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): SchedulerRuntime => {
@@ -556,6 +566,14 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     },
     async drain() {
       await Promise.allSettled([...inflight]);
+    },
+    retireSpentOneShot(scheduleId) {
+      const record = store.get(scheduleId);
+      if (!record || record.cadence.kind !== 'at' || record.nextFireAt) {
+        return;
+      }
+      store.delete(record.id);
+      log(`schedule ${record.id}: one-shot's recovered firing finished; removing`);
     },
   };
 };

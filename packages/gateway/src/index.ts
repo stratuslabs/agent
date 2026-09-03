@@ -1977,6 +1977,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
         const runner = runnerFor(await runtimeForAgent(source));
         await runner.recoverPendingApproval(sessionId, { denyPending: expired });
+        // A recovered firing's row outlived the process that would have
+        // retired it; the scheduler decides whether there is anything to do.
+        const scheduleId = session.metadata?.[SCHEDULE_ID_METADATA_KEY];
+        if (typeof scheduleId === 'string') {
+          scheduler.retireSpentOneShot(scheduleId);
+        }
       } catch (error) {
         warn(`could not recover parked session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
       }
