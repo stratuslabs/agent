@@ -53,6 +53,23 @@ export class WhitelistUnreadableError extends Error {
  * file whose edits grant permissions, and the same bargain the credential
  * store makes.
  */
+/**
+ * A read failure in words that carry none of the file. Node's JSON parser
+ * quotes the offending excerpt in its message, and a whitelist argument
+ * can be a URL with a credential in it — the daemon log is a trace, never
+ * a second copy of what an agent was handed, and the decision line
+ * carries this text too. The position survives; the bytes do not.
+ */
+const describeReadFailure = (error: unknown): string => {
+  if (error instanceof SyntaxError) {
+    const at = /position (\d+)(?: \(line (\d+) column (\d+)\))?/.exec(error.message);
+    return at
+      ? `not valid JSON at position ${at[1]}${at[2] ? ` (line ${at[2]} column ${at[3]})` : ''}`
+      : 'not valid JSON';
+  }
+  return error instanceof Error ? error.message : String(error);
+};
+
 export const createFileCommandWhitelist = (options: {
   directory: string;
   /**
@@ -104,7 +121,7 @@ export const createFileCommandWhitelist = (options: {
       // every grant it held. So it is said once, and `remember` refuses.
       scopes = [];
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        const reason = error instanceof Error ? error.message : String(error);
+        const reason = describeReadFailure(error);
         unreadable.set(agentId, reason);
         options.warn?.(
           `${file} could not be read (${reason}); its scopes are ignored and "always" answers for ${agentId} `

@@ -259,6 +259,31 @@ test('a whitelist that exists but will not read is said once, ignored, and never
   assert.equal(warnings.length, 2, 'a second store warns once more, not twice');
 });
 
+test('a whitelist that will not parse is described without quoting it', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'stratus-whitelist-secret-'));
+  const warnings: string[] = [];
+  const whitelist = createFileCommandWhitelist({ directory, warn: (line) => warnings.push(line) });
+  // Node's parser quotes the offending excerpt, and a stored argument can
+  // be a URL with a credential in it. The log is a trace, not a copy of
+  // the file: the position may be said, the bytes may not.
+  await writeFile(whitelistPathFor(directory, 'ava'), 'SECRET-TOKEN-9f3a {\n');
+
+  const decisions: PermissionDecision[] = [];
+  const policy = createPermissionPolicy({
+    mode: 'interactive',
+    ask: async () => 'always',
+    onDecision: (decision) => decisions.push(decision),
+    commands: { whitelist },
+  });
+  assert.equal(await policy.approve(contextFor('git push origin main')), true);
+
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0] ?? '', /could not be read \(not valid JSON/);
+  assert.doesNotMatch(warnings[0] ?? '', /SECRET-TOKEN/);
+  assert.match(decisions.at(-1)?.reason ?? '', /not saved: .*not valid JSON/);
+  assert.doesNotMatch(decisions.at(-1)?.reason ?? '', /SECRET-TOKEN/);
+});
+
 test('a scope approved for a flag-first command covers that command', () => {
   // The scope used to skip over the flags to reach the first positional,
   // while the matcher reads a scope's args as the leading tokens — so the
