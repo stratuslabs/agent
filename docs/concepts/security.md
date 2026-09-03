@@ -23,6 +23,13 @@ linked own the full story.
   list a name cannot reach it. Channel tokens stay out of that path
   entirely; a namespace next door is not a way in.
   ([Tools](../guides/tools.md#searching-the-web))
+- **The credentials file is replaced, never rewritten in place.** A named
+  credential is resolved per tool call so that a rotated key needs no
+  restart, which means the file has a concurrent reader — and a truncate
+  followed by a write leaves a window where that reader sees an empty file.
+  Each write lands in a `0600` temporary beside it and is renamed over the
+  destination, so a reader sees the old document or the new one and a crash
+  mid-write leaves the old credentials rather than none.
 - **A credential value is never taken from the command line and never
   printed back.** `stratus credential set` reads it from stdin, because a
   secret in argv is a secret in shell history and in every `ps` on the
@@ -39,6 +46,10 @@ gets to make. ([Configuration](../reference/config.md))
 
 ## What an agent can reach
 
+- **A plugin resolves only the credentials its own manifest declares.**
+  Installing two plugins does not let one read the other's key, even when
+  the same agent allowlists both — the resolver a plugin is handed is bound
+  to its manifest, and the agent's soul list applies behind it.
 - **Two gates on every plugin-provided capability**: a trusted config
   enables the plugin, and the agent's own soul lists what it may call.
   The built-ins (echo, memory, delegation, schedules) register without a

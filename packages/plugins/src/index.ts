@@ -26,6 +26,8 @@ export {
   type PluginToolDeclaration,
 } from './manifest.ts';
 
+export { createManifestBoundCredentialResolver } from './credentials.ts';
+
 export {
   ManifestBoundToolRegistry,
   riskFloorFor,

@@ -20,6 +20,7 @@ import {
   PluginManifestError,
   type PluginManifest,
 } from './manifest.ts';
+import { createManifestBoundCredentialResolver } from './credentials.ts';
 import { ManifestBoundToolRegistry, type PluginToolRecord } from './registry.ts';
 
 /**
@@ -364,7 +365,13 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
       await plugin.setup({
         bus: options.bus,
         tools: view,
-        ...(options.credentials !== undefined ? { credentials: options.credentials } : {}),
+        // Bound to what this plugin's manifest declares, never the host's
+        // resolver raw: a plugin must not reach a credential it did not
+        // declare merely because the calling agent allowlisted it for
+        // something else.
+        ...(options.credentials !== undefined
+          ? { credentials: createManifestBoundCredentialResolver(manifest, options.credentials) }
+          : {}),
         ...(options.log !== undefined ? { log: options.log } : {}),
         ...(options.warn !== undefined ? { warn: options.warn } : {}),
       });

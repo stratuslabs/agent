@@ -408,8 +408,15 @@ narrow. They are not a sandbox, and this document does not claim one:
 - **A plugin gets a scoped credential resolver and its own config block, so it
   never needs `process.env`** — it declares what it needs by name in the
   manifest and receives exactly that, through `PluginContext.credentials`,
-  which resolves per call against the agent making it. Read what this does
-  and does not buy.
+  which resolves per call against the agent making it. "Exactly that" is
+  **enforced, not advisory**: the resolver handed to `setup` is bound to the
+  manifest's `credentials` list, for the same reason `context.tools` is
+  bound to its `contributes` list — validating `package.json` before import
+  says what a plugin claims and says nothing about what `setup()` then asks
+  for. A plugin declaring only `search.apiKey` cannot read a `github.token`
+  the calling agent happens to allowlist for some other plugin. Two gates,
+  in order, answering different questions: did this *code* declare the name,
+  and was this *agent* granted it. Read what this does and does not buy.
   It does not *prevent* a plugin from reading `process.env`: in-process code
   can, and no interface we hand it changes that. What it buys is that an honest
   plugin never has to, so its manifest is a true statement of what it uses and

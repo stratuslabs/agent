@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -1006,4 +1006,60 @@ test('credential names are keys from outside, so the maps holding them have no p
   const agent = { id: 'ava', name: 'Ava', credentials: ['toString', 'constructor'] };
   assert.equal(await resolver.resolve(agent, 'toString'), undefined);
   assert.equal(await resolver.resolve(agent, 'constructor'), undefined);
+});
+
+test('a credential rotation is atomic, so a concurrent resolve never sees half a file', async () => {
+  const { createFileCredentialResolver, saveNamedCredentials } = await import('../src/index.ts');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-atomic-'));
+  const env = { homeDir: home };
+  await saveNamedCredentials(env, { shared: { 'search.apiKey': 'first' }, agents: {} });
+
+  const resolver = createFileCredentialResolver(env, {});
+  const agent = { id: 'ava', name: 'Ava', credentials: ['search.apiKey'] };
+
+  // The rotate-without-restart path, exercised the way it actually happens:
+  // `stratus credential set` rewriting the file while the daemon resolves
+  // per tool call. Rewritten in place this fails — `writeFile` opens with
+  // O_TRUNC, so a reader in that window gets "Unexpected end of JSON input"
+  // — which measured at 62 failures in 983 reads before the rename landed.
+  // Not a timing assertion: the reader is bounded by the writer finishing,
+  // and the assertion is that no read failed, not that any read was fast.
+  let writing = true;
+  const failures: string[] = [];
+  const seen = new Set<string>();
+
+  const writer = (async () => {
+    for (let round = 0; round < 150; round += 1) {
+      await saveNamedCredentials(env, { shared: { 'search.apiKey': `key-${round}`.repeat(20) }, agents: {} });
+    }
+    writing = false;
+  })();
+
+  const reader = (async () => {
+    let reads = 0;
+    while (writing) {
+      try {
+        const value = await resolver.resolve(agent, 'search.apiKey');
+        seen.add(typeof value === 'string' ? 'a value' : String(value));
+      } catch (error) {
+        failures.push(error instanceof Error ? error.message : String(error));
+      }
+      reads += 1;
+    }
+    return reads;
+  })();
+
+  await writer;
+  const reads = await reader;
+
+  assert.deepEqual(failures, [], 'a resolve saw a partially written credentials file');
+  assert.ok(reads > 0, 'the reader never got a turn, so this proved nothing');
+  assert.deepEqual([...seen], ['a value'], 'a resolve read something that was not the credential');
+
+  // The invariant survives the new write path, and the temporary file it
+  // renames from is never left behind.
+  const credentialsFile = path.join(home, '.stratus', 'credentials.json');
+  assert.equal((await stat(credentialsFile)).mode & 0o777, 0o600);
+  const leftovers = (await readdir(path.join(home, '.stratus'))).filter((name) => name.endsWith('.tmp'));
+  assert.deepEqual(leftovers, []);
 });
