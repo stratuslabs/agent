@@ -7061,6 +7061,14 @@ const serveHeldHome = async (
     log(`approvals: remote — gated calls are parked and asked in Slack (${describeApprovers(approvalsConfig, askable)})`);
   }
 
+  /**
+   * The one signal handler this daemon has, for the whole of its life —
+   * installed by the wait below, removed in the finally after the drain.
+   * See the wait for why it is never `once` and never removed sooner.
+   */
+  let stopSignal: (() => void) | undefined;
+  let repeatWarned = false;
+
   // The gateway's restart hands the process back here once it has stopped:
   // the outcome is kept and the wait below released, and the tail of this
   // function decides what "come back" means for this process.
@@ -7220,12 +7228,44 @@ const serveHeldHome = async (
         }
         settled = true;
         clearInterval(keepAlive);
-        process.off('SIGTERM', shutdown);
-        process.off('SIGINT', shutdown);
         resolve();
       };
-      process.once('SIGTERM', shutdown);
-      process.once('SIGINT', shutdown);
+      stopSignal = (): void => {
+        if (!settled) {
+          shutdown();
+          return;
+        }
+        // A signal while a drain is already running — a repeat, or a stop
+        // arriving during a restart's drain. Either way the drain goes on,
+        // and a daemon told to stop does not come back.
+        stopRequested = true;
+        if (!repeatWarned) {
+          repeatWarned = true;
+          // Said from signal dispatch, outside the promise and its finally:
+          // a stream that throws on write (a host's injected stderr) would
+          // otherwise end the process from here — mid-drain, the very
+          // thing this handler exists to prevent. The word is best effort.
+          try {
+            warn('stop signal received while draining; still draining, and this daemon will not come back (SIGKILL ends it at once)');
+          } catch {
+            // Nothing to say it to; the drain is what matters.
+          }
+        }
+      };
+      // `on`, never `once`, and not removed until the drain is over (the
+      // finally below). `once` drops the listener before running it, Node
+      // uninstalls its native handler the moment no listener is left, and
+      // a second SIGTERM landing in that window ends the process by the
+      // default action — mid-drain, with nothing said. The second signal
+      // is the normal case, not an edge: a stop delivered to the process
+      // group, as systemd's KillMode=control-group and a terminal's Ctrl+C
+      // deliver it, reaches a supervised daemon once from the kernel and
+      // once more forwarded by its supervisor. Reproduced two runs in
+      // three: the replacement died and the supervisor exited 1 on a
+      // `stratus service stop` after a restart. SIGKILL still ends the
+      // process at once.
+      process.on('SIGTERM', stopSignal);
+      process.on('SIGINT', stopSignal);
       void shutdownRequested.then(shutdown);
       if (env.shutdownSignal?.aborted) {
         shutdown();
@@ -7259,15 +7299,33 @@ const serveHeldHome = async (
       writeLine(streams.stdout, 'Stopping — draining in-flight turns.');
     }
   } finally {
-    await gateway.stop();
-    if (redirectTimer) {
-      clearInterval(redirectTimer);
+    try {
+      await gateway.stop();
+      // Writes are queued and dropped on the hot path so logging never sits
+      // on a streamed token. That makes the tail of the log the part most
+      // likely to be lost — and the tail is the shutdown reason, the last
+      // warning, the line explaining a restart.
+      await logWriter?.flush();
+    } finally {
+      // The shutdown is over, the flush included: a stop signal from here
+      // on is the process's to handle by default again — and a host that
+      // calls runServe repeatedly (the tests) must not accumulate handlers.
+      // Last, and under its own finally, because the listener is on the
+      // global process: taken off before the flush, a repeated signal
+      // landing during it would end the process by the default action
+      // (which a supervisor reports as a failure, and a service manager
+      // set to restart on failure would then bring back a daemon an
+      // operator just stopped); left on by a stop() that rejects (its last
+      // log line can throw through an injected stream), a settled handler
+      // would swallow the host's next signal.
+      if (stopSignal) {
+        process.off('SIGTERM', stopSignal);
+        process.off('SIGINT', stopSignal);
+      }
+      if (redirectTimer) {
+        clearInterval(redirectTimer);
+      }
     }
-    // Writes are queued and dropped on the hot path so logging never sits
-    // on a streamed token. That makes the tail of the log the part most
-    // likely to be lost — and the tail is the shutdown reason, the last
-    // warning, the line explaining a restart.
-    await logWriter?.flush();
   }
 
   const bound = boundApiPort !== undefined && Number.isInteger(boundApiPort) && boundApiPort > 0

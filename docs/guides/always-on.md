@@ -4,7 +4,8 @@
 roster live at once on its own provider and model, sessions in SQLite so
 they survive restarts, delegation between agents, a watchdog for stalled
 turns, and any installed channels connected. Ctrl+C or SIGTERM drains
-cleanly.
+cleanly, and a second one during the drain is ignored rather than cutting
+it short (SIGKILL ends the process at once).
 
 It stays a foreground process on purpose — debuggable, and composable with
 whatever supervisor you already run. Surviving logout, crashes, and reboots

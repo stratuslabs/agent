@@ -7917,3 +7917,251 @@ test('the supervisor hands each daemon the port its predecessor bound, and a sup
   assert.equal(await childServing, 0);
   assert.deepEqual(reported, [Number(new URL(childBase).port)]);
 });
+
+/** GET a daemon route over node:http, resolving with the status. */
+const getStatus = (url: string, token: string): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const request = httpRequest(
+      { host: target.hostname, port: target.port, path: target.pathname, headers: { authorization: `Bearer ${token}` } },
+      (response) => {
+        response.resume();
+        response.on('end', () => resolve(response.statusCode ?? 0));
+      },
+    );
+    // Bounded per request: a replacement that accepts the connection and
+    // then stalls would otherwise hold this open past the caller's loop.
+    request.setTimeout(5_000, () => request.destroy(new Error('the health check timed out')));
+    request.on('error', reject);
+    request.end();
+  });
+
+test('a stop delivered to the whole process group after a restart drains the replacement and exits clean', {
+  // A negative pid addresses a POSIX process group; Windows has no such
+  // thing, and the signal the test is about is delivered differently there.
+  skip: process.platform === 'win32' && 'process-group signals are POSIX',
+}, async () => {
+  // The one path the in-process tests cannot reach: a real supervisor, a
+  // real replacement daemon, the IPC channel between them, and a signal
+  // delivered the way systemd's KillMode=control-group and a terminal's
+  // Ctrl+C deliver it — to every process in the group at once, so the
+  // replacement gets it from the kernel and again forwarded by the
+  // supervisor. Before the fix the second copy killed it mid-drain.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-group-stop-'));
+  const entrypoint = fileURLToPath(new URL('../src/bin.ts', import.meta.url));
+  const daemon = spawn(
+    process.execPath,
+    ['--experimental-strip-types', entrypoint, 'serve', '--no-events', '--api-port', '0', '--no-log-file'],
+    { env: { ...process.env, HOME: serveHome }, stdio: ['ignore', 'pipe', 'pipe'], detached: true },
+  );
+  let output = '';
+  daemon.stdout?.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+  daemon.stderr?.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+  // `close`, not `exit`: it fires once the process has ended *and* its
+  // piped streams have closed, so everything it and the replacement (which
+  // inherits the same pipes) wrote is in `output` by the time this settles.
+  // After `exit` alone, a final chunk can still be in flight on a loaded
+  // runner.
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    daemon.once('close', (code, signal) => resolve({ code, signal }));
+  });
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  const info = async (): Promise<{ pid?: number; url: string } | undefined> => {
+    try {
+      return JSON.parse(await readFile(path.join(serveHome, '.stratus', 'gateway.json'), 'utf8')) as { pid?: number; url: string };
+    } catch {
+      return undefined;
+    }
+  };
+
+  try {
+    // One deadline per wait, far above what a loaded runner needs: the
+    // gate is the daemon publishing itself, and a daemon that never does
+    // fails here rather than hanging the suite. A deadline rather than an
+    // attempt count, because an attempt can now take as long as a health
+    // check's own timeout.
+    let first: { pid?: number; url: string } | undefined;
+    for (const deadline = Date.now() + 30_000; !first && Date.now() < deadline;) {
+      first = await info();
+      if (!first) await sleep(100);
+    }
+    assert.ok(first, `the daemon never published gateway.json:\n${output}`);
+    const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+    assert.equal((await postJson(`${first.url}/api/v1/restart`, token, { reason: 'test' })).status, 202);
+
+    let second: { pid?: number; url: string } | undefined;
+    for (const deadline = Date.now() + 30_000; !second && Date.now() < deadline;) {
+      const current = await info();
+      if (current && current.pid !== first.pid && await getStatus(`${current.url}/api/v1/health`, token).catch(() => 0) === 200) {
+        second = current;
+      } else {
+        await sleep(100);
+      }
+    }
+    assert.ok(second, `no replacement daemon came up:\n${output}`);
+    // The supervisor is the process the manager started; the replacement
+    // is on the port the first daemon bound.
+    assert.equal(first.pid, daemon.pid);
+    assert.equal(second.url, first.url);
+
+    process.kill(-(daemon.pid as number), 'SIGTERM');
+    // The losing timer is cleared: left armed, it would hold the test
+    // worker open for the rest of its 30 seconds after a clean exit.
+    let hung: NodeJS.Timeout | undefined;
+    const result = await Promise.race([
+      exited,
+      new Promise<'hung'>((resolve) => { hung = setTimeout(() => resolve('hung'), 30_000); }),
+    ]).finally(() => clearTimeout(hung));
+    assert.notEqual(result, 'hung', `the daemon did not exit after a group stop:\n${output}`);
+    assert.deepEqual(result, { code: 0, signal: null }, output);
+    // The replacement drained rather than dying to the repeated signal.
+    const stops = output.split('stratusd stopped').length - 1;
+    assert.equal(stops, 2, `expected the first daemon and its replacement each to stop cleanly:\n${output}`);
+  } finally {
+    try {
+      process.kill(-(daemon.pid as number), 'SIGKILL');
+    } catch {
+      // Already gone.
+    }
+  }
+});
+
+test('a second stop signal while the drain is running is ignored, not fatal', async () => {
+  // The deterministic half of the group-stop case above: the second
+  // signal is sent only once the first one's drain is provably underway,
+  // with a turn held open so the drain cannot finish first. Without the
+  // fix the second signal ends this very process, which is the failure.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-second-signal-'));
+  await mkdir(path.join(serveHome, '.stratus', 'agents'), { recursive: true });
+  await writeFile(
+    path.join(serveHome, '.stratus', 'agents', 'ava.md'),
+    '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n',
+  );
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let turnStarted!: () => void;
+  const started = new Promise<void>((resolve) => { turnStarted = resolve; });
+  const fetchImpl = (async () => {
+    turnStarted();
+    await held;
+    return new Response(
+      JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'done' } }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof fetch;
+
+  const base = createStreams();
+  let draining!: () => void;
+  const drainStarted = new Promise<void>((resolve) => { draining = resolve; });
+  let warned!: () => void;
+  const repeatWarned = new Promise<void>((resolve) => { warned = resolve; });
+  let announceApi!: (url: string) => void;
+  const apiUrl = new Promise<string>((resolve) => { announceApi = resolve; });
+  const streams = {
+    stdout: {
+      write(chunk: string) {
+        const match = /control API on (http:\/\/\S+)/.exec(chunk);
+        if (match?.[1]) announceApi(match[1]);
+        if (chunk.includes('Stopping — draining in-flight turns.')) draining();
+        return base.streams.stdout.write(chunk);
+      },
+    },
+    stderr: {
+      write(chunk: string) {
+        if (chunk.includes('stop signal received while draining')) warned();
+        return base.streams.stderr.write(chunk);
+      },
+    },
+  };
+
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams,
+    env: { homeDir: serveHome, cwd: serveHome, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+  });
+  const url = await apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  assert.equal((await postJson(`${url}/api/v1/sessions/s-held/messages`, token, { message: 'take your time', agentId: 'ava' })).status, 202);
+  await started;
+
+  // Real signals to this process: the daemon's handlers are the only ones.
+  process.kill(process.pid, 'SIGTERM');
+  await drainStarted;
+  process.kill(process.pid, 'SIGTERM');
+  await repeatWarned;
+  release();
+
+  assert.equal(await serving, 0);
+  assert.match(base.output.stdout, /stratusd stopped/);
+});
+
+test('a second stop signal is still not fatal when the stream its warning goes to throws', async () => {
+  // The warning is said from signal dispatch, outside runServe's promise
+  // and its finally. A host that embeds runServe with a stderr whose
+  // write throws would otherwise turn the repeated signal into an
+  // uncaught exception — ending the process mid-drain by another route.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-signal-throwing-stream-'));
+  await mkdir(path.join(serveHome, '.stratus', 'agents'), { recursive: true });
+  await writeFile(
+    path.join(serveHome, '.stratus', 'agents', 'ava.md'),
+    '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n',
+  );
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let turnStarted!: () => void;
+  const started = new Promise<void>((resolve) => { turnStarted = resolve; });
+  const fetchImpl = (async () => {
+    turnStarted();
+    await held;
+    return new Response(
+      JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'done' } }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof fetch;
+
+  const base = createStreams();
+  let draining!: () => void;
+  const drainStarted = new Promise<void>((resolve) => { draining = resolve; });
+  let threw!: () => void;
+  const warningThrew = new Promise<void>((resolve) => { threw = resolve; });
+  let announceApi!: (url: string) => void;
+  const apiUrl = new Promise<string>((resolve) => { announceApi = resolve; });
+  const streams = {
+    stdout: {
+      write(chunk: string) {
+        const match = /control API on (http:\/\/\S+)/.exec(chunk);
+        if (match?.[1]) announceApi(match[1]);
+        if (chunk.includes('Stopping — draining in-flight turns.')) draining();
+        return base.streams.stdout.write(chunk);
+      },
+    },
+    stderr: {
+      write(chunk: string) {
+        if (chunk.includes('stop signal received while draining')) {
+          threw();
+          throw new Error('stderr is gone');
+        }
+        return base.streams.stderr.write(chunk);
+      },
+    },
+  };
+
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams,
+    env: { homeDir: serveHome, cwd: serveHome, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+  });
+  const url = await apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  assert.equal((await postJson(`${url}/api/v1/sessions/s-held/messages`, token, { message: 'take your time', agentId: 'ava' })).status, 202);
+  await started;
+
+  process.kill(process.pid, 'SIGTERM');
+  await drainStarted;
+  process.kill(process.pid, 'SIGTERM');
+  await warningThrew;
+  release();
+
+  assert.equal(await serving, 0);
+  assert.match(base.output.stdout, /stratusd stopped/);
+});
