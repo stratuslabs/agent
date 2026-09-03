@@ -164,6 +164,51 @@ test('local command executor preserves utf-8 characters split across stdout chun
   assert.equal(output.stdout, '😀');
 });
 
+test('output past maxOutputBytes is dropped as it arrives, on a character boundary', async () => {
+  // 'é' is two bytes, so a 1001-byte cap lands inside one: the kept text is
+  // exactly 500 of them, no U+FFFD, and the flag says the rest was dropped.
+  const tool = defineLocalCommandTool({
+    name: 'flood',
+    createCommand() {
+      return {
+        command: process.execPath,
+        args: ['-e', 'process.stdout.write("é".repeat(3000)); process.stderr.write("short")'],
+        maxOutputBytes: 1001,
+      };
+    },
+  });
+
+  const executor = createLocalCommandExecutor();
+  const result = await executor.execute({ id: 'call-flood', toolName: 'flood', input: {} }, tool, session);
+
+  assert.equal(result.ok, true);
+  const output = result.output as Record<string, unknown>;
+  assert.equal(output.stdout, 'é'.repeat(500));
+  assert.equal(output.stdoutTruncated, true);
+  assert.equal(output.stderr, 'short');
+  assert.equal(output.stderrTruncated, false);
+});
+
+test('the executor’s own cap applies when the invocation sets none', async () => {
+  const tool = defineLocalCommandTool({
+    name: 'flood.default',
+    createCommand() {
+      return {
+        command: process.execPath,
+        args: ['-e', 'process.stdout.write("x".repeat(5000))'],
+      };
+    },
+  });
+
+  const executor = createLocalCommandExecutor({ maxOutputBytes: 1000 });
+  const result = await executor.execute({ id: 'call-flood-default', toolName: 'flood.default', input: {} }, tool, session);
+
+  assert.equal(result.ok, true);
+  const output = result.output as Record<string, unknown>;
+  assert.equal(output.stdout, 'x'.repeat(1000));
+  assert.equal(output.stdoutTruncated, true);
+});
+
 test('local command executor kills the child when the turn aborts', async () => {
   const tool = defineLocalCommandTool({
     name: 'sleepy',

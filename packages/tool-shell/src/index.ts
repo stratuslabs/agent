@@ -39,8 +39,12 @@ const asNumber = (value: JsonValue | undefined, fallback: number): number =>
 const asStrings = (value: JsonValue | undefined, fallback: string[]): string[] =>
   Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : fallback;
 
-const truncate = (value: string, maxBytes: number): { text: string; truncated: boolean } => {
-  if (Buffer.byteLength(value, 'utf8') <= maxBytes) {
+// The executor already stopped keeping the stream at `maxBytes` (see
+// `maxOutputBytes` on the invocation below), so the text arriving here is
+// within the cap and `dropped` is how we know the command wrote more. The
+// byte check stays for an executor that does not honor the cap.
+const truncate = (value: string, maxBytes: number, dropped: boolean): { text: string; truncated: boolean } => {
+  if (!dropped && Buffer.byteLength(value, 'utf8') <= maxBytes) {
     return { text: value, truncated: false };
   }
   return { text: `${value.slice(0, maxBytes)}\n… output truncated at ${maxBytes} bytes`, truncated: true };
@@ -138,12 +142,16 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
         // allow `curl -d "$ANTHROPIC_API_KEY"`.
         envMode: 'replace',
         timeoutMs: asNumber(input.timeoutMs, settings.timeoutMs),
+        // Enforced as the output is read, not after: a command that floods
+        // stdout must not be held whole in the daemon's heap for a result
+        // that is about to be cut to this size anyway.
+        maxOutputBytes: settings.maxOutputBytes,
       };
     },
     parseResult(result: LocalCommandExecution, context): JsonValue {
       const settings = settingsFor(config, context.session, options.processEnv ?? process.env);
-      const stdout = truncate(result.stdout, settings.maxOutputBytes);
-      const stderr = truncate(result.stderr, settings.maxOutputBytes);
+      const stdout = truncate(result.stdout, settings.maxOutputBytes, result.stdoutTruncated);
+      const stderr = truncate(result.stderr, settings.maxOutputBytes, result.stderrTruncated);
       return {
         stdout: stdout.text,
         stderr: stderr.text,
