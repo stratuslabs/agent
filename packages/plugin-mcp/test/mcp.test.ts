@@ -9,7 +9,7 @@ import { DEFAULT_INHERITED_ENV_VARS } from '@modelcontextprotocol/sdk/client/std
 import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { ListToolsRequestSchema, type JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { z } from 'zod';
@@ -71,6 +71,8 @@ interface FakeServerHandle {
   transportFor: () => Promise<Transport>;
   /** Close the server end of the latest connection, as a dying server would. */
   closeCurrent: () => Promise<void>;
+  /** Put a raw message on the wire from the server end, bypassing the server. */
+  sendRaw: (message: JSONRPCMessage) => Promise<void>;
 }
 
 /**
@@ -92,6 +94,9 @@ const fakeServer = (build: { current: (server: McpServer) => void }): FakeServer
     },
     async closeCurrent() {
       await serverSide?.close();
+    },
+    async sendRaw(message) {
+      await serverSide?.send(message);
     },
   };
 };
@@ -438,6 +443,52 @@ test('a transport error is logged, and the call it killed says why instead of on
       warnings.find((message) => message.includes('transport error')) ?? '',
       /mcp server linear transport error: the server sent a single message larger than the 10485760-byte stdio limit/,
     );
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('a protocol-level client error is neither logged nor blamed for a later close, and a parse error is logged without the line', async () => {
+  // The SDK routes its own protocol errors through client.onerror too, and
+  // a reply arriving after its request timed out becomes "Received a
+  // response for an unknown message ID: <the whole response>". That is a
+  // tool result; it must reach neither the daemon log nor the error text
+  // of whatever fails next. A non-JSON line on stdout is the transport's
+  // error, and the line it quotes is a server's stray logging.
+  let clientTransport: Transport | undefined;
+  const handle = fakeServer({ current: linearTools });
+  const target = new ToolRegistry();
+  const warnings: string[] = [];
+  const plugin = pluginFor(handle, {}, {
+    warn: (message) => warnings.push(message),
+    reconnectDelayMs: () => 3_600_000,
+    transportFor: async () => {
+      clientTransport = await handle.transportFor();
+      return clientTransport;
+    },
+  });
+  await loadThroughView(plugin, target);
+  try {
+    const payload = 'secret-result-'.repeat(1000);
+    await handle.sendRaw({ jsonrpc: '2.0', id: 999, result: { content: [{ type: 'text', text: payload }] } });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(warnings.some((message) => message.includes('transport error')), false, warnings.join(' | '));
+
+    clientTransport?.onerror?.(new SyntaxError('Unexpected token \'g\', "garbage: token=abc" is not valid JSON'));
+    const parse = warnings.find((message) => message.includes('transport error')) ?? '';
+    assert.match(parse, /a line to stdout that is not JSON-RPC/);
+    assert.equal(parse.includes('garbage'), false);
+
+    // A round trip that completes clears the remembered error, so the
+    // close that follows is reported as what it is: a bare closure.
+    assert.equal(await target.get('mcp.linear.get_issue')!.execute({ id: '7' }, sessionFor('ava')), 'issue 7');
+    const pending = target.get('mcp.linear.get_issue')!.execute({ id: '8' }, sessionFor('ava'));
+    await handle.closeCurrent();
+    await assert.rejects(pending, (error: Error) => {
+      assert.equal(error.message, 'MCP error -32000: Connection closed');
+      return true;
+    });
+    assert.equal(warnings.some((message) => message.includes(payload.slice(0, 40))), false);
   } finally {
     await plugin.dispose?.();
   }

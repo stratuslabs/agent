@@ -316,12 +316,18 @@ const resolveServerSpec = (
  * to tear it down.
  */
 /**
- * The transport's error text, with the one the operator needs translated.
- * The SDK's stdio reader refuses a single JSON-RPC message over its buffer
- * limit (10 MB unless the transport is built with another) and closes the
- * connection; its wording names the buffer, not the reply that overflowed
- * it, and nothing about it says the server has to change.
+ * The transport's error text, with the two the operator needs translated
+ * and the rest bounded. The SDK's stdio reader refuses a single JSON-RPC
+ * message over its buffer limit (10 MB unless the transport is built with
+ * another) and closes the connection; its wording names the buffer, not
+ * the reply that overflowed it, and nothing about it says the server has
+ * to change. A line on stdout that is not JSON fails to parse with the
+ * line quoted in the error — a server's stray logging, which belongs in
+ * neither the daemon log nor an agent's error text. Anything else is cut
+ * to a length that cannot be a payload.
  */
+const TRANSPORT_ERROR_MAX_CHARS = 200;
+
 const describeTransportError = (error: unknown): string => {
   const message = error instanceof Error ? error.message : String(error);
   const overflow = /ReadBuffer exceeded maximum size of (\d+) bytes/.exec(message);
@@ -329,7 +335,10 @@ const describeTransportError = (error: unknown): string => {
     return `the server sent a single message larger than the ${overflow[1]}-byte stdio limit, and the connection was closed. `
       + 'A result that large has to come back smaller — paged, summarized, or written to a file.';
   }
-  return message;
+  if (error instanceof SyntaxError) {
+    return 'the server wrote a line to stdout that is not JSON-RPC — its own logging belongs on stderr.';
+  }
+  return message.length > TRANSPORT_ERROR_MAX_CHARS ? `${message.slice(0, TRANSPORT_ERROR_MAX_CHARS)}…` : message;
 };
 
 const isConnectionFailure = (error: unknown): boolean =>
@@ -621,7 +630,9 @@ interface ServerState {
    * oversized reply is the case that found this: the SDK's stdio reader
    * refuses a single message over its buffer limit and closes the
    * connection, and without this the agent saw the closure, the log saw
-   * nothing, and every retry did it again.
+   * nothing, and every retry did it again. Cleared by any exchange that
+   * completes afterwards — an error the connection outlived is not the
+   * reason it later closed.
    */
   lastTransportError: string | undefined;
   attempt: number;
@@ -710,6 +721,9 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         }
         throw error;
       }
+      // A completed round trip is proof the connection outlived whatever
+      // the transport last reported; it is not what a later close is about.
+      state.lastTransportError = undefined;
       return normalizeCallResult(result, {
         server: state.spec.name,
         tool: info.mcpName,
@@ -898,13 +912,18 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
       // these awaits to notice `disposed` on their own.
       state.pending = transport;
       state.lastTransportError = undefined;
-      const client = new Client({ name: '@stratusagent/plugin-mcp', version: PLUGIN_MCP_VERSION });
-      // The transport's errors otherwise go nowhere: the SDK hands them to
-      // this hook and to nothing else, and the one that closes a stdio
-      // connection — a reply over the reader's buffer limit — arrives here
-      // moments before the onclose that the tool call then reports as a
-      // bare "Connection closed".
-      client.onerror = (error) => {
+      // The transport's errors otherwise go nowhere, and the one that
+      // closes a stdio connection — a reply over the reader's buffer limit
+      // — arrives here moments before the onclose that the tool call then
+      // reports as a bare "Connection closed". Hooked on the transport, not
+      // on `client.onerror`: the client funnels its own protocol errors
+      // through that too, and one of them — a reply landing after its
+      // request timed out — carries the entire serialized response in its
+      // message. Logged, that is a tool result in the daemon log; retained,
+      // it is what an unrelated later failure would be blamed on.
+      // `client.connect` wraps whatever handler the transport already has,
+      // so this one keeps running underneath the SDK's.
+      transport.onerror = (error) => {
         if (disposed) {
           return;
         }
@@ -912,6 +931,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         state.lastTransportError = described;
         warn(`mcp server ${state.spec.name} transport error: ${described}`);
       };
+      const client = new Client({ name: '@stratusagent/plugin-mcp', version: PLUGIN_MCP_VERSION });
       // A close that lands before this client is published cannot be
       // dropped: the identity guard below would discard it, and connect()
       // would then mark an already-closed client connected — leaving the
