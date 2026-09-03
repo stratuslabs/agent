@@ -2321,6 +2321,21 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     
   };
 
+  /**
+   * Both stores, once. Reached from `stop()` and from a `start()` that
+   * failed, and a host may call the one after the other; node:sqlite
+   * refuses a second close, so this remembers.
+   */
+  let storesClosed = false;
+  const closeStores = (): void => {
+    if (storesClosed) {
+      return;
+    }
+    storesClosed = true;
+    scheduleStore.close();
+    store.close();
+  };
+
   /** Release what the plugins acquired, reporting rather than throwing. */
   const disposePlugins = async (): Promise<void> => {
     await Promise.allSettled(loadedPlugins.map(async (plugin) => {
@@ -2340,24 +2355,29 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     store,
 
     async start() {
-      await migrateLegacyMemory(env);
-      // Before the roster and before channels: a turn must never arrive for
-      // an agent whose soul lists a tool the daemon has not registered yet,
-      // which would refuse the call as "not permitted" and blame the soul.
-      // Skills first for the same reason — and before the plugins, so the
-      // operator's bare ids win their aliases (see startSkills).
-      await startSkills();
-      await startPlugins();
       try {
+        await migrateLegacyMemory(env);
+        // Before the roster and before channels: a turn must never arrive
+        // for an agent whose soul lists a tool the daemon has not
+        // registered yet, which would refuse the call as "not permitted"
+        // and blame the soul. Skills first for the same reason — and before
+        // the plugins, so the operator's bare ids win their aliases (see
+        // startSkills).
+        await startSkills();
+        await startPlugins();
         await startServing();
       } catch (error) {
-        // Everything after the plugins loaded is inside that try for one
-        // reason: a `start()` that rejects never reaches its caller's
-        // shutdown path — `stratus serve` awaits it *before* the try/finally
-        // that calls `stop()` — so a duplicate agent id in the roster would
-        // leave a plugin's browser, socket, or subscription held for the
-        // life of a process that is on its way out.
+        // A `start()` that rejects never reaches its caller's shutdown path
+        // — `stratus serve` awaits it *before* the try/finally that calls
+        // `stop()` — so everything the constructor and the steps above
+        // acquired is released here: a duplicate agent id in the roster
+        // would otherwise leave a plugin's browser, socket, or subscription
+        // held for the life of a process that is on its way out, and the
+        // two stores opened before any of this ran would keep their
+        // descriptors — four more per attempt in a host that retries a
+        // port it cannot bind.
         await disposePlugins();
+        closeStores();
         throw error;
       }
     },
@@ -2397,8 +2417,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // browser is the reason this exists, and closing it out from under a
       // running screenshot would fail that turn rather than tidy up.
       await disposePlugins();
-      scheduleStore.close();
-      store.close();
+      closeStores();
       log('stratusd stopped');
     },
 

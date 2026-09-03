@@ -583,6 +583,12 @@ test('a required adapter that cannot start fails the gateway start and stops the
     // The failure is the rejection, not a warning beside a daemon that keeps
     // going: nothing here should read as "serving anyway".
     assert.ok(!warnings.some((line) => line.includes('failed to start')), warnings.join('\n'));
+    // And nothing stays open: a start that rejects never reaches its
+    // caller's stop(), so the stores the constructor opened close with it
+    // — a host retrying a port it cannot bind would otherwise leak
+    // descriptors on every attempt. The stop() below is still allowed
+    // after that, and closes nothing twice.
+    await assert.rejects(gateway.store.get('nothing'), /not open/);
   } finally {
     // Also the losing path: a start that resolved instead has a scheduler
     // ticking, and only a stop lets the suite end.
