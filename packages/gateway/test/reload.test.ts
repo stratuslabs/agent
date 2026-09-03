@@ -646,7 +646,14 @@ test('a turn queued behind the one aborted at the window is aborted too, not lef
   const running = gateway.dispatch({ sessionId: 'queued', agentId: 'ava', userMessage: 'first' });
   const queued = gateway.dispatch({ sessionId: 'queued', agentId: 'ava', userMessage: 'second' });
   await started;
-  gateway.restart({ drainTimeoutMs: 50 });
+  // The window is armed twice: once for the turns to finish on their own
+  // (they never will — the provider blocks until aborted), and once more
+  // for the aborted turns to settle, which is two abort rejections, two
+  // session writes, and their events. 50ms lost that second race on a
+  // loaded CI runner and reported `drained: false` for a drain that was
+  // merely slow; the number has to sit far above that work, not just
+  // above it.
+  gateway.restart({ drainTimeoutMs: 500 });
 
   const isRestartAbort = (error: Error): boolean => error instanceof RunAbortedError && error.message === RESTARTING_TURN_ERROR;
   await assert.rejects(running, isRestartAbort);

@@ -310,9 +310,13 @@ test('a deferred firing whose window passes is skipped with a line that says so,
   // `every 1m` firing that ran for two minutes: the deferred slot was
   // skipped under "missed firing(s) while the daemon was down", and the
   // daemon had not been down.
+  // The waiter's window is its interval, and it has to outlast the
+  // runtime's start — at 40ms a slow CI runner had the slot already past
+  // its window the first time the scheduler looked, which is the
+  // downtime case this test exists to tell apart from the deferral.
   const due = new Date(Date.now() - 5).toISOString();
   store.insert(record({ id: 'holder', agentId: 'ava', cadence: { kind: 'every', intervalMs: 3_600_000 }, nextFireAt: due }));
-  store.insert(record({ id: 'waiter', agentId: 'ava', cadence: { kind: 'every', intervalMs: 40 }, nextFireAt: due }));
+  store.insert(record({ id: 'waiter', agentId: 'ava', cadence: { kind: 'every', intervalMs: 500 }, nextFireAt: due }));
 
   await runtime.start();
   await waitFor(() => dispatches === 1, 'the holder to be held');
