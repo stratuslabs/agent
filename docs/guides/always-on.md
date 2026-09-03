@@ -86,8 +86,9 @@ after the store closes. That makes it atomic between two daemons starting
 together, keeps a daemon that is still draining its last turns holding the
 home against its replacement (the refusal then says so, since there is no
 address to name yet), and means a daemon that died released it with its
-file descriptors — there is no stale lock to clean up. `gateway.json` is
-read only to name the holder.
+file descriptors — there is no stale lock to clean up. The file itself
+stays between runs; the claim is the open descriptor, not the file's
+existence. `gateway.json` is read only to name the holder.
 
 The control API is a required channel: a daemon that cannot bind its port
 stops instead of serving without one, with an error naming the port and
