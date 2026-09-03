@@ -98,7 +98,9 @@ than a surprise, and one that costs the fleet as little as it can.
    back on the port it had, so a dashboard page reconnects to it.
 
 What comes back is what a stop-and-start brings back: durable sessions,
-schedules with their catch-up sweep, and channels reconnected. The
+schedules with their catch-up sweep, and channels reconnected — plus the
+dashboard's signed-in pages, handed from the old process to the new one in
+memory (see [Remote access](./remote-access.md#the-dashboard)). The
 announcement is written to `stratus logs` before the drain begins — the last
 point that process is certain to reach the structured log; a fresh daemon
 that fails before it serves reports to stderr only, as [Logs](./logs.md)

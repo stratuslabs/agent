@@ -74,8 +74,10 @@ Slack channel tokens.
 
 ## When the daemon restarts
 
-Sessions live in the daemon's memory, so restarting it signs the browser out
-and the page says so rather than rendering an empty roster that looks like a
-fleet that vanished. Run `stratus dashboard` again. If the socket drops
-without the daemon dying, the page reconnects on its own with a backoff and
-re-reads everything it missed.
+Sessions live in the daemon's memory. An announced restart (`stratus
+restart`) hands them to the replacement, so the page reconnects and stays
+signed in; a crash or a plain stop-and-start signs the browser out, and the
+page says so rather than rendering an empty roster that looks like a fleet
+that vanished. Run `stratus dashboard` again. If the socket drops without
+the daemon dying, the page reconnects on its own with a backoff and re-reads
+everything it missed.

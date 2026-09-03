@@ -8,11 +8,12 @@ import { createGateway, type ApprovalTransport, type Gateway, type GatewayOption
 import type { StateEnvironment } from '@stratusagent/state';
 import { WebSocket } from 'ws';
 
-import { createControlApi, type ControlApiOptions } from '../src/index.ts';
+import { createControlApi, type ControlApi, type ControlApiOptions } from '../src/index.ts';
 
 export interface Harness {
   home: string;
   gateway: Gateway;
+  api: ControlApi;
   /**
    * The approval transport, when the harness was asked for one. Captured the
    * way `stratus serve` captures it — every tool the fleet registers today is
@@ -126,6 +127,7 @@ export const startApi = async (
   return {
     home,
     gateway,
+    api,
     transport,
     url,
     token,
