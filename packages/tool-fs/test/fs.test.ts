@@ -322,6 +322,22 @@ test('a named file that is one enormous line is searched in bounded memory, and 
   assert.equal(late.skippedTotal, 1);
 });
 
+test('a line of exactly the limit was searched whole, and the result does not say otherwise', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-exact-'));
+  const needle = 'needle';
+  await writeFile(path.join(root, 'exact.txt'), `${'a'.repeat(1_000_000 - needle.length)}${needle}\nsecond line\n`);
+  await writeFile(path.join(root, 'over.txt'), `${'a'.repeat(1_000_001)}\n`);
+  const tools = await registryFor({ roots: [root] });
+  const session = sessionFor('ava');
+
+  const exact = await run(tools, 'fs.search', { query: needle, path: 'exact.txt' }, session) as JsonObject;
+  assert.equal((exact.matches as unknown[]).length, 1);
+  assert.equal(exact.skipped, undefined, 'nothing of this line went unsearched');
+
+  const over = await run(tools, 'fs.search', { query: needle, path: 'over.txt' }, session) as JsonObject;
+  assert.equal(over.skippedTotal, 1);
+});
+
 test('the skipped list is capped, and the count says how many there were', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-skipmany-'));
   const big = 'x'.repeat(1_000_001);

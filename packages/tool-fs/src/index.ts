@@ -253,12 +253,27 @@ const matcherFor = (query: string, options: { caseSensitive?: boolean; wholeWord
  * and a reader that accumulates a whole line before yielding it holds the
  * whole file after all. A line past `MAX_LINE_CHARS` is yielded as its
  * first `MAX_LINE_CHARS` characters and the rest is discarded to the next
- * newline; the caller is told so through `clipped`.
+ * newline; the line says so through `clipped` — said there rather than
+ * inferred from its length, because a line of exactly `MAX_LINE_CHARS` was
+ * searched whole.
+ *
+ * Opened through `openContained`, like `fs.read`: the containment check
+ * captured the file's identity, and a name repointed between that check
+ * and this open is refused here rather than read.
  */
 const MAX_LINE_CHARS = 1_000_000;
 
-const readLines = async function* (file: string): AsyncGenerator<string | undefined> {
-  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+interface LineRead {
+  text: string;
+  clipped: boolean;
+}
+
+/** A line that ended inside the chunk that pushed it past the limit is clipped like any other. */
+const bounded = (text: string): LineRead =>
+  text.length > MAX_LINE_CHARS ? { text: text.slice(0, MAX_LINE_CHARS), clipped: true } : { text, clipped: false };
+
+const readLines = async function* (resolved: ResolvedPath): AsyncGenerator<LineRead | undefined> {
+  const handle = await openContained(resolved, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
   try {
     const probe = Buffer.alloc(8_192);
     const { bytesRead } = await handle.read(probe, 0, probe.length, 0);
@@ -284,14 +299,14 @@ const readLines = async function* (file: string): AsyncGenerator<string | undefi
           }
           break;
         }
-        yield discarding ? carry : carry + text.slice(from, newline);
+        yield discarding ? { text: carry, clipped: true } : bounded(carry + text.slice(from, newline));
         carry = '';
         discarding = false;
         from = newline + 1;
       }
     }
-    const tail = discarding ? carry : carry + decoder.end();
-    if (tail.length > 0) {
+    const tail = discarding ? { text: carry, clipped: true } : bounded(carry + decoder.end());
+    if (tail.text.length > 0) {
       yield tail;
     }
   } finally {
@@ -413,13 +428,13 @@ const createSearchTool = (config: JsonObject): Tool => ({
       // full of large files read whole) does not apply.
       let index = 0;
       let clipped = false;
-      for await (const line of readLines(resolved.path)) {
+      for await (const line of readLines(resolved)) {
         if (line === undefined) {
           skip({ path: relativeTo(resolved.root, resolved.path), bytes: (await stat(resolved.path)).size, reason: 'binary' });
           break;
         }
-        clipped ||= line.length >= MAX_LINE_CHARS;
-        if (pattern.test(line) && !record(resolved.path, index, line)) {
+        clipped ||= line.clipped;
+        if (pattern.test(line.text) && !record(resolved.path, index, line.text)) {
           break;
         }
         index += 1;
