@@ -96,8 +96,12 @@ Some settings are read **only** from a config you chose yourself — the
 global `~/.stratus/config.json`, or a file passed with `--config` /
 `STRATUS_CONFIG`. An auto-discovered project-local `stratus.config.json`
 ships in any repository you clone, and none of these is a decision a clone
-gets to make; a project config that tries is ignored, with a warning naming
-the file.
+gets to make; a project config that tries is ignored. The three blocks say
+so with a warning naming the file. `apiKeyEnv` has no such channel — it is
+read while a run's provider is being resolved, before anything is logging —
+so the provider's own default variable is substituted quietly, and the
+setting is named in the missing-key error you get if that variable is not
+set.
 
 | Setting | Decides | Documented in |
 | --- | --- | --- |

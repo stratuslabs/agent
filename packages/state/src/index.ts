@@ -2383,6 +2383,18 @@ export const resolveRuntimeConfig = async (
         : DEFAULT_OPENAI_MODEL);
 
   const apiKeyEnvName = apiKeyEnvNameFor(provider as CredentialProviderName, fileConfig, fileConfigApplies, env, configTrusted);
+  // Read off the answer rather than re-deriving the rule that produced it:
+  // an untrusted config named a variable and something else won. There is
+  // no warning channel here (`resolveRuntimeConfig` takes no logger), so
+  // the one place this can be said is the error someone gets when no key
+  // resolves — which is exactly the case where the substitution is why
+  // they are stuck.
+  const ignoredApiKeyEnv = configTrusted === false
+    && fileConfigApplies
+    && typeof fileConfig.apiKeyEnv === 'string'
+    && fileConfig.apiKeyEnv !== apiKeyEnvName
+    ? fileConfig.apiKeyEnv
+    : undefined;
 
   const credentials = await loadCredentials(env);
 
@@ -2494,7 +2506,10 @@ export const resolveRuntimeConfig = async (
       );
     }
     throw new Error(
-      `Missing API key for provider=${provider}. Run \`stratus setup\` to sign in, or set STRATUS_API_KEY or ${apiKeyEnvName}.`,
+      `Missing API key for provider=${provider}. Run \`stratus setup\` to sign in, or set STRATUS_API_KEY or ${apiKeyEnvName}.`
+      + (ignoredApiKeyEnv !== undefined
+        ? ` (The project config at ${configPathShown} asks for ${ignoredApiKeyEnv}, which an auto-discovered config does not get to choose — it decides which of this machine's secrets the process reads. Run with --config ${configPathShown} to trust that file.)`
+        : ''),
     );
   }
 

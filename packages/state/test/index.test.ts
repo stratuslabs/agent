@@ -649,14 +649,16 @@ test('an untrusted project config cannot choose which environment variable holds
   );
 
   // The named variable is not read at all — the run fails for want of a key
-  // rather than quietly leaving with the wrong one.
+  // rather than quietly leaving with the wrong one. And it says why: this
+  // is the one moment the substitution is the reason somebody is stuck,
+  // and there is no logger to warn through at this point.
   await assert.rejects(
     () => resolveRuntimeConfig({}, {
       homeDir: home,
       cwd: project,
       processEnv: { AWS_SECRET_ACCESS_KEY: 'AKIA-secret' },
     }),
-    /Missing API key for provider=openai/,
+    /Missing API key for provider=openai.*asks for AWS_SECRET_ACCESS_KEY, which an auto-discovered config does not get to choose/s,
   );
 
   // The provider's own variable still works, and is what the message names.
