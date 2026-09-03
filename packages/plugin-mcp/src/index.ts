@@ -315,6 +315,23 @@ const resolveServerSpec = (
  * params, a timeout on a slow tool — is a live connection and no reason
  * to tear it down.
  */
+/**
+ * The transport's error text, with the one the operator needs translated.
+ * The SDK's stdio reader refuses a single JSON-RPC message over its buffer
+ * limit (10 MB unless the transport is built with another) and closes the
+ * connection; its wording names the buffer, not the reply that overflowed
+ * it, and nothing about it says the server has to change.
+ */
+const describeTransportError = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : String(error);
+  const overflow = /ReadBuffer exceeded maximum size of (\d+) bytes/.exec(message);
+  if (overflow) {
+    return `the server sent a single message larger than the ${overflow[1]}-byte stdio limit, and the connection was closed. `
+      + 'A result that large has to come back smaller — paged, summarized, or written to a file.';
+  }
+  return message;
+};
+
 const isConnectionFailure = (error: unknown): boolean =>
   error instanceof StreamableHTTPError
   || (error instanceof McpError && error.code === ErrorCode.ConnectionClosed)
@@ -598,6 +615,15 @@ interface ServerState {
   pending: Transport | undefined;
   connected: boolean;
   connecting: boolean;
+  /**
+   * What the transport last reported on the live connection, kept so the
+   * call that then fails with a bare "Connection closed" can say why. An
+   * oversized reply is the case that found this: the SDK's stdio reader
+   * refuses a single message over its buffer limit and closes the
+   * connection, and without this the agent saw the closure, the log saw
+   * nothing, and every retry did it again.
+   */
+  lastTransportError: string | undefined;
   attempt: number;
   timer: NodeJS.Timeout | undefined;
   /** Registered name → what it bridges to. The live descriptor cache. */
@@ -605,8 +631,11 @@ interface ServerState {
 }
 
 export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptions = {}): Plugin => {
-  const log = options.log ?? ((message: string) => console.error(`[plugin-mcp] ${message}`));
-  const warn = options.warn ?? ((message: string) => console.error(`[plugin-mcp] ${message}`));
+  // Reassigned at setup when the host offers its own log and the caller
+  // did not: the daemon's structured log is where these lines belong, and
+  // stderr is the fallback for a host that has nothing better.
+  let log = options.log ?? ((message: string) => console.error(`[plugin-mcp] ${message}`));
+  let warn = options.warn ?? ((message: string) => console.error(`[plugin-mcp] ${message}`));
   const processEnv = options.processEnv ?? process.env;
   const delayFor = options.reconnectDelayMs
     ?? ((attempt: number) => Math.min(RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, RECONNECT_MAX_DELAY_MS));
@@ -623,6 +652,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
     pending: undefined,
     connected: false,
     connecting: false,
+    lastTransportError: undefined,
     attempt: 0,
     timer: undefined,
     tools: new Map(),
@@ -669,6 +699,14 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         // reconnect that already replaced it is left alone.
         if (isConnectionFailure(error) && state.client === client) {
           dropConnection(state, error);
+        }
+        // "Connection closed" is all the SDK says about a request the
+        // transport died under. When the transport said why, say so here,
+        // where the agent reads it.
+        if (isConnectionFailure(error) && state.lastTransportError !== undefined) {
+          throw new Error(
+            `${error instanceof Error ? error.message : String(error)} — ${state.lastTransportError}`,
+          );
         }
         throw error;
       }
@@ -859,7 +897,21 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
       // so dispose() can cut a handshake short instead of waiting for
       // these awaits to notice `disposed` on their own.
       state.pending = transport;
+      state.lastTransportError = undefined;
       const client = new Client({ name: '@stratusagent/plugin-mcp', version: PLUGIN_MCP_VERSION });
+      // The transport's errors otherwise go nowhere: the SDK hands them to
+      // this hook and to nothing else, and the one that closes a stdio
+      // connection — a reply over the reader's buffer limit — arrives here
+      // moments before the onclose that the tool call then reports as a
+      // bare "Connection closed".
+      client.onerror = (error) => {
+        if (disposed) {
+          return;
+        }
+        const described = describeTransportError(error);
+        state.lastTransportError = described;
+        warn(`mcp server ${state.spec.name} transport error: ${described}`);
+      };
       // A close that lands before this client is published cannot be
       // dropped: the identity guard below would discard it, and connect()
       // would then mark an already-closed client connected — leaving the
@@ -916,6 +968,12 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
 
     async setup(context) {
       view = context.tools;
+      if (options.log === undefined && context.log !== undefined) {
+        log = context.log;
+      }
+      if (options.warn === undefined && context.warn !== undefined) {
+        warn = context.warn;
+      }
       await Promise.all(states.map(async (state) => {
         try {
           await connect(state, true);

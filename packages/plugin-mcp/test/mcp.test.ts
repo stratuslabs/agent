@@ -357,6 +357,92 @@ test('a tool discovered only on reconnect registers, and one no longer advertise
   }
 });
 
+test('lifecycle lines reach the host’s log when the plugin was created without one of its own', async () => {
+  // The loader hands the daemon's structured log to setup(); created
+  // without log/warn options, the plugin must take it up — before this,
+  // every disconnect warning went to console.error and `stratus logs`
+  // showed a server dropping as nothing at all.
+  const handle = fakeServer({ current: linearTools });
+  const target = new ToolRegistry();
+  const lines: string[] = [];
+  const warnings: string[] = [];
+  let connections = 0;
+  let signalReconnected = () => {};
+  const reconnected = new Promise<void>((resolve) => {
+    signalReconnected = resolve;
+  });
+  const plugin = createMcpPlugin(
+    { servers: { linear: { url: 'http://127.0.0.1:9/unused' } } },
+    {
+      transportFor: () => handle.transportFor(),
+      reconnectDelayMs: () => 1,
+      onConnected: () => {
+        connections += 1;
+        if (connections === 2) {
+          signalReconnected();
+        }
+      },
+    },
+  );
+  const view = await viewFor(target);
+  await plugin.setup({
+    bus: new EventBus(),
+    tools: view,
+    log: (message) => lines.push(message),
+    warn: (message) => warnings.push(message),
+  });
+  view.commit(new Map());
+  const keepAlive = setInterval(() => {}, 50);
+  try {
+    assert.ok(lines.some((message) => message.includes('mcp server linear connected')), `log: ${lines.join(' | ')}`);
+    await handle.closeCurrent();
+    await reconnected;
+    assert.ok(warnings.some((message) => message.includes('mcp server linear disconnected')), `warn: ${warnings.join(' | ')}`);
+  } finally {
+    clearInterval(keepAlive);
+    await plugin.dispose?.();
+  }
+});
+
+test('a transport error is logged, and the call it killed says why instead of only "Connection closed"', async () => {
+  // What the SDK's stdio reader does with a reply over its buffer limit:
+  // report the overflow on onerror, then close the connection. The call in
+  // flight sees a bare ConnectionClosed from the SDK.
+  let clientTransport: Transport | undefined;
+  const handle = fakeServer({
+    current: (server) => {
+      server.registerTool('big', { description: 'A reply too large to read.' }, async () => {
+        clientTransport?.onerror?.(new Error('ReadBuffer exceeded maximum size of 10485760 bytes'));
+        await handle.closeCurrent();
+        return { content: [{ type: 'text', text: 'never delivered' }] };
+      });
+    },
+  });
+  const target = new ToolRegistry();
+  const warnings: string[] = [];
+  const plugin = pluginFor(handle, {}, {
+    warn: (message) => warnings.push(message),
+    reconnectDelayMs: () => 3_600_000,
+    transportFor: async () => {
+      clientTransport = await handle.transportFor();
+      return clientTransport;
+    },
+  });
+  await loadThroughView(plugin, target);
+  try {
+    await assert.rejects(
+      target.get('mcp.linear.big')!.execute({}, sessionFor('ava')),
+      /Connection closed — the server sent a single message larger than the 10485760-byte stdio limit/,
+    );
+    assert.match(
+      warnings.find((message) => message.includes('transport error')) ?? '',
+      /mcp server linear transport error: the server sent a single message larger than the 10485760-byte stdio limit/,
+    );
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
 test('an HTTP session lost mid-call marks the server down and reconnects — onclose never fires on that path', async () => {
   // A sessionful Streamable HTTP server that restarted: the handshake
   // worked, and later requests fail on the wire (a 404 for the stale

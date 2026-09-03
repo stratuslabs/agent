@@ -172,6 +172,9 @@ export interface LoadPluginsOptions {
   workspaceRoot?: string;
   /** Overrides the trusted set. See `isFirstPartyPackage`. */
   trusted?: (packageName: string) => boolean;
+  /** Handed to every plugin's `setup` as `PluginContext.log` / `.warn`. */
+  log?: (message: string) => void;
+  warn?: (message: string) => void;
 }
 
 export interface LoadPluginsResult {
@@ -336,7 +339,12 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
       instance = plugin;
 
       const view = new ManifestBoundToolRegistry({ manifest, target: options.tools, trusted: isTrusted, riskOverrides });
-      await plugin.setup({ bus: options.bus, tools: view });
+      await plugin.setup({
+        bus: options.bus,
+        tools: view,
+        ...(options.log !== undefined ? { log: options.log } : {}),
+        ...(options.warn !== undefined ? { warn: options.warn } : {}),
+      });
 
       // Everything that can refuse happens before anything commits, so a
       // plugin never lands half — tools registered, skills not. The

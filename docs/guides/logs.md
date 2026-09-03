@@ -20,7 +20,12 @@ stratus logs --format json       # the raw records, for jq
 09:14:31  ava         session.created [slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456]
 09:14:36  ava         tool.completed tool=memory.remember ok=true [slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456]
 09:21:07  —           warning: anthropic returned 529; retrying on the fallback model
+09:40:12  —           warning: mcp server linear disconnected — its tools are unavailable until it comes back
 ```
+
+A plugin's lifecycle lines land here too — an MCP server that dropped or
+came back, a reconnect that failed — not only on the stderr the service
+manager owns.
 
 Session ids are the channel's own key —
 `channel:agent:team:conversation[:thread]` — so the id in the last column
