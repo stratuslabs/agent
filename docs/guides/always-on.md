@@ -90,7 +90,9 @@ daemon that died released it with its file descriptors — there is no stale
 lock to clean up, and nothing a crash could leave half-written. The empty
 file stays between runs; the claim is the open descriptor, not the file's
 existence, and a file that is not a database any more is replaced rather
-than obeyed. `gateway.json` is read only to name the holder.
+than obeyed (under a sibling `stratusd.lock.repair`, so two daemons
+starting over the same damaged file cannot each replace it). `gateway.json`
+is read only to name the holder.
 
 The control API is a required channel: a daemon that cannot bind its port
 stops instead of serving without one, with an error naming the port and

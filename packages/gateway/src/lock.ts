@@ -5,6 +5,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { stratusHomePath, type StateEnvironment } from '@stratusagent/state';
 
 const HOME_LOCK_FILENAME = 'stratusd.lock';
+/** Beside the lock, held only while a damaged lock file is being replaced. */
+const REPAIR_SUFFIX = '.repair';
 
 /** `~/.stratus/stratusd.lock` — held by the daemon serving that home. */
 export const homeLockPath = (env: StateEnvironment): string =>
@@ -68,6 +70,55 @@ const claimAt = (lockPath: string): DatabaseSync => {
 };
 
 /**
+ * Replace a lock file that is not a database and claim the replacement —
+ * under a second claim, on a sibling file, so only one starter does it.
+ *
+ * Two starters can both have read the same damaged file. Without this,
+ * the first removes it and claims a fresh one, and the second, acting on
+ * its own earlier error, removes *that* — the file the first now holds —
+ * and claims yet another: two daemons on two inodes, one home. So the
+ * repair is serialized on `<lock>.repair` (never written either), and the
+ * lock is tried once more under it before anything is removed: a file
+ * that is by then the fresh one is claimed, or refused because its holder
+ * is the starter that got there first. The loser is refused as a daemon
+ * still starting, which by then it is.
+ */
+const replaceDamaged = (lockPath: string): DatabaseSync => {
+  let repair: DatabaseSync;
+  try {
+    repair = claimAt(`${lockPath}${REPAIR_SUFFIX}`);
+  } catch (error) {
+    if (isBusy(error)) {
+      throw new HomeClaimedError(lockPath);
+    }
+    throw error;
+  }
+  try {
+    try {
+      return claimAt(lockPath);
+    } catch (error) {
+      if (isBusy(error)) {
+        throw new HomeClaimedError(lockPath);
+      }
+      if (!isNotADatabase(error)) {
+        throw error;
+      }
+    }
+    rmSync(lockPath, { force: true });
+    try {
+      return claimAt(lockPath);
+    } catch (error) {
+      if (isBusy(error)) {
+        throw new HomeClaimedError(lockPath);
+      }
+      throw error;
+    }
+  } finally {
+    repair.close();
+  }
+};
+
+/**
  * Claim a home for one daemon, exclusively, for as long as the claim is
  * held.
  *
@@ -97,22 +148,18 @@ const claimAt = (lockPath: string): DatabaseSync => {
 export const claimHome = (env: StateEnvironment): HomeClaim => {
   const lockPath = homeLockPath(env);
   mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
-  let db: DatabaseSync | undefined;
-  for (const rebuilt of [false, true]) {
-    try {
-      db = claimAt(lockPath);
-      break;
-    } catch (error) {
-      if (isBusy(error)) {
-        throw new HomeClaimedError(lockPath);
-      }
-      if (rebuilt || !isNotADatabase(error)) {
-        throw error;
-      }
-      rmSync(lockPath, { force: true });
+  let held: DatabaseSync;
+  try {
+    held = claimAt(lockPath);
+  } catch (error) {
+    if (isBusy(error)) {
+      throw new HomeClaimedError(lockPath);
     }
+    if (!isNotADatabase(error)) {
+      throw error;
+    }
+    held = replaceDamaged(lockPath);
   }
-  const held = db!;
 
   let released = false;
   return {

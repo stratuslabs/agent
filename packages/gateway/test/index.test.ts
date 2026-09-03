@@ -596,6 +596,43 @@ test('a required adapter that cannot start fails the gateway start and stops the
   }
 });
 
+test('a start that fails after a channel accepted a turn lets that turn finish before the store closes', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+
+  // A channel that is up before the required one fails can already have
+  // dispatched — a Slack message arriving in the window. Closing the store
+  // under that turn would fail it on its own save; the failed start is a
+  // shutdown, so it drains first, the way stop() does.
+  let turn: Promise<unknown> | undefined;
+  const early: GatewayChannelAdapter = {
+    name: 'early',
+    async start(gateway) {
+      turn = gateway.dispatch({ sessionId: 'accepted-1', userMessage: 'say hello' });
+    },
+    async stop() {},
+  };
+  const port = {
+    name: 'port',
+    required: true,
+    async start() {
+      throw new Error('address already in use');
+    },
+    async stop() {},
+  };
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, channels: [early, port], warn: () => {} });
+  try {
+    await assert.rejects(gateway.start(), /port could not start/);
+    assert.ok(turn, 'the early channel dispatched');
+    const session = await turn as { status: string; lastError?: string };
+    assert.equal(session.status, 'completed', session.lastError);
+    await assert.rejects(gateway.store.get('accepted-1'), /not open/);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('the idle watchdog honors a session sticky-switched to a non-streaming fallback', async () => {
   const home = await newHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });
