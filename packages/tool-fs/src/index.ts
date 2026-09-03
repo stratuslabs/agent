@@ -51,7 +51,7 @@ const asNumber = (value: JsonValue | undefined, fallback: number): number =>
  * file asked for `maxBytes: 1e10` and got the whole 6.7 MB of it into the
  * transcript.
  */
-const narrowed = (requested: unknown, cap: number): number => Math.min(asNumber(requested, cap), cap);
+const narrowed = (requested: JsonValue | undefined, cap: number): number => Math.min(asNumber(requested, cap), cap);
 
 const requireString = (input: JsonObject, key: string): string => {
   const value = input[key];
