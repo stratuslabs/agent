@@ -112,6 +112,13 @@ export const isFirstPartyPackage = (packageName: string): boolean =>
 export interface PluginSkillRecord {
   /** The qualified id (`stratus-plugin-github:pr-review`) — the canonical form. */
   id: string;
+  /**
+   * The id the manifest declared, which the skill also answers to while no
+   * one else claims it. Kept so a host rebuilding its catalog — a live
+   * skills reload — can re-run the alias rules rather than re-derive the
+   * bare form from the qualified one.
+   */
+  bareId: string;
   name: string;
   description: string;
   /** The package whose skill this is — provenance, same as tools. */
@@ -257,6 +264,7 @@ const stageManifestSkills = async (
       skill: createLazySkill({ id: qualified, document, read: () => readFile(filePath, 'utf8') }),
       record: {
         id: qualified,
+        bareId: declaration.id,
         name: document.name ?? declaration.id,
         description: document.description,
         package: manifest.packageName,

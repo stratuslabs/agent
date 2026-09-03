@@ -99,6 +99,8 @@ log, and an address bar is one that gets noticed when it changes.
 | GET | `/agents/:id` | One agent in full: complete instructions, the raw soul markdown, its pins |
 | PUT | `/agents/:id` | Edit a soul, by field or as raw markdown |
 | POST | `/roster/reload` | Re-read the agents directory and the configured default soul |
+| POST | `/skills/reload` | Re-read `~/.stratus/skills` and serve it, no restart — the `skills` half of `/catalog/tools` as the response. A skill that will not load answers `422 skills_reload_refused` naming the file, and the previous set keeps serving |
+| POST | `/restart` | Announce a restart: `{ reason?, drainTimeoutMs? }` → `202 { restarting, reason?, drainTimeoutMs, inflight }`. New turns are refused from here, in-flight ones get the window, and the daemon comes back. `501 restart_unsupported` from a host that cannot bring it back; `409 not_restartable` while the daemon is still starting or already stopping |
 | GET | `/sessions?agent=&limit=` | Durable sessions, newest first. `limit` bounds the result — the table grows for the life of an install |
 | GET | `/sessions/:id` | One session, provider replay state stripped — including `usage`, the token records of every provider call it has made |
 | POST | `/sessions/:id/messages` | Dispatch a message; returns `202 { sessionId, turnId }`. A `schedule:`-prefixed id answers `400 session_id_reserved` — those belong to scheduled firings. An optional `metadata` object is attached to a new session as given, except the keys the daemon writes for itself (`pendingApproval`, `fallbackActive`, `delegatedBy`, `rootSessionId`, `delegationDepth`, `scheduled`, `scheduleId`), which answer `400 metadata_reserved`. An existing session whose agent has since left the roster answers `404 agent_not_found` |
@@ -130,6 +132,30 @@ is ignored and the file's existing block is preserved rather than deleted by
 the replace. Enabling a plugin runs somebody else's code inside the daemon —
 that is the boundary the whole trust model rests on, and it stays a
 deliberate edit to a file rather than a settings save.
+
+### Reload and restart
+
+Three things change under a running daemon without a restart, and the API
+is how each takes effect: a soul (re-read before every turn; a file added
+or deleted needs `POST /roster/reload`), a skill (`POST /skills/reload`),
+and an MCP server's tools (discovered on reconnect). A skills reload is a
+whole-catalog swap: it rebuilds what a restart would produce — operator
+skills first, then each loaded plugin's, in load order, so an operator's
+bare id still outranks a plugin's alias and a contested bare id stays
+contested — and a file that will not load refuses the whole reload with
+`422` rather than serving half a catalog. Loaded is not enabled: a reloaded
+skill reaches only the agents whose souls list it.
+
+A plugin is code, and code gets a restart — `POST /restart`, which answers
+`202` at once and then refuses new turns (a `POST /sessions/:id/messages`
+during the drain fails with "stratusd is restarting and will accept new work
+once it is back up"), lets in-flight turns finish for `drainTimeoutMs`
+(default 30 000), aborts what is still running at the end of it (the session
+is saved as failed with `Run aborted: stratusd is restarting`), stops, and
+comes back — this API's connections and event streams included, so a client
+reconnects. `~/.stratus/gateway.json` is rewritten by the new process. What
+needs a restart and what does not is tabled in
+[Always on](../../docs/guides/always-on.md#what-needs-a-restart-and-what-does-not).
 
 `PUT /config` **replaces** the file rather than merging into it — `GET` hands
 you the whole document and `PUT` takes the whole document back, so a partial

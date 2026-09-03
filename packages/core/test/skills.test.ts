@@ -350,3 +350,58 @@ test('toolAllowlistCovers reads requires entries the way the warning needs', () 
   assert.equal(toolAllowlistCovers('browser.*', ['browser.goto']), true);
   assert.equal(toolAllowlistCovers('browser.*', ['fs.*']), false);
 });
+
+test('replaceWith swaps the whole set at once, keeps the alias rules the build applied, and drops cached bodies', async () => {
+  const registry = new SkillRegistry();
+  let reads = 0;
+  registry.register(skill('code-review', { load: async () => { reads += 1; return 'v1'; } }));
+  assert.equal(await registry.read('code-review'), 'v1');
+  assert.equal(await registry.read('code-review'), 'v1');
+  assert.equal(reads, 1, 'the body is cached');
+
+  // The next set is built in a fresh registry, so a reload never has to
+  // re-register into a serving one (which would refuse every id already
+  // loaded) — and the build applies the alias rules, not the swap.
+  // The plugin's skill is the same object, re-registered: a host reloading
+  // the operator directory does not reload plugins, and its cached body
+  // must not be replaced by whatever the package's file says now.
+  let pluginReads = 0;
+  const pluginSkill = skill('acme:triage', { load: async () => { pluginReads += 1; return 'plugin v1'; } });
+  registry.register(pluginSkill);
+  registry.registerAlias('triage', 'acme:triage');
+  assert.equal(await registry.read('acme:triage'), 'plugin v1');
+
+  const next = new SkillRegistry();
+  next.register(skill('code-review', { load: async () => { reads += 1; return 'v2'; } }));
+  next.register(skill('triage', { description: 'The operator copy.' }));
+  next.register(pluginSkill);
+  next.registerAlias('triage', 'acme:triage');
+  next.register(skill('a:shared'));
+  next.register(skill('b:shared'));
+  next.registerAlias('shared', 'a:shared');
+  next.registerAlias('shared', 'b:shared');
+
+  registry.replaceWith(next);
+
+  // A replaced file is read again, never served from the old cache; the
+  // plugin's unchanged object keeps its body without a second read.
+  assert.equal(await registry.read('code-review'), 'v2');
+  assert.equal(reads, 2);
+  assert.equal(await registry.read('acme:triage'), 'plugin v1');
+  assert.equal(pluginReads, 1, 'the plugin body was re-read');
+  // An operator skill outranks the plugin's bare alias after the swap
+  // exactly as it did at load, and the contested bare id stays dead.
+  assert.equal(registry.resolve('triage')?.description, 'The operator copy.');
+  assert.deepEqual(registry.idsFor('acme:triage'), ['acme:triage']);
+  assert.equal(registry.resolve('shared'), undefined);
+  assert.equal(registry.has('shared'), false);
+  registry.registerAlias('shared', 'a:shared');
+  assert.equal(registry.resolve('shared'), undefined, 'contested survives the swap');
+  assert.deepEqual(registry.list().map((entry) => entry.id).sort(), ['a:shared', 'acme:triage', 'b:shared', 'code-review', 'triage']);
+
+  // Consumed: the source no longer shares state with the live registry.
+  assert.deepEqual(next.list(), []);
+  next.register(skill('code-review'));
+  assert.equal(registry.resolve('code-review')?.load !== undefined, true);
+  assert.equal(registry.list().filter((entry) => entry.id === 'code-review').length, 1);
+});

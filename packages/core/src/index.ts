@@ -1483,6 +1483,43 @@ export class SkillRegistry {
     return [...this.skills.values()];
   }
 
+  /**
+   * Become `next`, in one synchronous step — the swap behind a live reload.
+   *
+   * A reload cannot re-register into a serving registry: `register` throws
+   * on every id already loaded, and unregistering one at a time would have
+   * to re-derive which aliases a departed skill was blocking. So the loader
+   * builds the whole next set into a fresh registry, and this adopts it —
+   * skills, aliases, and the contested set together, so the alias rules
+   * the build applied are exactly the ones that serve. Synchronous, so a
+   * `read` in flight sees either the old set or the new one, never a
+   * half-swapped map. A cached body survives only for a `Skill` object the
+   * next set registers unchanged — a plugin's, re-registered by a host that
+   * did not reload the plugin — and is dropped for one built afresh, since
+   * that is a file that may have been replaced. Dropping a plugin's too
+   * would serve a package's edited prose under a name and description
+   * staged before the edit, without the restart a plugin change requires.
+   * A read already underway keeps the promise it holds either way. `next`
+   * is consumed — emptied, not shared — so nothing can go on mutating this
+   * registry through it.
+   */
+  replaceWith(next: SkillRegistry): void {
+    const kept = new Map<string, Promise<string>>();
+    for (const [id, body] of this.bodies) {
+      if (next.skills.get(id) === this.skills.get(id)) {
+        kept.set(id, body);
+      }
+    }
+    this.skills = next.skills;
+    this.aliases = next.aliases;
+    this.contestedAliases = next.contestedAliases;
+    this.bodies = kept;
+    next.skills = new Map();
+    next.aliases = new Map();
+    next.contestedAliases = new Set();
+    next.bodies = new Map();
+  }
+
   describe(): SkillDescriptor[] {
     return this.list().map((skill) => ({
       id: skill.id,

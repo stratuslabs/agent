@@ -67,6 +67,17 @@ test('one broken skill is a warning, and the rest still load', async () => {
   assert.equal(warnings.length, 3);
   assert.ok(warnings.some((line) => line.includes('not a skill id')));
   assert.ok(warnings.some((line) => line.includes('no "description"')));
+
+  // Strict is the reload's contract: the first skill that would not load
+  // refuses the whole set, named by path, and nothing warns — half a
+  // catalog is worse than a stale one.
+  const strict = new SkillRegistry();
+  const strictWarnings: string[] = [];
+  await assert.rejects(
+    loadOperatorSkills(env, strict, (line) => strictWarnings.push(line), { strict: true }),
+    (error: Error) => error.message.startsWith('Cannot load ') && error.message.includes(path.join(dir, 'Bad Name', 'SKILL.md')),
+  );
+  assert.deepEqual(strictWarnings, []);
 });
 
 test('install discovers a skills repo laid out like the ecosystem publishes them', async () => {
