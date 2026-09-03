@@ -41,7 +41,7 @@ const asNumber = (value: JsonValue | undefined, fallback: number): number =>
 
 // A per-call `maxBytes` may narrow the operator's `maxTextBytes`, never
 // raise it — a cap the model can lift by naming a bigger number is not one.
-const narrowed = (requested: unknown, cap: number): number => Math.min(asNumber(requested, cap), cap);
+const narrowed = (requested: JsonValue | undefined, cap: number): number => Math.min(asNumber(requested, cap), cap);
 
 /** The address policy a block describes, per-agent or top-level. */
 const policyFrom = (resolved: JsonObject): EgressPolicy => ({
