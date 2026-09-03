@@ -202,6 +202,13 @@ OAuth-authenticated HTTP servers are not modeled yet; a static bearer in
   may no longer mean what it meant.
 - **While a server is down**, calls to its tools fail with a "not
   connected" error rather than hanging.
+- **A transport error is logged and named.** The SDK's stdio reader
+  refuses a single message over 10 MB and closes the connection, which a
+  call in flight would otherwise see only as "Connection closed"; the call's
+  error and the log line both say a reply was too large, so the fix is the
+  server's result size and not the network.
+- **All of these lines are in the daemon's log** — `stratus logs` — under
+  the daemon, and on stderr in a one-shot `stratus run`.
 
 ## Results
 

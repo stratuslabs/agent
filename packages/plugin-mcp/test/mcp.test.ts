@@ -9,7 +9,7 @@ import { DEFAULT_INHERITED_ENV_VARS } from '@modelcontextprotocol/sdk/client/std
 import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { ListToolsRequestSchema, type JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { z } from 'zod';
@@ -71,6 +71,8 @@ interface FakeServerHandle {
   transportFor: () => Promise<Transport>;
   /** Close the server end of the latest connection, as a dying server would. */
   closeCurrent: () => Promise<void>;
+  /** Put a raw message on the wire from the server end, bypassing the server. */
+  sendRaw: (message: JSONRPCMessage) => Promise<void>;
 }
 
 /**
@@ -92,6 +94,9 @@ const fakeServer = (build: { current: (server: McpServer) => void }): FakeServer
     },
     async closeCurrent() {
       await serverSide?.close();
+    },
+    async sendRaw(message) {
+      await serverSide?.send(message);
     },
   };
 };
@@ -271,7 +276,9 @@ test('a server that is unreachable at startup leaves the rest serving, with an i
     {
       servers: {
         linear: { url: 'http://127.0.0.1:9/unused' },
-        flaky: { url: 'http://127.0.0.1:9/unused' },
+        // A credential in the endpoint — userinfo, a path segment, a query
+        // value — must not reach the log through the hint that names it.
+        flaky: { url: 'http://svc:hunter2@127.0.0.1:9/mcp/pathtoken?sig=secretsig' },
       },
     },
     {
@@ -296,6 +303,10 @@ test('a server that is unreachable at startup leaves the rest serving, with an i
     assert.ok(hint, 'the unreachable server was reported');
     assert.match(hint!, /servers\.flaky/);
     assert.match(hint!, /connection refused/);
+    assert.equal(hint!.includes('hunter2'), false, hint);
+    assert.equal(hint!.includes('secretsig'), false, hint);
+    assert.equal(hint!.includes('pathtoken'), false, hint);
+    assert.match(hint!, /the endpoint \(http:\/\/127\.0\.0\.1:9\)/);
   } finally {
     await plugin.dispose?.();
   }
@@ -354,6 +365,363 @@ test('a tool discovered only on reconnect registers, and one no longer advertise
   } finally {
     clearInterval(keepAlive);
     await plugin.dispose?.();
+  }
+});
+
+test('lifecycle lines reach the host’s log when the plugin was created without one of its own', async () => {
+  // The loader hands the daemon's structured log to setup(); created
+  // without log/warn options, the plugin must take it up — before this,
+  // every disconnect warning went to console.error and `stratus logs`
+  // showed a server dropping as nothing at all.
+  const handle = fakeServer({ current: linearTools });
+  const target = new ToolRegistry();
+  const lines: string[] = [];
+  const warnings: string[] = [];
+  let connections = 0;
+  let signalReconnected = () => {};
+  const reconnected = new Promise<void>((resolve) => {
+    signalReconnected = resolve;
+  });
+  const plugin = createMcpPlugin(
+    { servers: { linear: { url: 'http://127.0.0.1:9/unused' } } },
+    {
+      transportFor: () => handle.transportFor(),
+      reconnectDelayMs: () => 1,
+      onConnected: () => {
+        connections += 1;
+        if (connections === 2) {
+          signalReconnected();
+        }
+      },
+    },
+  );
+  const view = await viewFor(target);
+  await plugin.setup({
+    bus: new EventBus(),
+    tools: view,
+    log: (message) => lines.push(message),
+    warn: (message) => warnings.push(message),
+  });
+  view.commit(new Map());
+  const keepAlive = setInterval(() => {}, 50);
+  try {
+    assert.ok(lines.some((message) => message.includes('mcp server linear connected')), `log: ${lines.join(' | ')}`);
+    await handle.closeCurrent();
+    await reconnected;
+    assert.ok(warnings.some((message) => message.includes('mcp server linear disconnected')), `warn: ${warnings.join(' | ')}`);
+  } finally {
+    clearInterval(keepAlive);
+    await plugin.dispose?.();
+  }
+});
+
+test('a transport error is logged, and the call it killed says why instead of only "Connection closed"', async () => {
+  // What the SDK's stdio reader does with a reply over its buffer limit:
+  // report the overflow on onerror, then close the connection. The call in
+  // flight sees a bare ConnectionClosed from the SDK.
+  let clientTransport: Transport | undefined;
+  const handle = fakeServer({
+    current: (server) => {
+      server.registerTool('big', { description: 'A reply too large to read.' }, async () => {
+        clientTransport?.onerror?.(new Error('ReadBuffer exceeded maximum size of 10485760 bytes'));
+        // The SDK's close is asynchronous, and stdout it had already
+        // queued can still be delivered before the process is gone; a
+        // valid message here must not talk the cause out of the record.
+        await handle.sendRaw({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
+        await handle.closeCurrent();
+        return { content: [{ type: 'text', text: 'never delivered' }] };
+      });
+    },
+  });
+  const target = new ToolRegistry();
+  const warnings: string[] = [];
+  // A stdio server: the overflow is its reader's, and only its errors are
+  // read as one.
+  const plugin = createMcpPlugin(
+    { servers: { linear: { command: process.execPath } } },
+    {
+      warn: (message) => warnings.push(message),
+      log: () => {},
+      reconnectDelayMs: () => 3_600_000,
+      transportFor: async () => {
+        clientTransport = await handle.transportFor();
+        return clientTransport;
+      },
+    },
+  );
+  await loadThroughView(plugin, target);
+  try {
+    await assert.rejects(
+      target.get('mcp.linear.big')!.execute({}, sessionFor('ava')),
+      /Connection closed — the server sent a single message larger than the 10485760-byte stdio limit/,
+    );
+    assert.match(
+      warnings.find((message) => message.includes('transport error')) ?? '',
+      /mcp server linear transport error: the server sent a single message larger than the 10485760-byte stdio limit/,
+    );
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('a protocol-level client error is neither logged nor blamed for a later close, and a parse error is logged without the line', async () => {
+  // The SDK routes its own protocol errors through client.onerror too, and
+  // a reply arriving after its request timed out becomes "Received a
+  // response for an unknown message ID: <the whole response>". That is a
+  // tool result; it must reach neither the daemon log nor the error text
+  // of whatever fails next. A non-JSON line on stdout is the transport's
+  // error, and the line it quotes is a server's stray logging.
+  let clientTransport: Transport | undefined;
+  const handle = fakeServer({ current: linearTools });
+  const target = new ToolRegistry();
+  const warnings: string[] = [];
+  const plugin = pluginFor(handle, {}, {
+    warn: (message) => warnings.push(message),
+    reconnectDelayMs: () => 3_600_000,
+    transportFor: async () => {
+      clientTransport = await handle.transportFor();
+      return clientTransport;
+    },
+  });
+  await loadThroughView(plugin, target);
+  try {
+    const payload = 'secret-result-'.repeat(1000);
+    await handle.sendRaw({ jsonrpc: '2.0', id: 999, result: { content: [{ type: 'text', text: payload }] } });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(warnings.some((message) => message.includes('transport error')), false, warnings.join(' | '));
+
+    // This server is URL-backed: an HTTP error quoting a body that happens
+    // to contain the stdio reader's overflow phrase is still a body, and
+    // is bounded like one rather than rewritten as an overflow.
+    clientTransport?.onerror?.(new Error(`Streamable HTTP error: Error POSTing to endpoint: ReadBuffer exceeded maximum size of ${'9'.repeat(5000)} bytes`));
+    const quoted = warnings.filter((message) => message.includes('transport error')).at(-1) ?? '';
+    assert.ok(quoted.length < 400, `${quoted.length} chars`);
+    assert.equal(quoted.includes('stdio limit'), false);
+
+    // This server is URL-backed: a SyntaxError here is a body that was not
+    // JSON-RPC, and the stdout/stderr advice would be nonsense for it.
+    clientTransport?.onerror?.(new SyntaxError('Unexpected token \'g\', "garbage: token=abc" is not valid JSON'));
+    const parse = warnings.filter((message) => message.includes('transport error')).at(-1) ?? '';
+    assert.match(parse, /answered with a body that is not valid JSON-RPC/);
+    assert.equal(parse.includes('garbage'), false);
+
+    // A round trip that completes clears the remembered error, so the
+    // close that follows is reported as what it is: a bare closure.
+    assert.equal(await target.get('mcp.linear.get_issue')!.execute({ id: '7' }, sessionFor('ava')), 'issue 7');
+    const pending = target.get('mcp.linear.get_issue')!.execute({ id: '8' }, sessionFor('ava'));
+    await handle.closeCurrent();
+    await assert.rejects(pending, (error: Error) => {
+      assert.equal(error.message, 'MCP error -32000: Connection closed');
+      return true;
+    });
+    assert.equal(warnings.some((message) => message.includes(payload.slice(0, 40))), false);
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('every line the plugin logs is bounded, whatever a server named its tool', async () => {
+  // MCP puts no length on a tool name, and the daemon log rotates at 8 MB;
+  // the "connected" and "added" lines carry the name, so the bound is on
+  // the line, not on any one thing composed into it.
+  // A raw Server, because McpServer's registerTool validates names and a
+  // remote server's tools/list is under no such obligation.
+  // The name reaches a line when it is discovered on a reconnect, so the
+  // server advertises nothing on its first dial and the long name on its
+  // second.
+  const longName = 'x'.repeat(20_000);
+  let dials = 0;
+  let serverSide: Transport | undefined;
+  const transportFor = async (): Promise<Transport> => {
+    dials += 1;
+    const advertised = dials === 1 ? [] : [{ name: longName, inputSchema: { type: 'object' as const } }];
+    const server = new Server({ name: 'verbose', version: '1.0.0' }, { capabilities: { tools: {} } });
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: advertised }));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    serverSide = serverTransport;
+    await server.connect(serverTransport);
+    return clientTransport;
+  };
+  const lines: string[] = [];
+  let connections = 0;
+  let signalReconnected = () => {};
+  const reconnected = new Promise<void>((resolve) => {
+    signalReconnected = resolve;
+  });
+  const plugin = createMcpPlugin(
+    { servers: { verbose: { url: 'http://127.0.0.1:9/unused' } } },
+    {
+      transportFor,
+      log: (message) => lines.push(message),
+      warn: (message) => lines.push(message),
+      reconnectDelayMs: () => 1,
+      onConnected: () => {
+        connections += 1;
+        if (connections === 2) {
+          signalReconnected();
+        }
+      },
+    },
+  );
+  await loadThroughView(plugin, new ToolRegistry());
+  const keepAlive = setInterval(() => {}, 50);
+  try {
+    await serverSide?.close();
+    await reconnected;
+    assert.ok(lines.some((line) => line.includes('xxxx')), 'the name reached a log line');
+    for (const line of lines) {
+      assert.ok(line.length <= 1001, `${line.length} chars`);
+    }
+  } finally {
+    clearInterval(keepAlive);
+    await plugin.dispose?.();
+  }
+});
+
+test('a transport error the SDK keeps the connection through is never blamed for a later close', async () => {
+  // A stdin EPIPE, like a schema miss or a stray line, is reported and
+  // then read past; with nothing valid arriving afterwards, a server that
+  // dies during the next call is still reported as exactly that.
+  let clientTransport: Transport | undefined;
+  const handle = fakeServer({
+    current: (server) => {
+      linearTools(server);
+      server.registerTool('die', { description: 'Exit mid-call.' }, async () => {
+        await handle.closeCurrent();
+        return { content: [{ type: 'text', text: 'never delivered' }] };
+      });
+    },
+  });
+  const target = new ToolRegistry();
+  const plugin = createMcpPlugin(
+    { servers: { linear: { command: process.execPath } } },
+    {
+      transportFor: async () => {
+        clientTransport = await handle.transportFor();
+        return clientTransport;
+      },
+      warn: () => {},
+      log: () => {},
+      reconnectDelayMs: () => 3_600_000,
+    },
+  );
+  await loadThroughView(plugin, target);
+  try {
+    clientTransport?.onerror?.(new Error('write EPIPE'));
+    await assert.rejects(
+      target.get('mcp.linear.die')!.execute({}, sessionFor('ava')),
+      (error: Error) => {
+        assert.equal(error.message, 'MCP error -32000: Connection closed');
+        return true;
+      },
+    );
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('a stdio server’s parse error names its stdout, and every error the log gets is bounded', async () => {
+  // The same SyntaxError from a stdio server is stray logging on stdout.
+  let stdioTransport: Transport | undefined;
+  const stdioHandle = fakeServer({
+    current: (server) => {
+      linearTools(server);
+      server.registerTool('die', { description: 'Exit mid-call.' }, async () => {
+        await stdioHandle.closeCurrent();
+        return { content: [{ type: 'text', text: 'never delivered' }] };
+      });
+    },
+  });
+  const stdioWarnings: string[] = [];
+  const stdioPlugin = createMcpPlugin(
+    { servers: { linear: { command: process.execPath } } },
+    {
+      transportFor: async () => {
+        stdioTransport = await stdioHandle.transportFor();
+        return stdioTransport;
+      },
+      warn: (message) => stdioWarnings.push(message),
+      log: () => {},
+      reconnectDelayMs: () => 3_600_000,
+    },
+  );
+  const target = new ToolRegistry();
+  await loadThroughView(stdioPlugin, target);
+  try {
+    stdioTransport?.onerror?.(new SyntaxError('Unexpected token \'g\', "garbage" is not valid JSON'));
+    const parse = stdioWarnings.find((message) => message.includes('transport error')) ?? '';
+    assert.match(parse, /wrote a line to stdout that is not JSON-RPC/);
+    assert.equal(parse.includes('garbage'), false);
+
+    // The SDK skips the line and keeps the connection, so the stray line
+    // is never what a later close was about: with nothing valid arriving
+    // in between, a server that dies during the next call is reported as
+    // exactly that.
+    await assert.rejects(
+      target.get('mcp.linear.die')!.execute({}, sessionFor('ava')),
+      (error: Error) => {
+        assert.equal(error.message, 'MCP error -32000: Connection closed');
+        return true;
+      },
+    );
+  } finally {
+    await stdioPlugin.dispose?.();
+  }
+
+  // The SDK quotes a failed POST's whole response body in the error; the
+  // reconnect and the unreachable-at-startup paths forward errors to the
+  // same log, so they are bounded too.
+  const body = 'Streamable HTTP error: Error POSTing to endpoint: ' + '<html>'.repeat(2000);
+  let dials = 0;
+  let signalReconnectFailed = () => {};
+  const reconnectFailed = new Promise<void>((resolve) => {
+    signalReconnectFailed = resolve;
+  });
+  const handle = fakeServer({ current: linearTools });
+  const warnings: string[] = [];
+  const plugin = pluginFor(handle, {}, {
+    reconnectDelayMs: () => 1,
+    transportFor: async () => {
+      dials += 1;
+      if (dials > 1) {
+        throw new Error(body);
+      }
+      return handle.transportFor();
+    },
+    warn: (message) => {
+      warnings.push(message);
+      if (message.includes('reconnect failed')) {
+        signalReconnectFailed();
+      }
+    },
+  });
+  await loadThroughView(plugin, new ToolRegistry());
+  const keepAlive = setInterval(() => {}, 50);
+  try {
+    await handle.closeCurrent();
+    await reconnectFailed;
+    const line = warnings.find((message) => message.includes('reconnect failed')) ?? '';
+    assert.ok(line.length < 400, `${line.length} chars`);
+    assert.ok(line.endsWith('…'));
+  } finally {
+    clearInterval(keepAlive);
+    await plugin.dispose?.();
+  }
+
+  const unreachableWarnings: string[] = [];
+  const unreachable = pluginFor(handle, {}, {
+    reconnectDelayMs: () => 3_600_000,
+    transportFor: async () => {
+      throw new Error(body);
+    },
+    warn: (message) => unreachableWarnings.push(message),
+  });
+  await loadThroughView(unreachable, new ToolRegistry());
+  try {
+    const line = unreachableWarnings.find((message) => message.includes('is unreachable')) ?? '';
+    assert.ok(line.length > 0 && line.length < 600, `${line.length} chars`);
+  } finally {
+    await unreachable.dispose?.();
   }
 });
 

@@ -55,6 +55,58 @@ stratusd  running
   at login  yes
 ```
 
+## What needs a restart, and what does not
+
+The question every operator asks on their second day:
+
+| Changing | Restart? | How it takes effect |
+| --- | --- | --- |
+| A soul's contents | No | Re-read before every turn |
+| A soul file added or deleted | No | `POST /roster/reload` — `POST /agents` and `PUT /agents/:id` perform it themselves |
+| A skill installed, edited, or removed | No | `stratus skill add` reloads the daemon it finds; `stratus skill reload` after a hand edit. See [Skills](./skills.md#installing-while-the-daemon-runs) |
+| Tools from an MCP server that reconnects | No | Discovered on reconnect |
+| A plugin enabled, disabled, upgraded, or reconfigured | **Yes** | `stratus restart` |
+| Credentials, or the `api` and `approvals` blocks | **Yes** | `stratus restart` — they come from a trusted config and decide who may approve and what the daemon binds, so they are not re-read live |
+| The `stratus` package itself | **Yes** | `stratus update`, which stops and starts the service around the upgrade |
+
+### `stratus restart`: announced, drained, and back
+
+A plugin is code, and code gets a restart — but an announced one rather
+than a surprise, and one that costs the fleet as little as it can.
+`stratus restart` (or `POST /restart`) asks the running daemon to:
+
+1. **Refuse new turns**, at once. A message arriving during the drain is
+   answered with "stratusd is restarting and will accept new work once it
+   is back up" rather than dropped.
+2. **Let in-flight turns finish**, for up to the drain window —
+   `--drain-timeout <seconds>`, default 30. A turn still running when the
+   window closes is aborted the way the watchdog aborts one: its session is
+   saved as failed with `Run aborted: stratusd is restarting`, so the next
+   daemon finds a finished turn, not an abandoned one. A call parked on a
+   human is denied as cancelled, exactly as a stop denies it.
+3. **Stop, then start again.** The process that received the restart drains,
+   closes its store, lets go of the [home claim](#one-daemon-per-home), and
+   then starts a fresh daemon as a child and waits for it. It stays, rather
+   than exiting: under systemd and launchd the process
+   the manager started *is* the service, and its exit would end the job —
+   so staying is what lets the same path hold under the service manager,
+   in the foreground, and under `--no-login`, where a clean exit is never
+   brought back. `stratus service stop`, Ctrl+C, and SIGTERM still reach
+   the daemon through it. The cost is one idle Node process for the rest of
+   the run. A daemon that asked for any free port (`--api-port 0`) comes
+   back on the port it had, so a dashboard page reconnects to it.
+
+What comes back is what a stop-and-start brings back: durable sessions,
+schedules with their catch-up sweep, and channels reconnected. The
+announcement is written to `stratus logs` before the drain begins — the last
+point that process is certain to reach the structured log; a fresh daemon
+that fails before it serves reports to stderr only, as [Logs](./logs.md)
+explains.
+
+Refusing new turns first makes the drain's known gap smaller, not closed: a
+turn finishing after the drain's snapshot can still start work the snapshot
+never saw.
+
 ## Login, not power-on
 
 **One limit worth knowing before you rely on it.** A LaunchAgent starts at

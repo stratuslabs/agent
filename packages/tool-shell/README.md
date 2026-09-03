@@ -66,8 +66,8 @@ read would not have said so.
 | `passEnv` | `PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ` | Names forwarded from the daemon's environment. Nothing on the default list is a secret; that is the test for adding one. |
 | `env` | none | Variables set outright. Where a token goes if a command genuinely needs one — deliberately, in config, where an auditor can see it. |
 | `cwd` | the agent's workspace | Where commands start. The default — `~/.stratus/workspaces/<agent-id>` — is created on first use; a directory you name is not, and a missing one is reported by name rather than as a spawn failure. |
-| `timeoutMs` | `60000` | Killed with its whole process group after this. |
-| `maxOutputBytes` | `100000` | Per stream, then a truncation marker. |
+| `timeoutMs` | `60000` | Killed with its whole process group after this. A process the command left in its own session (`setsid`, a daemon that detaches itself) survives, but no longer holds the call open — see [the guide](https://github.com/stratuslabs/agent/blob/main/docs/guides/shell.md#timeouts-and-background-processes). |
+| `maxOutputBytes` | `100000` | Per stream, then a truncation marker. Enforced as the output is read, so a command that floods stdout is never held whole in the daemon's memory. |
 | `shell` | `/bin/sh` | The interpreter. |
 
 All of them can be set per agent under `agents`.

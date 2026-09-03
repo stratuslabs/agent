@@ -25,6 +25,9 @@ export type { EventEnvelope, EventFilter } from './events.ts';
 export const CONTROL_API_VERSION = '0.10.0';
 
 /** The default port `stratusd` serves its API on. Loopback only. */
+/** How long stop() lets an answer already being written finish before it closes the socket anyway. */
+const IN_FLIGHT_RESPONSE_GRACE_MS = 2_000;
+
 export const DEFAULT_CONTROL_API_PORT = 4123;
 export const DEFAULT_CONTROL_API_HOST = '127.0.0.1';
 
@@ -133,6 +136,9 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
   const sameOriginHost = (request: IncomingMessage): string | undefined => request.headers.host;
   let startedAt = Date.now();
   let ui: DashboardAssets | undefined;
+  const inflightResponses = new Set<ServerResponse>();
+  /** Set while stop() waits for the last in-flight answer to finish. */
+  let responsesIdle: (() => void) | undefined;
 
   const handleApiRequest = async (
     gateway: Gateway,
@@ -337,6 +343,18 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       wss = new WebSocketServer({ noServer: true });
 
       server = createServer((request, response) => {
+        // Tracked so stop() can let an answer already being written reach
+        // its client before the sockets go — the 202 for the restart that
+        // is stopping this server, above all.
+        inflightResponses.add(response);
+        const settled = (): void => {
+          inflightResponses.delete(response);
+          if (inflightResponses.size === 0) {
+            responsesIdle?.();
+          }
+        };
+        response.once('finish', settled);
+        response.once('close', settled);
         void handleRequest(gateway, request, response).catch((error: unknown) => {
           if (!response.headersSent) {
             sendError(response, error);
@@ -391,6 +409,21 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       const closing = server;
       server = undefined;
       if (closing) {
+        // Answers in flight first, bounded: every handler here answers in
+        // milliseconds, and one that did not must not hold the drain.
+        // `closeAllConnections` below would otherwise cut a response the
+        // handler has already committed to — a "socket hang up" for the
+        // caller whose request was the last thing this daemon did.
+        if (inflightResponses.size > 0) {
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, IN_FLIGHT_RESPONSE_GRACE_MS);
+            responsesIdle = () => {
+              clearTimeout(timer);
+              resolve();
+            };
+          });
+          responsesIdle = undefined;
+        }
         await new Promise<void>((resolve) => {
           closing.close(() => resolve());
           closing.closeAllConnections?.();

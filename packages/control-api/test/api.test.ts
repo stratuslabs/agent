@@ -1933,6 +1933,85 @@ test('metadata carrying a key the daemon reserves is refused where the caller ca
   }
 });
 
+test('reloading skills serves a skill installed behind the daemon\'s back, and refuses a broken one whole', async () => {
+  const home = await newHome();
+  const harness = await startApi({ home });
+  try {
+    const skillsDir = path.join(home, '.stratus', 'skills');
+    await mkdir(path.join(skillsDir, 'triage'), { recursive: true });
+    await writeFile(path.join(skillsDir, 'triage', 'SKILL.md'), '---\nname: Triage\ndescription: Use when sorting issues.\n---\n\n# Triage\n');
+
+    const reloaded = await harness.call('/api/v1/skills/reload', { method: 'POST' });
+    assert.equal(reloaded.status, 200);
+    const { skills } = await json<{ skills: Array<{ id: string; path: string }> }>(reloaded);
+    assert.deepEqual(skills.map((skill) => skill.id), ['triage']);
+    // The same listing the catalog serves, so a surface can swap one for
+    // the other without a second fetch.
+    const catalog = await json<{ skills: Array<{ id: string }> }>(await harness.call('/api/v1/catalog/tools'));
+    assert.deepEqual(catalog.skills.map((skill) => skill.id), ['triage']);
+
+    // A file that will not load names itself and changes nothing — and it
+    // is not the daemon that is broken, so not a 500.
+    await mkdir(path.join(skillsDir, 'broken'), { recursive: true });
+    await writeFile(path.join(skillsDir, 'broken', 'SKILL.md'), '---\nname: Broken\n---\n\nNo description.\n');
+    const refused = await harness.call('/api/v1/skills/reload', { method: 'POST' });
+    assert.equal(refused.status, 422);
+    const { error } = await json<{ error: { code: string; message: string } }>(refused);
+    assert.equal(error.code, 'skills_reload_refused');
+    assert.ok(error.message.includes(path.join(skillsDir, 'broken', 'SKILL.md')), error.message);
+    assert.deepEqual(harness.gateway.skills().map((skill) => skill.id), ['triage']);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('an announced restart is accepted, refuses the next message, and reaches the host', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  let handOff!: (outcome: { drained: boolean; reason?: string }) => void;
+  const restarted = new Promise<{ drained: boolean; reason?: string }>((resolve) => { handOff = resolve; });
+  const harness = await startApi({ home, gateway: { onRestart: (outcome) => handOff(outcome) } });
+  try {
+    const invalid = await harness.call('/api/v1/restart', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ drainTimeoutMs: 'soon' }),
+    });
+    assert.equal(invalid.status, 400);
+
+    const accepted = await harness.call('/api/v1/restart', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: 'plugin enabled', drainTimeoutMs: 5000 }),
+    });
+    assert.equal(accepted.status, 202);
+    assert.deepEqual(await json(accepted), { restarting: true, reason: 'plugin enabled', drainTimeoutMs: 5000, inflight: 0 });
+
+    // Refused from the announcement on, whichever surface asks.
+    await assert.rejects(
+      harness.gateway.dispatch({ sessionId: 's-late', agentId: 'ava', userMessage: 'hello' }),
+      /restarting/,
+    );
+    assert.deepEqual(await restarted, { reason: 'plugin enabled', drained: true });
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('a daemon whose host cannot restart it says so as 501, not as a failure', async () => {
+  const harness = await startApi();
+  try {
+    const response = await harness.call('/api/v1/restart', { method: 'POST' });
+    assert.equal(response.status, 501);
+    const { error } = await json<{ error: { code: string } }>(response);
+    assert.equal(error.code, 'restart_unsupported');
+    // Still serving: a refused restart is not a stop.
+    assert.equal((await harness.call('/api/v1/health')).status, 200);
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('the API is a required channel, and a port it cannot bind is named with what to do', async () => {
   // Something else on the port — another stratusd on this home, in the
   // case this exists for. The gateway used to log the bind failure and

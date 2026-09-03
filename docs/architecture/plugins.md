@@ -61,7 +61,9 @@ export interface Plugin {
 }
 ```
 
-`PluginContext` is `{ bus, tools }` — that is the whole of it, and
+`PluginContext` is `{ bus, tools }` plus an optional `log` / `warn` pair —
+the host's log, which in the daemon is the structured file `stratus logs`
+reads; a host that omits them leaves a plugin to its own stderr — and
 `AgentRunner.initialize` calls `plugins.loadAll({ bus, tools })` with nothing
 else. **So four of the seven kinds have an interface but no registration path.**
 An implementation of `ChannelAdapter` exists (`@stratusagent/channel-slack`),

@@ -112,6 +112,13 @@ export const isFirstPartyPackage = (packageName: string): boolean =>
 export interface PluginSkillRecord {
   /** The qualified id (`stratus-plugin-github:pr-review`) — the canonical form. */
   id: string;
+  /**
+   * The id the manifest declared, which the skill also answers to while no
+   * one else claims it. Kept so a host rebuilding its catalog — a live
+   * skills reload — can re-run the alias rules rather than re-derive the
+   * bare form from the qualified one.
+   */
+  bareId: string;
   name: string;
   description: string;
   /** The package whose skill this is — provenance, same as tools. */
@@ -172,6 +179,9 @@ export interface LoadPluginsOptions {
   workspaceRoot?: string;
   /** Overrides the trusted set. See `isFirstPartyPackage`. */
   trusted?: (packageName: string) => boolean;
+  /** Handed to every plugin's `setup` as `PluginContext.log` / `.warn`. */
+  log?: (message: string) => void;
+  warn?: (message: string) => void;
 }
 
 export interface LoadPluginsResult {
@@ -257,6 +267,7 @@ const stageManifestSkills = async (
       skill: createLazySkill({ id: qualified, document, read: () => readFile(filePath, 'utf8') }),
       record: {
         id: qualified,
+        bareId: declaration.id,
         name: document.name ?? declaration.id,
         description: document.description,
         package: manifest.packageName,
@@ -336,7 +347,12 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
       instance = plugin;
 
       const view = new ManifestBoundToolRegistry({ manifest, target: options.tools, trusted: isTrusted, riskOverrides });
-      await plugin.setup({ bus: options.bus, tools: view });
+      await plugin.setup({
+        bus: options.bus,
+        tools: view,
+        ...(options.log !== undefined ? { log: options.log } : {}),
+        ...(options.warn !== undefined ? { warn: options.warn } : {}),
+      });
 
       // Everything that can refuse happens before anything commits, so a
       // plugin never lands half — tools registered, skills not. The

@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import type { Session, Tool } from '@stratusagent/core';
 import {
@@ -161,6 +164,51 @@ test('local command executor preserves utf-8 characters split across stdout chun
   assert.equal(output.stdout, '😀');
 });
 
+test('output past maxOutputBytes is dropped as it arrives, on a character boundary', async () => {
+  // 'é' is two bytes, so a 1001-byte cap lands inside one: the kept text is
+  // exactly 500 of them, no U+FFFD, and the flag says the rest was dropped.
+  const tool = defineLocalCommandTool({
+    name: 'flood',
+    createCommand() {
+      return {
+        command: process.execPath,
+        args: ['-e', 'process.stdout.write("é".repeat(3000)); process.stderr.write("short")'],
+        maxOutputBytes: 1001,
+      };
+    },
+  });
+
+  const executor = createLocalCommandExecutor();
+  const result = await executor.execute({ id: 'call-flood', toolName: 'flood', input: {} }, tool, session);
+
+  assert.equal(result.ok, true);
+  const output = result.output as Record<string, unknown>;
+  assert.equal(output.stdout, 'é'.repeat(500));
+  assert.equal(output.stdoutTruncated, true);
+  assert.equal(output.stderr, 'short');
+  assert.equal(output.stderrTruncated, false);
+});
+
+test('the executor’s own cap applies when the invocation sets none', async () => {
+  const tool = defineLocalCommandTool({
+    name: 'flood.default',
+    createCommand() {
+      return {
+        command: process.execPath,
+        args: ['-e', 'process.stdout.write("x".repeat(5000))'],
+      };
+    },
+  });
+
+  const executor = createLocalCommandExecutor({ maxOutputBytes: 1000 });
+  const result = await executor.execute({ id: 'call-flood-default', toolName: 'flood.default', input: {} }, tool, session);
+
+  assert.equal(result.ok, true);
+  const output = result.output as Record<string, unknown>;
+  assert.equal(output.stdout, 'x'.repeat(1000));
+  assert.equal(output.stdoutTruncated, true);
+});
+
 test('local command executor kills the child when the turn aborts', async () => {
   const tool = defineLocalCommandTool({
     name: 'sleepy',
@@ -223,6 +271,59 @@ test('cancellation kills the whole process tree, not just the direct child', asy
   // The wait ended because the grandchild died with the group — well
   // before its own 5s timer.
   assert.ok(Date.now() - startedAt < 4000);
+});
+
+test('a timeout settles even when an escaped grandchild still holds the output pipe', async () => {
+  // The grandchild starts `detached` — its own session, outside the group
+  // the timeout kills — with the command's stdout inherited, and outlives
+  // both the timeout and the test's patience. Before the fix, the call
+  // waited for it to exit on its own. It then writes to that inherited
+  // stdout and records how that went: a read end destroyed under it would
+  // make the write fail with EPIPE (SIGPIPE, for a process that has not
+  // ignored it), and the survivor is meant to survive.
+  //
+  // Wall-clock by necessity, so the margins are wide: the timeout is ten
+  // times a node startup, the survivor's write lands five timeouts later,
+  // and the call must settle well before that write.
+  const marker = path.join(await mkdtemp(path.join(os.tmpdir(), 'stratus-executor-')), 'late-write');
+  const grandchild = `
+    setTimeout(() => {
+      process.stdout.write('late\\n', (error) => {
+        require('node:fs').writeFileSync(${JSON.stringify(marker)}, error ? 'failed: ' + error.code : 'written');
+      });
+    }, 2500);
+  `;
+  const script = `
+    const { spawn } = require('node:child_process');
+    spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { detached: true, stdio: ['ignore', 'inherit', 'ignore'] }).unref();
+    setTimeout(() => {}, 5000);
+  `;
+  const tool = defineLocalCommandTool({
+    name: 'escapee',
+    createCommand() {
+      return { command: process.execPath, args: ['-e', script], timeoutMs: 500 };
+    },
+  });
+
+  const executor = createLocalCommandExecutor();
+  const startedAt = Date.now();
+  const result = await executor.execute({ id: 'call-escapee', toolName: 'escapee', input: {} }, tool, session);
+
+  assert.equal(result.ok, false);
+  const output = result.output as Record<string, unknown>;
+  assert.equal(output.timedOut, true);
+  // Settled with the timeout, not with the grandchild's lifetime.
+  assert.ok(Date.now() - startedAt < 2000, `took ${Date.now() - startedAt}ms`);
+
+  // The gate is the marker the survivor writes after the call has settled;
+  // the loop is bounded so a survivor that died instead fails the test
+  // rather than hanging it.
+  let outcome = '';
+  for (let attempt = 0; attempt < 200 && outcome === ''; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    outcome = await readFile(marker, 'utf8').catch(() => '');
+  }
+  assert.equal(outcome, 'written');
 });
 
 test('cancellation settles the turn even when createCommand never resolves', async () => {

@@ -79,6 +79,41 @@ stratus skill validate ./my-skill
 stratus skill validate code-review
 ```
 
+## Installing while the daemon runs
+
+A skill takes effect **without a restart**, and without dropping a single
+channel connection. Once the copy is done, `stratus skill add` tells the
+running daemon to re-read `~/.stratus/skills/` — the daemon it finds through
+`~/.stratus/gateway.json`; `--no-reload` skips this, and a machine with no
+daemon running sees nothing about one — and an allowlisted agent reads the
+new skill on its next turn. For a skill you edited or removed by hand:
+
+```bash
+stratus skill reload         # or: POST /skills/reload on the control API
+```
+
+Two rules keep a reload honest:
+
+- **A reload swaps the whole set or nothing.** A skill that will not load —
+  a `SKILL.md` with no description, a directory whose name is not an id —
+  fails the reload with the file named, and the daemon keeps serving the
+  set it had. Half a catalog is worse than a stale one; fix the file and
+  reload again. (At start there is no previous set to keep, so a broken
+  skill is a warning there and the rest still load.)
+- **Loaded is not enabled.** A reloaded skill reaches only the agents whose
+  souls list it, exactly as at start. A removed skill stops being loadable,
+  and an agent whose soul still lists it fails a read the way it would for
+  any missing skill.
+
+A reload produces what a restart would: an operator skill still outranks a
+plugin's bare alias for the same id, and a bare id two plugins both want
+stays contested. Reloading with nothing changed is a no-op, and a reload
+during a turn that is reading a skill does not fail that turn.
+
+Plugins are the other half. A plugin is code, and code gets a restart — an
+announced one, `stratus restart`. See
+[what needs a restart, and what does not](./always-on.md#what-needs-a-restart-and-what-does-not).
+
 ## Enabling skills
 
 **Installed is not enabled.** A skill is markdown, but it is markdown your

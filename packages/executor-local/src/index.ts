@@ -53,6 +53,13 @@ export interface LocalCommandInvocation {
   stdin?: string;
   shell?: boolean;
   timeoutMs?: number;
+  /**
+   * How much of each stream is kept, in bytes. Output past it is read and
+   * dropped — read, so the child never blocks on a full pipe — and the
+   * execution says so in `stdoutTruncated` / `stderrTruncated`. Omitted,
+   * the executor's own cap applies.
+   */
+  maxOutputBytes?: number;
 }
 
 export interface LocalCommandExecution {
@@ -61,6 +68,10 @@ export interface LocalCommandExecution {
   cwd?: string;
   stdout: string;
   stderr: string;
+  /** True when stdout hit `maxOutputBytes` and the rest was dropped. */
+  stdoutTruncated: boolean;
+  /** True when stderr hit `maxOutputBytes` and the rest was dropped. */
+  stderrTruncated: boolean;
   exitCode: number;
   timedOut: boolean;
   /** True when the turn's abort signal killed the child before completion. */
@@ -103,10 +114,21 @@ export interface LocalCommandExecutorOptions {
   spawn?: LocalSpawn;
   defaultTimeoutMs?: number;
   maxTimeoutMs?: number;
+  /**
+   * Per-stream cap for invocations that set none of their own. Not a
+   * ceiling on theirs: a tool that asks for more gets it.
+   */
+  maxOutputBytes?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_TIMEOUT_MS = 300_000;
+// Per stream. Output is accumulated in the daemon's heap as it arrives, and
+// before this cap existed `head -c 300000000 /dev/zero | tr '\0' a` took a
+// daemon from 108 MB to 785 MB resident — and left it there — for a result
+// tool-shell then cut to 100 KB. Generous, because this is the floor for
+// every local-command tool, not a tool's own idea of a useful result.
+const DEFAULT_MAX_OUTPUT_BYTES = 10_000_000;
 
 export const defineLocalCommandTool = ({
   name,
@@ -139,12 +161,14 @@ export class LocalCommandExecutor implements Executor {
   private readonly spawn: LocalSpawn;
   private readonly defaultTimeoutMs: number;
   private readonly maxTimeoutMs: number;
+  private readonly maxOutputBytes: number;
 
   constructor(options: LocalCommandExecutorOptions = {}) {
     this.fallback = options.fallback ?? createDirectExecutor();
     this.spawn = options.spawn ?? nodeSpawn;
     this.defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxTimeoutMs = options.maxTimeoutMs ?? DEFAULT_MAX_TIMEOUT_MS;
+    this.maxOutputBytes = resolveMaxOutputBytes(options.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES);
   }
 
   async execute(call: ToolCall, tool: Tool, session: Session, context?: ExecutionContext): Promise<ToolResult> {
@@ -169,6 +193,7 @@ export class LocalCommandExecutor implements Executor {
       const execution = await runLocalCommand(invocation, {
         spawn: this.spawn,
         timeoutMs,
+        maxOutputBytes: resolveMaxOutputBytes(invocation.maxOutputBytes, this.maxOutputBytes),
         ...(context?.signal ? { signal: context.signal } : {}),
       });
 
@@ -260,18 +285,55 @@ const resolveTimeoutMs = (
   return Math.min(candidate, maxTimeoutMs);
 };
 
+const resolveMaxOutputBytes = (requested: number | undefined, fallback: number): number =>
+  requested !== undefined && Number.isFinite(requested) && requested > 0 ? Math.floor(requested) : fallback;
+
+/**
+ * Collects one stream up to `maxBytes`, decoding as it goes so a multibyte
+ * character split across chunks still comes out whole. Past the cap, chunks
+ * are consumed and dropped rather than left in the pipe: an unread pipe
+ * fills and blocks the writer, and a command stalled on its own output is
+ * indistinguishable from a hang until the timeout kills it.
+ */
+const createOutputSink = (maxBytes: number): { write: (chunk: Buffer) => void; end: () => string; truncated: () => boolean } => {
+  const decoder = new StringDecoder('utf8');
+  let text = '';
+  let bytes = 0;
+  let truncated = false;
+  return {
+    write: (chunk) => {
+      const room = maxBytes - bytes;
+      if (room <= 0) {
+        truncated = true;
+        return;
+      }
+      if (chunk.length > room) {
+        text += decoder.write(chunk.subarray(0, room));
+        bytes = maxBytes;
+        truncated = true;
+        return;
+      }
+      text += decoder.write(chunk);
+      bytes += chunk.length;
+    },
+    // A cut can land inside a multibyte character; the decoder is holding
+    // its first bytes, and flushing them would end the text with U+FFFD.
+    // Dropped output ends on a character boundary instead.
+    end: () => text + (truncated ? '' : decoder.end()),
+    truncated: () => truncated,
+  };
+};
+
 const runLocalCommand = async (
   invocation: LocalCommandInvocation,
-  options: { spawn: LocalSpawn; timeoutMs: number; signal?: AbortSignal },
+  options: { spawn: LocalSpawn; timeoutMs: number; maxOutputBytes: number; signal?: AbortSignal },
 ): Promise<LocalCommandExecution> => {
   const startedAt = Date.now();
   const args = invocation.args ?? [];
-  let stdout = '';
-  let stderr = '';
   let timedOut = false;
   let aborted = false;
-  const stdoutDecoder = new StringDecoder('utf8');
-  const stderrDecoder = new StringDecoder('utf8');
+  const stdout = createOutputSink(options.maxOutputBytes);
+  const stderr = createOutputSink(options.maxOutputBytes);
 
   const child = options.spawn(invocation.command, args, {
     cwd: invocation.cwd,
@@ -300,12 +362,60 @@ const runLocalCommand = async (
     child.kill('SIGKILL');
   };
 
-  child.stdout.on('data', (chunk) => {
-    stdout += stdoutDecoder.write(chunk);
+  // A kill reaches the process group, not the pipes. A grandchild that
+  // moved to its own session — `setsid`, a daemonizing server, anything
+  // `nohup … &` starts under a shell that then exits — inherited the
+  // command's stdout and keeps it open after everything in the group is
+  // dead, and `'close'` waits for every stdio stream: a 2s timeout on
+  // `setsid sleep 60 &` settled after 61s, when the escapee happened to
+  // exit. So once the tree has been killed, the call settles on the
+  // child's exit instead, and whatever the survivor writes afterwards is
+  // read and dropped. Read, not cut off: destroying the read end would
+  // hand the survivor SIGPIPE on its next write, and the point of leaving
+  // it alive is that it stays alive. The handles are unref'd so an
+  // escapee's pipe cannot hold a one-shot CLI run open either.
+  let released = false;
+  const releaseStdio = (): void => {
+    released = true;
+    unrefStream(child.stdout);
+    unrefStream(child.stderr);
+    settleOnExit();
+  };
+
+  child.stdout.on('data', (chunk: Buffer) => {
+    if (!released) {
+      stdout.write(chunk);
+    }
   });
 
-  child.stderr.on('data', (chunk) => {
-    stderr += stderrDecoder.write(chunk);
+  child.stderr.on('data', (chunk: Buffer) => {
+    if (!released) {
+      stderr.write(chunk);
+    }
+  });
+
+  let settle: (code: number) => void = () => {};
+  let fail: (error: Error) => void = () => {};
+  const settled = new Promise<number>((resolve, reject) => {
+    settle = resolve;
+    fail = reject;
+  });
+  let exitCode: number | undefined;
+  // The exit may already have happened when the timeout fires — a command
+  // that finished, leaving a survivor on its pipe, looks exactly like one
+  // still running until then.
+  const settleOnExit = (): void => {
+    if (released && exitCode !== undefined) {
+      settle(exitCode);
+    }
+  };
+  child.once('error', fail);
+  child.once('exit', (code) => {
+    exitCode = code ?? -1;
+    settleOnExit();
+  });
+  child.once('close', (code) => {
+    settle(code ?? -1);
   });
 
   if (typeof invocation.stdin === 'string') {
@@ -317,6 +427,7 @@ const runLocalCommand = async (
   const timer = setTimeout(() => {
     timedOut = true;
     killTree();
+    releaseStdio();
   }, options.timeoutMs);
   timer.unref();
 
@@ -325,6 +436,7 @@ const runLocalCommand = async (
   const onAbort = (): void => {
     aborted = true;
     killTree();
+    releaseStdio();
   };
   if (options.signal?.aborted) {
     onAbort();
@@ -333,16 +445,16 @@ const runLocalCommand = async (
   }
 
   try {
-    const exitCode = await waitForChild(child);
-    stdout += stdoutDecoder.end();
-    stderr += stderrDecoder.end();
+    const exitCode = await settled;
 
     return {
       command: invocation.command,
       args: [...args],
       ...(invocation.cwd ? { cwd: invocation.cwd } : {}),
-      stdout,
-      stderr,
+      stdout: stdout.end(),
+      stderr: stderr.end(),
+      stdoutTruncated: stdout.truncated(),
+      stderrTruncated: stderr.truncated(),
       exitCode,
       timedOut,
       aborted,
@@ -354,13 +466,13 @@ const runLocalCommand = async (
   }
 };
 
-const waitForChild = async (child: ChildProcessWithoutNullStreams): Promise<number> => {
-  return new Promise<number>((resolve, reject) => {
-    child.once('error', reject);
-    child.once('close', (code) => {
-      resolve(code ?? -1);
-    });
-  });
+// The stdio streams are typed as bare Readables, but a spawned child's are
+// sockets over pipes, and a socket can be unref'd.
+const unrefStream = (stream: NodeJS.ReadableStream): void => {
+  const candidate = stream as { unref?: () => void };
+  if (typeof candidate.unref === 'function') {
+    candidate.unref();
+  }
 };
 
 const serializeExecution = (execution: LocalCommandExecution): JsonValue => ({
@@ -369,6 +481,8 @@ const serializeExecution = (execution: LocalCommandExecution): JsonValue => ({
   ...(execution.cwd ? { cwd: execution.cwd } : {}),
   stdout: execution.stdout,
   stderr: execution.stderr,
+  stdoutTruncated: execution.stdoutTruncated,
+  stderrTruncated: execution.stderrTruncated,
   exitCode: execution.exitCode,
   timedOut: execution.timedOut,
   aborted: execution.aborted,
