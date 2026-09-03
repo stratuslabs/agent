@@ -340,17 +340,46 @@ const describeError = (error: unknown): string => {
  * that was not JSON-RPC — and neither belongs in the daemon log or an
  * agent's error text.
  */
-const describeTransportError = (error: unknown, spec: McpServerSpec): string => {
+/**
+ * The limit a stdio reader overflow names, or undefined for any other
+ * error. Only a stdio server has the reader; an HTTP error quoting a body
+ * that happens to contain the phrase is a body, and is bounded like one.
+ * The digits are bounded too, so a match can never carry more than a
+ * number. This is the one transport error the SDK follows with a close of
+ * its own — see `ServerState.closeCause`.
+ */
+const stdioOverflowBytes = (error: unknown, spec: McpServerSpec): string | undefined => {
+  if (spec.command === undefined) {
+    return undefined;
+  }
   const message = error instanceof Error ? error.message : String(error);
-  // Only a stdio server has the reader this names; an HTTP error quoting a
-  // body that happens to contain the phrase is a body, and is bounded like
-  // one. The digits are bounded too, so a match can never carry more than
-  // a number.
-  const overflow = spec.command !== undefined
-    ? /^ReadBuffer exceeded maximum size of (\d{1,15}) bytes$/.exec(message)
-    : null;
-  if (overflow) {
-    return `the server sent a single message larger than the ${overflow[1]}-byte stdio limit, and the connection was closed. `
+  return /^ReadBuffer exceeded maximum size of (\d{1,15}) bytes$/.exec(message)?.[1];
+};
+
+/**
+ * A URL as the log may carry it: a token in the userinfo or a signed query
+ * is a credential, and the log is what people paste into issues.
+ */
+const redactUrl = (url: string): string => {
+  try {
+    const parsed = new URL(url);
+    if (parsed.username !== '' || parsed.password !== '') {
+      parsed.username = '***';
+      parsed.password = '';
+    }
+    for (const key of [...parsed.searchParams.keys()]) {
+      parsed.searchParams.set(key, '***');
+    }
+    return parsed.toString();
+  } catch {
+    return '<unparseable url>';
+  }
+};
+
+const describeTransportError = (error: unknown, spec: McpServerSpec): string => {
+  const overflow = stdioOverflowBytes(error, spec);
+  if (overflow !== undefined) {
+    return `the server sent a single message larger than the ${overflow}-byte stdio limit, and the connection was closed. `
       + 'A result that large has to come back smaller — paged, summarized, or written to a file.';
   }
   if (error instanceof SyntaxError) {
@@ -645,17 +674,17 @@ interface ServerState {
   connected: boolean;
   connecting: boolean;
   /**
-   * What the transport last reported on the live connection, kept so the
-   * call that then fails with a bare "Connection closed" can say why. An
-   * oversized reply is the case that found this: the SDK's stdio reader
-   * refuses a single message over its buffer limit and closes the
-   * connection, and without this the agent saw the closure, the log saw
-   * nothing, and every retry did it again. A nonfatal parse error is never
-   * kept, and any valid message that arrives afterwards — the handshake's,
-   * discovery's, a call's — clears what was: an error the connection
-   * outlived is not the reason it later closed.
+   * Why the live connection is closing, when the transport said so before
+   * it did — kept so the call that then fails with a bare "Connection
+   * closed" can say why. Exactly one error qualifies: the SDK's stdio
+   * reader refusing a single message over its buffer limit, which it
+   * follows with a close of its own. Every other transport error is logged
+   * and forgotten here, because the SDK keeps the connection through them
+   * — a stray line, a schema miss, a stdin EPIPE — and a server that dies
+   * during a later call must not be blamed on one. Being tied to a close
+   * the SDK has already started, nothing clears it but the next connect.
    */
-  lastTransportError: string | undefined;
+  closeCause: string | undefined;
   attempt: number;
   timer: NodeJS.Timeout | undefined;
   /** Registered name → what it bridges to. The live descriptor cache. */
@@ -684,7 +713,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
     pending: undefined,
     connected: false,
     connecting: false,
-    lastTransportError: undefined,
+    closeCause: undefined,
     attempt: 0,
     timer: undefined,
     tools: new Map(),
@@ -735,9 +764,9 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         // "Connection closed" is all the SDK says about a request the
         // transport died under. When the transport said why, say so here,
         // where the agent reads it.
-        if (isConnectionFailure(error) && state.lastTransportError !== undefined) {
+        if (isConnectionFailure(error) && state.closeCause !== undefined) {
           throw new Error(
-            `${error instanceof Error ? error.message : String(error)} — ${state.lastTransportError}`,
+            `${error instanceof Error ? error.message : String(error)} — ${state.closeCause}`,
           );
         }
         throw error;
@@ -929,7 +958,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
       // so dispose() can cut a handshake short instead of waiting for
       // these awaits to notice `disposed` on their own.
       state.pending = transport;
-      state.lastTransportError = undefined;
+      state.closeCause = undefined;
       // The transport's errors otherwise go nowhere, and the one that
       // closes a stdio connection — a reply over the reader's buffer limit
       // — arrives here moments before the onclose that the tool call then
@@ -947,21 +976,9 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         }
         const described = describeTransportError(error, state.spec);
         warn(`mcp server ${state.spec.name} transport error: ${described}`);
-        // A parse error is nonfatal by the SDK's design — the reader skips
-        // the line and keeps the connection — so it is never what a later
-        // close was about, and remembering it would blame a server that
-        // died mid-call on a stray line it printed a minute earlier.
-        if (!(error instanceof SyntaxError)) {
-          state.lastTransportError = described;
+        if (stdioOverflowBytes(error, state.spec) !== undefined) {
+          state.closeCause = described;
         }
-      };
-      // A valid message after the error is proof the connection outlived
-      // it. On the message hook rather than on a completed call: a stray
-      // line during the handshake is followed by the initialize and
-      // tools/list replies, and clearing only on a call's success would
-      // still pin that line on a server that dies during its first one.
-      transport.onmessage = () => {
-        state.lastTransportError = undefined;
       };
       const client = new Client({ name: '@stratusagent/plugin-mcp', version: PLUGIN_MCP_VERSION });
       // A close that lands before this client is published cannot be
@@ -1039,7 +1056,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
           }
           warn(
             `mcp server ${state.spec.name} is unreachable — starting without its tools; they register when it comes back. `
-            + `Check ${state.spec.command !== undefined ? `the command (${state.spec.command})` : `the endpoint (${state.spec.url})`} `
+            + `Check ${state.spec.command !== undefined ? `the command (${state.spec.command})` : `the endpoint (${redactUrl(state.spec.url as string)})`} `
             + `under plugins["@stratusagent/plugin-mcp"].servers.${state.spec.name}. `
             + `(${describeError(error)})`,
           );

@@ -276,7 +276,9 @@ test('a server that is unreachable at startup leaves the rest serving, with an i
     {
       servers: {
         linear: { url: 'http://127.0.0.1:9/unused' },
-        flaky: { url: 'http://127.0.0.1:9/unused' },
+        // A credential in the endpoint must not reach the log through the
+        // hint that names the endpoint.
+        flaky: { url: 'http://svc:hunter2@127.0.0.1:9/unused?sig=secretsig' },
       },
     },
     {
@@ -301,6 +303,9 @@ test('a server that is unreachable at startup leaves the rest serving, with an i
     assert.ok(hint, 'the unreachable server was reported');
     assert.match(hint!, /servers\.flaky/);
     assert.match(hint!, /connection refused/);
+    assert.equal(hint!.includes('hunter2'), false, hint);
+    assert.equal(hint!.includes('secretsig'), false, hint);
+    assert.match(hint!, /the endpoint \(http:\/\/\*\*\*@127\.0\.0\.1:9\/unused\?sig=\*\*\*\)/);
   } finally {
     await plugin.dispose?.();
   }
@@ -418,6 +423,10 @@ test('a transport error is logged, and the call it killed says why instead of on
     current: (server) => {
       server.registerTool('big', { description: 'A reply too large to read.' }, async () => {
         clientTransport?.onerror?.(new Error('ReadBuffer exceeded maximum size of 10485760 bytes'));
+        // The SDK's close is asynchronous, and stdout it had already
+        // queued can still be delivered before the process is gone; a
+        // valid message here must not talk the cause out of the record.
+        await handle.sendRaw({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
         await handle.closeCurrent();
         return { content: [{ type: 'text', text: 'never delivered' }] };
       });
@@ -510,11 +519,10 @@ test('a protocol-level client error is neither logged nor blamed for a later clo
   }
 });
 
-test('a retained transport error is cleared by any valid message that follows it', async () => {
-  // A stdin EPIPE is kept (unlike a parse error, it is not nonfatal by
-  // design), and a notification arriving afterwards — as the handshake and
-  // discovery replies would for an error at startup — is proof the
-  // connection outlived it.
+test('a transport error the SDK keeps the connection through is never blamed for a later close', async () => {
+  // A stdin EPIPE, like a schema miss or a stray line, is reported and
+  // then read past; with nothing valid arriving afterwards, a server that
+  // dies during the next call is still reported as exactly that.
   let clientTransport: Transport | undefined;
   const handle = fakeServer({
     current: (server) => {
@@ -541,8 +549,6 @@ test('a retained transport error is cleared by any valid message that follows it
   await loadThroughView(plugin, target);
   try {
     clientTransport?.onerror?.(new Error('write EPIPE'));
-    await handle.sendRaw({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
-    await new Promise((resolve) => setImmediate(resolve));
     await assert.rejects(
       target.get('mcp.linear.die')!.execute({}, sessionFor('ava')),
       (error: Error) => {
