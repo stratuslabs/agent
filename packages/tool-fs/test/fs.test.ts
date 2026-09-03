@@ -305,6 +305,34 @@ test('a large file named outright is searched, and one a walk skips is named in 
   assert.match(skipped[0]!.reason, /over the 1 MB walk limit/);
 });
 
+test('a named file that is one enormous line is searched in bounded memory, and the result says where it stopped', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-line-'));
+  // 3 million characters, no newline: a needle inside the first million and
+  // another beyond it.
+  await writeFile(path.join(root, 'minified.js'), `${'a'.repeat(500_000)}early${'b'.repeat(1_500_000)}late${'c'.repeat(1_000_000)}`);
+  const tools = await registryFor({ roots: [root] });
+  const session = sessionFor('ava');
+
+  const early = await run(tools, 'fs.search', { query: 'early', path: 'minified.js' }, session) as JsonObject;
+  assert.equal((early.matches as unknown[]).length, 1);
+  assert.match(String((early.skipped as Array<{ reason: string }>)[0]?.reason), /longer than 1 million characters/);
+  const late = await run(tools, 'fs.search', { query: 'late', path: 'minified.js' }, session) as JsonObject;
+  assert.deepEqual(late.matches, [], 'past the first million characters of a line, nothing is searched');
+  assert.equal(late.skippedTotal, 1);
+});
+
+test('the skipped list is capped, and the count says how many there were', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-skipmany-'));
+  const big = 'x'.repeat(1_000_001);
+  for (let i = 0; i < 60; i += 1) {
+    await writeFile(path.join(root, `big-${i}.log`), big);
+  }
+  const tools = await registryFor({ roots: [root] });
+  const walked = await run(tools, 'fs.search', { query: 'needle' }, sessionFor('ava')) as JsonObject;
+  assert.equal((walked.skipped as unknown[]).length, 50);
+  assert.equal(walked.skippedTotal, 60);
+});
+
 test('a search pattern is literal text, so no query can stall the process', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-redos-'));
   await writeFile(path.join(root, 'notes.md'), `a(b)c ${'a'.repeat(4_000)}\n`);
