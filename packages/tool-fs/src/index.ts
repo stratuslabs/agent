@@ -1,5 +1,6 @@
 import { constants } from 'node:fs';
-import { mkdir, readdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, stat } from 'node:fs/promises';
+import { StringDecoder } from 'node:string_decoder';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -253,6 +254,209 @@ const matcherFor = (query: string, options: { caseSensitive?: boolean; wholeWord
   );
 };
 
+/**
+ * A text file a line at a time, or `undefined` once when it turns out to be
+ * binary — decided on every chunk as it streams, since a file that starts
+ * as text and turns binary later was read whole and judged whole before
+ * it was streamed. Streamed in chunks so a file named outright can be any
+ * size, and so can a line: a minified file or a base64 log is one line for
+ * megabytes, and a reader that accumulates a whole line before yielding it
+ * holds the whole file after all. A line past `MAX_LINE_CHARS` is yielded
+ * as its first `MAX_LINE_CHARS` characters and the rest is discarded to the
+ * next newline; the line says so through `clipped` — said there rather
+ * than inferred from its length, because a line of exactly
+ * `MAX_LINE_CHARS` was searched whole. Characters are Unicode code points,
+ * not UTF-16 code units: counted by `length`, a line of half a million
+ * emoji would have been clipped at a "million characters" it never
+ * reached, and the cut could land between the halves of a pair.
+ *
+ * Opened through `openContained`, like `fs.read`: the containment check
+ * captured the file's identity, and a name repointed between that check
+ * and this open is refused here rather than read. The size comes from the
+ * open descriptor for the same reason — a `stat` of the name afterwards is
+ * fresh evidence about whatever the name points at by then, which after a
+ * log rotation is a different file or none.
+ */
+const MAX_LINE_CHARS = 1_000_000;
+
+interface LineRead {
+  text: string;
+  clipped: boolean;
+  /**
+   * The code point that came right after a clip, kept so a match ending at
+   * the clip can be told from one ending at a real word boundary. Empty
+   * when the line was not clipped.
+   */
+  next: string;
+}
+
+interface OpenedLines {
+  /** The size of the file that was opened, in bytes. */
+  size: number;
+  lines: AsyncGenerator<LineRead | undefined>;
+  /**
+   * Set when the file reported no size and the read reached the cap that
+   * stands in for one — so the caller can say the search stopped there.
+   */
+  capped: boolean;
+}
+
+/**
+ * How much of a file that reports no size is read. A virtual file
+ * (`/proc/version`, a sysfs attribute) has content its size does not admit
+ * to, so it cannot be bounded by its size; a regular file that was empty
+ * when opened and is being appended to cannot be bounded by it either,
+ * and an unbounded read would run for as long as the writer stays ahead.
+ * The walk limit is the bound the tool already lives with.
+ */
+const MAX_UNSIZED_FILE_BYTES = DEFAULT_MAX_SEARCH_FILE_BYTES;
+
+const isHighSurrogate = (code: number): boolean => code >= 0xd800 && code <= 0xdbff;
+const isLowSurrogate = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff;
+
+/** Code points, not code units — only ever asked of text that might be over the limit. */
+const codePointLength = (text: string): number => {
+  let pairs = 0;
+  for (let index = 0; index < text.length - 1; index += 1) {
+    if (isHighSurrogate(text.charCodeAt(index)) && isLowSurrogate(text.charCodeAt(index + 1))) {
+      pairs += 1;
+      index += 1;
+    }
+  }
+  return text.length - pairs;
+};
+
+/** The first `count` code points of `text`, never ending inside a pair. */
+const firstCodePoints = (text: string, count: number): string => {
+  let units = 0;
+  for (let seen = 0; seen < count && units < text.length; seen += 1) {
+    units += isHighSurrogate(text.charCodeAt(units)) && units + 1 < text.length && isLowSurrogate(text.charCodeAt(units + 1)) ? 2 : 1;
+  }
+  return text.slice(0, units);
+};
+
+/**
+ * A line clipped to the limit when it is over it, in code points. `length`
+ * is a ceiling on code points, so a line within it in code units is within
+ * it and is not counted.
+ */
+const bounded = (text: string): LineRead => {
+  if (text.length <= MAX_LINE_CHARS || codePointLength(text) <= MAX_LINE_CHARS) {
+    return { text, clipped: false, next: '' };
+  }
+  const kept = firstCodePoints(text, MAX_LINE_CHARS);
+  return { text: kept, clipped: true, next: firstCodePoints(text.slice(kept.length), 1) };
+};
+
+/**
+ * Whether the query occurs inside the part of this line that was searched.
+ *
+ * A clipped line ends where the tool stopped reading, not where the file's
+ * line ends, and `\b` at that artificial end would call a word cut in half
+ * a whole word. The code point that came next is kept for exactly this: the
+ * match runs against it too, and counts only if it ends before it.
+ */
+const matchesWithin = (pattern: RegExp, line: LineRead): boolean => {
+  if (!line.clipped || line.next.length === 0) {
+    return pattern.test(line.text);
+  }
+  const found = pattern.exec(line.text + line.next);
+  return found !== null && found.index + found[0].length <= line.text.length;
+};
+
+const openLines = async (resolved: ResolvedPath): Promise<OpenedLines> => {
+  const handle = await openContained(resolved, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  try {
+    const { size } = await handle.stat();
+    const capped = { capped: false };
+    return { size, lines: linesOf(handle, size, capped), get capped() { return capped.capped; } };
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+};
+
+/** Owns `handle`: closes it when the lines run out, or when the caller stops early. */
+const linesOf = async function* (
+  handle: Awaited<ReturnType<typeof open>>,
+  size: number,
+  opened: { capped: boolean },
+): AsyncGenerator<LineRead | undefined> {
+  try {
+    const decoder = new StringDecoder('utf8');
+    let carry = '';
+    let discarding = false;
+    let discardedNext = '';
+    // Bounded to the size the file had when it was opened: a log being
+    // appended to would otherwise be read for as long as its writer stays
+    // ahead, and the result's `bytes` would name a size the search had
+    // long passed. One call searches one finite snapshot. A file that
+    // reports no size is bounded by `MAX_UNSIZED_FILE_BYTES` instead (see
+    // there); a file that is really empty ends its stream at once either way.
+    // The unsized bound reads one byte past the cap on purpose: that byte
+    // arriving is the only proof there was more, so a file of exactly the
+    // cap is reported as searched whole rather than as clipped.
+    const end = size > 0 ? size - 1 : MAX_UNSIZED_FILE_BYTES;
+    let read = 0;
+    for await (const raw of handle.createReadStream({ start: 0, end, highWaterMark: 64 * 1024 })) {
+      // Whatever came past the cap is the probe and nothing more: it says
+      // there was more to read, and is not itself searched, decoded, or
+      // weighed in the binary verdict — the file's first
+      // `MAX_UNSIZED_FILE_BYTES` bytes are what this call reports on.
+      const over = size === 0 ? Math.max(0, read + (raw as Buffer).length - MAX_UNSIZED_FILE_BYTES) : 0;
+      read += (raw as Buffer).length;
+      if (over > 0) {
+        opened.capped = true;
+      }
+      const chunk = over > 0 ? (raw as Buffer).subarray(0, (raw as Buffer).length - over) : (raw as Buffer);
+      if (chunk.length === 0) {
+        break;
+      }
+      if (looksBinary(chunk)) {
+        yield undefined;
+        return;
+      }
+      const text = decoder.write(chunk);
+      let from = 0;
+      for (;;) {
+        const newline = text.indexOf('\n', from);
+        if (newline === -1) {
+          if (!discarding) {
+            carry += text.slice(from);
+            // Decoded chunks end on whole code points (the decoder holds a
+            // partial sequence back), so a pair is never split across them.
+            const clipped = bounded(carry);
+            if (clipped.clipped) {
+              carry = clipped.text;
+              discarding = true;
+              discardedNext = clipped.next;
+            }
+          }
+          break;
+        }
+        yield discarding
+          ? { text: carry, clipped: true, next: discardedNext }
+          : bounded(carry + text.slice(from, newline));
+        carry = '';
+        discarding = false;
+        discardedNext = '';
+        from = newline + 1;
+      }
+    }
+    const tail: LineRead = discarding
+      ? { text: carry, clipped: true, next: discardedNext }
+      : bounded(carry + decoder.end());
+    if (tail.text.length > 0) {
+      yield tail;
+    }
+  } finally {
+    await handle.close();
+  }
+};
+
+/** How many skipped files a result names outright; the rest are a count. */
+const MAX_SKIPPED_REPORTED = 50;
+
 const walkFiles = async function* (directory: string, depth = 0): AsyncGenerator<string> {
   if (depth > 12) {
     return;
@@ -310,6 +514,28 @@ const createSearchTool = (config: JsonObject): Tool => ({
     });
 
     const matches: SearchMatch[] = [];
+    // What the walk looked past, said outright. A file over the size
+    // limit used to vanish from the result: a search of a directory holding
+    // one 6.7 MB log came back with no matches and no hint that the log
+    // was never opened, and a summary written from that is confidently
+    // wrong in the way a silently clipped read is.
+    const skipped: Array<{ path: string; bytes: number; reason: string }> = [];
+    // Bounded like the matches: a directory of large files would otherwise
+    // put one record per file into a result the search limit was meant
+    // to keep small. Past the cap, they are a count.
+    let skippedTotal = 0;
+    const skip = (entry: { path: string; bytes: number; reason: string }): void => {
+      skippedTotal += 1;
+      if (skipped.length < MAX_SKIPPED_REPORTED) {
+        skipped.push(entry);
+      }
+    };
+    const report = (): JsonObject => ({
+      query,
+      matches,
+      truncated,
+      ...(skippedTotal > 0 ? { skipped, skippedTotal } : {}),
+    });
     let truncated = false;
     // A file is searched as itself. Falling back to its parent would answer
     // a question nobody asked — `{ path: 'notes/today.md' }` coming back
@@ -322,13 +548,70 @@ const createSearchTool = (config: JsonObject): Tool => ({
       // us directly can.
       throw new Error(`${resolved.path} is not a regular file.`);
     }
-    const files = resolved.kind === 'directory'
-      ? walkFiles(resolved.path)
-      : (async function* single() {
-          yield resolved.path;
-        })();
+    const record = (file: string, index: number, line: string): boolean => {
+      if (matches.length >= limit) {
+        truncated = true;
+        return false;
+      }
+      matches.push({
+        path: relativeTo(resolved.root, file),
+        line: index + 1,
+        text: line.length > 400 ? `${line.slice(0, 400)}…` : line,
+      });
+      return true;
+    };
 
-    for await (const file of files) {
+    if (resolved.kind === 'file') {
+      // A file named outright is searched whatever its size — the caller
+      // asked about this file, not about a limit meant for a walk — and
+      // streamed a line at a time, so the size limit's reason (a directory
+      // full of large files read whole) does not apply.
+      let index = 0;
+      let clipped = false;
+      const opened = await openLines(resolved);
+      const { size, lines } = opened;
+      const before = matches.length;
+      const truncatedBefore = truncated;
+      // Past the match cap the file is still read to its end, no longer
+      // matched: the binary verdict is decided on every chunk, and a NUL
+      // after the cap would otherwise go unseen, leaving matches from a
+      // file that is not text standing as results.
+      let capped = false;
+      for await (const line of lines) {
+        if (line === undefined) {
+          // Binary after all: what matched in the text before the first
+          // NUL is not a search result of a text file, because this is
+          // not one.
+          matches.splice(before);
+          truncated = truncatedBefore;
+          clipped = false;
+          skip({ path: relativeTo(resolved.root, resolved.path), bytes: size, reason: 'binary' });
+          break;
+        }
+        clipped ||= line.clipped;
+        if (!capped && matchesWithin(pattern, line) && !record(resolved.path, index, line.text)) {
+          capped = true;
+        }
+        index += 1;
+      }
+      if (clipped) {
+        skip({
+          path: relativeTo(resolved.root, resolved.path),
+          bytes: size,
+          reason: `a line longer than ${MAX_LINE_CHARS / 1_000_000} million characters was searched in its first ${MAX_LINE_CHARS / 1_000_000} million only`,
+        });
+      }
+      if (opened.capped) {
+        skip({
+          path: relativeTo(resolved.root, resolved.path),
+          bytes: size,
+          reason: `reports no size, and was searched in its first ${MAX_UNSIZED_FILE_BYTES / 1_000_000} MB only`,
+        });
+      }
+      return report();
+    }
+
+    for await (const file of walkFiles(resolved.path)) {
       if (matches.length >= limit) {
         truncated = true;
         break;
@@ -337,6 +620,11 @@ const createSearchTool = (config: JsonObject): Tool => ({
       try {
         const info = await stat(file);
         if (info.size > DEFAULT_MAX_SEARCH_FILE_BYTES) {
+          skip({
+            path: relativeTo(resolved.root, file),
+            bytes: info.size,
+            reason: `over the ${DEFAULT_MAX_SEARCH_FILE_BYTES / 1_000_000} MB walk limit — search it by name to read it whole`,
+          });
           continue;
         }
         contents = await readFile(file);
@@ -348,22 +636,13 @@ const createSearchTool = (config: JsonObject): Tool => ({
       }
       const lines = contents.toString('utf8').split('\n');
       for (const [index, line] of lines.entries()) {
-        if (!pattern.test(line)) {
-          continue;
-        }
-        if (matches.length >= limit) {
-          truncated = true;
+        if (pattern.test(line) && !record(file, index, line)) {
           break;
         }
-        matches.push({
-          path: relativeTo(resolved.root, file),
-          line: index + 1,
-          text: line.length > 400 ? `${line.slice(0, 400)}…` : line,
-        });
       }
     }
 
-    return { query, matches, truncated };
+    return report();
   },
 });
 
