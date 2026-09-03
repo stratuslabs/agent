@@ -363,16 +363,25 @@ const linesOf = async function* (
     // cap is reported as searched whole rather than as clipped.
     const end = size > 0 ? size - 1 : MAX_UNSIZED_FILE_BYTES;
     let read = 0;
-    for await (const chunk of handle.createReadStream({ start: 0, end, highWaterMark: 64 * 1024 })) {
-      read += (chunk as Buffer).length;
-      if (size === 0 && read > MAX_UNSIZED_FILE_BYTES) {
+    for await (const raw of handle.createReadStream({ start: 0, end, highWaterMark: 64 * 1024 })) {
+      // Whatever came past the cap is the probe and nothing more: it says
+      // there was more to read, and is not itself searched, decoded, or
+      // weighed in the binary verdict — the file's first
+      // `MAX_UNSIZED_FILE_BYTES` bytes are what this call reports on.
+      const over = size === 0 ? Math.max(0, read + (raw as Buffer).length - MAX_UNSIZED_FILE_BYTES) : 0;
+      read += (raw as Buffer).length;
+      if (over > 0) {
         opened.capped = true;
       }
-      if (looksBinary(chunk as Buffer)) {
+      const chunk = over > 0 ? (raw as Buffer).subarray(0, (raw as Buffer).length - over) : (raw as Buffer);
+      if (chunk.length === 0) {
+        break;
+      }
+      if (looksBinary(chunk)) {
         yield undefined;
         return;
       }
-      const text = decoder.write(chunk as Buffer);
+      const text = decoder.write(chunk);
       let from = 0;
       for (;;) {
         const newline = text.indexOf('\n', from);
