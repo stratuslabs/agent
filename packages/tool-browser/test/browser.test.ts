@@ -488,6 +488,49 @@ test('a refusal in one conversation is never reported to another under the same 
   assert.match(String((own.blockedRequests as string[])[0]), /token=abc/);
 });
 
+test('a refusal survives a call that fails after it, and is reported by the next one', async (t) => {
+  // The refusal list is emptied by reading it. A `title()` that throws
+  // after the drain would take the refusals with it, and no result would
+  // ever carry them — so nothing is drained until the result is certain.
+  const recorder = emptyRecorder();
+  let titles = 0;
+  const tools = new ToolRegistry();
+  const plugin = createBrowserPlugin(
+    { allowedHosts: ['example.com'] },
+    {
+      driver: fakeDriver(recorder, {
+        // The second call is the one that fails, after the refusal below.
+        title: () => (titles++ === 1 ? Promise.reject(new Error('Target page, context or browser has been closed')) : Promise.resolve('Example Domain')),
+      }),
+    },
+  );
+  await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
+  t.after(() => plugin.dispose());
+  const goto = tools.get('browser.goto') as Tool;
+  const session = sessionFor('kept');
+
+  await goto.execute({ url: 'https://example.com/' }, session);
+
+  // What the page was refused before the failing call.
+  const proxy = new URL(recorder.contextProxyUrls[0]!);
+  await new Promise<void>((resolve, reject) => {
+    const request = http.request(
+      { host: proxy.hostname, port: Number(proxy.port), method: 'GET', path: 'http://127.0.0.1:1/health' },
+      (response) => {
+        response.resume();
+        response.on('end', () => resolve());
+      },
+    );
+    request.on('error', reject);
+    request.end();
+  });
+
+  await assert.rejects(goto.execute({ url: 'https://example.com/' }, session), /has been closed/);
+
+  const next = await goto.execute({ url: 'https://example.com/' }, session) as JsonObject;
+  assert.match(String((next.blockedRequests as string[])[0]), /127\.0\.0\.1/);
+});
+
 test('one agent’s blocked requests are not reported to another', async (t) => {
   const recorder = emptyRecorder();
   const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'] }, recorder);

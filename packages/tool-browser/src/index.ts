@@ -235,11 +235,16 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       const settings = settingsFor(config, session);
       const page = await runtime.pageFor(session);
       const status = await navigate(page, String(input.url ?? ''), settings.policy, settings.navigationTimeoutMs);
+      // Everything that can still fail first, and the drain last: the
+      // refusal list is emptied by reading it, so a `title()` that throws
+      // after the drain would take the refusals with it and no result
+      // would ever carry them.
+      const title = await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs);
       const blockedRequests = refusalsFor(runtime, session);
       return {
         url: page.url(),
         ...(status === undefined ? {} : { status }),
-        title: await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs),
+        title,
         ...(blockedRequests.length > 0 ? { blockedRequests } : {}),
       };
     },
@@ -264,10 +269,11 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
         typeof extracted === 'string' ? extracted : '',
         asNumber(input.maxBytes, settings.maxTextBytes),
       );
+      const title = await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs);
       const blockedRequests = refusalsFor(runtime, session);
       return {
         url: page.url(),
-        title: await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs),
+        title,
         text,
         truncated,
         ...(blockedRequests.length > 0 ? { blockedRequests } : {}),
@@ -297,11 +303,12 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       // picture in Slack rather than a path nobody can open. One key rather
       // than a `path` alias beside it — two words for one thing is how a
       // convention stops being one.
+      const title = await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs);
       const blockedRequests = refusalsFor(runtime, session);
       return {
         file: target,
         url: page.url(),
-        title: await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs),
+        title,
         ...(blockedRequests.length > 0 ? { blockedRequests } : {}),
       };
     },
@@ -337,12 +344,13 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       } else {
         throw new Error(`Unsupported action: ${String(input.action)}. Use click or type.`);
       }
+      const title = await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs);
       const blockedRequests = refusalsFor(runtime, session);
       return {
         action: input.action,
         selector,
         url: page.url(),
-        title: await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs),
+        title,
         ...(blockedRequests.length > 0 ? { blockedRequests } : {}),
       };
     },
