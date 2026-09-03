@@ -474,6 +474,14 @@ test('a protocol-level client error is neither logged nor blamed for a later clo
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(warnings.some((message) => message.includes('transport error')), false, warnings.join(' | '));
 
+    // This server is URL-backed: an HTTP error quoting a body that happens
+    // to contain the stdio reader's overflow phrase is still a body, and
+    // is bounded like one rather than rewritten as an overflow.
+    clientTransport?.onerror?.(new Error(`Streamable HTTP error: Error POSTing to endpoint: ReadBuffer exceeded maximum size of ${'9'.repeat(5000)} bytes`));
+    const quoted = warnings.filter((message) => message.includes('transport error')).at(-1) ?? '';
+    assert.ok(quoted.length < 400, `${quoted.length} chars`);
+    assert.equal(quoted.includes('stdio limit'), false);
+
     // This server is URL-backed: a SyntaxError here is a body that was not
     // JSON-RPC, and the stdout/stderr advice would be nonsense for it.
     clientTransport?.onerror?.(new SyntaxError('Unexpected token \'g\', "garbage: token=abc" is not valid JSON'));

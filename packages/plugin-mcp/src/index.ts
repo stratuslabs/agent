@@ -342,7 +342,13 @@ const describeError = (error: unknown): string => {
  */
 const describeTransportError = (error: unknown, spec: McpServerSpec): string => {
   const message = error instanceof Error ? error.message : String(error);
-  const overflow = /ReadBuffer exceeded maximum size of (\d+) bytes/.exec(message);
+  // Only a stdio server has the reader this names; an HTTP error quoting a
+  // body that happens to contain the phrase is a body, and is bounded like
+  // one. The digits are bounded too, so a match can never carry more than
+  // a number.
+  const overflow = spec.command !== undefined
+    ? /^ReadBuffer exceeded maximum size of (\d{1,15}) bytes$/.exec(message)
+    : null;
   if (overflow) {
     return `the server sent a single message larger than the ${overflow[1]}-byte stdio limit, and the connection was closed. `
       + 'A result that large has to come back smaller — paged, summarized, or written to a file.';
