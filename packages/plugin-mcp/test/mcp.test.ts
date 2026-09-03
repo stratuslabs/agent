@@ -499,7 +499,15 @@ test('a protocol-level client error is neither logged nor blamed for a later clo
 test('a stdio server’s parse error names its stdout, and every error the log gets is bounded', async () => {
   // The same SyntaxError from a stdio server is stray logging on stdout.
   let stdioTransport: Transport | undefined;
-  const stdioHandle = fakeServer({ current: linearTools });
+  const stdioHandle = fakeServer({
+    current: (server) => {
+      linearTools(server);
+      server.registerTool('die', { description: 'Exit mid-call.' }, async () => {
+        await stdioHandle.closeCurrent();
+        return { content: [{ type: 'text', text: 'never delivered' }] };
+      });
+    },
+  });
   const stdioWarnings: string[] = [];
   const stdioPlugin = createMcpPlugin(
     { servers: { linear: { command: process.execPath } } },
@@ -513,12 +521,27 @@ test('a stdio server’s parse error names its stdout, and every error the log g
       reconnectDelayMs: () => 3_600_000,
     },
   );
-  await loadThroughView(stdioPlugin, new ToolRegistry());
+  const target = new ToolRegistry();
+  await loadThroughView(stdioPlugin, target);
   try {
     stdioTransport?.onerror?.(new SyntaxError('Unexpected token \'g\', "garbage" is not valid JSON'));
     const parse = stdioWarnings.find((message) => message.includes('transport error')) ?? '';
     assert.match(parse, /wrote a line to stdout that is not JSON-RPC/);
     assert.equal(parse.includes('garbage'), false);
+
+    // Any valid message afterwards — here a notification, as the handshake
+    // and discovery replies would be for a stray line at startup — clears
+    // it, so a server that then dies during a call is reported as exactly
+    // that, not as a victim of the earlier line.
+    await stdioHandle.sendRaw({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
+    await new Promise((resolve) => setImmediate(resolve));
+    await assert.rejects(
+      target.get('mcp.linear.die')!.execute({}, sessionFor('ava')),
+      (error: Error) => {
+        assert.equal(error.message, 'MCP error -32000: Connection closed');
+        return true;
+      },
+    );
   } finally {
     await stdioPlugin.dispose?.();
   }

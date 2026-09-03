@@ -644,9 +644,9 @@ interface ServerState {
    * oversized reply is the case that found this: the SDK's stdio reader
    * refuses a single message over its buffer limit and closes the
    * connection, and without this the agent saw the closure, the log saw
-   * nothing, and every retry did it again. Cleared by any exchange that
-   * completes afterwards — an error the connection outlived is not the
-   * reason it later closed.
+   * nothing, and every retry did it again. Cleared by any valid message
+   * that arrives afterwards — the handshake's, discovery's, a call's — an
+   * error the connection outlived is not the reason it later closed.
    */
   lastTransportError: string | undefined;
   attempt: number;
@@ -735,9 +735,6 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         }
         throw error;
       }
-      // A completed round trip is proof the connection outlived whatever
-      // the transport last reported; it is not what a later close is about.
-      state.lastTransportError = undefined;
       return normalizeCallResult(result, {
         server: state.spec.name,
         tool: info.mcpName,
@@ -944,6 +941,14 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         const described = describeTransportError(error, state.spec);
         state.lastTransportError = described;
         warn(`mcp server ${state.spec.name} transport error: ${described}`);
+      };
+      // A valid message after the error is proof the connection outlived
+      // it. On the message hook rather than on a completed call: a stray
+      // line during the handshake is followed by the initialize and
+      // tools/list replies, and clearing only on a call's success would
+      // still pin that line on a server that dies during its first one.
+      transport.onmessage = () => {
+        state.lastTransportError = undefined;
       };
       const client = new Client({ name: '@stratusagent/plugin-mcp', version: PLUGIN_MCP_VERSION });
       // A close that lands before this client is published cannot be
