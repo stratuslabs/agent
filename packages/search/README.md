@@ -233,11 +233,11 @@ from snippets, and turns `publishedAt` into a UTC instant (dropping anything
 that will not parse, rather than guessing).
 
 Pass your vendor's decorated snippet straight through — highlight markup is
-expected. Formatting tags are **removed**, not replaced with a space, because
-vendors highlight the matched *substring*: `un<strong>expected</strong>`
+expected. Inline formatting is **removed**, not replaced with a space,
+because vendors highlight the matched *substring*: `un<strong>expected</strong>`
 reads back as `unexpected`, and `<strong>kettle</strong>.` keeps its full
-stop attached. The few tags that genuinely separate words (`<br>`, `<p>`,
-`<li>` and friends) become a space instead. Send the options upstream anyway
+stop attached. Anything that is not inline formatting becomes a space
+instead, so two table cells never fuse into `AlphaBeta`. Send the options upstream anyway
 where your vendor supports them — native filtering ranks better than a filter
 applied afterwards — but the guarantee does not rest on your having done so.
 

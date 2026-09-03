@@ -29,6 +29,19 @@ const DROPPED_ELEMENTS = [
   'form',
 ];
 
+/**
+ * Formatting that wraps text which was already adjacent, so removing it
+ * joins nothing that was apart. Deliberately a closed set: everything not
+ * named here becomes a space, which is the safe direction — see the
+ * substitution below.
+ */
+const INLINE_ELEMENTS = new Set([
+  'a', 'abbr', 'b', 'bdi', 'bdo', 'big', 'cite', 'code', 'data', 'del', 'dfn',
+  'em', 'font', 'i', 'ins', 'kbd', 'mark', 'nobr', 'q', 'rp', 'rt', 'ruby',
+  's', 'samp', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'time',
+  'tt', 'u', 'var', 'wbr',
+]);
+
 const BLOCK_ELEMENTS = [
   'p', 'div', 'section', 'article', 'main', 'br', 'hr',
   'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
@@ -70,7 +83,13 @@ export const extractTitle = (html: string): string | undefined => {
 };
 
 export const htmlToText = (html: string): string => {
+  // Comments first, then the doctype and any processing instruction. These
+  // are removed by name rather than by a blanket `<[^>]*>` sweep, because
+  // that sweep reads `5 < 10 and 20 > 15` as a tag and deletes the middle
+  // of the sentence — prose about arbitrary subjects is exactly what a
+  // fetched page is.
   let text = html.replace(/<!--[\s\S]*?-->/g, '');
+  text = text.replace(/<[!?][^>]*>/g, ' ');
 
   for (const element of DROPPED_ELEMENTS) {
     text = text.replace(new RegExp(`<${element}\\b[^>]*>[\\s\\S]*?</${element}>`, 'gi'), ' ');
@@ -83,14 +102,27 @@ export const htmlToText = (html: string): string => {
   for (const element of BLOCK_ELEMENTS) {
     text = text.replace(new RegExp(`</?${element}\\b[^>]*>`, 'gi'), '\n');
   }
-  // Removed rather than replaced with a space. Every element that separates
-  // words became a newline above, so whatever is left here is *inline*
-  // decoration wrapped around text that was already adjacent — and a space
-  // there rewrites the page: `un<em>expected</em>` becomes `un expected`, a
-  // word the page does not contain, and `<strong>kettle</strong>.` becomes
-  // `kettle .`. A model reading the extraction cannot tell either from the
-  // real thing.
-  text = text.replace(/<[^>]+>/g, '');
+  // Inline formatting is removed; every other tag becomes a space.
+  //
+  // A space around formatting rewrites the page — `un<em>expected</em>`
+  // becomes `un expected`, a word the page does not contain, and
+  // `<strong>kettle</strong>.` becomes `kettle .` — and a model reading the
+  // extraction cannot tell either from the real thing.
+  //
+  // The default runs the other way on purpose. Naming the *separators*
+  // instead and deleting the rest looks equivalent and is not: the list is
+  // never complete. `td`, `dd`, and `option` are all missing from the block
+  // list above, and a custom element is missing from every list anybody
+  // will write — so that spelling silently glued `AlphaBeta` out of two
+  // table cells. Inline formatting is a closed set that has not grown in
+  // twenty years, so listing it is the half that can be finished, and an
+  // unrecognised tag falls to a space: a seam that was not needed is a
+  // blemish, while one that was is a word nobody wrote.
+  text = text.replace(
+    /<\/?([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*>/g,
+    (_tag, name: string) => (INLINE_ELEMENTS.has(name.toLowerCase()) ? '' : ' '),
+  );
+
   text = decodeEntities(text);
 
   return text

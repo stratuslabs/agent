@@ -191,7 +191,19 @@ test('the extractor keeps prose and drops furniture', () => {
   assert.equal(htmlToText('<p>un<em>expected</em> results</p>'), 'unexpected results');
   assert.equal(htmlToText('<p>The <strong>kettle</strong>.</p>'), 'The kettle.');
   assert.equal(htmlToText('<p>see <a href="/x">the docs</a>, then stop</p>'), 'see the docs, then stop');
-  // …while the elements that do separate words still produce their break.
+  // …while everything that is not inline formatting still separates, which
+  // is what the default has to be: the block list above does not name
+  // `td`, `dd`, or `option`, and no list names a custom element, so
+  // deleting the unrecognised ones glues two values into one.
   assert.equal(htmlToText('<ul><li>one</li><li>two</li></ul>'), '- one\n- two');
+  assert.equal(htmlToText('<table><tr><td>Alpha</td><td>Beta</td></tr></table>'), 'Alpha Beta');
+  assert.equal(htmlToText('<dl><dt>Term</dt><dd>Definition</dd></dl>'), 'Term Definition');
+  assert.equal(htmlToText('<select><option>A</option><option>B</option></select>'), 'A B');
+  assert.equal(htmlToText('<my-widget>Alpha</my-widget><my-widget>Beta</my-widget>'), 'Alpha Beta');
+  // A doctype goes with the comments rather than through a blanket sweep,
+  // because that sweep reads `5 < 10 and 20 > 15` as a tag and deletes the
+  // middle of the sentence.
+  assert.equal(htmlToText('<!doctype html><p>hi</p>'), 'hi');
+  assert.equal(htmlToText('<p>5 < 10 and 20 > 15</p>'), '5 < 10 and 20 > 15');
   assert.equal(htmlToText('<script>var x = "<p>trap</p>";</script><p>real</p>'), 'real');
 });

@@ -179,11 +179,16 @@ test('a highlighted substring does not become two words, or a detached full stop
   assert.equal(plainSnippet('the <em>API</em>, and more'), 'the API, and more');
   assert.equal(plainSnippet('a <b>bold</b><i>run</i>'), 'a boldrun');
 
-  // The few tags that genuinely separate words still do. Removing these
-  // would glue two sentences together, which is the opposite mistake.
+  // Anything that is not inline formatting still separates. Removing these
+  // would glue two values into one, which is the opposite mistake.
   assert.equal(plainSnippet('one<br>two'), 'one two');
   assert.equal(plainSnippet('<p>one</p><p>two</p>'), 'one two');
   assert.equal(plainSnippet('<li>one</li><li>two</li>'), 'one two');
+  assert.equal(plainSnippet('<td>Alpha</td><td>Beta</td>'), 'Alpha Beta');
+  // Including a tag no list will ever contain, which is why the default
+  // runs this way: an unneeded space is a blemish, a missing one is a word
+  // nobody wrote.
+  assert.equal(plainSnippet('<my-widget>Alpha</my-widget><my-widget>Beta</my-widget>'), 'Alpha Beta');
 });
 
 test('a snippet that compares two numbers keeps the sentence between them', () => {

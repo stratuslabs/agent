@@ -33,10 +33,9 @@ import { hostMatchesSite } from './options.ts';
  * highlight the matched *substring*, so `un<strong>expected</strong>`
  * arrives routinely — and a space there produces `un expected`, a word the
  * page does not contain. The same space detaches punctuation, turning
- * `<strong>kettle</strong>.` into `kettle .`. The handful of tags that do
- * separate words become a space, because removing those would glue two
- * sentences together instead; everything else is inline decoration around
- * text that was already adjacent.
+ * `<strong>kettle</strong>.` into `kettle .`. Anything that is not inline
+ * formatting becomes a space, because removing a cell or list boundary
+ * glues two values into one instead — see `INLINE_ELEMENTS`.
  *
  * Entity *decoding* is deliberately not done here: a snippet arrives as a
  * string a backend parsed out of its vendor's JSON, so whatever encoding
@@ -44,13 +43,31 @@ import { hostMatchesSite } from './options.ts';
  * it would corrupt a snippet that legitimately contains an ampersand
  * followed by a word.
  */
-const SNIPPET_SEPARATOR = /^(?:br|p|div|li|tr|td|th|h[1-6]|blockquote|section|article)$/i;
+/**
+ * Formatting that wraps text which was already adjacent. Everything not
+ * named here becomes a space instead, which is the safe direction: naming
+ * the *separators* looks equivalent and is not, because that list is never
+ * complete — a custom element is missing from every list anybody will
+ * write, and deleting one glues `AlphaBeta` out of two cells. Inline
+ * formatting is a closed set, so it is the half that can be finished.
+ *
+ * `@stratusagent/tool-web` keeps the same set for the same reason. They are
+ * not shared because no dependency direction exists between a contract
+ * package and a plugin: `search` must not depend on `tool-web`, and the
+ * reverse would be backwards.
+ */
+const INLINE_ELEMENTS = new Set([
+  'a', 'abbr', 'b', 'bdi', 'bdo', 'big', 'cite', 'code', 'data', 'del', 'dfn',
+  'em', 'font', 'i', 'ins', 'kbd', 'mark', 'nobr', 'q', 'rp', 'rt', 'ruby',
+  's', 'samp', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'time',
+  'tt', 'u', 'var', 'wbr',
+]);
 
 export const plainSnippet = (value: string): string =>
   value
     .replace(
-      /<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>/g,
-      (_tag, name: string) => (SNIPPET_SEPARATOR.test(name) ? ' ' : ''),
+      /<\/?([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*>/g,
+      (_tag, name: string) => (INLINE_ELEMENTS.has(name.toLowerCase()) ? '' : ' '),
     )
     .replace(/\s+/g, ' ')
     .trim();
