@@ -810,6 +810,7 @@ Options:
   --drain-timeout  restart: seconds the daemon lets in-flight turns finish
                    before aborting them (default: 30)
   --no-api         serve: do not serve the control API
+  --api            serve: serve it even where the config says api.enabled: false
   --api-host       serve: control API interface (default: 127.0.0.1)
   --api-port       serve: control API port (default: 4123, 0 for any free port)
   --help, -h       Show this help message
@@ -972,6 +973,10 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       }
       if (token === '--no-api') {
         parsed.api = false;
+        continue;
+      }
+      if (token === '--api') {
+        parsed.api = true;
         continue;
       }
       if (token === '--api-port') {
@@ -6480,6 +6485,17 @@ const loadServePlugins = async (
  */
 export const RESTART_EXIT_CODE = 75;
 
+/**
+ * What a daemon exits with when a restart could not drain — a turn that
+ * ignored its abort, a plugin or channel that did not let go. Distinct from
+ * the restart status on purpose: the supervisor answers this one by
+ * exiting with it too, so the process the service manager started ends
+ * and the manager restarts the whole unit — under systemd, cleaning the
+ * cgroup of whatever the plugin left running. A supervisor that started
+ * another daemon instead would keep that cgroup, and its leaks, alive.
+ */
+export const UNDRAINED_RESTART_EXIT_CODE = 76;
+
 /** Set in a daemon the supervisor started, so its own restart is an exit, not a second supervisor. */
 const SUPERVISED_ENV = 'STRATUS_SERVE_SUPERVISED';
 
@@ -6496,7 +6512,7 @@ export const serveArgv = (command: ParsedServeCommand): string[] => [
   ...(command.approvals !== undefined ? ['--approvals', command.approvals] : []),
   ...(command.events ? [] : ['--no-events']),
   ...(command.logToFile === false ? ['--no-log-file'] : []),
-  ...(command.api === false ? ['--no-api'] : []),
+  ...(command.api === false ? ['--no-api'] : command.api === true ? ['--api'] : []),
   ...(command.apiPort !== undefined ? ['--api-port', String(command.apiPort)] : []),
   ...(command.apiHost !== undefined ? ['--api-host', command.apiHost] : []),
 ];
@@ -6562,7 +6578,9 @@ const defaultServeRespawn = (env: CliEnvironment) => (argv: string[]): Promise<n
 
 /**
  * Keep starting daemons for as long as they exit asking for another; the
- * first exit that does not is this process's own.
+ * first exit that does not is this process's own — an undrained restart's
+ * status included, which ends the supervisor rather than starting a daemon
+ * beside what the last one could not release.
  */
 const superviseRestarts = async (
   command: ParsedServeCommand,
@@ -7025,7 +7043,7 @@ const serveHeldHome = async (
         // possibly still writing sessions. Starting a fresh daemon beside
         // it would be two processes on one store; exiting instead leaves
         // the service manager, where there is one, to bring it back.
-        warn(`restart: a turn did not stop; exiting with status ${RESTART_EXIT_CODE} instead of starting a new daemon beside it`);
+        warn(`restart: something did not let go; exiting with status ${UNDRAINED_RESTART_EXIT_CODE} for the service manager to restart, instead of starting a new daemon beside it`);
       } else {
         log(`restarting stratusd${restart.reason ? ` (${restart.reason})` : ''}`);
       }
@@ -7048,8 +7066,8 @@ const serveHeldHome = async (
     return 0;
   }
   if (!restart.drained) {
-    (env.exitProcess ?? process.exit)(RESTART_EXIT_CODE);
-    return 1;
+    (env.exitProcess ?? process.exit)(UNDRAINED_RESTART_EXIT_CODE);
+    return UNDRAINED_RESTART_EXIT_CODE;
   }
   // Asked to come back. Whether this process starts the next daemon or
   // exits for its supervisor to is `runServe`'s decision, after the home

@@ -34,6 +34,7 @@ import {
   parseCommand,
   resolveRuntimeConfig,
   RESTART_EXIT_CODE,
+  UNDRAINED_RESTART_EXIT_CODE,
   restartEntrypoint,
   runCli,
   serveArgv,
@@ -7055,6 +7056,11 @@ test('serveArgv round-trips every serve option, so the daemon a restart starts i
   const bare = parseCommand(['serve']);
   assert.equal(bare.command, 'serve');
   assert.deepEqual(serveArgv(bare), ['serve']);
+  // The explicit override `stratus dashboard` passes to serve the API over
+  // a config that disables it: a respawn that dropped it would come back
+  // without the API, and the dashboard would lose the daemon it started.
+  assert.deepEqual(serveArgv({ command: 'serve', events: false, api: true }), ['serve', '--no-events', '--api']);
+  assert.deepEqual(parseCommand(['serve', '--api']), { command: 'serve', events: true, api: true });
 });
 
 test('runCli skill add reloads the running daemon, and says so; --no-reload and no daemon stay quiet', async () => {
@@ -7640,4 +7646,81 @@ test('a restart respawns the bin beside the running module, compiled or source',
   assert.equal(restartEntrypoint('file:///work/agent/packages/cli/src/index.ts'), path.join('/work/agent/packages/cli/src', 'bin.ts'));
   // And the one this test process is running: the file exists.
   assert.ok(restartEntrypoint(new URL('../src/index.ts', import.meta.url).href).endsWith(path.join('src', 'bin.ts')));
+});
+
+test('a supervised daemon that could not drain ends the supervisor, so the service manager restarts the unit', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-undrained-child-'));
+  const watched = watchedServeStreams();
+  const respawned: string[][] = [];
+
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: watched.streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: {},
+      serveRespawn: async (argv) => {
+        respawned.push(argv);
+        // The fresh daemon was asked to restart in turn and could not
+        // drain: a plugin would not let go. It exited saying so.
+        return UNDRAINED_RESTART_EXIT_CODE;
+      },
+    },
+  });
+
+  const base = await watched.apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  const accepted = await postJson(`${base}/api/v1/restart`, token, { reason: 'test', drainTimeoutMs: 5000 });
+  assert.equal(accepted.status, 202, accepted.body);
+
+  // One daemon started, and no second one beside whatever it leaked: the
+  // supervisor exits with the undrained status for the manager to act on.
+  assert.equal(await serving, UNDRAINED_RESTART_EXIT_CODE);
+  assert.equal(respawned.length, 1);
+});
+
+test('a supervised daemon that could not drain exits with the undrained status, never the one that asks for another', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-undrained-exit-'));
+  await mkdir(path.join(serveHome, '.stratus', 'agents'), { recursive: true });
+  await writeFile(
+    path.join(serveHome, '.stratus', 'agents', 'ava.md'),
+    '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n',
+  );
+  // A turn that never answers and ignores its abort: the daemon cannot
+  // drain it, only shut down around it.
+  let turnStarted!: () => void;
+  const started = new Promise<void>((resolve) => { turnStarted = resolve; });
+  const fetchImpl = (() => new Promise<Response>(() => { turnStarted(); })) as typeof fetch;
+
+  const watched = watchedServeStreams();
+  const exits: number[] = [];
+  let respawns = 0;
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: watched.streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: { OPENAI_API_KEY: 'sk-test', STRATUS_SERVE_SUPERVISED: '1' },
+      fetch: fetchImpl,
+      exitProcess: (code) => { exits.push(code); },
+      serveRespawn: async () => { respawns += 1; return 0; },
+    },
+  });
+
+  const base = await watched.apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  const queued = await postJson(`${base}/api/v1/sessions/s-stuck/messages`, token, { message: 'hang', agentId: 'ava' });
+  assert.equal(queued.status, 202, queued.body);
+  await started;
+  const accepted = await postJson(`${base}/api/v1/restart`, token, { reason: 'test', drainTimeoutMs: 50 });
+  assert.equal(accepted.status, 202, accepted.body);
+
+  // Said with the status the supervisor ends on, so the service manager
+  // restarts the unit and cleans up what this process could not.
+  assert.equal(await serving, UNDRAINED_RESTART_EXIT_CODE);
+  assert.deepEqual(exits, [UNDRAINED_RESTART_EXIT_CODE]);
+  assert.equal(respawns, 0);
+  assert.match(watched.output.stderr, /something did not let go; exiting with status 76/);
 });
