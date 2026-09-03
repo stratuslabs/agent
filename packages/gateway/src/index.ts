@@ -1873,6 +1873,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * it and leaves it recorded as nothing at all.
    */
   let abortingTurns = false;
+  /**
+   * Set once `start()` has finished. A restart before that would stop the
+   * channels started so far and close the stores while the rest of
+   * startup is still running — reachable, since the control API can be
+   * up and answering `POST /restart` while a later channel is still
+   * connecting — and the startup then fails on a closed store instead of
+   * the daemon coming back.
+   */
+  let serving = false;
   /** Set once `restart()` announced; the refusal a caller reads says why. */
   let restartStatus: RestartStatus | undefined;
   const refusal = (): Error => new Error(restartStatus
@@ -2718,6 +2727,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         await shutdown(undefined);
         throw error;
       }
+      serving = true;
     },
 
     // Drain: channels stop taking messages, in-flight turns finish, new
@@ -2771,6 +2781,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       if (stopping) {
         throw new Error('The gateway is already stopping, and a stop does not come back on its own.');
+      }
+      if (!serving) {
+        throw new Error('stratusd is still starting; ask for a restart again once it is serving.');
       }
       const requested = request.drainTimeoutMs ?? options.restartDrainTimeoutMs ?? DEFAULT_RESTART_DRAIN_TIMEOUT_MS;
       // Checked here and not only at the HTTP route: a host calling this

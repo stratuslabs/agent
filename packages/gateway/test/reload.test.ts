@@ -690,3 +690,43 @@ test('a restart asked for with a window that is not a number of milliseconds is 
     await gateway.stop();
   }
 });
+
+test('a restart asked for while the daemon is still starting is refused, and works once it serves', async () => {
+  const home = await newHome();
+  // A channel that takes its time connecting — the control API, started
+  // before it, is already answering by then.
+  let entered!: () => void;
+  const starting = new Promise<void>((resolve) => { entered = resolve; });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const slow: GatewayChannelAdapter = {
+    name: 'slow',
+    async start() {
+      entered();
+      await released;
+    },
+    async stop() {},
+  };
+  let handOff!: (outcome: RestartOutcome) => void;
+  const restarted = new Promise<RestartOutcome>((resolve) => { handOff = resolve; });
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    channels: [slow],
+    log: () => {},
+    warn: () => {},
+    onRestart: (outcome) => handOff(outcome),
+  });
+
+  const start = gateway.start();
+  await starting;
+  assert.throws(() => gateway.restart(), /still starting/);
+  release();
+  await start;
+
+  // Startup finished with its stores open, and the restart now proceeds.
+  const status = gateway.restart({ reason: 'later' });
+  assert.equal(status.reason, 'later');
+  assert.deepEqual(await restarted, { reason: 'later', drained: true });
+  await gateway.stop();
+});
