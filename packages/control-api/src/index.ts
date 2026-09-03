@@ -20,6 +20,7 @@ import { API_PREFIX, ApiError, isStateChanging, sendError, sendJson } from './ht
 import { allowedMethodsFor, resolveRoute, type RouteContext } from './routes.ts';
 
 export { API_PREFIX } from './http.ts';
+export { tokenFingerprint } from './auth.ts';
 export type { DashboardSession } from './auth.ts';
 export type { EventEnvelope, EventFilter } from './events.ts';
 

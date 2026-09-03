@@ -261,6 +261,8 @@ export interface DashboardSession {
   id: string;
   /** Epoch milliseconds; a handed session keeps the expiry it was minted with. */
   expiresAt: number;
+  /** A fingerprint of the bearer token it was minted under; the replacement adopts it only under the same one. */
+  vouchedBy: string;
 }
 
 /** What a daemon and its supervisor say to each other. See SupervisorLink. */
@@ -6564,7 +6566,8 @@ const BOUND_API_PORT_ENV = 'STRATUS_SERVE_BOUND_API_PORT';
 const isDashboardSession = (value: unknown): value is DashboardSession =>
   typeof value === 'object' && value !== null
   && typeof (value as { id?: unknown }).id === 'string'
-  && typeof (value as { expiresAt?: unknown }).expiresAt === 'number';
+  && typeof (value as { expiresAt?: unknown }).expiresAt === 'number'
+  && typeof (value as { vouchedBy?: unknown }).vouchedBy === 'string';
 
 /** Shape-checked, because the other end of an IPC channel is still another process. */
 const isSupervisorMessage = (value: unknown): value is SupervisorMessage => {

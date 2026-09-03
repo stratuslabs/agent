@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, link, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import type { IncomingMessage } from 'node:http';
 import path from 'node:path';
@@ -166,7 +166,22 @@ export interface DashboardSession {
   id: string;
   /** Epoch milliseconds; a handed session keeps the expiry it was minted with. */
   expiresAt: number;
+  /**
+   * `tokenFingerprint` of the bearer token whose holder minted it. A
+   * replacement adopts a session only under the same token: rotating
+   * `~/.stratus/gateway-token` must sign every browser out, and a restart
+   * across the rotation must not carry the old token's sessions past it.
+   */
+  vouchedBy: string;
 }
+
+/**
+ * Identifies a bearer token without being one: enough of a hash to tell two
+ * tokens apart, never enough to recover either. What a handed session names
+ * as the credential it was minted under.
+ */
+export const tokenFingerprint = (token: string): string =>
+  createHash('sha256').update(token).digest('hex').slice(0, 16);
 
 /**
  * Everything the API knows about who may talk to it: the bearer token, the
@@ -183,6 +198,7 @@ export interface DashboardSession {
  */
 export const createAuthenticator = (options: AuthenticatorOptions) => {
   const now = options.now ?? Date.now;
+  const vouchedBy = tokenFingerprint(options.token);
   const sessions = new Map<string, { expiresAt: number }>();
   const oneTimeTokens = new Map<string, { expiresAt: number }>();
 
@@ -281,18 +297,19 @@ export const createAuthenticator = (options: AuthenticatorOptions) => {
     /** Every live session, for the hand-off to a replacement process. Never for disk. */
     exportSessions(): DashboardSession[] {
       sweep();
-      return [...sessions].map(([id, session]) => ({ id, expiresAt: session.expiresAt }));
+      return [...sessions].map(([id, session]) => ({ id, expiresAt: session.expiresAt, vouchedBy }));
     },
 
     /**
      * Sessions a predecessor handed over, each with the expiry it was
      * minted with — a hand-off extends nothing. One already expired is
-     * dropped rather than kept for the next sweep to find.
+     * dropped rather than kept for the next sweep to find, and one minted
+     * under another bearer token is dropped too (see DashboardSession).
      */
     adoptSessions(handed: DashboardSession[]): void {
       const at = now();
       for (const session of handed) {
-        if (session.expiresAt > at) {
+        if (session.expiresAt > at && session.vouchedBy === vouchedBy) {
           sessions.set(session.id, { expiresAt: session.expiresAt });
         }
       }

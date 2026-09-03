@@ -63,7 +63,9 @@ while breaking every request. TLS is a tunnel's job.
 Sessions live in memory and are never written to disk. An announced restart
 (`stratus restart`, `POST /restart`) hands them from the stopping process to
 the one replacing it, so the browser stays signed in; a crash or a plain
-stop-and-start signs it out. Run `stratus dashboard` again for a new link.
+stop-and-start signs it out, and so does rotating the token (a handed session
+is adopted only under the token it was minted with). Run `stratus dashboard`
+again for a new link.
 
 **Origin binding.** `SameSite` matching ignores ports, so a page served from
 another port on the same host counts as the same site and its requests carry

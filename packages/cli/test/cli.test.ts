@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { tokenFingerprint } from '@stratusagent/control-api';
 import { claimHome } from '@stratusagent/gateway';
 
 import {
@@ -7877,7 +7878,7 @@ test('the dashboard sessions live at a restart go to the daemon that comes back,
         // The first replacement signs a different browser in and asks for
         // another restart; the second stops for good.
         return handoffs.length === 1
-          ? { code: RESTART_EXIT_CODE, sessions: [{ id: 'minted-by-the-replacement', expiresAt: Date.now() + 60_000 }] }
+          ? { code: RESTART_EXIT_CODE, sessions: [{ id: 'minted-by-the-replacement', expiresAt: Date.now() + 60_000, vouchedBy: 'the-replacement-token' }] }
           : { code: 0 };
       },
     },
@@ -7909,9 +7910,14 @@ test('the dashboard sessions live at a restart go to the daemon that comes back,
 
 test('a supervised daemon takes the sessions handed down its channel before it serves, and hands its own back up when it restarts', async () => {
   const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-adopt-'));
+  // The token this daemon will read, so the hand-off can name it: a
+  // session is adopted only under the token it was minted with.
+  await mkdir(path.join(serveHome, '.stratus'), { recursive: true });
+  await writeFile(path.join(serveHome, '.stratus', 'gateway-token'), 'the-daemon-token\n');
   const watched = watchedServeStreams();
   const sent: Array<{ type: string; sessions?: string[] }> = [];
-  const handed = { id: 'handed-by-the-supervisor', expiresAt: Date.now() + 60_000 };
+  const handed = { id: 'handed-by-the-supervisor', expiresAt: Date.now() + 60_000, vouchedBy: tokenFingerprint('the-daemon-token') };
+  const rotatedAway = { id: 'minted-under-the-old-token', expiresAt: Date.now() + 60_000, vouchedBy: tokenFingerprint('a-token-since-rotated') };
   const serving = runCli({
     argv: ['serve', '--no-events', '--api-port', '0'],
     streams: watched.streams,
@@ -7930,7 +7936,7 @@ test('a supervised daemon takes the sessions handed down its channel before it s
         // even listening, so it arrives the moment the daemon does — well
         // before its API is up. The API has to hold it until then.
         receive: (handler) => {
-          handler({ type: 'stratusd.sessions', sessions: [handed] });
+          handler({ type: 'stratusd.sessions', sessions: [handed, rotatedAway] });
         },
       },
     },
@@ -7940,6 +7946,7 @@ test('a supervised daemon takes the sessions handed down its channel before it s
   const cookie = `${SESSION_COOKIE}=${handed.id}`;
   assert.equal((await rawGet(`${base}/api/v1/health`, { cookie })).status, 200);
   assert.equal((await rawGet(`${base}/api/v1/health`, { cookie: `${SESSION_COOKIE}=never-handed` })).status, 401);
+  assert.equal((await rawGet(`${base}/api/v1/health`, { cookie: `${SESSION_COOKIE}=${rotatedAway.id}` })).status, 401);
 
   // A browser this daemon signed in itself goes back up with the adopted one.
   const own = (await signInToDashboard(base, token)).slice(`${SESSION_COOKIE}=`.length);

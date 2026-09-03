@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { allowedOrigins, createAuthenticator, ensureGatewayToken, SESSION_COOKIE } from '../src/auth.ts';
+import { allowedOrigins, createAuthenticator, ensureGatewayToken, SESSION_COOKIE, tokenFingerprint } from '../src/auth.ts';
 import { authority, createControlApi } from '../src/index.ts';
 import { newHome, openSocket, rawGet, rawPost, startApi } from './harness.ts';
 
@@ -426,6 +426,8 @@ test('an authenticator hands its live sessions on with the expiry each was minte
   assert.deepEqual(handed.map((session) => session.id).sort(), [kept, stale].sort());
   const keptExpiry = handed.find((session) => session.id === kept)?.expiresAt;
   assert.ok(keptExpiry !== undefined && keptExpiry > clock);
+  const vouchedBy = tokenFingerprint('gateway-token');
+  assert.ok(handed.every((session) => session.vouchedBy === vouchedBy), 'each names the token it was minted under');
 
   // The replacement comes up later. A hand-off extends nothing: the
   // session keeps its own expiry, and one that ran out on the way is not
@@ -433,8 +435,8 @@ test('an authenticator hands its live sessions on with the expiry each was minte
   clock += 60_000;
   const replacement = createAuthenticator({ token: 'gateway-token', now: () => clock });
   replacement.adoptSessions([
-    { id: kept, expiresAt: keptExpiry },
-    { id: stale, expiresAt: clock - 1 },
+    { id: kept, expiresAt: keptExpiry, vouchedBy },
+    { id: stale, expiresAt: clock - 1, vouchedBy },
   ]);
   assert.equal(replacement.sessionCount(), 1);
   assert.deepEqual(
@@ -442,7 +444,7 @@ test('an authenticator hands its live sessions on with the expiry each was minte
     { kind: 'cookie', sessionId: kept },
   );
   assert.equal(replacement.authenticate({ headers: { cookie: `${SESSION_COOKIE}=${stale}` } }), undefined);
-  assert.deepEqual(replacement.exportSessions(), [{ id: kept, expiresAt: keptExpiry }]);
+  assert.deepEqual(replacement.exportSessions(), [{ id: kept, expiresAt: keptExpiry, vouchedBy }]);
 
   // And at its own expiry the adopted session goes the way a minted one does.
   clock = keptExpiry;
@@ -457,7 +459,7 @@ test('a session handed to a control API authenticates there, whether adopted bef
     const sessionId = cookie.slice(`${SESSION_COOKIE}=`.length);
 
     // Adopted into a serving API: live at once.
-    const handed = { id: 'handed-while-serving', expiresAt: Date.now() + 60_000 };
+    const handed = { id: 'handed-while-serving', expiresAt: Date.now() + 60_000, vouchedBy: tokenFingerprint(harness.token) };
     harness.api.adoptSessions([handed]);
     const adopted = await harness.call('/api/v1/health', { auth: 'cookie', cookie: `${SESSION_COOKIE}=${handed.id}` });
     assert.equal(adopted.status, 200);
@@ -489,4 +491,21 @@ test('a session handed to a control API authenticates there, whether adopted bef
   } finally {
     await harness.stop();
   }
+});
+
+test('a session minted under another gateway token is not adopted, so rotating the token signs the browser out across a restart', () => {
+  const before = createAuthenticator({ token: 'token-before-rotation' });
+  const minted = before.redeemOneTimeToken(before.mintOneTimeToken());
+  assert.ok(minted);
+  const handed = before.exportSessions();
+
+  const rotated = createAuthenticator({ token: 'token-after-rotation' });
+  rotated.adoptSessions(handed);
+  assert.equal(rotated.sessionCount(), 0);
+  assert.equal(rotated.authenticate({ headers: { cookie: `${SESSION_COOKIE}=${minted}` } }), undefined);
+
+  // The same token, read again by the replacement, is the case that works.
+  const same = createAuthenticator({ token: 'token-before-rotation' });
+  same.adoptSessions(handed);
+  assert.equal(same.sessionCount(), 1);
 });
