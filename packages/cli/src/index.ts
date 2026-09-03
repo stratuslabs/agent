@@ -5835,6 +5835,18 @@ const processAlive = (pid: number): boolean => {
  * a `STRATUS_GATEWAY_TOKEN` exported for some remote gateway would answer
  * 401 for the local one, and the claim needs no second opinion.
  */
+/**
+ * `stratus serve` refused because another daemon holds the home. Its own
+ * type so `stratus dashboard` can tell "a daemon is there, wait for it to
+ * publish" from "the daemon could not start".
+ */
+class HomeHeldError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HomeHeldError';
+  }
+}
+
 const describeHeldHome = async (env: CliEnvironment): Promise<string> => {
   const info = await readGatewayInfo(env);
   const holder = info?.pid !== undefined && processAlive(info.pid)
@@ -5916,7 +5928,11 @@ export const runDashboard = async (
     // rather than waiting out a timeout for a process that is already gone.
     const startedBy = Date.now() + 15_000;
     let daemonStopped = false;
-    void daemonExit.then(() => { daemonStopped = true; });
+    // Except when the daemon gave up because another one holds the home:
+    // an installed service that is still starting, or still draining, has
+    // not published its address yet and is about to. That is the daemon
+    // to wait for, not a failure to report.
+    void daemonExit.then(() => { daemonStopped = !(daemonFailure instanceof HomeHeldError); });
     while (!base && !daemonStopped && Date.now() < startedBy) {
       const info = await readGatewayInfo(env);
       if (info && await gatewayAnswering(env, info.url, fetchImpl)) {
@@ -5930,11 +5946,20 @@ export const runDashboard = async (
       await daemonExit;
       writeLine(
         streams.stderr,
-        daemonFailure
-          ? `Error: the daemon could not start: ${daemonFailure instanceof Error ? daemonFailure.message : String(daemonFailure)}`
-          : 'Error: the daemon did not start serving its control API. Is @stratusagent/control-api installed?',
+        daemonFailure instanceof HomeHeldError
+          ? 'Error: another daemon holds this home but never published its address. It may still be starting or '
+            + 'draining — try again in a moment, or check `stratus service status`.'
+          : daemonFailure
+            ? `Error: the daemon could not start: ${daemonFailure instanceof Error ? daemonFailure.message : String(daemonFailure)}`
+            : 'Error: the daemon did not start serving its control API. Is @stratusagent/control-api installed?',
       );
       return 1;
+    }
+    if (daemonFailure instanceof HomeHeldError) {
+      // The daemon that answered is the one that held the home. Ours never
+      // started, so there is nothing of ours to wait for or to stop: from
+      // here this is the found-a-running-daemon case.
+      serving = undefined;
     }
   }
 
@@ -6130,7 +6155,7 @@ export const runServe = async (
     claim = claimHome(env);
   } catch (error) {
     if (error instanceof HomeClaimedError) {
-      throw new Error(await describeHeldHome(env));
+      throw new HomeHeldError(await describeHeldHome(env));
     }
     throw error;
   }
@@ -6438,41 +6463,45 @@ const serveHeldHome = async (
 
   await gateway.start();
 
-  // The roster is only known once the gateway has loaded it, and in remote
-  // mode an agent no channel can ask for is the quietest failure this
-  // feature has: its gated calls park with nobody rendering them and wait
-  // out the whole timeout before being denied. No channel can detect this
-  // on its own — a request is a broadcast, and no adapter knows whether
-  // another one is about to answer — so it is reported here, where the
-  // roster and the channel list are both in view.
-  if (approvalMode === 'remote') {
-    const askable = new Set(slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : []);
-    const unreachable = gateway.agents().map((agent) => agent.id).filter((id) => !askable.has(id));
-    if (unreachable.length > 0) {
-      warn(
-        `no channel can ask for ${unreachable.join(', ')}, so their gated calls will wait out the `
-        + 'approval timeout and then be denied. Connect a Slack app for them, or run with --approvals headless.',
-      );
-    }
-  }
-
-  writeLine(streams.stdout, 'Press Ctrl+C to stop.');
-
-  // And periodically, for a long-running daemon that warns steadily
-  // without ever writing enough records to rotate. Unref'd, so it never
-  // holds the process open. Armed only once the daemon is actually
-  // serving: every step above can throw, and runServe is an exported
-  // function as much as a process entry point — in a host that survives
-  // the failure, a timer armed before the throw would outlive the call
-  // and go on truncating that environment's redirect logs. The finally
-  // below takes it down on every other exit path.
+  // Under one finally from here: a throw anywhere after the start — a
+  // host's writable refusing a line, say — must still stop the gateway
+  // before the claim on the home is released, or a live gateway would be
+  // left behind a lock the next daemon can take.
   let redirectTimer: NodeJS.Timeout | undefined;
-  if (logWriter) {
-    redirectTimer = setInterval(() => void truncateRedirectLogs(logsDirPath(env)), 5 * 60_000);
-    redirectTimer.unref?.();
-  }
-
   try {
+    // The roster is only known once the gateway has loaded it, and in remote
+    // mode an agent no channel can ask for is the quietest failure this
+    // feature has: its gated calls park with nobody rendering them and wait
+    // out the whole timeout before being denied. No channel can detect this
+    // on its own — a request is a broadcast, and no adapter knows whether
+    // another one is about to answer — so it is reported here, where the
+    // roster and the channel list are both in view.
+    if (approvalMode === 'remote') {
+      const askable = new Set(slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : []);
+      const unreachable = gateway.agents().map((agent) => agent.id).filter((id) => !askable.has(id));
+      if (unreachable.length > 0) {
+        warn(
+          `no channel can ask for ${unreachable.join(', ')}, so their gated calls will wait out the `
+          + 'approval timeout and then be denied. Connect a Slack app for them, or run with --approvals headless.',
+        );
+      }
+    }
+
+    writeLine(streams.stdout, 'Press Ctrl+C to stop.');
+
+    // And periodically, for a long-running daemon that warns steadily
+    // without ever writing enough records to rotate. Unref'd, so it never
+    // holds the process open. Armed only once the daemon is actually
+    // serving: every step above can throw, and runServe is an exported
+    // function as much as a process entry point — in a host that survives
+    // the failure, a timer armed before the throw would outlive the call
+    // and go on truncating that environment's redirect logs. The finally
+    // below takes it down on every other exit path.
+    if (logWriter) {
+      redirectTimer = setInterval(() => void truncateRedirectLogs(logsDirPath(env)), 5 * 60_000);
+      redirectTimer.unref?.();
+    }
+
     // Hold the event loop open until a shutdown request, then drain: new
     // dispatches are refused while in-flight turns finish.
     await new Promise<void>((resolve) => {
@@ -6498,9 +6527,9 @@ const serveHeldHome = async (
     });
 
     writeLine(streams.stdout, 'Stopping — draining in-flight turns.');
-    await gateway.stop();
     return 0;
   } finally {
+    await gateway.stop();
     if (redirectTimer) {
       clearInterval(redirectTimer);
     }

@@ -8,6 +8,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { claimHome } from '@stratusagent/gateway';
+
 import {
   createFileMemoryStore,
   unsupportedNodeMessage,
@@ -7065,6 +7067,67 @@ test('a serve that fails before its gateway exists lets the home go', async () =
   await rm(path.join(home, '.stratus', 'credentials.json'));
   const { stderr } = await withServedApi(home, async () => {});
   assert.doesNotMatch(stderr, /already running/);
+});
+
+test('a throw after the daemon started still stops it before the home is released', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-throw-'));
+  // A host's writable that refuses the line printed after the gateway is
+  // up. runServe rejects — and the gateway it started must not be left
+  // live behind a claim the next daemon can take.
+  let stderr = '';
+  const streams = {
+    stdout: {
+      write(chunk: string) {
+        if (chunk.includes('Press Ctrl+C')) {
+          throw new Error('stdout closed');
+        }
+        return true;
+      },
+    },
+    stderr: { write(chunk: string) { stderr += chunk; return true; } },
+  };
+  const code = await runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+  assert.equal(code, 1);
+  assert.match(stderr, /stdout closed/);
+  // Stopped, not abandoned: the shutdown reached the log before the claim
+  // was released.
+  const log = await readFile(path.join(home, '.stratus', 'logs', 'stratusd.jsonl'), 'utf8');
+  assert.match(log, /stratusd stopped/);
+  const claim = claimHome({ homeDir: home, cwd: home, processEnv: {} });
+  claim.release();
+});
+
+test('stratus dashboard waits for a daemon that holds the home but has not published yet', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-dash-held-'));
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  // The installed service is starting: it holds the home and has not bound
+  // its API. The dashboard's own daemon is refused — and that is the daemon
+  // to wait for, not a failure to report.
+  const holder = claimHome(env);
+  const { streams, output } = createStreams();
+  let openedUrl = '';
+  const dashboard = runCli({
+    argv: ['dashboard', '--port', '0'],
+    streams,
+    env: { ...env, openExternal: async (opened) => { openedUrl = opened; } },
+  });
+
+  // Long enough that the dashboard's own attempt has certainly been refused
+  // before the holder publishes; the assertion below has a losing path if
+  // it was not (the dashboard's own daemon would answer on another port).
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  holder.release();
+  await withServedApi(home, async ({ url }) => {
+    assert.equal(await dashboard, 0, output.stderr);
+    assert.ok(output.stdout.includes(`ready at ${url}`), output.stdout);
+    assert.ok(openedUrl.startsWith(`${url}/api/v1/auth/session?ott=`), openedUrl);
+    // Found, not started: the refused attempt is not reported as a failure.
+    assert.doesNotMatch(output.stderr, /already running/);
+  });
 });
 
 test('a discovery file left by a daemon that died does not refuse the next one', async () => {
