@@ -7130,6 +7130,30 @@ test('stratus dashboard waits for a daemon that holds the home but has not publi
   });
 });
 
+test('stratus dashboard starts its own daemon once a draining holder lets the home go', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-dash-drained-'));
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  // A daemon still draining holds the home with its address already
+  // withdrawn — and then exits, with no service manager to replace it.
+  // The dashboard's own attempt was refused while it held; it must be
+  // repeated once the home is free, not waited out.
+  const holder = claimHome(env);
+  const { streams, output } = createStreams();
+  const dashboard = runCli({
+    argv: ['dashboard', '--port', '0', '--no-open'],
+    streams,
+    env: { ...env, dashboardAutoShutdownMs: 200 },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  holder.release();
+
+  assert.equal(await dashboard, 0, output.stderr);
+  assert.match(output.stdout, /ready at http:\/\/127\.0\.0\.1:\d+/);
+  // Its own daemon, started on the retry — not one it found.
+  assert.match(output.stdout, /Press Ctrl\+C to stop the daemon/);
+  assert.doesNotMatch(output.stderr, /already running/);
+});
+
 test('a discovery file left by a daemon that died does not refuse the next one', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-stale-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });

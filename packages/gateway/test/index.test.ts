@@ -596,6 +596,64 @@ test('a required adapter that cannot start fails the gateway start and stops the
   }
 });
 
+test('a start that fails after a channel parked an approval denies it before that channel is stopped', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  let transport: ApprovalTransport | undefined;
+
+  // A channel up before the required one fails has parked a gated turn on
+  // a person — buttons showing somewhere. The failed start is a shutdown,
+  // and a shutdown denies what is parked and lets the denial reach the
+  // channel before stopping it, or the buttons stay up for a turn that is
+  // over. Stopping the channel first, as the failure path once did, is the
+  // one order that loses that.
+  const order: string[] = [];
+  let parked: Promise<unknown> | undefined;
+  const early: GatewayChannelAdapter = {
+    name: 'early',
+    async start(gateway) {
+      gateway.bus.subscribe((event) => {
+        if (event.type === 'tool.approval-resolved') {
+          order.push(`resolved:${event.reason}`);
+        }
+      });
+      assert.ok(transport, 'the approvals factory ran before the channels started');
+      parked = transport.request(parkedCall('parked-in-start'));
+    },
+    async stop() {
+      order.push('early stopped');
+    },
+  };
+  const port = {
+    name: 'port',
+    required: true,
+    async start() {
+      throw new Error('address already in use');
+    },
+    async stop() {},
+  };
+
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    approvalTimeoutMs: 0,
+    channels: [early, port],
+    warn: () => {},
+    approvals: (given) => {
+      transport = given;
+      return { async approve() { return true; } };
+    },
+  });
+  try {
+    await assert.rejects(gateway.start(), /port could not start/);
+    assert.ok(parked, 'the early channel parked a request');
+    assert.equal(await settles(parked as Promise<string>, 'the parked request'), 'deny');
+    assert.deepEqual(order, ['resolved:cancelled', 'early stopped']);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('a start that fails after a channel accepted a turn lets that turn finish before the store closes', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };

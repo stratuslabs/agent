@@ -2290,9 +2290,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           // Before the scheduler and the sweeps below, deliberately: a
           // daemon that is not going to serve must not fire a catch-up
           // slot or re-ask a parked approval on its way out. The channels
-          // already up are the only thing to undo.
-          await Promise.allSettled(startedChannels.map((started) => started.stop()));
-          startedChannels.length = 0;
+          // already up are left to the shutdown this throw becomes, which
+          // denies what they parked and lets those denials reach them
+          // BEFORE it stops them — stopped here, a channel that had parked
+          // a gated turn in the window would never learn to retract its
+          // buttons.
           throw new Error(`${adapter.name} could not start, and the gateway cannot serve without it: ${reason}`);
         }
       }
