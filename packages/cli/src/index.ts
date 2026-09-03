@@ -7167,13 +7167,19 @@ const serveHeldHome = async (
       writeLine(streams.stdout, 'Stopping — draining in-flight turns.');
     }
   } finally {
-    await gateway.stop();
-    // The drain is over: a stop signal from here on is the process's to
-    // handle by default again — and a host that calls runServe repeatedly
-    // (the tests) must not accumulate handlers.
-    if (stopSignal) {
-      process.off('SIGTERM', stopSignal);
-      process.off('SIGINT', stopSignal);
+    try {
+      await gateway.stop();
+    } finally {
+      // The drain is over: a stop signal from here on is the process's to
+      // handle by default again — and a host that calls runServe repeatedly
+      // (the tests) must not accumulate handlers. Under its own finally
+      // because the listener is on the global process: a stop() that
+      // rejects (its last log line can throw through an injected stream)
+      // must not leave a settled handler behind to swallow the next signal.
+      if (stopSignal) {
+        process.off('SIGTERM', stopSignal);
+        process.off('SIGINT', stopSignal);
+      }
     }
     if (redirectTimer) {
       clearInterval(redirectTimer);

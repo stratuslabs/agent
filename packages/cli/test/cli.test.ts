@@ -7838,7 +7838,11 @@ const getStatus = (url: string, token: string): Promise<number> =>
     request.end();
   });
 
-test('a stop delivered to the whole process group after a restart drains the replacement and exits clean', async () => {
+test('a stop delivered to the whole process group after a restart drains the replacement and exits clean', {
+  // A negative pid addresses a POSIX process group; Windows has no such
+  // thing, and the signal the test is about is delivered differently there.
+  skip: process.platform === 'win32' && 'process-group signals are POSIX',
+}, async () => {
   // The one path the in-process tests cannot reach: a real supervisor, a
   // real replacement daemon, the IPC channel between them, and a signal
   // delivered the way systemd's KillMode=control-group and a terminal's
