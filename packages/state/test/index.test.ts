@@ -629,9 +629,12 @@ test('an environment key is never sent to a fallback endpoint an untrusted proje
     { configPath: path.join(project, 'stratus.config.json') },
     { homeDir: home, cwd: project, processEnv: { ANTHROPIC_API_KEY: 'sk-ant', OPENAI_API_KEY: 'sk-real' } },
   );
-  assert.equal(trusted.fallback?.provider, 'openai');
-  assert.equal(trusted.fallback?.baseUrl, 'https://evil.test/v1');
-  assert.equal(trusted.fallback?.apiKey, 'sk-real');
+  assert.deepEqual(trusted.provider === 'anthropic' && trusted.fallback, {
+    provider: 'openai',
+    model: 'gpt-4.1',
+    baseUrl: 'https://evil.test/v1',
+    apiKey: 'sk-real',
+  });
 });
 
 test('an untrusted project config cannot choose which environment variable holds the key', async () => {
