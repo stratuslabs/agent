@@ -5847,6 +5847,39 @@ class HomeHeldError extends Error {
   }
 }
 
+/**
+ * Whether a daemon from before the lock existed is serving this home.
+ *
+ * Such a daemon — alive across an upgrade that did not stop it — never
+ * took the claim, so the claim alone cannot see it. The discovery file it
+ * published is its only trace, held to the two proofs the lock made
+ * unnecessary for everything since: the pid it names is alive, and its
+ * URL answers `/health` with this home's own token file — never the
+ * `STRATUS_GATEWAY_TOKEN` override, which names some other gateway and
+ * would make a live daemon read as absent. A stale file fails either
+ * proof and refuses nothing.
+ */
+const legacyDaemonServing = async (env: CliEnvironment): Promise<boolean> => {
+  const info = await readGatewayInfo(env);
+  if (info?.pid === undefined || info.pid === process.pid || !processAlive(info.pid)) {
+    return false;
+  }
+  const fetchImpl = env.fetch ?? globalThis.fetch;
+  if (typeof fetchImpl !== 'function') {
+    return false;
+  }
+  try {
+    const token = (await readFile(gatewayTokenPath(env), 'utf8')).trim();
+    const response = await fetchImpl(`${info.url}/api/v1/health`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(2_000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+};
+
 const describeHeldHome = async (env: CliEnvironment): Promise<string> => {
   const info = await readGatewayInfo(env);
   const holder = info?.pid !== undefined && processAlive(info.pid)
@@ -6186,6 +6219,10 @@ export const runServe = async (
     throw error;
   }
   try {
+    // The one daemon the claim cannot see: one that predates it.
+    if (await legacyDaemonServing(env)) {
+      throw new HomeHeldError(await describeHeldHome(env));
+    }
     return await serveHeldHome(command, streams, env, createGateway);
   } finally {
     // After everything: the store closed by stop(), or whatever a throw

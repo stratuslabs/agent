@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -84,37 +84,71 @@ const claimAt = (lockPath: string): DatabaseSync => {
  * still starting, which by then it is.
  */
 const replaceDamaged = (lockPath: string): DatabaseSync => {
-  let repair: DatabaseSync;
+  const repair = claimRepair(lockPath);
   try {
-    repair = claimAt(`${lockPath}${REPAIR_SUFFIX}`);
-  } catch (error) {
-    if (isBusy(error)) {
-      throw new HomeClaimedError(lockPath);
-    }
-    throw error;
-  }
-  try {
-    try {
-      return claimAt(lockPath);
-    } catch (error) {
-      if (isBusy(error)) {
-        throw new HomeClaimedError(lockPath);
+    // Twice at most: once against the file as found, once against the
+    // file after this starter replaced it. Between the two, the inode is
+    // checked — a lock whose inode changed since it was read as damaged
+    // is a lock another starter has just replaced, and is claimed or
+    // refused as such rather than removed from under them.
+    let seen = inodeOf(lockPath);
+    for (const replaced of [false, true]) {
+      try {
+        return claimAt(lockPath);
+      } catch (error) {
+        if (isBusy(error)) {
+          throw new HomeClaimedError(lockPath);
+        }
+        if (replaced || !isNotADatabase(error)) {
+          throw error;
+        }
       }
-      if (!isNotADatabase(error)) {
-        throw error;
+      const now = inodeOf(lockPath);
+      if (now !== seen) {
+        seen = now;
+        continue;
       }
+      rmSync(lockPath, { force: true });
     }
-    rmSync(lockPath, { force: true });
-    try {
-      return claimAt(lockPath);
-    } catch (error) {
-      if (isBusy(error)) {
-        throw new HomeClaimedError(lockPath);
-      }
-      throw error;
-    }
+    throw new HomeClaimedError(lockPath);
   } finally {
     repair.close();
+  }
+};
+
+/**
+ * The claim on the repair sibling. As disposable as the lock and written
+ * just as never, so one that is not a database any more — both files
+ * damaged together — is replaced the same way rather than refusing every
+ * start until an operator removes it by hand. Two starters that reach
+ * this over two damaged files at once may each hold a sibling of their
+ * own; the inode check in `replaceDamaged` is what keeps one of them from
+ * removing the lock the other has by then replaced and holds.
+ */
+const claimRepair = (lockPath: string): DatabaseSync => {
+  const repairPath = `${lockPath}${REPAIR_SUFFIX}`;
+  for (const replaced of [false, true]) {
+    try {
+      return claimAt(repairPath);
+    } catch (error) {
+      if (isBusy(error)) {
+        throw new HomeClaimedError(lockPath);
+      }
+      if (replaced || !isNotADatabase(error)) {
+        throw error;
+      }
+      rmSync(repairPath, { force: true });
+    }
+  }
+  throw new HomeClaimedError(lockPath);
+};
+
+/** The inode at a path, or undefined for none — a path removed meanwhile. */
+const inodeOf = (file: string): number | undefined => {
+  try {
+    return statSync(file).ino;
+  } catch {
+    return undefined;
   }
 };
 

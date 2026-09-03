@@ -73,3 +73,20 @@ test('replacing a damaged lock file is serialized, so two starters cannot each c
   assert.equal(await readFile(homeLockPath(env), 'utf8'), '');
   claim.release();
 });
+
+test('a damaged repair sibling is replaced too, not obeyed forever', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  // Both files damaged from outside. The sibling exists to serialize the
+  // repair; a sibling that cannot be claimed must not turn into a lock
+  // that refuses every start until somebody removes it by hand.
+  await mkdir(path.dirname(homeLockPath(env)), { recursive: true });
+  await writeFile(homeLockPath(env), 'not a database at all\n');
+  await writeFile(`${homeLockPath(env)}.repair`, 'nor this\n');
+
+  const claim = claimHome(env);
+  assert.throws(() => claimHome(env), HomeClaimedError, 'the rebuilt lock is held');
+  claim.release();
+  assert.equal(await readFile(homeLockPath(env), 'utf8'), '');
+  assert.equal(await readFile(`${homeLockPath(env)}.repair`, 'utf8'), '');
+});

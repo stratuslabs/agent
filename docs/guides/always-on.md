@@ -92,7 +92,10 @@ file stays between runs; the claim is the open descriptor, not the file's
 existence, and a file that is not a database any more is replaced rather
 than obeyed (under a sibling `stratusd.lock.repair`, so two daemons
 starting over the same damaged file cannot each replace it). `gateway.json`
-is read only to name the holder.
+is read to name the holder — and, for a daemon from a release before the
+lock existed that is still serving across an upgrade, it is the evidence:
+a live pid whose address answers with this home's token refuses the start
+the same way.
 
 The control API is a required channel: a daemon that cannot bind its port
 stops instead of serving without one, with an error naming the port and

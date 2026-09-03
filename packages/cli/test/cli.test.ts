@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import { EventEmitter, once } from 'node:events';
 import { Readable } from 'node:stream';
 import os from 'node:os';
@@ -7152,6 +7153,54 @@ test('stratus dashboard starts its own daemon once a draining holder lets the ho
   // Its own daemon, started on the retry — not one it found.
   assert.match(output.stdout, /Press Ctrl\+C to stop the daemon/);
   assert.doesNotMatch(output.stderr, /already running/);
+});
+
+test('a daemon from before the lock, still serving, refuses the next one through its discovery file', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-legacy-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A daemon started by the previous release never took the claim. What it
+  // left is its discovery file and its token, and a /health that answers
+  // to that token — the two proofs the lock cannot supply for it.
+  const token = 'legacy-token';
+  await writeFile(path.join(home, '.stratus', 'gateway-token'), `${token}\n`);
+  const legacy = createServer((request, response) => {
+    const authorized = request.headers.authorization === `Bearer ${token}`;
+    response.writeHead(request.url === '/api/v1/health' && authorized ? 200 : 401);
+    response.end();
+  });
+  await new Promise<void>((resolve) => legacy.listen(0, '127.0.0.1', resolve));
+  const { port } = legacy.address() as { port: number };
+  const url = `http://127.0.0.1:${port}`;
+  // A live process that is not this one, since a daemon is never its own
+  // predecessor.
+  const alive = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  await writeFile(
+    path.join(home, '.stratus', 'gateway.json'),
+    JSON.stringify({ url, host: '127.0.0.1', port, pid: alive.pid }),
+  );
+
+  try {
+    const { streams, output } = createStreams();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2_000);
+    const code = await runCli({
+      argv: ['serve', '--no-events', '--api-port', '0'],
+      streams,
+      // The override names some other gateway; the probe must use the
+      // home's own token file, or the legacy daemon reads as absent.
+      env: { homeDir: home, cwd: home, processEnv: { STRATUS_GATEWAY_TOKEN: 'for-another-gateway' }, shutdownSignal: controller.signal },
+    });
+    clearTimeout(timer);
+    assert.equal(code, 1);
+    assert.match(output.stderr, new RegExp(`already running for this home \\(pid ${alive.pid}, ${url.replace(/[.]/g, '\\.')}\\)`));
+    assert.ok(!output.stdout.includes('control API on'), output.stdout);
+    // And the home was let go: the claim taken for the check is released.
+    const claim = claimHome({ homeDir: home, cwd: home, processEnv: {} });
+    claim.release();
+  } finally {
+    alive.kill();
+    await new Promise<void>((resolve) => legacy.close(() => resolve()));
+  }
 });
 
 test('a discovery file left by a daemon that died does not refuse the next one', async () => {
