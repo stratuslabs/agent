@@ -33,6 +33,7 @@ stratus agent new --name Ava --instructions "You research things." --format soul
 stratus agents                         # who's on the team (also: stratus agent list)
 stratus skill add owner/repo           # install skills from GitHub or a local path
 stratus skill add owner/repo --skill hn-search --agent ava
+stratus skill validate ./my-skill      # check a skill (or a repo of them, or an installed id) against the Agent Skills spec
 stratus skills                         # what is installed, who enables it (also: stratus skill list)
 stratus skill reload                   # a running daemon re-reads ~/.stratus/skills — no restart
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
@@ -51,7 +52,7 @@ stratus dashboard                      # local browser dashboard
 | `doctor` | [Troubleshooting](../guides/troubleshooting.md) |
 | `update` | [Updating](../guides/updating.md) |
 | `agent new`, `agents` | [Agents](../concepts/agents.md) |
-| `skill add`, `skills`, `skill reload` | [Skills](../guides/skills.md) |
+| `skill add`, `skill validate`, `skills`, `skill reload` | [Skills](../guides/skills.md), [Skill format](./skill-format.md) |
 | `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
 | `schedules …` | [Schedules](../guides/schedules.md) |
 | `dashboard` | [Remote access](../guides/remote-access.md) |

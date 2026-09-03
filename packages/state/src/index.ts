@@ -26,6 +26,9 @@ import {
 import {
   agentIdWithSuffix,
   createLazySkill,
+  isLoadableSkillId,
+  SKILL_ID_RULE,
+  validateSkillDocument,
   defineAgent,
   isValidSkillId,
   parseSkillDocument,
@@ -1614,6 +1617,11 @@ export interface OperatorSkillInfo {
   path: string;
   /** Toolset globs the skill's frontmatter says it expects. Advisory. */
   requires?: string[];
+  /**
+   * The spec's `compatibility` prose — what the skill says it needs from
+   * its environment. For the operator at install; nothing acts on it.
+   */
+  compatibility?: string;
 }
 
 export interface LoadOperatorSkillsOptions {
@@ -1671,9 +1679,17 @@ export const loadOperatorSkills = async (
     }
     const id = entry.name;
     const skillPath = path.join(skillsDirPath(env), id, 'SKILL.md');
-    if (!isValidSkillId(id)) {
-      skip(skillPath, `${JSON.stringify(id)} is not a skill id. Skill ids are kebab-case (web-research).`);
+    if (!isLoadableSkillId(id)) {
+      skip(skillPath, `${JSON.stringify(id)} is not a skill id. ${SKILL_ID_RULE}`);
       continue;
+    }
+    if (!isValidSkillId(id)) {
+      // Served, and said: the spec's rule is newer than this directory,
+      // and an upgrade must not silently take an enabled procedure away.
+      // A fresh install of it would be refused.
+      warn(
+        `${skillPath}: ${JSON.stringify(id)} predates the Agent Skills name rule (${SKILL_ID_RULE}) — still served, but a fresh install of it would be refused. Rename the directory, and its name:, to conform.`,
+      );
     }
     let document;
     try {
@@ -1689,6 +1705,7 @@ export const loadOperatorSkills = async (
       description: document.description,
       path: skillPath,
       ...(document.requires ? { requires: document.requires } : {}),
+      ...(document.compatibility !== undefined ? { compatibility: document.compatibility } : {}),
     });
   }
   return loaded;
@@ -1702,6 +1719,12 @@ export interface SkillInstallCandidate {
   directory: string;
   name: string;
   description: string;
+  /**
+   * What validation noted without refusing: fields outside the spec, the
+   * legacy Stratus keys, a bundled `scripts/`. For the installer to say,
+   * per skill, next to what it installed.
+   */
+  warnings: string[];
 }
 
 /** A skill a source offered that was not installed, and why. */
@@ -1709,6 +1732,83 @@ export interface SkillInstallSkip {
   id: string;
   reason: string;
 }
+
+/** A skill that installed, and something the operator should know about it. */
+export interface SkillInstallWarning {
+  id: string;
+  message: string;
+}
+
+export interface ValidateSkillDirectoryOptions {
+  /**
+   * Check `name` against this directory name, as the spec requires.
+   * Omitted for a skill whose directory is circumstance — a repository
+   * that is the skill, checked out wherever git put it.
+   */
+  directoryName?: string;
+  /** What a missing `name` should be, for the error text. */
+  suggestedName?: string;
+}
+
+/** The outcome of validating one skill directory. `document` is present whenever the file parsed. */
+export interface SkillDirectoryValidation {
+  document?: ParsedSkillDocument;
+  errors: string[];
+  warnings: string[];
+}
+
+/**
+ * Validate one skill directory the way an install does: the `SKILL.md`
+ * parses, its frontmatter passes `validateSkillDocument`, and what the
+ * directory bundles is noted. `stratus skill validate` and `stratus skill
+ * add` share this — one reading of "conforms", so a skill that validates
+ * is a skill that installs, and vice versa.
+ *
+ * A bundled `scripts/` is a warning rather than a refusal: the files are
+ * inert on disk, and the roadmap's line — prose imports, executables do
+ * not — means nothing here registers or runs them. An agent can run one
+ * only through its own `shell.run` gate, like any other command, and the
+ * operator installing the skill should hear that it bundles some.
+ */
+export const validateSkillDirectory = async (
+  directory: string,
+  options: ValidateSkillDirectoryOptions = {},
+): Promise<SkillDirectoryValidation> => {
+  let source: string;
+  try {
+    source = await readFile(path.join(directory, 'SKILL.md'), 'utf8');
+  } catch (error) {
+    return {
+      errors: [`no SKILL.md in ${directory}: ${error instanceof Error ? error.message : String(error)}. A skill is a directory with a SKILL.md.`],
+      warnings: [],
+    };
+  }
+  let document: ParsedSkillDocument;
+  try {
+    document = parseSkillDocument(source);
+  } catch (error) {
+    return { errors: [error instanceof Error ? error.message : String(error)], warnings: [] };
+  }
+  const { errors, warnings } = validateSkillDocument(document, {
+    ...(options.directoryName !== undefined ? { directoryName: options.directoryName } : {}),
+    ...(options.suggestedName !== undefined ? { suggestedName: options.suggestedName } : {}),
+  });
+
+  let scriptCount = 0;
+  try {
+    const entries = await readdir(path.join(directory, 'scripts'), { recursive: true, withFileTypes: true });
+    scriptCount = entries.filter((entry) => entry.isFile()).length;
+  } catch {
+    // No scripts/ — the common case.
+  }
+  if (scriptCount > 0) {
+    warnings.push(
+      `bundles scripts/ (${scriptCount} file${scriptCount === 1 ? '' : 's'}). Installed as files only: nothing registers or runs them, and an agent can run one only through its own shell.run gate, like any other command.`,
+    );
+  }
+
+  return { document, errors, warnings };
+};
 
 export interface InstallSkillsOptions {
   /** Install only these ids; everything else the source offers is skipped silently. */
@@ -1727,10 +1827,21 @@ export interface DiscoverSkillsOptions {
    * accidentally one. Read only by the root-as-skill case.
    */
   rootId?: string;
+  /**
+   * Treat the root directory's own name as the skill's identity and check
+   * `name` against it, as for a skill inside a container. Off by default,
+   * because a source's root is usually a checkout, whose directory name is
+   * circumstance. On for a directory that *is* the installed layout —
+   * `~/.stratus/skills/<id>` — where a `name` that disagrees with the
+   * directory is exactly the defect to report.
+   */
+  checkRootDirectoryName?: boolean;
 }
 
 export interface InstallSkillsResult {
   installed: OperatorSkillInfo[];
+  /** What validation noted about the skills in `installed`, per skill. */
+  warnings: SkillInstallWarning[];
   /**
    * Offered by the source and already present under the same id — not
    * copied, but real, loadable, and as eligible for enablement as a fresh
@@ -1758,9 +1869,11 @@ const SKILL_IGNORED_DIRNAMES = new Set(['.git', 'node_modules']);
  * are flat, and a walk that reached deeper would install directories
  * nobody published as skills.
  *
- * Invalid entries (an unparseable SKILL.md, an id that is not an id) come
- * back as skips with the reason, so an installer can say what it left
- * behind rather than silently thinning the source.
+ * Every candidate passed `validateSkillDirectory`: a skill that does not
+ * conform to the spec (no `name`, a name that is not an id or not its
+ * directory's, a description past the ceiling) comes back as a skip with
+ * every reason, so an installer can say what it left behind rather than
+ * silently thinning the source — and so what installed is known to load.
  */
 export const discoverSkillsInDirectory = async (
   sourceDir: string,
@@ -1770,41 +1883,42 @@ export const discoverSkillsInDirectory = async (
   const skipped: SkillInstallSkip[] = [];
   const claimed = new Set<string>();
 
-  const consider = async (directory: string, fallbackId: string, preferDocumentName = false): Promise<void> => {
-    let source: string;
+  const consider = async (directory: string, fallbackId: string, isRoot = false): Promise<void> => {
     try {
-      source = await readFile(path.join(directory, 'SKILL.md'), 'utf8');
+      await readFile(path.join(directory, 'SKILL.md'), 'utf8');
     } catch {
       return;
     }
-    let document: ParsedSkillDocument;
-    try {
-      document = parseSkillDocument(source);
-    } catch (error) {
-      skipped.push({ id: fallbackId, reason: error instanceof Error ? error.message : String(error) });
+    // The spec makes `name` the id and requires it to equal the directory
+    // name, which is what it will be in `~/.stratus/skills/`. A repository
+    // whose root is the skill is the exception: its directory is wherever
+    // it happened to be checked out, so only the name is checked there,
+    // and the caller-supplied root id is what a nameless one is told to
+    // add.
+    const checkDirectory = !isRoot || options.checkRootDirectoryName === true;
+    const validation = await validateSkillDirectory(
+      directory,
+      checkDirectory ? { directoryName: fallbackId, suggestedName: fallbackId } : { suggestedName: fallbackId },
+    );
+    if (validation.errors.length > 0 || validation.document?.name === undefined) {
+      // Every error is a sentence naming its fix, so joined they read as
+      // the whole diagnosis — one skip line saying everything wrong.
+      skipped.push({ id: fallbackId, reason: validation.errors.join(' ') });
       return;
     }
-    // The directory name is the id, as it will be in `~/.stratus/skills/`.
-    // A repository whose root is the skill is the exception: its directory
-    // name is wherever it happened to be checked out, so the frontmatter
-    // `name` wins there, with the caller-supplied root id as the fallback
-    // for a nameless skill.
-    const fromDocument = document.name && isValidSkillId(document.name) ? document.name : undefined;
-    const fromFallback = isValidSkillId(fallbackId) ? fallbackId : undefined;
-    const id = preferDocumentName ? (fromDocument ?? fromFallback) : (fromFallback ?? fromDocument);
-    if (id === undefined) {
-      skipped.push({
-        id: fallbackId,
-        reason: `${JSON.stringify(fallbackId)} is not a skill id and the frontmatter name is not one either. Skill ids are kebab-case (web-research).`,
-      });
-      return;
-    }
+    const id = validation.document.name;
     if (claimed.has(id)) {
       skipped.push({ id, reason: 'the source offers this id more than once; the first occurrence was kept' });
       return;
     }
     claimed.add(id);
-    candidates.push({ id, directory, name: document.name ?? id, description: document.description });
+    candidates.push({
+      id,
+      directory,
+      name: id,
+      description: validation.document.description,
+      warnings: validation.warnings,
+    });
   };
 
   await consider(sourceDir, options.rootId ?? path.basename(sourceDir), true);
@@ -1877,6 +1991,7 @@ export const installSkillsFromDirectory = async (
   }
 
   const installed: OperatorSkillInfo[] = [];
+  const warnings: SkillInstallWarning[] = [];
   const alreadyInstalled: OperatorSkillInfo[] = [];
   for (const candidate of wanted) {
     const destination = path.join(skillsDirPath(env), candidate.id);
@@ -1901,6 +2016,7 @@ export const installSkillsFromDirectory = async (
           description: document.description,
           path: installedPath,
           ...(document.requires ? { requires: document.requires } : {}),
+          ...(document.compatibility !== undefined ? { compatibility: document.compatibility } : {}),
         });
       } catch (error) {
         skipped.push({
@@ -1949,13 +2065,17 @@ export const installSkillsFromDirectory = async (
         description: document.description,
         path: path.join(destination, 'SKILL.md'),
         ...(document.requires ? { requires: document.requires } : {}),
+        ...(document.compatibility !== undefined ? { compatibility: document.compatibility } : {}),
       });
+      for (const message of candidate.warnings) {
+        warnings.push({ id: candidate.id, message });
+      }
     } finally {
       await rm(staging, { recursive: true, force: true });
     }
   }
 
-  return { installed, alreadyInstalled, skipped };
+  return { installed, warnings, alreadyInstalled, skipped };
 };
 
 /**

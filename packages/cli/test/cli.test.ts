@@ -549,13 +549,14 @@ test('runCli skill add clones a git source — the transport skills.sh repos arr
   await readFile(path.join(home, '.stratus', 'skills', 'code-review', 'SKILL.md'), 'utf8');
 });
 
-test('runCli skill add of a repo whose root is the skill installs under the repo name', async () => {
+test('runCli skill add of a repo whose root is a nameless skill refuses it, suggesting the repo name', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillrootgit-'));
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillrootgit-cwd-'));
   const parent = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillrootgit-src-'));
-  // The repository IS the skill, and its SKILL.md has no name — the id
-  // must come from the repository's name, never from the random temp
-  // directory the clone lands in.
+  // The repository IS the skill, and its SKILL.md has no name. The spec
+  // requires one, so the install is refused — and the name it is told to
+  // add is the repository's, never the random temp directory the clone
+  // lands in.
   const source = path.join(parent, 'my-skills');
   await mkdir(source, { recursive: true });
   await writeFile(path.join(source, 'SKILL.md'), '---\ndescription: Use when rooting.\n---\n\nBody.\n');
@@ -574,9 +575,94 @@ test('runCli skill add of a repo whose root is the skill installs under the repo
     streams,
     env: { cwd, homeDir: home, processEnv: {} },
   });
+  assert.equal(exitCode, 1);
+  assert.match(output.stderr, /Warning: skipped my-skills: frontmatter has no "name".*add: name: my-skills/);
+  assert.match(output.stderr, /Error: nothing was installed\./);
+  assert.ok(!output.stderr.includes('stratus-skill-add-'), 'suggested the clone directory');
+});
+
+test('runCli skill add says what installed with a caveat, per skill', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillwarn-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillwarn-cwd-'));
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillwarn-src-'));
+  // Published for another host: its field, and a script.
+  await mkdir(path.join(source, 'pdf', 'scripts'), { recursive: true });
+  await writeFile(
+    path.join(source, 'pdf', 'SKILL.md'),
+    '---\nname: pdf\ndescription: Use for PDFs.\ncompatibility: Needs python3 on PATH.\nargument-hint: "[file]"\n---\n\nRun scripts/extract.py.\n',
+  );
+  await writeFile(path.join(source, 'pdf', 'scripts', 'extract.py'), 'print(1)');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({ argv: ['skill', 'add', source], streams, env: { cwd, homeDir: home, processEnv: {} } });
   assert.equal(exitCode, 0, output.stderr);
-  assert.match(output.stdout, /installed my-skills — Use when rooting\./);
-  await readFile(path.join(home, '.stratus', 'skills', 'my-skills', 'SKILL.md'), 'utf8');
+  assert.match(output.stdout, /installed pdf — Use for PDFs\.\n {2}compatibility: Needs python3 on PATH\./);
+  assert.match(output.stderr, /Warning: pdf: frontmatter key outside the Agent Skills spec: "argument-hint"/);
+  assert.match(output.stderr, /Warning: pdf: bundles scripts\/ \(1 file\)/);
+  await readFile(path.join(home, '.stratus', 'skills', 'pdf', 'scripts', 'extract.py'), 'utf8');
+});
+
+test('runCli skill validate reports what install would refuse and warn about, and exits 1 only on a refusal', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillval-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillval-cwd-'));
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillval-src-'));
+  await mkdir(path.join(source, 'pdf'), { recursive: true });
+  await writeFile(
+    path.join(source, 'pdf', 'SKILL.md'),
+    '---\nname: pdf\ndescription: Use for PDFs.\nargument-hint: "[file]"\n---\n\nBody.\n',
+  );
+  await mkdir(path.join(source, 'notes'), { recursive: true });
+  await writeFile(path.join(source, 'notes', 'SKILL.md'), '---\nname: note-taking\ndescription: Use for notes.\n---\n\nBody.\n');
+  await mkdir(path.join(source, 'fine'), { recursive: true });
+  await writeFile(path.join(source, 'fine', 'SKILL.md'), '---\nname: fine\ndescription: Use for fine things.\n---\n\nBody.\n');
+  const env = { cwd, homeDir: home, processEnv: {} };
+
+  // A directory of skills: every one reported, exit 1 because one would be refused.
+  const repo = createStreams();
+  assert.equal(await runCli({ argv: ['skill', 'validate', source], streams: repo.streams, env }), 1);
+  assert.match(repo.output.stdout, /^fine: ok$/m);
+  assert.match(repo.output.stdout, /^pdf: ok — 1 warning\n {2}warning: frontmatter key outside the Agent Skills spec: "argument-hint"/m);
+  assert.match(repo.output.stdout, /^notes: refused\n {2}error: name "note-taking" does not match the directory name "notes"/m);
+  assert.match(repo.output.stderr, /Error: 1 skill would be refused at install\./);
+
+  // One conforming skill directory: clean, exit 0, nothing on stderr.
+  const clean = createStreams();
+  assert.equal(await runCli({ argv: ['skill', 'validate', path.join(source, 'fine')], streams: clean.streams, env }), 0);
+  assert.equal(clean.output.stdout, 'fine: ok\n');
+  assert.equal(clean.output.stderr, '');
+
+  // An installed id resolves to ~/.stratus/skills/<id> — here a pre-spec
+  // install, so the operator learns what to add before publishing it.
+  const installed = path.join(home, '.stratus', 'skills', 'code-review');
+  await mkdir(installed, { recursive: true });
+  await writeFile(path.join(installed, 'SKILL.md'), '---\ndescription: Use when reviewing.\n---\n\nBody.\n');
+  const byId = createStreams();
+  assert.equal(await runCli({ argv: ['skill', 'validate', 'code-review'], streams: byId.streams, env }), 1);
+  assert.match(byId.output.stdout, /^code-review: refused\n {2}error: frontmatter has no "name".*add: name: code-review/m);
+
+  // An installed directory is the layout the spec's directory rule is
+  // about: a name that disagrees with it (a hand edit, say) is reported
+  // under the directory's id, not waved through as a root skill.
+  const renamed = path.join(home, '.stratus', 'skills', 'foo');
+  await mkdir(renamed, { recursive: true });
+  await writeFile(path.join(renamed, 'SKILL.md'), '---\nname: bar\ndescription: Use for bar.\n---\n\nBody.\n');
+  const mismatch = createStreams();
+  assert.equal(await runCli({ argv: ['skill', 'validate', 'foo'], streams: mismatch.streams, env }), 1);
+  assert.match(mismatch.output.stdout, /^foo: refused\n {2}error: name "bar" does not match the directory name "foo"/m);
+
+  // A pre-spec directory id still resolves, so the operator is told what
+  // to rename rather than that nothing is installed under it.
+  const legacy = path.join(home, '.stratus', 'skills', 'old--id');
+  await mkdir(legacy, { recursive: true });
+  await writeFile(path.join(legacy, 'SKILL.md'), '---\nname: old--id\ndescription: Use for old things.\n---\n\nBody.\n');
+  const legacyRun = createStreams();
+  assert.equal(await runCli({ argv: ['skill', 'validate', 'old--id'], streams: legacyRun.streams, env }), 1);
+  assert.match(legacyRun.output.stdout, /^old--id: refused\n {2}error: name "old--id" is not a skill id/m);
+
+  // Neither a directory nor an installed id.
+  const missing = createStreams();
+  assert.equal(await runCli({ argv: ['skill', 'validate', 'nope'], streams: missing.streams, env }), 1);
+  assert.match(missing.output.stderr, /"nope" is neither a directory nor an installed skill id/);
 });
 
 test('runCli skill add never prints a credential-bearing source URL', async () => {
@@ -600,7 +686,7 @@ test('runCli skill add --agent reaches the configured soul outside the agents di
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillcfg-cwd-'));
   const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillcfg-src-'));
   await mkdir(path.join(source, 'code-review'), { recursive: true });
-  await writeFile(path.join(source, 'code-review', 'SKILL.md'), '---\ndescription: Use when reviewing.\n---\n\nBody.\n');
+  await writeFile(path.join(source, 'code-review', 'SKILL.md'), '---\nname: code-review\ndescription: Use when reviewing.\n---\n\nBody.\n');
   // The served default soul lives OUTSIDE ~/.stratus/agents, named by the
   // config — a roster case stratus agents and the daemon both include.
   const soulPath = path.join(home, 'elsewhere', 'ava.md');
@@ -649,7 +735,7 @@ test('runCli skill commands handle configured-soul edges: unreadable, shadowed, 
   // directory, never as a link back into the source tree.
   const realSource = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilledge-src-'));
   await mkdir(path.join(realSource, 'hn-search'), { recursive: true });
-  await writeFile(path.join(realSource, 'hn-search', 'SKILL.md'), '---\ndescription: Use when searching HN.\n---\n\nBody.\n');
+  await writeFile(path.join(realSource, 'hn-search', 'SKILL.md'), '---\nname: hn-search\ndescription: Use when searching HN.\n---\n\nBody.\n');
   const linkSource = path.join(cwd, 'linked-source');
   await symlink(realSource, linkSource);
 
@@ -680,6 +766,15 @@ test('runCli skills withholds enablement claims when the roster cannot load', as
   assert.match(output.stdout, /code-review\s+Use when reviewing\./);
   // Unreadable is not "unused": no enablement claim either way.
   assert.ok(!output.stdout.includes('enabled by'), 'made an enablement claim from an unreadable roster');
+});
+
+test('parseCommand reads skill validate', () => {
+  assert.deepEqual(parseCommand(['skill', 'validate', './my-skill']), { command: 'skill-validate', target: './my-skill' });
+  assert.deepEqual(parseCommand(['skill', 'validate', 'code-review']), { command: 'skill-validate', target: 'code-review' });
+  assert.throws(() => parseCommand(['skill', 'validate']), /needs a target/);
+  assert.throws(() => parseCommand(['skill', 'validate', 'a', 'b']), /one target/);
+  assert.throws(() => parseCommand(['skill', 'validate', 'a', '--force']), /Unknown option/);
+  assert.deepEqual(parseCommand(['skill', 'validate', '--help']), { command: 'help' });
 });
 
 test('parseCommand reads skill add and skills forms', () => {
@@ -7847,6 +7942,24 @@ const rawGet = (url: string, headers: Record<string, string>): Promise<{ status:
     request.end();
   });
 
+/** GET a daemon route over node:http, resolving with the status. */
+const getStatus = (url: string, token: string): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const request = httpRequest(
+      { host: target.hostname, port: target.port, path: target.pathname, headers: { authorization: `Bearer ${token}` } },
+      (response) => {
+        response.resume();
+        response.on('end', () => resolve(response.statusCode ?? 0));
+      },
+    );
+    // Bounded per request: a replacement that accepts the connection and
+    // then stalls would otherwise hold this open past the caller's loop.
+    request.setTimeout(5_000, () => request.destroy(new Error('the health check timed out')));
+    request.on('error', reject);
+    request.end();
+  });
+
 /** The dashboard's session cookie name, as the control API sets it. */
 const SESSION_COOKIE = 'stratus_session';
 
@@ -7955,4 +8068,234 @@ test('a supervised daemon takes the sessions handed down its channel before it s
   const handedBack = sent.find((message) => message.type === 'stratusd.sessions');
   assert.deepEqual(handedBack?.sessions?.sort(), [handed.id, own].sort());
   assert.ok(sent.some((message) => message.type === 'stratusd.bound-api-port'), 'the bound port still goes up the same channel');
+});
+
+test('a stop delivered to the whole process group after a restart drains the replacement and exits clean', {
+  // A negative pid addresses a POSIX process group; Windows has no such
+  // thing, and the signal the test is about is delivered differently there.
+  skip: process.platform === 'win32' && 'process-group signals are POSIX',
+}, async () => {
+  // The one path the in-process tests cannot reach: a real supervisor, a
+  // real replacement daemon, the IPC channel between them, and a signal
+  // delivered the way systemd's KillMode=control-group and a terminal's
+  // Ctrl+C deliver it — to every process in the group at once, so the
+  // replacement gets it from the kernel and again forwarded by the
+  // supervisor. Before the fix the second copy killed it mid-drain.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-group-stop-'));
+  const entrypoint = fileURLToPath(new URL('../src/bin.ts', import.meta.url));
+  const daemon = spawn(
+    process.execPath,
+    ['--experimental-strip-types', entrypoint, 'serve', '--no-events', '--api-port', '0', '--no-log-file'],
+    { env: { ...process.env, HOME: serveHome }, stdio: ['ignore', 'pipe', 'pipe'], detached: true },
+  );
+  let output = '';
+  daemon.stdout?.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+  daemon.stderr?.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+  // `close`, not `exit`: it fires once the process has ended *and* its
+  // piped streams have closed, so everything it and the replacement (which
+  // inherits the same pipes) wrote is in `output` by the time this settles.
+  // After `exit` alone, a final chunk can still be in flight on a loaded
+  // runner.
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    daemon.once('close', (code, signal) => resolve({ code, signal }));
+  });
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  const info = async (): Promise<{ pid?: number; url: string } | undefined> => {
+    try {
+      return JSON.parse(await readFile(path.join(serveHome, '.stratus', 'gateway.json'), 'utf8')) as { pid?: number; url: string };
+    } catch {
+      return undefined;
+    }
+  };
+
+  try {
+    // One deadline per wait, far above what a loaded runner needs: the
+    // gate is the daemon publishing itself, and a daemon that never does
+    // fails here rather than hanging the suite. A deadline rather than an
+    // attempt count, because an attempt can now take as long as a health
+    // check's own timeout.
+    let first: { pid?: number; url: string } | undefined;
+    for (const deadline = Date.now() + 30_000; !first && Date.now() < deadline;) {
+      first = await info();
+      if (!first) await sleep(100);
+    }
+    assert.ok(first, `the daemon never published gateway.json:\n${output}`);
+    const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+    assert.equal((await postJson(`${first.url}/api/v1/restart`, token, { reason: 'test' })).status, 202);
+
+    let second: { pid?: number; url: string } | undefined;
+    for (const deadline = Date.now() + 30_000; !second && Date.now() < deadline;) {
+      const current = await info();
+      if (current && current.pid !== first.pid && await getStatus(`${current.url}/api/v1/health`, token).catch(() => 0) === 200) {
+        second = current;
+      } else {
+        await sleep(100);
+      }
+    }
+    assert.ok(second, `no replacement daemon came up:\n${output}`);
+    // The supervisor is the process the manager started; the replacement
+    // is on the port the first daemon bound.
+    assert.equal(first.pid, daemon.pid);
+    assert.equal(second.url, first.url);
+
+    process.kill(-(daemon.pid as number), 'SIGTERM');
+    // The losing timer is cleared: left armed, it would hold the test
+    // worker open for the rest of its 30 seconds after a clean exit.
+    let hung: NodeJS.Timeout | undefined;
+    const result = await Promise.race([
+      exited,
+      new Promise<'hung'>((resolve) => { hung = setTimeout(() => resolve('hung'), 30_000); }),
+    ]).finally(() => clearTimeout(hung));
+    assert.notEqual(result, 'hung', `the daemon did not exit after a group stop:\n${output}`);
+    assert.deepEqual(result, { code: 0, signal: null }, output);
+    // The replacement drained rather than dying to the repeated signal.
+    const stops = output.split('stratusd stopped').length - 1;
+    assert.equal(stops, 2, `expected the first daemon and its replacement each to stop cleanly:\n${output}`);
+  } finally {
+    try {
+      process.kill(-(daemon.pid as number), 'SIGKILL');
+    } catch {
+      // Already gone.
+    }
+  }
+});
+
+test('a second stop signal while the drain is running is ignored, not fatal', async () => {
+  // The deterministic half of the group-stop case above: the second
+  // signal is sent only once the first one's drain is provably underway,
+  // with a turn held open so the drain cannot finish first. Without the
+  // fix the second signal ends this very process, which is the failure.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-second-signal-'));
+  await mkdir(path.join(serveHome, '.stratus', 'agents'), { recursive: true });
+  await writeFile(
+    path.join(serveHome, '.stratus', 'agents', 'ava.md'),
+    '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n',
+  );
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let turnStarted!: () => void;
+  const started = new Promise<void>((resolve) => { turnStarted = resolve; });
+  const fetchImpl = (async () => {
+    turnStarted();
+    await held;
+    return new Response(
+      JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'done' } }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof fetch;
+
+  const base = createStreams();
+  let draining!: () => void;
+  const drainStarted = new Promise<void>((resolve) => { draining = resolve; });
+  let warned!: () => void;
+  const repeatWarned = new Promise<void>((resolve) => { warned = resolve; });
+  let announceApi!: (url: string) => void;
+  const apiUrl = new Promise<string>((resolve) => { announceApi = resolve; });
+  const streams = {
+    stdout: {
+      write(chunk: string) {
+        const match = /control API on (http:\/\/\S+)/.exec(chunk);
+        if (match?.[1]) announceApi(match[1]);
+        if (chunk.includes('Stopping — draining in-flight turns.')) draining();
+        return base.streams.stdout.write(chunk);
+      },
+    },
+    stderr: {
+      write(chunk: string) {
+        if (chunk.includes('stop signal received while draining')) warned();
+        return base.streams.stderr.write(chunk);
+      },
+    },
+  };
+
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams,
+    env: { homeDir: serveHome, cwd: serveHome, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+  });
+  const url = await apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  assert.equal((await postJson(`${url}/api/v1/sessions/s-held/messages`, token, { message: 'take your time', agentId: 'ava' })).status, 202);
+  await started;
+
+  // Real signals to this process: the daemon's handlers are the only ones.
+  process.kill(process.pid, 'SIGTERM');
+  await drainStarted;
+  process.kill(process.pid, 'SIGTERM');
+  await repeatWarned;
+  release();
+
+  assert.equal(await serving, 0);
+  assert.match(base.output.stdout, /stratusd stopped/);
+});
+
+test('a second stop signal is still not fatal when the stream its warning goes to throws', async () => {
+  // The warning is said from signal dispatch, outside runServe's promise
+  // and its finally. A host that embeds runServe with a stderr whose
+  // write throws would otherwise turn the repeated signal into an
+  // uncaught exception — ending the process mid-drain by another route.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-signal-throwing-stream-'));
+  await mkdir(path.join(serveHome, '.stratus', 'agents'), { recursive: true });
+  await writeFile(
+    path.join(serveHome, '.stratus', 'agents', 'ava.md'),
+    '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n',
+  );
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let turnStarted!: () => void;
+  const started = new Promise<void>((resolve) => { turnStarted = resolve; });
+  const fetchImpl = (async () => {
+    turnStarted();
+    await held;
+    return new Response(
+      JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'done' } }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof fetch;
+
+  const base = createStreams();
+  let draining!: () => void;
+  const drainStarted = new Promise<void>((resolve) => { draining = resolve; });
+  let threw!: () => void;
+  const warningThrew = new Promise<void>((resolve) => { threw = resolve; });
+  let announceApi!: (url: string) => void;
+  const apiUrl = new Promise<string>((resolve) => { announceApi = resolve; });
+  const streams = {
+    stdout: {
+      write(chunk: string) {
+        const match = /control API on (http:\/\/\S+)/.exec(chunk);
+        if (match?.[1]) announceApi(match[1]);
+        if (chunk.includes('Stopping — draining in-flight turns.')) draining();
+        return base.streams.stdout.write(chunk);
+      },
+    },
+    stderr: {
+      write(chunk: string) {
+        if (chunk.includes('stop signal received while draining')) {
+          threw();
+          throw new Error('stderr is gone');
+        }
+        return base.streams.stderr.write(chunk);
+      },
+    },
+  };
+
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams,
+    env: { homeDir: serveHome, cwd: serveHome, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+  });
+  const url = await apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  assert.equal((await postJson(`${url}/api/v1/sessions/s-held/messages`, token, { message: 'take your time', agentId: 'ava' })).status, 202);
+  await started;
+
+  process.kill(process.pid, 'SIGTERM');
+  await drainStarted;
+  process.kill(process.pid, 'SIGTERM');
+  await warningThrew;
+  release();
+
+  assert.equal(await serving, 0);
+  assert.match(base.output.stdout, /stratusd stopped/);
 });

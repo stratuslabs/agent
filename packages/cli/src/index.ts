@@ -70,6 +70,7 @@ import {
   MEMORY_TOOL_NAME,
   formatSoul,
   generateAgentName,
+  isLoadableSkillId,
   parseSoul,
   type ParsedSoul,
 } from '@stratusagent/agents';
@@ -91,6 +92,7 @@ import {
   globalConfigPath,
   loadChannelCredentials,
   loadCredentials,
+  discoverSkillsInDirectory,
   installSkillsFromDirectory,
   loadOperatorSkills,
   loadRosterSouls,
@@ -487,6 +489,12 @@ export interface ParsedSkillAddCommand {
   reload?: boolean;
 }
 
+export interface ParsedSkillValidateCommand {
+  command: 'skill-validate';
+  /** A skill directory, a directory of skills, or an installed skill's id. */
+  target: string;
+}
+
 export interface ParsedSkillsCommand {
   command: 'skills';
 }
@@ -593,6 +601,7 @@ export type ParsedCommand =
   | ParsedAgentNewCommand
   | ParsedAgentsCommand
   | ParsedSkillAddCommand
+  | ParsedSkillValidateCommand
   | ParsedSkillsCommand
   | ParsedSkillReloadCommand
   | ParsedRestartCommand
@@ -735,6 +744,7 @@ Usage:
   stratus agents --gateway http://127.0.0.1:4123
   stratus skill add stratuslabs/skill-code-review
   stratus skill add ./my-skills --skill code-review --agent ava
+  stratus skill validate ./my-skill
   stratus skills
   stratus skill reload
   stratus restart
@@ -787,9 +797,16 @@ Commands:
                    (skills.sh-style repos). Installed is not enabled: a soul
                    opts in via skills:, or pass --agent <id> to enable now.
                    --skill <id> picks from a multi-skill repo (repeatable),
-                   --force replaces an already-installed id. A running
-                   daemon reloads its skills afterwards, no restart
-                   (--no-reload skips that)
+                   --force replaces an already-installed id. A skill that
+                   does not conform to the Agent Skills spec is refused,
+                   naming what is wrong; one that installs with caveats
+                   (fields another host owns, a bundled scripts/) says so.
+                   A running daemon reloads its skills afterwards, no
+                   restart (--no-reload skips that)
+  skill validate   Check a skill directory, a directory of skills, or an
+                   installed skill id against the Agent Skills spec — the
+                   same check "skill add" runs, so what validates installs.
+                   Exit 1 if anything would be refused
   skills           List installed skills and which agents enable each
                    (also: stratus skill list)
   skill reload     Ask the running daemon to re-read ~/.stratus/skills — for a
@@ -1360,6 +1377,25 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     if (subcommand === '--help' || subcommand === '-h') {
       return { command: 'help' };
     }
+    if (subcommand === 'validate') {
+      let target: string | undefined;
+      for (const token of skillRest) {
+        if (token === '--help' || token === '-h') {
+          return { command: 'help' };
+        }
+        if (token.startsWith('--')) {
+          throw new Error(`Unknown option: ${token}`);
+        }
+        if (target !== undefined) {
+          throw new Error(`skill validate takes one target; got both ${JSON.stringify(target)} and ${JSON.stringify(token)}.`);
+        }
+        target = token;
+      }
+      if (target === undefined) {
+        throw new Error('skill validate needs a target: a skill directory, a directory of skills, or an installed skill id.');
+      }
+      return { command: 'skill-validate', target };
+    }
     if (subcommand === 'reload') {
       const parsed: ParsedSkillReloadCommand = { command: 'skill-reload' };
       for (let index = 0; index < skillRest.length; index += 1) {
@@ -1385,7 +1421,7 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       return parsed;
     }
     if (subcommand !== 'add') {
-      throw new Error(`Unknown skill subcommand: ${subcommand ?? '(missing)'}. Try: stratus skill add <source>, stratus skill reload, stratus skills`);
+      throw new Error(`Unknown skill subcommand: ${subcommand ?? '(missing)'}. Try: stratus skill add <source>, stratus skill validate <path>, stratus skill reload, stratus skills`);
     }
 
     let source: string | undefined;
@@ -5589,6 +5625,18 @@ export const runSkillAdd = async (
 
     for (const skill of result.installed) {
       writeLine(streams.stdout, `installed ${skill.id} — ${skill.description}`);
+      // The spec's compatibility field is written for exactly this reader:
+      // the person deciding whether this environment can carry the skill.
+      if (skill.compatibility !== undefined) {
+        writeLine(streams.stdout, `  compatibility: ${skill.compatibility}`);
+      }
+    }
+    // What installed with a caveat — a field another host owns, the
+    // legacy key form, a bundled scripts/ — is said next to the install,
+    // per skill: the operator deciding to enable it is the one who needs
+    // to hear it, and this is the moment they are looking.
+    for (const warning of result.warnings) {
+      writeLine(streams.stderr, `Warning: ${warning.id}: ${warning.message}`);
     }
     // Present already is a no-op, not a failure — and exactly what the
     // "rerun with --agent" hint below produces, so these stay eligible
@@ -5705,6 +5753,82 @@ export const runSchedules = async (
   } finally {
     store.close();
   }
+};
+
+/**
+ * `stratus skill validate <target>`: the install-time check, run without
+ * installing — for an author about to publish a skill, or an operator
+ * asking why one was refused. A local path is a skill directory or a
+ * directory of skills, discovered exactly as `skill add` would; a bare id
+ * names an installed skill under `~/.stratus/skills/`. Exit 1 when
+ * anything would be refused, so a publish step can gate on it.
+ */
+export const runSkillValidate = async (
+  command: ParsedSkillValidateCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  let directory: string | undefined;
+  let installed = false;
+  const localPath = path.resolve(readWorkingDirectory(env), command.target);
+  try {
+    if ((await stat(localPath)).isDirectory()) {
+      directory = localPath;
+    }
+  } catch {
+    // Not a local directory; try it as an installed id.
+  }
+  // The loader's rule for the lookup, so a directory that loads with a
+  // pre-spec id can be validated — and told what to rename.
+  if (directory === undefined && isLoadableSkillId(command.target)) {
+    const installedPath = path.join(skillsDirPath(env), command.target);
+    try {
+      if ((await stat(installedPath)).isDirectory()) {
+        directory = installedPath;
+        installed = true;
+      }
+    } catch {
+      // Not installed either.
+    }
+  }
+  if (directory === undefined) {
+    writeLine(
+      streams.stderr,
+      `Error: ${JSON.stringify(command.target)} is neither a directory nor an installed skill id (stratus skills lists those).`,
+    );
+    return 1;
+  }
+
+  // An installed directory IS the layout the spec's directory rule is
+  // about, so its name is checked; a path the author typed is a checkout
+  // or a container, judged as `skill add` would judge it.
+  const { candidates, skipped } = await discoverSkillsInDirectory(
+    directory,
+    installed ? { checkRootDirectoryName: true } : {},
+  );
+  if (candidates.length === 0 && skipped.length === 0) {
+    writeLine(streams.stderr, `Error: no skills found in ${directory}. A skill is a directory with a SKILL.md.`);
+    return 1;
+  }
+  for (const candidate of candidates) {
+    const caveat = candidate.warnings.length > 0
+      ? ` — ${candidate.warnings.length} warning${candidate.warnings.length === 1 ? '' : 's'}`
+      : '';
+    writeLine(streams.stdout, `${candidate.id}: ok${caveat}`);
+    for (const warning of candidate.warnings) {
+      writeLine(streams.stdout, `  warning: ${warning}`);
+    }
+  }
+  for (const skip of skipped) {
+    writeLine(streams.stdout, `${skip.id}: refused`);
+    writeLine(streams.stdout, `  error: ${skip.reason}`);
+  }
+  if (skipped.length > 0) {
+    const noun = skipped.length === 1 ? 'skill' : 'skills';
+    writeLine(streams.stderr, `Error: ${skipped.length} ${noun} would be refused at install.`);
+    return 1;
+  }
+  return 0;
 };
 
 /** Where a command aimed at "the running daemon" is pointed. */
@@ -7059,6 +7183,14 @@ const serveHeldHome = async (
     log(`approvals: remote — gated calls are parked and asked in Slack (${describeApprovers(approvalsConfig, askable)})`);
   }
 
+  /**
+   * The one signal handler this daemon has, for the whole of its life —
+   * installed by the wait below, removed in the finally after the drain.
+   * See the wait for why it is never `once` and never removed sooner.
+   */
+  let stopSignal: (() => void) | undefined;
+  let repeatWarned = false;
+
   // The gateway's restart hands the process back here once it has stopped:
   // the outcome is kept and the wait below released, and the tail of this
   // function decides what "come back" means for this process.
@@ -7218,12 +7350,44 @@ const serveHeldHome = async (
         }
         settled = true;
         clearInterval(keepAlive);
-        process.off('SIGTERM', shutdown);
-        process.off('SIGINT', shutdown);
         resolve();
       };
-      process.once('SIGTERM', shutdown);
-      process.once('SIGINT', shutdown);
+      stopSignal = (): void => {
+        if (!settled) {
+          shutdown();
+          return;
+        }
+        // A signal while a drain is already running — a repeat, or a stop
+        // arriving during a restart's drain. Either way the drain goes on,
+        // and a daemon told to stop does not come back.
+        stopRequested = true;
+        if (!repeatWarned) {
+          repeatWarned = true;
+          // Said from signal dispatch, outside the promise and its finally:
+          // a stream that throws on write (a host's injected stderr) would
+          // otherwise end the process from here — mid-drain, the very
+          // thing this handler exists to prevent. The word is best effort.
+          try {
+            warn('stop signal received while draining; still draining, and this daemon will not come back (SIGKILL ends it at once)');
+          } catch {
+            // Nothing to say it to; the drain is what matters.
+          }
+        }
+      };
+      // `on`, never `once`, and not removed until the drain is over (the
+      // finally below). `once` drops the listener before running it, Node
+      // uninstalls its native handler the moment no listener is left, and
+      // a second SIGTERM landing in that window ends the process by the
+      // default action — mid-drain, with nothing said. The second signal
+      // is the normal case, not an edge: a stop delivered to the process
+      // group, as systemd's KillMode=control-group and a terminal's Ctrl+C
+      // deliver it, reaches a supervised daemon once from the kernel and
+      // once more forwarded by its supervisor. Reproduced two runs in
+      // three: the replacement died and the supervisor exited 1 on a
+      // `stratus service stop` after a restart. SIGKILL still ends the
+      // process at once.
+      process.on('SIGTERM', stopSignal);
+      process.on('SIGINT', stopSignal);
       void shutdownRequested.then(shutdown);
       if (env.shutdownSignal?.aborted) {
         shutdown();
@@ -7257,15 +7421,33 @@ const serveHeldHome = async (
       writeLine(streams.stdout, 'Stopping — draining in-flight turns.');
     }
   } finally {
-    await gateway.stop();
-    if (redirectTimer) {
-      clearInterval(redirectTimer);
+    try {
+      await gateway.stop();
+      // Writes are queued and dropped on the hot path so logging never sits
+      // on a streamed token. That makes the tail of the log the part most
+      // likely to be lost — and the tail is the shutdown reason, the last
+      // warning, the line explaining a restart.
+      await logWriter?.flush();
+    } finally {
+      // The shutdown is over, the flush included: a stop signal from here
+      // on is the process's to handle by default again — and a host that
+      // calls runServe repeatedly (the tests) must not accumulate handlers.
+      // Last, and under its own finally, because the listener is on the
+      // global process: taken off before the flush, a repeated signal
+      // landing during it would end the process by the default action
+      // (which a supervisor reports as a failure, and a service manager
+      // set to restart on failure would then bring back a daemon an
+      // operator just stopped); left on by a stop() that rejects (its last
+      // log line can throw through an injected stream), a settled handler
+      // would swallow the host's next signal.
+      if (stopSignal) {
+        process.off('SIGTERM', stopSignal);
+        process.off('SIGINT', stopSignal);
+      }
+      if (redirectTimer) {
+        clearInterval(redirectTimer);
+      }
     }
-    // Writes are queued and dropped on the hot path so logging never sits
-    // on a streamed token. That makes the tail of the log the part most
-    // likely to be lost — and the tail is the shutdown reason, the last
-    // warning, the line explaining a restart.
-    await logWriter?.flush();
   }
 
   const bound = boundApiPort !== undefined && Number.isInteger(boundApiPort) && boundApiPort > 0
@@ -7371,6 +7553,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'skill-add') {
       return await runSkillAdd(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'skill-validate') {
+      return await runSkillValidate(command, streams, resolvedEnv);
     }
 
     if (command.command === 'skills') {

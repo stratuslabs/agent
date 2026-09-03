@@ -210,6 +210,11 @@ hand and by review:
   pushes destroy review context and are not wanted here.
 - One PR at a time, based off `main`, not stacked on another branch.
 - Never push to a branch other than the one you were asked to work on.
+- **Open the pull request yourself once the work is pushed — never ask
+  whether to.** A pushed branch with no PR is work nobody can review, and
+  the question "want me to open a PR?" only costs a round trip to the
+  answer that is always yes. Then watch it: CI, review comments, and
+  merge conflicts on a PR you opened are yours until it merges.
 
 ## Before you push
 
