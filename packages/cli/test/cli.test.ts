@@ -7259,7 +7259,7 @@ test('runCli serve comes back from an announced restart by supervising a fresh d
       serveRespawn: async (argv, boundApiPort) => {
         respawned.push({ argv, boundApiPort });
         // The fresh daemon ran and was stopped normally.
-        return 0;
+        return { code: 0 };
       },
     },
   });
@@ -7301,7 +7301,7 @@ test('a supervised daemon answers a restart by exiting with the restart status, 
       processEnv: { STRATUS_SERVE_SUPERVISED: '1' },
       serveRespawn: async () => {
         respawns += 1;
-        return 0;
+        return { code: 0 };
       },
     },
   });
@@ -7620,7 +7620,7 @@ test('a stop signal during a restart\'s drain stops the daemon; it does not come
       shutdownSignal: controller.signal,
       serveRespawn: async () => {
         respawns += 1;
-        return 0;
+        return { code: 0 };
       },
     },
   });
@@ -7669,7 +7669,7 @@ test('a supervised daemon that could not drain ends the supervisor, so the servi
         respawned.push(argv);
         // The fresh daemon was asked to restart in turn and could not
         // drain: a plugin would not let go. It exited saying so.
-        return UNDRAINED_RESTART_EXIT_CODE;
+        return { code: UNDRAINED_RESTART_EXIT_CODE };
       },
     },
   });
@@ -7710,7 +7710,7 @@ test('a supervised daemon that could not drain exits with the undrained status, 
       processEnv: { OPENAI_API_KEY: 'sk-test', STRATUS_SERVE_SUPERVISED: '1' },
       fetch: fetchImpl,
       exitProcess: (code) => { exits.push(code); },
-      serveRespawn: async () => { respawns += 1; return 0; },
+      serveRespawn: async () => { respawns += 1; return { code: 0 }; },
     },
   });
 
@@ -7772,4 +7772,53 @@ test('a replacement daemon takes the bound-port hint only while its own request 
   // reaches this daemon the same way: the request wins, the hint does not.
   const fixed = await freePort();
   assert.equal(await serveOn(['serve', '--no-events', '--api-port', String(fixed)]), fixed);
+});
+
+test('the supervisor hands each daemon the port its predecessor bound, and a supervised daemon reports its own', async () => {
+  // The hint follows the daemons. The first replacement came back on a
+  // fixed port (a config edited meanwhile) and said so; when it asks for
+  // another restart, that is the port the next daemon is told, not the
+  // one the original daemon had.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-hint-chain-'));
+  const watched = watchedServeStreams();
+  const hints: Array<number | undefined> = [];
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: watched.streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: {},
+      serveRespawn: async (_argv, boundApiPort) => {
+        hints.push(boundApiPort);
+        return hints.length === 1 ? { code: RESTART_EXIT_CODE, boundApiPort: 45_001 } : { code: 0 };
+      },
+    },
+  });
+  const base = await watched.apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  assert.equal((await postJson(`${base}/api/v1/restart`, token, {})).status, 202);
+  assert.equal(await serving, 0);
+  assert.deepEqual(hints, [Number(new URL(base).port), 45_001]);
+
+  // And the reporting half: a supervised daemon says what it bound.
+  const childHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-report-'));
+  const child = watchedServeStreams();
+  const controller = new AbortController();
+  const reported: number[] = [];
+  const childServing = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: child.streams,
+    env: {
+      homeDir: childHome,
+      cwd: childHome,
+      processEnv: { STRATUS_SERVE_SUPERVISED: '1' },
+      shutdownSignal: controller.signal,
+      reportBoundApiPort: (port) => { reported.push(port); },
+    },
+  });
+  const childBase = await child.apiUrl;
+  controller.abort();
+  assert.equal(await childServing, 0);
+  assert.deepEqual(reported, [Number(new URL(childBase).port)]);
 });

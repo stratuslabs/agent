@@ -227,7 +227,13 @@ export interface CliEnvironment {
    * with its exit code. Injected so tests never spawn a process; the
    * default runs this CLI's own entrypoint with the serve arguments given.
    */
-  serveRespawn?: (argv: string[], boundApiPort: number | undefined) => Promise<number>;
+  serveRespawn?: (argv: string[], boundApiPort: number | undefined) => Promise<RespawnResult>;
+  /**
+   * How a supervised daemon tells its supervisor the control API port it
+   * bound (tests). The default sends it over the IPC channel the
+   * supervisor opened, and does nothing where there is none.
+   */
+  reportBoundApiPort?: (port: number) => void;
   /** Ends the process at once (tests). Default `process.exit`. */
   exitProcess?: (code: number) => void;
   /** Runs launchctl/systemctl. Injected so tests never touch the real one. */
@@ -240,6 +246,12 @@ export interface CliEnvironment {
   packageInstaller?: PackageInstaller;
   /** Looks up a package's latest published version. Injected so tests never ask npm. */
   packageVersionFetcher?: PackageVersionFetcher;
+}
+
+/** How a daemon the supervisor started ended, and the API port it bound if it said. */
+export interface RespawnResult {
+  code: number;
+  boundApiPort?: number;
 }
 
 export interface PackageInstallResult {
@@ -6512,6 +6524,22 @@ const SUPERVISED_ENV = 'STRATUS_SERVE_SUPERVISED';
 const BOUND_API_PORT_ENV = 'STRATUS_SERVE_BOUND_API_PORT';
 
 /**
+ * The message a supervised daemon sends its supervisor over the IPC channel
+ * once its control API is bound, so the supervisor carries *that* port to
+ * the next daemon rather than the one the first daemon had: a config edited
+ * to a fixed port and back leaves dashboard pages on the last address.
+ */
+const BOUND_API_PORT_MESSAGE = 'stratusd.bound-api-port';
+
+const defaultReportBoundApiPort = (port: number): void => {
+  // Only where a supervisor is listening: the channel exists exactly when
+  // this process was started by one.
+  if (typeof process.send === 'function' && process.channel) {
+    process.send({ type: BOUND_API_PORT_MESSAGE, port });
+  }
+};
+
+/**
  * The parsed serve command as arguments again — what the fresh daemon is
  * started with. From the command, not from `process.argv`: `stratus
  * dashboard` runs the daemon through `runServe` with a command it built,
@@ -6554,11 +6582,13 @@ export const restartEntrypoint = (moduleUrl: string): string => {
  * hold in the foreground and under `--no-login`, where nothing else would
  * bring a clean exit back.
  */
-const defaultServeRespawn = (env: CliEnvironment) => (argv: string[], boundApiPort: number | undefined): Promise<number> =>
+const defaultServeRespawn = (env: CliEnvironment) => (argv: string[], boundApiPort: number | undefined): Promise<RespawnResult> =>
   new Promise((resolve, reject) => {
     const entrypoint = restartEntrypoint(import.meta.url);
+    // The daemon's own streams, plus an IPC channel for the one thing it
+    // has to tell its supervisor: the port it bound.
     const child = spawn(process.execPath, [...process.execArgv, entrypoint, ...argv], {
-      stdio: 'inherit',
+      stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
       env: {
         ...process.env,
         [SUPERVISED_ENV]: '1',
@@ -6581,6 +6611,15 @@ const defaultServeRespawn = (env: CliEnvironment) => (argv: string[], boundApiPo
       process.off('SIGINT', onInt);
       env.shutdownSignal?.removeEventListener('abort', onAbort);
     };
+    let reported: number | undefined;
+    child.on('message', (message) => {
+      const port = typeof message === 'object' && message !== null && (message as { type?: unknown }).type === BOUND_API_PORT_MESSAGE
+        ? (message as { port?: unknown }).port
+        : undefined;
+      if (typeof port === 'number' && Number.isInteger(port) && port > 0) {
+        reported = port;
+      }
+    });
     child.once('error', (error) => {
       done();
       reject(error);
@@ -6588,7 +6627,7 @@ const defaultServeRespawn = (env: CliEnvironment) => (argv: string[], boundApiPo
     child.once('exit', (code, signal) => {
       done();
       // Killed by a signal is a stop, not a request to come back.
-      resolve(code ?? (signal ? 1 : 0));
+      resolve({ code: code ?? (signal ? 1 : 0), ...(reported !== undefined ? { boundApiPort: reported } : {}) });
     });
   });
 
@@ -6605,12 +6644,17 @@ const superviseRestarts = async (
   env: CliEnvironment,
 ): Promise<number> => {
   const respawn = env.serveRespawn ?? defaultServeRespawn(env);
-  let code: number;
+  // The hint follows the daemons: each one that said what it bound is
+  // what the next one is told, so a config edited to a fixed port and back
+  // hands on the last address, not the first.
+  let hint = boundApiPort;
+  let result: RespawnResult;
   do {
     writeLine(streams.stdout, 'Restarting stratusd.');
-    code = await respawn(serveArgv(command), boundApiPort);
-  } while (code === RESTART_EXIT_CODE);
-  return code;
+    result = await respawn(serveArgv(command), hint);
+    hint = result.boundApiPort ?? hint;
+  } while (result.code === RESTART_EXIT_CODE);
+  return result.code;
 };
 
 export const runServe = async (
@@ -6998,6 +7042,9 @@ const serveHeldHome = async (
   // Read now, while the API is bound: its stop forgets the address, and
   // a restart's respawn needs it (see ServeOutcome).
   const boundApiPort = boundApi?.url !== undefined ? Number(new URL(boundApi.url).port) : undefined;
+  if (readProcessEnv(env)[SUPERVISED_ENV] && boundApiPort !== undefined && Number.isInteger(boundApiPort) && boundApiPort > 0) {
+    (env.reportBoundApiPort ?? defaultReportBoundApiPort)(boundApiPort);
+  }
 
   // Under one finally from here: a throw anywhere after the start — a
   // host's writable refusing a line, say — must still stop the gateway
