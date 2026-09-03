@@ -176,6 +176,24 @@ test('a long file is truncated with the marker, and a binary one is not returned
   assert.equal(binary.content, undefined);
 });
 
+test('a call may narrow the read and match caps, never raise them', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-cap-'));
+  await writeFile(path.join(root, 'long.txt'), 'needle\n'.repeat(1_000));
+
+  const tools = await registryFor({ roots: [root], maxBytes: 100, maxMatches: 5 });
+  const session = sessionFor('ava');
+
+  const lifted = await run(tools, 'fs.read', { path: 'long.txt', maxBytes: 1_000_000 }, session) as JsonObject;
+  assert.equal(String(lifted.content).length, 100, 'a bigger maxBytes does not lift the cap');
+  assert.equal(lifted.truncated, true);
+  const narrowed = await run(tools, 'fs.read', { path: 'long.txt', maxBytes: 10 }, session) as JsonObject;
+  assert.equal(String(narrowed.content).length, 10, 'a smaller one narrows it');
+
+  const matches = await run(tools, 'fs.search', { query: 'needle', maxMatches: 500 }, session) as JsonObject;
+  assert.equal((matches.matches as unknown[]).length, 5);
+  assert.equal(matches.truncated, true);
+});
+
 test('an agent allowed only reads cannot write, whatever the tool would have done', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-allow-'));
   await writeFile(path.join(root, 'notes.md'), 'read me');

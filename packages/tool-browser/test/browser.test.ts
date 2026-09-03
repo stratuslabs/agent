@@ -216,6 +216,24 @@ test('giving up on a page is itself bounded, when even closing its context hangs
   assert.equal(again.blockedRequests, undefined, 'the abandoned page\'s refusals went with it');
 });
 
+test('a call may narrow maxTextBytes, never raise it', async (t) => {
+  const recorder = emptyRecorder();
+  const tools = new ToolRegistry();
+  const plugin = createBrowserPlugin(
+    { allowedHosts: ['example.com'], maxTextBytes: 20 },
+    { driver: fakeDriver(recorder, { async evaluate() { return 'x'.repeat(1_000); } }) },
+  );
+  await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
+  t.after(() => plugin.dispose?.());
+  const read = tools.get('browser.read') as Tool;
+
+  const lifted = await read.execute({ url: 'https://example.com/', maxBytes: 1_000_000 }, sessionFor('s1')) as JsonObject;
+  assert.equal(lifted.truncated, true);
+  assert.ok(String(lifted.text).startsWith('x'.repeat(20) + '\n'), 'a bigger maxBytes does not lift the cap');
+  const narrowed = await read.execute({ url: 'https://example.com/', maxBytes: 5 }, sessionFor('s1')) as JsonObject;
+  assert.ok(String(narrowed.text).startsWith('xxxxx\n'));
+});
+
 test('one browser, a context per conversation, dropped when idle', async (t) => {
   const recorder = emptyRecorder();
   const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'], idleMs: 60_000 }, recorder);

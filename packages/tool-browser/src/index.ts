@@ -39,6 +39,10 @@ export interface BrowserPluginConfig extends JsonObject {
 const asNumber = (value: JsonValue | undefined, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 
+// A per-call `maxBytes` may narrow the operator's `maxTextBytes`, never
+// raise it — a cap the model can lift by naming a bigger number is not one.
+const narrowed = (requested: JsonValue | undefined, cap: number): number => Math.min(asNumber(requested, cap), cap);
+
 /** The address policy a block describes, per-agent or top-level. */
 const policyFrom = (resolved: JsonObject): EgressPolicy => ({
   ...(resolved.allowPrivateAddresses === true ? { allowPrivateAddresses: true } : {}),
@@ -258,7 +262,7 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       const extracted = await runtime.ask(session, page, 'its text', () => page.evaluate(READABLE_TEXT_SCRIPT), settings.navigationTimeoutMs);
       const { text, truncated } = truncate(
         typeof extracted === 'string' ? extracted : '',
-        asNumber(input.maxBytes, settings.maxTextBytes),
+        narrowed(input.maxBytes, settings.maxTextBytes),
       );
       return {
         url: page.url(),
