@@ -6,7 +6,7 @@ import {
   type JsonValue,
   type ToolRisk,
 } from '@stratusagent/core';
-import { isValidSkillId } from '@stratusagent/agents';
+import { SKILL_ID_RULE, isLoadableSkillId } from '@stratusagent/agents';
 
 /**
  * The manifest version this host understands. A plugin declaring anything
@@ -208,9 +208,12 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
           `Plugin ${packageName}: every contributes.skills entry needs an "id" and a "path".`,
         );
       }
-      if (!isValidSkillId(entry.id)) {
+      // The loader's rule, not the installer's: a plugin already on this
+      // machine whose declared id predates the spec's name rule keeps
+      // loading, the way an operator directory does.
+      if (!isLoadableSkillId(entry.id)) {
         throw new PluginManifestError(
-          `Plugin ${packageName}: ${JSON.stringify(entry.id)} is not a skill id. Skill ids are kebab-case (web-research).`,
+          `Plugin ${packageName}: ${JSON.stringify(entry.id)} is not a skill id. ${SKILL_ID_RULE}`,
         );
       }
       // Refused at the manifest, not discovered mid-registration: the

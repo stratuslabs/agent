@@ -16,6 +16,7 @@ tree is where the depth lives.
 | Give agents files, a shell, the web, a browser | [Tools](./guides/tools.md) |
 | Control which shell commands run unattended | [Shell commands](./guides/shell.md) |
 | Teach an agent a procedure | [Skills](./guides/skills.md) |
+| Write a skill that works on every agent, or check one against the spec | [Skill format](./reference/skill-format.md) |
 | Decide what runs unattended and approve the rest from Slack | [Approvals](./guides/approvals.md) |
 | Let agents act on their own schedule | [Schedules](./guides/schedules.md) |
 | Keep the daemon running after I close the terminal | [Always on](./guides/always-on.md) |

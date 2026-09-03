@@ -372,6 +372,12 @@ interface FrontmatterShape {
   scalarKeys: readonly string[];
   listKeys: readonly string[];
   /**
+   * Keys whose value is a block of `key: value` string pairs (the Agent
+   * Skills spec's `metadata:`). Read only in tolerant mode, which is the
+   * only dialect that writes one.
+   */
+  mapKeys?: readonly string[];
+  /**
    * Ignore what the shape does not name instead of refusing it — unknown
    * keys, whatever indented block sits under one, and the YAML block and
    * multi-line scalars other ecosystems write.
@@ -389,6 +395,14 @@ interface FrontmatterShape {
 interface ParsedFrontmatter {
   scalars: Partial<Record<string, string>>;
   lists: Partial<Record<string, string[]>>;
+  maps: Partial<Record<string, Record<string, string>>>;
+  /**
+   * Top-level keys the shape does not name, in file order. Tolerant mode
+   * skips them; this is how a validator still gets to say which ones it
+   * skipped, so a misspelled field is a warning somebody reads instead of
+   * silence.
+   */
+  unknownKeys: string[];
 }
 
 // A deliberately tiny frontmatter dialect: `key: value` scalars and block
@@ -399,8 +413,11 @@ interface ParsedFrontmatter {
 const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): ParsedFrontmatter => {
   const scalars: ParsedFrontmatter['scalars'] = {};
   const lists: ParsedFrontmatter['lists'] = {};
+  const maps: ParsedFrontmatter['maps'] = {};
+  const unknownKeys: string[] = [];
   const tolerant = shape.tolerant ?? false;
   let currentList: string[] | undefined;
+  let currentMap: Record<string, string> | undefined;
   // Tolerant-mode line context: an unknown key whose indented block is
   // being skipped, or a known scalar whose value continues on indented
   // lines (a YAML block scalar, or a plain scalar that wraps). Inside
@@ -450,6 +467,24 @@ const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): Parsed
       continue;
     }
 
+    if (currentMap && isIndented(line)) {
+      // One level of `key: value` pairs, every value a string — the
+      // spec's shape for `metadata`. Anything deeper is not a string
+      // value, and refusing it beats reading the wrong half of it.
+      // Any string is a key — quoted (`"vendor/key": v`), or bare up to
+      // the first colon — since the spec types the map as string to
+      // string and says nothing about what a key looks like.
+      const pair = /^\s+(?:"([^"]*)"|'([^']*)'|([^\s"'#][^:]*?))\s*:\s*(.*)$/.exec(line);
+      const mapKey = pair?.[1] ?? pair?.[2] ?? pair?.[3]?.trim();
+      if (!pair || mapKey === undefined || mapKey.length === 0 || pair[4] === undefined || unquote(pair[4]).length === 0) {
+        throw new Error(
+          `${capitalize(shape.kind)} frontmatter metadata entries must be "key: value" strings, one per line: "${line.trim()}"`,
+        );
+      }
+      currentMap[mapKey] = unquote(pair[4]);
+      continue;
+    }
+
     const listItem = /^\s+-\s*(.*)$/.exec(line);
     if (listItem) {
       if (!currentList) {
@@ -470,8 +505,22 @@ const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): Parsed
     const key = entry[1] ?? '';
     const value = entry[2] ?? '';
     currentList = undefined;
+    currentMap = undefined;
     skippingUnknownBlock = false;
     continuation = undefined;
+
+    if (tolerant && shape.mapKeys?.includes(key)) {
+      const inline = value.trim();
+      if (inline.length > 0 && inline !== '{}') {
+        throw new Error(
+          `${capitalize(shape.kind)} frontmatter "${key}" must be a block of indented "key: value" lines: "${inline}"`,
+        );
+      }
+      const map: Record<string, string> = {};
+      maps[key] = map;
+      currentMap = map;
+      continue;
+    }
 
     if (shape.listKeys.includes(key)) {
       const list: string[] = [];
@@ -498,6 +547,8 @@ const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): Parsed
     if (!shape.scalarKeys.includes(key)) {
       if (tolerant) {
         // The key and anything nested under it belong to some other host.
+        // Remembered, not refused: a validator reports them.
+        unknownKeys.push(key);
         skippingUnknownBlock = true;
         continue;
       }
@@ -542,7 +593,7 @@ const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): Parsed
     }
   }
 
-  return { scalars, lists };
+  return { scalars, lists, maps, unknownKeys };
 };
 
 const capitalize = (word: string): string => `${word.charAt(0).toUpperCase()}${word.slice(1)}`;
@@ -581,7 +632,7 @@ export const parseSoul = (source: string, options: ParseSoulOptions = {}): Parse
   const { lines, body } = extractFrontmatter(source, 'soul');
   const { scalars, lists } = lines
     ? parseFrontmatterLines(lines, { kind: 'soul', scalarKeys: SOUL_SCALAR_KEYS, listKeys: SOUL_LIST_KEYS })
-    : { scalars: {}, lists: {} } as ParsedFrontmatter;
+    : { scalars: {}, lists: {}, maps: {}, unknownKeys: [] } as ParsedFrontmatter;
 
   const instructions = body.trim();
 
@@ -637,56 +688,127 @@ export const formatSoul = (soul: ParsedSoul): string => {
 // ---- skills ----------------------------------------------------------------
 
 /**
- * The shape a skill id is written in: lowercase kebab-case (`web-research`).
- * One pattern for the manifest's declared ids and the operator directory's
- * folder names — two copies would drift into two answers to what a valid
+ * The shape a skill id is written in — the Agent Skills spec's rule for
+ * `name`, which is also the directory name: lowercase letters and digits
+ * in hyphen-separated runs (`web-research`), at most 64 characters, no
+ * leading, trailing, or doubled hyphen. One pattern for the manifest's
+ * declared ids, the operator directory's folder names, and install-time
+ * validation — two copies would drift into two answers to what a valid
  * id is.
  */
-export const SKILL_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+export const SKILL_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
-export const isValidSkillId = (id: string): boolean => SKILL_ID_PATTERN.test(id);
+/** The spec's ceiling on `name`, and so on a skill id. */
+export const SKILL_ID_MAX_LENGTH = 64;
 
-const SKILL_SCALAR_KEYS = ['name', 'description', 'version'] as const;
+export const isValidSkillId = (id: string): boolean =>
+  id.length <= SKILL_ID_MAX_LENGTH && SKILL_ID_PATTERN.test(id);
+
+// The rule before the spec's: any lowercase kebab-ish run, doubled and
+// trailing hyphens and all, no length cap. What a directory or manifest
+// id that loaded yesterday was checked against.
+const LEGACY_SKILL_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+/**
+ * Whether an id that is already on this machine — a directory under
+ * `~/.stratus/skills/`, a plugin manifest's declared id — is served.
+ * Wider than `isValidSkillId` on purpose: the spec's rule arrived after
+ * some of these were written, and tightening the *loader* would silently
+ * drop an enabled procedure from an agent on upgrade. Installing and
+ * validating use the strict rule; loading uses this one, and warns.
+ */
+export const isLoadableSkillId = (id: string): boolean => LEGACY_SKILL_ID_PATTERN.test(id);
+
+/** What a skill id refusal says, everywhere one is refused. */
+export const SKILL_ID_RULE =
+  'Skill ids are lowercase letters, digits, and single hyphens (web-research), at most 64 characters.';
+
+/** The spec's ceiling on `description`. */
+export const SKILL_DESCRIPTION_MAX_LENGTH = 1024;
+/** The spec's ceiling on `compatibility`. */
+export const SKILL_COMPATIBILITY_MAX_LENGTH = 500;
+
+// The frontmatter keys the Agent Skills spec defines. Everything else at
+// the top level belongs to some other host — read past, and reported by
+// `validateSkillDocument`. `allowed-tools` is read so it is not reported,
+// and then deliberately unused: it is another host's pre-approval list,
+// and here the two gates (a trusted config, a soul's allowlist) are the
+// only things that grant a tool.
+const SKILL_SPEC_KEYS: readonly string[] = ['name', 'description', 'license', 'compatibility', 'metadata', 'allowed-tools'];
+
+// `version` and `requires` at the top level are the pre-spec Stratus form;
+// the spec keeps host extensions under `metadata:`, and that is where a
+// skill written today puts them. The old form still reads, so an installed
+// skill keeps working — and validation says which form it found.
+const SKILL_SCALAR_KEYS = ['name', 'description', 'license', 'compatibility', 'allowed-tools', 'version'] as const;
 const SKILL_LIST_KEYS = ['requires'] as const;
+const SKILL_MAP_KEYS = ['metadata'] as const;
+const SKILL_LEGACY_KEYS: readonly string[] = ['version', 'requires'];
 
 /**
  * A parsed `SKILL.md`: the one-line identity that reaches the system
  * prompt, and the body that only ever travels through `skill.read`.
  */
 export interface ParsedSkillDocument {
-  /** Display name; the registered skill falls back to its id. */
+  /**
+   * The skill's name — under the spec, its id, and equal to its directory
+   * name. Optional here because loading stays tolerant of what is already
+   * installed; the registered skill falls back to its id.
+   */
   name?: string;
   /**
    * When to reach for this skill — what routing runs on, so it earns its
    * place by saying when, not what the body contains.
    */
   description: string;
-  /** Informational; nothing keys on it. */
+  /** The spec's `license`: a name, or a bundled file. Informational. */
+  license?: string;
+  /**
+   * The spec's `compatibility`: what the skill needs from its environment,
+   * in prose — for the operator installing it, since nothing here can act
+   * on it.
+   */
+  compatibility?: string;
+  /** The spec's `metadata:` map, verbatim — every value a string. */
+  metadata?: Record<string, string>;
+  /** `metadata.version`, or the legacy top-level key. Informational. */
   version?: string;
-  /** Toolset globs the procedure expects (`browser.*`). Advisory — see `Skill.requires`. */
+  /**
+   * Toolset globs the procedure expects (`browser.*`), from
+   * `metadata.requires` (space-separated) or the legacy top-level list.
+   * Advisory — see `Skill.requires`.
+   */
   requires?: string[];
+  /**
+   * Top-level keys outside the spec, in file order — the legacy Stratus
+   * keys and other hosts' fields alike. What validation warns about.
+   */
+  unknownKeys: string[];
   body: string;
 }
 
 /**
  * Parse a `SKILL.md` — the same frontmatter dialect souls use (`key: value`
- * scalars, block lists), with the skill's keys: `name`, `description`,
- * optional `version`, optional `requires`. The body is the procedure
- * itself, markdown, untouched.
+ * scalars, block lists), plus the spec's `metadata:` map. The body is the
+ * procedure itself, markdown, untouched.
  *
  * `description` is required: it is the only thing the model sees before
  * deciding to load the body, and a skill without one is unreachable by the
- * mechanism that makes skills cheap.
+ * mechanism that makes skills cheap. Everything the spec constrains beyond
+ * presence — the name rule, the length ceilings — is
+ * `validateSkillDocument`'s, so that loading what is already installed
+ * stays lenient while installing is strict.
  */
 export const parseSkillDocument = (source: string): ParsedSkillDocument => {
   const { lines, body } = extractFrontmatter(source, 'skill');
   if (!lines) {
     throw new Error('Skill file has no frontmatter. A SKILL.md starts with --- and needs at least a description.');
   }
-  const { scalars, lists } = parseFrontmatterLines(lines, {
+  const { scalars, lists, maps, unknownKeys } = parseFrontmatterLines(lines, {
     kind: 'skill',
     scalarKeys: SKILL_SCALAR_KEYS,
     listKeys: SKILL_LIST_KEYS,
+    mapKeys: SKILL_MAP_KEYS,
     // Skills travel the wider agent-skills ecosystem (skills.sh and the
     // registries behind it), whose frontmatter carries fields other hosts
     // own. Those are metadata to skip, not defects to refuse — see
@@ -699,13 +821,119 @@ export const parseSkillDocument = (source: string): ParsedSkillDocument => {
       'Skill frontmatter has no "description". The description is what an agent routes on — say when to reach for this skill.',
     );
   }
+  const metadata = maps.metadata;
+  const version = metadata?.version ?? scalars.version;
+  const requires = metadata?.requires !== undefined
+    ? metadata.requires.split(/\s+/).filter((entry) => entry.length > 0)
+    : lists.requires;
+  // The legacy keys are read, and still not the spec's: a validator names
+  // them so a skill written here can be moved to the form that ports.
+  const legacy = SKILL_LEGACY_KEYS.filter((key) => (key === 'requires' ? lists.requires : scalars[key]) !== undefined);
   return {
     ...(scalars.name ? { name: scalars.name } : {}),
     description,
-    ...(scalars.version ? { version: scalars.version } : {}),
-    ...(lists.requires && lists.requires.length > 0 ? { requires: lists.requires } : {}),
+    ...(scalars.license ? { license: scalars.license } : {}),
+    ...(scalars.compatibility ? { compatibility: scalars.compatibility } : {}),
+    ...(metadata ? { metadata } : {}),
+    ...(version ? { version } : {}),
+    ...(requires && requires.length > 0 ? { requires } : {}),
+    unknownKeys: [...legacy, ...unknownKeys.filter((key) => !SKILL_SPEC_KEYS.includes(key))],
     body: body.trim(),
   };
+};
+
+export interface ValidateSkillDocumentOptions {
+  /**
+   * The directory the skill sits in (its basename), which the spec
+   * requires `name` to equal. Omit where the directory is circumstance
+   * rather than identity — a repository whose root is the skill, checked
+   * out wherever git put it.
+   */
+  directoryName?: string;
+  /**
+   * What to suggest when `name` is missing — the directory name, or for a
+   * root skill the repository's. Only ever read for the error text.
+   */
+  suggestedName?: string;
+}
+
+const characterCount = (text: string): number => Array.from(text).length;
+
+/** What `validateSkillDocument` found: errors refuse an install, warnings ride along. */
+export interface SkillValidation {
+  errors: string[];
+  warnings: string[];
+}
+
+/**
+ * Check a parsed `SKILL.md` against the Agent Skills spec — the checks
+ * `skills-ref validate` runs, so a skill that passes here passes there:
+ * `name` present, shaped like an id, equal to the directory name;
+ * `description` and `compatibility` under their ceilings. Errors are what
+ * refuses an install. Top-level keys the spec does not define are
+ * warnings, not errors: the reference validator refuses them, but the
+ * ecosystem's skills carry other hosts' fields routinely, and refusing a
+ * skill over a field that changes nothing here fails the whole point of
+ * conforming. The legacy Stratus keys get their own warning, naming the
+ * `metadata:` form that ports.
+ *
+ * Loading never calls this — an installed skill keeps loading whatever
+ * the spec says today. Installing always does.
+ */
+export const validateSkillDocument = (
+  document: ParsedSkillDocument,
+  options: ValidateSkillDocumentOptions = {},
+): SkillValidation => {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (document.name === undefined) {
+    const suggestion = options.suggestedName ?? options.directoryName;
+    errors.push(
+      `frontmatter has no "name". The Agent Skills spec requires one, equal to the directory name${
+        suggestion !== undefined ? ` — add: name: ${suggestion}` : ''
+      }.`,
+    );
+  } else if (!isValidSkillId(document.name)) {
+    errors.push(`name ${JSON.stringify(document.name)} is not a skill id. ${SKILL_ID_RULE}`);
+  } else if (options.directoryName !== undefined && document.name !== options.directoryName) {
+    errors.push(
+      `name ${JSON.stringify(document.name)} does not match the directory name ${JSON.stringify(options.directoryName)}. The spec requires the two to agree — rename one.`,
+    );
+  }
+
+  // Characters, as the spec and its Python reference count them — code
+  // points, not the UTF-16 units `.length` reports, which would count an
+  // emoji twice and refuse a description the reference validator passes.
+  const descriptionLength = characterCount(document.description);
+  if (descriptionLength > SKILL_DESCRIPTION_MAX_LENGTH) {
+    errors.push(
+      `description is ${descriptionLength} characters, past the spec's ceiling of ${SKILL_DESCRIPTION_MAX_LENGTH}. Say when to reach for the skill, and move the rest into the body.`,
+    );
+  }
+  const compatibilityLength = document.compatibility !== undefined ? characterCount(document.compatibility) : 0;
+  if (compatibilityLength > SKILL_COMPATIBILITY_MAX_LENGTH) {
+    errors.push(
+      `compatibility is ${compatibilityLength} characters, past the spec's ceiling of ${SKILL_COMPATIBILITY_MAX_LENGTH}.`,
+    );
+  }
+
+  const legacy = document.unknownKeys.filter((key) => SKILL_LEGACY_KEYS.includes(key));
+  const foreign = document.unknownKeys.filter((key) => !SKILL_LEGACY_KEYS.includes(key));
+  for (const key of legacy) {
+    warnings.push(
+      key === 'requires'
+        ? 'top-level "requires" is the pre-spec Stratus form, and the reference validator refuses it. Write it as metadata.requires, one space-separated string: "browser.* fs.read".'
+        : 'top-level "version" is the pre-spec Stratus form, and the reference validator refuses it. Write it as metadata.version.',
+    );
+  }
+  if (foreign.length > 0) {
+    warnings.push(
+      `frontmatter key${foreign.length > 1 ? 's' : ''} outside the Agent Skills spec: ${foreign.map((key) => JSON.stringify(key)).join(', ')}. Another host's; ignored here, and the reference validator refuses ${foreign.length > 1 ? 'them' : 'it'}.`,
+    );
+  }
+
+  return { errors, warnings };
 };
 
 export interface LazySkillInput {

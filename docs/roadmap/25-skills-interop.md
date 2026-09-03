@@ -40,7 +40,7 @@ distribution stays deferred.
 - **Fix what does not conform**, or record deliberately why not. A difference
   that survives should be a decision with a reason, not an accident.
 - **Install from the ecosystem** — a skill from a git repository or the
-  existing index lands in `~/.stratus/skills/` under its id. `stratus skills
+  existing index lands in `~/.stratus/skills/` under its id.
   `stratus skill add` already does this, accepting a GitHub repo, a git URL,
   or a local path — so this step is about conformance and validation on that
   shipped path rather than a new command.

@@ -183,7 +183,7 @@ ignored for the same reason).
     { "name": "notes.read", "risk": "gated", "package": "stratus-plugin-notes", "trusted": false }
   ],
   "skills": [
-    { "id": "code-review", "name": "Code Review",
+    { "id": "code-review", "name": "code-review",
       "description": "Use when reviewing a diff or a pull request.",
       "path": "/home/me/.stratus/skills/code-review/SKILL.md" },
     { "id": "stratus-plugin-github:pr-review", "name": "pr-review", "alias": "pr-review",
