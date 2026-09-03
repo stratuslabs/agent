@@ -1008,6 +1008,52 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
   };
 
+  /**
+   * The other half of `reportUnrenderedFailure`: a turn nobody here was
+   * rendering that *finished*. A turn parked on a human when the daemon
+   * died is re-asked after the restart, approved, and completed by a
+   * process that never opened a placeholder for it — so the approval
+   * survived the restart and the reply went nowhere. Posted as a fresh
+   * message in the thread, since the placeholder it would have edited
+   * belonged to the old process.
+   */
+  const reportUnrenderedReply = async (
+    event: Extract<StratusEvent, { type: 'session.completed' }>,
+  ): Promise<void> => {
+    const gateway = gatewayRef;
+    if (!gateway?.sessionRouting) {
+      return;
+    }
+    let routing;
+    try {
+      routing = await gateway.sessionRouting(event.sessionId);
+    } catch (error) {
+      warn(`slack: could not read the routing for a finished turn: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    const metadata = routing?.metadata;
+    if (!routing || metadata?.channel !== 'slack' || typeof metadata.slackChannel !== 'string' || !routing.reply) {
+      return;
+    }
+    const connection = connectionFor(routing.agentId);
+    if (!connection) {
+      return;
+    }
+    const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
+    try {
+      for (const chunk of splitForSlack(routing.reply)) {
+        await connection.web.chat.postMessage({
+          channel: metadata.slackChannel,
+          text: chunk,
+          ...(thread ? { thread_ts: thread } : {}),
+        });
+      }
+      log(`slack: posted the reply of a turn finished after a restart to ${metadata.slackChannel}`);
+    } catch (error) {
+      warn(`slack: could not post a finished turn's reply: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   const handleInteractive = async (connection: AgentConnection, args: SlackSocketEventArgs): Promise<void> => {
     // Ack first and unconditionally: Slack retries an unacked interaction,
     // and a redelivered click on a request that is no longer pending would
@@ -1262,6 +1308,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // is at the head of the queue, whether or not it is theirs.
         if (event.type === 'session.failed' && !renderers.get(event.sessionId)?.length) {
           track(reportUnrenderedFailure(event));
+          return;
+        }
+        if (event.type === 'session.completed' && !renderers.get(event.sessionId)?.length) {
+          track(reportUnrenderedReply(event));
           return;
         }
         if ('sessionId' in event) {

@@ -76,6 +76,14 @@ export interface SessionRouting {
   agentId: string;
   /** The metadata the dispatching channel attached to the session. */
   metadata: JsonObject;
+  /**
+   * The session's latest reply — its last assistant message with any text
+   * — for a turn the adapter did not start and so never rendered. A turn
+   * parked on a human when the daemon died is re-asked after the restart
+   * and finishes in a process that has no placeholder to edit; without
+   * this, the approval survived the restart and the reply went nowhere.
+   */
+  reply?: string;
 }
 
 export interface GatewayLike {

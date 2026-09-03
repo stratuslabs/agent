@@ -399,6 +399,8 @@ export interface SessionRouting {
   agentId: string;
   /** The metadata the dispatching surface attached to the session. */
   metadata: JsonObject;
+  /** The last assistant message with text, when there is one — see `@stratusagent/channels`. */
+  reply?: string;
 }
 
 /**
@@ -2761,9 +2763,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     async sessionRouting(sessionId: string) {
       const session = await store.get(sessionId);
-      return session
-        ? { agentId: session.agent.id, metadata: session.metadata ?? {} }
-        : undefined;
+      if (!session) {
+        return undefined;
+      }
+      // The reply, not the record: a channel that finishes a turn it did
+      // not start needs the one message to post, and the transcript stays
+      // the session's own.
+      const reply = [...session.messages].reverse().find((message) => message.role === 'assistant' && message.content.length > 0);
+      return {
+        agentId: session.agent.id,
+        metadata: session.metadata ?? {},
+        ...(reply ? { reply: reply.content } : {}),
+      };
     },
 
     agents() {

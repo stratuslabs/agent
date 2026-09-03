@@ -1336,6 +1336,60 @@ test('a turn that failed with nobody rendering it is reported in its own thread'
   assert.match(posted?.text ?? '', /not resumed/);
 });
 
+test('a turn that finished with nobody rendering it has its reply posted in its own thread', async () => {
+  // The recovery case: parked on a human when the daemon died, re-asked
+  // after the restart, approved, and finished by a process that never
+  // opened a placeholder for it. The failure half of this has always been
+  // reported; the reply half went nowhere.
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },
+  ]);
+  gateway.sessionRouting = async (sessionId: string) =>
+    sessionId === 'slack:ava:T1:C1:100.1'
+      ? {
+          agentId: 'ava',
+          metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+          reply: 'Done — the deploy finished cleanly.',
+        }
+      : undefined;
+  await adapter.start(gateway);
+
+  await gateway.bus.emit({ type: 'session.completed', sessionId: 'slack:ava:T1:C1:100.1' });
+  await adapter.stop();
+
+  const posted = web.posts.at(-1);
+  assert.equal(posted?.channel, 'C1');
+  assert.equal(posted?.thread_ts, '100.1', 'the reply belongs in the thread the turn came from');
+  assert.equal(posted?.text, 'Done — the deploy finished cleanly.');
+});
+
+test('a completion the running turn is already rendering is not posted a second time', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the one reply'));
+  let routingReads = 0;
+  gateway.sessionRouting = async () => {
+    routingReads += 1;
+    return { agentId: 'ava', metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1' }, reply: 'the one reply' };
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> do the thing'));
+  await adapter.stop();
+
+  assert.equal(routingReads, 0, 'a rendered turn is the renderer\'s to finish');
+  const replies = [
+    ...web.posts.filter((entry) => /the one reply/.test(entry.text)),
+    ...web.updates.filter((entry) => /the one reply/.test(entry.text)),
+  ];
+  assert.equal(replies.length, 1, 'exactly one copy of the reply');
+});
+
 test('a failure the running turn is already rendering is not reported twice', async () => {
   // The renderer opened at intake reports this one. Posting again would
   // put the same failure in the thread a second time, from the far side of

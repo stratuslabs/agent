@@ -119,6 +119,24 @@ test('sessions survive a gateway restart and resume with full history', async ()
   assert.equal(resumed.status, 'completed');
 });
 
+test('a session\'s routing carries its latest reply, for a channel finishing a turn it did not start', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+  try {
+    assert.equal(await gateway.sessionRouting('nothing-yet'), undefined);
+    const session = await gateway.dispatch({ sessionId: 'thread-r', userMessage: 'say hello' });
+    const lastReply = [...session.messages].reverse().find((message) => message.role === 'assistant')?.content;
+    assert.ok(lastReply, 'the turn produced a reply');
+    const routing = await gateway.sessionRouting('thread-r');
+    assert.equal(routing?.agentId, session.agent.id);
+    assert.equal(routing?.reply, lastReply);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('sqlite sessions round-trip metadata (anthropic raw-turn cache included)', async () => {
   const home = await newHome();
   const store = new SqliteSessionStore(path.join(home, 'sessions.db'));
