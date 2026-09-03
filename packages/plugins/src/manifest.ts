@@ -6,7 +6,7 @@ import {
   type JsonValue,
   type ToolRisk,
 } from '@stratusagent/core';
-import { isValidSkillId } from '@stratusagent/agents';
+import { SKILL_ID_RULE, isValidSkillId } from '@stratusagent/agents';
 
 /**
  * The manifest version this host understands. A plugin declaring anything
@@ -210,7 +210,7 @@ export const parsePluginManifest = (packageJson: unknown, specifier: string): Pl
       }
       if (!isValidSkillId(entry.id)) {
         throw new PluginManifestError(
-          `Plugin ${packageName}: ${JSON.stringify(entry.id)} is not a skill id. Skill ids are kebab-case (web-research).`,
+          `Plugin ${packageName}: ${JSON.stringify(entry.id)} is not a skill id. ${SKILL_ID_RULE}`,
         );
       }
       // Refused at the manifest, not discovered mid-registration: the

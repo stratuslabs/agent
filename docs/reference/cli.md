@@ -33,6 +33,7 @@ stratus agent new --name Ava --instructions "You research things." --format soul
 stratus agents                         # who's on the team (also: stratus agent list)
 stratus skill add owner/repo           # install skills from GitHub or a local path
 stratus skill add owner/repo --skill hn-search --agent ava
+stratus skill validate ./my-skill      # check a skill (or a repo of them, or an installed id) against the Agent Skills spec
 stratus skills                         # what is installed, who enables it (also: stratus skill list)
 stratus schedules                      # what the fleet has scheduled (also: stratus schedule list)
 stratus schedules cancel <id>          # stop the next firing, revoke its destination
@@ -49,7 +50,7 @@ stratus dashboard                      # local browser dashboard
 | `doctor` | [Troubleshooting](../guides/troubleshooting.md) |
 | `update` | [Updating](../guides/updating.md) |
 | `agent new`, `agents` | [Agents](../concepts/agents.md) |
-| `skill add`, `skills` | [Skills](../guides/skills.md) |
+| `skill add`, `skill validate`, `skills` | [Skills](../guides/skills.md), [Skill format](./skill-format.md) |
 | `schedules …` | [Schedules](../guides/schedules.md) |
 | `dashboard` | [Remote access](../guides/remote-access.md) |
 

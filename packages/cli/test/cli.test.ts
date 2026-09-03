@@ -543,13 +543,14 @@ test('runCli skill add clones a git source — the transport skills.sh repos arr
   await readFile(path.join(home, '.stratus', 'skills', 'code-review', 'SKILL.md'), 'utf8');
 });
 
-test('runCli skill add of a repo whose root is the skill installs under the repo name', async () => {
+test('runCli skill add of a repo whose root is a nameless skill refuses it, suggesting the repo name', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillrootgit-'));
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillrootgit-cwd-'));
   const parent = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillrootgit-src-'));
-  // The repository IS the skill, and its SKILL.md has no name — the id
-  // must come from the repository's name, never from the random temp
-  // directory the clone lands in.
+  // The repository IS the skill, and its SKILL.md has no name. The spec
+  // requires one, so the install is refused — and the name it is told to
+  // add is the repository's, never the random temp directory the clone
+  // lands in.
   const source = path.join(parent, 'my-skills');
   await mkdir(source, { recursive: true });
   await writeFile(path.join(source, 'SKILL.md'), '---\ndescription: Use when rooting.\n---\n\nBody.\n');
@@ -568,9 +569,75 @@ test('runCli skill add of a repo whose root is the skill installs under the repo
     streams,
     env: { cwd, homeDir: home, processEnv: {} },
   });
+  assert.equal(exitCode, 1);
+  assert.match(output.stderr, /Warning: skipped my-skills: frontmatter has no "name".*add: name: my-skills/);
+  assert.match(output.stderr, /Error: nothing was installed\./);
+  assert.ok(!output.stderr.includes('stratus-skill-add-'), 'suggested the clone directory');
+});
+
+test('runCli skill add says what installed with a caveat, per skill', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillwarn-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillwarn-cwd-'));
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillwarn-src-'));
+  // Published for another host: its field, and a script.
+  await mkdir(path.join(source, 'pdf', 'scripts'), { recursive: true });
+  await writeFile(
+    path.join(source, 'pdf', 'SKILL.md'),
+    '---\nname: pdf\ndescription: Use for PDFs.\ncompatibility: Needs python3 on PATH.\nargument-hint: "[file]"\n---\n\nRun scripts/extract.py.\n',
+  );
+  await writeFile(path.join(source, 'pdf', 'scripts', 'extract.py'), 'print(1)');
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({ argv: ['skill', 'add', source], streams, env: { cwd, homeDir: home, processEnv: {} } });
   assert.equal(exitCode, 0, output.stderr);
-  assert.match(output.stdout, /installed my-skills — Use when rooting\./);
-  await readFile(path.join(home, '.stratus', 'skills', 'my-skills', 'SKILL.md'), 'utf8');
+  assert.match(output.stdout, /installed pdf — Use for PDFs\.\n {2}compatibility: Needs python3 on PATH\./);
+  assert.match(output.stderr, /Warning: pdf: frontmatter key outside the Agent Skills spec: "argument-hint"/);
+  assert.match(output.stderr, /Warning: pdf: bundles scripts\/ \(1 file\)/);
+  await readFile(path.join(home, '.stratus', 'skills', 'pdf', 'scripts', 'extract.py'), 'utf8');
+});
+
+test('runCli skill validate reports what install would refuse and warn about, and exits 1 only on a refusal', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillval-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillval-cwd-'));
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillval-src-'));
+  await mkdir(path.join(source, 'pdf'), { recursive: true });
+  await writeFile(
+    path.join(source, 'pdf', 'SKILL.md'),
+    '---\nname: pdf\ndescription: Use for PDFs.\nargument-hint: "[file]"\n---\n\nBody.\n',
+  );
+  await mkdir(path.join(source, 'notes'), { recursive: true });
+  await writeFile(path.join(source, 'notes', 'SKILL.md'), '---\nname: note-taking\ndescription: Use for notes.\n---\n\nBody.\n');
+  await mkdir(path.join(source, 'fine'), { recursive: true });
+  await writeFile(path.join(source, 'fine', 'SKILL.md'), '---\nname: fine\ndescription: Use for fine things.\n---\n\nBody.\n');
+  const env = { cwd, homeDir: home, processEnv: {} };
+
+  // A directory of skills: every one reported, exit 1 because one would be refused.
+  const repo = createStreams();
+  assert.equal(await runCli({ argv: ['skill', 'validate', source], streams: repo.streams, env }), 1);
+  assert.match(repo.output.stdout, /^fine: ok$/m);
+  assert.match(repo.output.stdout, /^pdf: ok — 1 warning\n {2}warning: frontmatter key outside the Agent Skills spec: "argument-hint"/m);
+  assert.match(repo.output.stdout, /^notes: refused\n {2}error: name "note-taking" does not match the directory name "notes"/m);
+  assert.match(repo.output.stderr, /Error: 1 skill would be refused at install\./);
+
+  // One conforming skill directory: clean, exit 0, nothing on stderr.
+  const clean = createStreams();
+  assert.equal(await runCli({ argv: ['skill', 'validate', path.join(source, 'fine')], streams: clean.streams, env }), 0);
+  assert.equal(clean.output.stdout, 'fine: ok\n');
+  assert.equal(clean.output.stderr, '');
+
+  // An installed id resolves to ~/.stratus/skills/<id> — here a pre-spec
+  // install, so the operator learns what to add before publishing it.
+  const installed = path.join(home, '.stratus', 'skills', 'code-review');
+  await mkdir(installed, { recursive: true });
+  await writeFile(path.join(installed, 'SKILL.md'), '---\ndescription: Use when reviewing.\n---\n\nBody.\n');
+  const byId = createStreams();
+  assert.equal(await runCli({ argv: ['skill', 'validate', 'code-review'], streams: byId.streams, env }), 1);
+  assert.match(byId.output.stdout, /^code-review: refused\n {2}error: frontmatter has no "name".*add: name: code-review/m);
+
+  // Neither a directory nor an installed id.
+  const missing = createStreams();
+  assert.equal(await runCli({ argv: ['skill', 'validate', 'nope'], streams: missing.streams, env }), 1);
+  assert.match(missing.output.stderr, /"nope" is neither a directory nor an installed skill id/);
 });
 
 test('runCli skill add never prints a credential-bearing source URL', async () => {
@@ -594,7 +661,7 @@ test('runCli skill add --agent reaches the configured soul outside the agents di
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillcfg-cwd-'));
   const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillcfg-src-'));
   await mkdir(path.join(source, 'code-review'), { recursive: true });
-  await writeFile(path.join(source, 'code-review', 'SKILL.md'), '---\ndescription: Use when reviewing.\n---\n\nBody.\n');
+  await writeFile(path.join(source, 'code-review', 'SKILL.md'), '---\nname: code-review\ndescription: Use when reviewing.\n---\n\nBody.\n');
   // The served default soul lives OUTSIDE ~/.stratus/agents, named by the
   // config — a roster case stratus agents and the daemon both include.
   const soulPath = path.join(home, 'elsewhere', 'ava.md');
@@ -643,7 +710,7 @@ test('runCli skill commands handle configured-soul edges: unreadable, shadowed, 
   // directory, never as a link back into the source tree.
   const realSource = await mkdtemp(path.join(os.tmpdir(), 'stratus-skilledge-src-'));
   await mkdir(path.join(realSource, 'hn-search'), { recursive: true });
-  await writeFile(path.join(realSource, 'hn-search', 'SKILL.md'), '---\ndescription: Use when searching HN.\n---\n\nBody.\n');
+  await writeFile(path.join(realSource, 'hn-search', 'SKILL.md'), '---\nname: hn-search\ndescription: Use when searching HN.\n---\n\nBody.\n');
   const linkSource = path.join(cwd, 'linked-source');
   await symlink(realSource, linkSource);
 
@@ -674,6 +741,15 @@ test('runCli skills withholds enablement claims when the roster cannot load', as
   assert.match(output.stdout, /code-review\s+Use when reviewing\./);
   // Unreadable is not "unused": no enablement claim either way.
   assert.ok(!output.stdout.includes('enabled by'), 'made an enablement claim from an unreadable roster');
+});
+
+test('parseCommand reads skill validate', () => {
+  assert.deepEqual(parseCommand(['skill', 'validate', './my-skill']), { command: 'skill-validate', target: './my-skill' });
+  assert.deepEqual(parseCommand(['skill', 'validate', 'code-review']), { command: 'skill-validate', target: 'code-review' });
+  assert.throws(() => parseCommand(['skill', 'validate']), /needs a target/);
+  assert.throws(() => parseCommand(['skill', 'validate', 'a', 'b']), /one target/);
+  assert.throws(() => parseCommand(['skill', 'validate', 'a', '--force']), /Unknown option/);
+  assert.deepEqual(parseCommand(['skill', 'validate', '--help']), { command: 'help' });
 });
 
 test('parseCommand reads skill add and skills forms', () => {

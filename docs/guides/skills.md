@@ -2,7 +2,10 @@
 
 Tools are capability; a **skill** is competence — markdown that teaches an
 agent a procedure: the rubric for a code review, the order to check things
-in, the format to answer in. A skill is a directory with a `SKILL.md`:
+in, the format to answer in. A skill is a directory with a `SKILL.md`, in
+the [Agent Skills](https://agentskills.io) format — the open standard a few
+dozen agents read, so a skill published for any of them is a candidate for
+yours, and one you write here works there:
 
 ```text
 ~/.stratus/skills/
@@ -12,7 +15,7 @@ in, the format to answer in. A skill is a directory with a `SKILL.md`:
 
 ```markdown
 ---
-name: Code Review
+name: code-review
 description: Use when reviewing a diff or a pull request.
 ---
 
@@ -21,16 +24,14 @@ description: Use when reviewing a diff or a pull request.
 Lead with the verdict, then findings ordered by severity...
 ```
 
-The frontmatter is the soul dialect — `name`, `description`, optional
-`version`, and an optional `requires:` list of toolsets the procedure
-expects (`browser.*`) — read **tolerantly**, unlike a soul's: keys other
-ecosystems write (`license`, `allowed-tools`, nested `metadata:`) and YAML's
-multi-line descriptions are skipped rather than refused, so a skill
-published for another agent loads here unmodified. The directory name is the
-skill's id. Plugins can ship skills too, declared in their manifest; those
-are addressed by the package name verbatim
-(`stratus-plugin-github:pr-review`), and by the bare id while no other
-package claims it.
+`name` is the skill's id and, as the spec requires, equals its directory
+name. `description` is what routing runs on. The other fields the spec
+defines, the two Stratus extensions (`metadata.requires` and
+`metadata.version`), and the exact list of where Stratus and the spec
+differ are in the [skill format reference](../reference/skill-format.md).
+Plugins can ship skills too, declared in their manifest; those are
+addressed by the package name verbatim (`stratus-plugin-github:pr-review`),
+and by the bare id while no other package claims it.
 
 ## Installing skills
 
@@ -48,8 +49,35 @@ stratus skills                               # what is installed, and who enable
 finds skills at the repo root, one level down, and in the `skills/`,
 `.claude/skills/`, and `.agents/skills/` directories the ecosystem uses,
 then copies each **whole directory** into `~/.stratus/skills/`. An id
-already installed is refused per skill (`--force` replaces it), and an
-unparseable skill is reported while the rest still install.
+already installed is refused per skill (`--force` replaces it).
+
+**Nothing installs that does not conform.** Every skill is validated
+against the spec before it is copied — the same checks the reference
+`skills-ref validate` runs — and one that fails is refused, naming what is
+wrong, while the rest of the repo still installs:
+
+```text
+Warning: skipped pdf: name "pdf-processing" does not match the directory name "pdf". The spec requires the two to agree — rename one.
+```
+
+What the spec constrains is refused: no `name`, a `name` that is not an id
+or not the directory's, a `description` or `compatibility` past its
+ceiling. What the spec is silent on is installed with a warning next to
+the install line, so the person deciding whether to enable it hears it:
+frontmatter fields another host owns (Claude Code's `argument-hint`, say),
+the pre-spec Stratus key form, and a bundled `scripts/` directory. A skill's
+`compatibility` line, when it has one, is printed too — it is written for
+exactly this moment.
+
+The same check runs without installing, for an author about to publish or
+an operator asking why something was refused. It takes a skill directory,
+a directory of skills, or the id of an installed skill, and exits 1 if
+anything would be refused:
+
+```bash
+stratus skill validate ./my-skill
+stratus skill validate code-review
+```
 
 ## Enabling skills
 
@@ -73,6 +101,12 @@ skills:
 ---
 ```
 
+Treat a skill from outside the way you would treat a plugin: **untrusted
+until you have read it.** The risk is not that it executes — it is prose —
+but that it instructs, and an agent with real tools will do what it says.
+Enabling one is the same kind of decision as enabling a plugin, and the
+artifact being markdown does not make it smaller.
+
 ## How an agent uses a skill
 
 **An enabled skill costs one line per turn, not its body.** Only the name
@@ -89,8 +123,30 @@ what the file contains: "Use when reviewing a diff or a pull request", not
 "A rubric with twelve sections". A skill without a description does not
 load.
 
-A skill whose `requires:` names toolsets the agent's `tools:` does not cover
-is a warning when the daemon loads the roster, never a refusal — a skill is
-prose, and can degrade. `stratus run` and `stratus chat` serve the same
-skills directory the daemon does, so a skill that routes locally routes in
-Slack.
+A skill whose `metadata.requires` names toolsets the agent's `tools:` does
+not cover is a warning when the daemon loads the roster, never a refusal —
+a skill is prose, and can degrade. `stratus run` and `stratus chat` serve
+the same skills directory the daemon does, so a skill that routes locally
+routes in Slack.
+
+## What portability means
+
+A skill is prose, and prose ports: the `SKILL.md`, and the `references/`
+and `assets/` it bundles, mean the same thing on every agent that reads
+the standard. Three things do not port, and are worth knowing before you
+wonder why nothing happens:
+
+- **Tool names.** A procedure that says "run `fs.read`" was written for
+  this install's toolsets; one that says "use the Read tool" was written
+  for someone else's. A skill referencing a tool this install lacks still
+  installs, and the failure when the agent reaches for it is the ordinary
+  allowlist refusal — nothing maps one agent's tool names onto another's.
+- **`allowed-tools`.** The spec's pre-approval list is read and ignored.
+  Here a tool is granted by a trusted config and a soul's `tools:`, and a
+  file that arrived in a `git clone` is neither.
+- **`scripts/`.** The spec lets a skill bundle executable code. Stratus
+  installs those files as files and never registers or runs them: prose
+  imports, executables do not. An agent can run one only through its own
+  `shell.run` gate, approved like any other command, and a skill whose
+  procedure depends on a script needs that tool and that approval to work
+  here. Something that needs to *act* is a plugin contributing a tool.

@@ -135,7 +135,7 @@ daemon, and in whatever embeds the runtime next.
 | --- | --- | --- |
 | Tool | `namespace.verb` | `fs.read`, `browser.goto`, `memory.remember` |
 | Toolset | the namespace | `fs`, `browser`, `agent` |
-| Skill | kebab-case id | `web-research`, `code-review` |
+| Skill | the [Agent Skills](https://agentskills.io) `name` rule: lowercase runs joined by single hyphens, at most 64 characters, equal to the directory name | `web-research`, `code-review` |
 | First-party package | `@stratusagent/<kind>-<name>` | `tool-fs`, `channel-slack`, `provider-anthropic` |
 | Third-party package | `stratus-plugin-<name>` | `stratus-plugin-github` |
 

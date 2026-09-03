@@ -7,6 +7,9 @@ import {
   isValidSkillId,
   parseSkillDocument,
   parseSoul,
+  SKILL_DESCRIPTION_MAX_LENGTH,
+  SKILL_ID_MAX_LENGTH,
+  validateSkillDocument,
 } from '../src/index.ts';
 
 // The shape of the existing skill repositories (stratuslabs/skill-code-review,
@@ -98,7 +101,120 @@ The procedure.
   // Another host's tool names are not our `requires` vocabulary — ignored,
   // not mapped into false advisory warnings.
   assert.equal(document.requires, undefined);
+  assert.equal(document.license, 'MIT');
+  assert.deepEqual(document.metadata, { internal: 'false', author: 'someone' });
+  // The spec's keys are not unknown; the legacy top-level version is
+  // reported, so validation can name the form that ports.
+  assert.deepEqual(document.unknownKeys, ['version']);
   assert.ok(document.body.startsWith('# PDF tools'));
+});
+
+test('the Stratus extensions read from metadata, the spec\'s home for host fields', () => {
+  const document = parseSkillDocument(`---
+name: browse
+description: Use when browsing a site.
+compatibility: Needs a browser plugin.
+metadata:
+  version: "2.0.0"
+  requires: browser.* fs.read
+  # a comment inside the map is skipped
+  author: someone
+---
+
+Body.
+`);
+  assert.equal(document.version, '2.0.0');
+  assert.deepEqual(document.requires, ['browser.*', 'fs.read']);
+  assert.equal(document.compatibility, 'Needs a browser plugin.');
+  assert.deepEqual(document.metadata, { version: '2.0.0', requires: 'browser.* fs.read', author: 'someone' });
+  assert.deepEqual(document.unknownKeys, []);
+
+  // Top-level keys keep reading — what is installed keeps working — and
+  // metadata wins when both are written.
+  const both = parseSkillDocument(
+    '---\nname: x\ndescription: d\nversion: 1.0.0\nrequires: [fs.*]\nmetadata:\n  version: "2.0.0"\n---\n\nBody.',
+  );
+  assert.equal(both.version, '2.0.0');
+  assert.deepEqual(both.requires, ['fs.*']);
+  assert.deepEqual(both.unknownKeys, ['version', 'requires']);
+
+  // An empty flow map is fine; a nested block under metadata is not a
+  // string value and is refused rather than half-read.
+  assert.deepEqual(parseSkillDocument('---\ndescription: d\nmetadata: {}\n---\n\nBody.').metadata, {});
+  assert.throws(
+    () => parseSkillDocument('---\ndescription: d\nmetadata:\n  nested:\n    deep: 1\n---\n\nBody.'),
+    /metadata entries must be "key: value" strings/,
+  );
+  assert.throws(
+    () => parseSkillDocument('---\ndescription: d\nmetadata: {a: b}\n---\n\nBody.'),
+    /must be a block of indented/,
+  );
+});
+
+test('unknown keys are reported in file order, and the spec\'s own keys never are', () => {
+  const document = parseSkillDocument(`---
+name: pdf
+description: Use for PDFs.
+argument-hint: "[file]"
+license: MIT
+allowed-tools: Bash(python:*) Read
+disable-model-invocation: true
+hooks:
+  PreToolUse:
+    - matcher: Bash
+---
+
+Body.
+`);
+  assert.deepEqual(document.unknownKeys, ['argument-hint', 'disable-model-invocation', 'hooks']);
+});
+
+test('validateSkillDocument enforces what the spec constrains, and warns about the rest', () => {
+  const parse = (frontmatter: string) => parseSkillDocument(`---\n${frontmatter}\n---\n\nBody.`);
+
+  // A conforming skill is clean.
+  assert.deepEqual(
+    validateSkillDocument(parse('name: code-review\ndescription: Use when reviewing.'), { directoryName: 'code-review' }),
+    { errors: [], warnings: [] },
+  );
+
+  // name: required, an id, the directory's.
+  const nameless = validateSkillDocument(parse('description: d'), { directoryName: 'code-review' });
+  assert.match(nameless.errors[0] ?? '', /no "name".*add: name: code-review/);
+  const suggested = validateSkillDocument(parse('description: d'), { suggestedName: 'my-repo' });
+  assert.match(suggested.errors[0] ?? '', /add: name: my-repo/);
+  assert.match(
+    validateSkillDocument(parse('name: Code Review\ndescription: d')).errors[0] ?? '',
+    /"Code Review" is not a skill id/,
+  );
+  assert.match(
+    validateSkillDocument(parse('name: pdf-processing\ndescription: d'), { directoryName: 'pdf' }).errors[0] ?? '',
+    /does not match the directory name "pdf"/,
+  );
+  // No directory to match against: a root skill's name stands alone.
+  assert.deepEqual(validateSkillDocument(parse('name: pdf-processing\ndescription: d')).errors, []);
+
+  // The ceilings.
+  const long = validateSkillDocument(parse(`name: x\ndescription: ${'d'.repeat(SKILL_DESCRIPTION_MAX_LENGTH + 1)}`));
+  assert.match(long.errors[0] ?? '', /description is 1025 characters, past the spec's ceiling of 1024/);
+  assert.deepEqual(
+    validateSkillDocument(parse(`name: x\ndescription: ${'d'.repeat(SKILL_DESCRIPTION_MAX_LENGTH)}`)).errors,
+    [],
+  );
+  const compat = validateSkillDocument(parse(`name: x\ndescription: d\ncompatibility: ${'c'.repeat(501)}`));
+  assert.match(compat.errors[0] ?? '', /compatibility is 501 characters, past the spec's ceiling of 500/);
+
+  // Warnings: the legacy Stratus keys name the metadata form; other
+  // hosts' keys are named and called ignored. Neither refuses.
+  const legacy = validateSkillDocument(parse('name: x\ndescription: d\nversion: 1.0.0\nrequires:\n  - fs.*'));
+  assert.deepEqual(legacy.errors, []);
+  assert.equal(legacy.warnings.length, 2);
+  assert.match(legacy.warnings[0] ?? '', /top-level "version".*metadata\.version/);
+  assert.match(legacy.warnings[1] ?? '', /top-level "requires".*metadata\.requires.*"browser\.\* fs\.read"/);
+  const foreign = validateSkillDocument(parse('name: x\ndescription: d\nargument-hint: f\nmodel: opus'));
+  assert.deepEqual(foreign.errors, []);
+  assert.equal(foreign.warnings.length, 1);
+  assert.match(foreign.warnings[0] ?? '', /keys outside the Agent Skills spec: "argument-hint", "model"\. Another host's; ignored here/);
 });
 
 test('a plain description wrapping onto indented lines folds; a literal block keeps its breaks', () => {
@@ -151,11 +267,16 @@ test('souls stay strict: an unknown soul key is still refused', () => {
   );
 });
 
-test('skill ids are kebab-case', () => {
+test('skill ids follow the spec\'s name rule: hyphen-separated lowercase runs, at most 64 characters', () => {
   assert.equal(isValidSkillId('web-research'), true);
   assert.equal(isValidSkillId('code-review-2'), true);
+  assert.equal(isValidSkillId('a'), true);
+  assert.equal(isValidSkillId('a'.repeat(SKILL_ID_MAX_LENGTH)), true);
   assert.equal(isValidSkillId('Code-Review'), false);
   assert.equal(isValidSkillId('-leading'), false);
+  assert.equal(isValidSkillId('trailing-'), false);
+  assert.equal(isValidSkillId('double--hyphen'), false);
+  assert.equal(isValidSkillId('a'.repeat(SKILL_ID_MAX_LENGTH + 1)), false);
   assert.equal(isValidSkillId('a/b'), false);
   assert.equal(isValidSkillId(''), false);
 });
