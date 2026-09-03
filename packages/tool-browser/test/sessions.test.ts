@@ -76,6 +76,50 @@ test('a release whose context close settles late does not take the browser from 
   assert.equal(pool.size, 1);
 });
 
+test('an idle sweep that reaches a context its session has already replaced leaves the replacement alone', async (t) => {
+  // Two idle contexts. The sweep drops the first, whose close is held;
+  // meanwhile the second times out, is released, and its session opens a
+  // fresh context. When the sweep gets to its snapshot of the second, that
+  // context is gone and the id belongs to the replacement.
+  let contexts = 0;
+  let finishFirstClose!: () => void;
+  const firstClose = new Promise<void>((resolve) => { finishFirstClose = resolve; });
+  const driver: BrowserDriver = {
+    async launch() {
+      return {
+        async newContext() {
+          contexts += 1;
+          const held = contexts === 1;
+          const context: BrowserContextLike = {
+            async newPage() {
+              return stubPage();
+            },
+            close: () => (held ? firstClose : Promise.resolve()),
+          };
+          return context;
+        },
+        async close() {},
+      };
+    },
+  };
+  const pool = new BrowserSessionPool({ driver, idleMs: 100 });
+  t.after(() => pool.close());
+
+  await pool.pageFor('a', 1);
+  await pool.pageFor('b', 2);
+  const sweep = pool.sweepIdle(1_000);
+  assert.equal(await pool.release('b'), true);
+  await pool.pageFor('b', 1_001);
+  assert.equal(pool.size, 1);
+
+  // (The first browser did go, rightly: with `a` on its way out and `b`
+  // released, nothing held it, and the replacement launched a new one.)
+  finishFirstClose();
+  assert.deepEqual(await sweep, ['a', 'b']);
+  assert.equal(pool.size, 1, 'the replacement context is still held');
+  assert.equal(pool.browserCount, 1, 'and so is the browser it lives in');
+});
+
 test('releasing an unresponsive page neither waits for another conversation\'s admission nor closes the browser it is being admitted into', async (t) => {
   // The second context to be opened blocks until the test lets it through:
   // a `newContext` that hangs, the way a wedged Chromium does.

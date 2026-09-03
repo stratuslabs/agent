@@ -271,6 +271,14 @@ export class BrowserSessionPool {
   }
 
   private async drop(entry: PooledContext, reason: 'idle' | 'capacity' | 'shutdown' | 'policy' | 'unresponsive'): Promise<void> {
+    // Only the context the pool still holds for this session. The idle
+    // sweep and shutdown work from a snapshot and await each drop in turn,
+    // so by the time they reach an entry, that session may have timed out,
+    // been released, and opened a replacement under the same id — and
+    // the state keyed by that id is the replacement's now, not this one's.
+    if (this.contexts.get(entry.sessionId) !== entry) {
+      return;
+    }
     this.contexts.delete(entry.sessionId);
     // Ownership goes before the close, not after it. A close that outlasts
     // the teardown bound in `answeredWithin` settles after this session has
