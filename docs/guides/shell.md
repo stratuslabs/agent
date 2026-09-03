@@ -96,6 +96,20 @@ goes to whoever is being asked to approve it: the terminal prompt and the
 Slack message both show it in full, because approving a bare tool name is
 approving something you cannot see.
 
+## Timeouts and background processes
+
+A command is killed with its whole process group when its `timeoutMs` runs
+out — 60 seconds by default, settable per call and per agent — and the call
+comes back with `timedOut: true` and whatever it had read so far. A process
+the command started in its own session is outside that group and survives:
+`setsid`, or a server that detaches itself. If it inherited the command's
+output, it used to hold the call open until it exited on its own — a
+2-second timeout on `setsid sleep 60 &` came back after 61. It no longer
+does: the call settles at the timeout, and whatever the survivor writes
+afterwards is dropped. A command that means to leave something running
+should still redirect that thing's output (`… > /dev/null 2>&1 &`), because
+until the timeout an open pipe looks exactly like a command still working.
+
 ## Why the safe list is short
 
 The safe list is deliberately short, and `cat`, `ls`, and `grep` are the
