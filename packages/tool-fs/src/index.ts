@@ -329,17 +329,18 @@ const openLines = async (resolved: ResolvedPath): Promise<OpenedLines> => {
 /** Owns `handle`: closes it when the lines run out, or when the caller stops early. */
 const linesOf = async function* (handle: Awaited<ReturnType<typeof open>>, size: number): AsyncGenerator<LineRead | undefined> {
   try {
-    if (size === 0) {
-      return;
-    }
     const decoder = new StringDecoder('utf8');
     let carry = '';
     let discarding = false;
     // Bounded to the size the file had when it was opened: a log being
     // appended to would otherwise be read for as long as its writer stays
     // ahead, and the result's `bytes` would name a size the search had
-    // long passed. One call searches one finite snapshot.
-    for await (const chunk of handle.createReadStream({ start: 0, end: size - 1, highWaterMark: 64 * 1024 })) {
+    // long passed. One call searches one finite snapshot. Except when that
+    // size is zero: a virtual file (`/proc/version`, a sysfs attribute)
+    // reports no size and has content anyway, and a file that is really
+    // empty ends the stream at once either way.
+    const bound = size > 0 ? { end: size - 1 } : {};
+    for await (const chunk of handle.createReadStream({ start: 0, ...bound, highWaterMark: 64 * 1024 })) {
       if (looksBinary(chunk as Buffer)) {
         yield undefined;
         return;

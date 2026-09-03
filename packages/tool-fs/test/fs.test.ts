@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -369,6 +370,14 @@ test('a named file that turns binary after its first pages is reported as binary
   assert.deepEqual(capped.matches, []);
   assert.equal(capped.truncated, false);
   assert.equal((capped.skipped as Array<{ reason: string }>)[0]?.reason, 'binary');
+});
+
+test('a virtual file that reports no size is still read when named', { skip: !existsSync('/proc/version') }, async () => {
+  // procfs says `size: 0` for files that have content; the size that bounds
+  // the stream must not be taken as proof there is nothing to read.
+  const tools = await registryFor({ roots: ['/proc'] });
+  const result = await run(tools, 'fs.search', { query: 'Linux', path: 'version' }, sessionFor('ava')) as JsonObject;
+  assert.equal((result.matches as unknown[]).length, 1, '/proc/version names the kernel');
 });
 
 test('the skipped list is capped, and the count says how many there were', async () => {
