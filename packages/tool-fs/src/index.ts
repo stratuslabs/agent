@@ -279,7 +279,22 @@ interface OpenedLines {
   /** The size of the file that was opened, in bytes. */
   size: number;
   lines: AsyncGenerator<LineRead | undefined>;
+  /**
+   * Set when the file reported no size and the read reached the cap that
+   * stands in for one — so the caller can say the search stopped there.
+   */
+  capped: boolean;
 }
+
+/**
+ * How much of a file that reports no size is read. A virtual file
+ * (`/proc/version`, a sysfs attribute) has content its size does not admit
+ * to, so it cannot be bounded by its size; a regular file that was empty
+ * when opened and is being appended to cannot be bounded by it either,
+ * and an unbounded read would run for as long as the writer stays ahead.
+ * The walk limit is the bound the tool already lives with.
+ */
+const MAX_UNSIZED_FILE_BYTES = DEFAULT_MAX_SEARCH_FILE_BYTES;
 
 const isHighSurrogate = (code: number): boolean => code >= 0xd800 && code <= 0xdbff;
 const isLowSurrogate = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff;
@@ -319,7 +334,8 @@ const openLines = async (resolved: ResolvedPath): Promise<OpenedLines> => {
   const handle = await openContained(resolved, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
   try {
     const { size } = await handle.stat();
-    return { size, lines: linesOf(handle, size) };
+    const capped = { capped: false };
+    return { size, lines: linesOf(handle, size, capped), get capped() { return capped.capped; } };
   } catch (error) {
     await handle.close();
     throw error;
@@ -327,7 +343,11 @@ const openLines = async (resolved: ResolvedPath): Promise<OpenedLines> => {
 };
 
 /** Owns `handle`: closes it when the lines run out, or when the caller stops early. */
-const linesOf = async function* (handle: Awaited<ReturnType<typeof open>>, size: number): AsyncGenerator<LineRead | undefined> {
+const linesOf = async function* (
+  handle: Awaited<ReturnType<typeof open>>,
+  size: number,
+  opened: { capped: boolean },
+): AsyncGenerator<LineRead | undefined> {
   try {
     const decoder = new StringDecoder('utf8');
     let carry = '';
@@ -335,12 +355,16 @@ const linesOf = async function* (handle: Awaited<ReturnType<typeof open>>, size:
     // Bounded to the size the file had when it was opened: a log being
     // appended to would otherwise be read for as long as its writer stays
     // ahead, and the result's `bytes` would name a size the search had
-    // long passed. One call searches one finite snapshot. Except when that
-    // size is zero: a virtual file (`/proc/version`, a sysfs attribute)
-    // reports no size and has content anyway, and a file that is really
-    // empty ends the stream at once either way.
-    const bound = size > 0 ? { end: size - 1 } : {};
-    for await (const chunk of handle.createReadStream({ start: 0, ...bound, highWaterMark: 64 * 1024 })) {
+    // long passed. One call searches one finite snapshot. A file that
+    // reports no size is bounded by `MAX_UNSIZED_FILE_BYTES` instead (see
+    // there); a file that is really empty ends its stream at once either way.
+    const end = (size > 0 ? size : MAX_UNSIZED_FILE_BYTES) - 1;
+    let read = 0;
+    for await (const chunk of handle.createReadStream({ start: 0, end, highWaterMark: 64 * 1024 })) {
+      read += (chunk as Buffer).length;
+      if (size === 0 && read > end) {
+        opened.capped = true;
+      }
       if (looksBinary(chunk as Buffer)) {
         yield undefined;
         return;
@@ -491,7 +515,8 @@ const createSearchTool = (config: JsonObject): Tool => ({
       // full of large files read whole) does not apply.
       let index = 0;
       let clipped = false;
-      const { size, lines } = await openLines(resolved);
+      const opened = await openLines(resolved);
+      const { size, lines } = opened;
       const before = matches.length;
       const truncatedBefore = truncated;
       // Past the match cap the file is still read to its end, no longer
@@ -521,6 +546,13 @@ const createSearchTool = (config: JsonObject): Tool => ({
           path: relativeTo(resolved.root, resolved.path),
           bytes: size,
           reason: `a line longer than ${MAX_LINE_CHARS / 1_000_000} million characters was searched in its first ${MAX_LINE_CHARS / 1_000_000} million only`,
+        });
+      }
+      if (opened.capped) {
+        skip({
+          path: relativeTo(resolved.root, resolved.path),
+          bytes: size,
+          reason: `reports no size, and was searched in its first ${MAX_UNSIZED_FILE_BYTES / 1_000_000} MB only`,
         });
       }
       return report();

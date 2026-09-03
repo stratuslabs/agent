@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -378,6 +378,27 @@ test('a virtual file that reports no size is still read when named', { skip: !ex
   const tools = await registryFor({ roots: ['/proc'] });
   const result = await run(tools, 'fs.search', { query: 'Linux', path: 'version' }, sessionFor('ava')) as JsonObject;
   assert.equal((result.matches as unknown[]).length, 1, '/proc/version names the kernel');
+});
+
+test('a virtual file that reports no size is read up to the walk limit, and the result says so', { skip: !existsSync('/proc/kallsyms') }, async (t) => {
+  // procfs again, this time a file whose content runs to megabytes while
+  // its size stays zero: the cap that stands in for a size stops the read.
+  let bytes = 0;
+  try {
+    bytes = (await readFile('/proc/kallsyms')).length;
+  } catch {
+    bytes = 0;
+  }
+  if (bytes <= 1_000_000) {
+    t.skip('/proc/kallsyms is not over the cap here');
+    return;
+  }
+  const tools = await registryFor({ roots: ['/proc'] });
+  const result = await run(tools, 'fs.search', { query: 'no such symbol name', path: 'kallsyms' }, sessionFor('ava')) as JsonObject;
+  assert.deepEqual(result.matches, []);
+  const skipped = result.skipped as Array<{ bytes: number; reason: string }>;
+  assert.match(skipped[0]?.reason ?? '', /reports no size, and was searched in its first 1 MB only/);
+  assert.equal(skipped[0]?.bytes, 0);
 });
 
 test('the skipped list is capped, and the count says how many there were', async () => {
