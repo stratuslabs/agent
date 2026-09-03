@@ -226,6 +226,39 @@ test('a message returns its turn id, and a new session must name an agent', asyn
     });
     assert.equal(crossed.status, 409);
     assert.equal((await json<{ error: { code: string } }>(crossed)).error.code, 'session_agent_mismatch');
+
+    // And a stored agent that has since left the roster answers like a
+    // typo, one door later. Without this the dispatch rejected with nobody
+    // awaiting it: the caller held a 202 and a turn id, the event stream
+    // said `session.failed`, and the session went on reading `completed`
+    // with the failed message not even on it.
+    const gone = await harness.call('/api/v1/sessions/ava-1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hello', agentId: 'ava' }),
+    });
+    assert.equal(gone.status, 202);
+    await settles(new Promise<void>((resolve) => {
+      const off = harness.gateway.bus.subscribe((event) => {
+        if (event.sessionId === 'ava-1' && (event.type === 'session.completed' || event.type === 'session.failed')) {
+          off();
+          resolve();
+        }
+      });
+    }), "ava's first turn");
+    await rm(path.join(harness.home, '.stratus', 'agents', 'ava.md'));
+    await harness.gateway.reloadRoster();
+    const orphaned = await harness.call('/api/v1/sessions/ava-1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'still there?' }),
+    });
+    assert.equal(orphaned.status, 404);
+    const body = await json<{ error: { code: string; message: string } }>(orphaned);
+    assert.equal(body.error.code, 'agent_not_found');
+    assert.match(body.error.message, /belongs to agent ava, which is not on the roster now/);
+    const stored = await json<{ session: { messages: unknown[] } }>(await harness.call('/api/v1/sessions/ava-1'));
+    assert.equal(stored.session.messages.length, 2, 'the refused message never reached the conversation');
   } finally {
     await harness.stop();
   }
