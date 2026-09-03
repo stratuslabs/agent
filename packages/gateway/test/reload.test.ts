@@ -5,12 +5,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { RunAbortedError, type StratusEvent } from '@stratusagent/core';
+import { PENDING_APPROVAL_METADATA_KEY, RunAbortedError, type StratusEvent } from '@stratusagent/core';
 import type { OptionalModuleHost } from '@stratusagent/plugins';
 
 import {
   RESTARTING_TURN_ERROR,
   RestartUnsupportedError,
+  SqliteSessionStore,
   createGateway,
   type GatewayChannelAdapter,
   type RestartOutcome,
@@ -729,4 +730,74 @@ test('a restart asked for while the daemon is still starting is refused, and wor
   assert.equal(status.reason, 'later');
   assert.deepEqual(await restarted, { reason: 'later', drained: true });
   await gateway.stop();
+});
+
+test('a turn recovered from a parked approval is aborted at the window like any other', async () => {
+  const home = await newHome();
+  const dbPath = path.join(home, 'sessions.db');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  // A session left as a kill mid-approval leaves one. Recovery runs the
+  // parked call and then asks the provider again — and that call is the
+  // one that blocks until its signal aborts.
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: 'parked-session',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'go', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+    ],
+    metadata: {
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  seed.close();
+
+  let firstCall!: () => void;
+  const started = new Promise<void>((resolve) => { firstCall = resolve; });
+  const fetchImpl = ((_url: unknown, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      firstCall();
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    })) as typeof fetch;
+
+  let handOff!: (outcome: RestartOutcome) => void;
+  const restarted = new Promise<RestartOutcome>((resolve) => { handOff = resolve; });
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    sessionDbPath: dbPath,
+    log: () => {},
+    warn: () => {},
+    onRestart: (outcome) => handOff(outcome),
+  });
+  const failed = nextEvent(gateway.bus, 'session.failed');
+  await gateway.start();
+  await started;
+
+  gateway.restart({ drainTimeoutMs: 50 });
+  // Aborted inside the window, not shut down around after a second one:
+  // the recovered turn is recorded as restart-aborted and the daemon
+  // reports drained.
+  const outcome = await Promise.race([
+    restarted,
+    new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 5_000)),
+  ]);
+  assert.deepEqual(outcome, { drained: true });
+  assert.equal((await failed).error, RESTARTING_TURN_ERROR);
+  await gateway.stop();
+
+  const after = new SqliteSessionStore(dbPath);
+  const session = await after.get('parked-session');
+  after.close();
+  assert.equal(session?.status, 'failed');
+  assert.equal(session?.lastError, RESTARTING_TURN_ERROR);
 });

@@ -2196,9 +2196,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         await store.save(session);
 
         const runner = runnerFor(await runtimeForAgent(source));
+        // Tracked like a dispatched turn's controller: a recovered turn
+        // that runs on past its approval is a turn like any other, and a
+        // restart's window has to be able to cut it short with the same
+        // reason — or it runs unseen to the second window and the restart
+        // reports undrained for a turn it could have finished cleanly.
+        const controller = new AbortController();
+        turnControllers.add(controller);
+        if (abortingTurns) {
+          controller.abort(new RunAbortedError(RESTARTING_TURN_ERROR));
+        }
         try {
-          await runner.recoverPendingApproval(sessionId, { denyPending: expired });
+          await runner.recoverPendingApproval(sessionId, { denyPending: expired, signal: controller.signal });
         } finally {
+          turnControllers.delete(controller);
           // A recovered firing's row outlived the process that would have
           // retired it, and the firing is over either way — a recovery that
           // failed has durably failed its session, which is as finished as
