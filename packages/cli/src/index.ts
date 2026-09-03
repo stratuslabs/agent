@@ -227,7 +227,7 @@ export interface CliEnvironment {
    * with its exit code. Injected so tests never spawn a process; the
    * default runs this CLI's own entrypoint with the serve arguments given.
    */
-  serveRespawn?: (argv: string[]) => Promise<number>;
+  serveRespawn?: (argv: string[], boundApiPort: number | undefined) => Promise<number>;
   /** Ends the process at once (tests). Default `process.exit`. */
   exitProcess?: (code: number) => void;
   /** Runs launchctl/systemctl. Injected so tests never touch the real one. */
@@ -6500,6 +6500,18 @@ export const UNDRAINED_RESTART_EXIT_CODE = 76;
 const SUPERVISED_ENV = 'STRATUS_SERVE_SUPERVISED';
 
 /**
+ * The control API port the last daemon bound, handed to its replacement by
+ * the supervisor. Honoured only where the replacement's own request — the
+ * flag, else the config it reads afresh — is still for any free port: a
+ * daemon that asked for port 0 comes back on the port it had, so a
+ * dashboard page reconnects to it, while a config since edited to a fixed
+ * port takes effect on that restart, as an `api` block change is meant to.
+ * A hint, never a pin: passing the port back as `--api-port` would outrank
+ * the config for every restart after.
+ */
+const BOUND_API_PORT_ENV = 'STRATUS_SERVE_BOUND_API_PORT';
+
+/**
  * The parsed serve command as arguments again — what the fresh daemon is
  * started with. From the command, not from `process.argv`: `stratus
  * dashboard` runs the daemon through `runServe` with a command it built,
@@ -6542,12 +6554,16 @@ export const restartEntrypoint = (moduleUrl: string): string => {
  * hold in the foreground and under `--no-login`, where nothing else would
  * bring a clean exit back.
  */
-const defaultServeRespawn = (env: CliEnvironment) => (argv: string[]): Promise<number> =>
+const defaultServeRespawn = (env: CliEnvironment) => (argv: string[], boundApiPort: number | undefined): Promise<number> =>
   new Promise((resolve, reject) => {
     const entrypoint = restartEntrypoint(import.meta.url);
     const child = spawn(process.execPath, [...process.execArgv, entrypoint, ...argv], {
       stdio: 'inherit',
-      env: { ...process.env, [SUPERVISED_ENV]: '1' },
+      env: {
+        ...process.env,
+        [SUPERVISED_ENV]: '1',
+        ...(boundApiPort !== undefined ? { [BOUND_API_PORT_ENV]: String(boundApiPort) } : {}),
+      },
     });
     const forward = (signal: NodeJS.Signals) => (): void => {
       child.kill(signal);
@@ -6584,6 +6600,7 @@ const defaultServeRespawn = (env: CliEnvironment) => (argv: string[]): Promise<n
  */
 const superviseRestarts = async (
   command: ParsedServeCommand,
+  boundApiPort: number | undefined,
   streams: CliStreams,
   env: CliEnvironment,
 ): Promise<number> => {
@@ -6591,7 +6608,7 @@ const superviseRestarts = async (
   let code: number;
   do {
     writeLine(streams.stdout, 'Restarting stratusd.');
-    code = await respawn(serveArgv(command));
+    code = await respawn(serveArgv(command), boundApiPort);
   } while (code === RESTART_EXIT_CODE);
   return code;
 };
@@ -6647,23 +6664,17 @@ export const runServe = async (
   // exiting; the first daemon becomes the supervisor itself. Either way the
   // process the service manager (or the terminal) started is what stays.
   if (outcome.code === RESTART_EXIT_CODE && !readProcessEnv(env)[SUPERVISED_ENV]) {
-    return superviseRestarts(outcome.respawnAs, streams, env);
+    return superviseRestarts(command, outcome.boundApiPort, streams, env);
   }
   return outcome.code;
 };
 
 /** Everything `stratus serve` does once it holds the home. */
-/** How a served daemon ended, and what to start in its place if it asked for one. */
+/** How a served daemon ended, and what a replacement should know. */
 interface ServeOutcome {
   code: number;
-  /**
-   * The serve command a replacement runs with. The one this daemon ran
-   * with, except that a request for any free port (`--api-port 0`, or the
-   * config's `api.port: 0`) becomes the port actually bound: a replacement
-   * that picked a fresh one would leave every dashboard page reconnecting
-   * to the old address, and `gateway.json` the only thing that knew.
-   */
-  respawnAs: ParsedServeCommand;
+  /** The control API port this daemon bound, if it served one. See BOUND_API_PORT_ENV. */
+  boundApiPort?: number;
 }
 
 const serveHeldHome = async (
@@ -6726,7 +6737,12 @@ const serveHeldHome = async (
     // Everything still bound and every test still passed, on whichever port
     // nobody happened to be using.
     const apiHost = command.apiHost ?? apiConfig.host;
-    const apiPort = command.apiPort ?? apiConfig.port;
+    const requestedPort = command.apiPort ?? apiConfig.port;
+    // The port the last daemon bound, from the supervisor that started
+    // this one — taken only where this daemon's own request is still for
+    // any free port. See BOUND_API_PORT_ENV.
+    const hinted = Number(readProcessEnv(env)[BOUND_API_PORT_ENV]);
+    const apiPort = requestedPort === 0 && Number.isInteger(hinted) && hinted > 0 ? hinted : requestedPort;
     if (createControlApi) {
       const api = createControlApi({
         env,
@@ -7083,22 +7099,21 @@ const serveHeldHome = async (
     await logWriter?.flush();
   }
 
-  const askedForAnyPort = (command.apiPort ?? apiConfig.port) === 0;
-  const respawnAs: ParsedServeCommand = askedForAnyPort && boundApiPort !== undefined && Number.isInteger(boundApiPort) && boundApiPort > 0
-    ? { ...command, apiPort: boundApiPort }
-    : command;
+  const bound = boundApiPort !== undefined && Number.isInteger(boundApiPort) && boundApiPort > 0
+    ? { boundApiPort }
+    : {};
   if (!restart || stopRequested) {
-    return { code: 0, respawnAs };
+    return { code: 0, ...bound };
   }
   if (!restart.drained) {
     (env.exitProcess ?? process.exit)(UNDRAINED_RESTART_EXIT_CODE);
-    return { code: UNDRAINED_RESTART_EXIT_CODE, respawnAs };
+    return { code: UNDRAINED_RESTART_EXIT_CODE, ...bound };
   }
   // Asked to come back. Whether this process starts the next daemon or
   // exits for its supervisor to is `runServe`'s decision, after the home
   // is released: the claim is held until this returns, and a daemon
   // started before that would be refused as a second one on the home.
-  return { code: RESTART_EXIT_CODE, respawnAs };
+  return { code: RESTART_EXIT_CODE, ...bound };
 };
 
 export const runCli = async ({ argv, streams = process, env = {} }: CliRunOptions): Promise<number> => {

@@ -7247,7 +7247,7 @@ const watchedServeStreams = () => {
 test('runCli serve comes back from an announced restart by supervising a fresh daemon, with the arguments it ran with', async () => {
   const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-restart-'));
   const watched = watchedServeStreams();
-  const respawned: string[][] = [];
+  const respawned: Array<{ argv: string[]; boundApiPort: number | undefined }> = [];
 
   const serving = runCli({
     argv: ['serve', '--no-events', '--api-port', '0'],
@@ -7256,8 +7256,8 @@ test('runCli serve comes back from an announced restart by supervising a fresh d
       homeDir: serveHome,
       cwd: serveHome,
       processEnv: {},
-      serveRespawn: async (argv) => {
-        respawned.push(argv);
+      serveRespawn: async (argv, boundApiPort) => {
+        respawned.push({ argv, boundApiPort });
         // The fresh daemon ran and was stopped normally.
         return 0;
       },
@@ -7270,14 +7270,14 @@ test('runCli serve comes back from an announced restart by supervising a fresh d
   assert.equal(accepted.status, 202, accepted.body);
 
   // The command's exit is the last daemon's exit: the supervisor started
-  // one, it stopped cleanly, and there was nothing more to start. And it
-  // was started on the port this daemon actually bound, not on "any free
-  // port" again — a replacement on a fresh port would strand every
-  // dashboard page reconnecting to this one.
+  // one, it stopped cleanly, and there was nothing more to start. Started
+  // with the arguments this daemon ran with, and told the port it bound —
+  // as a hint, not as an argument: an argument would outrank a config
+  // edited to a fixed port on every restart after.
   assert.equal(await serving, 0);
-  const boundPort = new URL(base).port;
-  assert.notEqual(boundPort, '0');
-  assert.deepEqual(respawned, [['serve', '--no-events', '--api-port', boundPort]]);
+  const boundPort = Number(new URL(base).port);
+  assert.ok(boundPort > 0);
+  assert.deepEqual(respawned, [{ argv: ['serve', '--no-events', '--api-port', '0'], boundApiPort: boundPort }]);
   assert.match(watched.output.stdout, /restart requested \(test\) — refusing new turns/);
   assert.match(watched.output.stdout, /stratusd stopped/);
   assert.match(watched.output.stdout, /restarting stratusd \(test\)/);
@@ -7728,4 +7728,48 @@ test('a supervised daemon that could not drain exits with the undrained status, 
   assert.deepEqual(exits, [UNDRAINED_RESTART_EXIT_CODE]);
   assert.equal(respawns, 0);
   assert.match(watched.output.stderr, /something did not let go; exiting with status 76/);
+});
+
+/** A port nothing is listening on right now. */
+const freePort = async (): Promise<number> => {
+  const { createServer } = await import('node:net');
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      server.close(() => resolve(port));
+    });
+  });
+};
+
+test('a replacement daemon takes the bound-port hint only while its own request is still for any free port', async () => {
+  const hint = await freePort();
+  const serveOn = async (argv: string[]): Promise<number> => {
+    const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-hint-'));
+    const watched = watchedServeStreams();
+    const controller = new AbortController();
+    const serving = runCli({
+      argv,
+      streams: watched.streams,
+      env: {
+        homeDir: serveHome,
+        cwd: serveHome,
+        processEnv: { STRATUS_SERVE_SUPERVISED: '1', STRATUS_SERVE_BOUND_API_PORT: String(hint) },
+        shutdownSignal: controller.signal,
+      },
+    });
+    const base = await watched.apiUrl;
+    controller.abort();
+    assert.equal(await serving, 0);
+    return Number(new URL(base).port);
+  };
+
+  // Asked for any free port again: the one the last daemon had.
+  assert.equal(await serveOn(['serve', '--no-events', '--api-port', '0']), hint);
+  // Asked for a specific port since — a config edited to a fixed port
+  // reaches this daemon the same way: the request wins, the hint does not.
+  const fixed = await freePort();
+  assert.equal(await serveOn(['serve', '--no-events', '--api-port', String(fixed)]), fixed);
 });
