@@ -6502,6 +6502,19 @@ export const serveArgv = (command: ParsedServeCommand): string[] => [
 ];
 
 /**
+ * The `bin` beside the module at `moduleUrl`, with that module's own
+ * extension: `dist/index.js` respawns `dist/bin.js`, and a source checkout
+ * running `src/index.ts` under type stripping respawns `src/bin.ts` — the
+ * flags that made that possible travel in `process.execArgv`. Assuming
+ * compiled output would hand a source checkout a file that does not exist,
+ * and a daemon that never comes back.
+ */
+export const restartEntrypoint = (moduleUrl: string): string => {
+  const modulePath = fileURLToPath(moduleUrl);
+  return path.join(path.dirname(modulePath), `bin${path.extname(modulePath)}`);
+};
+
+/**
  * Run this CLI's own entrypoint as a child with the daemon's streams and
  * exit code, forwarding the signals a supervisor would otherwise swallow.
  *
@@ -6515,7 +6528,7 @@ export const serveArgv = (command: ParsedServeCommand): string[] => [
  */
 const defaultServeRespawn = (env: CliEnvironment) => (argv: string[]): Promise<number> =>
   new Promise((resolve, reject) => {
-    const entrypoint = fileURLToPath(new URL('./bin.js', import.meta.url));
+    const entrypoint = restartEntrypoint(import.meta.url);
     const child = spawn(process.execPath, [...process.execArgv, entrypoint, ...argv], {
       stdio: 'inherit',
       env: { ...process.env, [SUPERVISED_ENV]: '1' },

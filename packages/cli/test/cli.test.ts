@@ -34,6 +34,7 @@ import {
   parseCommand,
   resolveRuntimeConfig,
   RESTART_EXIT_CODE,
+  restartEntrypoint,
   runCli,
   serveArgv,
   soulPinForNewAgent,
@@ -7629,4 +7630,14 @@ test('a stop signal during a restart\'s drain stops the daemon; it does not come
   assert.equal(respawns, 0, 'a daemon told to stop came back');
   assert.match(watched.output.stdout, /Stopping — draining in-flight turns\./);
   assert.ok(!watched.output.stdout.includes('Restarting stratusd.'), watched.output.stdout);
+});
+
+test('a restart respawns the bin beside the running module, compiled or source', () => {
+  assert.equal(restartEntrypoint('file:///opt/stratus/dist/index.js'), path.join('/opt/stratus/dist', 'bin.js'));
+  // `pnpm cli serve` runs src/bin.ts under type stripping; there is no
+  // bin.js beside src/index.ts, and a respawn that assumed one would exit
+  // at once with the daemon never coming back.
+  assert.equal(restartEntrypoint('file:///work/agent/packages/cli/src/index.ts'), path.join('/work/agent/packages/cli/src', 'bin.ts'));
+  // And the one this test process is running: the file exists.
+  assert.ok(restartEntrypoint(new URL('../src/index.ts', import.meta.url).href).endsWith(path.join('src', 'bin.ts')));
 });
