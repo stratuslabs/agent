@@ -546,11 +546,13 @@ export interface RestartOutcome {
   reason?: string;
   /**
    * Whether everything let go — every turn finished inside the window or
-   * after being aborted at it, and every plugin released what it held.
-   * False means a turn ignored its abort for a whole second window, or a
-   * plugin's dispose never settled, and the gateway shut down around it; a
-   * host should exit the process rather than start a new daemon beside a
-   * turn still writing or a plugin still holding a browser or a socket.
+   * after being aborted at it, every channel stopped, and every plugin
+   * released what it held. False means a turn ignored its abort for a
+   * whole second window, or a channel's stop or a plugin's dispose never
+   * settled or rejected, and the gateway shut down around it; a host
+   * should exit the process rather than start a new daemon beside a turn
+   * still writing, a channel still connected, or a plugin still holding a
+   * browser or a socket.
    */
   drained: boolean;
 }
@@ -2523,16 +2525,24 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     store.close();
   };
 
-  /** Release what the plugins acquired, reporting rather than throwing. */
-  const disposePlugins = async (): Promise<void> => {
+  /**
+   * Release what the plugins acquired, reporting rather than throwing.
+   * Resolves with whether every plugin let go: a dispose that rejected may
+   * still hold the browser or socket it was closing, which a restart has
+   * to know before it starts a daemon beside it.
+   */
+  const disposePlugins = async (): Promise<boolean> => {
+    let released = true;
     await Promise.allSettled(loadedPlugins.map(async (plugin) => {
       try {
         await plugin.instance.dispose?.();
       } catch (error) {
+        released = false;
         warn(`plugin ${plugin.package} failed to shut down: ${error instanceof Error ? error.message : String(error)}`);
       }
     }));
     loadedPlugins = [];
+    return released;
   };
 
   const startedChannels: GatewayChannelAdapter[] = [];
@@ -2589,16 +2599,30 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // the rendering they have in flight, which is a running turn's output.
     // All three inside the window: a subscriber or a channel stalled on a
     // stuck turn would otherwise hold the restart outside it.
+    // A channel whose stop rejected may still hold its connection — and a
+    // replacement daemon opening another would be two of them answering
+    // the same messages. Reported, and for a restart, counted as not
+    // drained; a plain stop goes on closing either way.
+    let channelsReleased = true;
     const drain = (async () => {
       await Promise.allSettled([...approvalEmissions]);
-      await Promise.allSettled(startedChannels.map((adapter) => adapter.stop()));
+      const stopping = [...startedChannels];
+      const stops = await Promise.allSettled(stopping.map((adapter) => adapter.stop()));
+      stops.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          channelsReleased = false;
+          warn(`channel ${stopping[index]?.name} failed to stop: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+        }
+      });
       startedChannels.length = 0;
       await Promise.allSettled([...inflight]);
     })();
     let drained = true;
     if (abortAfterMs === undefined) {
       await drain;
-    } else if (!(await settlesWithin(drain, abortAfterMs))) {
+    } else if (await settlesWithin(drain, abortAfterMs)) {
+      drained = channelsReleased;
+    } else {
       warn(`restart: ${inflight.size} turn(s) still running after ${abortAfterMs}ms; aborting them`);
       // The watchdog's own mechanism: the runner fails each session with
       // the reason on the signal, saves it, and emits session.failed —
@@ -2610,6 +2634,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       if (!drained) {
         warn(`restart: ${inflight.size} turn(s) did not stop after being aborted; shutting down around them`);
       }
+      drained = drained && channelsReleased;
     }
     // After the turn drain: a firing's wrapper settles after its
     // dispatch does (it retires spent one-shots), so this is the last
@@ -2632,7 +2657,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const disposal = disposePlugins();
     if (abortAfterMs === undefined) {
       await disposal;
-    } else if (!(await settlesWithin(disposal, abortAfterMs))) {
+    } else if (await settlesWithin(disposal, abortAfterMs)) {
+      // A dispose that rejected has already been named; what it may still
+      // hold is the same problem as one that never answered.
+      drained = drained && await disposal;
+    } else {
       warn(`restart: a plugin did not release what it holds within ${abortAfterMs}ms; shutting down around it`);
       drained = false;
     }

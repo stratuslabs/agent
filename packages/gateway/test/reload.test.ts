@@ -12,6 +12,7 @@ import {
   RESTARTING_TURN_ERROR,
   RestartUnsupportedError,
   createGateway,
+  type GatewayChannelAdapter,
   type RestartOutcome,
 } from '../src/index.ts';
 
@@ -557,4 +558,63 @@ test('a plugin whose dispose never settles does not hold the restart, and the ho
   assert.deepEqual(outcome, { drained: false });
   assert.ok(warnings.some((line) => /a plugin did not release what it holds within 50ms/.test(line)), warnings.join('\n'));
   await gateway.stop();
+});
+
+test('a channel whose stop rejects, or a plugin whose dispose rejects, leaves the restart undrained', async () => {
+  const home = await newHome();
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-reload-reject-'));
+  const directory = path.join(root, 'stratus-plugin-flaky');
+  await mkdir(path.join(directory, 'dist'), { recursive: true });
+  await mkdir(path.join(directory, 'skills'), { recursive: true });
+  await writeFile(path.join(directory, 'package.json'), JSON.stringify({
+    name: 'stratus-plugin-flaky',
+    stratus: { pluginVersion: 1, contributes: { skills: [{ id: 'triage', path: './skills/triage.md' }] } },
+  }));
+  await writeFile(path.join(directory, 'skills', 'triage.md'), '---\ndescription: Use when sorting.\n---\n\n# triage\n');
+  const host: OptionalModuleHost = {
+    resolve: () => pathToFileURL(path.join(directory, 'dist', 'index.js')).href,
+    async import() {
+      return { createPlugin: () => ({ name: 'flaky', setup() {}, dispose: async () => { throw new Error('the browser would not close'); } }) };
+    },
+  };
+  // Answers at once, and rejects: whether its connection is really gone
+  // is exactly what nobody can say.
+  const channel: GatewayChannelAdapter = {
+    name: 'flaky-channel',
+    async start() {},
+    async stop() {
+      throw new Error('socket refused to close');
+    },
+  };
+
+  const outcomeOf = async (options: { plugin: boolean; channel: boolean }): Promise<{ outcome: RestartOutcome; warnings: string[] }> => {
+    let handOff!: (outcome: RestartOutcome) => void;
+    const restarted = new Promise<RestartOutcome>((resolve) => { handOff = resolve; });
+    const warnings: string[] = [];
+    const gateway = createGateway({
+      env: { homeDir: home, cwd: home, processEnv: {} },
+      idleTimeoutMs: 0,
+      ...(options.plugin ? { plugins: { 'stratus-plugin-flaky': { enabled: true } }, pluginHost: host } : {}),
+      ...(options.channel ? { channels: [channel] } : {}),
+      log: () => {},
+      warn: (line) => warnings.push(line),
+      onRestart: (outcome) => handOff(outcome),
+    });
+    await gateway.start();
+    gateway.restart({ drainTimeoutMs: 60_000 });
+    const outcome = await restarted;
+    await gateway.stop();
+    return { outcome, warnings };
+  };
+
+  const plugin = await outcomeOf({ plugin: true, channel: false });
+  assert.deepEqual(plugin.outcome, { drained: false });
+  assert.ok(plugin.warnings.some((line) => /plugin stratus-plugin-flaky failed to shut down: the browser would not close/.test(line)), plugin.warnings.join('\n'));
+
+  const adapter = await outcomeOf({ plugin: false, channel: true });
+  assert.deepEqual(adapter.outcome, { drained: false });
+  assert.ok(adapter.warnings.some((line) => /channel flaky-channel failed to stop: socket refused to close/.test(line)), adapter.warnings.join('\n'));
+
+  // And with nothing misbehaving, the same daemon reports drained.
+  assert.deepEqual((await outcomeOf({ plugin: false, channel: false })).outcome, { drained: true });
 });
