@@ -60,8 +60,15 @@ the one thing a browser cannot do for itself, since page JavaScript cannot
 read `~/.stratus/gateway-token` and a WebSocket upgrade cannot carry a
 header.
 
-The link works once. Run the command again for another. A daemon restart
-signs the browser out too, because its sessions live in memory.
+The link works once. Run the command again for another.
+
+A signed-in page stays signed in across `stratus restart`: the stopping
+daemon hands its live browser sessions to the one replacing it, in memory
+and over the channel between them, and nothing is written to disk. A crash
+or a plain stop-and-start still signs the page out — the process that
+vouched for it is gone, and no file says otherwise — so that is when the
+link is needed again. So does rotating `~/.stratus/gateway-token`: a handed
+session is adopted only under the token it was minted with.
 
 What you get: the roster with live activity, streaming chat with tool
 status lines, an approvals panel that resolves calls parked from anywhere,

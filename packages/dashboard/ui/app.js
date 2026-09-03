@@ -88,9 +88,11 @@ const routeFromHash = () => {
 /**
  * Refresh the shared data every screen leans on.
  *
- * A 401 here means the daemon restarted — its cookie sessions live in memory —
- * so the page says exactly that instead of rendering an empty roster that
- * looks like a fleet that vanished.
+ * A 401 here means the session is gone — the daemon crashed or was stopped
+ * and started again (an announced `stratus restart` hands its cookie
+ * sessions to the replacement; nothing else does, because they live in
+ * memory) — so the page says exactly that instead of rendering an empty
+ * roster that looks like a fleet that vanished.
  */
 // Overlapping refreshes settle latest-wins — see lib/latest.js for the
 // approval this lost.
@@ -292,7 +294,7 @@ const sidebar = () => {
 const signedOut = () => el('div', { class: 'main solo' },
   el('div', { class: 'card' },
     el('h2', {}, 'Not signed in'),
-    el('p', {}, 'This browser has no session with stratusd. Sessions live in the daemon’s memory, so restarting it signs you out.'),
+    el('p', {}, 'This browser has no session with stratusd. Sessions live in the daemon’s memory: stratus restart hands them to the new daemon, but a crash or a stop and start signs you out.'),
     el('p', { class: 'field-note' }, 'Run stratus dashboard in a terminal to open a fresh one.'),
   ),
 );

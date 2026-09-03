@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { tokenFingerprint } from '@stratusagent/control-api';
 import { claimHome } from '@stratusagent/gateway';
 
 import {
@@ -7342,7 +7343,7 @@ const watchedServeStreams = () => {
 test('runCli serve comes back from an announced restart by supervising a fresh daemon, with the arguments it ran with', async () => {
   const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-restart-'));
   const watched = watchedServeStreams();
-  const respawned: Array<{ argv: string[]; boundApiPort: number | undefined }> = [];
+  const respawned: Array<{ argv: string[]; boundApiPort: number | undefined; sessions: number }> = [];
 
   const serving = runCli({
     argv: ['serve', '--no-events', '--api-port', '0'],
@@ -7351,8 +7352,8 @@ test('runCli serve comes back from an announced restart by supervising a fresh d
       homeDir: serveHome,
       cwd: serveHome,
       processEnv: {},
-      serveRespawn: async (argv, boundApiPort) => {
-        respawned.push({ argv, boundApiPort });
+      serveRespawn: async (argv, handoff) => {
+        respawned.push({ argv, boundApiPort: handoff.boundApiPort, sessions: handoff.sessions.length });
         // The fresh daemon ran and was stopped normally.
         return { code: 0 };
       },
@@ -7372,7 +7373,7 @@ test('runCli serve comes back from an announced restart by supervising a fresh d
   assert.equal(await serving, 0);
   const boundPort = Number(new URL(base).port);
   assert.ok(boundPort > 0);
-  assert.deepEqual(respawned, [{ argv: ['serve', '--no-events', '--api-port', '0'], boundApiPort: boundPort }]);
+  assert.deepEqual(respawned, [{ argv: ['serve', '--no-events', '--api-port', '0'], boundApiPort: boundPort, sessions: 0 }]);
   assert.match(watched.output.stdout, /restart requested \(test\) — refusing new turns/);
   assert.match(watched.output.stdout, /stratusd stopped/);
   assert.match(watched.output.stdout, /restarting stratusd \(test\)/);
@@ -7884,8 +7885,8 @@ test('the supervisor hands each daemon the port its predecessor bound, and a sup
       homeDir: serveHome,
       cwd: serveHome,
       processEnv: {},
-      serveRespawn: async (_argv, boundApiPort) => {
-        hints.push(boundApiPort);
+      serveRespawn: async (_argv, handoff) => {
+        hints.push(handoff.boundApiPort);
         return hints.length === 1 ? { code: RESTART_EXIT_CODE, boundApiPort: 45_001 } : { code: 0 };
       },
     },
@@ -7909,11 +7910,392 @@ test('the supervisor hands each daemon the port its predecessor bound, and a sup
       cwd: childHome,
       processEnv: { STRATUS_SERVE_SUPERVISED: '1' },
       shutdownSignal: controller.signal,
-      reportBoundApiPort: (port) => { reported.push(port); },
+      supervisorLink: {
+        send: (message) => {
+          if (message.type === 'stratusd.bound-api-port') {
+            reported.push(message.port);
+          }
+        },
+        receive: () => {},
+      },
     },
   });
   const childBase = await child.apiUrl;
   controller.abort();
   assert.equal(await childServing, 0);
   assert.deepEqual(reported, [Number(new URL(childBase).port)]);
+});
+
+/** A GET over `node:http` (see postJson), reporting the cookie it was handed. */
+const rawGet = (url: string, headers: Record<string, string>): Promise<{ status: number; setCookie: string | undefined }> =>
+  new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const request = httpRequest(
+      { host: target.hostname, port: target.port, path: `${target.pathname}${target.search}`, method: 'GET', headers },
+      (response) => {
+        response.resume();
+        const raw = response.headers['set-cookie'];
+        resolve({ status: response.statusCode ?? 0, setCookie: Array.isArray(raw) ? raw[0] : raw });
+      },
+    );
+    request.on('error', reject);
+    request.end();
+  });
+
+/** GET a daemon route over node:http, resolving with the status. */
+const getStatus = (url: string, token: string): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const request = httpRequest(
+      { host: target.hostname, port: target.port, path: target.pathname, headers: { authorization: `Bearer ${token}` } },
+      (response) => {
+        response.resume();
+        response.on('end', () => resolve(response.statusCode ?? 0));
+      },
+    );
+    // Bounded per request: a replacement that accepts the connection and
+    // then stalls would otherwise hold this open past the caller's loop.
+    request.setTimeout(5_000, () => request.destroy(new Error('the health check timed out')));
+    request.on('error', reject);
+    request.end();
+  });
+
+/** The dashboard's session cookie name, as the control API sets it. */
+const SESSION_COOKIE = 'stratus_session';
+
+/** Sign a browser in the way `stratus dashboard` does: mint a one-time token, then exchange it. */
+const signInToDashboard = async (base: string, token: string): Promise<string> => {
+  const minted = await postJson(`${base}/api/v1/auth/ott`, token, {});
+  assert.equal(minted.status, 200, minted.body);
+  const { url } = JSON.parse(minted.body) as { url: string };
+  const exchanged = await rawGet(url, {});
+  assert.equal(exchanged.status, 302);
+  const cookie = exchanged.setCookie?.split(';')[0] ?? '';
+  assert.ok(cookie.startsWith(`${SESSION_COOKIE}=`), 'the exchange sets a session cookie');
+  return cookie;
+};
+
+test('the dashboard sessions live at a restart go to the daemon that comes back, and follow the daemons after — never through the disk', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-sessions-'));
+  const watched = watchedServeStreams();
+  const handoffs: Array<{ sessions: string[]; boundApiPort: number | undefined }> = [];
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: watched.streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: {},
+      serveRespawn: async (_argv, handoff) => {
+        handoffs.push({ sessions: handoff.sessions.map((session) => session.id), boundApiPort: handoff.boundApiPort });
+        // The first replacement signs a different browser in and asks for
+        // another restart; the second stops for good.
+        return handoffs.length === 1
+          ? { code: RESTART_EXIT_CODE, sessions: [{ id: 'minted-by-the-replacement', expiresAt: Date.now() + 60_000, vouchedBy: 'the-replacement-token' }] }
+          : { code: 0 };
+      },
+    },
+  });
+  const base = await watched.apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  const cookie = await signInToDashboard(base, token);
+  const sessionId = cookie.slice(`${SESSION_COOKIE}=`.length);
+  assert.equal((await rawGet(`${base}/api/v1/health`, { cookie })).status, 200);
+
+  assert.equal((await postJson(`${base}/api/v1/restart`, token, {})).status, 202);
+  assert.equal(await serving, 0);
+
+  // The first daemon handed the browser it had signed in; the replacement
+  // handed what *it* had, not what it was given: a session that lapsed or
+  // was never adopted is not resurrected by the supervisor.
+  assert.deepEqual(handoffs.map((handoff) => handoff.sessions), [[sessionId], ['minted-by-the-replacement']]);
+  assert.equal(handoffs[0]?.boundApiPort, Number(new URL(base).port));
+
+  // In memory end to end. The home holds the token file, the sessions
+  // store, the log — none of which may carry a browser session.
+  const stratusDir = path.join(serveHome, '.stratus');
+  const entries = await readdir(stratusDir, { recursive: true });
+  for (const entry of entries) {
+    const contents = await readFile(path.join(stratusDir, entry), 'utf8').catch(() => '');
+    assert.ok(!contents.includes(sessionId), `${entry} must not carry a dashboard session`);
+  }
+});
+
+test('a supervised daemon takes the sessions handed down its channel before it serves, and hands its own back up when it restarts', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-adopt-'));
+  // The token this daemon will read, so the hand-off can name it: a
+  // session is adopted only under the token it was minted with.
+  await mkdir(path.join(serveHome, '.stratus'), { recursive: true });
+  await writeFile(path.join(serveHome, '.stratus', 'gateway-token'), 'the-daemon-token\n');
+  const watched = watchedServeStreams();
+  const sent: Array<{ type: string; sessions?: string[] }> = [];
+  const handed = { id: 'handed-by-the-supervisor', expiresAt: Date.now() + 60_000, vouchedBy: tokenFingerprint('the-daemon-token') };
+  const rotatedAway = { id: 'minted-under-the-old-token', expiresAt: Date.now() + 60_000, vouchedBy: tokenFingerprint('a-token-since-rotated') };
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: watched.streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: { STRATUS_SERVE_SUPERVISED: '1' },
+      serveRespawn: async () => { throw new Error('a supervised daemon never supervises'); },
+      supervisorLink: {
+        send: (message) => {
+          sent.push(message.type === 'stratusd.sessions'
+            ? { type: message.type, sessions: message.sessions.map((session) => session.id) }
+            : { type: message.type });
+        },
+        // Queued in the channel by the supervisor before this daemon was
+        // even listening, so it arrives the moment the daemon does — well
+        // before its API is up. The API has to hold it until then.
+        receive: (handler) => {
+          handler({ type: 'stratusd.sessions', sessions: [handed, rotatedAway] });
+        },
+      },
+    },
+  });
+  const base = await watched.apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  const cookie = `${SESSION_COOKIE}=${handed.id}`;
+  assert.equal((await rawGet(`${base}/api/v1/health`, { cookie })).status, 200);
+  assert.equal((await rawGet(`${base}/api/v1/health`, { cookie: `${SESSION_COOKIE}=never-handed` })).status, 401);
+  assert.equal((await rawGet(`${base}/api/v1/health`, { cookie: `${SESSION_COOKIE}=${rotatedAway.id}` })).status, 401);
+
+  // A browser this daemon signed in itself goes back up with the adopted one.
+  const own = (await signInToDashboard(base, token)).slice(`${SESSION_COOKIE}=`.length);
+  assert.equal((await postJson(`${base}/api/v1/restart`, token, {})).status, 202);
+  assert.equal(await serving, RESTART_EXIT_CODE);
+  const handedBack = sent.find((message) => message.type === 'stratusd.sessions');
+  assert.deepEqual(handedBack?.sessions?.sort(), [handed.id, own].sort());
+  assert.ok(sent.some((message) => message.type === 'stratusd.bound-api-port'), 'the bound port still goes up the same channel');
+});
+
+test('a stop delivered to the whole process group after a restart drains the replacement and exits clean', {
+  // A negative pid addresses a POSIX process group; Windows has no such
+  // thing, and the signal the test is about is delivered differently there.
+  skip: process.platform === 'win32' && 'process-group signals are POSIX',
+}, async () => {
+  // The one path the in-process tests cannot reach: a real supervisor, a
+  // real replacement daemon, the IPC channel between them, and a signal
+  // delivered the way systemd's KillMode=control-group and a terminal's
+  // Ctrl+C deliver it — to every process in the group at once, so the
+  // replacement gets it from the kernel and again forwarded by the
+  // supervisor. Before the fix the second copy killed it mid-drain.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-group-stop-'));
+  const entrypoint = fileURLToPath(new URL('../src/bin.ts', import.meta.url));
+  const daemon = spawn(
+    process.execPath,
+    ['--experimental-strip-types', entrypoint, 'serve', '--no-events', '--api-port', '0', '--no-log-file'],
+    { env: { ...process.env, HOME: serveHome }, stdio: ['ignore', 'pipe', 'pipe'], detached: true },
+  );
+  let output = '';
+  daemon.stdout?.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+  daemon.stderr?.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+  // `close`, not `exit`: it fires once the process has ended *and* its
+  // piped streams have closed, so everything it and the replacement (which
+  // inherits the same pipes) wrote is in `output` by the time this settles.
+  // After `exit` alone, a final chunk can still be in flight on a loaded
+  // runner.
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    daemon.once('close', (code, signal) => resolve({ code, signal }));
+  });
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  const info = async (): Promise<{ pid?: number; url: string } | undefined> => {
+    try {
+      return JSON.parse(await readFile(path.join(serveHome, '.stratus', 'gateway.json'), 'utf8')) as { pid?: number; url: string };
+    } catch {
+      return undefined;
+    }
+  };
+
+  try {
+    // One deadline per wait, far above what a loaded runner needs: the
+    // gate is the daemon publishing itself, and a daemon that never does
+    // fails here rather than hanging the suite. A deadline rather than an
+    // attempt count, because an attempt can now take as long as a health
+    // check's own timeout.
+    let first: { pid?: number; url: string } | undefined;
+    for (const deadline = Date.now() + 30_000; !first && Date.now() < deadline;) {
+      first = await info();
+      if (!first) await sleep(100);
+    }
+    assert.ok(first, `the daemon never published gateway.json:\n${output}`);
+    const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+    assert.equal((await postJson(`${first.url}/api/v1/restart`, token, { reason: 'test' })).status, 202);
+
+    let second: { pid?: number; url: string } | undefined;
+    for (const deadline = Date.now() + 30_000; !second && Date.now() < deadline;) {
+      const current = await info();
+      if (current && current.pid !== first.pid && await getStatus(`${current.url}/api/v1/health`, token).catch(() => 0) === 200) {
+        second = current;
+      } else {
+        await sleep(100);
+      }
+    }
+    assert.ok(second, `no replacement daemon came up:\n${output}`);
+    // The supervisor is the process the manager started; the replacement
+    // is on the port the first daemon bound.
+    assert.equal(first.pid, daemon.pid);
+    assert.equal(second.url, first.url);
+
+    process.kill(-(daemon.pid as number), 'SIGTERM');
+    // The losing timer is cleared: left armed, it would hold the test
+    // worker open for the rest of its 30 seconds after a clean exit.
+    let hung: NodeJS.Timeout | undefined;
+    const result = await Promise.race([
+      exited,
+      new Promise<'hung'>((resolve) => { hung = setTimeout(() => resolve('hung'), 30_000); }),
+    ]).finally(() => clearTimeout(hung));
+    assert.notEqual(result, 'hung', `the daemon did not exit after a group stop:\n${output}`);
+    assert.deepEqual(result, { code: 0, signal: null }, output);
+    // The replacement drained rather than dying to the repeated signal.
+    const stops = output.split('stratusd stopped').length - 1;
+    assert.equal(stops, 2, `expected the first daemon and its replacement each to stop cleanly:\n${output}`);
+  } finally {
+    try {
+      process.kill(-(daemon.pid as number), 'SIGKILL');
+    } catch {
+      // Already gone.
+    }
+  }
+});
+
+test('a second stop signal while the drain is running is ignored, not fatal', async () => {
+  // The deterministic half of the group-stop case above: the second
+  // signal is sent only once the first one's drain is provably underway,
+  // with a turn held open so the drain cannot finish first. Without the
+  // fix the second signal ends this very process, which is the failure.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-second-signal-'));
+  await mkdir(path.join(serveHome, '.stratus', 'agents'), { recursive: true });
+  await writeFile(
+    path.join(serveHome, '.stratus', 'agents', 'ava.md'),
+    '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n',
+  );
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let turnStarted!: () => void;
+  const started = new Promise<void>((resolve) => { turnStarted = resolve; });
+  const fetchImpl = (async () => {
+    turnStarted();
+    await held;
+    return new Response(
+      JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'done' } }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof fetch;
+
+  const base = createStreams();
+  let draining!: () => void;
+  const drainStarted = new Promise<void>((resolve) => { draining = resolve; });
+  let warned!: () => void;
+  const repeatWarned = new Promise<void>((resolve) => { warned = resolve; });
+  let announceApi!: (url: string) => void;
+  const apiUrl = new Promise<string>((resolve) => { announceApi = resolve; });
+  const streams = {
+    stdout: {
+      write(chunk: string) {
+        const match = /control API on (http:\/\/\S+)/.exec(chunk);
+        if (match?.[1]) announceApi(match[1]);
+        if (chunk.includes('Stopping — draining in-flight turns.')) draining();
+        return base.streams.stdout.write(chunk);
+      },
+    },
+    stderr: {
+      write(chunk: string) {
+        if (chunk.includes('stop signal received while draining')) warned();
+        return base.streams.stderr.write(chunk);
+      },
+    },
+  };
+
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams,
+    env: { homeDir: serveHome, cwd: serveHome, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+  });
+  const url = await apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  assert.equal((await postJson(`${url}/api/v1/sessions/s-held/messages`, token, { message: 'take your time', agentId: 'ava' })).status, 202);
+  await started;
+
+  // Real signals to this process: the daemon's handlers are the only ones.
+  process.kill(process.pid, 'SIGTERM');
+  await drainStarted;
+  process.kill(process.pid, 'SIGTERM');
+  await repeatWarned;
+  release();
+
+  assert.equal(await serving, 0);
+  assert.match(base.output.stdout, /stratusd stopped/);
+});
+
+test('a second stop signal is still not fatal when the stream its warning goes to throws', async () => {
+  // The warning is said from signal dispatch, outside runServe's promise
+  // and its finally. A host that embeds runServe with a stderr whose
+  // write throws would otherwise turn the repeated signal into an
+  // uncaught exception — ending the process mid-drain by another route.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-signal-throwing-stream-'));
+  await mkdir(path.join(serveHome, '.stratus', 'agents'), { recursive: true });
+  await writeFile(
+    path.join(serveHome, '.stratus', 'agents', 'ava.md'),
+    '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n',
+  );
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let turnStarted!: () => void;
+  const started = new Promise<void>((resolve) => { turnStarted = resolve; });
+  const fetchImpl = (async () => {
+    turnStarted();
+    await held;
+    return new Response(
+      JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'done' } }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof fetch;
+
+  const base = createStreams();
+  let draining!: () => void;
+  const drainStarted = new Promise<void>((resolve) => { draining = resolve; });
+  let threw!: () => void;
+  const warningThrew = new Promise<void>((resolve) => { threw = resolve; });
+  let announceApi!: (url: string) => void;
+  const apiUrl = new Promise<string>((resolve) => { announceApi = resolve; });
+  const streams = {
+    stdout: {
+      write(chunk: string) {
+        const match = /control API on (http:\/\/\S+)/.exec(chunk);
+        if (match?.[1]) announceApi(match[1]);
+        if (chunk.includes('Stopping — draining in-flight turns.')) draining();
+        return base.streams.stdout.write(chunk);
+      },
+    },
+    stderr: {
+      write(chunk: string) {
+        if (chunk.includes('stop signal received while draining')) {
+          threw();
+          throw new Error('stderr is gone');
+        }
+        return base.streams.stderr.write(chunk);
+      },
+    },
+  };
+
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams,
+    env: { homeDir: serveHome, cwd: serveHome, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+  });
+  const url = await apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  assert.equal((await postJson(`${url}/api/v1/sessions/s-held/messages`, token, { message: 'take your time', agentId: 'ava' })).status, 202);
+  await started;
+
+  process.kill(process.pid, 'SIGTERM');
+  await drainStarted;
+  process.kill(process.pid, 'SIGTERM');
+  await warningThrew;
+  release();
+
+  assert.equal(await serving, 0);
+  assert.match(base.output.stdout, /stratusd stopped/);
 });

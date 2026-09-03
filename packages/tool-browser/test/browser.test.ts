@@ -107,6 +107,115 @@ const pluginWith = async (config: JsonObject, recorder: Recorder) => {
   return { plugin, tools, tool: (name: string) => tools.get(name) as Tool };
 };
 
+test('a page whose script never yields is given up on within the timeout, and the next call gets a fresh page', async (t) => {
+  // Playwright bounds navigation, not `evaluate` or `title`; a busy main
+  // thread answers neither. The first read hangs forever; the second page
+  // answers, which is what a fresh context buys.
+  const recorder = emptyRecorder();
+  let reads = 0;
+  const tools = new ToolRegistry();
+  const plugin = createBrowserPlugin(
+    { allowedHosts: ['example.com'], navigationTimeoutMs: 50 },
+    {
+      driver: fakeDriver(recorder, {
+        evaluate: () => (reads++ === 0 ? new Promise<never>(() => {}) : Promise.resolve('answered')),
+      }),
+    },
+  );
+  await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
+  t.after(() => plugin.dispose?.());
+  const read = tools.get('browser.read') as Tool;
+  const session = sessionFor('busy');
+
+  // Raced against a bound of its own, so a read that never gives up fails
+  // this assertion instead of hanging the suite.
+  const outcome = await Promise.race([
+    read.execute({ url: 'https://example.com/' }, session).then(() => 'answered', (error: Error) => error.message),
+    new Promise<string>((resolve) => setTimeout(() => resolve('still waiting'), 2_000)),
+  ]);
+  assert.match(outcome, /did not answer for its text within 50ms.*fresh page/);
+  assert.equal(recorder.closedContexts, 1, 'the unresponsive context was closed');
+
+  const again = await read.execute({ url: 'https://example.com/' }, session) as JsonObject;
+  assert.equal(again.text, 'answered');
+  assert.equal(recorder.contexts, 2, 'the second call ran in a fresh context');
+});
+
+test('giving up on a page is itself bounded, when even closing its context hangs', async (t) => {
+  // A transport wedged enough that the first `context.close()` never
+  // settles either. The call still comes back within the timeout with the
+  // same error, and the next call runs in a fresh context; the close
+  // carries on unwaited.
+  let reads = 0;
+  let contexts = 0;
+  let closes = 0;
+  const routes: Array<(route: RouteLike) => void | Promise<void>> = [];
+  const driver: BrowserDriver = {
+    async launch() {
+      return {
+        async newContext() {
+          contexts += 1;
+          return {
+            async newPage() {
+              return {
+                async goto() {
+                  return { status: () => 200 };
+                },
+                url: () => 'https://example.com/',
+                async title() {
+                  return 'Example Domain';
+                },
+                async content() {
+                  return '';
+                },
+                evaluate: () => (reads++ === 0 ? new Promise<never>(() => {}) : Promise.resolve('answered')),
+                async screenshot() {
+                  return Buffer.from('png');
+                },
+                async click() {},
+                async fill() {},
+                async route(_pattern, handler) {
+                  routes.push(handler);
+                },
+                async close() {},
+              };
+            },
+            close: () => (closes++ === 0 ? new Promise<never>(() => {}) : Promise.resolve()),
+          };
+        },
+        async close() {},
+      };
+    },
+  };
+  const tools = new ToolRegistry();
+  const plugin = createBrowserPlugin({ allowedHosts: ['example.com'], navigationTimeoutMs: 50 }, { driver });
+  await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
+  t.after(() => plugin.dispose());
+  const read = tools.get('browser.read') as Tool;
+  const session = sessionFor('wedged');
+
+  // The page that is about to hang was refused something first.
+  await tools.get('browser.goto')!.execute({ url: 'https://example.com/' }, session);
+  await routes[0]!({
+    request: () => ({ url: () => 'file:///etc/passwd' }),
+    async abort() {},
+    async continue() {},
+  });
+
+  const outcome = await Promise.race([
+    read.execute({}, session).then(() => 'answered', (error: Error) => error.message),
+    new Promise<string>((resolve) => setTimeout(() => resolve('still waiting'), 2_000)),
+  ]);
+  assert.match(outcome, /did not answer for its text within 50ms.*fresh page/);
+
+  const again = await read.execute({ url: 'https://example.com/' }, session) as JsonObject;
+  assert.equal(again.text, 'answered');
+  assert.equal(contexts, 2, 'the second call ran in a fresh context');
+  // The refusal belonged to the page that was given up on; the fresh page
+  // is not told about it, even though the old context never finished closing.
+  assert.equal(again.blockedRequests, undefined, 'the abandoned page\'s refusals went with it');
+});
+
 test('one browser, a context per conversation, dropped when idle', async (t) => {
   const recorder = emptyRecorder();
   const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'], idleMs: 60_000 }, recorder);
