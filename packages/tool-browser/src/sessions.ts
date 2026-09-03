@@ -18,7 +18,7 @@ export interface SessionPoolOptions {
   /** How many contexts may exist at once. The oldest goes when a new one would exceed it. */
   maxContexts?: number;
   /** Called when a page is dropped, so a caller can log it. */
-  onEvicted?: (event: { sessionId: string; reason: 'idle' | 'capacity' | 'shutdown' | 'policy' }) => void;
+  onEvicted?: (event: { sessionId: string; reason: 'idle' | 'capacity' | 'shutdown' | 'policy' | 'unresponsive' }) => void;
   /** Reported rather than thrown: a sweep runs on a timer with nobody waiting on it. */
   onError?: (error: unknown) => void;
 }
@@ -227,7 +227,22 @@ export class BrowserSessionPool {
     return this.browsers.get(context.browserKey)?.proxy.refusals ?? [];
   }
 
-  private async drop(entry: PooledContext, reason: 'idle' | 'capacity' | 'shutdown' | 'policy'): Promise<void> {
+  /**
+   * Close one conversation's context because its page stopped answering —
+   * a script that never yields holds `evaluate` and `title` forever, and
+   * the only way past it is a fresh page. Returns false when the session
+   * had no context to close.
+   */
+  async release(sessionId: string): Promise<boolean> {
+    const entry = this.contexts.get(sessionId);
+    if (!entry) {
+      return false;
+    }
+    await this.drop(entry, 'unresponsive');
+    return true;
+  }
+
+  private async drop(entry: PooledContext, reason: 'idle' | 'capacity' | 'shutdown' | 'policy' | 'unresponsive'): Promise<void> {
     this.contexts.delete(entry.sessionId);
     try {
       await entry.context.close();

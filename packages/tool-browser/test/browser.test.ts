@@ -107,6 +107,40 @@ const pluginWith = async (config: JsonObject, recorder: Recorder) => {
   return { plugin, tools, tool: (name: string) => tools.get(name) as Tool };
 };
 
+test('a page whose script never yields is given up on within the timeout, and the next call gets a fresh page', async (t) => {
+  // Playwright bounds navigation, not `evaluate` or `title`; a busy main
+  // thread answers neither. The first read hangs forever; the second page
+  // answers, which is what a fresh context buys.
+  const recorder = emptyRecorder();
+  let reads = 0;
+  const tools = new ToolRegistry();
+  const plugin = createBrowserPlugin(
+    { allowedHosts: ['example.com'], navigationTimeoutMs: 50 },
+    {
+      driver: fakeDriver(recorder, {
+        evaluate: () => (reads++ === 0 ? new Promise<never>(() => {}) : Promise.resolve('answered')),
+      }),
+    },
+  );
+  await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
+  t.after(() => plugin.dispose?.());
+  const read = tools.get('browser.read') as Tool;
+  const session = sessionFor('busy');
+
+  // Raced against a bound of its own, so a read that never gives up fails
+  // this assertion instead of hanging the suite.
+  const outcome = await Promise.race([
+    read.execute({ url: 'https://example.com/' }, session).then(() => 'answered', (error: Error) => error.message),
+    new Promise<string>((resolve) => setTimeout(() => resolve('still waiting'), 2_000)),
+  ]);
+  assert.match(outcome, /did not answer for its text within 50ms.*fresh page/);
+  assert.equal(recorder.closedContexts, 1, 'the unresponsive context was closed');
+
+  const again = await read.execute({ url: 'https://example.com/' }, session) as JsonObject;
+  assert.equal(again.text, 'answered');
+  assert.equal(recorder.contexts, 2, 'the second call ran in a fresh context');
+});
+
 test('one browser, a context per conversation, dropped when idle', async (t) => {
   const recorder = emptyRecorder();
   const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'], idleMs: 60_000 }, recorder);
