@@ -362,12 +362,60 @@ const runLocalCommand = async (
     child.kill('SIGKILL');
   };
 
+  // A kill reaches the process group, not the pipes. A grandchild that
+  // moved to its own session — `setsid`, a daemonizing server, anything
+  // `nohup … &` starts under a shell that then exits — inherited the
+  // command's stdout and keeps it open after everything in the group is
+  // dead, and `'close'` waits for every stdio stream: a 2s timeout on
+  // `setsid sleep 60 &` settled after 61s, when the escapee happened to
+  // exit. So once the tree has been killed, the call settles on the
+  // child's exit instead, and whatever the survivor writes afterwards is
+  // read and dropped. Read, not cut off: destroying the read end would
+  // hand the survivor SIGPIPE on its next write, and the point of leaving
+  // it alive is that it stays alive. The handles are unref'd so an
+  // escapee's pipe cannot hold a one-shot CLI run open either.
+  let released = false;
+  const releaseStdio = (): void => {
+    released = true;
+    unrefStream(child.stdout);
+    unrefStream(child.stderr);
+    settleOnExit();
+  };
+
   child.stdout.on('data', (chunk: Buffer) => {
-    stdout.write(chunk);
+    if (!released) {
+      stdout.write(chunk);
+    }
   });
 
   child.stderr.on('data', (chunk: Buffer) => {
-    stderr.write(chunk);
+    if (!released) {
+      stderr.write(chunk);
+    }
+  });
+
+  let settle: (code: number) => void = () => {};
+  let fail: (error: Error) => void = () => {};
+  const settled = new Promise<number>((resolve, reject) => {
+    settle = resolve;
+    fail = reject;
+  });
+  let exitCode: number | undefined;
+  // The exit may already have happened when the timeout fires — a command
+  // that finished, leaving a survivor on its pipe, looks exactly like one
+  // still running until then.
+  const settleOnExit = (): void => {
+    if (released && exitCode !== undefined) {
+      settle(exitCode);
+    }
+  };
+  child.once('error', fail);
+  child.once('exit', (code) => {
+    exitCode = code ?? -1;
+    settleOnExit();
+  });
+  child.once('close', (code) => {
+    settle(code ?? -1);
   });
 
   if (typeof invocation.stdin === 'string') {
@@ -379,6 +427,7 @@ const runLocalCommand = async (
   const timer = setTimeout(() => {
     timedOut = true;
     killTree();
+    releaseStdio();
   }, options.timeoutMs);
   timer.unref();
 
@@ -387,6 +436,7 @@ const runLocalCommand = async (
   const onAbort = (): void => {
     aborted = true;
     killTree();
+    releaseStdio();
   };
   if (options.signal?.aborted) {
     onAbort();
@@ -395,7 +445,7 @@ const runLocalCommand = async (
   }
 
   try {
-    const exitCode = await waitForChild(child);
+    const exitCode = await settled;
 
     return {
       command: invocation.command,
@@ -416,13 +466,13 @@ const runLocalCommand = async (
   }
 };
 
-const waitForChild = async (child: ChildProcessWithoutNullStreams): Promise<number> => {
-  return new Promise<number>((resolve, reject) => {
-    child.once('error', reject);
-    child.once('close', (code) => {
-      resolve(code ?? -1);
-    });
-  });
+// The stdio streams are typed as bare Readables, but a spawned child's are
+// sockets over pipes, and a socket can be unref'd.
+const unrefStream = (stream: NodeJS.ReadableStream): void => {
+  const candidate = stream as { unref?: () => void };
+  if (typeof candidate.unref === 'function') {
+    candidate.unref();
+  }
 };
 
 const serializeExecution = (execution: LocalCommandExecution): JsonValue => ({
