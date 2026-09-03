@@ -1616,22 +1616,42 @@ export interface OperatorSkillInfo {
   requires?: string[];
 }
 
+export interface LoadOperatorSkillsOptions {
+  /**
+   * Refuse the whole load on the first skill that would not load, instead
+   * of warning and serving the rest. What a live reload wants: a daemon
+   * that already serves a complete catalog must not swap it for a partial
+   * one because a file is mid-edit, and the error names the file so the
+   * operator can fix it and reload again. At start there is no previous
+   * set to keep, which is why the default degrades.
+   */
+  strict?: boolean;
+}
+
 /**
  * Load `~/.stratus/skills/` into a skill registry: each subdirectory with a
  * `SKILL.md` is one skill, the directory name its id.
  *
  * Degrades the way `loadRosterSouls` does — one unparseable skill is a
- * warning, never a refusal to serve the rest — with the same exception: an
- * id collision has no right winner, so `SkillRegistry.register` throwing
- * `DuplicateSkillIdError` propagates rather than being caught. Load these
- * before plugins, so an operator's bare id beats a plugin's bare alias
- * while the plugin's skill stays reachable qualified.
+ * warning, never a refusal to serve the rest (unless `strict`) — with the
+ * same exception: an id collision has no right winner, so
+ * `SkillRegistry.register` throwing `DuplicateSkillIdError` propagates
+ * rather than being caught. Load these before plugins, so an operator's
+ * bare id beats a plugin's bare alias while the plugin's skill stays
+ * reachable qualified.
  */
 export const loadOperatorSkills = async (
   env: StateEnvironment,
   registry: SkillRegistry,
   warn: (message: string) => void = () => {},
+  options: LoadOperatorSkillsOptions = {},
 ): Promise<OperatorSkillInfo[]> => {
+  const skip = (skillPath: string, reason: string): void => {
+    if (options.strict) {
+      throw new Error(`Cannot load ${skillPath}: ${reason}`);
+    }
+    warn(`skipping ${skillPath}: ${reason}`);
+  };
   let entries: import('node:fs').Dirent[] = [];
   try {
     entries = await readdir(skillsDirPath(env), { withFileTypes: true });
@@ -1652,14 +1672,14 @@ export const loadOperatorSkills = async (
     const id = entry.name;
     const skillPath = path.join(skillsDirPath(env), id, 'SKILL.md');
     if (!isValidSkillId(id)) {
-      warn(`skipping ${skillPath}: ${JSON.stringify(id)} is not a skill id. Skill ids are kebab-case (web-research).`);
+      skip(skillPath, `${JSON.stringify(id)} is not a skill id. Skill ids are kebab-case (web-research).`);
       continue;
     }
     let document;
     try {
       document = parseSkillDocument(await readFile(skillPath, 'utf8'));
     } catch (error) {
-      warn(`skipping ${skillPath}: ${error instanceof Error ? error.message : String(error)}`);
+      skip(skillPath, error instanceof Error ? error.message : String(error));
       continue;
     }
     registry.register(createLazySkill({ id, document, read: () => readFile(skillPath, 'utf8') }));

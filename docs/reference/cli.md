@@ -34,6 +34,8 @@ stratus agents                         # who's on the team (also: stratus agent 
 stratus skill add owner/repo           # install skills from GitHub or a local path
 stratus skill add owner/repo --skill hn-search --agent ava
 stratus skills                         # what is installed, who enables it (also: stratus skill list)
+stratus skill reload                   # a running daemon re-reads ~/.stratus/skills — no restart
+stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
 stratus schedules                      # what the fleet has scheduled (also: stratus schedule list)
 stratus schedules cancel <id>          # stop the next firing, revoke its destination
 stratus dashboard                      # local browser dashboard
@@ -49,7 +51,8 @@ stratus dashboard                      # local browser dashboard
 | `doctor` | [Troubleshooting](../guides/troubleshooting.md) |
 | `update` | [Updating](../guides/updating.md) |
 | `agent new`, `agents` | [Agents](../concepts/agents.md) |
-| `skill add`, `skills` | [Skills](../guides/skills.md) |
+| `skill add`, `skills`, `skill reload` | [Skills](../guides/skills.md) |
+| `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
 | `schedules …` | [Schedules](../guides/schedules.md) |
 | `dashboard` | [Remote access](../guides/remote-access.md) |
 
@@ -75,7 +78,7 @@ stratus dashboard                      # local browser dashboard
 | `--no-api` | `stratus serve`: do not serve the control API |
 | `--api-host` | `stratus serve`: control API interface (default `127.0.0.1`) |
 | `--api-port` | `stratus serve`: control API port (default `4123`; `0` picks any free port) |
-| `--gateway <url>` | `stratus agents`: read the roster from a running daemon's control API |
+| `--gateway <url>` | `stratus agents`, `skill reload`, `restart`: a running daemon's control API (the last two default to the daemon `~/.stratus/gateway.json` names) |
 | `--port`, `--host` | `stratus dashboard`: where a daemon it starts should bind |
 | `--no-open` | `stratus dashboard`: skip automatic browser opening |
 | `--token` | Bearer token for `--gateway` (default: `~/.stratus/gateway-token`, or `STRATUS_GATEWAY_TOKEN`) |
@@ -86,6 +89,9 @@ stratus dashboard                      # local browser dashboard
 | `--session` | `stratus logs`: show only one session's records |
 | `--skill <id>` | `stratus skill add`: pick one skill from a multi-skill repo (repeatable) |
 | `--force` | `stratus skill add`: replace an already-installed skill id |
+| `--no-reload` | `stratus skill add`: install without telling a running daemon to reload |
+| `--reason` | `stratus restart`: why, for the daemon's log |
+| `--drain-timeout <seconds>` | `stratus restart`: how long in-flight turns get to finish before they are aborted (default 30) |
 | `--help`, `-h` | Show help |
 
 Tool plugins have no flags: what is installed is a config decision

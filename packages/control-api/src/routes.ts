@@ -16,6 +16,7 @@ import {
   isScheduleSessionId,
   RESERVED_SESSION_METADATA_KEYS,
   reservedSessionMetadataKey,
+  RestartUnsupportedError,
   SCHEDULE_SESSION_ID_PREFIX,
   type Gateway,
 } from '@stratusagent/gateway';
@@ -634,6 +635,48 @@ export const routes: Route[] = [
     async handler(context) {
       const agents = await context.gateway.reloadRoster();
       return { agents: agents.map((agent) => ({ id: agent.id, name: agent.name })) };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: `${API_PREFIX}/skills/reload`,
+    async handler(context) {
+      try {
+        return { skills: await context.gateway.reloadSkills() };
+      } catch (error) {
+        // The daemon is fine and still serving the previous set; what is
+        // wrong is a file on disk, which the message names. Not a 500,
+        // which every client reads as the daemon being broken.
+        throw new ApiError(422, 'skills_reload_refused', error instanceof Error ? error.message : String(error));
+      }
+    },
+  },
+  {
+    method: 'POST',
+    pattern: `${API_PREFIX}/restart`,
+    async handler(context) {
+      const body = await readJsonObject(context.request);
+      const reason = optionalString(body, 'reason');
+      const drainTimeoutMs = body.drainTimeoutMs;
+      if (drainTimeoutMs !== undefined && (typeof drainTimeoutMs !== 'number' || !Number.isInteger(drainTimeoutMs) || drainTimeoutMs < 0)) {
+        throw new ApiError(400, 'invalid_body', '"drainTimeoutMs" must be a non-negative whole number of milliseconds when present.');
+      }
+      let status;
+      try {
+        status = context.gateway.restart({
+          ...(reason !== undefined ? { reason } : {}),
+          ...(typeof drainTimeoutMs === 'number' ? { drainTimeoutMs } : {}),
+        });
+      } catch (error) {
+        if (error instanceof RestartUnsupportedError) {
+          throw new ApiError(501, 'restart_unsupported', error.message);
+        }
+        throw new ApiError(409, 'not_restartable', error instanceof Error ? error.message : String(error));
+      }
+      // Accepted, not done: the drain runs after this response leaves, and
+      // this connection is one of the things it closes.
+      context.response.statusCode = 202;
+      return { restarting: true, ...status };
     },
   },
 

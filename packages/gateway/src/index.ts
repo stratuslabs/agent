@@ -495,6 +495,58 @@ export interface GatewaySkill {
   path?: string;
 }
 
+/** What a turn cut short by an announced restart records as its failure. */
+export const RESTARTING_TURN_ERROR = 'Run aborted: stratusd is restarting';
+
+/**
+ * How long an announced restart lets in-flight turns finish before aborting
+ * them. Matches the systemd unit's `TimeoutStopSec`, so the two windows an
+ * operator can hit agree.
+ */
+export const DEFAULT_RESTART_DRAIN_TIMEOUT_MS = 30_000;
+
+export interface RestartRequest {
+  /** Why, for the log — "plugin stratus-plugin-github enabled". */
+  reason?: string;
+  /** Overrides the gateway's drain window for this restart. */
+  drainTimeoutMs?: number;
+}
+
+/** What `restart()` announced: the terms the drain is running under. */
+export interface RestartStatus {
+  reason?: string;
+  drainTimeoutMs: number;
+  /** Turns that were running when the restart was announced. */
+  inflight: number;
+}
+
+/** What the host is handed once the daemon has stopped for a restart. */
+export interface RestartOutcome {
+  reason?: string;
+  /**
+   * Whether every turn finished — inside the window, or after being
+   * aborted at it. False means a turn ignored its abort for a whole second
+   * window and the gateway shut down around it; a host should exit the
+   * process rather than start a new daemon beside a turn still writing.
+   */
+  drained: boolean;
+}
+
+/**
+ * `restart()` on a gateway whose host gave it no way back. Exported so the
+ * control API can answer it as "not supported here" rather than as a
+ * failure of the daemon.
+ */
+export class RestartUnsupportedError extends Error {
+  constructor() {
+    super(
+      'This daemon cannot restart itself: the host that started it did not say how. '
+      + 'Restart it from the service manager (stratus service stop, then start) or from the terminal it runs in.',
+    );
+    this.name = 'RestartUnsupportedError';
+  }
+}
+
 /** A plugin this daemon was asked to load, and what came of it. */
 export interface GatewayPluginStatus {
   package: string;
@@ -559,6 +611,16 @@ export interface GatewayOptions {
    * to the CLI.
    */
   pluginHost?: OptionalModuleHost;
+  /**
+   * How this daemon comes back after `restart()`: called once the gateway
+   * has stopped, by the host that owns the process — `stratus serve`
+   * starts a fresh daemon and supervises it. The gateway can drain and
+   * stop; only its host can start a process. A host that omits this gives
+   * up `restart()`, which then throws `RestartUnsupportedError`.
+   */
+  onRestart?: (outcome: RestartOutcome) => void | Promise<void>;
+  /** The drain window a `restart()` uses when the request names none. Default 30s. */
+  restartDrainTimeoutMs?: number;
   log?: (line: string) => void;
   warn?: (line: string) => void;
 }
@@ -605,6 +667,38 @@ export interface Gateway {
    * created by another surface, or one whose soul was deleted.
    */
   reloadRoster(): Promise<AgentDefinition[]>;
+  /**
+   * Re-read `~/.stratus/skills/` and serve what is there now, without a
+   * restart — the shape `reloadRoster()` established: idempotent,
+   * serialized against itself and the roster reload, and a failure that
+   * leaves the previous set serving. Plugin-contributed skills are rebuilt
+   * from the plugins already loaded (never re-imported), in the same order
+   * they loaded, so operator precedence and contested aliases come out as
+   * a restart would produce them.
+   *
+   * A skill that would not load — a malformed `SKILL.md`, a directory whose
+   * name is not an id — rejects with the file named and changes nothing:
+   * half a catalog is worse than a stale one.
+   *
+   * Loaded is not enabled: a reloaded skill still reaches only the agents
+   * whose souls list it.
+   */
+  reloadSkills(): Promise<GatewaySkill[]>;
+  /**
+   * Announce a restart: refuse new turns now, let running ones finish
+   * inside the drain window, abort what is still running at the end of
+   * it, stop, and hand the process back to the host through `onRestart`.
+   * Returns at once with the terms; the drain runs behind it. Idempotent —
+   * a second call while one is underway reports the same announcement.
+   *
+   * What comes back is what a stop-and-start brings back: durable sessions,
+   * schedules, and channels; a call parked on a human is denied as
+   * cancelled, exactly as a stop denies it. The refusal comes first, which
+   * makes the drain's known gap smaller — a turn finishing after the
+   * snapshot can still start work the snapshot never saw — but does not
+   * close it.
+   */
+  restart(request?: RestartRequest): RestartStatus;
   /**
    * The turn currently running on a session, if the caller that started it
    * named one. Single-flight per session is what makes this exact: at most
@@ -1274,22 +1368,76 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   /**
-   * Roster rebuilds, one at a time.
+   * Rebuild the skill catalog from what is on disk right now, into a fresh
+   * registry, and swap it in whole. See `Gateway.reloadSkills`.
+   *
+   * Strict on the operator directory: the previous set is still serving,
+   * so a file that will not load is a reason to keep it, not to serve the
+   * rest. The plugins' skills are re-registered from the load records, in
+   * load order, after the operator's — the order `start()` used, which is
+   * what makes an operator's bare id win its alias and a bare id two
+   * plugins want stay contested. Nothing is imported again: a plugin is
+   * code, and code gets a restart.
+   */
+  const loadSkills = async (): Promise<void> => {
+    const next = new SkillRegistry();
+    const operator = await loadOperatorSkills(env, next, warn, { strict: true });
+    for (const plugin of loadedPlugins) {
+      for (const record of plugin.skills) {
+        // The live catalog holds the very `Skill` the loader staged, under
+        // its canonical id; a rebuild re-registers that object rather than
+        // re-reading the plugin's file, so a plugin's skills are exactly
+        // what loaded with it until it is loaded again.
+        const skill = skillCatalog.resolve(record.id);
+        if (!skill) {
+          throw new Error(`Plugin ${plugin.package} lists skill ${record.id}, but the catalog no longer holds it. Restart the daemon.`);
+        }
+        next.register(skill);
+        next.registerAlias(record.bareId, skill.id);
+      }
+    }
+
+    const before = new Set(operatorSkills.map((skill) => skill.id));
+    const after = new Set(operator.map((skill) => skill.id));
+    skillCatalog.replaceWith(next);
+    operatorSkills = operator;
+
+    const added = operator.filter((skill) => !before.has(skill.id)).map((skill) => skill.id);
+    const removed = [...before].filter((id) => !after.has(id));
+    const change = [
+      ...(added.length > 0 ? [`added ${added.join(', ')}`] : []),
+      ...(removed.length > 0 ? [`removed ${removed.join(', ')}`] : []),
+    ];
+    log(`skills reloaded — ${skillCatalog.list().length} skill(s)${change.length > 0 ? `: ${change.join('; ')}` : ' (no change)'}`);
+    // The same advisory check the roster load runs: a removed skill an
+    // agent still lists, or a new one whose `requires:` the agent's tools
+    // do not cover, is worth a line now rather than at the next restart.
+    for (const agent of registry.list()) {
+      for (const { skill, missing } of missingSkillRequirements(agent, skillCatalog)) {
+        warn(`agent ${agent.id} enables skill ${skill.id}, which expects tools the agent is not allowed: ${missing.join(', ')}`);
+      }
+    }
+  };
+
+  /**
+   * Roster and skill rebuilds, one at a time.
    *
    * `loadRoster` prunes by comparing the registry against the ids *this pass*
    * saw, so two overlapping passes destroy each other's work: the older one
    * snapshots a roster without agent B, the newer one registers B and
    * finishes, and then the older one reaches its prune and unregisters B —
    * which two clients creating agents at once will do, each having been told
-   * 201 for an agent that is no longer dispatchable.
+   * 201 for an agent that is no longer dispatchable. Skill reloads share the
+   * chain: each is a whole-catalog swap, and the roster load reads the
+   * catalog for its advisory warnings.
    *
    * A chain rather than a lock: a reload is idempotent, so a caller arriving
    * mid-rebuild wants the *next* complete one, and waiting for it is exactly
    * what this gives them.
    */
   let reloads: Promise<unknown> = Promise.resolve();
-  const reloadsInOrder = async (): Promise<void> => {
-    const next = reloads.then(loadRoster, loadRoster);
+  const reloadsInOrder = async (work: () => Promise<void>): Promise<void> => {
+    const next = reloads.then(work, work);
     // Swallowed for the chain only — the caller still sees the rejection, but
     // a roster that failed to load must not block every reload after it.
     reloads = next.catch(() => undefined);
@@ -1507,10 +1655,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   ): Promise<T> => {
     const effectiveIdleMs = idleEnabled || fallbackStreams ? idleTimeoutMs : 0;
     if (effectiveIdleMs <= 0 && !external) {
-      return run(new AbortController().signal);
+      // No watchdog and nobody outside to cancel it — but still a turn an
+      // announced restart must be able to cut short at the window.
+      const idle = new AbortController();
+      turnControllers.add(idle);
+      try {
+        return await run(idle.signal);
+      } finally {
+        turnControllers.delete(idle);
+      }
     }
 
     const controller = new AbortController();
+    turnControllers.add(controller);
     // The external reason travels: a caller that aborted with its own
     // `RunAbortedError` gets it recorded on the session, like the watchdog's.
     const onExternalAbort = (): void => controller.abort(external?.reason);
@@ -1655,6 +1812,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       unsubscribeObserver();
       unsubscribeDrain();
       suspendWatchdog.delete(sessionId);
+      turnControllers.delete(controller);
       external?.removeEventListener('abort', onExternalAbort);
     }
   };
@@ -1667,6 +1825,19 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const sessionChains = new Map<string, Promise<unknown>>();
   const inflight = new Set<Promise<unknown>>();
   let stopping = false;
+  /**
+   * The abort handle of every turn running right now. A restart's drain
+   * window ends by aborting these — the same signal the watchdog fires —
+   * so a turn that outlives the window fails as aborted, its session
+   * saved, instead of being cut off by a process exit and found as
+   * abandoned by the next one.
+   */
+  const turnControllers = new Set<AbortController>();
+  /** Set once `restart()` announced; the refusal a caller reads says why. */
+  let restartStatus: RestartStatus | undefined;
+  const refusal = (): Error => new Error(restartStatus
+    ? 'stratusd is restarting and will accept new work once it is back up.'
+    : 'The gateway is stopping and no longer accepts new work.');
 
   /**
    * The turn id running on each session, for callers that named one.
@@ -2133,14 +2304,14 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    */
   const dispatchScheduledFiring = (input: DispatchInput): Promise<Session> => {
     if (stopping) {
-      throw new Error('The gateway is stopping and no longer accepts new work.');
+      throw refusal();
     }
     return onSessionChain(input.sessionId, () => dispatchInternal(input));
   };
 
   const dispatch = async (input: DispatchInput): Promise<Session> => {
     if (stopping) {
-      throw new Error('The gateway is stopping and no longer accepts new work.');
+      throw refusal();
     }
 
     // The reserved namespace is the scheduler's alone. A caller that could
@@ -2314,6 +2485,89 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
   const startedChannels: GatewayChannelAdapter[] = [];
 
+  /** Resolves with `true` when `work` settles before `ms` elapse. */
+  const settlesWithin = (work: Promise<unknown>, ms: number): Promise<boolean> =>
+    new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), ms);
+      void work.then(
+        () => { clearTimeout(timer); resolve(true); },
+        () => { clearTimeout(timer); resolve(true); },
+      );
+    });
+
+  let stopped: Promise<void> | undefined;
+
+  /**
+   * The one shutdown sequence, for a stop and for a restart alike.
+   *
+   * `abortAfterMs` is the difference: a stop waits for every in-flight
+   * turn however long it takes (the service manager's own timeout is the
+   * bound there), while a restart waits that long and then aborts what is
+   * still running, so the daemon can come back instead of waiting on one
+   * stuck turn. Resolves with whether everything finished — after an abort,
+   * a turn that still ignores its signal for a second window is shut down
+   * around, and the host is told so it can exit rather than start a new
+   * daemon beside it.
+   */
+  const shutdown = async (abortAfterMs: number | undefined): Promise<boolean> => {
+    // Refuse new work first; then let channels finish rendering their
+    // in-flight turns (already-started dispatches keep running), drain,
+    // and close.
+    stopping = true;
+    // No new firings from here: the tick stops before anything drains,
+    // so the drain below is over a set that can only shrink. A tick
+    // already past its `stopping` check loses to `dispatch`'s own
+    // refusal — the second gate is why this needs no handshake.
+    scheduler.stop();
+    // Deny what is parked before draining, or the drain waits out every
+    // outstanding approval timeout — a shutdown would hang for as long as
+    // the longest request had left. Each denial is a real decision the
+    // turn continues from, so the drain below still finishes those turns.
+    for (const parked of [...pendingApprovals.values()]) {
+      parked.settle('deny', 'cancelled');
+    }
+    // Let those resolutions reach their subscribers before the channels
+    // go down, or a channel that renders approvals never learns to
+    // retract the buttons it is still showing.
+    await Promise.allSettled([...approvalEmissions]);
+    // The channels' stop awaits the rendering they have in flight, which
+    // is a running turn's output — so the window covers both halves of
+    // the drain, or a stuck turn would hold the channel stop outside it.
+    const drain = (async () => {
+      await Promise.allSettled(startedChannels.map((adapter) => adapter.stop()));
+      startedChannels.length = 0;
+      await Promise.allSettled([...inflight]);
+    })();
+    let drained = true;
+    if (abortAfterMs === undefined) {
+      await drain;
+    } else if (!(await settlesWithin(drain, abortAfterMs))) {
+      warn(`restart: ${inflight.size} turn(s) still running after ${abortAfterMs}ms; aborting them`);
+      // The watchdog's own mechanism: the runner fails each session with
+      // the reason on the signal, saves it, and emits session.failed —
+      // so the next daemon finds a finished turn, not an abandoned one.
+      for (const controller of turnControllers) {
+        controller.abort(new RunAbortedError(RESTARTING_TURN_ERROR));
+      }
+      drained = await settlesWithin(drain, abortAfterMs);
+      if (!drained) {
+        warn(`restart: ${inflight.size} turn(s) did not stop after being aborted; shutting down around them`);
+      }
+    }
+    // After the turn drain: a firing's wrapper settles after its
+    // dispatch does (it retires spent one-shots), so this is the last
+    // writer of the schedule table.
+    await scheduler.drain();
+    // After the turns that might still be using them. A plugin holding a
+    // browser is the reason this exists, and closing it out from under a
+    // running screenshot would fail that turn rather than tidy up.
+    await disposePlugins();
+    scheduleStore.close();
+    store.close();
+    log('stratusd stopped');
+    return drained;
+  };
+
   const gateway: Gateway = {
     bus,
     store,
@@ -2343,42 +2597,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     // Drain: channels stop taking messages, in-flight turns finish, new
     // dispatches are refused, then the database closes. SIGTERM handling
-    // in `stratus serve` calls this.
-    async stop() {
-      // Refuse new work first; then let channels finish rendering their
-      // in-flight turns (already-started dispatches keep running), drain,
-      // and close.
-      stopping = true;
-      // No new firings from here: the tick stops before anything drains,
-      // so the drain below is over a set that can only shrink. A tick
-      // already past its `stopping` check loses to `dispatch`'s own
-      // refusal — the second gate is why this needs no handshake.
-      scheduler.stop();
-      // Deny what is parked before draining, or the drain waits out every
-      // outstanding approval timeout — a shutdown would hang for as long as
-      // the longest request had left. Each denial is a real decision the
-      // turn continues from, so the drain below still finishes those turns.
-      for (const parked of [...pendingApprovals.values()]) {
-        parked.settle('deny', 'cancelled');
-      }
-      // Let those resolutions reach their subscribers before the channels
-      // go down, or a channel that renders approvals never learns to
-      // retract the buttons it is still showing.
-      await Promise.allSettled([...approvalEmissions]);
-      await Promise.allSettled(startedChannels.map((adapter) => adapter.stop()));
-      startedChannels.length = 0;
-      await Promise.allSettled([...inflight]);
-      // After the turn drain: a firing's wrapper settles after its
-      // dispatch does (it retires spent one-shots), so this is the last
-      // writer of the schedule table.
-      await scheduler.drain();
-      // After the turns that might still be using them. A plugin holding a
-      // browser is the reason this exists, and closing it out from under a
-      // running screenshot would fail that turn rather than tidy up.
-      await disposePlugins();
-      scheduleStore.close();
-      store.close();
-      log('stratusd stopped');
+    // in `stratus serve` calls this. Idempotent: a restart stops the
+    // gateway itself before handing the process to the host, whose own
+    // shutdown path then calls this again and must find nothing to do.
+    stop() {
+      stopped ??= shutdown(undefined).then(() => undefined);
+      return stopped;
     },
 
     dispatch,
@@ -2395,10 +2619,58 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
 
     async reloadRoster() {
-      await reloadsInOrder();
+      await reloadsInOrder(loadRoster);
       const roster = registry.list();
       log(`roster reloaded — ${roster.length} agent(s): ${roster.map((agent) => agent.name).join(', ')}`);
       return roster;
+    },
+
+    async reloadSkills() {
+      try {
+        await reloadsInOrder(loadSkills);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        warn(`skills reload refused — ${reason}; the previously loaded skills are still serving`);
+        throw new Error(`Skills were not reloaded: ${reason} The previously loaded skills are still serving; fix the file and reload again.`);
+      }
+      return gateway.skills();
+    },
+
+    restart(request = {}) {
+      if (!options.onRestart) {
+        throw new RestartUnsupportedError();
+      }
+      if (restartStatus) {
+        return restartStatus;
+      }
+      if (stopping) {
+        throw new Error('The gateway is already stopping, and a stop does not come back on its own.');
+      }
+      const drainTimeoutMs = request.drainTimeoutMs ?? options.restartDrainTimeoutMs ?? DEFAULT_RESTART_DRAIN_TIMEOUT_MS;
+      const status: RestartStatus = {
+        ...(request.reason !== undefined ? { reason: request.reason } : {}),
+        drainTimeoutMs,
+        inflight: inflight.size,
+      };
+      restartStatus = status;
+      // Said now, while stdout and the structured log both still work: a
+      // process on its way down is the one whose last lines matter, and
+      // the one least able to write them.
+      log(
+        `restart requested${status.reason ? ` (${status.reason})` : ''} — refusing new turns; `
+        + `${status.inflight} turn(s) in flight, draining for up to ${drainTimeoutMs}ms`,
+      );
+      const onRestart = options.onRestart;
+      const draining = shutdown(drainTimeoutMs);
+      // The host's own shutdown path calls stop() next; it must find this
+      // one rather than start a second.
+      stopped = draining.then(() => undefined);
+      void draining
+        .then((drained) => onRestart({ ...(status.reason !== undefined ? { reason: status.reason } : {}), drained }))
+        .catch((error) => {
+          warn(`restart failed: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      return status;
     },
 
     activeTurnId(sessionId) {

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { appendFile, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import os from 'node:os';
@@ -31,7 +32,7 @@ import {
 // Type-only: the gateway itself is imported lazily (it pulls in node:sqlite
 // and the whole runner stack), and a serve-only policy seam must not make
 // `stratus run` pay for it.
-import type { ApprovalTransport, GatewayChannelAdapter } from '@stratusagent/gateway';
+import type { ApprovalTransport, GatewayChannelAdapter, RestartOutcome } from '@stratusagent/gateway';
 import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
 import {
   createFileCommandWhitelist,
@@ -221,6 +222,14 @@ export interface CliEnvironment {
   dashboardAutoShutdownMs?: number;
   /** Shuts down `stratus serve` the way SIGTERM would (tests). */
   shutdownSignal?: AbortSignal;
+  /**
+   * Starts the fresh daemon an announced restart asks for and resolves
+   * with its exit code. Injected so tests never spawn a process; the
+   * default runs this CLI's own entrypoint with the serve arguments given.
+   */
+  serveRespawn?: (argv: string[]) => Promise<number>;
+  /** Ends the process at once (tests). Default `process.exit`. */
+  exitProcess?: (code: number) => void;
   /** Runs launchctl/systemctl. Injected so tests never touch the real one. */
   serviceRunner?: ServiceRunner;
   /** Service-manager platform override (tests) — which unit format and manager commands apply. */
@@ -422,10 +431,29 @@ export interface ParsedSkillAddCommand {
   force?: boolean;
   /** Enable the installed skills in this agent's soul afterwards. */
   agentId?: string;
+  /** Tell a running daemon to reload its skills afterwards. Default true; `--no-reload` sets false. */
+  reload?: boolean;
 }
 
 export interface ParsedSkillsCommand {
   command: 'skills';
+}
+
+export interface ParsedSkillReloadCommand {
+  command: 'skill-reload';
+  /** A daemon's control API URL; default: the one `~/.stratus/gateway.json` names. */
+  gateway?: string;
+  token?: string;
+}
+
+export interface ParsedRestartCommand {
+  command: 'restart';
+  /** For the daemon's log. */
+  reason?: string;
+  /** How long the daemon lets in-flight turns finish, in milliseconds. */
+  drainTimeoutMs?: number;
+  gateway?: string;
+  token?: string;
 }
 
 export interface ParsedAgentsCommand {
@@ -514,6 +542,8 @@ export type ParsedCommand =
   | ParsedAgentsCommand
   | ParsedSkillAddCommand
   | ParsedSkillsCommand
+  | ParsedSkillReloadCommand
+  | ParsedRestartCommand
   | ParsedSchedulesCommand
   | ParsedDoctorCommand
   | ParsedLogsCommand
@@ -654,6 +684,8 @@ Usage:
   stratus skill add stratuslabs/skill-code-review
   stratus skill add ./my-skills --skill code-review --agent ava
   stratus skills
+  stratus skill reload
+  stratus restart
   stratus schedules
   stratus schedules cancel <id>
   stratus doctor
@@ -701,9 +733,21 @@ Commands:
                    (skills.sh-style repos). Installed is not enabled: a soul
                    opts in via skills:, or pass --agent <id> to enable now.
                    --skill <id> picks from a multi-skill repo (repeatable),
-                   --force replaces an already-installed id
+                   --force replaces an already-installed id. A running
+                   daemon reloads its skills afterwards, no restart
+                   (--no-reload skips that)
   skills           List installed skills and which agents enable each
                    (also: stratus skill list)
+  skill reload     Ask the running daemon to re-read ~/.stratus/skills — for a
+                   skill edited or removed by hand. A skill that will not
+                   load refuses the whole reload and the previous set keeps
+                   serving; nothing becomes reachable to an agent whose soul
+                   does not list it
+  restart          Ask the running daemon for an announced restart — what a
+                   plugin change needs: it refuses new turns, lets in-flight
+                   ones finish for up to --drain-timeout <seconds> (default
+                   30), then comes back with sessions, schedules, and
+                   channels intact, under the service manager or not
   schedules        List every schedule the fleet has set — cadence, prompt,
                    pre-authorized destination, next firing — straight from the
                    daemon's database (--format json). "stratus schedules
@@ -755,8 +799,14 @@ Options:
   --port           dashboard: port for a daemon it starts (default: 4123)
   --host           dashboard: host for a daemon it starts (default: 127.0.0.1)
   --no-open        Do not open the browser automatically
-  --gateway        agents: read the roster from a running daemon's control API
+  --gateway        agents / skill reload / restart: a running daemon's control
+                   API (skill reload and restart default to the daemon
+                   ~/.stratus/gateway.json names)
   --token          Bearer token for --gateway (default: ~/.stratus/gateway-token)
+  --no-reload      skill add: install without reloading a running daemon
+  --reason         restart: why, for the daemon's log
+  --drain-timeout  restart: seconds the daemon lets in-flight turns finish
+                   before aborting them (default: 30)
   --no-api         serve: do not serve the control API
   --api-host       serve: control API interface (default: 127.0.0.1)
   --api-port       serve: control API port (default: 4123, 0 for any free port)
@@ -1251,14 +1301,39 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     if (subcommand === '--help' || subcommand === '-h') {
       return { command: 'help' };
     }
+    if (subcommand === 'reload') {
+      const parsed: ParsedSkillReloadCommand = { command: 'skill-reload' };
+      for (let index = 0; index < skillRest.length; index += 1) {
+        const token = skillRest[index];
+        if (!token) {
+          continue;
+        }
+        if (token === '--help' || token === '-h') {
+          return { command: 'help' };
+        }
+        if (token === '--gateway') {
+          parsed.gateway = readOptionValue(skillRest, index, '--gateway');
+          index += 1;
+          continue;
+        }
+        if (token === '--token') {
+          parsed.token = readOptionValue(skillRest, index, '--token');
+          index += 1;
+          continue;
+        }
+        throw new Error(`Unknown option: ${token}`);
+      }
+      return parsed;
+    }
     if (subcommand !== 'add') {
-      throw new Error(`Unknown skill subcommand: ${subcommand ?? '(missing)'}. Try: stratus skill add <source>, stratus skills`);
+      throw new Error(`Unknown skill subcommand: ${subcommand ?? '(missing)'}. Try: stratus skill add <source>, stratus skill reload, stratus skills`);
     }
 
     let source: string | undefined;
     const skillIds: string[] = [];
     let force = false;
     let agentId: string | undefined;
+    let reload = true;
 
     for (let index = 0; index < skillRest.length; index += 1) {
       const token = skillRest[index];
@@ -1282,6 +1357,10 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         force = true;
         continue;
       }
+      if (token === '--no-reload') {
+        reload = false;
+        continue;
+      }
       if (token.startsWith('--')) {
         throw new Error(`Unknown option: ${token}`);
       }
@@ -1301,7 +1380,47 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       ...(skillIds.length > 0 ? { skillIds } : {}),
       ...(force ? { force } : {}),
       ...(agentId !== undefined ? { agentId } : {}),
+      ...(reload ? {} : { reload }),
     };
+  }
+
+  if (command === 'restart') {
+    const parsed: ParsedRestartCommand = { command: 'restart' };
+    for (let index = 0; index < rest.length; index += 1) {
+      const token = rest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--reason') {
+        parsed.reason = readOptionValue(rest, index, '--reason');
+        index += 1;
+        continue;
+      }
+      if (token === '--drain-timeout') {
+        const seconds = Number(readOptionValue(rest, index, '--drain-timeout'));
+        if (!Number.isFinite(seconds) || seconds < 0) {
+          throw new Error(`Invalid value for --drain-timeout: ${rest[index + 1] ?? '(missing)'}`);
+        }
+        parsed.drainTimeoutMs = Math.round(seconds * 1000);
+        index += 1;
+        continue;
+      }
+      if (token === '--gateway') {
+        parsed.gateway = readOptionValue(rest, index, '--gateway');
+        index += 1;
+        continue;
+      }
+      if (token === '--token') {
+        parsed.token = readOptionValue(rest, index, '--token');
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+    return parsed;
   }
 
   if (command === 'agent') {
@@ -5428,6 +5547,14 @@ export const runSkillAdd = async (
       return 1;
     }
 
+    // The ordinary path needs no second step: a daemon that is running
+    // serves what was just installed from its next turn. Only when
+    // something changed on disk — a re-run that installed nothing has
+    // nothing to reload — and only where a daemon has said it is running.
+    if (result.installed.length > 0 && command.reload !== false) {
+      await reloadRunningDaemonSkills(streams, env);
+    }
+
     // Installed is not enabled: a soul opts in through its skills:
     // allowlist, and that stays true when the install came through a
     // command. --agent is the explicit way to say both at once.
@@ -5519,6 +5646,156 @@ export const runSchedules = async (
   } finally {
     store.close();
   }
+};
+
+/** Where a command aimed at "the running daemon" is pointed. */
+interface RunningGatewayTarget {
+  gateway?: string;
+  token?: string;
+}
+
+/**
+ * The control API base a command should talk to: `--gateway` when given,
+ * else whatever daemon `~/.stratus/gateway.json` says is serving, else
+ * nothing — the file is written when the API binds and removed when it
+ * stops, so its absence means no daemon has said where it is.
+ */
+const runningGatewayBase = async (env: CliEnvironment, target: RunningGatewayTarget): Promise<string | undefined> => {
+  if (target.gateway) {
+    return target.gateway.replace(/\/+$/, '');
+  }
+  const info = await readGatewayInfo(env);
+  return info?.url.replace(/\/+$/, '');
+};
+
+/** One authenticated call to a daemon's control API, with the network and auth failures said plainly. */
+const callRunningGateway = async (
+  env: CliEnvironment,
+  target: RunningGatewayTarget,
+  base: string,
+  pathname: string,
+  body?: Record<string, unknown>,
+): Promise<Response> => {
+  const token = await gatewayToken(env, target.token);
+  const fetchImpl = env.fetch ?? globalThis.fetch;
+  if (typeof fetchImpl !== 'function') {
+    throw new Error('fetch is unavailable, so this runtime cannot reach a daemon.');
+  }
+  let response: Response;
+  try {
+    response = await fetchImpl(`${base}${pathname}`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(body ? { 'content-type': 'application/json' } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+  } catch (error) {
+    throw new Error(
+      `Could not reach the gateway at ${base} (${error instanceof Error ? error.message : String(error)}). `
+      + 'Is stratusd running, and does it have @stratusagent/control-api installed?',
+    );
+  }
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(`The gateway at ${base} rejected this token. Check --token, STRATUS_GATEWAY_TOKEN, or ~/.stratus/gateway-token.`);
+  }
+  return response;
+};
+
+/** The API's own sentence for a failure, or the status when it sent none. */
+const gatewayErrorMessage = async (response: Response): Promise<string> => {
+  try {
+    const payload = await response.json() as { error?: { message?: string } };
+    if (payload.error?.message) {
+      return payload.error.message;
+    }
+  } catch {
+    // Not JSON; the status is all there is to say.
+  }
+  return `HTTP ${response.status}`;
+};
+
+const noRunningDaemonMessage = (env: CliEnvironment): string =>
+  `no running daemon found — ${gatewayInfoPath(env)} does not exist, and no --gateway was given. `
+  + 'Start one with `stratus serve` or `stratus service start`; a daemon loads ~/.stratus/skills at start.';
+
+/**
+ * After `skill add`: tell the daemon, if one says it is running. Silent
+ * when none does — a `stratus run` user with no daemon should not read a
+ * note about one — and a warning, never a failure, when the file names a
+ * daemon that did not answer: the install itself succeeded.
+ */
+const reloadRunningDaemonSkills = async (streams: CliStreams, env: CliEnvironment): Promise<void> => {
+  const info = await readGatewayInfo(env);
+  if (!info) {
+    return;
+  }
+  const base = info.url.replace(/\/+$/, '');
+  try {
+    const response = await callRunningGateway(env, {}, base, '/api/v1/skills/reload');
+    if (!response.ok) {
+      throw new Error(await gatewayErrorMessage(response));
+    }
+    writeLine(streams.stdout, `reloaded the running daemon's skills (${base}) — no restart needed`);
+  } catch (error) {
+    writeLine(
+      streams.stderr,
+      `Warning: ${gatewayInfoPath(env)} names a daemon at ${base}, but its skills were not reloaded: `
+      + `${error instanceof Error ? error.message : String(error)} If it is running, reload it with: stratus skill reload`,
+    );
+  }
+};
+
+export const runSkillReload = async (
+  command: ParsedSkillReloadCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const base = await runningGatewayBase(env, command);
+  if (!base) {
+    writeLine(streams.stderr, `Error: ${noRunningDaemonMessage(env)}`);
+    return 1;
+  }
+  const response = await callRunningGateway(env, command, base, '/api/v1/skills/reload');
+  if (!response.ok) {
+    writeLine(streams.stderr, `Error: ${await gatewayErrorMessage(response)}`);
+    return 1;
+  }
+  const { skills } = await response.json() as { skills?: Array<{ id: string }> };
+  const ids = (skills ?? []).map((skill) => skill.id);
+  writeLine(streams.stdout, `reloaded skills in the daemon at ${base} — ${ids.length} skill(s) serving${ids.length > 0 ? `: ${ids.join(', ')}` : ''}`);
+  return 0;
+};
+
+export const runRestart = async (
+  command: ParsedRestartCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const base = await runningGatewayBase(env, command);
+  if (!base) {
+    writeLine(streams.stderr, `Error: ${noRunningDaemonMessage(env)}`);
+    return 1;
+  }
+  const response = await callRunningGateway(env, command, base, '/api/v1/restart', {
+    reason: command.reason ?? 'stratus restart',
+    ...(command.drainTimeoutMs !== undefined ? { drainTimeoutMs: command.drainTimeoutMs } : {}),
+  });
+  if (!response.ok) {
+    writeLine(streams.stderr, `Error: ${await gatewayErrorMessage(response)}`);
+    return 1;
+  }
+  const status = await response.json() as { inflight?: number; drainTimeoutMs?: number };
+  const inflight = status.inflight ?? 0;
+  const window = Math.round((status.drainTimeoutMs ?? 0) / 1000);
+  writeLine(
+    streams.stdout,
+    `restart announced to the daemon at ${base} — new turns are refused; ${inflight} turn(s) in flight `
+    + `get up to ${window}s to finish, then it comes back.`,
+  );
+  writeLine(streams.stdout, 'Watch it come back: stratus logs -f');
+  return 0;
 };
 
 export const runSkills = async (
@@ -6073,6 +6350,98 @@ const loadServePlugins = async (
  * roster, accept dispatches, print events, and drain cleanly on SIGTERM,
  * SIGINT, or the injected shutdown signal.
  */
+/**
+ * What a daemon exits with to ask for a fresh process. Only ever seen by the
+ * supervisor below, which is the only thing that starts a daemon with the
+ * environment marker that makes it exit this way instead of supervising.
+ */
+export const RESTART_EXIT_CODE = 75;
+
+/** Set in a daemon the supervisor started, so its own restart is an exit, not a second supervisor. */
+const SUPERVISED_ENV = 'STRATUS_SERVE_SUPERVISED';
+
+/**
+ * The parsed serve command as arguments again — what the fresh daemon is
+ * started with. From the command, not from `process.argv`: `stratus
+ * dashboard` runs the daemon through `runServe` with a command it built,
+ * and the process's own arguments would start a second dashboard.
+ */
+export const serveArgv = (command: ParsedServeCommand): string[] => [
+  'serve',
+  ...(command.configPath !== undefined ? ['--config', command.configPath] : []),
+  ...(command.idleTimeoutMs !== undefined ? ['--idle-timeout', String(command.idleTimeoutMs / 1000)] : []),
+  ...(command.approvals !== undefined ? ['--approvals', command.approvals] : []),
+  ...(command.events ? [] : ['--no-events']),
+  ...(command.logToFile === false ? ['--no-log-file'] : []),
+  ...(command.api === false ? ['--no-api'] : []),
+  ...(command.apiPort !== undefined ? ['--api-port', String(command.apiPort)] : []),
+  ...(command.apiHost !== undefined ? ['--api-host', command.apiHost] : []),
+];
+
+/**
+ * Run this CLI's own entrypoint as a child with the daemon's streams and
+ * exit code, forwarding the signals a supervisor would otherwise swallow.
+ *
+ * A child, and the parent waits, rather than a detached process and an
+ * exit: under systemd and launchd the process the manager started is the
+ * service, and its exit ends the job — cgroup and all, on Linux — so the
+ * daemon that received the restart has to stay the manager's process and
+ * become the supervisor of the next one. That is what makes the same path
+ * hold in the foreground and under `--no-login`, where nothing else would
+ * bring a clean exit back.
+ */
+const defaultServeRespawn = (env: CliEnvironment) => (argv: string[]): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const entrypoint = fileURLToPath(new URL('./bin.js', import.meta.url));
+    const child = spawn(process.execPath, [...process.execArgv, entrypoint, ...argv], {
+      stdio: 'inherit',
+      env: { ...process.env, [SUPERVISED_ENV]: '1' },
+    });
+    const forward = (signal: NodeJS.Signals) => (): void => {
+      child.kill(signal);
+    };
+    const onTerm = forward('SIGTERM');
+    const onInt = forward('SIGINT');
+    const onAbort = (): void => {
+      child.kill('SIGTERM');
+    };
+    process.on('SIGTERM', onTerm);
+    process.on('SIGINT', onInt);
+    env.shutdownSignal?.addEventListener('abort', onAbort, { once: true });
+    const done = (): void => {
+      process.off('SIGTERM', onTerm);
+      process.off('SIGINT', onInt);
+      env.shutdownSignal?.removeEventListener('abort', onAbort);
+    };
+    child.once('error', (error) => {
+      done();
+      reject(error);
+    });
+    child.once('exit', (code, signal) => {
+      done();
+      // Killed by a signal is a stop, not a request to come back.
+      resolve(code ?? (signal ? 1 : 0));
+    });
+  });
+
+/**
+ * Keep starting daemons for as long as they exit asking for another; the
+ * first exit that does not is this process's own.
+ */
+const superviseRestarts = async (
+  command: ParsedServeCommand,
+  streams: CliStreams,
+  env: CliEnvironment,
+): Promise<number> => {
+  const respawn = env.serveRespawn ?? defaultServeRespawn(env);
+  let code: number;
+  do {
+    writeLine(streams.stdout, 'Restarting stratusd.');
+    code = await respawn(serveArgv(command));
+  } while (code === RESTART_EXIT_CODE);
+  return code;
+};
+
 export const runServe = async (
   command: ParsedServeCommand,
   streams: CliStreams,
@@ -6292,9 +6661,22 @@ export const runServe = async (
     log(`approvals: remote — gated calls are parked and asked in Slack (${describeApprovers(approvalsConfig, askable)})`);
   }
 
+  // The gateway's restart hands the process back here once it has stopped:
+  // the outcome is kept and the wait below released, and the tail of this
+  // function decides what "come back" means for this process.
+  let restart: RestartOutcome | undefined;
+  let requestShutdown: () => void = () => {};
+  const shutdownRequested = new Promise<void>((resolve) => {
+    requestShutdown = resolve;
+  });
+
   const gateway = createGateway({
     env,
     approvals,
+    onRestart: (outcome) => {
+      restart = outcome;
+      requestShutdown();
+    },
     ...(Object.keys(pluginsConfig).length > 0
       ? {
           plugins: pluginsConfig,
@@ -6431,6 +6813,7 @@ export const runServe = async (
       };
       process.once('SIGTERM', shutdown);
       process.once('SIGINT', shutdown);
+      void shutdownRequested.then(shutdown);
       if (env.shutdownSignal?.aborted) {
         shutdown();
       } else {
@@ -6438,9 +6821,23 @@ export const runServe = async (
       }
     });
 
-    writeLine(streams.stdout, 'Stopping — draining in-flight turns.');
-    await gateway.stop();
-    return 0;
+    if (restart) {
+      // Already stopped: the gateway drained and closed before handing the
+      // process over. Said here, while the structured log still takes
+      // writes — the next lines belong to a process that has none.
+      if (!restart.drained) {
+        // A turn that ignored its abort is still running in this process,
+        // possibly still writing sessions. Starting a fresh daemon beside
+        // it would be two processes on one store; exiting instead leaves
+        // the service manager, where there is one, to bring it back.
+        warn(`restart: a turn did not stop; exiting with status ${RESTART_EXIT_CODE} instead of starting a new daemon beside it`);
+      } else {
+        log(`restarting stratusd${restart.reason ? ` (${restart.reason})` : ''}`);
+      }
+    } else {
+      writeLine(streams.stdout, 'Stopping — draining in-flight turns.');
+      await gateway.stop();
+    }
   } finally {
     if (redirectTimer) {
       clearInterval(redirectTimer);
@@ -6451,6 +6848,21 @@ export const runServe = async (
     // warning, the line explaining a restart.
     await logWriter?.flush();
   }
+
+  if (!restart) {
+    return 0;
+  }
+  if (!restart.drained) {
+    (env.exitProcess ?? process.exit)(RESTART_EXIT_CODE);
+    return RESTART_EXIT_CODE;
+  }
+  // A daemon the supervisor started asks it for the next one by exiting;
+  // the first daemon becomes the supervisor itself. Either way the process
+  // the service manager (or the terminal) started is the one that stays.
+  if (readProcessEnv(env)[SUPERVISED_ENV]) {
+    return RESTART_EXIT_CODE;
+  }
+  return superviseRestarts(command, streams, env);
 };
 
 export const runCli = async ({ argv, streams = process, env = {} }: CliRunOptions): Promise<number> => {
@@ -6536,6 +6948,14 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'skills') {
       return await runSkills(streams, resolvedEnv);
+    }
+
+    if (command.command === 'skill-reload') {
+      return await runSkillReload(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'restart') {
+      return await runRestart(command, streams, resolvedEnv);
     }
 
     if (command.command === 'schedules') {

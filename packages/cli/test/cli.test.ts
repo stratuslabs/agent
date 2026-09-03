@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
+import { request as httpRequest } from 'node:http';
 import { Readable } from 'node:stream';
 import os from 'node:os';
 import path from 'node:path';
@@ -29,7 +30,9 @@ import {
   HELP_TEXT,
   parseCommand,
   resolveRuntimeConfig,
+  RESTART_EXIT_CODE,
   runCli,
+  serveArgv,
   soulPinForNewAgent,
   warnOnCredentialOverride,
   readRecentRecords,
@@ -6989,4 +6992,310 @@ test('stratus schedules lists the daemon database and cancel revokes a row', asy
   assert.equal(await runCli({ argv: ['schedules'], streams: empty.streams, env }), 0);
   assert.match(empty.output.stdout, /No schedules set/);
   await rm(home, { recursive: true, force: true });
+});
+
+/** A daemon's control API as the CLI discovers it: the info file and the token. */
+const publishGateway = async (home: string, url: string): Promise<void> => {
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'gateway.json'), JSON.stringify({ url, pid: process.pid }));
+  await writeFile(path.join(home, '.stratus', 'gateway-token'), 'tok-1\n');
+};
+
+interface CapturedCall {
+  url: string;
+  method: string | undefined;
+  authorization: string | undefined;
+  body: unknown;
+}
+
+/** A control API that records what it was asked and answers as told. */
+const fakeGateway = (answer: (call: CapturedCall) => Response | Promise<Response>) => {
+  const calls: CapturedCall[] = [];
+  const fetchImpl = (async (url: unknown, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    const call: CapturedCall = {
+      url: String(url),
+      method: init?.method,
+      authorization: headers.get('authorization') ?? undefined,
+      body: init?.body ? JSON.parse(String(init.body)) : undefined,
+    };
+    calls.push(call);
+    return answer(call);
+  }) as typeof fetch;
+  return { calls, fetchImpl };
+};
+
+test('parseCommand parses skill reload, restart, and skill add --no-reload', () => {
+  assert.deepEqual(parseCommand(['skill', 'reload']), { command: 'skill-reload' });
+  assert.deepEqual(parseCommand(['skill', 'reload', '--gateway', 'http://h:1', '--token', 't']), {
+    command: 'skill-reload', gateway: 'http://h:1', token: 't',
+  });
+  assert.deepEqual(parseCommand(['restart']), { command: 'restart' });
+  assert.deepEqual(parseCommand(['restart', '--reason', 'plugin enabled', '--drain-timeout', '5']), {
+    command: 'restart', reason: 'plugin enabled', drainTimeoutMs: 5000,
+  });
+  assert.throws(() => parseCommand(['restart', '--drain-timeout', '-1']), /Invalid value for --drain-timeout/);
+  assert.deepEqual(parseCommand(['skill', 'add', 'owner/repo', '--no-reload']), {
+    command: 'skill-add', source: 'owner/repo', reload: false,
+  });
+  assert.deepEqual(parseCommand(['skill', 'add', 'owner/repo']), { command: 'skill-add', source: 'owner/repo' });
+});
+
+test('serveArgv round-trips every serve option, so the daemon a restart starts is the one that was running', () => {
+  const full = parseCommand([
+    'serve', '--config', './x.json', '--idle-timeout', '30', '--approvals', 'remote',
+    '--no-events', '--no-log-file', '--no-api', '--api-port', '0', '--api-host', '0.0.0.0',
+  ]);
+  assert.equal(full.command, 'serve');
+  assert.deepEqual(parseCommand(serveArgv(full)), full);
+  const bare = parseCommand(['serve']);
+  assert.equal(bare.command, 'serve');
+  assert.deepEqual(serveArgv(bare), ['serve']);
+});
+
+test('runCli skill add reloads the running daemon, and says so; --no-reload and no daemon stay quiet', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillreload-'));
+  const source = await mkdtemp(path.join(os.tmpdir(), 'stratus-skillreload-src-'));
+  await mkdir(path.join(source, 'hn-search'), { recursive: true });
+  await writeFile(path.join(source, 'hn-search', 'SKILL.md'), '---\nname: hn-search\ndescription: Use when searching Hacker News.\n---\n\n# HN search\n');
+  await mkdir(path.join(source, 'visual-qa'), { recursive: true });
+  await writeFile(path.join(source, 'visual-qa', 'SKILL.md'), '---\nname: visual-qa\ndescription: Use when reviewing screenshots.\n---\n\n# Visual QA\n');
+
+  // No daemon has said it is running: nothing to reload, and nothing said
+  // about it — a `stratus run` user should not read notes about a daemon.
+  const quiet = fakeGateway(() => Response.json({ skills: [] }));
+  const first = createStreams();
+  assert.equal(await runCli({
+    argv: ['skill', 'add', source, '--skill', 'visual-qa'],
+    streams: first.streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, fetch: quiet.fetchImpl },
+  }), 0);
+  assert.deepEqual(quiet.calls, []);
+  assert.ok(!first.output.stdout.includes('reload'), first.output.stdout);
+
+  await publishGateway(home, 'http://127.0.0.1:4123/');
+  const daemon = fakeGateway(() => Response.json({ skills: [{ id: 'hn-search' }, { id: 'visual-qa' }] }));
+  const second = createStreams();
+  assert.equal(await runCli({
+    argv: ['skill', 'add', source, '--skill', 'hn-search'],
+    streams: second.streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, fetch: daemon.fetchImpl },
+  }), 0);
+  assert.deepEqual(daemon.calls, [{
+    url: 'http://127.0.0.1:4123/api/v1/skills/reload',
+    method: 'POST',
+    authorization: 'Bearer tok-1',
+    body: undefined,
+  }]);
+  assert.match(second.output.stdout, /installed hn-search/);
+  assert.match(second.output.stdout, /reloaded the running daemon's skills \(http:\/\/127\.0\.0\.1:4123\) — no restart needed/);
+
+  // Already installed: nothing changed on disk, nothing to reload.
+  const again = fakeGateway(() => Response.json({ skills: [] }));
+  const third = createStreams();
+  assert.equal(await runCli({
+    argv: ['skill', 'add', source, '--skill', 'hn-search'],
+    streams: third.streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, fetch: again.fetchImpl },
+  }), 0);
+  assert.deepEqual(again.calls, []);
+
+  // Opted out.
+  const optOut = fakeGateway(() => Response.json({ skills: [] }));
+  const fourth = createStreams();
+  assert.equal(await runCli({
+    argv: ['skill', 'add', source, '--skill', 'hn-search', '--force', '--no-reload'],
+    streams: fourth.streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, fetch: optOut.fetchImpl },
+  }), 0);
+  assert.deepEqual(optOut.calls, []);
+
+  // The file names a daemon that refused: the install stands, the warning
+  // carries the daemon's own sentence, and the exit is still success.
+  const refusing = fakeGateway(() => Response.json(
+    { error: { code: 'skills_reload_refused', message: 'Skills were not reloaded: Cannot load /x/SKILL.md: no "description".' } },
+    { status: 422 },
+  ));
+  const fifth = createStreams();
+  assert.equal(await runCli({
+    argv: ['skill', 'add', source, '--skill', 'hn-search', '--force'],
+    streams: fifth.streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, fetch: refusing.fetchImpl },
+  }), 0);
+  assert.match(fifth.output.stderr, /Warning: .*gateway\.json names a daemon at http:\/\/127\.0\.0\.1:4123, but its skills were not reloaded: Skills were not reloaded: Cannot load \/x\/SKILL\.md/);
+  assert.match(fifth.output.stderr, /stratus skill reload/);
+});
+
+test('runCli skill reload and restart talk to the daemon gateway.json names, and say when there is none', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-restartcmd-'));
+
+  const none = createStreams();
+  assert.equal(await runCli({ argv: ['restart'], streams: none.streams, env: { homeDir: home, cwd: home, processEnv: {} } }), 1);
+  assert.match(none.output.stderr, /no running daemon found/);
+  const noneReload = createStreams();
+  assert.equal(await runCli({ argv: ['skill', 'reload'], streams: noneReload.streams, env: { homeDir: home, cwd: home, processEnv: {} } }), 1);
+  assert.match(noneReload.output.stderr, /no running daemon found/);
+
+  await publishGateway(home, 'http://127.0.0.1:4123');
+  const reloading = fakeGateway(() => Response.json({ skills: [{ id: 'code-review' }, { id: 'acme:triage', package: 'acme' }] }));
+  const reload = createStreams();
+  assert.equal(await runCli({
+    argv: ['skill', 'reload'],
+    streams: reload.streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, fetch: reloading.fetchImpl },
+  }), 0);
+  assert.equal(reloading.calls[0]?.url, 'http://127.0.0.1:4123/api/v1/skills/reload');
+  assert.match(reload.output.stdout, /reloaded skills in the daemon at http:\/\/127\.0\.0\.1:4123 — 2 skill\(s\) serving: code-review, acme:triage/);
+
+  const restarting = fakeGateway(() => Response.json({ restarting: true, inflight: 1, drainTimeoutMs: 5000 }, { status: 202 }));
+  const restart = createStreams();
+  assert.equal(await runCli({
+    argv: ['restart', '--drain-timeout', '5', '--reason', 'plugin enabled'],
+    streams: restart.streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, fetch: restarting.fetchImpl },
+  }), 0);
+  assert.deepEqual(restarting.calls, [{
+    url: 'http://127.0.0.1:4123/api/v1/restart',
+    method: 'POST',
+    authorization: 'Bearer tok-1',
+    body: { reason: 'plugin enabled', drainTimeoutMs: 5000 },
+  }]);
+  assert.match(restart.output.stdout, /restart announced to the daemon at http:\/\/127\.0\.0\.1:4123 — new turns are refused; 1 turn\(s\) in flight get up to 5s to finish/);
+
+  // A daemon that cannot come back says so in its own words, as a failure
+  // of this command — the operator asked for something that will not happen.
+  const unsupported = fakeGateway(() => Response.json(
+    { error: { code: 'restart_unsupported', message: 'This daemon cannot restart itself: the host that started it did not say how.' } },
+    { status: 501 },
+  ));
+  const refused = createStreams();
+  assert.equal(await runCli({
+    argv: ['restart', '--gateway', 'http://10.0.0.5:4123/', '--token', 'remote-tok'],
+    streams: refused.streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, fetch: unsupported.fetchImpl },
+  }), 1);
+  assert.equal(unsupported.calls[0]?.url, 'http://10.0.0.5:4123/api/v1/restart');
+  assert.equal(unsupported.calls[0]?.authorization, 'Bearer remote-tok');
+  assert.match(refused.output.stderr, /Error: This daemon cannot restart itself/);
+});
+
+/**
+ * A POST to the daemon this test started, over `node:http` rather than the
+ * global fetch — a sandbox that routes fetch through a proxy would send a
+ * loopback request somewhere it cannot reach.
+ */
+const postJson = (url: string, token: string, body: unknown): Promise<{ status: number; body: string }> =>
+  new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const payload = JSON.stringify(body);
+    const request = httpRequest(
+      {
+        host: target.hostname,
+        port: target.port,
+        path: target.pathname,
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) },
+      },
+      (response) => {
+        let text = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => { text += chunk; });
+        response.on('end', () => resolve({ status: response.statusCode ?? 0, body: text }));
+      },
+    );
+    request.on('error', reject);
+    request.end(payload);
+  });
+
+/**
+ * `stratus serve` with its output watched: resolves the control API's URL
+ * the moment the daemon prints it, which is the event a restart request
+ * has to wait for.
+ */
+const watchedServeStreams = () => {
+  const base = createStreams();
+  let announce!: (url: string) => void;
+  const apiUrl = new Promise<string>((resolve) => { announce = resolve; });
+  return {
+    apiUrl,
+    output: base.output,
+    streams: {
+      stdout: {
+        write(chunk: string) {
+          const match = /control API on (http:\/\/\S+)/.exec(chunk);
+          if (match?.[1]) {
+            announce(match[1]);
+          }
+          return base.streams.stdout.write(chunk);
+        },
+      },
+      stderr: base.streams.stderr,
+    },
+  };
+};
+
+test('runCli serve comes back from an announced restart by supervising a fresh daemon, with the arguments it ran with', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-restart-'));
+  const watched = watchedServeStreams();
+  const respawned: string[][] = [];
+
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: watched.streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: {},
+      serveRespawn: async (argv) => {
+        respawned.push(argv);
+        // The fresh daemon ran and was stopped normally.
+        return 0;
+      },
+    },
+  });
+
+  const base = await watched.apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  const accepted = await postJson(`${base}/api/v1/restart`, token, { reason: 'test', drainTimeoutMs: 5000 });
+  assert.equal(accepted.status, 202, accepted.body);
+
+  // The command's exit is the last daemon's exit: the supervisor started
+  // one, it stopped cleanly, and there was nothing more to start.
+  assert.equal(await serving, 0);
+  assert.deepEqual(respawned, [['serve', '--no-events', '--api-port', '0']]);
+  assert.match(watched.output.stdout, /restart requested \(test\) — refusing new turns/);
+  assert.match(watched.output.stdout, /stratusd stopped/);
+  assert.match(watched.output.stdout, /restarting stratusd \(test\)/);
+  assert.match(watched.output.stdout, /Restarting stratusd\./);
+  assert.ok(!watched.output.stdout.includes('Stopping — draining'), 'the restart path must not stop twice');
+  // The supervisor keeps going for as long as daemons ask to come back.
+  await rm(path.join(serveHome, '.stratus', 'gateway.json'), { force: true });
+});
+
+test('a supervised daemon answers a restart by exiting with the restart status, never by supervising in turn', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-supervised-'));
+  const watched = watchedServeStreams();
+  let respawns = 0;
+
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: watched.streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: { STRATUS_SERVE_SUPERVISED: '1' },
+      serveRespawn: async () => {
+        respawns += 1;
+        return 0;
+      },
+    },
+  });
+
+  const base = await watched.apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  const accepted = await postJson(`${base}/api/v1/restart`, token, {});
+  assert.equal(accepted.status, 202, accepted.body);
+
+  assert.equal(await serving, RESTART_EXIT_CODE);
+  assert.equal(respawns, 0);
 });

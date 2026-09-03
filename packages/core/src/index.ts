@@ -1483,6 +1483,32 @@ export class SkillRegistry {
     return [...this.skills.values()];
   }
 
+  /**
+   * Become `next`, in one synchronous step — the swap behind a live reload.
+   *
+   * A reload cannot re-register into a serving registry: `register` throws
+   * on every id already loaded, and unregistering one at a time would have
+   * to re-derive which aliases a departed skill was blocking. So the loader
+   * builds the whole next set into a fresh registry, and this adopts it —
+   * skills, aliases, and the contested set together, so the alias rules
+   * the build applied are exactly the ones that serve. Synchronous, so a
+   * `read` in flight sees either the old set or the new one, never a
+   * half-swapped map. The body cache starts empty: a reloaded skill may be
+   * a replaced file, and a read already underway keeps the promise it
+   * holds. `next` is consumed — emptied, not shared — so nothing can go on
+   * mutating this registry through it.
+   */
+  replaceWith(next: SkillRegistry): void {
+    this.skills = next.skills;
+    this.aliases = next.aliases;
+    this.contestedAliases = next.contestedAliases;
+    this.bodies = new Map();
+    next.skills = new Map();
+    next.aliases = new Map();
+    next.contestedAliases = new Set();
+    next.bodies = new Map();
+  }
+
   describe(): SkillDescriptor[] {
     return this.list().map((skill) => ({
       id: skill.id,

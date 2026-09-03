@@ -36,6 +36,14 @@ config** — the global `~/.stratus/config.json`, or a file you passed with
 `--config` — never by being present on disk, and never by a
 `stratus.config.json` that shipped in a repository you cloned.
 
+And because it is code in the daemon's process, enabling, disabling,
+upgrading, or reconfiguring one takes a restart — an announced one,
+`stratus restart`, which refuses new turns, drains the ones in flight, and
+comes back with sessions and channels intact. Skills are the exception:
+prose read from disk, reloaded live by `stratus skill add`. The full table
+of what needs a restart is in
+[Always on](../guides/always-on.md#what-needs-a-restart-and-what-does-not).
+
 Today's optional packages predate that rule and each keeps its own path, so
 be precise about which is which. A **channel** starts when *its credentials
 are stored* — a decision you already made when you connected the app. The
