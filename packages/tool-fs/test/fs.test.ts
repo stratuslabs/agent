@@ -283,8 +283,9 @@ test('searching one file searches that file, not its neighbours', async () => {
 test('a large file named outright is searched, and one a walk skips is named in the result', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-large-'));
   await mkdir(path.join(root, 'logs'), { recursive: true });
-  // Over the walk limit, with the only needle on its last line.
-  await writeFile(path.join(root, 'logs', 'big.log'), `${'x'.repeat(1_200_000)}\nneedle at the end\n`);
+  // Over the walk limit, in lines the line limit leaves whole, with the
+  // only needle on the last one.
+  await writeFile(path.join(root, 'logs', 'big.log'), `${'x'.repeat(600_000)}\n${'y'.repeat(600_000)}\nneedle at the end\n`);
   await writeFile(path.join(root, 'logs', 'small.log'), 'nothing here\n');
 
   const tools = await registryFor({ roots: [root] });
@@ -293,7 +294,7 @@ test('a large file named outright is searched, and one a walk skips is named in 
   const named = await run(tools, 'fs.search', { query: 'needle', path: 'logs/big.log' }, session) as JsonObject;
   assert.deepEqual(
     (named.matches as Array<{ path: string; line: number }>).map((match) => [match.path, match.line]),
-    [[path.join('logs', 'big.log'), 2]],
+    [[path.join('logs', 'big.log'), 3]],
   );
   assert.equal(named.skipped, undefined);
 
