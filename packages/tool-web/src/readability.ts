@@ -129,8 +129,13 @@ export const htmlToText = (html: string): string => {
   // twenty years, so listing it is the half that can be finished, and an
   // unrecognised tag falls to a space: a seam that was not needed is a
   // blemish, while one that was is a word nobody wrote.
+  //
+  // The name is captured whole, punctuation included. Stopping at the first
+  // character outside `[a-zA-Z0-9-]` reads `<a:widget>` as the inline `a`
+  // and deletes it — and a namespaced element is precisely the unknown tag
+  // this default exists for.
   text = text.replace(
-    /<\/?([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*>/g,
+    /<\/?([a-zA-Z][^\s/>]*)[^>]*>/g,
     (_tag, name: string) => (INLINE_ELEMENTS.has(name.toLowerCase()) ? '' : ' '),
   );
 

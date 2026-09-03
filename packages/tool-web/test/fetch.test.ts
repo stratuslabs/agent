@@ -211,5 +211,12 @@ test('the extractor keeps prose and drops furniture', () => {
   // joined: `H2O` is one token and that is the point.
   assert.equal(htmlToText('<p><ruby>東京<rt>とうきょう</rt></ruby>へ行く</p>'), '東京 とうきょう へ行く');
   assert.equal(htmlToText('<p>H<sub>2</sub>O and x<sup>2</sup></p>'), 'H2O and x2');
+  // The tag name is read whole: stopping at the first punctuation classifies
+  // `<a:widget>` as the inline `a` and deletes it, and a namespaced element
+  // is exactly the unknown tag the separator default exists for.
+  assert.equal(htmlToText('<a:widget>Alpha</a:widget><a:widget>Beta</a:widget>'), 'Alpha Beta');
+  assert.equal(htmlToText('<o:p>Alpha</o:p><o:p>Beta</o:p>'), 'Alpha Beta');
+  assert.equal(htmlToText('<p>un<STRONG>expected</STRONG></p>'), 'unexpected');
+  assert.equal(htmlToText('<p>I <3 you > them</p>'), 'I <3 you > them');
   assert.equal(htmlToText('<script>var x = "<p>trap</p>";</script><p>real</p>'), 'real');
 });

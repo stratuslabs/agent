@@ -196,6 +196,24 @@ test('a highlighted substring does not become two words, or a detached full stop
   assert.equal(plainSnippet('H<sub>2</sub>O'), 'H2O');
 });
 
+test('the tag name is read whole, so a namespaced element is not mistaken for an inline one', () => {
+  // Reading only up to the first punctuation classifies `<a:widget>` as the
+  // inline `a` and deletes it — and a namespaced or framework-generated
+  // element is exactly the unknown tag the separator default exists for, so
+  // misreading one defeats the rule at the only point where it matters.
+  assert.equal(plainSnippet('<a:widget>Alpha</a:widget><a:widget>Beta</a:widget>'), 'Alpha Beta');
+  assert.equal(plainSnippet('<b:x>Alpha</b:x><b:x>Beta</b:x>'), 'Alpha Beta');
+  assert.equal(plainSnippet('<o:p>Alpha</o:p><o:p>Beta</o:p>'), 'Alpha Beta');
+  assert.equal(plainSnippet('<foo.bar>Alpha</foo.bar><foo.bar>Beta</foo.bar>'), 'Alpha Beta');
+
+  // The shapes that still have to read as the tags they are.
+  assert.equal(plainSnippet('un<STRONG>expected</STRONG>'), 'unexpected');
+  assert.equal(plainSnippet('see <a href="/x" title="q">docs</a>, then'), 'see docs, then');
+  assert.equal(plainSnippet('a<br/>b'), 'a b');
+  // And the shapes that are not tags at all.
+  assert.equal(plainSnippet('I <3 you > them'), 'I <3 you > them');
+});
+
 test('a snippet that compares two numbers keeps the sentence between them', () => {
   // A blanket `<[^>]*>` reads everything between a less-than and the next
   // greater-than as a tag and deletes the prose in the middle. Snippets are

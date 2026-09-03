@@ -51,6 +51,13 @@ import { hostMatchesSite } from './options.ts';
  * write, and deleting one glues `AlphaBeta` out of two cells. Inline
  * formatting is a closed set, so it is the half that can be finished.
  *
+ * The name is captured **whole**, punctuation included, before it is looked
+ * up. Stopping at the first character outside `[a-zA-Z0-9-]` reads
+ * `<a:widget>` as the inline `a` and deletes it — and a namespaced or
+ * framework-generated element is precisely the unknown tag the separator
+ * default exists for, so misreading one defeats the rule at the only point
+ * where it matters.
+ *
  * `@stratusagent/tool-web` keeps the same set for the same reason. They are
  * not shared because no dependency direction exists between a contract
  * package and a plugin: `search` must not depend on `tool-web`, and the
@@ -77,7 +84,7 @@ const INLINE_ELEMENTS = new Set([
 export const plainSnippet = (value: string): string =>
   value
     .replace(
-      /<\/?([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*>/g,
+      /<\/?([a-zA-Z][^\s/>]*)[^>]*>/g,
       (_tag, name: string) => (INLINE_ELEMENTS.has(name.toLowerCase()) ? '' : ' '),
     )
     .replace(/\s+/g, ' ')
