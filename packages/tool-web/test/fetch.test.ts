@@ -218,5 +218,9 @@ test('the extractor keeps prose and drops furniture', () => {
   assert.equal(htmlToText('<o:p>Alpha</o:p><o:p>Beta</o:p>'), 'Alpha Beta');
   assert.equal(htmlToText('<p>un<STRONG>expected</STRONG></p>'), 'unexpected');
   assert.equal(htmlToText('<p>I <3 you > them</p>'), 'I <3 you > them');
+  // `q` draws a character of its own from the stylesheet, so it neither
+  // fuses two quotations nor detaches the comma after one.
+  assert.equal(htmlToText('<p>He said <q>yes</q>, then left.</p>'), 'He said "yes", then left.');
+  assert.equal(htmlToText('<p><q>yes</q><q>no</q></p>'), '"yes""no"');
   assert.equal(htmlToText('<script>var x = "<p>trap</p>";</script><p>real</p>'), 'real');
 });

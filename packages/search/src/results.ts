@@ -65,7 +65,7 @@ import { hostMatchesSite } from './options.ts';
  */
 const INLINE_ELEMENTS = new Set([
   'a', 'abbr', 'b', 'bdi', 'bdo', 'big', 'cite', 'code', 'data', 'del', 'dfn',
-  'em', 'font', 'i', 'ins', 'kbd', 'mark', 'nobr', 'q', 'ruby',
+  'em', 'font', 'i', 'ins', 'kbd', 'mark', 'nobr', 'ruby',
   's', 'samp', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'time',
   'tt', 'u', 'var', 'wbr',
 ]);
@@ -81,11 +81,25 @@ const INLINE_ELEMENTS = new Set([
 // `sub` and `sup` stay, and are the deliberate contrast: `H<sub>2</sub>O`
 // is one token and joining it is the whole point.
 
+/**
+ * `q` is the one element that renders a character of its own: a browser
+ * draws quotation marks around it from the stylesheet, so neither answer
+ * above is right. Removing it fuses `<q>yes</q><q>no</q>` into `yesno`,
+ * and spacing it detaches the comma in `<q>yes</q>, then left` — the very
+ * defect this file exists to fix. Emitting the mark the reader sees costs
+ * nothing and is the more faithful extraction of the two.
+ */
+const QUOTE_ELEMENT = 'q';
+
 export const plainSnippet = (value: string): string =>
   value
     .replace(
       /<\/?([a-zA-Z][^\s/>]*)[^>]*>/g,
-      (_tag, name: string) => (INLINE_ELEMENTS.has(name.toLowerCase()) ? '' : ' '),
+      (_tag, rawName: string) => {
+        const name = rawName.toLowerCase();
+        if (name === QUOTE_ELEMENT) return '"';
+        return INLINE_ELEMENTS.has(name) ? '' : ' ';
+      },
     )
     .replace(/\s+/g, ' ')
     .trim();

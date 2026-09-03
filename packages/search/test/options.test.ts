@@ -196,6 +196,16 @@ test('a highlighted substring does not become two words, or a detached full stop
   assert.equal(plainSnippet('H<sub>2</sub>O'), 'H2O');
 });
 
+test('a quotation renders the mark a browser draws, so it neither fuses nor detaches', () => {
+  // `q` is the one element that draws a character of its own, from the
+  // stylesheet. Removing it fuses two quotations; spacing it detaches the
+  // comma, which is the defect this file exists to fix. Emitting the mark
+  // avoids both and is what the reader actually sees.
+  assert.equal(plainSnippet('<q>yes</q><q>no</q>'), '"yes""no"');
+  assert.equal(plainSnippet('He said <q>yes</q>, then left.'), 'He said "yes", then left.');
+  assert.equal(plainSnippet('<q cite="/x">yes</q>'), '"yes"');
+});
+
 test('the tag name is read whole, so a namespaced element is not mistaken for an inline one', () => {
   // Reading only up to the first punctuation classifies `<a:widget>` as the
   // inline `a` and deletes it — and a namespaced or framework-generated

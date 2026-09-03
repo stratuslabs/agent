@@ -37,7 +37,7 @@ const DROPPED_ELEMENTS = [
  */
 const INLINE_ELEMENTS = new Set([
   'a', 'abbr', 'b', 'bdi', 'bdo', 'big', 'cite', 'code', 'data', 'del', 'dfn',
-  'em', 'font', 'i', 'ins', 'kbd', 'mark', 'nobr', 'q', 'ruby',
+  'em', 'font', 'i', 'ins', 'kbd', 'mark', 'nobr', 'ruby',
   's', 'samp', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'time',
   'tt', 'u', 'var', 'wbr',
 ]);
@@ -52,6 +52,15 @@ const INLINE_ELEMENTS = new Set([
 //
 // `sub` and `sup` stay, and are the deliberate contrast: `H<sub>2</sub>O`
 // is one token and joining it is the whole point.
+
+/**
+ * `q` renders a character of its own — a browser draws quotation marks
+ * around it from the stylesheet — so neither answer above is right for it.
+ * Removing it fuses `<q>yes</q><q>no</q>` into `yesno`; spacing it detaches
+ * the comma in `<q>yes</q>, then left`. Emitting the mark a reader sees
+ * avoids both and is the more faithful extraction.
+ */
+const QUOTE_ELEMENT = 'q';
 
 const BLOCK_ELEMENTS = [
   'p', 'div', 'section', 'article', 'main', 'br', 'hr',
@@ -136,7 +145,11 @@ export const htmlToText = (html: string): string => {
   // this default exists for.
   text = text.replace(
     /<\/?([a-zA-Z][^\s/>]*)[^>]*>/g,
-    (_tag, name: string) => (INLINE_ELEMENTS.has(name.toLowerCase()) ? '' : ' '),
+    (_tag, rawName: string) => {
+      const name = rawName.toLowerCase();
+      if (name === QUOTE_ELEMENT) return '"';
+      return INLINE_ELEMENTS.has(name) ? '' : ' ';
+    },
   );
 
   text = decodeEntities(text);
