@@ -51,6 +51,9 @@ connection opened under a permissive policy is one a stricter policy can be
 handed — and a reused socket resolves nothing, so the pinned lookup that
 would have refused it is never called.
 
+- Connections through the proxy live exactly as long as the browser's side
+  of them: a page navigated away from mid-transfer takes its upstream socket
+  with it, and `close()` takes every one that is left.
 - `createEgressProxy(policy)` is a loopback proxy for a browser, which resolves
   names for itself whatever an interception handler decides. It resolves,
   checks, and dials the checked address. `chromiumProxyOptions` /

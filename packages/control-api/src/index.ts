@@ -13,12 +13,15 @@ import {
   ensureGatewayToken,
   originAllowed,
   type Authenticator,
+  type DashboardSession,
 } from './auth.ts';
 import { createEventStream, type EventFilter } from './events.ts';
 import { API_PREFIX, ApiError, isStateChanging, sendError, sendJson } from './http.ts';
 import { allowedMethodsFor, resolveRoute, type RouteContext } from './routes.ts';
 
 export { API_PREFIX } from './http.ts';
+export { tokenFingerprint } from './auth.ts';
+export type { DashboardSession } from './auth.ts';
 export type { EventEnvelope, EventFilter } from './events.ts';
 
 /** Kept in step with package.json, the way the CLI keeps its own version. */
@@ -89,6 +92,17 @@ export interface ControlApi extends GatewayChannelAdapter {
   readonly url: string | undefined;
   /** The bearer token clients authenticate with, once started. */
   readonly token: string | undefined;
+  /**
+   * Take on a predecessor's dashboard sessions — at once if this API is
+   * serving, at start otherwise. How an announced restart keeps a browser
+   * signed in; see `createAuthenticator` for why nothing here reaches disk.
+   */
+  adoptSessions(sessions: DashboardSession[]): void;
+  /**
+   * The dashboard sessions that were live when stop() ran — what a daemon
+   * stopping for a restart hands to the one replacing it. Empty until then.
+   */
+  sessionsAtStop(): DashboardSession[];
 }
 
 /**
@@ -139,6 +153,10 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
   const inflightResponses = new Set<ServerResponse>();
   /** Set while stop() waits for the last in-flight answer to finish. */
   let responsesIdle: (() => void) | undefined;
+  /** Sessions handed over before start() made an authenticator to hold them. */
+  let pendingSessions: DashboardSession[] = [];
+  /** What the last stop() found live, for the replacement. */
+  let sessionsWhenStopped: DashboardSession[] = [];
 
   const handleApiRequest = async (
     gateway: Gateway,
@@ -332,6 +350,18 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       return token;
     },
 
+    adoptSessions(sessions) {
+      if (auth) {
+        auth.adoptSessions(sessions);
+      } else {
+        pendingSessions.push(...sessions);
+      }
+    },
+
+    sessionsAtStop() {
+      return sessionsWhenStopped;
+    },
+
     async start(gateway: Gateway) {
       startedAt = Date.now();
       ui = options.ui === false
@@ -339,6 +369,8 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
         : options.ui ?? await loadDashboardAssets();
       token = await ensureGatewayToken(env);
       auth = createAuthenticator({ token });
+      auth.adoptSessions(pendingSessions);
+      pendingSessions = [];
       stream = createEventStream(gateway);
       wss = new WebSocketServer({ noServer: true });
 
@@ -431,6 +463,11 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       }
       await removeGatewayInfo().catch(() => undefined);
       ui = undefined;
+      // Kept for the process that replaces this one, in memory only. A
+      // second stop() has no authenticator and keeps the first one's answer.
+      if (auth) {
+        sessionsWhenStopped = auth.exportSessions();
+      }
       auth = undefined;
       url = undefined;
       token = undefined;

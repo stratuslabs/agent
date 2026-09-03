@@ -57,8 +57,8 @@ tools: [fs.read, fs.search]     # or fs.* for the whole toolset
 | Key | Default | What |
 | --- | --- | --- |
 | `roots` | none | Directories this agent may reach. **No roots means no filesystem** — nothing is readable, rather than everything. |
-| `maxBytes` | `64000` | Cap on one `fs.read`, before the `truncated` marker. |
-| `maxMatches` | `100` | Cap on `fs.search` matches. |
+| `maxBytes` | `64000` | Cap on one `fs.read`, before the `truncated` marker. A call's own `maxBytes` may ask for less, never more. |
+| `maxMatches` | `100` | Cap on `fs.search` matches. A call's own `maxMatches` may ask for fewer, never more. |
 | `maxEntries` | `500` | Cap on `fs.list` entries. |
 
 Every key can be set per agent in the `agents` sub-block, over the defaults

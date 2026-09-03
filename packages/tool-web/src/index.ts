@@ -29,6 +29,14 @@ export interface WebPluginConfig extends JsonObject {
 const asNumber = (value: unknown, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 
+/**
+ * A per-call `maxBytes` may narrow the operator's cap, never raise it. A
+ * cap the model can lift is not one: a fetch of a 300 MB body asked for
+ * `maxBytes: 50000000`, got 50 MB of it, and took the daemon from 278 MB to
+ * 1.1 GB resident on the way.
+ */
+const narrowed = (requested: unknown, cap: number): number => Math.min(asNumber(requested, cap), cap);
+
 const settingsFor = (config: JsonObject, session: Session) => {
   // Per call, from the session: an agent allowed to reach an internal host
   // is a decision about that agent, and closing over it at setup would
@@ -78,16 +86,39 @@ export const fetchThroughPolicy = async (
   const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
   const hops: string[] = [];
   let current = assertRequestAllowed(rawUrl, options.policy ?? {}).href;
+  // One budget for the whole exchange, not one per hop. Each hop is its own
+  // request with its own timer, and a fresh timer per hop let a chain of
+  // slow redirects multiply the configured timeout by the redirect limit:
+  // four hops at three seconds each answered after twelve seconds under a
+  // five-second timeout, which is not what "give up on the whole exchange"
+  // promises.
+  const deadline = options.timeoutMs === undefined ? undefined : Date.now() + options.timeoutMs;
+  const timedOut = (): Error =>
+    new Error(`Timed out after ${options.timeoutMs}ms across ${hops.length - 1} redirect(s) starting at ${rawUrl}`);
 
   for (let hop = 0; hop <= maxRedirects; hop += 1) {
     hops.push(current);
-    const response = await requestThroughPolicy(current, {
-      ...(options.policy ? { policy: options.policy } : {}),
-      headers: { 'user-agent': options.userAgent ?? DEFAULT_USER_AGENT, accept: 'text/html,text/plain;q=0.9,*/*;q=0.5' },
-      ...(options.maxBytes === undefined ? {} : { maxBytes: options.maxBytes }),
-      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
+    const remainingMs = deadline === undefined ? undefined : deadline - Date.now();
+    if (remainingMs !== undefined && remainingMs <= 0) {
+      throw timedOut();
+    }
+    let response;
+    try {
+      response = await requestThroughPolicy(current, {
+        ...(options.policy ? { policy: options.policy } : {}),
+        headers: { 'user-agent': options.userAgent ?? DEFAULT_USER_AGENT, accept: 'text/html,text/plain;q=0.9,*/*;q=0.5' },
+        ...(options.maxBytes === undefined ? {} : { maxBytes: options.maxBytes }),
+        ...(remainingMs === undefined ? {} : { timeoutMs: remainingMs }),
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (error) {
+      // A hop that ran out the shared budget reports the budget, not the
+      // sliver of it that this hop was left.
+      if (deadline !== undefined && hops.length > 1 && Date.now() >= deadline) {
+        throw timedOut();
+      }
+      throw error;
+    }
 
     const location = response.headers.location;
     if (isRedirect(response.status) && typeof location === 'string' && location.length > 0) {
@@ -134,7 +165,7 @@ const createFetchTool = (config: JsonObject): Tool => ({
     const settings = settingsFor(config, session);
     const response = await fetchThroughPolicy(url, {
       policy: settings.policy,
-      maxBytes: asNumber(input.maxBytes, settings.maxBytes),
+      maxBytes: narrowed(input.maxBytes, settings.maxBytes),
       timeoutMs: settings.timeoutMs,
       maxRedirects: settings.maxRedirects,
       userAgent: settings.userAgent,

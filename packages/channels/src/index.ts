@@ -76,6 +76,16 @@ export interface SessionRouting {
   agentId: string;
   /** The metadata the dispatching channel attached to the session. */
   metadata: JsonObject;
+  /**
+   * The text the session's latest turn produced (`latestTurnReply` in
+   * `@stratusagent/core`, the same rule an adapter finalizes its own turns
+   * by; absent when the turn produced none) — for a turn the adapter did
+   * not start and so never rendered. A turn
+   * parked on a human when the daemon died is re-asked after the restart
+   * and finishes in a process that has no placeholder to edit; without
+   * this, the approval survived the restart and the reply went nowhere.
+   */
+  reply?: string;
 }
 
 export interface GatewayLike {
@@ -85,9 +95,23 @@ export interface GatewayLike {
     userMessage: string;
     metadata?: JsonObject;
     signal?: AbortSignal;
+    /**
+     * Caller-chosen id for this turn, so the adapter can tell its own turn's
+     * events from another caller's on the same session — see `activeTurnId`.
+     */
+    turnId?: string;
   }): Promise<Session>;
   readonly bus: EventBus;
   agents(): AgentDefinition[];
+  /**
+   * The `turnId` of the turn currently running on a session, if its caller
+   * named one. Optional: a host that omits it leaves the adapter to guess
+   * which turn an outcome belongs to from the order events arrive in, which
+   * is right for every turn the adapter started itself and wrong for a turn
+   * another surface dispatched to the same session while a message of the
+   * adapter's was queued behind it.
+   */
+  activeTurnId?(sessionId: string): string | undefined;
   /**
    * Where a durable session came from, or undefined if there is no such
    * session.
