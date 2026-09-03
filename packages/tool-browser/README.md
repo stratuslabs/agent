@@ -94,6 +94,12 @@ other local schemes never reach a proxy at all, and this process can read
 the files they name. Those are refused before navigation and again on every
 request the page makes.
 
+What was refused is reported once, as `blockedRequests` on the next result
+of the conversation whose page was browsing — never to a conversation that
+began after it, and never twice. The proxy keeps its last hundred refusals
+for that, so a page refused something on every load does not grow the
+daemon's memory.
+
 The address policy itself is [`@stratusagent/egress`](../egress) — the same
 module `tool-web` uses, tested against the same table of hostile URLs. A
 second copy would not drift into a style difference; the stale one would be

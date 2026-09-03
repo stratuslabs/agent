@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readdir, writeFile } from 'node:fs/promises';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -17,6 +18,8 @@ import {
 
 interface Recorder {
   launches: number;
+  /** The proxy each launch was pointed at, so a test can send a request through it. */
+  proxyUrls: string[];
   contexts: number;
   closedContexts: number;
   closedBrowsers: number;
@@ -25,8 +28,9 @@ interface Recorder {
 }
 
 const fakeDriver = (recorder: Recorder, page?: Partial<PageLike>): BrowserDriver => ({
-  async launch() {
+  async launch(options) {
     recorder.launches += 1;
+    recorder.proxyUrls.push(String(options.proxy?.server ?? ''));
     const browser: BrowserLike = {
       async newContext() {
         recorder.contexts += 1;
@@ -84,6 +88,7 @@ const fakeDriver = (recorder: Recorder, page?: Partial<PageLike>): BrowserDriver
 
 const emptyRecorder = (): Recorder => ({
   launches: 0,
+  proxyUrls: [],
   contexts: 0,
   closedContexts: 0,
   closedBrowsers: 0,
@@ -300,6 +305,41 @@ test('an agent whose policy is narrower than the default gets a browser that enf
   // launching a third.
   await tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor('rex-1', 'rex'));
   assert.equal(recorder.launches, 2);
+});
+
+test('a refusal is reported once, to the conversation whose page was browsing, and not to one that began later', async (t) => {
+  const recorder = emptyRecorder();
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'] }, recorder);
+  t.after(() => plugin.dispose());
+
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor('first'));
+  const proxy = new URL(recorder.proxyUrls[0]!);
+  // What the page does when a script on it fetches a local address: the
+  // request reaches the proxy, and the proxy refuses it.
+  const through = (): Promise<number> =>
+    new Promise((resolve, reject) => {
+      const request = http.request(
+        { host: proxy.hostname, port: Number(proxy.port), method: 'GET', path: 'http://localhost:1/health' },
+        (response) => {
+          response.resume();
+          response.on('end', () => resolve(response.statusCode ?? 0));
+        },
+      );
+      request.on('error', reject);
+      request.end();
+    });
+  assert.equal(await through(), 403);
+
+  const reported = await tool('browser.read').execute({}, sessionFor('first')) as JsonObject;
+  assert.match(String((reported.blockedRequests as string[])[0]), /localhost/);
+  const again = await tool('browser.read').execute({}, sessionFor('first')) as JsonObject;
+  assert.equal(again.blockedRequests, undefined, 'a refusal is reported once');
+
+  // A conversation that began after the refusal was never browsing when it
+  // happened, and is told nothing about it.
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor('later'));
+  const later = await tool('browser.read').execute({}, sessionFor('later')) as JsonObject;
+  assert.equal(later.blockedRequests, undefined);
 });
 
 test('one agent’s blocked requests are not reported to another', async (t) => {

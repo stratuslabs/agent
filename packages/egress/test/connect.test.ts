@@ -116,6 +116,28 @@ test('the browser proxy refuses a request the policy refuses, and forwards one i
   assert.match(allowed.body, /internal service reached: \/ok/);
 });
 
+test('the proxy keeps its last hundred refusals and counts every one', async (t) => {
+  const proxy = await createEgressProxy();
+  t.after(() => proxy.close());
+  const refused = (): Promise<number> =>
+    new Promise((resolve, reject) => {
+      const request = http.request(
+        { host: '127.0.0.1', port: proxy.port, method: 'GET', path: 'http://localhost:1/' },
+        (response) => {
+          response.resume();
+          response.on('end', () => resolve(response.statusCode ?? 0));
+        },
+      );
+      request.on('error', reject);
+      request.end();
+    });
+  for (let i = 0; i < 105; i += 1) {
+    assert.equal(await refused(), 403);
+  }
+  assert.equal(proxy.refusalCount, 105);
+  assert.equal(proxy.refusals.length, 100);
+});
+
 test('a browser is launched pinned to the proxy, loopback included', () => {
   const args = chromiumProxyArgs({ url: 'http://127.0.0.1:9999' });
   assert.ok(args.includes('--proxy-server=http://127.0.0.1:9999'));

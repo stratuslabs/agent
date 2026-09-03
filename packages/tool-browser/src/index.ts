@@ -121,11 +121,16 @@ interface BrowserRuntime {
  * of the policy: the scheme guard inside the browser, and the proxy that
  * owns the connections. Reported to the agent because a page that renders
  * empty because its requests were blocked is otherwise a mystery it retries.
+ *
+ * Each refusal is reported once — this drains what it reports — so a
+ * result names what happened since the last one, not everything that ever
+ * did. Called once per result, for the same reason.
  */
-const refusalsFor = (runtime: BrowserRuntime, session: Session): string[] => [
-  ...(runtime.blocked.get(session.id) ?? []),
-  ...runtime.pool.refusalsFor(session.id),
-].slice(-10);
+const refusalsFor = (runtime: BrowserRuntime, session: Session): string[] => {
+  const inBrowser = runtime.blocked.get(session.id) ?? [];
+  runtime.blocked.delete(session.id);
+  return [...inBrowser, ...runtime.pool.refusalsFor(session.id)].slice(-10);
+};
 
 const truncate = (value: string, maxBytes: number): { text: string; truncated: boolean } =>
   Buffer.byteLength(value, 'utf8') <= maxBytes
@@ -179,13 +184,12 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       const settings = settingsFor(config, session);
       const page = await runtime.pageFor(session);
       const status = await navigate(page, String(input.url ?? ''), settings.policy, settings.navigationTimeoutMs);
+      const blockedRequests = refusalsFor(runtime, session);
       return {
         url: page.url(),
         ...(status === undefined ? {} : { status }),
         title: await page.title(),
-        ...(refusalsFor(runtime, session).length > 0
-          ? { blockedRequests: refusalsFor(runtime, session) }
-          : {}),
+        ...(blockedRequests.length > 0 ? { blockedRequests } : {}),
       };
     },
   };
@@ -209,14 +213,13 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
         typeof extracted === 'string' ? extracted : '',
         asNumber(input.maxBytes, settings.maxTextBytes),
       );
+      const blockedRequests = refusalsFor(runtime, session);
       return {
         url: page.url(),
         title: await page.title(),
         text,
         truncated,
-        ...(refusalsFor(runtime, session).length > 0
-          ? { blockedRequests: refusalsFor(runtime, session) }
-          : {}),
+        ...(blockedRequests.length > 0 ? { blockedRequests } : {}),
       };
     },
   };

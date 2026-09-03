@@ -36,6 +36,15 @@ interface PooledContext {
   page: PageLike;
   lastUsedAt: number;
   browserKey: string;
+  /**
+   * The proxy's refusal count when this conversation last had its refusals
+   * reported (or when it began): what it is told next time is what came
+   * after. Without the cursor, every conversation in a browser was handed
+   * the browser's whole history on every call — one page's refused
+   * redirect to localhost was reported to every later conversation of the
+   * agent, forever.
+   */
+  refusalsSeen: number;
 }
 
 const DEFAULT_IDLE_MS = 5 * 60_000;
@@ -205,7 +214,14 @@ export class BrowserSessionPool {
       }
       throw error;
     }
-    this.contexts.set(sessionId, { sessionId, context, page, lastUsedAt: now, browserKey: key });
+    this.contexts.set(sessionId, {
+      sessionId,
+      context,
+      page,
+      lastUsedAt: now,
+      browserKey: key,
+      refusalsSeen: entry.proxy.refusalCount,
+    });
     entry.sessions.add(sessionId);
     return page;
   }
@@ -221,10 +237,15 @@ export class BrowserSessionPool {
    */
   refusalsFor(sessionId: string): string[] {
     const context = this.contexts.get(sessionId);
-    if (!context) {
+    const proxy = context ? this.browsers.get(context.browserKey)?.proxy : undefined;
+    if (!context || !proxy) {
       return [];
     }
-    return this.browsers.get(context.browserKey)?.proxy.refusals ?? [];
+    // Only what arrived since this conversation last looked, and each
+    // entry once: a report is a report, not a standing accusation.
+    const unseen = Math.min(proxy.refusalCount - context.refusalsSeen, proxy.refusals.length);
+    context.refusalsSeen = proxy.refusalCount;
+    return unseen > 0 ? proxy.refusals.slice(-unseen) : [];
   }
 
   private async drop(entry: PooledContext, reason: 'idle' | 'capacity' | 'shutdown' | 'policy'): Promise<void> {
