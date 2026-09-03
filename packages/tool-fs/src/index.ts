@@ -282,6 +282,12 @@ const MAX_LINE_CHARS = 1_000_000;
 interface LineRead {
   text: string;
   clipped: boolean;
+  /**
+   * The code point that came right after a clip, kept so a match ending at
+   * the clip can be told from one ending at a real word boundary. Empty
+   * when the line was not clipped.
+   */
+  next: string;
 }
 
 interface OpenedLines {
@@ -334,10 +340,29 @@ const firstCodePoints = (text: string, count: number): string => {
  * is a ceiling on code points, so a line within it in code units is within
  * it and is not counted.
  */
-const bounded = (text: string): LineRead =>
-  text.length > MAX_LINE_CHARS && codePointLength(text) > MAX_LINE_CHARS
-    ? { text: firstCodePoints(text, MAX_LINE_CHARS), clipped: true }
-    : { text, clipped: false };
+const bounded = (text: string): LineRead => {
+  if (text.length <= MAX_LINE_CHARS || codePointLength(text) <= MAX_LINE_CHARS) {
+    return { text, clipped: false, next: '' };
+  }
+  const kept = firstCodePoints(text, MAX_LINE_CHARS);
+  return { text: kept, clipped: true, next: firstCodePoints(text.slice(kept.length), 1) };
+};
+
+/**
+ * Whether the query occurs inside the part of this line that was searched.
+ *
+ * A clipped line ends where the tool stopped reading, not where the file's
+ * line ends, and `\b` at that artificial end would call a word cut in half
+ * a whole word. The code point that came next is kept for exactly this: the
+ * match runs against it too, and counts only if it ends before it.
+ */
+const matchesWithin = (pattern: RegExp, line: LineRead): boolean => {
+  if (!line.clipped || line.next.length === 0) {
+    return pattern.test(line.text);
+  }
+  const found = pattern.exec(line.text + line.next);
+  return found !== null && found.index + found[0].length <= line.text.length;
+};
 
 const openLines = async (resolved: ResolvedPath): Promise<OpenedLines> => {
   const handle = await openContained(resolved, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
@@ -361,6 +386,7 @@ const linesOf = async function* (
     const decoder = new StringDecoder('utf8');
     let carry = '';
     let discarding = false;
+    let discardedNext = '';
     // Bounded to the size the file had when it was opened: a log being
     // appended to would otherwise be read for as long as its writer stays
     // ahead, and the result's `bytes` would name a size the search had
@@ -403,17 +429,23 @@ const linesOf = async function* (
             if (clipped.clipped) {
               carry = clipped.text;
               discarding = true;
+              discardedNext = clipped.next;
             }
           }
           break;
         }
-        yield discarding ? { text: carry, clipped: true } : bounded(carry + text.slice(from, newline));
+        yield discarding
+          ? { text: carry, clipped: true, next: discardedNext }
+          : bounded(carry + text.slice(from, newline));
         carry = '';
         discarding = false;
+        discardedNext = '';
         from = newline + 1;
       }
     }
-    const tail = discarding ? { text: carry, clipped: true } : bounded(carry + decoder.end());
+    const tail: LineRead = discarding
+      ? { text: carry, clipped: true, next: discardedNext }
+      : bounded(carry + decoder.end());
     if (tail.text.length > 0) {
       yield tail;
     }
@@ -557,7 +589,7 @@ const createSearchTool = (config: JsonObject): Tool => ({
           break;
         }
         clipped ||= line.clipped;
-        if (!capped && pattern.test(line.text) && !record(resolved.path, index, line.text)) {
+        if (!capped && matchesWithin(pattern, line) && !record(resolved.path, index, line.text)) {
           capped = true;
         }
         index += 1;

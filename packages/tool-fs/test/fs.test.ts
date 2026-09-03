@@ -433,6 +433,25 @@ test('a file whose size the cap exactly matches is not reported as clipped', asy
   assert.equal(result.skipped, undefined, 'a file read to its end reports nothing skipped');
 });
 
+test('a whole-word match at a clipped line\'s edge is judged by the file, not by where the search stopped', async () => {
+  // The line is cut at a million characters. A query ending exactly there
+  // looks like a whole word if you only read what was kept — the file says
+  // otherwise, and the code point that came next is what settles it.
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-wordedge-'));
+  const needle = 'needle';
+  const lead = 'a '.repeat((1_000_000 - needle.length) / 2);
+  await writeFile(path.join(root, 'cut.txt'), `${lead}${needle}xtra and more past the cut\n`);
+  await writeFile(path.join(root, 'whole.txt'), `${lead}${needle} and more past the cut\n`);
+  const tools = await registryFor({ roots: [root] });
+  const session = sessionFor('ava');
+
+  const cut = await run(tools, 'fs.search', { query: needle, path: 'cut.txt', wholeWord: true }, session) as JsonObject;
+  assert.deepEqual(cut.matches, [], 'the word runs on past the cut, so it is not a whole word');
+
+  const whole = await run(tools, 'fs.search', { query: needle, path: 'whole.txt', wholeWord: true }, session) as JsonObject;
+  assert.equal((whole.matches as unknown[]).length, 1, 'a word that really ends at the cut still matches');
+});
+
 test('the skipped list is capped, and the count says how many there were', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-skipmany-'));
   const big = 'x'.repeat(1_000_001);
