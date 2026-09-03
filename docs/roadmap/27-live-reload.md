@@ -84,10 +84,14 @@ half: prose read from disk, no code imported, nothing holding a socket.
 - Follow `reloadRoster()` rather than inventing a second shape: idempotent,
   serialized against itself, and a failure that leaves the previous state
   serving rather than blocking every reload after it.
-- The drain already has a documented limit and this step must not overstate it:
-  `stop()` drains a **one-time snapshot** of in-flight work, and a turn still
-  finishing can start work the snapshot never saw. An announced restart makes
-  that window smaller by refusing new turns first; it does not close it.
+- Do not overstate what a drain guarantees. A channel's `stop()` drains
+  **until its in-flight set stays empty**, because a turn finishing inside the
+  drain still hands it work; the gateway's own turn drain is a single snapshot,
+  which is sound only because every path into `onSessionChain` refuses once
+  `stopping` is set. A reload that adds a way to start a turn after that point
+  breaks the second half — the snapshot is a consequence of the refusal, not a
+  guarantee that stands on its own. What no drain can promise is that a turn
+  *finishes*: `--drain-timeout` still gives up and aborts.
 - A restart is the moment an operator most wants the log to be useful, and it
   is also the case the log cannot cover — a daemon that fails before it serves
   writes nothing to the JSONL. Whatever this step prints, it should print

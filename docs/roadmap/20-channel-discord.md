@@ -66,10 +66,12 @@ repository once the contract has stopped moving.
   gateway connection with resume semantics, backoff, and session invalidation.
   `plugin-mcp` already has a reconnect-with-backoff shape worth reading before
   inventing a second one.
-- `stop()` must keep the guarantee the Slack adapter makes: it awaits the work
-  in flight when it was called. The known gap is documented in `CLAUDE.md` and
-  is not made worse here — the drain is a one-time snapshot, and a turn still
-  finishing can emit an event the snapshot never saw.
+- `stop()` must keep the guarantee the Slack adapter makes: it drains until
+  its in-flight set stays empty, not over a snapshot of it. A turn finishing
+  inside the drain still hands the adapter work — a retraction is the case
+  that matters — and the bus subscription comes down only afterwards, so a
+  second adapter written to drain once would reintroduce a gap this one has
+  closed.
 - Message length limits, rate limits, and edit throttling differ from Slack's,
   and streaming deltas are where that bites. Whatever pacing this needs is a
   candidate for `channels` rather than a private trick.
