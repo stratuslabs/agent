@@ -58,8 +58,8 @@ fails that one call with a message naming the fix.
 | `allowPrivateAddresses` | `false` | Reach non-global addresses. The trusted-workstation posture. |
 | `idleMs` | `300000` | Close a conversation's context after this much quiet. |
 | `maxContexts` | `4` | Contexts at once; the least recently used goes first. |
-| `maxTextBytes` | `100000` | Cap on `browser.read`, then a `truncated` marker. |
-| `navigationTimeoutMs` | `30000` | Per navigation and per action. |
+| `maxTextBytes` | `100000` | Cap on `browser.read`, then a `truncated` marker. A call's own `maxBytes` may ask for less, never more. |
+| `navigationTimeoutMs` | `30000` | Per navigation, per action, and on reading a page — one whose script never yields is given up on, its context closed, and the next call opens a fresh page. |
 | `workspaceRoot` | supplied by the daemon | Where screenshots go: `<root>/<agent-id>/screenshots`. |
 
 Address settings apply per agent under `agents`, and they are enforced —
@@ -93,6 +93,14 @@ Interception still does the half a proxy cannot: `file:`, `data:`, and
 other local schemes never reach a proxy at all, and this process can read
 the files they name. Those are refused before navigation and again on every
 request the page makes.
+
+Each conversation's context browses through a proxy of its own, under the
+same policy as the browser's. What was refused is reported once, as
+`blockedRequests` on the next result of the conversation whose page was
+browsing — never to another conversation, however alike their policies,
+never to one that began after it, and never twice. A proxy keeps its last
+hundred refusals for that, so a page refused something on every load does
+not grow the daemon's memory.
 
 The address policy itself is [`@stratusagent/egress`](../egress) — the same
 module `tool-web` uses, tested against the same table of hostile URLs. A

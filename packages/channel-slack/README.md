@@ -2,7 +2,7 @@
 
 Slack adapter for Stratus agents. **One Slack app per agent** — Slack has no way to give a single bot several identities with real avatars, presence, and DMs, so each agent gets its own app, and the adapter runs one Socket Mode connection per agent (no public ingress needed; Mac Minis behind NAT are fine).
 
-- **Resumable conversations**: session keys are `slack:<agent>:<team>:<channel>:<thread_ts ?? ts>` (DMs: the DM channel id) — a thread is a conversation, it survives daemon restarts, and two agents sharing a thread keep fully separate sessions.
+- **Resumable conversations**: session keys are `slack:<agent>:<team>:<channel>:<thread_ts ?? ts>` (DMs: the DM channel id) — a thread is a conversation, it survives daemon restarts, and two agents sharing a thread keep fully separate sessions. A turn parked on a human when the daemon died is re-asked after the restart, and when it finishes its reply is posted into the thread as a fresh message — the placeholder it would have edited belonged to the old process.
 - **Streaming replies**: post a placeholder, edit as deltas arrive (throttled for `chat.update` limits), show `⚙ tool…` status lines, finalize with the full reply — split across messages when it outgrows one.
 - **Mention-only in channels, free-form in DMs.** Inbound mentions of other users are humanized to `@Display Name` for the model; redeliveries are deduped so a slow turn never runs twice.
 - **Approval buttons** for the gateway's `remote` permission mode: a gated tool call parks the turn and asks in its thread with **Allow once** / **Always allow** / **Deny**. See [Approving tool calls](#approving-tool-calls) — clicks are authorized by *who clicked*, never by who can see the message.

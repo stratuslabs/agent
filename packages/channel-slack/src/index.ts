@@ -1,8 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
-import type { ApprovalAnswer, JsonObject, Session, StratusEvent, ToolResult } from '@stratusagent/core';
+import { latestTurnReply, type ApprovalAnswer, type JsonObject, type Session, type StratusEvent, type ToolResult } from '@stratusagent/core';
 import {
   channelSessionKey,
   type ChannelAdapter,
@@ -157,6 +158,22 @@ const defaultWebClient = (botToken: string): SlackWebLike => {
  * (split across messages when it outgrows one).
  */
 class ReplyRenderer {
+  /**
+   * Whether the gateway has begun the turn this renderer was opened for.
+   * A renderer is queued at intake, before the gateway starts its turn,
+   * so until the session reports `running` again the turn at the head of
+   * the session's chain may be somebody else's — a recovery still parked
+   * on a human — and its completion is not this renderer's to swallow.
+   */
+  turnStarted = false;
+  /**
+   * The id this renderer's turn is dispatched under. A gateway that reports
+   * its active turn (`activeTurnId`) lets the adapter match an outcome to
+   * this renderer exactly, rather than to whichever turn reported `running`
+   * next — which, for a session another surface can also dispatch to, may
+   * not be this one.
+   */
+  readonly turnId: string = randomUUID();
   private buffer = '';
   private turnBreakPending = false;
   private toolLine: string | undefined;
@@ -165,6 +182,19 @@ class ReplyRenderer {
   private pendingEdit: NodeJS.Timeout | undefined;
   private editChain: Promise<void> = Promise.resolve();
   private uploadChain: Promise<void> = Promise.resolve();
+  /**
+   * A handover in progress (`yieldTo`): edits and the finalize wait for it,
+   * so a turn that finishes while its placeholder is being given away
+   * writes into the fresh one rather than over the reply it was given to.
+   */
+  private handover: Promise<void> = Promise.resolve();
+  /**
+   * Bumped by a handover. An edit scheduled before it carries the text of
+   * the turn that was handed over — the recovery's stream, routed to this
+   * renderer while it was at the head of the queue — and must not land in
+   * the placeholder opened for this turn.
+   */
+  private generation = 0;
   private finalized = false;
   private readonly web: SlackWebLike;
   private readonly channel: string;
@@ -184,6 +214,25 @@ class ReplyRenderer {
     this.threadTs = threadTs;
     this.editIntervalMs = editIntervalMs;
     this.warn = warn;
+  }
+
+  /**
+   * The gateway has begun this renderer's turn. Whatever was streamed here
+   * before now belonged to the turn ahead of it on the session chain — a
+   * recovery's stream, routed to this renderer because it was at the head
+   * of the queue — and is dropped, edits already scheduled for it
+   * included, so this turn's placeholder starts empty.
+   */
+  beginTurn(): void {
+    this.turnStarted = true;
+    if (this.pendingEdit) {
+      clearTimeout(this.pendingEdit);
+      this.pendingEdit = undefined;
+    }
+    this.buffer = '';
+    this.toolLine = undefined;
+    this.turnBreakPending = false;
+    this.generation += 1;
   }
 
   async open(): Promise<void> {
@@ -292,7 +341,9 @@ class ReplyRenderer {
   }
 
   private scheduleEdit(): void {
-    if (!this.ref || this.pendingEdit) {
+    // Not gated on having a placeholder: during a handover there is none
+    // for a moment, and the edit reads the fresh one when its turn comes.
+    if (this.pendingEdit) {
       return;
     }
     const elapsed = Date.now() - this.lastEditAt;
@@ -309,18 +360,30 @@ class ReplyRenderer {
   }
 
   private queueEdit(text: string): void {
-    const ref = this.ref;
-    if (!ref) {
-      return;
-    }
+    const generation = this.generation;
+    // The handover as it stands when the edit is queued, not when it runs:
+    // a handover that begins after this edit waits for this edit, and an
+    // edit that then waited for that handover would be a cycle nothing
+    // could break.
+    const handover = this.handover;
     this.editChain = this.editChain
-      .then(() => this.web.chat.update({ channel: ref.channel, ts: ref.ts, text }))
+      .then(() => handover)
+      .then(() => {
+        // Read after the handover, not before: the placeholder may have
+        // changed hands while this edit waited its turn — and the text
+        // may belong to the turn that was handed over.
+        const ref = this.ref;
+        return ref && generation === this.generation
+          ? this.web.chat.update({ channel: ref.channel, ts: ref.ts, text })
+          : undefined;
+      })
       .then(() => undefined)
       .catch((error) => this.warn(`chat.update failed: ${error instanceof Error ? error.message : String(error)}`));
   }
 
   /** Replace the placeholder with the final reply, splitting if oversized. */
   async finalize(reply: string): Promise<void> {
+    await this.handover;
     this.finalized = true;
     if (this.pendingEdit) {
       clearTimeout(this.pendingEdit);
@@ -328,10 +391,15 @@ class ReplyRenderer {
     }
     const text = reply.trim().length > 0 ? reply : '(no reply)';
     const chunks = splitForSlack(text);
-    this.queueEdit(chunks[0] ?? '(no reply)');
+    // No placeholder — a handover could not open a fresh one — and the
+    // reply is a message of its own rather than nothing at all.
+    const rest = this.ref ? chunks.slice(1) : chunks;
+    if (this.ref) {
+      this.queueEdit(chunks[0] ?? '(no reply)');
+    }
     await this.editChain;
     await this.uploadChain;
-    for (const chunk of chunks.slice(1)) {
+    for (const chunk of rest) {
       try {
         await this.web.chat.postMessage({
           channel: this.channel,
@@ -346,6 +414,73 @@ class ReplyRenderer {
 
   async fail(message: string): Promise<void> {
     await this.finalize(`Something went wrong: ${message}`);
+  }
+
+  /**
+   * Hand the placeholder to a turn that finished ahead of this one — the
+   * recovery this renderer was queued behind — and open a fresh one below
+   * it for this turn. Slack keeps a message's place when it is edited, so
+   * the earlier turn's reply lands above this turn's, in the order the
+   * conversation happened; posted as a new message instead, it would sit
+   * below a placeholder that was posted first. False when there is no
+   * placeholder to hand over (never opened, or already finished), and the
+   * caller posts the reply itself.
+   */
+  async yieldTo(chunks: readonly string[]): Promise<boolean> {
+    const [first, ...rest] = chunks;
+    if (first === undefined) {
+      return false;
+    }
+    // One handover at a time: two turns ahead of this one finishing close
+    // together would otherwise both take the placeholder as they found it,
+    // and the second would write over the first's reply. Each waits for
+    // the one before it and takes the placeholder that reopen left.
+    // The edits to let through first are the ones queued before this
+    // handover existed; those queued after it wait for it (see `queueEdit`),
+    // so waiting on the live chain here would wait on them in return.
+    const drained = this.editChain;
+    const work = this.handover.then(async (): Promise<boolean> => {
+      const given = this.ref;
+      if (this.finalized || !given) {
+        return false;
+      }
+      await drained;
+      try {
+        await this.web.chat.update({ channel: given.channel, ts: given.ts, text: first });
+      } catch (error) {
+        // Not handed over: the placeholder is still this turn's, and the
+        // caller posts the reply as messages of its own.
+        this.warn(`chat.update failed: ${error instanceof Error ? error.message : String(error)}`);
+        return false;
+      }
+      // The placeholder is the earlier turn's now, and the reference goes
+      // before the reopen, so a reopen that fails cannot leave this turn
+      // writing over the reply just handed over. (What was streamed into
+      // it is dealt with by `beginTurn`, at the boundary that actually
+      // separates the two turns' output.)
+      this.ref = undefined;
+      for (const chunk of rest) {
+        try {
+          await this.web.chat.postMessage({
+            channel: this.channel,
+            text: chunk,
+            ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
+          });
+        } catch (error) {
+          this.warn(`chat.postMessage failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      try {
+        await this.open();
+      } catch (error) {
+        // No placeholder for this turn, then: its reply is posted as a
+        // message of its own when it comes (see `finalize`).
+        this.warn(`could not reopen a placeholder: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return true;
+    });
+    this.handover = work.then(() => undefined, () => undefined);
+    return work;
   }
 }
 
@@ -407,23 +542,9 @@ const splitForSlack = (text: string): string[] => {
   return chunks;
 };
 
-const lastAssistantReply = (session: Session): string => {
-  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
-    const message = session.messages[index];
-    if (!message) {
-      continue;
-    }
-    // Stop at the current turn's input: an earlier turn's answer must not
-    // be replayed as this turn's reply when the provider returned no text.
-    if (message.role === 'user') {
-      break;
-    }
-    if (message.role === 'assistant' && message.content.trim().length > 0) {
-      return message.content;
-    }
-  }
-  return '(no reply)';
-};
+// One rule with the gateway's `sessionRouting`, which posts the same
+// message for a turn this adapter did not start.
+const lastAssistantReply = (session: Session): string => latestTurnReply(session) ?? '(no reply)';
 
 const APPROVAL_ACTIONS: Record<string, ApprovalAnswer> = {
   stratus_approve_once: 'once',
@@ -581,6 +702,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // to the FIRST registered renderer (the running turn), never a later
   // message's placeholder. Each handler removes exactly its own renderer.
   const renderers = new Map<string, ReplyRenderer[]>();
+  /**
+   * Files a turn nobody here rendered produced — a recovery's screenshot,
+   * say — keyed by session, waiting for the turn's outcome to be posted so
+   * they can follow it into the thread. A rendered turn's files go through
+   * its renderer as they are produced; these have no renderer to go through.
+   */
+  const unrenderedFiles = new Map<string, string[]>();
   // In-flight turns, so stop() can drain: a reply mid-render should reach
   // Slack before the sockets go away.
   const inflight = new Set<Promise<void>>();
@@ -969,8 +1097,73 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * The routing has to come from the durable session, because the only
    * in-memory copy died with the process that had it.
    */
+  /**
+   * Post a turn's outcome into its thread ahead of a renderer queued behind
+   * it, when there is one — through that renderer's placeholder, so the
+   * thread reads in order — and as fresh messages otherwise. Each chunk on
+   * its own, the way `finalize` posts overflow: one refused chunk must not
+   * cost the rest of the answer.
+   */
+  const postAheadOf = async (
+    behind: ReplyRenderer | undefined,
+    connection: AgentConnection,
+    channel: string,
+    thread: string | undefined,
+    chunks: readonly string[],
+  ): Promise<void> => {
+    if (behind && await behind.yieldTo(chunks)) {
+      return;
+    }
+    for (const chunk of chunks) {
+      try {
+        await connection.web.chat.postMessage({
+          channel,
+          text: chunk,
+          ...(thread ? { thread_ts: thread } : {}),
+        });
+      } catch (error) {
+        warn(`slack: could not post part of a turn's outcome: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  };
+
+  /**
+   * The files an unrendered turn produced, taken off the session the moment
+   * its outcome arrives — before anything is awaited, so a next turn's files
+   * arriving while this outcome waits on Slack are never mistaken for its.
+   */
+  const takeUnrenderedFiles = (sessionId: string): string[] => {
+    const paths = unrenderedFiles.get(sessionId) ?? [];
+    unrenderedFiles.delete(sessionId);
+    return paths;
+  };
+
+  /** Post the files an unrendered turn produced into its thread, in order. */
+  const uploadUnrenderedFiles = async (
+    connection: AgentConnection,
+    channel: string,
+    thread: string | undefined,
+    paths: readonly string[],
+  ): Promise<void> => {
+    for (const filePath of paths) {
+      try {
+        const data = await readFile(filePath);
+        await connection.web.files.uploadV2({
+          channel_id: channel,
+          file: data,
+          filename: path.basename(filePath),
+          ...(thread ? { thread_ts: thread } : {}),
+        });
+      } catch (error) {
+        warn(`files.uploadV2 failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  };
+
   const reportUnrenderedFailure = async (
     event: Extract<StratusEvent, { type: 'session.failed' }>,
+    behind: ReplyRenderer | undefined,
+    files: readonly string[],
   ): Promise<void> => {
     const gateway = gatewayRef;
     if (!gateway?.sessionRouting) {
@@ -997,15 +1190,50 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return;
     }
     const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
-    try {
-      await connection.web.chat.postMessage({
-        channel: metadata.slackChannel,
-        text: `Something went wrong: ${event.error}`,
-        ...(thread ? { thread_ts: thread } : {}),
-      });
-    } catch (error) {
-      warn(`slack: could not report a failed turn: ${error instanceof Error ? error.message : String(error)}`);
+    await postAheadOf(behind, connection, metadata.slackChannel, thread, splitForSlack(`Something went wrong: ${event.error}`));
+    await uploadUnrenderedFiles(connection, metadata.slackChannel, thread, files);
+  };
+
+  /**
+   * The other half of `reportUnrenderedFailure`: a turn nobody here was
+   * rendering that *finished*. A turn parked on a human when the daemon
+   * died is re-asked after the restart, approved, and completed by a
+   * process that never opened a placeholder for it — so the approval
+   * survived the restart and the reply went nowhere. Posted as a fresh
+   * message in the thread, since the placeholder it would have edited
+   * belonged to the old process.
+   */
+  const reportUnrenderedReply = async (
+    event: Extract<StratusEvent, { type: 'session.completed' }>,
+    behind: ReplyRenderer | undefined,
+    files: readonly string[],
+  ): Promise<void> => {
+    const gateway = gatewayRef;
+    if (!gateway?.sessionRouting) {
+      return;
     }
+    let routing;
+    try {
+      routing = await gateway.sessionRouting(event.sessionId);
+    } catch (error) {
+      warn(`slack: could not read the routing for a finished turn: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    const metadata = routing?.metadata;
+    if (!routing || metadata?.channel !== 'slack' || typeof metadata.slackChannel !== 'string') {
+      return;
+    }
+    const connection = connectionFor(routing.agentId);
+    if (!connection) {
+      return;
+    }
+    const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
+    // A turn that produced files and no text still has the files to post.
+    if (routing.reply) {
+      await postAheadOf(behind, connection, metadata.slackChannel, thread, splitForSlack(routing.reply));
+      log(`slack: posted the reply of a turn finished after a restart to ${metadata.slackChannel}`);
+    }
+    await uploadUnrenderedFiles(connection, metadata.slackChannel, thread, files);
   };
 
   const handleInteractive = async (connection: AgentConnection, args: SlackSocketEventArgs): Promise<void> => {
@@ -1163,6 +1391,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         sessionId,
         agentId: connection.config.agentId,
         userMessage,
+        turnId: renderer.turnId,
         metadata: {
           channel: 'slack',
           team,
@@ -1242,26 +1471,59 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           track(retractApprovalRequest(event));
           return;
         }
-        // A failure with no renderer is not a turn this process is
-        // serving — it is one the startup sweep or a failed recovery
-        // closed out. Nothing downstream would say anything about it.
+        // A turn ends here in one of two hands. One this adapter started
+        // is finished by the renderer it opened at intake, from the
+        // session `dispatch` returns. One it did not start — a recovery
+        // of a turn parked on a human when the daemon died, or a turn the
+        // startup sweep closed out — has no renderer, and is reported
+        // from the session's stored routing instead.
         //
-        // A non-empty queue is not proof the failure belongs to a turn
-        // this adapter dispatched, only that it has one for this session.
-        // A renderer is queued at intake, before the gateway starts the
-        // turn it belongs to, so a message arriving while a recovery is
-        // still ahead of it on the session chain leaves the recovery's
-        // failure looking rendered when it is not. Suppressing is the
-        // conservative half of that trade: the alternative reports every
-        // ordinary failure twice.
+        // A renderer in the queue is not proof the outcome is that turn's.
+        // The renderer is queued at intake, before the gateway starts the
+        // turn, so a message arriving while a recovery is still ahead of
+        // it on the session chain has a renderer at the head while the
+        // recovery finishes — and the recovery's reply would be swallowed
+        // as rendered when nothing rendered it.
         //
-        // Telling them apart needs a turn identifier, which `StratusEvent`
-        // does not carry — the same gap 05's WS envelope closes with
-        // `{ sessionId, turnId, event }`. The routing a line below has it
-        // too: recovery events are already delivered to whichever renderer
-        // is at the head of the queue, whether or not it is theirs.
-        if (event.type === 'session.failed' && !renderers.get(event.sessionId)?.length) {
-          track(reportUnrenderedFailure(event));
+        // Which turn is running is exact when the gateway says so: every
+        // turn this adapter dispatches carries its renderer's `turnId`, and
+        // `activeTurnId` names the one on the session now (`StratusEvent`
+        // itself carries no turn identifier), so a turn another surface
+        // dispatched to the same session is never taken for this adapter's,
+        // whatever order the two started in. A gateway without that answer
+        // leaves the order of events: the session reports `running` as
+        // each turn begins, and the next `running` is taken to be the
+        // head renderer's — right for a recovery, which is always ahead of
+        // the message queued behind it, and wrong only for a foreign turn
+        // that starts after the message was queued.
+        const head = renderers.get(event.sessionId)?.[0];
+        const exact = gateway.activeTurnId !== undefined;
+        const active = gateway.activeTurnId?.(event.sessionId);
+        // A file a turn with no renderer produced is kept for its outcome
+        // (a renderer at the head, though not the turn's own, uploads what
+        // it is handed as it goes, the way it always has).
+        if (event.type === 'tool.completed' && event.result.ok && !head) {
+          const produced = collectFilePaths(event.result);
+          if (produced.length > 0) {
+            unrenderedFiles.set(event.sessionId, [...(unrenderedFiles.get(event.sessionId) ?? []), ...produced].slice(-20));
+          }
+        }
+        if (event.type === 'session.updated' && event.status === 'running' && head && (!exact || active === head.turnId)) {
+          head.beginTurn();
+        }
+        // A renderer at the head that has not seen its turn start is
+        // queued behind the turn ending now, and its placeholder is
+        // already in the thread: the outcome goes through it, so the
+        // thread reads in the order the conversation happened.
+        const rendered = exact
+          ? active !== undefined && (renderers.get(event.sessionId) ?? []).some((renderer) => renderer.turnId === active)
+          : head?.turnStarted === true;
+        if (event.type === 'session.failed' && !rendered) {
+          track(reportUnrenderedFailure(event, head, takeUnrenderedFiles(event.sessionId)));
+          return;
+        }
+        if (event.type === 'session.completed' && !rendered) {
+          track(reportUnrenderedReply(event, head, takeUnrenderedFiles(event.sessionId)));
           return;
         }
         if ('sessionId' in event) {

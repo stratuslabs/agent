@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -176,6 +177,24 @@ test('a long file is truncated with the marker, and a binary one is not returned
   assert.equal(binary.content, undefined);
 });
 
+test('a call may narrow the read and match caps, never raise them', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-cap-'));
+  await writeFile(path.join(root, 'long.txt'), 'needle\n'.repeat(1_000));
+
+  const tools = await registryFor({ roots: [root], maxBytes: 100, maxMatches: 5 });
+  const session = sessionFor('ava');
+
+  const lifted = await run(tools, 'fs.read', { path: 'long.txt', maxBytes: 1_000_000 }, session) as JsonObject;
+  assert.equal(String(lifted.content).length, 100, 'a bigger maxBytes does not lift the cap');
+  assert.equal(lifted.truncated, true);
+  const narrowed = await run(tools, 'fs.read', { path: 'long.txt', maxBytes: 10 }, session) as JsonObject;
+  assert.equal(String(narrowed.content).length, 10, 'a smaller one narrows it');
+
+  const matches = await run(tools, 'fs.search', { query: 'needle', maxMatches: 500 }, session) as JsonObject;
+  assert.equal((matches.matches as unknown[]).length, 5);
+  assert.equal(matches.truncated, true);
+});
+
 test('an agent allowed only reads cannot write, whatever the tool would have done', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-allow-'));
   await writeFile(path.join(root, 'notes.md'), 'read me');
@@ -278,6 +297,171 @@ test('searching one file searches that file, not its neighbours', async () => {
   // than a lost capability.
   const wide = await run(tools, 'fs.search', { query: 'kettle', path: 'notes' }, session) as JsonObject;
   assert.equal((wide.matches as unknown[]).length, 2);
+});
+
+test('a large file named outright is searched, and one a walk skips is named in the result', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-large-'));
+  await mkdir(path.join(root, 'logs'), { recursive: true });
+  // Over the walk limit, in lines the line limit leaves whole, with the
+  // only needle on the last one.
+  await writeFile(path.join(root, 'logs', 'big.log'), `${'x'.repeat(600_000)}\n${'y'.repeat(600_000)}\nneedle at the end\n`);
+  await writeFile(path.join(root, 'logs', 'small.log'), 'nothing here\n');
+
+  const tools = await registryFor({ roots: [root] });
+  const session = sessionFor('ava');
+
+  const named = await run(tools, 'fs.search', { query: 'needle', path: 'logs/big.log' }, session) as JsonObject;
+  assert.deepEqual(
+    (named.matches as Array<{ path: string; line: number }>).map((match) => [match.path, match.line]),
+    [[path.join('logs', 'big.log'), 3]],
+  );
+  assert.equal(named.skipped, undefined);
+
+  const walked = await run(tools, 'fs.search', { query: 'needle', path: 'logs' }, session) as JsonObject;
+  assert.deepEqual(walked.matches, []);
+  const skipped = walked.skipped as Array<{ path: string; bytes: number; reason: string }>;
+  assert.equal(skipped.length, 1);
+  assert.equal(skipped[0]!.path, path.join('logs', 'big.log'));
+  assert.match(skipped[0]!.reason, /over the 1 MB walk limit/);
+});
+
+test('a named file that is one enormous line is searched in bounded memory, and the result says where it stopped', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-line-'));
+  // 3 million characters, no newline: a needle inside the first million and
+  // another beyond it.
+  await writeFile(path.join(root, 'minified.js'), `${'a'.repeat(500_000)}early${'b'.repeat(1_500_000)}late${'c'.repeat(1_000_000)}`);
+  const tools = await registryFor({ roots: [root] });
+  const session = sessionFor('ava');
+
+  const early = await run(tools, 'fs.search', { query: 'early', path: 'minified.js' }, session) as JsonObject;
+  assert.equal((early.matches as unknown[]).length, 1);
+  assert.match(String((early.skipped as Array<{ reason: string }>)[0]?.reason), /longer than 1 million characters/);
+  const late = await run(tools, 'fs.search', { query: 'late', path: 'minified.js' }, session) as JsonObject;
+  assert.deepEqual(late.matches, [], 'past the first million characters of a line, nothing is searched');
+  assert.equal(late.skippedTotal, 1);
+});
+
+test('a line of exactly the limit was searched whole, and the result does not say otherwise', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-exact-'));
+  const needle = 'needle';
+  await writeFile(path.join(root, 'exact.txt'), `${'a'.repeat(1_000_000 - needle.length)}${needle}\nsecond line\n`);
+  await writeFile(path.join(root, 'over.txt'), `${'a'.repeat(1_000_001)}\n`);
+  const tools = await registryFor({ roots: [root] });
+  const session = sessionFor('ava');
+
+  const exact = await run(tools, 'fs.search', { query: needle, path: 'exact.txt' }, session) as JsonObject;
+  assert.equal((exact.matches as unknown[]).length, 1);
+  assert.equal(exact.skipped, undefined, 'nothing of this line went unsearched');
+
+  const over = await run(tools, 'fs.search', { query: needle, path: 'over.txt' }, session) as JsonObject;
+  assert.equal(over.skippedTotal, 1);
+
+  // Characters, not UTF-16 code units: 600,000 emoji are 1.2 million
+  // units and 600,000 characters, and the needle after them is found.
+  await writeFile(path.join(root, 'emoji.txt'), `${'😀'.repeat(600_000)}${needle}\n`);
+  const astral = await run(tools, 'fs.search', { query: needle, path: 'emoji.txt' }, session) as JsonObject;
+  assert.equal((astral.matches as unknown[]).length, 1, 'a line of 600,000 characters is within the limit');
+  assert.equal(astral.skipped, undefined);
+});
+
+test('a named file that turns binary after its first pages is reported as binary, with nothing matched', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-latebinary-'));
+  // Text for well past the first 8 KB — a needle in it — and then a NUL.
+  await writeFile(
+    path.join(root, 'mixed.bin'),
+    Buffer.concat([Buffer.from(`needle here\n${'plain text\n'.repeat(4_000)}`), Buffer.from([0, 1, 2, 3])]),
+  );
+  const tools = await registryFor({ roots: [root] });
+  const result = await run(tools, 'fs.search', { query: 'needle', path: 'mixed.bin' }, sessionFor('ava')) as JsonObject;
+  assert.deepEqual(result.matches, [], 'a match in the text before the NUL is not a result of a text file');
+  const skipped = result.skipped as Array<{ path: string; bytes: number; reason: string }>;
+  assert.equal(skipped[0]?.reason, 'binary');
+  assert.equal(skipped[0]?.bytes, 11 + 11 * 4_000 + 1 + 4);
+
+  // The match cap does not end the reading either: a NUL after more
+  // matches than the cap allows still makes the file binary.
+  await writeFile(
+    path.join(root, 'capped.bin'),
+    Buffer.concat([Buffer.from('needle\n'.repeat(5)), Buffer.from('plain text\n'.repeat(10_000)), Buffer.from([0])]),
+  );
+  const capped = await run(tools, 'fs.search', { query: 'needle', path: 'capped.bin', maxMatches: 2 }, sessionFor('ava')) as JsonObject;
+  assert.deepEqual(capped.matches, []);
+  assert.equal(capped.truncated, false);
+  assert.equal((capped.skipped as Array<{ reason: string }>)[0]?.reason, 'binary');
+});
+
+test('a virtual file that reports no size is still read when named', { skip: !existsSync('/proc/version') }, async () => {
+  // procfs says `size: 0` for files that have content; the size that bounds
+  // the stream must not be taken as proof there is nothing to read.
+  const tools = await registryFor({ roots: ['/proc'] });
+  const result = await run(tools, 'fs.search', { query: 'Linux', path: 'version' }, sessionFor('ava')) as JsonObject;
+  assert.equal((result.matches as unknown[]).length, 1, '/proc/version names the kernel');
+});
+
+test('a virtual file that reports no size is read up to the walk limit, and the result says so', { skip: !existsSync('/proc/kallsyms') }, async (t) => {
+  // procfs again, this time a file whose content runs to megabytes while
+  // its size stays zero: the cap that stands in for a size stops the read.
+  let bytes = 0;
+  try {
+    bytes = (await readFile('/proc/kallsyms')).length;
+  } catch {
+    bytes = 0;
+  }
+  if (bytes <= 1_000_000) {
+    t.skip('/proc/kallsyms is not over the cap here');
+    return;
+  }
+  const tools = await registryFor({ roots: ['/proc'] });
+  const result = await run(tools, 'fs.search', { query: 'no such symbol name', path: 'kallsyms' }, sessionFor('ava')) as JsonObject;
+  assert.deepEqual(result.matches, []);
+  const skipped = result.skipped as Array<{ bytes: number; reason: string }>;
+  assert.match(skipped[0]?.reason ?? '', /reports no size, and was searched in its first 1 MB only/);
+  assert.equal(skipped[0]?.bytes, 0);
+});
+
+test('a file whose size the cap exactly matches is not reported as clipped', async () => {
+  // The unsized path reads one byte past the cap to know there was more.
+  // A regular file of exactly the cap is bounded by its own size, so this
+  // covers the arithmetic the unsized path shares with it: read to the end
+  // and report nothing skipped.
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-exactcap-'));
+  const needle = 'needle';
+  await writeFile(path.join(root, 'atcap.txt'), `${'a'.repeat(1_000_000 - needle.length - 1)}${needle}\n`);
+  const tools = await registryFor({ roots: [root] });
+  const result = await run(tools, 'fs.search', { query: needle, path: 'atcap.txt' }, sessionFor('ava')) as JsonObject;
+  assert.equal((result.matches as unknown[]).length, 1);
+  assert.equal(result.skipped, undefined, 'a file read to its end reports nothing skipped');
+});
+
+test('a whole-word match at a clipped line\'s edge is judged by the file, not by where the search stopped', async () => {
+  // The line is cut at a million characters. A query ending exactly there
+  // looks like a whole word if you only read what was kept — the file says
+  // otherwise, and the code point that came next is what settles it.
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-wordedge-'));
+  const needle = 'needle';
+  const lead = 'a '.repeat((1_000_000 - needle.length) / 2);
+  await writeFile(path.join(root, 'cut.txt'), `${lead}${needle}xtra and more past the cut\n`);
+  await writeFile(path.join(root, 'whole.txt'), `${lead}${needle} and more past the cut\n`);
+  const tools = await registryFor({ roots: [root] });
+  const session = sessionFor('ava');
+
+  const cut = await run(tools, 'fs.search', { query: needle, path: 'cut.txt', wholeWord: true }, session) as JsonObject;
+  assert.deepEqual(cut.matches, [], 'the word runs on past the cut, so it is not a whole word');
+
+  const whole = await run(tools, 'fs.search', { query: needle, path: 'whole.txt', wholeWord: true }, session) as JsonObject;
+  assert.equal((whole.matches as unknown[]).length, 1, 'a word that really ends at the cut still matches');
+});
+
+test('the skipped list is capped, and the count says how many there were', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-skipmany-'));
+  const big = 'x'.repeat(1_000_001);
+  for (let i = 0; i < 60; i += 1) {
+    await writeFile(path.join(root, `big-${i}.log`), big);
+  }
+  const tools = await registryFor({ roots: [root] });
+  const walked = await run(tools, 'fs.search', { query: 'needle' }, sessionFor('ava')) as JsonObject;
+  assert.equal((walked.skipped as unknown[]).length, 50);
+  assert.equal(walked.skippedTotal, 60);
 });
 
 test('a search pattern is literal text, so no query can stall the process', async () => {

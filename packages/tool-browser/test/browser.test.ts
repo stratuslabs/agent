@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readdir, writeFile } from 'node:fs/promises';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -17,6 +18,9 @@ import {
 
 interface Recorder {
   launches: number;
+  /** The proxy each launch was pointed at, so a test can send a request through it. */
+  proxyUrls: string[];
+  contextProxyUrls: string[];
   contexts: number;
   closedContexts: number;
   closedBrowsers: number;
@@ -25,11 +29,13 @@ interface Recorder {
 }
 
 const fakeDriver = (recorder: Recorder, page?: Partial<PageLike>): BrowserDriver => ({
-  async launch() {
+  async launch(options) {
     recorder.launches += 1;
+    recorder.proxyUrls.push(String(options.proxy?.server ?? ''));
     const browser: BrowserLike = {
-      async newContext() {
+      async newContext(options) {
         recorder.contexts += 1;
+        recorder.contextProxyUrls.push(String(options?.proxy?.server ?? ''));
         const context: BrowserContextLike = {
           async newPage() {
             let current = 'about:blank';
@@ -84,6 +90,8 @@ const fakeDriver = (recorder: Recorder, page?: Partial<PageLike>): BrowserDriver
 
 const emptyRecorder = (): Recorder => ({
   launches: 0,
+  proxyUrls: [],
+  contextProxyUrls: [],
   contexts: 0,
   closedContexts: 0,
   closedBrowsers: 0,
@@ -106,6 +114,133 @@ const pluginWith = async (config: JsonObject, recorder: Recorder) => {
   await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
   return { plugin, tools, tool: (name: string) => tools.get(name) as Tool };
 };
+
+test('a page whose script never yields is given up on within the timeout, and the next call gets a fresh page', async (t) => {
+  // Playwright bounds navigation, not `evaluate` or `title`; a busy main
+  // thread answers neither. The first read hangs forever; the second page
+  // answers, which is what a fresh context buys.
+  const recorder = emptyRecorder();
+  let reads = 0;
+  const tools = new ToolRegistry();
+  const plugin = createBrowserPlugin(
+    { allowedHosts: ['example.com'], navigationTimeoutMs: 50 },
+    {
+      driver: fakeDriver(recorder, {
+        evaluate: () => (reads++ === 0 ? new Promise<never>(() => {}) : Promise.resolve('answered')),
+      }),
+    },
+  );
+  await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
+  t.after(() => plugin.dispose?.());
+  const read = tools.get('browser.read') as Tool;
+  const session = sessionFor('busy');
+
+  // Raced against a bound of its own, so a read that never gives up fails
+  // this assertion instead of hanging the suite.
+  const outcome = await Promise.race([
+    read.execute({ url: 'https://example.com/' }, session).then(() => 'answered', (error: Error) => error.message),
+    new Promise<string>((resolve) => setTimeout(() => resolve('still waiting'), 2_000)),
+  ]);
+  assert.match(outcome, /did not answer for its text within 50ms.*fresh page/);
+  assert.equal(recorder.closedContexts, 1, 'the unresponsive context was closed');
+
+  const again = await read.execute({ url: 'https://example.com/' }, session) as JsonObject;
+  assert.equal(again.text, 'answered');
+  assert.equal(recorder.contexts, 2, 'the second call ran in a fresh context');
+});
+
+test('giving up on a page is itself bounded, when even closing its context hangs', async (t) => {
+  // A transport wedged enough that the first `context.close()` never
+  // settles either. The call still comes back within the timeout with the
+  // same error, and the next call runs in a fresh context; the close
+  // carries on unwaited.
+  let reads = 0;
+  let contexts = 0;
+  let closes = 0;
+  const routes: Array<(route: RouteLike) => void | Promise<void>> = [];
+  const driver: BrowserDriver = {
+    async launch() {
+      return {
+        async newContext() {
+          contexts += 1;
+          return {
+            async newPage() {
+              return {
+                async goto() {
+                  return { status: () => 200 };
+                },
+                url: () => 'https://example.com/',
+                async title() {
+                  return 'Example Domain';
+                },
+                async content() {
+                  return '';
+                },
+                evaluate: () => (reads++ === 0 ? new Promise<never>(() => {}) : Promise.resolve('answered')),
+                async screenshot() {
+                  return Buffer.from('png');
+                },
+                async click() {},
+                async fill() {},
+                async route(_pattern, handler) {
+                  routes.push(handler);
+                },
+                async close() {},
+              };
+            },
+            close: () => (closes++ === 0 ? new Promise<never>(() => {}) : Promise.resolve()),
+          };
+        },
+        async close() {},
+      };
+    },
+  };
+  const tools = new ToolRegistry();
+  const plugin = createBrowserPlugin({ allowedHosts: ['example.com'], navigationTimeoutMs: 50 }, { driver });
+  await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
+  t.after(() => plugin.dispose());
+  const read = tools.get('browser.read') as Tool;
+  const session = sessionFor('wedged');
+
+  // The page that is about to hang was refused something first.
+  await tools.get('browser.goto')!.execute({ url: 'https://example.com/' }, session);
+  await routes[0]!({
+    request: () => ({ url: () => 'file:///etc/passwd' }),
+    async abort() {},
+    async continue() {},
+  });
+
+  const outcome = await Promise.race([
+    read.execute({}, session).then(() => 'answered', (error: Error) => error.message),
+    new Promise<string>((resolve) => setTimeout(() => resolve('still waiting'), 2_000)),
+  ]);
+  assert.match(outcome, /did not answer for its text within 50ms.*fresh page/);
+
+  const again = await read.execute({ url: 'https://example.com/' }, session) as JsonObject;
+  assert.equal(again.text, 'answered');
+  assert.equal(contexts, 2, 'the second call ran in a fresh context');
+  // The refusal belonged to the page that was given up on; the fresh page
+  // is not told about it, even though the old context never finished closing.
+  assert.equal(again.blockedRequests, undefined, 'the abandoned page\'s refusals went with it');
+});
+
+test('a call may narrow maxTextBytes, never raise it', async (t) => {
+  const recorder = emptyRecorder();
+  const tools = new ToolRegistry();
+  const plugin = createBrowserPlugin(
+    { allowedHosts: ['example.com'], maxTextBytes: 20 },
+    { driver: fakeDriver(recorder, { async evaluate() { return 'x'.repeat(1_000); } }) },
+  );
+  await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
+  t.after(() => plugin.dispose?.());
+  const read = tools.get('browser.read') as Tool;
+
+  const lifted = await read.execute({ url: 'https://example.com/', maxBytes: 1_000_000 }, sessionFor('s1')) as JsonObject;
+  assert.equal(lifted.truncated, true);
+  assert.ok(String(lifted.text).startsWith('x'.repeat(20) + '\n'), 'a bigger maxBytes does not lift the cap');
+  const narrowed = await read.execute({ url: 'https://example.com/', maxBytes: 5 }, sessionFor('s1')) as JsonObject;
+  assert.ok(String(narrowed.text).startsWith('xxxxx\n'));
+});
 
 test('one browser, a context per conversation, dropped when idle', async (t) => {
   const recorder = emptyRecorder();
@@ -300,6 +435,118 @@ test('an agent whose policy is narrower than the default gets a browser that enf
   // launching a third.
   await tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor('rex-1', 'rex'));
   assert.equal(recorder.launches, 2);
+});
+
+test('a refusal is reported once, to the conversation whose page was browsing, and not to one that began later', async (t) => {
+  const recorder = emptyRecorder();
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'] }, recorder);
+  t.after(() => plugin.dispose());
+
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor('first'));
+  const proxy = new URL(recorder.contextProxyUrls[0]!);
+  // What the page does when a script on it fetches a local address: the
+  // request reaches the proxy, and the proxy refuses it.
+  const through = (): Promise<number> =>
+    new Promise((resolve, reject) => {
+      const request = http.request(
+        { host: proxy.hostname, port: Number(proxy.port), method: 'GET', path: 'http://localhost:1/health' },
+        (response) => {
+          response.resume();
+          response.on('end', () => resolve(response.statusCode ?? 0));
+        },
+      );
+      request.on('error', reject);
+      request.end();
+    });
+  assert.equal(await through(), 403);
+
+  // Every result reports, the act included — the next result is the next
+  // result, whichever tool produced it.
+  const reported = await tool('browser.act').execute({ action: 'click', selector: '#go' }, sessionFor('first')) as JsonObject;
+  assert.match(String((reported.blockedRequests as string[])[0]), /localhost/);
+  const again = await tool('browser.read').execute({}, sessionFor('first')) as JsonObject;
+  assert.equal(again.blockedRequests, undefined, 'a refusal is reported once');
+
+  // A conversation that began after the refusal was never browsing when it
+  // happened, and is told nothing about it.
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor('later'));
+  const later = await tool('browser.read').execute({}, sessionFor('later')) as JsonObject;
+  assert.equal(later.blockedRequests, undefined);
+});
+
+test('a refusal in one conversation is never reported to another under the same policy', async (t) => {
+  const recorder = emptyRecorder();
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'] }, recorder);
+  t.after(() => plugin.dispose());
+
+  // Two conversations, one policy, one browser — and a proxy each.
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor('one'));
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, sessionFor('two'));
+  assert.equal(recorder.launches, 1);
+  assert.equal(new Set(recorder.contextProxyUrls).size, 2, 'each context browses through its own proxy');
+
+  // A page in the first conversation is refused a local address, with the
+  // whole URL in the reason — which is what must stay out of the second.
+  const proxy = new URL(recorder.contextProxyUrls[0]!);
+  await new Promise<void>((resolve, reject) => {
+    const request = http.request(
+      { host: proxy.hostname, port: Number(proxy.port), method: 'GET', path: 'http://127.0.0.1:1/secret?token=abc' },
+      (response) => {
+        response.resume();
+        response.on('end', () => resolve());
+      },
+    );
+    request.on('error', reject);
+    request.end();
+  });
+
+  const other = await tool('browser.read').execute({}, sessionFor('two')) as JsonObject;
+  assert.equal(other.blockedRequests, undefined, 'the other conversation is told nothing');
+  const own = await tool('browser.read').execute({}, sessionFor('one')) as JsonObject;
+  assert.match(String((own.blockedRequests as string[])[0]), /token=abc/);
+});
+
+test('a refusal survives a call that fails after it, and is reported by the next one', async (t) => {
+  // The refusal list is emptied by reading it. A `title()` that throws
+  // after the drain would take the refusals with it, and no result would
+  // ever carry them — so nothing is drained until the result is certain.
+  const recorder = emptyRecorder();
+  let titles = 0;
+  const tools = new ToolRegistry();
+  const plugin = createBrowserPlugin(
+    { allowedHosts: ['example.com'] },
+    {
+      driver: fakeDriver(recorder, {
+        // The second call is the one that fails, after the refusal below.
+        title: () => (titles++ === 1 ? Promise.reject(new Error('Target page, context or browser has been closed')) : Promise.resolve('Example Domain')),
+      }),
+    },
+  );
+  await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
+  t.after(() => plugin.dispose());
+  const goto = tools.get('browser.goto') as Tool;
+  const session = sessionFor('kept');
+
+  await goto.execute({ url: 'https://example.com/' }, session);
+
+  // What the page was refused before the failing call.
+  const proxy = new URL(recorder.contextProxyUrls[0]!);
+  await new Promise<void>((resolve, reject) => {
+    const request = http.request(
+      { host: proxy.hostname, port: Number(proxy.port), method: 'GET', path: 'http://127.0.0.1:1/health' },
+      (response) => {
+        response.resume();
+        response.on('end', () => resolve());
+      },
+    );
+    request.on('error', reject);
+    request.end();
+  });
+
+  await assert.rejects(goto.execute({ url: 'https://example.com/' }, session), /has been closed/);
+
+  const next = await goto.execute({ url: 'https://example.com/' }, session) as JsonObject;
+  assert.match(String((next.blockedRequests as string[])[0]), /127\.0\.0\.1/);
 });
 
 test('one agent’s blocked requests are not reported to another', async (t) => {

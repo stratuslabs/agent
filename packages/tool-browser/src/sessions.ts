@@ -18,7 +18,7 @@ export interface SessionPoolOptions {
   /** How many contexts may exist at once. The oldest goes when a new one would exceed it. */
   maxContexts?: number;
   /** Called when a page is dropped, so a caller can log it. */
-  onEvicted?: (event: { sessionId: string; reason: 'idle' | 'capacity' | 'shutdown' | 'policy' }) => void;
+  onEvicted?: (event: { sessionId: string; reason: 'idle' | 'capacity' | 'shutdown' | 'policy' | 'unresponsive' }) => void;
   /** Reported rather than thrown: a sweep runs on a timer with nobody waiting on it. */
   onError?: (error: unknown) => void;
 }
@@ -26,8 +26,22 @@ export interface SessionPoolOptions {
 interface BrowserEntry {
   key: string;
   browser: BrowserLike;
+  /**
+   * The proxy Chromium was launched with. Every context overrides it with
+   * one of its own (below), so nothing browses through this one; it is
+   * still the policy for anything that does not, and a Chromium launched
+   * without a proxy cannot be given per-context ones on every platform.
+   */
   proxy: EgressProxy;
   sessions: Set<string>;
+  /**
+   * Admissions between choosing this browser and adding their session to
+   * it. A browser with no sessions is closed as its last one goes, and an
+   * admission is an owner the session set cannot see yet: without this, an
+   * unresponsive page released while another conversation was opening its
+   * context closed the browser out from under that context.
+   */
+  admitting: number;
 }
 
 interface PooledContext {
@@ -36,6 +50,21 @@ interface PooledContext {
   page: PageLike;
   lastUsedAt: number;
   browserKey: string;
+  /**
+   * This conversation's own proxy, under the same policy as the browser's.
+   * What it refuses is this conversation's alone: with one proxy per
+   * browser, two conversations under one policy shared one refusal log,
+   * and a page in one was told what a page in the other had been refused
+   * — an address, and for plain HTTP the whole URL.
+   */
+  proxy: EgressProxy;
+  /**
+   * How many of the proxy's refusals this conversation has been told:
+   * what it is told next time is what came after. Without the cursor, a
+   * conversation was handed its whole history on every call — one page's
+   * refused redirect to localhost, reported on every later result, forever.
+   */
+  refusalsSeen: number;
 }
 
 const DEFAULT_IDLE_MS = 5 * 60_000;
@@ -55,7 +84,8 @@ const MAX_SWEEP_INTERVAL_MS = 60_000;
  *   names, so it cannot narrow a hostname destination without re-opening
  *   the DNS-rebinding race the proxy exists to close.
  * - **A context per conversation**, so two conversations never share a
- *   cookie jar or a login.
+ *   cookie jar or a login — and a proxy per context, under the same
+ *   policy, so they never share a refusal log either.
  * - **Nothing left running.** A context that has gone quiet is closed, and
  *   a browser whose last conversation went with it is closed too.
  *
@@ -94,15 +124,22 @@ export class BrowserSessionPool {
 
   private async browserFor(policy: EgressPolicy): Promise<BrowserEntry> {
     const key = policyKeyFor(policy);
+    // Claimed in the same tick as the lookup, before any await can let a
+    // release in: the caller owes an `admitting -= 1` for every entry
+    // returned here, whichever path produced it.
+    const claim = (entry: BrowserEntry): BrowserEntry => {
+      entry.admitting += 1;
+      return entry;
+    };
     const existing = this.browsers.get(key);
     if (existing) {
-      return existing;
+      return claim(existing);
     }
     // Single-flight per policy: two calls arriving together must not launch
     // two browsers, and the second would leak because only one is kept.
     const pending = this.launching.get(key);
     if (pending) {
-      return pending;
+      return pending.then(claim);
     }
 
     const launch = (async (): Promise<BrowserEntry> => {
@@ -114,7 +151,7 @@ export class BrowserSessionPool {
           ...(this.options.executablePath ? { executablePath: this.options.executablePath } : {}),
           ...(this.options.channel ? { channel: this.options.channel } : {}),
         });
-        const entry: BrowserEntry = { key, browser, proxy, sessions: new Set() };
+        const entry: BrowserEntry = { key, browser, proxy, sessions: new Set(), admitting: 0 };
         this.browsers.set(key, entry);
         this.armSweep();
         return entry;
@@ -126,7 +163,7 @@ export class BrowserSessionPool {
       }
     })();
     this.launching.set(key, launch);
-    return launch;
+    return launch.then(claim);
   }
 
   /**
@@ -174,74 +211,183 @@ export class BrowserSessionPool {
       await this.drop(existing, 'policy');
     }
 
+    // Claimed by `browserFor`: from here until the session is added below,
+    // a release of this browser's last session (an unresponsive page — the
+    // one pool change that does not queue behind admission, because the
+    // page it is giving up on already waited its full timeout) leaves the
+    // browser open for this context.
     const entry = await this.browserFor(policy);
-    const maxContexts = this.options.maxContexts ?? DEFAULT_MAX_CONTEXTS;
-    while (this.contexts.size >= maxContexts) {
-      const oldest = [...this.contexts.values()].sort((left, right) => left.lastUsedAt - right.lastUsedAt)[0];
-      if (!oldest) {
-        break;
-      }
-      await this.drop(oldest, 'capacity');
-    }
-
-    const context = await entry.browser.newContext();
-    let page: PageLike;
+    // The context's own proxy, under the same policy as the browser's, so
+    // what it refuses is this conversation's alone. Created inside the
+    // block below so a failure anywhere after it still closes it.
+    let proxy: EgressProxy | undefined;
     try {
-      page = await context.newPage();
-    } catch (error) {
-      // A context that never got a page is not in `contexts`, so the idle
-      // sweep will never look at it — and neither will shutdown, which
-      // walks the same map. Closed here or not at all, and the browser
-      // goes too when it turns out nothing is using it (which is also how
-      // a Chromium that died during page creation stops being handed to
-      // the next caller).
+      const maxContexts = this.options.maxContexts ?? DEFAULT_MAX_CONTEXTS;
+      while (this.contexts.size >= maxContexts) {
+        const oldest = [...this.contexts.values()].sort((left, right) => left.lastUsedAt - right.lastUsedAt)[0];
+        if (!oldest) {
+          break;
+        }
+        await this.drop(oldest, 'capacity');
+      }
+
+      proxy = await createEgressProxy(policy);
+      const context = await entry.browser.newContext({ proxy: chromiumProxyOptions(proxy) });
+      let page: PageLike;
       try {
-        await context.close();
-      } catch {
-        // Already gone with the browser that owned it.
+        page = await context.newPage();
+      } catch (error) {
+        // A context that never got a page is not in `contexts`, so the idle
+        // sweep will never look at it — and neither will shutdown, which
+        // walks the same map. Closed here or not at all.
+        try {
+          await context.close();
+        } catch {
+          // Already gone with the browser that owned it.
+        }
+        throw error;
       }
-      if (entry.sessions.size === 0) {
-        await this.closeBrowser(entry);
-      }
-      throw error;
+      this.contexts.set(sessionId, {
+        sessionId,
+        context,
+        page,
+        lastUsedAt: now,
+        browserKey: key,
+        proxy,
+        refusalsSeen: 0,
+      });
+      // Held by the session now; the `finally` below must not close it.
+      proxy = undefined;
+      entry.sessions.add(sessionId);
+      return page;
+    } finally {
+      entry.admitting -= 1;
+      // A proxy whose context never came to be is a listening socket
+      // nothing else would ever close.
+      await proxy?.close();
+      // A browser that nothing is using goes too — which is also how a
+      // Chromium that died during page creation stops being handed to the
+      // next caller. Never on the success path: the session was just added.
+      await this.closeBrowserIfUnused(entry);
     }
-    this.contexts.set(sessionId, { sessionId, context, page, lastUsedAt: now, browserKey: key });
-    entry.sessions.add(sessionId);
-    return page;
   }
 
   /**
-   * What the proxy refused for this session's browser.
-   *
-   * Scoped to the browser rather than to the process: an agent under a
-   * different policy has a different browser and never sees these. Two
-   * agents that share a policy share a browser and can see each other's
-   * refused *addresses* — which is the same set their identical policy
-   * already told them about.
+   * What this session's own proxy refused — its conversation's, and no
+   * other's, whatever policy the two share.
    */
   refusalsFor(sessionId: string): string[] {
     const context = this.contexts.get(sessionId);
     if (!context) {
       return [];
     }
-    return this.browsers.get(context.browserKey)?.proxy.refusals ?? [];
+    const { proxy } = context;
+    // Only what arrived since this conversation last looked, and each
+    // entry once: a report is a report, not a standing accusation.
+    const unseen = Math.min(proxy.refusalCount - context.refusalsSeen, proxy.refusals.length);
+    context.refusalsSeen = proxy.refusalCount;
+    return unseen > 0 ? proxy.refusals.slice(-unseen) : [];
   }
 
-  private async drop(entry: PooledContext, reason: 'idle' | 'capacity' | 'shutdown' | 'policy'): Promise<void> {
+  /**
+   * Close one conversation's context because its page stopped answering —
+   * a script that never yields holds `evaluate` and `title` forever, and
+   * the only way past it is a fresh page. Returns false when the session
+   * had no context to close.
+   */
+  async release(sessionId: string, page?: PageLike): Promise<boolean> {
+    // Not through the admission queue: the caller has already waited the
+    // page's full timeout, and an admission ahead in the queue is bounded
+    // by nothing — a launch or `newContext` that hangs would hold this
+    // call, and the tool call above it, past any promise the timeout made.
+    // What the queue protected against, a browser closed under an
+    // admission that had chosen it, `BrowserEntry.admitting` covers.
+    //
+    // The page, when the caller names one, has to be the one the session
+    // still holds: the sweep may have dropped the page that timed out and a
+    // concurrent call opened a healthy replacement under the same id
+    // before the timeout fired, and that replacement is not what stopped
+    // answering.
+    const entry = this.contexts.get(sessionId);
+    if (!entry || (page !== undefined && entry.page !== page)) {
+      return false;
+    }
+    await this.drop(entry, 'unresponsive');
+    return true;
+  }
+
+  private async drop(entry: PooledContext, reason: 'idle' | 'capacity' | 'shutdown' | 'policy' | 'unresponsive'): Promise<void> {
+    // Only the context the pool still holds for this session. The idle
+    // sweep and shutdown work from a snapshot and await each drop in turn,
+    // so by the time they reach an entry, that session may have timed out,
+    // been released, and opened a replacement under the same id — and
+    // the state keyed by that id is the replacement's now, not this one's.
+    if (this.contexts.get(entry.sessionId) !== entry) {
+      return;
+    }
     this.contexts.delete(entry.sessionId);
+    // Ownership goes before the close, not after it. A close that outlasts
+    // the teardown bound in `answeredWithin` settles after this session has
+    // opened a replacement context in the same browser, under the same id;
+    // taking "its" session out of the set then would take the replacement's,
+    // and close the browser under it.
+    this.browsers.get(entry.browserKey)?.sessions.delete(entry.sessionId);
+    // Reported here too, before the close rather than after it: the
+    // eviction is the pool forgetting the context, which has just happened,
+    // and a listener keying per-session state on it (the plugin's list of
+    // what a page was refused) must clear that state before the next call
+    // — which opens a replacement the moment this returns — not when a
+    // close that may never settle does, and never after the replacement
+    // has state of its own under the same id.
     try {
-      await entry.context.close();
-    } catch {
-      // A context that is already gone is the outcome we wanted.
+      this.options.onEvicted?.({ sessionId: entry.sessionId, reason });
+    } catch (error) {
+      // A listener's failure is its own; the context and browser below are
+      // no longer tracked anywhere and would leak if it stopped this drop.
+      this.options.onError?.(error);
     }
+    // The browser goes with its last conversation: a Chromium sitting idle
+    // overnight is the leak this pack is most likely to cause. Retired from
+    // the pool now, in the same step, and closed alongside the context
+    // rather than after it: a context whose close never settles (the case
+    // `answeredWithin` stops waiting on) would otherwise leave a possibly
+    // wedged browser registered for the next call to be handed, when that
+    // call was promised a fresh one.
     const browser = this.browsers.get(entry.browserKey);
-    browser?.sessions.delete(entry.sessionId);
-    if (browser && browser.sessions.size === 0) {
-      // The browser goes with its last conversation: a Chromium sitting
-      // idle overnight is the leak this pack is most likely to cause.
-      await this.closeBrowser(browser);
+    const retired = browser !== undefined && this.retireIfUnused(browser);
+    const closingContext = Promise.all([
+      entry.context.close().catch(() => {
+        // A context that is already gone is the outcome we wanted.
+      }),
+      // The context's own proxy goes with it, and alongside rather than
+      // after: a context close that never settles must not hold a
+      // listening socket open behind it.
+      entry.proxy.close().catch(() => undefined),
+    ]);
+    if (retired && browser) {
+      await this.shutBrowser(browser);
     }
-    this.options.onEvicted?.({ sessionId: entry.sessionId, reason });
+    await closingContext;
+  }
+
+  /**
+   * Take a browser no session holds and no admission is about to out of the
+   * pool — synchronously, so the next call launches afresh — and say
+   * whether it did. The caller then closes it with `shutBrowser`.
+   */
+  private retireIfUnused(entry: BrowserEntry): boolean {
+    if (entry.sessions.size === 0 && entry.admitting === 0 && this.browsers.get(entry.key) === entry) {
+      this.retireBrowser(entry);
+      return true;
+    }
+    return false;
+  }
+
+  /** Close a browser no session holds and no admission is about to. */
+  private async closeBrowserIfUnused(entry: BrowserEntry): Promise<void> {
+    if (this.retireIfUnused(entry)) {
+      await this.shutBrowser(entry);
+    }
   }
 
   /** Close whatever has been idle longer than the timeout. Returns what went. */
@@ -279,16 +425,27 @@ export class BrowserSessionPool {
   }
 
   private async closeBrowser(entry: BrowserEntry): Promise<void> {
+    this.retireBrowser(entry);
+    await this.shutBrowser(entry);
+  }
+
+  private retireBrowser(entry: BrowserEntry): void {
     this.browsers.delete(entry.key);
-    try {
-      await entry.browser.close();
-    } catch {
-      // Same as a context: already gone is fine.
-    }
-    await entry.proxy.close();
     if (this.browsers.size === 0) {
       this.disarmSweep();
     }
+  }
+
+  private async shutBrowser(entry: BrowserEntry): Promise<void> {
+    // The proxy alongside the browser, not after it: a browser whose close
+    // never settles is exactly the one being retired here, and its proxy
+    // is a listening socket nothing else would ever close.
+    await Promise.all([
+      entry.browser.close().catch(() => {
+        // Same as a context: already gone is fine.
+      }),
+      entry.proxy.close(),
+    ]);
   }
 
   /** Everything, for shutdown. */

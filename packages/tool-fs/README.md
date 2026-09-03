@@ -49,7 +49,7 @@ tools: [fs.read, fs.search]     # or fs.* for the whole toolset
 | --- | --- | --- |
 | `fs.read` | `safe` | Runs unattended. Nothing outside the agent's roots is readable, which is what makes reading safe rather than merely convenient. |
 | `fs.list` | `safe` | Runs unattended. Symlinks are listed as symlinks and never followed. |
-| `fs.search` | `safe` | Runs unattended. Matches **literal text** (optionally `wholeWord`), never a regular expression — see below. Given a directory it walks it without following symlinks, skipping `.git`, `node_modules`, and files over 1 MB; given a file it searches that file and no others. |
+| `fs.search` | `safe` | Runs unattended. Matches **literal text** (optionally `wholeWord`), never a regular expression — see below. Given a directory it walks it without following symlinks, skipping `.git`, `node_modules`, and files over 1 MB — each skipped file is named in the result's `skipped` list (the first fifty; `skippedTotal` counts them all), never silently passed over; given a file it searches that file and no others, streamed a line at a time, whatever its size — a single line longer than a million characters (Unicode code points, whatever their encoding) is searched in its first million only, and a file that reports no size (a `/proc` file) is searched in its first 1 MB only; the result says so either way. |
 | `fs.write` | `gated` | `interactive` asks at the terminal, `remote` asks in Slack, `headless` refuses. Writing where other people read is the thing worth a person's attention. |
 
 ## Settings
@@ -57,8 +57,8 @@ tools: [fs.read, fs.search]     # or fs.* for the whole toolset
 | Key | Default | What |
 | --- | --- | --- |
 | `roots` | none | Directories this agent may reach. **No roots means no filesystem** — nothing is readable, rather than everything. |
-| `maxBytes` | `64000` | Cap on one `fs.read`, before the `truncated` marker. |
-| `maxMatches` | `100` | Cap on `fs.search` matches. |
+| `maxBytes` | `64000` | Cap on one `fs.read`, before the `truncated` marker. A call's own `maxBytes` may ask for less, never more. |
+| `maxMatches` | `100` | Cap on `fs.search` matches. A call's own `maxMatches` may ask for fewer, never more. |
 | `maxEntries` | `500` | Cap on `fs.list` entries. |
 
 Every key can be set per agent in the `agents` sub-block, over the defaults

@@ -1073,6 +1073,33 @@ export interface PendingApprovalRecord {
   parkedAt: string;
 }
 
+/**
+ * The text a session's latest turn produced, or undefined when the turn
+ * produced none.
+ *
+ * Walks back from the end and stops at the latest user message: an earlier
+ * turn's answer must never be replayed as this turn's reply when the
+ * provider returned no text (or only whitespace). Every surface that posts
+ * a reply from a stored session — a channel finishing a turn it did not
+ * start, a channel finalizing its own — reads it through this, so the two
+ * cannot disagree on which message is "the reply".
+ */
+export const latestTurnReply = (session: Pick<Session, 'messages'>): string | undefined => {
+  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
+    const message = session.messages[index];
+    if (!message) {
+      continue;
+    }
+    if (message.role === 'user') {
+      return undefined;
+    }
+    if (message.role === 'assistant' && message.content.trim().length > 0) {
+      return message.content;
+    }
+  }
+  return undefined;
+};
+
 /** Reads the checkpoint off a session, if it is parked. */
 export const readPendingApproval = (session: Session): PendingApprovalRecord | undefined => {
   const raw = session.metadata?.[PENDING_APPROVAL_METADATA_KEY];

@@ -210,8 +210,19 @@ export interface EgressProxy {
   /** `http://127.0.0.1:<port>` — what a browser is launched pointing at. */
   url: string;
   port: number;
-  /** Requests this proxy refused, newest last. Surfaced to the agent as the reason a page is blank. */
+  /**
+   * Requests this proxy refused, newest last — the most recent hundred,
+   * because a page refused something on every load must not grow the
+   * daemon's memory for the life of the browser. Surfaced to the agent as
+   * the reason a page is blank.
+   */
   refusals: string[];
+  /**
+   * How many refusals there have ever been, so a consumer that reports
+   * them can tell which entries are new since it last looked, whatever
+   * `refusals` has since dropped.
+   */
+  readonly refusalCount: number;
   close(): Promise<void>;
 }
 
@@ -250,12 +261,33 @@ const parseAuthority = (authority: string): { host: string; port: number } | und
   return { host: groups.host, port };
 };
 
-export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<EgressProxy> => {
+const MAX_RETAINED_REFUSALS = 100;
+
+export const createEgressProxy = async (
+  policy: EgressPolicy = {},
+  options: {
+    /**
+     * The resolver behind CONNECT, every address of a name in the order
+     * the system returns them. A seam for tests that need a resolution
+     * to take time — the window a browser can close its end in.
+     */
+    lookup?: (hostname: string) => Promise<Array<{ address: string; family: number }>>;
+  } = {},
+): Promise<EgressProxy> => {
   const refusals: string[] = [];
+  let refusalCount = 0;
+  const refuse = (reason: string): void => {
+    refusals.push(reason);
+    refusalCount += 1;
+    if (refusals.length > MAX_RETAINED_REFUSALS) {
+      refusals.splice(0, refusals.length - MAX_RETAINED_REFUSALS);
+    }
+  };
   const sockets = new Set<net.Socket>();
+  const lookup = options.lookup ?? ((hostname: string) => dns.promises.lookup(hostname, { all: true, verbatim: true }));
 
   const dial = async (host: string, port: number): Promise<net.Socket> => {
-    const addresses = await dns.promises.lookup(host, { all: true, verbatim: true });
+    const addresses = await lookup(host);
     const permitted = addresses.find((entry) => checkAddress(policy, host, entry.address).allowed);
     if (!permitted) {
       const first = addresses[0];
@@ -274,7 +306,16 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
 
   server.on('connect', (request, clientSocket: net.Socket, head: Buffer) => {
     sockets.add(clientSocket);
-    clientSocket.on('close', () => sockets.delete(clientSocket));
+    // Recorded before the dial, which awaits a lookup: a browser that gives
+    // up on the tunnel while the name resolves closes its end before there
+    // is an upstream to couple it to, and a listener installed after that
+    // close never fires. `close()` destroying this socket during the same
+    // lookup is the same case, with the sweep already done.
+    let clientClosed = false;
+    clientSocket.on('close', () => {
+      clientClosed = true;
+      sockets.delete(clientSocket);
+    });
     const target = parseAuthority(request.url ?? '');
     if (!target) {
       clientSocket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
@@ -283,6 +324,11 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
     const { host, port } = target;
     dial(host, port).then(
       (upstream) => {
+        if (clientClosed) {
+          // Dialed for nobody: the browser left, or the proxy closed.
+          upstream.destroy();
+          return;
+        }
         sockets.add(upstream);
         upstream.on('close', () => sockets.delete(upstream));
         clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
@@ -293,10 +339,18 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
         clientSocket.pipe(upstream);
         upstream.on('error', () => clientSocket.destroy());
         clientSocket.on('error', () => upstream.destroy());
+        // Either end going away takes the other with it. `pipe` alone does
+        // not: a browser that abandons a page mid-transfer destroys its
+        // socket without ending it, and the upstream half stayed open for
+        // as long as the server kept talking — which for a server that
+        // never stops is forever, and an open socket is what kept a
+        // stopped daemon's process alive.
+        clientSocket.on('close', () => upstream.destroy());
+        upstream.on('close', () => clientSocket.destroy());
       },
       (error: unknown) => {
         const reason = error instanceof Error ? error.message : String(error);
-        refusals.push(reason);
+        refuse(reason);
         // 403 rather than a dropped socket: the page sees a refusal it can
         // render, and the reason reaches the agent through `refusals`.
         clientSocket.end(`HTTP/1.1 403 Forbidden\r\n\r\n${reason}`);
@@ -311,7 +365,7 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
       target = assertRequestAllowed(request.url ?? '', policy);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      refusals.push(reason);
+      refuse(reason);
       response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
       response.end(reason);
       return;
@@ -332,12 +386,26 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
       },
     );
     upstream.on('error', (error) => {
-      refusals.push(error.message);
+      refuse(error.message);
       if (!response.headersSent) {
         response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
       }
       response.end(error.message);
     });
+    // The same coupling as the CONNECT path, for plain HTTP: the browser's
+    // side closing — a page navigated away from, a tab closed — ends the
+    // upstream exchange, and the upstream socket is tracked so `close()`
+    // finds it. Without this, a never-ending response was read by a
+    // request nobody would ever collect.
+    upstream.on('socket', (socket) => {
+      sockets.add(socket);
+      socket.on('close', () => sockets.delete(socket));
+    });
+    response.on('close', () => upstream.destroy());
+    // And the other direction: an upstream that is destroyed — by `close()`,
+    // or by the target going away — ends the browser's response rather
+    // than leaving it waiting on a body that will never finish.
+    upstream.on('close', () => response.destroy());
     request.pipe(upstream);
   });
 
@@ -352,13 +420,24 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
     url: `http://127.0.0.1:${port}`,
     port,
     refusals,
+    get refusalCount() {
+      return refusalCount;
+    },
     async close() {
+      // Stop accepting first, then tear down: a connection accepted after
+      // the sweep below would be one nothing here ever destroys, and
+      // `server.close()` would wait on it — the hang this is meant to end.
+      const closed = new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
       for (const socket of sockets) {
         socket.destroy();
       }
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-      });
+      // The browser's own connections to this proxy too: `server.close()`
+      // waits for every keep-alive connection to end on its own, and a
+      // browser mid-page has no reason to end one.
+      server.closeAllConnections();
+      await closed;
     },
   };
 };
