@@ -225,6 +225,35 @@ test('cancellation kills the whole process tree, not just the direct child', asy
   assert.ok(Date.now() - startedAt < 4000);
 });
 
+test('a timeout settles even when an escaped grandchild still holds the output pipe', async () => {
+  // The grandchild starts `detached` — its own session, outside the group
+  // the timeout kills — with the command's stdout inherited, and outlives
+  // both the timeout and the test's patience. Before the fix, the call
+  // waited for it to exit on its own.
+  const grandchild = 'setTimeout(() => {}, 3000)';
+  const script = `
+    const { spawn } = require('node:child_process');
+    spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { detached: true, stdio: ['ignore', 'inherit', 'ignore'] }).unref();
+    setTimeout(() => {}, 3000);
+  `;
+  const tool = defineLocalCommandTool({
+    name: 'escapee',
+    createCommand() {
+      return { command: process.execPath, args: ['-e', script], timeoutMs: 100 };
+    },
+  });
+
+  const executor = createLocalCommandExecutor();
+  const startedAt = Date.now();
+  const result = await executor.execute({ id: 'call-escapee', toolName: 'escapee', input: {} }, tool, session);
+
+  assert.equal(result.ok, false);
+  const output = result.output as Record<string, unknown>;
+  assert.equal(output.timedOut, true);
+  // Settled with the timeout, not with the grandchild's 3s lifetime.
+  assert.ok(Date.now() - startedAt < 2000, `took ${Date.now() - startedAt}ms`);
+});
+
 test('cancellation settles the turn even when createCommand never resolves', async () => {
   // The factory runs before any process exists; the abort signal must be
   // honored there too, or a cancelled turn (and a draining daemon) waits

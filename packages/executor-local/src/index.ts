@@ -300,6 +300,19 @@ const runLocalCommand = async (
     child.kill('SIGKILL');
   };
 
+  // A kill reaches the process group, not the pipes. A grandchild that
+  // moved to its own session — `setsid`, a daemonizing server, anything
+  // `nohup … &` starts under a shell that then exits — inherited the
+  // command's stdout and keeps it open after everything in the group is
+  // dead, and `'close'` waits for every stdio stream: a 2s timeout on
+  // `setsid sleep 60 &` settled after 61s, when the escapee happened to
+  // exit. Whatever it writes later is not this command's output, so once
+  // the tree has been killed the pipes are let go rather than waited on.
+  const releaseStdio = (): void => {
+    child.stdout.destroy();
+    child.stderr.destroy();
+  };
+
   child.stdout.on('data', (chunk) => {
     stdout += stdoutDecoder.write(chunk);
   });
@@ -317,6 +330,7 @@ const runLocalCommand = async (
   const timer = setTimeout(() => {
     timedOut = true;
     killTree();
+    releaseStdio();
   }, options.timeoutMs);
   timer.unref();
 
@@ -325,6 +339,7 @@ const runLocalCommand = async (
   const onAbort = (): void => {
     aborted = true;
     killTree();
+    releaseStdio();
   };
   if (options.signal?.aborted) {
     onAbort();
