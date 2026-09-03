@@ -62,15 +62,27 @@ export const createFileCommandWhitelist = (options: {
    */
   warn?: (line: string) => void;
 }): CommandWhitelistStore => {
-  const cache = new Map<string, CommandScope[]>();
+  /**
+   * One read per agent per process, shared by everyone who asks — as a
+   * promise, so two sessions asking for the same agent at once share the
+   * read in flight rather than each missing an empty cache, each failing,
+   * and each warning.
+   */
+  const cache = new Map<string, Promise<CommandScope[]>>();
   /** Files that exist and could not be read, by agent — never written over. */
   const unreadable = new Map<string, string>();
 
-  const read = async (agentId: string): Promise<CommandScope[]> => {
+  const read = (agentId: string): Promise<CommandScope[]> => {
     const cached = cache.get(agentId);
     if (cached) {
       return cached;
     }
+    const reading = readFresh(agentId);
+    cache.set(agentId, reading);
+    return reading;
+  };
+
+  const readFresh = async (agentId: string): Promise<CommandScope[]> => {
     let scopes: CommandScope[] = [];
     // The agent id is a validated invariant by the time it reaches any
     // path join (see 03) — it is a single path segment or it was refused
@@ -100,7 +112,6 @@ export const createFileCommandWhitelist = (options: {
         );
       }
     }
-    cache.set(agentId, scopes);
     return scopes;
   };
 
@@ -118,7 +129,7 @@ export const createFileCommandWhitelist = (options: {
         return;
       }
       const updated = [...scopes, scope];
-      cache.set(agentId, updated);
+      cache.set(agentId, Promise.resolve(updated));
       await mkdir(options.directory, { recursive: true });
       const file: WhitelistFile = { version: WHITELIST_VERSION, scopes: updated };
       const target = whitelistPathFor(options.directory, agentId);

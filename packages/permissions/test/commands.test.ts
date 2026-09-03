@@ -220,7 +220,7 @@ test('a whitelist that exists but will not read is said once, ignored, and never
   // No file is the ordinary starting state, and not a warning. (Another
   // agent's, since a read is cached for the life of the store.)
   assert.deepEqual(await whitelist.scopesFor('juno'), []);
-  assert.deepEqual(warnings, []);
+  assert.equal(warnings.length, 0);
 
   // A hand edit gone wrong — one trailing comma. Reproduced against a
   // running daemon: the file read as empty with no line about it, and the
@@ -242,12 +242,19 @@ test('a whitelist that exists but will not read is said once, ignored, and never
   assert.equal(warnings.length, 1, warnings.join('\n'));
   assert.match(warnings[0] ?? '', /ava\.whitelist\.json could not be read \(.*\); its scopes are ignored and "always" answers for ava are not saved/);
   assert.equal(await readFile(file, 'utf8'), broken, 'the file is not written over');
-  assert.match(decisions.at(-1)?.reason ?? '', /runs without asking for the rest of this session — not saved: .*could not be read/);
+  assert.match(decisions.at(-1)?.reason ?? '', /runs without asking for ava until the daemon restarts — not saved: .*could not be read/);
 
-  // The answer still holds for the session, and the file is said once.
+  // The answer still holds as long as tier one does, and the file is said
+  // once.
   assert.equal(await policy.approve(contextFor('git push origin release')), true);
   assert.equal(asked, 1);
   assert.equal(warnings.length, 1);
+
+  // Once even when the first two readers arrive together — two sessions
+  // for one agent, each missing the cache, each failing the same read.
+  const together = createFileCommandWhitelist({ directory, warn: (line) => warnings.push(line) });
+  await Promise.all([together.scopesFor('ava'), together.scopesFor('ava')]);
+  assert.equal(warnings.length, 2, 'a second store warns once more, not twice');
 });
 
 test('a persisted scope cannot erase a distinction the safe list already draws', () => {
