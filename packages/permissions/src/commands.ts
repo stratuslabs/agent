@@ -443,15 +443,18 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
       if (refspecs && !token.startsWith('-') && (token.startsWith(':') || token.startsWith('+'))) {
         return undefined;
       }
-      // Nor anything the shell would expand. Tokens are stored unquoted,
-      // so `chmod -R 600 'file*'` and `chmod -R 600 file*` are one scope
-      // to this engine and two commands to `sh -c` — one touches a file
-      // named file*, the other every file that matches. The expansion
-      // characters are refused rather than the quoting remembered, since a
-      // scope that ran unattended on how a command was spelled would be a
-      // new kind of rule; the cost is a prompt each time for a URL with a
-      // `?` or a `find` with a pattern.
-      if (/[*?[\]{}~$\\]/.test(token)) {
+      // Nor anything the shell reads differently quoted and unquoted.
+      // Tokens are stored unquoted, so `chmod -R 600 'file*'` and
+      // `chmod -R 600 file*` are one scope to this engine and two commands
+      // to `sh -c` — one touches a file named file*, the other every file
+      // that matches — and `mkdir -p safe # other` and `mkdir -p safe '#'
+      // other` are one scope and two commands the other way round, since
+      // an unquoted `#` ends the command the shell runs. The characters are
+      // refused rather than the quoting remembered, since a scope that ran
+      // unattended on how a command was spelled would be a new kind of
+      // rule; the cost is a prompt each time for a URL with a `?` or a
+      // `find` with a pattern.
+      if (/[*?[\]{}~$\\#]/.test(token)) {
         return undefined;
       }
     }

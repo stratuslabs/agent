@@ -270,6 +270,11 @@ test('a scope approved for a flag-first command covers that command', () => {
   assert.equal(normalizeCommandScope(analyzeCommand("curl -sL 'https://example.com/?a=b'")), undefined);
   assert.equal(normalizeCommandScope(analyzeCommand('ls -la ~/notes')), undefined);
   assert.equal(normalizeCommandScope(analyzeCommand('ls -la $HOME')), undefined);
+  // And the other way round: an unquoted `#` ends what the shell runs, so
+  // `mkdir -p safe # other` runs `mkdir -p safe` and would have covered
+  // `mkdir -p safe '#' other`, where `other` is real.
+  assert.equal(normalizeCommandScope(analyzeCommand('mkdir -p safe # other')), undefined);
+  assert.equal(normalizeCommandScope(analyzeCommand("mkdir -p safe '#' other")), undefined);
   // A quoted token that the shell would not expand persists as the one
   // token it is, and matches only the same spelling.
   const spaced = normalizeCommandScope(analyzeCommand("mkdir -p 'my dir'"));
