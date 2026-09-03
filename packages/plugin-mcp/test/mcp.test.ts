@@ -276,9 +276,9 @@ test('a server that is unreachable at startup leaves the rest serving, with an i
     {
       servers: {
         linear: { url: 'http://127.0.0.1:9/unused' },
-        // A credential in the endpoint must not reach the log through the
-        // hint that names the endpoint.
-        flaky: { url: 'http://svc:hunter2@127.0.0.1:9/unused?sig=secretsig' },
+        // A credential in the endpoint — userinfo, a path segment, a query
+        // value — must not reach the log through the hint that names it.
+        flaky: { url: 'http://svc:hunter2@127.0.0.1:9/mcp/pathtoken?sig=secretsig' },
       },
     },
     {
@@ -305,7 +305,8 @@ test('a server that is unreachable at startup leaves the rest serving, with an i
     assert.match(hint!, /connection refused/);
     assert.equal(hint!.includes('hunter2'), false, hint);
     assert.equal(hint!.includes('secretsig'), false, hint);
-    assert.match(hint!, /the endpoint \(http:\/\/\*\*\*@127\.0\.0\.1:9\/unused\?sig=\*\*\*\)/);
+    assert.equal(hint!.includes('pathtoken'), false, hint);
+    assert.match(hint!, /the endpoint \(http:\/\/127\.0\.0\.1:9\)/);
   } finally {
     await plugin.dispose?.();
   }
@@ -515,6 +516,64 @@ test('a protocol-level client error is neither logged nor blamed for a later clo
     });
     assert.equal(warnings.some((message) => message.includes(payload.slice(0, 40))), false);
   } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('every line the plugin logs is bounded, whatever a server named its tool', async () => {
+  // MCP puts no length on a tool name, and the daemon log rotates at 8 MB;
+  // the "connected" and "added" lines carry the name, so the bound is on
+  // the line, not on any one thing composed into it.
+  // A raw Server, because McpServer's registerTool validates names and a
+  // remote server's tools/list is under no such obligation.
+  // The name reaches a line when it is discovered on a reconnect, so the
+  // server advertises nothing on its first dial and the long name on its
+  // second.
+  const longName = 'x'.repeat(20_000);
+  let dials = 0;
+  let serverSide: Transport | undefined;
+  const transportFor = async (): Promise<Transport> => {
+    dials += 1;
+    const advertised = dials === 1 ? [] : [{ name: longName, inputSchema: { type: 'object' as const } }];
+    const server = new Server({ name: 'verbose', version: '1.0.0' }, { capabilities: { tools: {} } });
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: advertised }));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    serverSide = serverTransport;
+    await server.connect(serverTransport);
+    return clientTransport;
+  };
+  const lines: string[] = [];
+  let connections = 0;
+  let signalReconnected = () => {};
+  const reconnected = new Promise<void>((resolve) => {
+    signalReconnected = resolve;
+  });
+  const plugin = createMcpPlugin(
+    { servers: { verbose: { url: 'http://127.0.0.1:9/unused' } } },
+    {
+      transportFor,
+      log: (message) => lines.push(message),
+      warn: (message) => lines.push(message),
+      reconnectDelayMs: () => 1,
+      onConnected: () => {
+        connections += 1;
+        if (connections === 2) {
+          signalReconnected();
+        }
+      },
+    },
+  );
+  await loadThroughView(plugin, new ToolRegistry());
+  const keepAlive = setInterval(() => {}, 50);
+  try {
+    await serverSide?.close();
+    await reconnected;
+    assert.ok(lines.some((line) => line.includes('xxxx')), 'the name reached a log line');
+    for (const line of lines) {
+      assert.ok(line.length <= 1001, `${line.length} chars`);
+    }
+  } finally {
+    clearInterval(keepAlive);
     await plugin.dispose?.();
   }
 });

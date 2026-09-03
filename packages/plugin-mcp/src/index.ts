@@ -357,23 +357,29 @@ const stdioOverflowBytes = (error: unknown, spec: McpServerSpec): string | undef
 };
 
 /**
- * A URL as the log may carry it: a token in the userinfo or a signed query
- * is a credential, and the log is what people paste into issues.
+ * An endpoint as the log may carry it: the origin and nothing else. A
+ * credential can sit in the userinfo, in a query value, or in a path
+ * segment (`https://host/mcp/<token>` is a common shape), and the log is
+ * what people paste into issues. The origin is enough to tell one server
+ * from another, and the line names the config block for the rest.
  */
-const redactUrl = (url: string): string => {
+const describeEndpoint = (url: string): string => {
   try {
-    const parsed = new URL(url);
-    if (parsed.username !== '' || parsed.password !== '') {
-      parsed.username = '***';
-      parsed.password = '';
-    }
-    for (const key of [...parsed.searchParams.keys()]) {
-      parsed.searchParams.set(key, '***');
-    }
-    return parsed.toString();
+    return new URL(url).origin;
   } catch {
     return '<unparseable url>';
   }
+};
+
+/**
+ * Whole log lines are bounded, not only the error text inside them — a
+ * remote server chooses its tool names, and one name can be as long as
+ * the server likes.
+ */
+const LOG_LINE_MAX_CHARS = 1000;
+
+const boundedSink = (sink: (message: string) => void) => (message: string): void => {
+  sink(message.length > LOG_LINE_MAX_CHARS ? `${message.slice(0, LOG_LINE_MAX_CHARS)}…` : message);
 };
 
 const describeTransportError = (error: unknown, spec: McpServerSpec): string => {
@@ -694,9 +700,11 @@ interface ServerState {
 export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptions = {}): Plugin => {
   // Reassigned at setup when the host offers its own log and the caller
   // did not: the daemon's structured log is where these lines belong, and
-  // stderr is the fallback for a host that has nothing better.
-  let log = options.log ?? ((message: string) => console.error(`[plugin-mcp] ${message}`));
-  let warn = options.warn ?? ((message: string) => console.error(`[plugin-mcp] ${message}`));
+  // stderr is the fallback for a host that has nothing better. Every line
+  // is bounded on its way out, whatever composed it — a server names its
+  // own tools, at any length it likes, and the daemon log rotates at 8 MB.
+  let log = boundedSink(options.log ?? ((message: string) => console.error(`[plugin-mcp] ${message}`)));
+  let warn = boundedSink(options.warn ?? ((message: string) => console.error(`[plugin-mcp] ${message}`)));
   const processEnv = options.processEnv ?? process.env;
   const delayFor = options.reconnectDelayMs
     ?? ((attempt: number) => Math.min(RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, RECONNECT_MAX_DELAY_MS));
@@ -1038,10 +1046,10 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
     async setup(context) {
       view = context.tools;
       if (options.log === undefined && context.log !== undefined) {
-        log = context.log;
+        log = boundedSink(context.log);
       }
       if (options.warn === undefined && context.warn !== undefined) {
-        warn = context.warn;
+        warn = boundedSink(context.warn);
       }
       await Promise.all(states.map(async (state) => {
         try {
@@ -1056,7 +1064,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
           }
           warn(
             `mcp server ${state.spec.name} is unreachable — starting without its tools; they register when it comes back. `
-            + `Check ${state.spec.command !== undefined ? `the command (${state.spec.command})` : `the endpoint (${redactUrl(state.spec.url as string)})`} `
+            + `Check ${state.spec.command !== undefined ? `the command (${state.spec.command})` : `the endpoint (${describeEndpoint(state.spec.url as string)})`} `
             + `under plugins["@stratusagent/plugin-mcp"].servers.${state.spec.name}. `
             + `(${describeError(error)})`,
           );
