@@ -361,8 +361,13 @@ class ReplyRenderer {
 
   private queueEdit(text: string): void {
     const generation = this.generation;
+    // The handover as it stands when the edit is queued, not when it runs:
+    // a handover that begins after this edit waits for this edit, and an
+    // edit that then waited for that handover would be a cycle nothing
+    // could break.
+    const handover = this.handover;
     this.editChain = this.editChain
-      .then(() => this.handover)
+      .then(() => handover)
       .then(() => {
         // Read after the handover, not before: the placeholder may have
         // changed hands while this edit waited its turn — and the text
@@ -430,12 +435,16 @@ class ReplyRenderer {
     // together would otherwise both take the placeholder as they found it,
     // and the second would write over the first's reply. Each waits for
     // the one before it and takes the placeholder that reopen left.
+    // The edits to let through first are the ones queued before this
+    // handover existed; those queued after it wait for it (see `queueEdit`),
+    // so waiting on the live chain here would wait on them in return.
+    const drained = this.editChain;
     const work = this.handover.then(async (): Promise<boolean> => {
       const given = this.ref;
       if (this.finalized || !given) {
         return false;
       }
-      await this.editChain;
+      await drained;
       try {
         await this.web.chat.update({ channel: given.channel, ts: given.ts, text: first });
       } catch (error) {
@@ -1118,15 +1127,24 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
   };
 
+  /**
+   * The files an unrendered turn produced, taken off the session the moment
+   * its outcome arrives — before anything is awaited, so a next turn's files
+   * arriving while this outcome waits on Slack are never mistaken for its.
+   */
+  const takeUnrenderedFiles = (sessionId: string): string[] => {
+    const paths = unrenderedFiles.get(sessionId) ?? [];
+    unrenderedFiles.delete(sessionId);
+    return paths;
+  };
+
   /** Post the files an unrendered turn produced into its thread, in order. */
   const uploadUnrenderedFiles = async (
     connection: AgentConnection,
     channel: string,
     thread: string | undefined,
-    sessionId: string,
+    paths: readonly string[],
   ): Promise<void> => {
-    const paths = unrenderedFiles.get(sessionId) ?? [];
-    unrenderedFiles.delete(sessionId);
     for (const filePath of paths) {
       try {
         const data = await readFile(filePath);
@@ -1145,6 +1163,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const reportUnrenderedFailure = async (
     event: Extract<StratusEvent, { type: 'session.failed' }>,
     behind: ReplyRenderer | undefined,
+    files: readonly string[],
   ): Promise<void> => {
     const gateway = gatewayRef;
     if (!gateway?.sessionRouting) {
@@ -1172,7 +1191,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
     await postAheadOf(behind, connection, metadata.slackChannel, thread, splitForSlack(`Something went wrong: ${event.error}`));
-    await uploadUnrenderedFiles(connection, metadata.slackChannel, thread, event.sessionId);
+    await uploadUnrenderedFiles(connection, metadata.slackChannel, thread, files);
   };
 
   /**
@@ -1187,6 +1206,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const reportUnrenderedReply = async (
     event: Extract<StratusEvent, { type: 'session.completed' }>,
     behind: ReplyRenderer | undefined,
+    files: readonly string[],
   ): Promise<void> => {
     const gateway = gatewayRef;
     if (!gateway?.sessionRouting) {
@@ -1200,7 +1220,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return;
     }
     const metadata = routing?.metadata;
-    if (!routing || metadata?.channel !== 'slack' || typeof metadata.slackChannel !== 'string' || !routing.reply) {
+    if (!routing || metadata?.channel !== 'slack' || typeof metadata.slackChannel !== 'string') {
       return;
     }
     const connection = connectionFor(routing.agentId);
@@ -1208,9 +1228,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return;
     }
     const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
-    await postAheadOf(behind, connection, metadata.slackChannel, thread, splitForSlack(routing.reply));
-    await uploadUnrenderedFiles(connection, metadata.slackChannel, thread, event.sessionId);
-    log(`slack: posted the reply of a turn finished after a restart to ${metadata.slackChannel}`);
+    // A turn that produced files and no text still has the files to post.
+    if (routing.reply) {
+      await postAheadOf(behind, connection, metadata.slackChannel, thread, splitForSlack(routing.reply));
+      log(`slack: posted the reply of a turn finished after a restart to ${metadata.slackChannel}`);
+    }
+    await uploadUnrenderedFiles(connection, metadata.slackChannel, thread, files);
   };
 
   const handleInteractive = async (connection: AgentConnection, args: SlackSocketEventArgs): Promise<void> => {
@@ -1496,11 +1519,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           ? active !== undefined && (renderers.get(event.sessionId) ?? []).some((renderer) => renderer.turnId === active)
           : head?.turnStarted === true;
         if (event.type === 'session.failed' && !rendered) {
-          track(reportUnrenderedFailure(event, head));
+          track(reportUnrenderedFailure(event, head, takeUnrenderedFiles(event.sessionId)));
           return;
         }
         if (event.type === 'session.completed' && !rendered) {
-          track(reportUnrenderedReply(event, head));
+          track(reportUnrenderedReply(event, head, takeUnrenderedFiles(event.sessionId)));
           return;
         }
         if ('sessionId' in event) {

@@ -1679,6 +1679,150 @@ test('a file a recovered turn produced follows its reply into the thread', async
   assert.deepEqual(web.uploads.map((entry) => [entry.filename, entry.contents]), [['page.png', 'png bytes']]);
 });
 
+test('a handover arriving while a streamed edit is in flight and another is queued behind it still completes', async () => {
+  // The recovery streams into the queued placeholder; one edit is out to
+  // Slack and a second waits behind it when the recovery finishes. The
+  // handover has to let those edits through without waiting on an edit
+  // that is waiting on it.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  let releaseFirstEdit!: () => void;
+  const firstEditHeld = new Promise<void>((resolve) => { releaseFirstEdit = resolve; });
+  let firstEditStarted!: () => void;
+  const firstEditInFlight = new Promise<void>((resolve) => { firstEditStarted = resolve; });
+  const update = web.chat.update.bind(web.chat);
+  let edits = 0;
+  web.chat.update = async (args) => {
+    if (++edits === 1) {
+      firstEditStarted();
+      await firstEditHeld;
+    }
+    return update(args);
+  };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: 'recovered ' } });
+    await firstEditInFlight;
+    await gateway.bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: 'partial' } });
+    // Let the second edit's timer fire and queue behind the held one.
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    releaseFirstEdit();
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the recovered reply',
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+
+  // The gate, with a way to lose: a deadlocked handover never lets stop()
+  // drain, and 3s is far above anything this exchange does.
+  const stopped = await Promise.race([
+    adapter.stop().then(() => 'stopped'),
+    new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 3_000)),
+  ]);
+  assert.equal(stopped, 'stopped');
+  assert.equal(web.updates.find((entry) => entry.text === 'the recovered reply')?.ts, 'bot-ts-1');
+  assert.equal(web.updates.find((entry) => /the message's own reply/.test(entry.text))?.ts, 'bot-ts-2');
+});
+
+test('each unrendered turn\'s files go with its own reply, even when two finish back to back', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-two-files-'));
+  const first = path.join(root, 'first.png');
+  const second = path.join(root, 'second.png');
+  await writeFile(first, 'first bytes');
+  await writeFile(second, 'second bytes');
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },
+  ]);
+  const calls: string[] = [];
+  const post = web.chat.postMessage.bind(web.chat);
+  web.chat.postMessage = async (args) => {
+    calls.push(`post:${args.text}`);
+    return post(args);
+  };
+  const upload = web.files.uploadV2.bind(web.files);
+  let secondUploaded!: () => void;
+  const secondFileSent = new Promise<void>((resolve) => { secondUploaded = resolve; });
+  web.files.uploadV2 = async (args) => {
+    calls.push(`upload:${args.filename}`);
+    if (args.filename === 'second.png') {
+      secondUploaded();
+    }
+    return upload(args);
+  };
+  // The first outcome's routing read is held until the second turn has
+  // finished, so the second turn's file arrives while the first report is
+  // still waiting on it.
+  let releaseFirst!: () => void;
+  const firstHeld = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let outcomes = 0;
+  gateway.sessionRouting = async () => {
+    const outcome = ++outcomes;
+    if (outcome === 1) {
+      await firstHeld;
+    }
+    return {
+      agentId: 'ava',
+      metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+      reply: `reply ${outcome}`,
+    };
+  };
+  await adapter.start(gateway);
+  const sessionId = 'slack:ava:T1:C1:100.1';
+  await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'browser.screenshot', ok: true, output: { file: first } } });
+  await gateway.bus.emit({ type: 'session.completed', sessionId });
+  await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c2', toolName: 'browser.screenshot', ok: true, output: { file: second } } });
+  await gateway.bus.emit({ type: 'session.completed', sessionId });
+  // The gate, with a way to lose: the second turn finishes its own report
+  // while the first is held, or the bucket was drained by the first and
+  // this never happens (which the upload list below then shows).
+  await Promise.race([secondFileSent, new Promise<void>((resolve) => setTimeout(resolve, 2_000))]);
+  releaseFirst();
+  await adapter.stop();
+
+  // With each turn's files taken at its own outcome, the second turn
+  // posts and uploads while the first is still held; without it the first
+  // report drains the whole bucket and the second uploads nothing, so both
+  // uploads land after the first reply.
+  assert.deepEqual(calls.filter((call) => call.startsWith('upload:')), ['upload:second.png', 'upload:first.png']);
+  assert.ok(
+    calls.indexOf('upload:second.png') < calls.indexOf('post:reply 1'),
+    `the second turn's file went with its own reply, not the first's: ${calls.join(', ')}`,
+  );
+});
+
+test('a recovered turn that produced a file and no text still has the file posted', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-file-only-'));
+  const shot = path.join(root, 'only.png');
+  await writeFile(shot, 'only bytes');
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },
+  ]);
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+  });
+  await adapter.start(gateway);
+  const sessionId = 'slack:ava:T1:C1:100.1';
+  await gateway.bus.emit({ type: 'tool.completed', sessionId, result: { callId: 'c1', toolName: 'browser.screenshot', ok: true, output: { file: shot } } });
+  await gateway.bus.emit({ type: 'session.completed', sessionId });
+  await adapter.stop();
+
+  assert.deepEqual(web.uploads.map((entry) => [entry.filename, entry.contents]), [['only.png', 'only bytes']]);
+  assert.equal(web.posts.length, 0, 'nothing to say, so nothing said');
+});
+
 test('a recovered reply too long for one message is posted in full even when one of its parts is refused', async () => {
   const { web, gateway, adapter } = approvalAdapter([
     { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },
