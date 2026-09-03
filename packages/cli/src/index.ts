@@ -32,7 +32,6 @@ import {
 // Type-only: the gateway itself is imported lazily (it pulls in node:sqlite
 // and the whole runner stack), and a serve-only policy seam must not make
 // `stratus run` pay for it.
-import type { DashboardSession } from '@stratusagent/control-api';
 import type { ApprovalTransport, GatewayChannelAdapter, HomeClaim, RestartOutcome } from '@stratusagent/gateway';
 import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
 import {
@@ -249,6 +248,19 @@ export interface CliEnvironment {
   packageInstaller?: PackageInstaller;
   /** Looks up a package's latest published version. Injected so tests never ask npm. */
   packageVersionFetcher?: PackageVersionFetcher;
+}
+
+/**
+ * A dashboard session as it crosses the restart hand-off: structurally the
+ * control API's `DashboardSession`, declared here rather than imported.
+ * That package is an optional peer, and a type import of it is kept in
+ * this package's declarations — every TypeScript consumer of the CLI would
+ * then need the optional package installed just to type-check.
+ */
+export interface DashboardSession {
+  id: string;
+  /** Epoch milliseconds; a handed session keeps the expiry it was minted with. */
+  expiresAt: number;
 }
 
 /** What a daemon and its supervisor say to each other. See SupervisorLink. */
