@@ -401,6 +401,20 @@ test('a virtual file that reports no size is read up to the walk limit, and the 
   assert.equal(skipped[0]?.bytes, 0);
 });
 
+test('a file whose size the cap exactly matches is not reported as clipped', async () => {
+  // The unsized path reads one byte past the cap to know there was more.
+  // A regular file of exactly the cap is bounded by its own size, so this
+  // covers the arithmetic the unsized path shares with it: read to the end
+  // and report nothing skipped.
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-exactcap-'));
+  const needle = 'needle';
+  await writeFile(path.join(root, 'atcap.txt'), `${'a'.repeat(1_000_000 - needle.length - 1)}${needle}\n`);
+  const tools = await registryFor({ roots: [root] });
+  const result = await run(tools, 'fs.search', { query: needle, path: 'atcap.txt' }, sessionFor('ava')) as JsonObject;
+  assert.equal((result.matches as unknown[]).length, 1);
+  assert.equal(result.skipped, undefined, 'a file read to its end reports nothing skipped');
+});
+
 test('the skipped list is capped, and the count says how many there were', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-skipmany-'));
   const big = 'x'.repeat(1_000_001);

@@ -358,11 +358,14 @@ const linesOf = async function* (
     // long passed. One call searches one finite snapshot. A file that
     // reports no size is bounded by `MAX_UNSIZED_FILE_BYTES` instead (see
     // there); a file that is really empty ends its stream at once either way.
-    const end = (size > 0 ? size : MAX_UNSIZED_FILE_BYTES) - 1;
+    // The unsized bound reads one byte past the cap on purpose: that byte
+    // arriving is the only proof there was more, so a file of exactly the
+    // cap is reported as searched whole rather than as clipped.
+    const end = size > 0 ? size - 1 : MAX_UNSIZED_FILE_BYTES;
     let read = 0;
     for await (const chunk of handle.createReadStream({ start: 0, end, highWaterMark: 64 * 1024 })) {
       read += (chunk as Buffer).length;
-      if (size === 0 && read > end) {
+      if (size === 0 && read > MAX_UNSIZED_FILE_BYTES) {
         opened.capped = true;
       }
       if (looksBinary(chunk as Buffer)) {
