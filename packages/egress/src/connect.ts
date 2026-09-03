@@ -250,12 +250,23 @@ const parseAuthority = (authority: string): { host: string; port: number } | und
   return { host: groups.host, port };
 };
 
-export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<EgressProxy> => {
+export const createEgressProxy = async (
+  policy: EgressPolicy = {},
+  options: {
+    /**
+     * The resolver behind CONNECT, every address of a name in the order
+     * the system returns them. A seam for tests that need a resolution
+     * to take time — the window a browser can close its end in.
+     */
+    lookup?: (hostname: string) => Promise<Array<{ address: string; family: number }>>;
+  } = {},
+): Promise<EgressProxy> => {
   const refusals: string[] = [];
   const sockets = new Set<net.Socket>();
+  const lookup = options.lookup ?? ((hostname: string) => dns.promises.lookup(hostname, { all: true, verbatim: true }));
 
   const dial = async (host: string, port: number): Promise<net.Socket> => {
-    const addresses = await dns.promises.lookup(host, { all: true, verbatim: true });
+    const addresses = await lookup(host);
     const permitted = addresses.find((entry) => checkAddress(policy, host, entry.address).allowed);
     if (!permitted) {
       const first = addresses[0];
@@ -274,7 +285,16 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
 
   server.on('connect', (request, clientSocket: net.Socket, head: Buffer) => {
     sockets.add(clientSocket);
-    clientSocket.on('close', () => sockets.delete(clientSocket));
+    // Recorded before the dial, which awaits a lookup: a browser that gives
+    // up on the tunnel while the name resolves closes its end before there
+    // is an upstream to couple it to, and a listener installed after that
+    // close never fires. `close()` destroying this socket during the same
+    // lookup is the same case, with the sweep already done.
+    let clientClosed = false;
+    clientSocket.on('close', () => {
+      clientClosed = true;
+      sockets.delete(clientSocket);
+    });
     const target = parseAuthority(request.url ?? '');
     if (!target) {
       clientSocket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
@@ -283,6 +303,11 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
     const { host, port } = target;
     dial(host, port).then(
       (upstream) => {
+        if (clientClosed) {
+          // Dialed for nobody: the browser left, or the proxy closed.
+          upstream.destroy();
+          return;
+        }
         sockets.add(upstream);
         upstream.on('close', () => sockets.delete(upstream));
         clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');

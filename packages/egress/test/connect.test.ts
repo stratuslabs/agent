@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 
 import {
@@ -185,6 +186,72 @@ test('a proxied connection the browser abandons is torn down upstream, and close
   });
   await proxy.close();
   assert.equal(await second, 'closed', 'close() tears down the upstream sockets it still has');
+});
+
+test('a CONNECT whose browser left while the name was resolving leaves no upstream behind, even after close()', async (t) => {
+  // An upstream that records what connected to it and whether it closed —
+  // and keeps its side open after the proxy ends its own, the way a peer
+  // that is still talking does. A well-behaved peer would close in answer
+  // to the half-close and hide the leak; this one leaves the proxy's
+  // socket open until the proxy destroys it.
+  const upstreams: Array<{ closed: Promise<void> }> = [];
+  let sawConnection!: () => void;
+  const connection = new Promise<void>((resolve) => { sawConnection = resolve; });
+  const accepted: net.Socket[] = [];
+  const server = net.createServer({ allowHalfOpen: true }, (socket) => {
+    accepted.push(socket);
+    upstreams.push({ closed: new Promise<void>((resolve) => socket.on('close', () => resolve())) });
+    sawConnection();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => {
+    // Force-closed: a connection this test proves was leaked would
+    // otherwise hold `server.close()` open forever.
+    for (const socket of accepted) {
+      socket.destroy();
+    }
+    server.close(() => resolve());
+  }));
+  const port = (server.address() as AddressInfo).port;
+
+  // A resolution held open until the test lets it finish, and then the
+  // address the server above is on (the system's answer for `localhost`
+  // may lead with `::1`, and a dial refused by the kernel proves nothing).
+  let resolving!: () => void;
+  const started = new Promise<void>((resolve) => { resolving = resolve; });
+  let finish!: () => void;
+  const held = new Promise<void>((resolve) => { finish = resolve; });
+  const proxy = await createEgressProxy({ allowedHosts: ['localhost'] }, {
+    lookup: async () => {
+      resolving();
+      await held;
+      return [{ address: '127.0.0.1', family: 4 }];
+    },
+  });
+
+  const client = net.connect(proxy.port, '127.0.0.1');
+  client.on('error', () => {});
+  await new Promise<void>((resolve) => client.on('connect', resolve));
+  client.write(`CONNECT localhost:${port} HTTP/1.1\r\nHost: localhost:${port}\r\n\r\n`);
+  await started;
+
+  // The proxy closes while the name is still resolving: its sweep destroys
+  // the browser's socket, the browser sees its end go, and only then does
+  // the dial go through — by which time the proxy's own close event for
+  // that socket has long fired.
+  const clientGone = new Promise<void>((resolve) => client.on('close', () => resolve()));
+  await proxy.close();
+  await clientGone;
+  finish();
+
+  // Bounded, with a way to lose: an upstream dialed for a browser that is
+  // gone either never connects or closes at once — one still open at 2s is
+  // the socket that kept a stopped daemon alive.
+  const within = <T,>(what: Promise<T>, otherwise: string): Promise<T | string> =>
+    Promise.race([what, new Promise<string>((resolve) => setTimeout(() => resolve(otherwise), 2_000))]);
+  if (await within(connection.then(() => 'connected'), 'never connected') === 'connected') {
+    assert.equal(await within(upstreams[0]!.closed.then(() => 'closed'), 'still open'), 'closed', 'the upstream dialed after the browser left was torn down');
+  }
 });
 
 test('a browser is launched pinned to the proxy, loopback included', () => {
