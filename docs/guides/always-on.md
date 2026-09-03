@@ -106,9 +106,13 @@ point that process is certain to reach the structured log; a fresh daemon
 that fails before it serves reports to stderr only, as [Logs](./logs.md)
 explains.
 
-Refusing new turns first makes the drain's known gap smaller, not closed: a
-turn finishing after the drain's snapshot can still start work the snapshot
-never saw.
+Refusing new turns first is what makes the drain finite: every turn is
+queued through one place, and that place turns new work away once a stop
+begins, so the set the daemon waits on can only shrink. A channel's own
+drain is a loop rather than a single snapshot, because a turn finishing
+inside the drain still hands it work to deliver — the retraction that takes
+the buttons off an approval denied by the shutdown is exactly that, and it
+is waited for rather than raced.
 
 ## Login, not power-on
 

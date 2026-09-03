@@ -842,6 +842,84 @@ const buttonIds = (blocks: SlackBlock[] | undefined): string[] => {
   return (actions?.elements ?? []).map((element) => element.action_id ?? '');
 };
 
+test('an approval retracted while stop() is draining still reaches the thread', async () => {
+  // The drain took a snapshot of the in-flight set once, and the bus
+  // subscription is torn down only after it — so a turn still finishing
+  // could hand `track` work nobody was left to wait for. The work at risk
+  // is exactly what the drain exists to deliver: a shutdown denies every
+  // parked call, and the retraction of one is what takes the live buttons
+  // off a message the daemon is about to stop listening to.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const sessionId = 'slack:ava:T1:C1:100.1';
+
+  let finishTurn!: (session: Session) => void;
+  const turnHeld = new Promise<Session>((resolve) => {
+    finishTurn = resolve;
+  });
+  let sawReply!: () => void;
+  const replyUpdated = new Promise<void>((resolve) => {
+    sawReply = resolve;
+  });
+  let releaseRetraction!: () => void;
+  const retractionHeld = new Promise<void>((resolve) => {
+    releaseRetraction = resolve;
+  });
+  const update = web.chat.update.bind(web.chat);
+  web.chat.update = async (args) => {
+    if (args.text === 'done') {
+      // The last thing the drain's snapshot is waiting on.
+      sawReply();
+      return update(args);
+    }
+    await retractionHeld;
+    return update(args);
+  };
+
+  const gateway = createStubGateway(() => turnHeld);
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  // A turn in flight, so its handler is in the snapshot the drain takes.
+  await socket.deliver('app_mention', mention('<@B-AVA> do the thing'));
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({ sessionId }));
+
+  const stopped = adapter.stop();
+  let stopReturned = false;
+  void stopped.then(() => {
+    stopReturned = true;
+  });
+  // Past the socket disconnect, so the snapshot has been taken.
+  await new Promise((resolve) => setImmediate(resolve));
+  // What a shutdown does to a parked call, arriving after that snapshot.
+  await gateway.bus.emit({
+    type: 'tool.approval-resolved',
+    sessionId,
+    requestId: 'req-1',
+    answer: 'deny',
+    reason: 'cancelled',
+  });
+  finishTurn(sessionWithReply(sessionId, 'done'));
+  await replyUpdated;
+  // Everything left in the snapshot's path is microtask work, so this
+  // settles it: whatever the drain still holds, it holds deliberately.
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(stopReturned, false, 'stop() waited for the retraction it had not yet seen');
+  releaseRetraction();
+  await stopped;
+  assert.match(
+    web.updates.find((entry) => entry.text !== 'done')?.text ?? '',
+    /Cancelled|Denied|Resolved/,
+    `the buttons came off before the adapter went away: ${web.updates.map((entry) => entry.text).join(' | ')}`,
+  );
+});
+
 test('a parked call is asked in the thread it came from, with three buttons', async () => {
   const { socket, web, gateway, adapter } = approvalAdapter([
     { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },

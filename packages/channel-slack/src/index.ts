@@ -1709,18 +1709,26 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
     async stop() {
       // Stop intake first, so no new INBOUND event can slip into
-      // `inflight` after the drain snapshot below.
-      //
-      // That is narrower than it used to claim. The snapshot is taken
-      // once, and this unsubscribes from the bus only after it, so a turn
-      // still finishing can emit an event whose subscriber tracks work
-      // this drain never waits for — a retraction posted after stop()
-      // returns, or dropped with the process. Draining until `inflight`
-      // stays empty would close it, and would make stop() wait on turns
-      // the gateway drains after this call rather than before; worth doing
-      // deliberately, not as a side effect.
+      // `inflight` while the drain below runs.
       await Promise.allSettled(connections.map((connection) => connection.socket.disconnect()));
-      await Promise.allSettled([...inflight]);
+      // Until it stays empty, not once. The bus subscription is still live
+      // here — it comes down after the drain, because a turn finishing
+      // inside the drain still has an outcome to render — so a turn the
+      // gateway is finishing can hand `track` work after any one snapshot
+      // was taken. A single snapshot dropped exactly what this drain
+      // exists to deliver: a shutdown denies every parked call, and the
+      // retraction that takes the live buttons off the message is tracked
+      // by a subscriber reacting to that denial, which is to say during
+      // the drain rather than before it.
+      //
+      // This waits for reactions, never for turns: work enters `inflight`
+      // only when an event arrives, so a turn that has not finished
+      // emitting anything is not something the loop can be waiting on. It
+      // ends when the set does, which is when a snapshot drain would have
+      // ended, plus the tail it used to leave behind.
+      while (inflight.size > 0) {
+        await Promise.allSettled([...inflight]);
+      }
       unsubscribe?.();
       unsubscribe = undefined;
       gatewayRef = undefined;
