@@ -28,6 +28,14 @@ interface BrowserEntry {
   browser: BrowserLike;
   proxy: EgressProxy;
   sessions: Set<string>;
+  /**
+   * Admissions between choosing this browser and adding their session to
+   * it. A browser with no sessions is closed as its last one goes, and an
+   * admission is an owner the session set cannot see yet: without this, an
+   * unresponsive page released while another conversation was opening its
+   * context closed the browser out from under that context.
+   */
+  admitting: number;
 }
 
 interface PooledContext {
@@ -94,15 +102,22 @@ export class BrowserSessionPool {
 
   private async browserFor(policy: EgressPolicy): Promise<BrowserEntry> {
     const key = policyKeyFor(policy);
+    // Claimed in the same tick as the lookup, before any await can let a
+    // release in: the caller owes an `admitting -= 1` for every entry
+    // returned here, whichever path produced it.
+    const claim = (entry: BrowserEntry): BrowserEntry => {
+      entry.admitting += 1;
+      return entry;
+    };
     const existing = this.browsers.get(key);
     if (existing) {
-      return existing;
+      return claim(existing);
     }
     // Single-flight per policy: two calls arriving together must not launch
     // two browsers, and the second would leak because only one is kept.
     const pending = this.launching.get(key);
     if (pending) {
-      return pending;
+      return pending.then(claim);
     }
 
     const launch = (async (): Promise<BrowserEntry> => {
@@ -114,7 +129,7 @@ export class BrowserSessionPool {
           ...(this.options.executablePath ? { executablePath: this.options.executablePath } : {}),
           ...(this.options.channel ? { channel: this.options.channel } : {}),
         });
-        const entry: BrowserEntry = { key, browser, proxy, sessions: new Set() };
+        const entry: BrowserEntry = { key, browser, proxy, sessions: new Set(), admitting: 0 };
         this.browsers.set(key, entry);
         this.armSweep();
         return entry;
@@ -126,7 +141,7 @@ export class BrowserSessionPool {
       }
     })();
     this.launching.set(key, launch);
-    return launch;
+    return launch.then(claim);
   }
 
   /**
@@ -174,40 +189,47 @@ export class BrowserSessionPool {
       await this.drop(existing, 'policy');
     }
 
+    // Claimed by `browserFor`: from here until the session is added below,
+    // a release of this browser's last session (an unresponsive page — the
+    // one pool change that does not queue behind admission, because the
+    // page it is giving up on already waited its full timeout) leaves the
+    // browser open for this context.
     const entry = await this.browserFor(policy);
-    const maxContexts = this.options.maxContexts ?? DEFAULT_MAX_CONTEXTS;
-    while (this.contexts.size >= maxContexts) {
-      const oldest = [...this.contexts.values()].sort((left, right) => left.lastUsedAt - right.lastUsedAt)[0];
-      if (!oldest) {
-        break;
-      }
-      await this.drop(oldest, 'capacity');
-    }
-
-    const context = await entry.browser.newContext();
-    let page: PageLike;
     try {
-      page = await context.newPage();
-    } catch (error) {
-      // A context that never got a page is not in `contexts`, so the idle
-      // sweep will never look at it — and neither will shutdown, which
-      // walks the same map. Closed here or not at all, and the browser
-      // goes too when it turns out nothing is using it (which is also how
-      // a Chromium that died during page creation stops being handed to
-      // the next caller).
+      const maxContexts = this.options.maxContexts ?? DEFAULT_MAX_CONTEXTS;
+      while (this.contexts.size >= maxContexts) {
+        const oldest = [...this.contexts.values()].sort((left, right) => left.lastUsedAt - right.lastUsedAt)[0];
+        if (!oldest) {
+          break;
+        }
+        await this.drop(oldest, 'capacity');
+      }
+
+      const context = await entry.browser.newContext();
+      let page: PageLike;
       try {
-        await context.close();
-      } catch {
-        // Already gone with the browser that owned it.
+        page = await context.newPage();
+      } catch (error) {
+        // A context that never got a page is not in `contexts`, so the idle
+        // sweep will never look at it — and neither will shutdown, which
+        // walks the same map. Closed here or not at all.
+        try {
+          await context.close();
+        } catch {
+          // Already gone with the browser that owned it.
+        }
+        throw error;
       }
-      if (entry.sessions.size === 0) {
-        await this.closeBrowser(entry);
-      }
-      throw error;
+      this.contexts.set(sessionId, { sessionId, context, page, lastUsedAt: now, browserKey: key });
+      entry.sessions.add(sessionId);
+      return page;
+    } finally {
+      entry.admitting -= 1;
+      // A browser that nothing is using goes too — which is also how a
+      // Chromium that died during page creation stops being handed to the
+      // next caller. Never on the success path: the session was just added.
+      await this.closeBrowserIfUnused(entry);
     }
-    this.contexts.set(sessionId, { sessionId, context, page, lastUsedAt: now, browserKey: key });
-    entry.sessions.add(sessionId);
-    return page;
   }
 
   /**
@@ -234,20 +256,12 @@ export class BrowserSessionPool {
    * had no context to close.
    */
   async release(sessionId: string): Promise<boolean> {
-    // Through the admission queue, like everything else that changes the
-    // pool: a release that ran alongside an admission could close a
-    // browser the admission was about to open its context in — the
-    // dropped session being the last one the browser had, as far as the
-    // release could see.
-    const released = this.admission.then(
-      () => this.releaseNow(sessionId),
-      () => this.releaseNow(sessionId),
-    );
-    this.admission = released.then(() => undefined, () => undefined);
-    return released;
-  }
-
-  private async releaseNow(sessionId: string): Promise<boolean> {
+    // Not through the admission queue: the caller has already waited the
+    // page's full timeout, and an admission ahead in the queue is bounded
+    // by nothing — a launch or `newContext` that hangs would hold this
+    // call, and the tool call above it, past any promise the timeout made.
+    // What the queue protected against, a browser closed under an
+    // admission that had chosen it, `BrowserEntry.admitting` covers.
     const entry = this.contexts.get(sessionId);
     if (!entry) {
       return false;
@@ -264,13 +278,20 @@ export class BrowserSessionPool {
       // A context that is already gone is the outcome we wanted.
     }
     const browser = this.browsers.get(entry.browserKey);
-    browser?.sessions.delete(entry.sessionId);
-    if (browser && browser.sessions.size === 0) {
+    if (browser) {
+      browser.sessions.delete(entry.sessionId);
       // The browser goes with its last conversation: a Chromium sitting
       // idle overnight is the leak this pack is most likely to cause.
-      await this.closeBrowser(browser);
+      await this.closeBrowserIfUnused(browser);
     }
     this.options.onEvicted?.({ sessionId: entry.sessionId, reason });
+  }
+
+  /** Close a browser no session holds and no admission is about to. */
+  private async closeBrowserIfUnused(entry: BrowserEntry): Promise<void> {
+    if (entry.sessions.size === 0 && entry.admitting === 0 && this.browsers.get(entry.key) === entry) {
+      await this.closeBrowser(entry);
+    }
   }
 
   /** Close whatever has been idle longer than the timeout. Returns what went. */
