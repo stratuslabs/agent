@@ -1264,6 +1264,16 @@ export class InMemorySessionStore implements SessionStore {
 export interface PluginContext {
   bus: EventBus;
   tools: ToolRegistry;
+  /**
+   * The host's log, for what a plugin has to say after `setup` returns —
+   * a server that dropped, a reconnect that failed. The daemon's is the
+   * structured log `stratus logs` reads. A host that omits these leaves
+   * the plugin to its own stderr, which under a service manager is a line
+   * nobody sees: plugin-mcp's disconnect warnings went there for as long
+   * as this seam did not exist.
+   */
+  log?: (message: string) => void;
+  warn?: (message: string) => void;
 }
 
 export interface Plugin {

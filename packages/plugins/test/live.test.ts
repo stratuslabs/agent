@@ -67,6 +67,36 @@ const capturingModule = (capture: (tools: ToolRegistry) => void) => ({
   }),
 });
 
+test('the host’s log reaches a plugin’s setup as PluginContext.log and .warn', async () => {
+  let seen: { log?: unknown; warn?: unknown } = {};
+  const host = await fakeHost({
+    'stratus-plugin-bridge': {
+      manifest: bridgeManifest,
+      module: {
+        createPlugin: (): Plugin => ({
+          name: 'bridge',
+          setup(context) {
+            seen = { log: context.log, warn: context.warn };
+          },
+        }),
+      },
+    },
+  });
+  const log = (): void => {};
+  const warn = (): void => {};
+  const result = await loadPlugins({
+    config: { 'stratus-plugin-bridge': { enabled: true } },
+    host,
+    tools: new ToolRegistry(),
+    bus: new EventBus(),
+    log,
+    warn,
+  });
+  assert.equal(result.failures.length, 0);
+  assert.equal(seen.log, log);
+  assert.equal(seen.warn, warn);
+});
+
 test('a tool discovered after load registers through the committed view, at the declared risk, and the load record follows', async () => {
   let view: ToolRegistry | undefined;
   const host = await fakeHost({
