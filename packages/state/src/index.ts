@@ -7,6 +7,7 @@ import type {
   AgentDefinition,
   AgentMemoryStore,
   AvatarTheme,
+  CredentialResolver,
   JsonObject,
   JsonValue,
   MemoryEntry,
@@ -18,6 +19,7 @@ import type {
   SkillRegistry,
 } from '@stratusagent/core';
 import {
+  assertCredentialAllowed,
   boundMemoryList,
   boundMemoryRead,
   clampMemoryRecallLimit,
@@ -669,6 +671,100 @@ export const saveChannelCredentials = async (
   existing.channels = channels;
   await writeRawCredentialsFile(env, existing);
 };
+
+/**
+ * Credentials an agent resolves by name — the `search.apiKey` a search
+ * backend asks for, and whatever the ecosystem asks for next.
+ *
+ * A separate namespace from the provider sign-ins above, because these are
+ * a different kind of thing: a sign-in is the daemon's own, selected by
+ * config resolution and bound to an endpoint, while a named credential is
+ * an *agent capability* gated by that agent's `credentials:` allowlist.
+ *
+ * `shared` is the fleet's; `agents` holds one map per agent, consulted
+ * first. That ordering is what lets two agents search the one installed
+ * backend on their own accounts. The `agents` key can never collide with a
+ * credential name because the two live at different depths.
+ *
+ * Channel tokens stay out of this path. They are gateway infrastructure
+ * secrets living under `channels.slack.<agentId>` precisely so an agent
+ * cannot read the tokens of the transport carrying it, and a named
+ * namespace next door must not become a way in.
+ */
+export interface NamedCredentials {
+  /** Fleet-wide, by credential name. */
+  shared: Record<string, string>;
+  /** Per agent, by agent id then credential name. Consulted before `shared`. */
+  agents: Record<string, Record<string, string>>;
+}
+
+const readNameMap = (value: unknown): Record<string, string> => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return {};
+  }
+  const entries: Record<string, string> = {};
+  for (const [name, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entry === 'string') {
+      entries[name] = entry;
+    }
+  }
+  return entries;
+};
+
+export const loadNamedCredentials = async (env: StateEnvironment): Promise<NamedCredentials> => {
+  const raw = await loadRawCredentialsFile(env);
+  const named = raw.named;
+  if (typeof named !== 'object' || named === null || Array.isArray(named)) {
+    return { shared: {}, agents: {} };
+  }
+  const block = named as Record<string, unknown>;
+  const agents: Record<string, Record<string, string>> = {};
+  if (typeof block.agents === 'object' && block.agents !== null && !Array.isArray(block.agents)) {
+    for (const [agentId, entry] of Object.entries(block.agents as Record<string, unknown>)) {
+      const names = readNameMap(entry);
+      if (Object.keys(names).length > 0) {
+        agents[agentId] = names;
+      }
+    }
+  }
+  return { shared: readNameMap(block.shared), agents };
+};
+
+export const saveNamedCredentials = async (
+  env: StateEnvironment,
+  named: NamedCredentials,
+): Promise<void> => {
+  const existing = await loadRawCredentialsFile(env);
+  existing.named = { shared: named.shared, agents: named.agents };
+  await writeRawCredentialsFile(env, existing);
+};
+
+/**
+ * The resolver a daemon actually installs: the credentials file first, the
+ * environment behind it.
+ *
+ * It keeps `EnvCredentialResolver`'s allowlist check exactly — through the
+ * kernel's own `assertCredentialAllowed`, so there is one implementation of
+ * what an agent's `credentials:` list means — and falls back to the
+ * environment so setups that export a name today keep working.
+ *
+ * The file is read **per resolve** rather than captured at construction.
+ * That is deliberate on both counts: a key rotated at three in the morning
+ * takes effect on the next call instead of the next restart, and the read
+ * is one small file per tool call that wanted a credential, which is not a
+ * hot path. Per-agent keys are a lookup order rather than an interface
+ * change, because `CredentialResolver.resolve` already takes the agent.
+ */
+export const createFileCredentialResolver = (
+  env: StateEnvironment,
+  processEnv: Record<string, string | undefined> = readProcessEnv(env),
+): CredentialResolver => ({
+  async resolve(agent, name) {
+    assertCredentialAllowed(agent, name);
+    const named = await loadNamedCredentials(env);
+    return named.agents[agent.id]?.[name] ?? named.shared[name] ?? processEnv[name];
+  },
+});
 
 // Memory used to live under the working directory. Fold any such file into
 // the global store the first time a run happens from that directory, then

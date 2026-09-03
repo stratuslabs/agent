@@ -663,6 +663,21 @@ export interface ScopedCredentials {
   get(name: string): Promise<string>;
 }
 
+/**
+ * The allowlist half of every `CredentialResolver`, so a second
+ * implementation cannot quietly become a second policy.
+ *
+ * This is the check that makes an agent's `credentials:` list mean
+ * something, and it belongs to the contract rather than to whichever
+ * resolver a host happens to install — a file-backed resolver that forgot
+ * it would hand every agent every key while still satisfying the interface.
+ */
+export const assertCredentialAllowed = (agent: AgentDefinition, name: string): void => {
+  if (!agent.credentials?.includes(name)) {
+    throw new Error(`Agent ${agent.id} is not allowed to access credential: ${name}`);
+  }
+};
+
 export class EnvCredentialResolver implements CredentialResolver {
   private readonly env: Record<string, string | undefined>;
 
@@ -672,9 +687,7 @@ export class EnvCredentialResolver implements CredentialResolver {
   }
 
   async resolve(agent: AgentDefinition, name: string): Promise<string | undefined> {
-    if (!agent.credentials?.includes(name)) {
-      throw new Error(`Agent ${agent.id} is not allowed to access credential: ${name}`);
-    }
+    assertCredentialAllowed(agent, name);
     return this.env[name];
   }
 }
@@ -1264,6 +1277,20 @@ export class InMemorySessionStore implements SessionStore {
 export interface PluginContext {
   bus: EventBus;
   tools: ToolRegistry;
+  /**
+   * How a plugin resolves a credential for the agent whose call it is
+   * serving, so it never needs `process.env`. It declares what it needs by
+   * name in its manifest and receives exactly that, per call — which is
+   * what a search backend needs to reach the *calling* agent's key rather
+   * than one captured at setup.
+   *
+   * A host that omits it leaves every plugin that wants a credential with
+   * no way to get one: such a plugin must fail the call naming what is
+   * missing, never fall back to ambient environment. Read
+   * `docs/architecture/plugins.md` on what this does and does not buy — a
+   * plugin is code, so scoping it is an interface rather than a boundary.
+   */
+  credentials?: CredentialResolver;
   /**
    * The host's log, for what a plugin has to say after `setup` returns —
    * a server that dropped, a reconnect that failed. The daemon's is the

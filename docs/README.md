@@ -14,6 +14,7 @@ tree is where the depth lives.
 | Run something *right now*, account or not | [Quickstart](./start/quickstart.md) |
 | Talk to my agents in Slack | [Slack](./guides/slack.md) |
 | Give agents files, a shell, the web, a browser | [Tools](./guides/tools.md) |
+| Let an agent search the web, or write a search backend | [Tools](./guides/tools.md#searching-the-web) · [`search`](../packages/search/README.md) |
 | Control which shell commands run unattended | [Shell commands](./guides/shell.md) |
 | Teach an agent a procedure | [Skills](./guides/skills.md) |
 | Write a skill that works on every agent, or check one against the spec | [Skill format](./reference/skill-format.md) |
@@ -48,4 +49,6 @@ Package READMEs stay canonical for their own surface:
 [`channel-slack`](../packages/channel-slack/README.md) for the Slack app
 setup, [`control-api`](../packages/control-api/README.md) for the HTTP + WS
 contract, [`plugin-mcp`](../packages/plugin-mcp/README.md) and the
-[`tool-*`](../packages/tool-fs/README.md) packages for their own settings.
+[`tool-*`](../packages/tool-fs/README.md) packages for their own settings,
+and [`search`](../packages/search/README.md) for the `web.search` contract
+every search backend implements.

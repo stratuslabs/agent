@@ -2,7 +2,15 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { EventBus, JsonObject, Plugin, Skill, SkillRegistry, ToolRegistry } from '@stratusagent/core';
+import type {
+  CredentialResolver,
+  EventBus,
+  JsonObject,
+  Plugin,
+  Skill,
+  SkillRegistry,
+  ToolRegistry,
+} from '@stratusagent/core';
 import { createLazySkill, parseSkillDocument } from '@stratusagent/agents';
 
 import {
@@ -169,6 +177,12 @@ export interface LoadPluginsOptions {
    */
   skills?: SkillRegistry;
   bus: EventBus;
+  /**
+   * Handed to every plugin's `setup` as `PluginContext.credentials`. A host
+   * that omits it leaves a plugin needing a key with no way to resolve one
+   * — see `PluginContext`.
+   */
+  credentials?: CredentialResolver;
   /**
    * Where tool output belongs on this machine. Supplied to any plugin whose
    * schema declares `workspaceRoot` and whose operator did not set one —
@@ -350,6 +364,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
       await plugin.setup({
         bus: options.bus,
         tools: view,
+        ...(options.credentials !== undefined ? { credentials: options.credentials } : {}),
         ...(options.log !== undefined ? { log: options.log } : {}),
         ...(options.warn !== undefined ? { warn: options.warn } : {}),
       });

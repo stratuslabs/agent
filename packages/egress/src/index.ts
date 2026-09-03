@@ -11,6 +11,7 @@ export {
   assertRequestAllowed,
   checkAddress,
   classifyAddress,
+  egressPolicyFrom,
   EgressPolicyError,
   type AddressVerdict,
   type EgressPolicy,

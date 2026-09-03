@@ -37,6 +37,10 @@ stratus skill validate ./my-skill      # check a skill (or a repo of them, or an
 stratus skills                         # what is installed, who enables it (also: stratus skill list)
 stratus skill reload                   # a running daemon re-reads ~/.stratus/skills — no restart
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
+printf %s "$KEY" | stratus credential set search.apiKey   # store a named credential (value from stdin, never a flag)
+stratus credential set search.apiKey --agent ava         # one agent's own key, over the shared one
+stratus credentials                    # stored names, never values (also: stratus credential list)
+stratus credential remove search.apiKey
 stratus schedules                      # what the fleet has scheduled (also: stratus schedule list)
 stratus schedules cancel <id>          # stop the next firing, revoke its destination
 stratus dashboard                      # local browser dashboard
@@ -53,6 +57,7 @@ stratus dashboard                      # local browser dashboard
 | `update` | [Updating](../guides/updating.md) |
 | `agent new`, `agents` | [Agents](../concepts/agents.md) |
 | `skill add`, `skill validate`, `skills`, `skill reload` | [Skills](../guides/skills.md), [Skill format](./skill-format.md) |
+| `credential set`, `credentials`, `credential remove` | [Tools](../guides/tools.md#searching-the-web), [Security](../concepts/security.md) |
 | `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
 | `schedules …` | [Schedules](../guides/schedules.md) |
 | `dashboard` | [Remote access](../guides/remote-access.md) |
@@ -87,7 +92,7 @@ stratus dashboard                      # local browser dashboard
 | `--no-login` | `stratus service install`: install without the start-at-login trigger |
 | `-f`, `--follow` | `stratus logs`: follow the log, across rotations |
 | `-n <count>` | `stratus logs`: how much backlog to print (default 50) |
-| `--agent` | `stratus logs`: show only one agent's records. `skill add`: also enable the installed skills in that agent's soul |
+| `--agent` | `stratus logs`: show only one agent's records. `skill add`: also enable the installed skills in that agent's soul. `credential set` / `credential remove`: that agent's own entry rather than the fleet's shared one |
 | `--session` | `stratus logs`: show only one session's records |
 | `--skill <id>` | `stratus skill add`: pick one skill from a multi-skill repo (repeatable) |
 | `--force` | `stratus skill add`: replace an already-installed skill id |
@@ -95,6 +100,11 @@ stratus dashboard                      # local browser dashboard
 | `--reason` | `stratus restart`: why, for the daemon's log |
 | `--drain-timeout <seconds>` | `stratus restart`: how long in-flight turns get to finish before they are aborted (default 30) |
 | `--help`, `-h` | Show help |
+
+`stratus credential set` takes the value on **stdin and never in a flag** —
+a secret in argv is a secret in your shell history and in every `ps` on the
+machine. Nothing prints a stored value back: `stratus credentials` reports
+names and which agents have their own.
 
 Tool plugins have no flags: what is installed is a config decision
 (`plugins` in a trusted config) and what an agent may call is a soul

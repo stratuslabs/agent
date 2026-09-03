@@ -47,6 +47,7 @@ stratus agents                         # who's on the team: souls, models, memor
 stratus skill add owner/repo           # install skills from GitHub (validated against the Agent Skills spec) — a running daemon picks them up, no restart
 stratus skill validate ./my-skill      # check a skill against the spec without installing it
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
+stratus credentials                    # stored credential names (never values)
 stratus schedules                      # what the fleet has scheduled, and where it reports
 stratus dashboard                      # web dashboard, signed in via a one-time link
 ```
@@ -72,6 +73,7 @@ Full reference with every subcommand:
 | `--no-api` | `serve`: do not serve the control API |
 | `--api-host`, `--api-port` | `serve`: control API bind (default `127.0.0.1:4123`) |
 | `--gateway <url>`, `--token` | `agents`: read the roster from a running daemon's control API |
+| `--agent <id>` | `credential set`/`remove`: that agent's own key rather than the fleet's shared one |
 | `--port`, `--host`, `--no-open` | `dashboard`: where a daemon it starts should bind; skip opening the browser |
 | `--no-login` | `service install`: install without the start-at-login trigger |
 | `-f`, `-n`, `--agent`, `--session` | `logs`: follow, backlog size, and filters |

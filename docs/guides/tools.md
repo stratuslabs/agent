@@ -75,6 +75,7 @@ shell is installed.
 | [`@stratusagent/tool-browser`](../../packages/tool-browser) | `browser.goto`, `.read`, `.screenshot` | `gated` |
 | | `browser.act` | `dangerous` — always a human |
 | [`@stratusagent/plugin-mcp`](../../packages/plugin-mcp) | `mcp.<server>.<tool>` — any MCP server's tools, [discovered at connect](./mcp.md) | `gated`, whatever the server says; per-tool `toolRisks` overrides |
+| a search backend plugin, [against the `web.search` contract](../../packages/search) | `web.search` | `gated` — the third-party floor, whatever the backend's manifest says |
 
 Each package's README carries its own settings and the reasoning behind its
 risk levels. Four things are worth knowing here:
@@ -94,6 +95,12 @@ risk levels. Four things are worth knowing here:
   addresses. It is enforced on the connection, so a redirect or a DNS answer
   cannot walk an agent into your metadata endpoint. `allowedHosts` opens a
   specific one when you mean to.
+- **`web.search` is a contract, not a package you install from us.** Every
+  search backend needs a vendor key and a commercial relationship, so core
+  ships `web.fetch` and the ecosystem ships `web.search`. What is
+  first-party is the *shape* — one tool name, one meaning per option, one
+  result envelope — so swapping vendors changes no soul and no skill. See
+  [Searching the web](#searching-the-web) below.
 - **`plugin-mcp` mounts somebody else's code.** Each configured MCP server's
   tools register as `mcp.<server>.<tool>`, so `tools: [mcp.linear.*]` grants
   one server, and every bridged tool is `gated` regardless of how the server
@@ -104,6 +111,59 @@ risk levels. Four things are worth knowing here:
 `GET /api/v1/catalog/tools` lists what a running daemon actually has, and
 the dashboard's **Plugins** screen renders it — including a plugin you
 enabled that failed to load, which is invisible in a list of tools.
+
+## Searching the web
+
+An agent that can fetch a URL but cannot find one is not a smaller
+capability — it is one that invites the model to guess a plausible domain.
+`web.search` closes that, and it arrives as a backend plugin somebody else
+publishes:
+
+```bash
+npm install -g stratus-plugin-somesearch
+printf %s "$SEARCH_KEY" | stratus credential set search.apiKey
+```
+
+```jsonc
+// ~/.stratus/config.json
+{
+  "plugins": {
+    "stratus-plugin-somesearch": { "enabled": true, "maxSearchesPerDay": 200 }
+  }
+}
+```
+
+```markdown
+---
+id: ava
+tools: [web.fetch, web.search]
+credentials: [search.apiKey]
+---
+```
+
+Three things are worth knowing, and the
+[contract package](../../packages/search) is canonical for the rest:
+
+- **The credential name is `search.apiKey` whatever the vendor is.** That is
+  what makes a swap free: a backend asking for `BRAVE_API_KEY` would mean
+  changing vendors edits every soul in the fleet. Store it with
+  `stratus credential set` — never as a literal in a config file people
+  commit. A self-hosted backend that needs no key at all is legitimate and
+  asks for nothing.
+- **`credentials:` is a second, separate gate.** `tools: [web.*]` picks up
+  search with no soul edit, but without `credentials: [search.apiKey]` every
+  call answers "not allowed to access credential".
+- **A metered API costs money, and that is a budget rather than a
+  permission.** `maxSearchesPerDay` caps one agent's calls in a UTC day
+  (default 200) instead of asking a human to approve each query. It lives in
+  the daemon's process, so a restart forgives the count.
+
+Two search backends cannot be enabled at once: both contribute `web.search`,
+a tool name is unique per install, and that is a load-time error naming both.
+
+Search results are **third-party text** — titles and snippets written by
+whoever owns the page and selected by a ranker — and the envelope says so.
+That marking is not a defence against prompt injection; it is a label.
 
 ## What runs without asking
 

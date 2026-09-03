@@ -1,0 +1,30 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "composite": true,
+    "rewriteRelativeImportExtensions": true,
+    "types": [
+      "node"
+    ]
+  },
+  "references": [
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../egress"
+    },
+    {
+      "path": "../plugins"
+    }
+  ],
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "dist",
+    "test"
+  ]
+}

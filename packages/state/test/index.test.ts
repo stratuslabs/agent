@@ -875,3 +875,95 @@ test('an anthropic fallback inherits the primary\'s cache settings', async () =>
   assert.equal(config.fallback?.promptCache, false);
   assert.equal(config.fallback?.promptCacheTtl, '1h');
 });
+
+test('named credentials live in their own namespace, beside the sign-ins and the channel tokens', async () => {
+  const {
+    loadChannelCredentials,
+    loadCredentials,
+    loadNamedCredentials,
+    saveChannelCredentials,
+    saveNamedCredentials,
+  } = await import('../src/index.ts');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-named-'));
+  const env = { homeDir: home };
+
+  await saveCredentials(env, { anthropic: { type: 'api_key', value: 'sk-ant-1' } });
+  await saveChannelCredentials(env, { slack: { ava: { appToken: 'xapp-1', botToken: 'xoxb-1' } } });
+  await saveNamedCredentials(env, {
+    shared: { 'search.apiKey': 'shared-key' },
+    agents: { ava: { 'search.apiKey': 'ava-key' } },
+  });
+  // A later provider re-save (what `stratus setup` does) must not clobber a
+  // named credential, and a named save must not clobber the others.
+  await saveCredentials(env, { anthropic: { type: 'api_key', value: 'sk-ant-2' } });
+
+  assert.deepEqual(await loadNamedCredentials(env), {
+    shared: { 'search.apiKey': 'shared-key' },
+    agents: { ava: { 'search.apiKey': 'ava-key' } },
+  });
+  assert.equal((await loadCredentials(env)).anthropic?.value, 'sk-ant-2');
+  assert.deepEqual(await loadChannelCredentials(env), { slack: { ava: { appToken: 'xapp-1', botToken: 'xoxb-1' } } });
+
+  // The existing invariant, across the code that could quietly break it.
+  const filePath = path.join(home, '.stratus', 'credentials.json');
+  assert.equal((await stat(filePath)).mode & 0o777, 0o600);
+});
+
+test('the file resolver reads the agent’s own key before the fleet’s, and the environment behind both', async () => {
+  const { createFileCredentialResolver, saveNamedCredentials } = await import('../src/index.ts');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-resolve-'));
+  const env = { homeDir: home };
+  const allowed = ['search.apiKey', 'legacy.key'];
+
+  await saveNamedCredentials(env, {
+    shared: { 'search.apiKey': 'shared-key' },
+    agents: { ava: { 'search.apiKey': 'ava-key' } },
+  });
+  const resolver = createFileCredentialResolver(env, { 'legacy.key': 'from-the-environment' });
+
+  const ava = { id: 'ava', name: 'Ava', credentials: allowed };
+  const juno = { id: 'juno', name: 'Juno', credentials: allowed };
+  // Per-agent keys are a lookup order rather than an interface change:
+  // the agent's own entry, then the shared one.
+  assert.equal(await resolver.resolve(ava, 'search.apiKey'), 'ava-key');
+  assert.equal(await resolver.resolve(juno, 'search.apiKey'), 'shared-key');
+  // The environment stays behind both, so setups that export a name today
+  // keep working.
+  assert.equal(await resolver.resolve(ava, 'legacy.key'), 'from-the-environment');
+  assert.equal(await resolver.resolve(ava, 'search.apiKey'), 'ava-key');
+});
+
+test('the file resolver keeps the allowlist check exactly, and re-reads a key rotated under it', async () => {
+  const { createFileCredentialResolver, saveNamedCredentials } = await import('../src/index.ts');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-rotate-'));
+  const env = { homeDir: home };
+  await saveNamedCredentials(env, { shared: { 'search.apiKey': 'first' }, agents: {} });
+  const resolver = createFileCredentialResolver(env, {});
+
+  const bare = { id: 'bare', name: 'Bare' };
+  await assert.rejects(
+    () => resolver.resolve(bare, 'search.apiKey'),
+    /Agent bare is not allowed to access credential: search\.apiKey/,
+  );
+
+  const ava = { id: 'ava', name: 'Ava', credentials: ['search.apiKey'] };
+  assert.equal(await resolver.resolve(ava, 'search.apiKey'), 'first');
+  // Read per resolve rather than captured at construction: a key rotated at
+  // three in the morning takes effect on the next call, not the next restart.
+  await saveNamedCredentials(env, { shared: { 'search.apiKey': 'second' }, agents: {} });
+  assert.equal(await resolver.resolve(ava, 'search.apiKey'), 'second');
+});
+
+test('a credentials file with a malformed named block reads as empty rather than throwing', async () => {
+  const { loadNamedCredentials } = await import('../src/index.ts');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-named-bad-'));
+  const env = { homeDir: home };
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Hand-edited, or written by another version. A daemon that refused to
+  // start over it would be worse than one that reports the key as missing.
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ named: { shared: 'not-an-object', agents: { ava: { 'search.apiKey': 42 } } } }),
+  );
+  assert.deepEqual(await loadNamedCredentials(env), { shared: {}, agents: {} });
+});

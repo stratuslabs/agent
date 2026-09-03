@@ -8299,3 +8299,112 @@ test('a second stop signal is still not fatal when the stream its warning goes t
   assert.equal(await serving, 0);
   assert.match(base.output.stdout, /stratusd stopped/);
 });
+
+test('stratus credential set reads the value from stdin, stores it 0600, and never prints it back', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cred-'));
+  const env = { homeDir: home, cwd: home, processEnv: {}, stdin: 'brave-secret-value' };
+
+  const set = createStreams();
+  assert.equal(
+    await runCli({ argv: ['credential', 'set', 'search.apiKey'], streams: set.streams, env }),
+    0,
+  );
+  // Storing grants nothing — the soul is still the per-identity gate, and an
+  // operator who stops here gets "not allowed to access credential".
+  assert.match(set.output.stdout, /credentials: \[search\.apiKey\]/);
+
+  const credentialsFile = path.join(home, '.stratus', 'credentials.json');
+  const stored = JSON.parse(await readFile(credentialsFile, 'utf8')) as {
+    named?: { shared?: Record<string, string> };
+  };
+  assert.equal(stored.named?.shared?.['search.apiKey'], 'brave-secret-value');
+  assert.equal((await stat(credentialsFile)).mode & 0o777, 0o600);
+
+  const list = createStreams();
+  assert.equal(await runCli({ argv: ['credentials'], streams: list.streams, env }), 0);
+  assert.match(list.output.stdout, /search\.apiKey/);
+  // Names, never values — the same posture the control API's credential
+  // read already keeps.
+  assert.ok(!list.output.stdout.includes('brave-secret-value'), 'listing printed a secret');
+});
+
+test('a per-agent credential is stored under that agent and listed apart from the shared one', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cred-agent-'));
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+
+  await runCli({
+    argv: ['credential', 'set', 'search.apiKey'],
+    streams: createStreams().streams,
+    env: { ...env, stdin: 'fleet-key' },
+  });
+  await runCli({
+    argv: ['credential', 'set', 'search.apiKey', '--agent', 'ava'],
+    streams: createStreams().streams,
+    env: { ...env, stdin: 'ava-key' },
+  });
+
+  const stored = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8')) as {
+    named?: { shared?: Record<string, string>; agents?: Record<string, Record<string, string>> };
+  };
+  assert.equal(stored.named?.shared?.['search.apiKey'], 'fleet-key');
+  assert.equal(stored.named?.agents?.ava?.['search.apiKey'], 'ava-key');
+
+  const list = createStreams();
+  await runCli({ argv: ['credential', 'list'], streams: list.streams, env });
+  assert.match(list.output.stdout, /Shared with the whole fleet:\n {2}search\.apiKey/);
+  assert.match(list.output.stdout, /Only ava:\n {2}search\.apiKey/);
+});
+
+test('stratus credential remove forgets one, and says so when there is nothing to forget', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cred-rm-'));
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await runCli({
+    argv: ['credential', 'set', 'search.apiKey', '--agent', 'ava'],
+    streams: createStreams().streams,
+    env: { ...env, stdin: 'ava-key' },
+  });
+
+  const missing = createStreams();
+  assert.equal(await runCli({ argv: ['credential', 'remove', 'search.apiKey'], streams: missing.streams, env }), 1);
+  // The shared entry and one agent's own are different things, so removing
+  // the one you did not store must not silently report success.
+  assert.match(missing.output.stderr, /No shared credential named search\.apiKey/);
+
+  const removed = createStreams();
+  assert.equal(
+    await runCli({ argv: ['credential', 'remove', 'search.apiKey', '--agent', 'ava'], streams: removed.streams, env }),
+    0,
+  );
+  const stored = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8')) as {
+    named?: { agents?: Record<string, unknown> };
+  };
+  assert.deepEqual(stored.named?.agents, {});
+});
+
+test('a credential value is never taken from the command line', () => {
+  // A secret in argv is a secret in shell history and in every `ps` on the
+  // machine, so there is deliberately no flag that carries one.
+  assert.throws(() => parseCommand(['credential', 'set', 'search.apiKey', '--value', 'sekrit']), /Unknown option: --value/);
+  assert.throws(() => parseCommand(['credential', 'set']), /needs a credential name/);
+  assert.throws(() => parseCommand(['credential', 'rotate', 'x']), /No credential subcommand named "rotate"/);
+  assert.deepEqual(parseCommand(['credentials']), { command: 'credential', action: 'list' });
+  assert.deepEqual(
+    parseCommand(['credential', 'set', 'search.apiKey', '--agent', 'ava']),
+    { command: 'credential', action: 'set', name: 'search.apiKey', agentId: 'ava' },
+  );
+});
+
+test('credential set with nothing on stdin stores nothing and says how to pipe it in', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cred-empty-'));
+  const { streams, output } = createStreams();
+  assert.equal(
+    await runCli({
+      argv: ['credential', 'set', 'search.apiKey'],
+      streams,
+      env: { homeDir: home, cwd: home, processEnv: {}, stdin: '   ' },
+    }),
+    1,
+  );
+  assert.match(output.stderr, /printf %s "\$KEY" \| stratus credential set search\.apiKey/);
+  await assert.rejects(() => readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
+});

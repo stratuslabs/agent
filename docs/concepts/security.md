@@ -15,6 +15,18 @@ linked own the full story.
   under `channels.slack.<agentId>` and are never resolvable through an
   agent's own credential allowlist — an agent must not be able to read the
   tokens of the transport carrying it. ([Slack](../guides/slack.md))
+- **Named credentials are the opposite case, and share the file without
+  sharing the door.** `search.apiKey` and its kind live under `named` and
+  *are* resolved through an agent's allowlist, because they are an agent
+  capability rather than the daemon's own — the agent's own entry first,
+  then the fleet's shared one, then the environment. A soul that does not
+  list a name cannot reach it. Channel tokens stay out of that path
+  entirely; a namespace next door is not a way in.
+  ([Tools](../guides/tools.md#searching-the-web))
+- **A credential value is never taken from the command line and never
+  printed back.** `stratus credential set` reads it from stdin, because a
+  secret in argv is a secret in shell history and in every `ps` on the
+  machine; `stratus credentials` reports names only.
 
 ## What a cloned repo cannot decide
 
@@ -42,6 +54,11 @@ gets to make. ([Configuration](../reference/config.md))
   link-local, IPv6 unique-local, and their IPv4-mapped and NAT64
   spellings — validated on the connection, so a redirect or DNS answer
   cannot walk an agent into a metadata endpoint. ([Tools](../guides/tools.md))
+- **Third-party text is labelled as such.** `web.search` results — titles
+  and snippets written by whoever owns the page, selected by a ranker —
+  come back in an envelope that says so. It is a label, not a defence
+  against prompt injection, and it does not make acting on that text safe.
+  ([Tools](../guides/tools.md#searching-the-web))
 - **`tool-shell` and stdio MCP servers get a replaced environment**: the
   daemon's own env vars, where API keys live, are not there to read.
 
@@ -54,7 +71,11 @@ gets to make. ([Configuration](../reference/config.md))
   request — so skim a log before sharing it. ([Logs](../guides/logs.md))
 - **No control API endpoint returns a secret.** Credential reads report
   presence, type, and bound endpoint; session reads strip the Anthropic
-  raw-turn cache. ([Control API](../../packages/control-api/README.md))
+  raw-turn cache. Named credentials are not on that API at all yet — the
+  CLI is the only way to add one. ([Control API](../../packages/control-api/README.md))
+- **The daemon log records that a search ran and against which backend,
+  never the query** — a query is user content, and the log is a trace
+  rather than a second transcript.
 
 ## The network posture
 
