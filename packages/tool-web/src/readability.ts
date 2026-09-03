@@ -83,7 +83,14 @@ export const htmlToText = (html: string): string => {
   for (const element of BLOCK_ELEMENTS) {
     text = text.replace(new RegExp(`</?${element}\\b[^>]*>`, 'gi'), '\n');
   }
-  text = text.replace(/<[^>]+>/g, ' ');
+  // Removed rather than replaced with a space. Every element that separates
+  // words became a newline above, so whatever is left here is *inline*
+  // decoration wrapped around text that was already adjacent — and a space
+  // there rewrites the page: `un<em>expected</em>` becomes `un expected`, a
+  // word the page does not contain, and `<strong>kettle</strong>.` becomes
+  // `kettle .`. A model reading the extraction cannot tell either from the
+  // real thing.
+  text = text.replace(/<[^>]+>/g, '');
   text = decodeEntities(text);
 
   return text

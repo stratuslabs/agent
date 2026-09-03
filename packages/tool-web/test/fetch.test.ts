@@ -183,5 +183,15 @@ test('the extractor keeps prose and drops furniture', () => {
   assert.equal(htmlToText('<p>tea &amp; toast &#8212; &#x2764;</p>'), 'tea & toast — ❤');
   assert.equal(htmlToText('<p>caf&eacute;</p>'), 'caf&eacute;');
   assert.equal(htmlToText('<!-- hidden --><p>shown</p>'), 'shown');
+  // Inline formatting is removed, not spaced out. Every element that
+  // separates words became a newline before this point, so a space here
+  // would rewrite the page: `un expected` is a word the page does not
+  // contain, and a model reading the extraction cannot tell it from one
+  // that does.
+  assert.equal(htmlToText('<p>un<em>expected</em> results</p>'), 'unexpected results');
+  assert.equal(htmlToText('<p>The <strong>kettle</strong>.</p>'), 'The kettle.');
+  assert.equal(htmlToText('<p>see <a href="/x">the docs</a>, then stop</p>'), 'see the docs, then stop');
+  // …while the elements that do separate words still produce their break.
+  assert.equal(htmlToText('<ul><li>one</li><li>two</li></ul>'), '- one\n- two');
   assert.equal(htmlToText('<script>var x = "<p>trap</p>";</script><p>real</p>'), 'real');
 });

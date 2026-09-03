@@ -29,14 +29,31 @@ import { hostMatchesSite } from './options.ts';
  * sentence between them. Snippets are prose about arbitrary subjects, so
  * that case is not hypothetical.
  *
+ * **A formatting tag is removed, not replaced with a space.** Vendors
+ * highlight the matched *substring*, so `un<strong>expected</strong>`
+ * arrives routinely — and a space there produces `un expected`, a word the
+ * page does not contain. The same space detaches punctuation, turning
+ * `<strong>kettle</strong>.` into `kettle .`. The handful of tags that do
+ * separate words become a space, because removing those would glue two
+ * sentences together instead; everything else is inline decoration around
+ * text that was already adjacent.
+ *
  * Entity *decoding* is deliberately not done here: a snippet arrives as a
  * string a backend parsed out of its vendor's JSON, so whatever encoding
  * that payload used is the backend's to undo, and this package guessing at
  * it would corrupt a snippet that legitimately contains an ampersand
  * followed by a word.
  */
+const SNIPPET_SEPARATOR = /^(?:br|p|div|li|tr|td|th|h[1-6]|blockquote|section|article)$/i;
+
 export const plainSnippet = (value: string): string =>
-  value.replace(/<\/?[a-zA-Z][^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  value
+    .replace(
+      /<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>/g,
+      (_tag, name: string) => (SNIPPET_SEPARATOR.test(name) ? ' ' : ''),
+    )
+    .replace(/\s+/g, ' ')
+    .trim();
 
 /**
  * A date-time this contract will accept: a calendar date, optionally with a

@@ -162,9 +162,28 @@ test('an invented date cannot survive a freshness filter, because it is never a 
 
 test('snippets arrive as plain text, whatever decoration the vendor sent', () => {
   assert.equal(plainSnippet('The <strong>kettle</strong>   guide.'), 'The kettle guide.');
+  // Without the runs of spaces the original fixture happened to carry, which
+  // is what hid the defect this pair now pins.
+  assert.equal(plainSnippet('The <strong>kettle</strong> guide.'), 'The kettle guide.');
   assert.equal(plainSnippet('An <img src="x.png"> illustration'), 'An illustration');
   assert.equal(plainSnippet('line\n\nbreak'), 'line break');
   assert.equal(plainSnippet('  padded  '), 'padded');
+});
+
+test('a highlighted substring does not become two words, or a detached full stop', () => {
+  // Vendors highlight the matched *substring*, so this is the shape a real
+  // backend returns most often — and replacing the tag with a space invents
+  // a word the page does not contain.
+  assert.equal(plainSnippet('un<strong>expected</strong> results'), 'unexpected results');
+  assert.equal(plainSnippet('The <strong>kettle</strong>.'), 'The kettle.');
+  assert.equal(plainSnippet('the <em>API</em>, and more'), 'the API, and more');
+  assert.equal(plainSnippet('a <b>bold</b><i>run</i>'), 'a boldrun');
+
+  // The few tags that genuinely separate words still do. Removing these
+  // would glue two sentences together, which is the opposite mistake.
+  assert.equal(plainSnippet('one<br>two'), 'one two');
+  assert.equal(plainSnippet('<p>one</p><p>two</p>'), 'one two');
+  assert.equal(plainSnippet('<li>one</li><li>two</li>'), 'one two');
 });
 
 test('a snippet that compares two numbers keeps the sentence between them', () => {
