@@ -1777,11 +1777,19 @@ test('an unnamed soul keeps the same generated identity across invocations', asy
 
 test('resolveRuntimeConfig treats provider-less config settings as openai-specific', async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
-  await writeFile(path.join(tempDir, 'stratus.config.json'), JSON.stringify({
+  const configPath = path.join(tempDir, 'stratus.config.json');
+  await writeFile(configPath, JSON.stringify({
     model: 'gpt-4.1-mini',
     baseUrl: 'https://example.test/v1',
     apiKeyEnv: 'CUSTOM_OPENAI_KEY',
   }));
+
+  // Named rather than auto-discovered, because the subject here is which
+  // *provider* a legacy config's settings apply to. `apiKeyEnv` and a
+  // custom `baseUrl` are honoured only from a config the operator chose
+  // (see the untrusted-endpoint tests in @stratusagent/state), and leaving
+  // this one to auto-discovery would test that rule instead of this one.
+  const configured = { configPath };
 
   // Legacy configs predate the anthropic provider, so their settings must
   // not leak into an anthropic run...
@@ -1791,6 +1799,7 @@ test('resolveRuntimeConfig treats provider-less config settings as openai-specif
     provider: 'anthropic',
     format: 'text',
     events: true,
+    ...configured,
   }, {
     cwd: tempDir,
     homeDir: tempHome,
@@ -1811,6 +1820,7 @@ test('resolveRuntimeConfig treats provider-less config settings as openai-specif
     provider: 'openai',
     format: 'text',
     events: true,
+    ...configured,
   }, {
     cwd: tempDir,
     homeDir: tempHome,
