@@ -3946,9 +3946,10 @@ export const runSetup = async (
     if (chosen.length > 0) {
       const packages = chosen.flatMap((group) => group.packages);
       writeLine(streams.stdout, `Running: npm install -g ${packages.join(' ')}`);
-      // Never fails setup, for the same reason the service install does not:
-      // the config and credentials are already written, and a package that
-      // did not install is a warning at the next start, not a broken machine.
+      // Never fails setup — not even its exit code, unlike the always-on
+      // service step below: the config and credentials are already written,
+      // and a package that did not install is a warning at the next start,
+      // not a broken machine.
       const result = await (env.packageInstaller ?? defaultPackageInstaller)(packages)
         .catch((error: unknown) => ({
           ok: false,
@@ -3978,20 +3979,24 @@ export const runSetup = async (
 
   /**
    * Write everything the menu decided, then report whether the always-on
-   * install it performed succeeded.
+   * service step it performed — installing the service, or removing one the
+   * user chose not to run — succeeded.
    *
-   * A boolean rather than a throw: the install is the one optional part of
+   * A boolean rather than a throw: the service is the one optional part of
    * setup and everything else is already on disk by the time it runs, so
    * failing outright would lose the saved config to a service that can be
-   * installed later. The exit code carries it instead — the same answer
-   * `stratus service install` gives for the identical failure, which is what
-   * a script driving setup has to be able to see.
+   * installed (or removed) later. The exit code carries it instead — the
+   * same answer `stratus service install` and `stratus service uninstall`
+   * give for the identical failure, which is what a script driving setup
+   * has to be able to see.
    */
   const save = async (): Promise<boolean> => {
-    // The always-on install is the only step here that can fail without
+    // The always-on service step is the only one here that can fail without
     // taking the rest of setup with it, so it is the only one the exit code
-    // has to carry.
-    let serviceInstallFailed = false;
+    // has to carry. Both signs count: a unit left in place after "do not run
+    // it for me" starts a daemon at login the user asked not to have, which
+    // is no more a successful setup than one that will not come up at all.
+    let serviceStepFailed = false;
     const config: Record<string, string> = { provider: state.provider };
     if (state.provider !== 'demo') {
       config.model = state.model ?? defaultModelFor(state.provider);
@@ -4087,6 +4092,9 @@ export const runSetup = async (
         for (const message of removed.messages) {
           writeLine(removed.ok ? streams.stdout : streams.stderr, message);
         }
+        if (!removed.ok) {
+          serviceStepFailed = true;
+        }
       }
     } else if (state.service.install && servicePlatform(serviceEnvFor(env))) {
       // The unit is pinned to the file setup just wrote. Its working
@@ -4111,7 +4119,7 @@ export const runSetup = async (
       }
       if (!result.ok) {
         writeLine(streams.stderr, `Setup is saved either way — start the daemon yourself with \`${serveCommand()}\`.`);
-        serviceInstallFailed = true;
+        serviceStepFailed = true;
       }
     }
     writeLine(streams.stdout);
@@ -4164,7 +4172,7 @@ export const runSetup = async (
     if (dashboardReady) {
       writeLine(streams.stdout, '  stratus dashboard');
     }
-    return !serviceInstallFailed;
+    return !serviceStepFailed;
   };
 
   try {
@@ -4208,11 +4216,12 @@ export const runSetup = async (
       }
     }
 
-    // Non-zero when the always-on install failed, matching `stratus service
-    // install`. Everything setup saved is still saved, and the output above
-    // says so — but a daemon that will not come up at login is not a
-    // successful setup, and a script that only reads the exit code had no
-    // way to tell.
+    // Non-zero when the always-on service step failed, matching `stratus
+    // service install` and `stratus service uninstall`. Everything setup
+    // saved is still saved, and the output above says so — but a daemon that
+    // will not come up at login, or one that will after the user said not to
+    // run it, is not a successful setup, and a script that only reads the
+    // exit code had no way to tell.
     return (await save()) ? 0 : 1;
   } finally {
     prompter.close();
