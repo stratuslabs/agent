@@ -360,7 +360,17 @@ class ReplyRenderer {
   // channel contract's upload operation. Uploads chain so they land in
   // order and finalize() waits for them.
   private queueUpload(filePath: string): void {
+    // Behind a handover in progress, for the same reason edits and the
+    // finalize are: the turn being handed the placeholder has its own
+    // attachments to put in the thread first, and an upload is a message
+    // of its own — one sent now would sit above them and read as this
+    // turn's answer arriving first. Captured at queue time, not read when
+    // the chain runs: a handover that begins after this upload waits for
+    // it, and an upload that then waited for that handover would be a
+    // cycle nothing breaks (see `queueEdit`).
+    const handover = this.handover;
     this.uploadChain = this.uploadChain
+      .then(() => handover)
       // Read as file DATA inside the chain: the Web API takes contents,
       // not a path, and a missing file surfaces as this upload's own
       // failure instead of an unhandled stream error.

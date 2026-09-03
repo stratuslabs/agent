@@ -1944,6 +1944,89 @@ test('a recovered turn claims the queued placeholder before its routing is read'
   assert.equal(web.updates.find((entry) => entry.text === 'the message\'s own reply')?.ts, 'bot-ts-2');
 });
 
+test('a queued turn\'s own file waits for the handover it is behind', async () => {
+  // The queued turn starts the moment the recovery's outcome lands, and can
+  // produce a file of its own while the recovery is still reading its
+  // routing. An upload is a message of its own, so one sent then would sit
+  // above the recovery's attachment and read as the newer turn answering
+  // first.
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-upload-order-'));
+  const recovered = path.join(root, 'recovered.png');
+  const queued = path.join(root, 'queued.png');
+  await writeFile(recovered, 'recovered bytes');
+  await writeFile(queued, 'queued bytes');
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const order: string[] = [];
+
+  let answerRouting!: () => void;
+  const routingHeld = new Promise<void>((resolve) => {
+    answerRouting = resolve;
+  });
+  const upload = web.files.uploadV2.bind(web.files);
+  web.files.uploadV2 = async (args) => {
+    order.push(`upload:${args.filename}`);
+    // Whichever comes first: the queued turn's upload getting through (the
+    // regression) or the finalize below. Either way the routing answers
+    // and the test finishes rather than hanging.
+    answerRouting();
+    return upload(args);
+  };
+
+  const gateway: StubGateway = createStubGateway(async ({ sessionId }) => {
+    // The queued turn's own tool result, produced while the recovery's
+    // routing lookup is still out.
+    await gateway.bus.emit({
+      type: 'tool.completed',
+      sessionId,
+      result: { callId: 'c2', toolName: 'browser.screenshot', ok: true, output: { file: queued } },
+    });
+    const session = sessionWithReply(sessionId, 'the message\'s own reply');
+    const messages = session.messages;
+    // Read immediately before the renderer is finalized: the moment the
+    // queued turn has nothing left to do but its own reply.
+    return {
+      ...session,
+      get messages() {
+        setImmediate(answerRouting);
+        return messages;
+      },
+    };
+  });
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    const stubActiveTurn = gateway.activeTurnId!;
+    gateway.activeTurnId = () => 'recovered-turn';
+    await gateway.bus.emit({
+      type: 'tool.completed',
+      sessionId: input.sessionId,
+      result: { callId: 'c1', toolName: 'browser.screenshot', ok: true, output: { file: recovered } },
+    });
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    gateway.activeTurnId = stubActiveTurn;
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => {
+    await routingHeld;
+    return {
+      agentId: 'ava',
+      metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+      reply: 'the recovered reply',
+    };
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  assert.deepEqual(order, ['upload:recovered.png', 'upload:queued.png']);
+});
+
 test('a turn with no renderer that outruns the attachment cap says so', async () => {
   // Nothing drains the queue of an unrendered turn's files until its
   // outcome arrives, so the queue is bounded — but attachments that never
