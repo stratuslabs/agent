@@ -29,6 +29,39 @@ const DROPPED_ELEMENTS = [
   'form',
 ];
 
+/**
+ * Formatting that wraps text which was already adjacent, so removing it
+ * joins nothing that was apart. Deliberately a closed set: everything not
+ * named here becomes a space, which is the safe direction — see the
+ * substitution below.
+ */
+const INLINE_ELEMENTS = new Set([
+  'a', 'abbr', 'b', 'bdi', 'bdo', 'big', 'cite', 'code', 'data', 'del', 'dfn',
+  'em', 'font', 'i', 'ins', 'kbd', 'mark', 'nobr', 'ruby',
+  's', 'samp', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'time',
+  'tt', 'u', 'var', 'wbr',
+]);
+// `rt` and `rp` are deliberately absent, though they are inline elements.
+// They hold a ruby annotation — a pronunciation printed *above* the base
+// text, not beside it — so joining them produces a token the page never
+// shows: `<ruby>東京<rt>とうきょう</rt></ruby>` reads back as 東京とうきょう,
+// fusing a word with its own furigana. Separating loses nothing and fuses
+// nothing, which is the safer of the two ways to be wrong here; dropping
+// the annotation outright would read better still and would be a guess
+// about whether the pronunciation is content.
+//
+// `sub` and `sup` stay, and are the deliberate contrast: `H<sub>2</sub>O`
+// is one token and joining it is the whole point.
+
+/**
+ * `q` renders a character of its own — a browser draws quotation marks
+ * around it from the stylesheet — so neither answer above is right for it.
+ * Removing it fuses `<q>yes</q><q>no</q>` into `yesno`; spacing it detaches
+ * the comma in `<q>yes</q>, then left`. Emitting the mark a reader sees
+ * avoids both and is the more faithful extraction.
+ */
+const QUOTE_ELEMENT = 'q';
+
 const BLOCK_ELEMENTS = [
   'p', 'div', 'section', 'article', 'main', 'br', 'hr',
   'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
@@ -70,7 +103,13 @@ export const extractTitle = (html: string): string | undefined => {
 };
 
 export const htmlToText = (html: string): string => {
+  // Comments first, then the doctype and any processing instruction. These
+  // are removed by name rather than by a blanket `<[^>]*>` sweep, because
+  // that sweep reads `5 < 10 and 20 > 15` as a tag and deletes the middle
+  // of the sentence — prose about arbitrary subjects is exactly what a
+  // fetched page is.
   let text = html.replace(/<!--[\s\S]*?-->/g, '');
+  text = text.replace(/<[!?][^>]*>/g, ' ');
 
   for (const element of DROPPED_ELEMENTS) {
     text = text.replace(new RegExp(`<${element}\\b[^>]*>[\\s\\S]*?</${element}>`, 'gi'), ' ');
@@ -83,7 +122,36 @@ export const htmlToText = (html: string): string => {
   for (const element of BLOCK_ELEMENTS) {
     text = text.replace(new RegExp(`</?${element}\\b[^>]*>`, 'gi'), '\n');
   }
-  text = text.replace(/<[^>]+>/g, ' ');
+  // Inline formatting is removed; every other tag becomes a space.
+  //
+  // A space around formatting rewrites the page — `un<em>expected</em>`
+  // becomes `un expected`, a word the page does not contain, and
+  // `<strong>kettle</strong>.` becomes `kettle .` — and a model reading the
+  // extraction cannot tell either from the real thing.
+  //
+  // The default runs the other way on purpose. Naming the *separators*
+  // instead and deleting the rest looks equivalent and is not: the list is
+  // never complete. `td`, `dd`, and `option` are all missing from the block
+  // list above, and a custom element is missing from every list anybody
+  // will write — so that spelling silently glued `AlphaBeta` out of two
+  // table cells. Inline formatting is a closed set that has not grown in
+  // twenty years, so listing it is the half that can be finished, and an
+  // unrecognised tag falls to a space: a seam that was not needed is a
+  // blemish, while one that was is a word nobody wrote.
+  //
+  // The name is captured whole, punctuation included. Stopping at the first
+  // character outside `[a-zA-Z0-9-]` reads `<a:widget>` as the inline `a`
+  // and deletes it — and a namespaced element is precisely the unknown tag
+  // this default exists for.
+  text = text.replace(
+    /<\/?([a-zA-Z][^\s/>]*)[^>]*>/g,
+    (_tag, rawName: string) => {
+      const name = rawName.toLowerCase();
+      if (name === QUOTE_ELEMENT) return '"';
+      return INLINE_ELEMENTS.has(name) ? '' : ' ';
+    },
+  );
+
   text = decodeEntities(text);
 
   return text

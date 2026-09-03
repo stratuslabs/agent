@@ -99,9 +99,9 @@ is not available, and that belongs in `channel-slack`.
 - Rate limits are now shared across the roster. Five agents on one app share
   one budget, and streaming edits are the heaviest consumer. Whatever pacing
   this needs is likely to be useful to [20](./20-channel-discord.md) too.
-- `stop()` keeps its guarantee, and the documented drain gap does not get
-  worse: one connection serving many agents means one snapshot covering all of
-  them.
+- `stop()` keeps its guarantee: one connection serving many agents means one
+  drain covering all of them, and that drain runs until the adapter's in-flight
+  set stays empty rather than over a snapshot of it.
 
 ## Acceptance criteria
 

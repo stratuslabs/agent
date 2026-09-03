@@ -29,14 +29,80 @@ import { hostMatchesSite } from './options.ts';
  * sentence between them. Snippets are prose about arbitrary subjects, so
  * that case is not hypothetical.
  *
+ * **A formatting tag is removed, not replaced with a space.** Vendors
+ * highlight the matched *substring*, so `un<strong>expected</strong>`
+ * arrives routinely — and a space there produces `un expected`, a word the
+ * page does not contain. The same space detaches punctuation, turning
+ * `<strong>kettle</strong>.` into `kettle .`. Anything that is not inline
+ * formatting becomes a space, because removing a cell or list boundary
+ * glues two values into one instead — see `INLINE_ELEMENTS`.
+ *
  * Entity *decoding* is deliberately not done here: a snippet arrives as a
  * string a backend parsed out of its vendor's JSON, so whatever encoding
  * that payload used is the backend's to undo, and this package guessing at
  * it would corrupt a snippet that legitimately contains an ampersand
  * followed by a word.
  */
+/**
+ * Formatting that wraps text which was already adjacent. Everything not
+ * named here becomes a space instead, which is the safe direction: naming
+ * the *separators* looks equivalent and is not, because that list is never
+ * complete — a custom element is missing from every list anybody will
+ * write, and deleting one glues `AlphaBeta` out of two cells. Inline
+ * formatting is a closed set, so it is the half that can be finished.
+ *
+ * The name is captured **whole**, punctuation included, before it is looked
+ * up. Stopping at the first character outside `[a-zA-Z0-9-]` reads
+ * `<a:widget>` as the inline `a` and deletes it — and a namespaced or
+ * framework-generated element is precisely the unknown tag the separator
+ * default exists for, so misreading one defeats the rule at the only point
+ * where it matters.
+ *
+ * `@stratusagent/tool-web` keeps the same set for the same reason. They are
+ * not shared because no dependency direction exists between a contract
+ * package and a plugin: `search` must not depend on `tool-web`, and the
+ * reverse would be backwards.
+ */
+const INLINE_ELEMENTS = new Set([
+  'a', 'abbr', 'b', 'bdi', 'bdo', 'big', 'cite', 'code', 'data', 'del', 'dfn',
+  'em', 'font', 'i', 'ins', 'kbd', 'mark', 'nobr', 'ruby',
+  's', 'samp', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'time',
+  'tt', 'u', 'var', 'wbr',
+]);
+// `rt` and `rp` are deliberately absent, though they are inline elements.
+// They hold a ruby annotation — a pronunciation printed *above* the base
+// text, not beside it — so joining them produces a token the page never
+// shows: `<ruby>東京<rt>とうきょう</rt></ruby>` reads back as 東京とうきょう,
+// fusing a word with its own furigana. Separating loses nothing and fuses
+// nothing, which is the safer of the two ways to be wrong here; dropping
+// the annotation outright would read better still and would be a guess
+// about whether the pronunciation is content.
+//
+// `sub` and `sup` stay, and are the deliberate contrast: `H<sub>2</sub>O`
+// is one token and joining it is the whole point.
+
+/**
+ * `q` is the one element that renders a character of its own: a browser
+ * draws quotation marks around it from the stylesheet, so neither answer
+ * above is right. Removing it fuses `<q>yes</q><q>no</q>` into `yesno`,
+ * and spacing it detaches the comma in `<q>yes</q>, then left` — the very
+ * defect this file exists to fix. Emitting the mark the reader sees costs
+ * nothing and is the more faithful extraction of the two.
+ */
+const QUOTE_ELEMENT = 'q';
+
 export const plainSnippet = (value: string): string =>
-  value.replace(/<\/?[a-zA-Z][^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  value
+    .replace(
+      /<\/?([a-zA-Z][^\s/>]*)[^>]*>/g,
+      (_tag, rawName: string) => {
+        const name = rawName.toLowerCase();
+        if (name === QUOTE_ELEMENT) return '"';
+        return INLINE_ELEMENTS.has(name) ? '' : ' ';
+      },
+    )
+    .replace(/\s+/g, ' ')
+    .trim();
 
 /**
  * A date-time this contract will accept: a calendar date, optionally with a

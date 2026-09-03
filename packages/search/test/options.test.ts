@@ -162,9 +162,66 @@ test('an invented date cannot survive a freshness filter, because it is never a 
 
 test('snippets arrive as plain text, whatever decoration the vendor sent', () => {
   assert.equal(plainSnippet('The <strong>kettle</strong>   guide.'), 'The kettle guide.');
+  // Without the runs of spaces the original fixture happened to carry, which
+  // is what hid the defect this pair now pins.
+  assert.equal(plainSnippet('The <strong>kettle</strong> guide.'), 'The kettle guide.');
   assert.equal(plainSnippet('An <img src="x.png"> illustration'), 'An illustration');
   assert.equal(plainSnippet('line\n\nbreak'), 'line break');
   assert.equal(plainSnippet('  padded  '), 'padded');
+});
+
+test('a highlighted substring does not become two words, or a detached full stop', () => {
+  // Vendors highlight the matched *substring*, so this is the shape a real
+  // backend returns most often — and replacing the tag with a space invents
+  // a word the page does not contain.
+  assert.equal(plainSnippet('un<strong>expected</strong> results'), 'unexpected results');
+  assert.equal(plainSnippet('The <strong>kettle</strong>.'), 'The kettle.');
+  assert.equal(plainSnippet('the <em>API</em>, and more'), 'the API, and more');
+  assert.equal(plainSnippet('a <b>bold</b><i>run</i>'), 'a boldrun');
+
+  // Anything that is not inline formatting still separates. Removing these
+  // would glue two values into one, which is the opposite mistake.
+  assert.equal(plainSnippet('one<br>two'), 'one two');
+  assert.equal(plainSnippet('<p>one</p><p>two</p>'), 'one two');
+  assert.equal(plainSnippet('<li>one</li><li>two</li>'), 'one two');
+  assert.equal(plainSnippet('<td>Alpha</td><td>Beta</td>'), 'Alpha Beta');
+  // Including a tag no list will ever contain, which is why the default
+  // runs this way: an unneeded space is a blemish, a missing one is a word
+  // nobody wrote.
+  assert.equal(plainSnippet('<my-widget>Alpha</my-widget><my-widget>Beta</my-widget>'), 'Alpha Beta');
+  // A ruby annotation prints above its base text, so joining them fuses a
+  // word with its own pronunciation into a token the page never shows.
+  assert.equal(plainSnippet('<ruby>東京<rt>とうきょう</rt></ruby>へ行く'), '東京 とうきょう へ行く');
+  // …while `sub`/`sup` stay joined, which is the contrast: `H2O` is one token.
+  assert.equal(plainSnippet('H<sub>2</sub>O'), 'H2O');
+});
+
+test('a quotation renders the mark a browser draws, so it neither fuses nor detaches', () => {
+  // `q` is the one element that draws a character of its own, from the
+  // stylesheet. Removing it fuses two quotations; spacing it detaches the
+  // comma, which is the defect this file exists to fix. Emitting the mark
+  // avoids both and is what the reader actually sees.
+  assert.equal(plainSnippet('<q>yes</q><q>no</q>'), '"yes""no"');
+  assert.equal(plainSnippet('He said <q>yes</q>, then left.'), 'He said "yes", then left.');
+  assert.equal(plainSnippet('<q cite="/x">yes</q>'), '"yes"');
+});
+
+test('the tag name is read whole, so a namespaced element is not mistaken for an inline one', () => {
+  // Reading only up to the first punctuation classifies `<a:widget>` as the
+  // inline `a` and deletes it — and a namespaced or framework-generated
+  // element is exactly the unknown tag the separator default exists for, so
+  // misreading one defeats the rule at the only point where it matters.
+  assert.equal(plainSnippet('<a:widget>Alpha</a:widget><a:widget>Beta</a:widget>'), 'Alpha Beta');
+  assert.equal(plainSnippet('<b:x>Alpha</b:x><b:x>Beta</b:x>'), 'Alpha Beta');
+  assert.equal(plainSnippet('<o:p>Alpha</o:p><o:p>Beta</o:p>'), 'Alpha Beta');
+  assert.equal(plainSnippet('<foo.bar>Alpha</foo.bar><foo.bar>Beta</foo.bar>'), 'Alpha Beta');
+
+  // The shapes that still have to read as the tags they are.
+  assert.equal(plainSnippet('un<STRONG>expected</STRONG>'), 'unexpected');
+  assert.equal(plainSnippet('see <a href="/x" title="q">docs</a>, then'), 'see docs, then');
+  assert.equal(plainSnippet('a<br/>b'), 'a b');
+  // And the shapes that are not tags at all.
+  assert.equal(plainSnippet('I <3 you > them'), 'I <3 you > them');
 });
 
 test('a snippet that compares two numbers keeps the sentence between them', () => {

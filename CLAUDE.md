@@ -187,13 +187,19 @@ hand and by review:
   something to wait for. Prove a gate is the gate by removing it: the
   assertion should fail, not pass more slowly.
 
+  `adapter.stop()` drains **until its in-flight set stays empty**, because
+  the bus subscription outlives the drain and a turn finishing inside it
+  still hands the adapter work — the retraction of an approval the
+  shutdown denied, which is what the drain exists to deliver. It waits for
+  reactions, never for turns: work is tracked only when an event arrives.
+  `gateway.stop()` drains a **single snapshot** and is right to, because
+  everything that enters its set goes through `onSessionChain`, and every
+  path there refuses once `stopping` is set — so that set can only shrink.
+
   Neither is a general quiescence barrier, and do not write one up as
-  though it were. Both drain a **one-time snapshot** of their in-flight
-  set, and the Slack adapter unsubscribes from the bus only *after* that
-  drain — so a turn still finishing can emit an event whose subscriber
-  tracks new work the snapshot never saw. That is a real gap on shutdown,
-  not only in tests: the work at risk is exactly the approval retraction
-  the drain exists to deliver.
+  though it were. The adapter's loop ends when the work it has *already
+  been handed* ends; a turn that has not emitted anything yet is not
+  something it can be waiting on.
 
   A wall-clock number that *must* stay a wall-clock number — the watchdog
   tests, where the point is that a phase outlasts the idle timeout —
