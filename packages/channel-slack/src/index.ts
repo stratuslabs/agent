@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
-import type { ApprovalAnswer, JsonObject, Session, StratusEvent, ToolResult } from '@stratusagent/core';
+import { latestTurnReply, type ApprovalAnswer, type JsonObject, type Session, type StratusEvent, type ToolResult } from '@stratusagent/core';
 import {
   channelSessionKey,
   type ChannelAdapter,
@@ -407,23 +407,9 @@ const splitForSlack = (text: string): string[] => {
   return chunks;
 };
 
-const lastAssistantReply = (session: Session): string => {
-  for (let index = session.messages.length - 1; index >= 0; index -= 1) {
-    const message = session.messages[index];
-    if (!message) {
-      continue;
-    }
-    // Stop at the current turn's input: an earlier turn's answer must not
-    // be replayed as this turn's reply when the provider returned no text.
-    if (message.role === 'user') {
-      break;
-    }
-    if (message.role === 'assistant' && message.content.trim().length > 0) {
-      return message.content;
-    }
-  }
-  return '(no reply)';
-};
+// One rule with the gateway's `sessionRouting`, which posts the same
+// message for a turn this adapter did not start.
+const lastAssistantReply = (session: Session): string => latestTurnReply(session) ?? '(no reply)';
 
 const APPROVAL_ACTIONS: Record<string, ApprovalAnswer> = {
   stratus_approve_once: 'once',

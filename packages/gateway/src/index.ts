@@ -14,6 +14,7 @@ import {
   createSkillReadTool,
   missingSkillRequirements,
   PENDING_APPROVAL_METADATA_KEY,
+  latestTurnReply,
   readPendingApproval,
   type AgentDefinition,
   type ApprovalAnswer,
@@ -399,7 +400,7 @@ export interface SessionRouting {
   agentId: string;
   /** The metadata the dispatching surface attached to the session. */
   metadata: JsonObject;
-  /** The last assistant message with text, when there is one — see `@stratusagent/channels`. */
+  /** The latest turn's text (`latestTurnReply`), when it produced any — see `@stratusagent/channels`. */
   reply?: string;
 }
 
@@ -2768,12 +2769,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       }
       // The reply, not the record: a channel that finishes a turn it did
       // not start needs the one message to post, and the transcript stays
-      // the session's own.
-      const reply = [...session.messages].reverse().find((message) => message.role === 'assistant' && message.content.length > 0);
+      // the session's own. The latest turn's text only — a turn that
+      // produced none has no reply, and an earlier turn's answer is not it.
+      const reply = latestTurnReply(session);
       return {
         agentId: session.agent.id,
         metadata: session.metadata ?? {},
-        ...(reply ? { reply: reply.content } : {}),
+        ...(reply !== undefined ? { reply } : {}),
       };
     },
 

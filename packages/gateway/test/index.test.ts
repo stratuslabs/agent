@@ -132,6 +132,17 @@ test('a session\'s routing carries its latest reply, for a channel finishing a t
     const routing = await gateway.sessionRouting('thread-r');
     assert.equal(routing?.agentId, session.agent.id);
     assert.equal(routing?.reply, lastReply);
+
+    // A later turn that produced no text has no reply: the earlier answer
+    // must not be posted again as though it answered the new message.
+    const stored = await gateway.store.get('thread-r');
+    assert.ok(stored);
+    stored.messages.push(
+      { id: 'thread-r:user:2', role: 'user', content: 'and again', createdAt: new Date().toISOString() },
+      { id: 'thread-r:assistant:2', role: 'assistant', content: '  \n', createdAt: new Date().toISOString() },
+    );
+    await gateway.store.save(stored);
+    assert.equal((await gateway.sessionRouting('thread-r'))?.reply, undefined);
   } finally {
     await gateway.stop();
   }
