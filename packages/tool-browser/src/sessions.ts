@@ -26,6 +26,12 @@ export interface SessionPoolOptions {
 interface BrowserEntry {
   key: string;
   browser: BrowserLike;
+  /**
+   * The proxy Chromium was launched with. Every context overrides it with
+   * one of its own (below), so nothing browses through this one; it is
+   * still the policy for anything that does not, and a Chromium launched
+   * without a proxy cannot be given per-context ones on every platform.
+   */
   proxy: EgressProxy;
   sessions: Set<string>;
 }
@@ -37,12 +43,18 @@ interface PooledContext {
   lastUsedAt: number;
   browserKey: string;
   /**
-   * The proxy's refusal count when this conversation last had its refusals
-   * reported (or when it began): what it is told next time is what came
-   * after. Without the cursor, every conversation in a browser was handed
-   * the browser's whole history on every call — one page's refused
-   * redirect to localhost was reported to every later conversation of the
-   * agent, forever.
+   * This conversation's own proxy, under the same policy as the browser's.
+   * What it refuses is this conversation's alone: with one proxy per
+   * browser, two conversations under one policy shared one refusal log,
+   * and a page in one was told what a page in the other had been refused
+   * — an address, and for plain HTTP the whole URL.
+   */
+  proxy: EgressProxy;
+  /**
+   * How many of the proxy's refusals this conversation has been told:
+   * what it is told next time is what came after. Without the cursor, a
+   * conversation was handed its whole history on every call — one page's
+   * refused redirect to localhost, reported on every later result, forever.
    */
   refusalsSeen: number;
 }
@@ -64,7 +76,8 @@ const MAX_SWEEP_INTERVAL_MS = 60_000;
  *   names, so it cannot narrow a hostname destination without re-opening
  *   the DNS-rebinding race the proxy exists to close.
  * - **A context per conversation**, so two conversations never share a
- *   cookie jar or a login.
+ *   cookie jar or a login — and a proxy per context, under the same
+ *   policy, so they never share a refusal log either.
  * - **Nothing left running.** A context that has gone quiet is closed, and
  *   a browser whose last conversation went with it is closed too.
  *
@@ -193,22 +206,29 @@ export class BrowserSessionPool {
       await this.drop(oldest, 'capacity');
     }
 
-    const context = await entry.browser.newContext();
+    const proxy = await createEgressProxy(policy);
+    let context: BrowserContextLike;
     let page: PageLike;
     try {
-      page = await context.newPage();
-    } catch (error) {
-      // A context that never got a page is not in `contexts`, so the idle
-      // sweep will never look at it — and neither will shutdown, which
-      // walks the same map. Closed here or not at all, and the browser
-      // goes too when it turns out nothing is using it (which is also how
-      // a Chromium that died during page creation stops being handed to
-      // the next caller).
+      context = await entry.browser.newContext({ proxy: chromiumProxyOptions(proxy) });
       try {
-        await context.close();
-      } catch {
-        // Already gone with the browser that owned it.
+        page = await context.newPage();
+      } catch (error) {
+        // A context that never got a page is not in `contexts`, so the idle
+        // sweep will never look at it — and neither will shutdown, which
+        // walks the same map. Closed here or not at all.
+        try {
+          await context.close();
+        } catch {
+          // Already gone with the browser that owned it.
+        }
+        throw error;
       }
+    } catch (error) {
+      // And the browser goes too when it turns out nothing is using it
+      // (which is also how a Chromium that died during page creation
+      // stops being handed to the next caller).
+      await proxy.close();
       if (entry.sessions.size === 0) {
         await this.closeBrowser(entry);
       }
@@ -220,27 +240,23 @@ export class BrowserSessionPool {
       page,
       lastUsedAt: now,
       browserKey: key,
-      refusalsSeen: entry.proxy.refusalCount,
+      proxy,
+      refusalsSeen: 0,
     });
     entry.sessions.add(sessionId);
     return page;
   }
 
   /**
-   * What the proxy refused for this session's browser.
-   *
-   * Scoped to the browser rather than to the process: an agent under a
-   * different policy has a different browser and never sees these. Two
-   * agents that share a policy share a browser and can see each other's
-   * refused *addresses* — which is the same set their identical policy
-   * already told them about.
+   * What this session's own proxy refused — its conversation's, and no
+   * other's, whatever policy the two share.
    */
   refusalsFor(sessionId: string): string[] {
     const context = this.contexts.get(sessionId);
-    const proxy = context ? this.browsers.get(context.browserKey)?.proxy : undefined;
-    if (!context || !proxy) {
+    if (!context) {
       return [];
     }
+    const { proxy } = context;
     // Only what arrived since this conversation last looked, and each
     // entry once: a report is a report, not a standing accusation.
     const unseen = Math.min(proxy.refusalCount - context.refusalsSeen, proxy.refusals.length);
@@ -255,6 +271,7 @@ export class BrowserSessionPool {
     } catch {
       // A context that is already gone is the outcome we wanted.
     }
+    await entry.proxy.close();
     const browser = this.browsers.get(entry.browserKey);
     browser?.sessions.delete(entry.sessionId);
     if (browser && browser.sessions.size === 0) {
