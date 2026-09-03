@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync } from 'node:fs';
+import { chmodSync, mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -27,8 +27,45 @@ export interface HomeClaim {
 }
 
 /** SQLITE_BUSY: another connection holds a lock this one needs. */
-const isBusy = (error: unknown): boolean =>
-  typeof error === 'object' && error !== null && (error as { errcode?: unknown }).errcode === 5;
+const isBusy = (error: unknown): boolean => errcodeOf(error) === 5;
+
+/** SQLITE_CORRUPT or SQLITE_NOTADB: the file is not a database any more. */
+const isNotADatabase = (error: unknown): boolean => {
+  const code = errcodeOf(error);
+  return code === 11 || code === 26;
+};
+
+const errcodeOf = (error: unknown): unknown =>
+  typeof error === 'object' && error !== null ? (error as { errcode?: unknown }).errcode : undefined;
+
+/**
+ * Open the file and take the lock, or close the file and throw.
+ *
+ * The claim is an exclusive transaction held open, never committed: SQLite
+ * takes the OS file lock for it and nothing is ever written — not a row,
+ * not a page, not a journal — so there is nothing a crash mid-claim can
+ * tear, and a machine that dies leaves a file the next daemon can claim.
+ * The in-memory journal mode is only so no `-journal` file appears beside
+ * the lock; it has nothing to roll back.
+ */
+const claimAt = (lockPath: string): DatabaseSync => {
+  const db = new DatabaseSync(lockPath);
+  try {
+    db.exec('PRAGMA journal_mode = MEMORY');
+    // A holder anywhere makes this fail with SQLITE_BUSY at once —
+    // node:sqlite waits for nothing by default.
+    db.exec('BEGIN EXCLUSIVE');
+    // Created under the umask, like every other file SQLite makes;
+    // tightened to match the rest of ~/.stratus. Inside the try: a
+    // filesystem that refuses the chmod must not leave the lock held by a
+    // connection nobody can close.
+    chmodSync(lockPath, 0o600);
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+};
 
 /**
  * Claim a home for one daemon, exclusively, for as long as the claim is
@@ -42,43 +79,40 @@ const isBusy = (error: unknown): boolean =>
  * second `stratus serve` lost the port to the first and served on with
  * no channel, and the next scheduled firing ran in it.
  *
- * The claim is an SQLite file in EXCLUSIVE locking mode: the first write
- * takes the OS file lock and the connection keeps it until it closes. That
- * gives three things a pid file cannot. It is atomic across processes —
- * two starters cannot both read it as stale and both take it, the case
+ * The claim is SQLite's own file lock (see `claimAt`), which gives three
+ * things a pid file cannot. It is atomic across processes — two starters
+ * cannot both read it as stale and both take it, the case
  * `ensureGatewayToken` spells out for the token file. It covers the whole
  * lifetime: released after the store closes, so a daemon still draining
  * its last turn holds the home against its replacement. And a daemon that
  * dies releases it with its descriptors, so it is never stale. The
  * discovery file could do none of this — it appears after the API binds
  * and goes when the API stops, both inside the window that matters.
+ *
+ * The file is disposable, since nothing is ever written to it. One that is
+ * not a database any more — damaged from outside, or left by something
+ * that was not this — is replaced and claimed: nobody can be holding it,
+ * because holding it needed the header this read refused.
  */
 export const claimHome = (env: StateEnvironment): HomeClaim => {
   const lockPath = homeLockPath(env);
   mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
-  const db = new DatabaseSync(lockPath);
-  try {
-    // The first read takes a SHARED lock that is never dropped; the first
-    // write, an EXCLUSIVE one held until close. A holder anywhere makes
-    // the next statement fail with SQLITE_BUSY at once — node:sqlite waits
-    // for nothing by default.
-    db.exec('PRAGMA locking_mode = EXCLUSIVE');
-    // Nothing here needs to survive a crash, and a rollback journal beside
-    // the lock would outlive the claim.
-    db.exec('PRAGMA journal_mode = MEMORY');
-    db.exec('CREATE TABLE IF NOT EXISTS holder (pid INTEGER NOT NULL)');
-    db.exec('DELETE FROM holder');
-    db.prepare('INSERT INTO holder (pid) VALUES (?)').run(process.pid);
-  } catch (error) {
-    db.close();
-    if (isBusy(error)) {
-      throw new HomeClaimedError(lockPath);
+  let db: DatabaseSync | undefined;
+  for (const rebuilt of [false, true]) {
+    try {
+      db = claimAt(lockPath);
+      break;
+    } catch (error) {
+      if (isBusy(error)) {
+        throw new HomeClaimedError(lockPath);
+      }
+      if (rebuilt || !isNotADatabase(error)) {
+        throw error;
+      }
+      rmSync(lockPath, { force: true });
     }
-    throw error;
   }
-  // Created under the umask, like every other file SQLite makes; tightened
-  // to match the rest of ~/.stratus. It holds a pid, nothing more.
-  chmodSync(lockPath, 0o600);
+  const held = db!;
 
   let released = false;
   return {
@@ -87,7 +121,7 @@ export const claimHome = (env: StateEnvironment): HomeClaim => {
         return;
       }
       released = true;
-      db.close();
+      held.close();
     },
   };
 };

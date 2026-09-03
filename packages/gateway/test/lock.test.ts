@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -24,7 +24,24 @@ test('a home is held by one claim at a time, until it is released', async () => 
   const second = claimHome(env);
   second.release();
 
-  // It holds a pid and nothing more, and is still 0600 like everything
+  // Nothing is ever written to it — the claim is an open transaction, so a
+  // crash mid-claim has nothing to tear — and it is 0600 like everything
   // else under ~/.stratus that decides something.
+  assert.equal((await stat(homeLockPath(env))).size, 0);
   assert.equal((await stat(homeLockPath(env))).mode & 0o777, 0o600);
+});
+
+test('a lock file that is not a database any more is replaced, not obeyed', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  // Damaged from outside — nothing of ours writes it. Nobody can be
+  // holding it: holding it needed the header this read refuses. Refusing
+  // to start over it would take the file's removal to bring a daemon up.
+  await mkdir(path.dirname(homeLockPath(env)), { recursive: true });
+  await writeFile(homeLockPath(env), 'not a database at all\n');
+
+  const claim = claimHome(env);
+  assert.throws(() => claimHome(env), HomeClaimedError, 'the rebuilt file is the lock');
+  claim.release();
+  assert.equal(await readFile(homeLockPath(env), 'utf8'), '', 'replaced with an empty database file');
 });

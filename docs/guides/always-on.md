@@ -80,15 +80,17 @@ Two daemons on one home would share the session store and the schedule
 table with nothing coordinating them — each slot fires in whichever process
 claims it first, each start sweep re-asks the approvals the other is
 holding, and the newer one fails as abandoned the turns the older one is
-still running. The claim is `~/.stratus/stratusd.lock`, an SQLite file the
-daemon holds in exclusive locking mode from before it opens the store until
-after the store closes. That makes it atomic between two daemons starting
-together, keeps a daemon that is still draining its last turns holding the
-home against its replacement (the refusal then says so, since there is no
-address to name yet), and means a daemon that died released it with its
-file descriptors — there is no stale lock to clean up. The file itself
-stays between runs; the claim is the open descriptor, not the file's
-existence. `gateway.json` is read only to name the holder.
+still running. The claim is `~/.stratus/stratusd.lock`, an SQLite file on
+which the daemon holds an exclusive transaction open — never writing it —
+from before it opens the store until after the store closes. That makes it
+atomic between two daemons starting together, keeps a daemon that is still
+draining its last turns holding the home against its replacement (the
+refusal then says so, since there is no address to name yet), and means a
+daemon that died released it with its file descriptors — there is no stale
+lock to clean up, and nothing a crash could leave half-written. The empty
+file stays between runs; the claim is the open descriptor, not the file's
+existence, and a file that is not a database any more is replaced rather
+than obeyed. `gateway.json` is read only to name the holder.
 
 The control API is a required channel: a daemon that cannot bind its port
 stops instead of serving without one, with an error naming the port and
