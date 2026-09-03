@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import path from 'node:path';
 
-import { CONTROL_API_VERSION } from '../src/index.ts';
+import { createGateway } from '@stratusagent/gateway';
+
+import { CONTROL_API_VERSION, createControlApi } from '../src/index.ts';
 import { newHome, openSocket, rawPost, settles, startApi, writeSoul } from './harness.ts';
 
 const json = async <T>(response: Response): Promise<T> => response.json() as Promise<T>;
@@ -1927,5 +1930,33 @@ test('metadata carrying a key the daemon reserves is refused where the caller ca
     assert.equal(listed.sessions.some((session) => session.id === 'forged-meta-1'), false, 'nothing was created');
   } finally {
     await harness.stop();
+  }
+});
+
+test('the API is a required channel, and a port it cannot bind is named with what to do', async () => {
+  // Something else on the port — another stratusd on this home, in the
+  // case this exists for. The gateway used to log the bind failure and
+  // serve on with no API, which is how a second `stratus serve` became a
+  // second daemon on the same database.
+  const holder = createServer();
+  await new Promise<void>((resolve) => holder.listen(0, '127.0.0.1', resolve));
+  const { port } = holder.address() as { port: number };
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+  const api = createControlApi({ env, port });
+
+  try {
+    assert.equal(api.required, true);
+    await assert.rejects(
+      api.start(gateway),
+      new RegExp(`could not listen on 127\\.0\\.0\\.1:${port} \\(listen EADDRINUSE.*--api-port <port>.*--no-api`),
+    );
+    assert.equal(api.url, undefined, 'a bind that failed publishes nowhere');
+  } finally {
+    await api.stop();
+    await gateway.stop();
+    await new Promise<void>((resolve) => holder.close(() => resolve()));
   }
 });

@@ -494,3 +494,12 @@ While it is serving, `~/.stratus/gateway.json` (0600) says where:
 
 Clients read it instead of guessing at a default the operator may have
 changed. It is removed on a clean stop, and only by the process that wrote it.
+A second daemon on the same home is refused by the home's lock
+(`~/.stratus/stratusd.lock`, held by the gateway's `claimHome`), not by this
+file — it exists only while the API is bound, which is inside the window that
+matters; `stratus serve` reads it to name the holder in its refusal.
+
+The API is a required channel. A port it cannot bind fails the gateway's
+start — after the channels already up are stopped, and before the scheduler
+starts or any parked approval is re-asked — rather than being logged past
+while the daemon serves on unreachable.

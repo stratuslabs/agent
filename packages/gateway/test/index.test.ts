@@ -547,6 +547,151 @@ test('an adapter whose start rejects is still cleaned up', async () => {
   assert.equal(cleanedUp, true, 'the failed adapter must be stopped in the failure path');
 });
 
+test('a required adapter that cannot start fails the gateway start and stops the channels before it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+
+  // The control API's shape: a second daemon on a home loses the port to
+  // the first. Logged and skipped, that daemon went on serving with no
+  // channel at all, and the next scheduled firing ran in it. Required, the
+  // failure is the gateway's, and the channels already up come down with
+  // it — a daemon that will not serve must not hold a Slack socket open.
+  const stops: string[] = [];
+  const first = {
+    name: 'first',
+    async start() {},
+    async stop() {
+      stops.push('first');
+    },
+  };
+  const port = {
+    name: 'port',
+    required: true,
+    async start() {
+      throw new Error('address already in use');
+    },
+    async stop() {
+      stops.push('port');
+    },
+  };
+  const warnings: string[] = [];
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, channels: [first, port], warn: (line) => warnings.push(line) });
+  try {
+    await assert.rejects(gateway.start(), /port could not start, and the gateway cannot serve without it: address already in use/);
+
+    assert.deepEqual(stops.sort(), ['first', 'port'], 'the failed adapter is cleaned up and the started one is stopped');
+    // The failure is the rejection, not a warning beside a daemon that keeps
+    // going: nothing here should read as "serving anyway".
+    assert.ok(!warnings.some((line) => line.includes('failed to start')), warnings.join('\n'));
+    // And nothing stays open: a start that rejects never reaches its
+    // caller's stop(), so the stores the constructor opened close with it
+    // — a host retrying a port it cannot bind would otherwise leak
+    // descriptors on every attempt. The stop() below is still allowed
+    // after that, and closes nothing twice.
+    await assert.rejects(gateway.store.get('nothing'), /not open/);
+  } finally {
+    // Also the losing path: a start that resolved instead has a scheduler
+    // ticking, and only a stop lets the suite end.
+    await gateway.stop();
+  }
+});
+
+test('a start that fails after a channel parked an approval denies it before that channel is stopped', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  let transport: ApprovalTransport | undefined;
+
+  // A channel up before the required one fails has parked a gated turn on
+  // a person — buttons showing somewhere. The failed start is a shutdown,
+  // and a shutdown denies what is parked and lets the denial reach the
+  // channel before stopping it, or the buttons stay up for a turn that is
+  // over. Stopping the channel first, as the failure path once did, is the
+  // one order that loses that.
+  const order: string[] = [];
+  let parked: Promise<unknown> | undefined;
+  const early: GatewayChannelAdapter = {
+    name: 'early',
+    async start(gateway) {
+      gateway.bus.subscribe((event) => {
+        if (event.type === 'tool.approval-resolved') {
+          order.push(`resolved:${event.reason}`);
+        }
+      });
+      assert.ok(transport, 'the approvals factory ran before the channels started');
+      parked = transport.request(parkedCall('parked-in-start'));
+    },
+    async stop() {
+      order.push('early stopped');
+    },
+  };
+  const port = {
+    name: 'port',
+    required: true,
+    async start() {
+      throw new Error('address already in use');
+    },
+    async stop() {},
+  };
+
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    approvalTimeoutMs: 0,
+    channels: [early, port],
+    warn: () => {},
+    approvals: (given) => {
+      transport = given;
+      return { async approve() { return true; } };
+    },
+  });
+  try {
+    await assert.rejects(gateway.start(), /port could not start/);
+    assert.ok(parked, 'the early channel parked a request');
+    assert.equal(await settles(parked as Promise<string>, 'the parked request'), 'deny');
+    assert.deepEqual(order, ['resolved:cancelled', 'early stopped']);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a start that fails after a channel accepted a turn lets that turn finish before the store closes', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+
+  // A channel that is up before the required one fails can already have
+  // dispatched — a Slack message arriving in the window. Closing the store
+  // under that turn would fail it on its own save; the failed start is a
+  // shutdown, so it drains first, the way stop() does.
+  let turn: Promise<unknown> | undefined;
+  const early: GatewayChannelAdapter = {
+    name: 'early',
+    async start(gateway) {
+      turn = gateway.dispatch({ sessionId: 'accepted-1', userMessage: 'say hello' });
+    },
+    async stop() {},
+  };
+  const port = {
+    name: 'port',
+    required: true,
+    async start() {
+      throw new Error('address already in use');
+    },
+    async stop() {},
+  };
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, channels: [early, port], warn: () => {} });
+  try {
+    await assert.rejects(gateway.start(), /port could not start/);
+    assert.ok(turn, 'the early channel dispatched');
+    const session = await turn as { status: string; lastError?: string };
+    assert.equal(session.status, 'completed', session.lastError);
+    await assert.rejects(gateway.store.get('accepted-1'), /not open/);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('the idle watchdog honors a session sticky-switched to a non-streaming fallback', async () => {
   const home = await newHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });

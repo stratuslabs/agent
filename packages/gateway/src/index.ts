@@ -55,6 +55,12 @@ import {
 } from './schedules.ts';
 
 export {
+  claimHome,
+  homeLockPath,
+  HomeClaimedError,
+  type HomeClaim,
+} from './lock.ts';
+export {
   SqliteScheduleStore,
   createSchedulerRuntime,
   isScheduleSessionId,
@@ -353,6 +359,21 @@ export interface GatewayChannelAdapter {
   name: string;
   start(gateway: Gateway): Promise<void>;
   stop(): Promise<void>;
+  /**
+   * Whether the gateway may serve without this channel.
+   *
+   * A channel whose `start()` rejects is logged and skipped, which is right
+   * for a Slack app whose tokens went stale: the rest of the fleet stays
+   * up. A required channel fails `start()` instead — after stopping the
+   * channels that did come up, and before the scheduler starts or any
+   * sweep re-asks an approval, so a daemon refused this way has done no
+   * work. The control API is the case: a second `stratus serve` on the
+   * same home lost the port to the first, logged it, and went on serving
+   * with no channel at all — and the next scheduled firing ran in it,
+   * where nobody could approve or hear anything. A host that omits this
+   * gets the skip.
+   */
+  required?: boolean;
   /**
    * The addressable outbound seam, mirroring
    * `@stratusagent/channels`' `ChannelAdapter.resolveOutbound` structurally
@@ -2265,7 +2286,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         await adapter.start(gateway);
         startedChannels.push(adapter);
       } catch (error) {
-        warn(`channel ${adapter.name} failed to start: ${error instanceof Error ? error.message : String(error)}`);
+        const reason = error instanceof Error ? error.message : String(error);
+        if (!adapter.required) {
+          warn(`channel ${adapter.name} failed to start: ${reason}`);
+        }
         // A start() that rejected may still hold sockets or listeners it
         // acquired before failing; it never reaches startedChannels, so
         // this is its only cleanup.
@@ -2273,6 +2297,17 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           await adapter.stop();
         } catch (stopError) {
           warn(`channel ${adapter.name} cleanup after failed start also failed: ${stopError instanceof Error ? stopError.message : String(stopError)}`);
+        }
+        if (adapter.required) {
+          // Before the scheduler and the sweeps below, deliberately: a
+          // daemon that is not going to serve must not fire a catch-up
+          // slot or re-ask a parked approval on its way out. The channels
+          // already up are left to the shutdown this throw becomes, which
+          // denies what they parked and lets those denials reach them
+          // BEFORE it stops them — stopped here, a channel that had parked
+          // a gated turn in the window would never learn to retract its
+          // buttons.
+          throw new Error(`${adapter.name} could not start, and the gateway cannot serve without it: ${reason}`);
         }
       }
     }
@@ -2300,6 +2335,59 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     
   };
 
+  /**
+   * Both stores, once. Reached from `stop()` and from a `start()` that
+   * failed, and a host may call the one after the other; node:sqlite
+   * refuses a second close, so this remembers.
+   */
+  let storesClosed = false;
+  const closeStores = (): void => {
+    if (storesClosed) {
+      return;
+    }
+    storesClosed = true;
+    scheduleStore.close();
+    store.close();
+  };
+
+  /**
+   * Everything a stop does, in order — and everything a start that failed
+   * must do too, since its caller never reaches stop(). Refuse new work
+   * first; then let channels finish rendering their in-flight turns
+   * (already-started dispatches keep running), drain, and close.
+   */
+  const shutDown = async (): Promise<void> => {
+    stopping = true;
+    // No new firings from here: the tick stops before anything drains, so
+    // the drain below is over a set that can only shrink. A tick already
+    // past its `stopping` check loses to `dispatch`'s own refusal — the
+    // second gate is why this needs no handshake.
+    scheduler.stop();
+    // Deny what is parked before draining, or the drain waits out every
+    // outstanding approval timeout — a shutdown would hang for as long as
+    // the longest request had left. Each denial is a real decision the
+    // turn continues from, so the drain below still finishes those turns.
+    for (const parked of [...pendingApprovals.values()]) {
+      parked.settle('deny', 'cancelled');
+    }
+    // Let those resolutions reach their subscribers before the channels go
+    // down, or a channel that renders approvals never learns to retract
+    // the buttons it is still showing.
+    await Promise.allSettled([...approvalEmissions]);
+    await Promise.allSettled(startedChannels.map((adapter) => adapter.stop()));
+    startedChannels.length = 0;
+    await Promise.allSettled([...inflight]);
+    // After the turn drain: a firing's wrapper settles after its dispatch
+    // does (it retires spent one-shots), so this is the last writer of the
+    // schedule table.
+    await scheduler.drain();
+    // After the turns that might still be using them. A plugin holding a
+    // browser is the reason this exists, and closing it out from under a
+    // running screenshot would fail that turn rather than tidy up.
+    await disposePlugins();
+    closeStores();
+  };
+
   /** Release what the plugins acquired, reporting rather than throwing. */
   const disposePlugins = async (): Promise<void> => {
     await Promise.allSettled(loadedPlugins.map(async (plugin) => {
@@ -2319,24 +2407,29 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     store,
 
     async start() {
-      await migrateLegacyMemory(env);
-      // Before the roster and before channels: a turn must never arrive for
-      // an agent whose soul lists a tool the daemon has not registered yet,
-      // which would refuse the call as "not permitted" and blame the soul.
-      // Skills first for the same reason — and before the plugins, so the
-      // operator's bare ids win their aliases (see startSkills).
-      await startSkills();
-      await startPlugins();
       try {
+        await migrateLegacyMemory(env);
+        // Before the roster and before channels: a turn must never arrive
+        // for an agent whose soul lists a tool the daemon has not
+        // registered yet, which would refuse the call as "not permitted"
+        // and blame the soul. Skills first for the same reason — and before
+        // the plugins, so the operator's bare ids win their aliases (see
+        // startSkills).
+        await startSkills();
+        await startPlugins();
         await startServing();
       } catch (error) {
-        // Everything after the plugins loaded is inside that try for one
-        // reason: a `start()` that rejects never reaches its caller's
-        // shutdown path — `stratus serve` awaits it *before* the try/finally
-        // that calls `stop()` — so a duplicate agent id in the roster would
-        // leave a plugin's browser, socket, or subscription held for the
-        // life of a process that is on its way out.
-        await disposePlugins();
+        // A `start()` that rejects never reaches its caller's shutdown path
+        // — `stratus serve` awaits it *before* the try/finally that calls
+        // `stop()` — so it is the shutdown, in full: a duplicate agent id
+        // in the roster would otherwise leave a plugin's browser, socket,
+        // or subscription held for the life of a process that is on its
+        // way out; the two stores opened before any of this ran would keep
+        // their descriptors, four more per attempt in a host that retries
+        // a port it cannot bind; and a turn a channel that did come up had
+        // already accepted must finish and save before the store it saves
+        // to is closed, exactly as it would under a stop().
+        await shutDown();
         throw error;
       }
     },
@@ -2345,39 +2438,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // dispatches are refused, then the database closes. SIGTERM handling
     // in `stratus serve` calls this.
     async stop() {
-      // Refuse new work first; then let channels finish rendering their
-      // in-flight turns (already-started dispatches keep running), drain,
-      // and close.
-      stopping = true;
-      // No new firings from here: the tick stops before anything drains,
-      // so the drain below is over a set that can only shrink. A tick
-      // already past its `stopping` check loses to `dispatch`'s own
-      // refusal — the second gate is why this needs no handshake.
-      scheduler.stop();
-      // Deny what is parked before draining, or the drain waits out every
-      // outstanding approval timeout — a shutdown would hang for as long as
-      // the longest request had left. Each denial is a real decision the
-      // turn continues from, so the drain below still finishes those turns.
-      for (const parked of [...pendingApprovals.values()]) {
-        parked.settle('deny', 'cancelled');
-      }
-      // Let those resolutions reach their subscribers before the channels
-      // go down, or a channel that renders approvals never learns to
-      // retract the buttons it is still showing.
-      await Promise.allSettled([...approvalEmissions]);
-      await Promise.allSettled(startedChannels.map((adapter) => adapter.stop()));
-      startedChannels.length = 0;
-      await Promise.allSettled([...inflight]);
-      // After the turn drain: a firing's wrapper settles after its
-      // dispatch does (it retires spent one-shots), so this is the last
-      // writer of the schedule table.
-      await scheduler.drain();
-      // After the turns that might still be using them. A plugin holding a
-      // browser is the reason this exists, and closing it out from under a
-      // running screenshot would fail that turn rather than tidy up.
-      await disposePlugins();
-      scheduleStore.close();
-      store.close();
+      await shutDown();
       log('stratusd stopped');
     },
 
