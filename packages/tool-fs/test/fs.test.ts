@@ -351,6 +351,17 @@ test('a named file that turns binary after its first pages is reported as binary
   const skipped = result.skipped as Array<{ path: string; bytes: number; reason: string }>;
   assert.equal(skipped[0]?.reason, 'binary');
   assert.equal(skipped[0]?.bytes, 11 + 11 * 4_000 + 1 + 4);
+
+  // The match cap does not end the reading either: a NUL after more
+  // matches than the cap allows still makes the file binary.
+  await writeFile(
+    path.join(root, 'capped.bin'),
+    Buffer.concat([Buffer.from('needle\n'.repeat(5)), Buffer.from('plain text\n'.repeat(10_000)), Buffer.from([0])]),
+  );
+  const capped = await run(tools, 'fs.search', { query: 'needle', path: 'capped.bin', maxMatches: 2 }, sessionFor('ava')) as JsonObject;
+  assert.deepEqual(capped.matches, []);
+  assert.equal(capped.truncated, false);
+  assert.equal((capped.skipped as Array<{ reason: string }>)[0]?.reason, 'binary');
 });
 
 test('the skipped list is capped, and the count says how many there were', async () => {

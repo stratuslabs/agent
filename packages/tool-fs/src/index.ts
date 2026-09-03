@@ -449,19 +449,26 @@ const createSearchTool = (config: JsonObject): Tool => ({
       let clipped = false;
       const { size, lines } = await openLines(resolved);
       const before = matches.length;
+      const truncatedBefore = truncated;
+      // Past the match cap the file is still read to its end, no longer
+      // matched: the binary verdict is decided on every chunk, and a NUL
+      // after the cap would otherwise go unseen, leaving matches from a
+      // file that is not text standing as results.
+      let capped = false;
       for await (const line of lines) {
         if (line === undefined) {
           // Binary after all: what matched in the text before the first
           // NUL is not a search result of a text file, because this is
           // not one.
           matches.splice(before);
+          truncated = truncatedBefore;
           clipped = false;
           skip({ path: relativeTo(resolved.root, resolved.path), bytes: size, reason: 'binary' });
           break;
         }
         clipped ||= line.clipped;
-        if (pattern.test(line.text) && !record(resolved.path, index, line.text)) {
-          break;
+        if (!capped && pattern.test(line.text) && !record(resolved.path, index, line.text)) {
+          capped = true;
         }
         index += 1;
       }
