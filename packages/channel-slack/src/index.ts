@@ -157,6 +157,14 @@ const defaultWebClient = (botToken: string): SlackWebLike => {
  * (split across messages when it outgrows one).
  */
 class ReplyRenderer {
+  /**
+   * Whether the gateway has begun the turn this renderer was opened for.
+   * A renderer is queued at intake, before the gateway starts its turn,
+   * so until the session reports `running` again the turn at the head of
+   * the session's chain may be somebody else's — a recovery still parked
+   * on a human — and its completion is not this renderer's to swallow.
+   */
+  turnStarted = false;
   private buffer = '';
   private turnBreakPending = false;
   private toolLine: string | undefined;
@@ -1274,29 +1282,39 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           track(retractApprovalRequest(event));
           return;
         }
-        // A failure with no renderer is not a turn this process is
-        // serving — it is one the startup sweep or a failed recovery
-        // closed out. Nothing downstream would say anything about it.
+        // A turn ends here in one of two hands. One this adapter started
+        // is finished by the renderer it opened at intake, from the
+        // session `dispatch` returns. One it did not start — a recovery
+        // of a turn parked on a human when the daemon died, or a turn the
+        // startup sweep closed out — has no renderer, and is reported
+        // from the session's stored routing instead.
         //
-        // A non-empty queue is not proof the failure belongs to a turn
-        // this adapter dispatched, only that it has one for this session.
-        // A renderer is queued at intake, before the gateway starts the
-        // turn it belongs to, so a message arriving while a recovery is
-        // still ahead of it on the session chain leaves the recovery's
-        // failure looking rendered when it is not. Suppressing is the
-        // conservative half of that trade: the alternative reports every
-        // ordinary failure twice.
-        //
-        // Telling them apart needs a turn identifier, which `StratusEvent`
-        // does not carry — the same gap 05's WS envelope closes with
-        // `{ sessionId, turnId, event }`. The routing a line below has it
-        // too: recovery events are already delivered to whichever renderer
-        // is at the head of the queue, whether or not it is theirs.
-        if (event.type === 'session.failed' && !renderers.get(event.sessionId)?.length) {
+        // A renderer in the queue is not proof the outcome is that turn's.
+        // The renderer is queued at intake, before the gateway starts the
+        // turn, so a message arriving while a recovery is still ahead of
+        // it on the session chain has a renderer at the head while the
+        // recovery finishes — and the recovery's reply would be swallowed
+        // as rendered when nothing rendered it. The gateway reports the
+        // session `running` as each turn begins (after the message is
+        // durable, before any provider work), so a renderer that has seen
+        // that owns the turn ending now, and one that has not is waiting
+        // behind whoever does. `StratusEvent` carries no turn identifier
+        // (the gap 05's WS envelope closes with `{ sessionId, turnId,
+        // event }`), so this is the nearest thing to one: it is wrong only
+        // for a foreign turn that both starts and ends after the message
+        // was queued, which the chain's order rules out for a recovery.
+        if (event.type === 'session.updated' && event.status === 'running') {
+          const head = renderers.get(event.sessionId)?.[0];
+          if (head) {
+            head.turnStarted = true;
+          }
+        }
+        const rendered = renderers.get(event.sessionId)?.[0]?.turnStarted === true;
+        if (event.type === 'session.failed' && !rendered) {
           track(reportUnrenderedFailure(event));
           return;
         }
-        if (event.type === 'session.completed' && !renderers.get(event.sessionId)?.length) {
+        if (event.type === 'session.completed' && !rendered) {
           track(reportUnrenderedReply(event));
           return;
         }

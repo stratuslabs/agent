@@ -183,6 +183,10 @@ const createStubGateway = (
         ...(input.agentId ? { agentId: input.agentId } : {}),
         userMessage: input.userMessage,
       });
+      // As the gateway does: the session reports `running` as the turn
+      // begins, which is how the adapter knows the turn at the head of the
+      // chain is the one it dispatched.
+      await bus.emit({ type: 'session.updated', sessionId: input.sessionId, status: 'running' });
       return reply({ sessionId: input.sessionId, userMessage: input.userMessage });
     },
   };
@@ -1388,6 +1392,42 @@ test('a completion the running turn is already rendering is not posted a second 
     ...web.updates.filter((entry) => /the one reply/.test(entry.text)),
   ];
   assert.equal(replies.length, 1, 'exactly one copy of the reply');
+});
+
+test('a recovered turn that finishes ahead of a queued message has its reply posted, and the message its own', async () => {
+  // The daemon restarts with a turn parked on a human in this thread; the
+  // recovery is re-asked and waits. A new message in the thread arrives
+  // meanwhile: its renderer is queued, its turn waits behind the recovery
+  // on the session chain. The recovery is then approved and finishes —
+  // with a renderer in the queue that has nothing to do with it.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    // The recovery finishes while this dispatch waits behind it — before
+    // the stub reports the queued turn `running` and answers it.
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the recovered reply',
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  const texts = [...web.posts, ...web.updates].map((entry) => entry.text);
+  assert.equal(texts.filter((text) => text === 'the recovered reply').length, 1, 'the recovery\'s reply was posted once');
+  assert.equal(texts.filter((text) => /the message's own reply/.test(text)).length, 1, 'the message got its own reply once');
 });
 
 test('a failure the running turn is already rendering is not reported twice', async () => {
