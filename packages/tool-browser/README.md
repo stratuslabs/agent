@@ -59,7 +59,7 @@ fails that one call with a message naming the fix.
 | `idleMs` | `300000` | Close a conversation's context after this much quiet. |
 | `maxContexts` | `4` | Contexts at once; the least recently used goes first. |
 | `maxTextBytes` | `100000` | Cap on `browser.read`, then a `truncated` marker. |
-| `navigationTimeoutMs` | `30000` | Per navigation and per action. |
+| `navigationTimeoutMs` | `30000` | Per navigation, per action, and on reading a page — one whose script never yields is given up on, its context closed, and the next call opens a fresh page. |
 | `workspaceRoot` | supplied by the daemon | Where screenshots go: `<root>/<agent-id>/screenshots`. |
 
 Address settings apply per agent under `agents`, and they are enforced —
