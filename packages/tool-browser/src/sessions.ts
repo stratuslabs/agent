@@ -272,6 +272,12 @@ export class BrowserSessionPool {
 
   private async drop(entry: PooledContext, reason: 'idle' | 'capacity' | 'shutdown' | 'policy' | 'unresponsive'): Promise<void> {
     this.contexts.delete(entry.sessionId);
+    // Ownership goes before the close, not after it. A close that outlasts
+    // the teardown bound in `answeredWithin` settles after this session has
+    // opened a replacement context in the same browser, under the same id;
+    // taking "its" session out of the set then would take the replacement's,
+    // and close the browser under it.
+    this.browsers.get(entry.browserKey)?.sessions.delete(entry.sessionId);
     try {
       await entry.context.close();
     } catch {
@@ -279,7 +285,6 @@ export class BrowserSessionPool {
     }
     const browser = this.browsers.get(entry.browserKey);
     if (browser) {
-      browser.sessions.delete(entry.sessionId);
       // The browser goes with its last conversation: a Chromium sitting
       // idle overnight is the leak this pack is most likely to cause.
       await this.closeBrowserIfUnused(browser);
