@@ -6982,3 +6982,87 @@ test('stratus schedules lists the daemon database and cancel revokes a row', asy
   assert.match(empty.output.stdout, /No schedules set/);
   await rm(home, { recursive: true, force: true });
 });
+
+test('a second serve on a home whose daemon is serving is refused before it opens anything', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-twice-'));
+
+  await withServedApi(home, async ({ url }) => {
+    const { streams, output } = createStreams();
+    // A losing path: without the refusal a second daemon comes up on a free
+    // port and would hold the test open, so it is shut down after a moment
+    // and the exit code says which of the two happened.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2_000);
+    const code = await runCli({
+      argv: ['serve', '--no-events', '--api-port', '0'],
+      streams,
+      env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+    });
+    clearTimeout(timer);
+
+    // Two daemons on one ~/.stratus share the session store and the
+    // schedule table with nothing coordinating them: the next slot fires
+    // in whichever claims it first. Reproduced against a running daemon —
+    // the second lost the port, kept serving with no channel, and the
+    // next scheduled firing ran in it where nobody could approve anything.
+    assert.equal(code, 1);
+    assert.match(output.stderr, new RegExp(`already running for this home \\(pid ${process.pid}, ${url.replace(/[.]/g, '\\.')}\\)`));
+    assert.match(output.stderr, /stratus service stop/);
+    assert.ok(!output.stdout.includes('control API on'), output.stdout);
+    // And the first daemon's discovery file still names the first daemon.
+    const info = JSON.parse(await readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8')) as { url: string };
+    assert.equal(info.url, url);
+  });
+});
+
+test('a discovery file left by a daemon that died does not refuse the next one', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-stale-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A SIGKILLed daemon removes nothing, and its pid is anyone's next. The
+  // refusal needs both proofs — the pid alive and the URL answering — so a
+  // file naming a dead process, or a live one that is not a daemon, is
+  // only ever overwritten by the daemon that starts.
+  const gone = spawn(process.execPath, ['-e', '']);
+  await once(gone, 'exit');
+  await writeFile(
+    path.join(home, '.stratus', 'gateway.json'),
+    JSON.stringify({ url: 'http://127.0.0.1:1', host: '127.0.0.1', port: 1, pid: gone.pid }),
+  );
+
+  const { stderr } = await withServedApi(home, async ({ url }) => {
+    const info = JSON.parse(await readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8')) as { url: string; pid: number };
+    assert.equal(info.url, url);
+    assert.equal(info.pid, process.pid);
+  });
+  assert.doesNotMatch(stderr, /already running/);
+});
+
+test('serve stops rather than serve without the API it was asked for', async () => {
+  const held = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-port-a-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-port-b-'));
+
+  await withServedApi(held, async ({ url }) => {
+    const { port } = new URL(url);
+    const { streams, output } = createStreams();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2_000);
+    const code = await runCli({
+      argv: ['serve', '--no-events', '--api-port', port],
+      streams,
+      env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+    });
+    clearTimeout(timer);
+
+    // A different home, so the discovery file says nothing; the port is
+    // the only evidence. Serving on without the API used to be a warning
+    // — a daemon no `stratus` command could reach, whose home had no
+    // discovery file to say so.
+    assert.equal(code, 1);
+    assert.match(
+      output.stderr,
+      new RegExp(`Error: control-api could not start, and the gateway cannot serve without it: The control API could not listen on 127\\.0\\.0\\.1:${port}`),
+    );
+    assert.match(output.stderr, /--api-port <port>/);
+    assert.ok(!output.stdout.includes('Press Ctrl+C to stop.'), output.stdout);
+  });
+});

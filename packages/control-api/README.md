@@ -491,3 +491,11 @@ While it is serving, `~/.stratus/gateway.json` (0600) says where:
 
 Clients read it instead of guessing at a default the operator may have
 changed. It is removed on a clean stop, and only by the process that wrote it.
+`stratus serve` reads it too: while the pid it names is alive and the URL
+answers `/health`, a second daemon on the same home is refused, since the two
+would share one session store and one schedule table.
+
+The API is a required channel. A port it cannot bind fails the gateway's
+start — after the channels already up are stopped, and before the scheduler
+starts or any parked approval is re-asked — rather than being logged past
+while the daemon serves on unreachable.

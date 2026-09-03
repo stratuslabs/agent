@@ -546,6 +546,50 @@ test('an adapter whose start rejects is still cleaned up', async () => {
   assert.equal(cleanedUp, true, 'the failed adapter must be stopped in the failure path');
 });
 
+test('a required adapter that cannot start fails the gateway start and stops the channels before it', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+
+  // The control API's shape: a second daemon on a home loses the port to
+  // the first. Logged and skipped, that daemon went on serving with no
+  // channel at all, and the next scheduled firing ran in it. Required, the
+  // failure is the gateway's, and the channels already up come down with
+  // it — a daemon that will not serve must not hold a Slack socket open.
+  const stops: string[] = [];
+  const first = {
+    name: 'first',
+    async start() {},
+    async stop() {
+      stops.push('first');
+    },
+  };
+  const port = {
+    name: 'port',
+    required: true,
+    async start() {
+      throw new Error('address already in use');
+    },
+    async stop() {
+      stops.push('port');
+    },
+  };
+  const warnings: string[] = [];
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, channels: [first, port], warn: (line) => warnings.push(line) });
+  try {
+    await assert.rejects(gateway.start(), /port could not start, and the gateway cannot serve without it: address already in use/);
+
+    assert.deepEqual(stops.sort(), ['first', 'port'], 'the failed adapter is cleaned up and the started one is stopped');
+    // The failure is the rejection, not a warning beside a daemon that keeps
+    // going: nothing here should read as "serving anyway".
+    assert.ok(!warnings.some((line) => line.includes('failed to start')), warnings.join('\n'));
+  } finally {
+    // Also the losing path: a start that resolved instead has a scheduler
+    // ticking, and only a stop lets the suite end.
+    await gateway.stop();
+  }
+});
+
 test('the idle watchdog honors a session sticky-switched to a non-streaming fallback', async () => {
   const home = await newHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });

@@ -679,7 +679,9 @@ Commands:
   run              Execute one local Stratus Agent session
   serve            Run stratusd, the always-on gateway: durable sessions, the
                    whole roster live at once (each agent on its own provider),
-                   delegation, and a watchdog — Ctrl+C / SIGTERM drains cleanly
+                   delegation, and a watchdog — one per home (it refuses to
+                   start over a daemon already serving ~/.stratus), and
+                   Ctrl+C / SIGTERM drains cleanly
                    (--idle-timeout <seconds>, --approvals <headless|remote>,
                    --no-events, --no-log-file, --config <path>); everything it
                    says is also written to ~/.stratus/logs, which
@@ -5809,6 +5811,54 @@ const gatewayAnswering = async (
 };
 
 /**
+ * Whether a process with this pid exists. EPERM is an answer — the process
+ * is there, it is just not ours to signal.
+ */
+const processAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+};
+
+/**
+ * Refuse to start a daemon over one already serving this home.
+ *
+ * Two daemons on one `~/.stratus` share a session store and a schedule
+ * table with nothing coordinating them: each slot fires in whichever
+ * process claims it first, and each start sweep re-asks the approvals the
+ * other is holding. Reproduced against a running daemon: a second `stratus
+ * serve` lost the port to the first, and the next scheduled firing ran in
+ * the second, where no channel could ask or report. The API is a required
+ * channel now, so a lost port ends the daemon — but only when the ports
+ * collide, and the database is shared whatever the port.
+ *
+ * The discovery file is the evidence, held to two proofs: the pid it
+ * names is alive AND its URL answers /health with this home's token. A
+ * daemon that was SIGKILLed leaves the file behind, and its pid can be
+ * reused by anything, so either alone would refuse a start that is fine.
+ * A daemon started with --no-api writes no discovery file and is invisible
+ * here.
+ */
+const refuseIfDaemonServing = async (env: CliEnvironment): Promise<void> => {
+  const info = await readGatewayInfo(env);
+  if (info?.pid === undefined || !processAlive(info.pid)) {
+    return;
+  }
+  const fetchImpl = env.fetch ?? globalThis.fetch;
+  if (typeof fetchImpl !== 'function' || !(await gatewayAnswering(env, info.url, fetchImpl))) {
+    return;
+  }
+  throw new Error(
+    `stratusd is already running for this home (pid ${info.pid}, ${info.url}). Two daemons on one ~/.stratus `
+      + 'would each fire the other\'s schedules and re-ask its approvals. Stop it first: `stratus service stop` '
+      + 'if it is the installed service, otherwise Ctrl+C where it runs.',
+  );
+};
+
+/**
  * `stratus dashboard` — open the web UI against a running daemon, starting
  * one in the foreground when there is none.
  *
@@ -6077,6 +6127,10 @@ export const runServe = async (
   if (command.logToFile !== false) {
     await truncateRedirectLogs(logsDirPath(env)).catch(() => undefined);
   }
+
+  // Before the store opens: a second daemon on this home is refused with
+  // nothing of its own written, and no sweep or firing started.
+  await refuseIfDaemonServing(env);
 
   // Loaded lazily: the gateway pulls in node:sqlite, which every other CLI
   // command neither needs nor should pay for (Node still prints an

@@ -67,6 +67,30 @@ LaunchAgent is the right choice.) The systemd equivalent is
 says both in the menu rather than leaving them to be discovered after a
 reboot.
 
+## One daemon per home
+
+`stratus serve` refuses to start while another daemon is serving the same
+`~/.stratus`:
+
+```
+Error: stratusd is already running for this home (pid 4242, http://127.0.0.1:4123). ...
+```
+
+Two daemons on one home would share the session store and the schedule
+table with nothing coordinating them — each slot fires in whichever process
+claims it first, and each start sweep re-asks the approvals the other is
+holding. The evidence is `~/.stratus/gateway.json`, which the control API
+writes when it binds: the refusal needs the pid it names to be alive *and*
+its URL to answer, so a file left behind by a daemon that was killed is
+overwritten, never obeyed. A daemon started with `--no-api` writes no
+discovery file and is invisible to this check.
+
+The control API is a required channel: a daemon that cannot bind its port
+stops instead of serving without one, with an error naming the port and
+the flags that change it. Under a service manager that is a restart loop
+until the port frees, which is the case the redirect-log truncation in
+[Logs](./logs.md) bounds.
+
 ## While it runs
 
 - What it will and won't do with nobody watching: [Approvals](./approvals.md)

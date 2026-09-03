@@ -311,6 +311,12 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
 
   return {
     name: 'control-api',
+    // A daemon whose API did not come up is one no `stratus` command and
+    // no dashboard can reach, running on a home whose discovery file still
+    // names whoever holds the port. The gateway would otherwise log the
+    // bind failure and serve on without it — which is how a second
+    // `stratus serve` on a home became a second daemon on its database.
+    required: true,
 
     get url() {
       return url;
@@ -343,8 +349,17 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       server.on('upgrade', handleUpgrade);
 
       const listening = server;
+      const asked = authority(host, options.port ?? DEFAULT_CONTROL_API_PORT);
       await new Promise<void>((resolve, reject) => {
-        const onError = (error: Error): void => reject(error);
+        // The bind failing is the one start failure with a story worth
+        // telling: another stratusd on this home, or another program on
+        // the port. Node's own message names the address; this names what
+        // to do about it.
+        const onError = (error: Error): void => reject(new Error(
+          `The control API could not listen on ${asked} (${error.message}). Another stratusd may be `
+            + 'serving this address, or another program holds the port: pick a different one with `api.port` '
+            + 'in the config or `stratus serve --api-port <port>`, or start with `--no-api`.',
+        ));
         listening.once('error', onError);
         listening.listen(options.port ?? DEFAULT_CONTROL_API_PORT, host, () => {
           listening.off('error', onError);

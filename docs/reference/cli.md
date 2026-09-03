@@ -74,7 +74,7 @@ stratus dashboard                      # local browser dashboard
 | `--no-log-file` | `stratus serve`: do not write `~/.stratus/logs/stratusd.jsonl` |
 | `--no-api` | `stratus serve`: do not serve the control API |
 | `--api-host` | `stratus serve`: control API interface (default `127.0.0.1`) |
-| `--api-port` | `stratus serve`: control API port (default `4123`; `0` picks any free port) |
+| `--api-port` | `stratus serve`: control API port (default `4123`; `0` picks any free port). A port the daemon cannot bind stops it — it does not serve without the API |
 | `--gateway <url>` | `stratus agents`: read the roster from a running daemon's control API |
 | `--port`, `--host` | `stratus dashboard`: where a daemon it starts should bind |
 | `--no-open` | `stratus dashboard`: skip automatic browser opening |

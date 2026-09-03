@@ -354,6 +354,21 @@ export interface GatewayChannelAdapter {
   start(gateway: Gateway): Promise<void>;
   stop(): Promise<void>;
   /**
+   * Whether the gateway may serve without this channel.
+   *
+   * A channel whose `start()` rejects is logged and skipped, which is right
+   * for a Slack app whose tokens went stale: the rest of the fleet stays
+   * up. A required channel fails `start()` instead — after stopping the
+   * channels that did come up, and before the scheduler starts or any
+   * sweep re-asks an approval, so a daemon refused this way has done no
+   * work. The control API is the case: a second `stratus serve` on the
+   * same home lost the port to the first, logged it, and went on serving
+   * with no channel at all — and the next scheduled firing ran in it,
+   * where nobody could approve or hear anything. A host that omits this
+   * gets the skip.
+   */
+  required?: boolean;
+  /**
    * The addressable outbound seam, mirroring
    * `@stratusagent/channels`' `ChannelAdapter.resolveOutbound` structurally
    * for the same reason the rest of this interface does. Optional: an
@@ -2253,7 +2268,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         await adapter.start(gateway);
         startedChannels.push(adapter);
       } catch (error) {
-        warn(`channel ${adapter.name} failed to start: ${error instanceof Error ? error.message : String(error)}`);
+        const reason = error instanceof Error ? error.message : String(error);
+        if (!adapter.required) {
+          warn(`channel ${adapter.name} failed to start: ${reason}`);
+        }
         // A start() that rejected may still hold sockets or listeners it
         // acquired before failing; it never reaches startedChannels, so
         // this is its only cleanup.
@@ -2261,6 +2279,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           await adapter.stop();
         } catch (stopError) {
           warn(`channel ${adapter.name} cleanup after failed start also failed: ${stopError instanceof Error ? stopError.message : String(stopError)}`);
+        }
+        if (adapter.required) {
+          // Before the scheduler and the sweeps below, deliberately: a
+          // daemon that is not going to serve must not fire a catch-up
+          // slot or re-ask a parked approval on its way out. The channels
+          // already up are the only thing to undo.
+          await Promise.allSettled(startedChannels.map((started) => started.stop()));
+          startedChannels.length = 0;
+          throw new Error(`${adapter.name} could not start, and the gateway cannot serve without it: ${reason}`);
         }
       }
     }
