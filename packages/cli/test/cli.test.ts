@@ -7043,6 +7043,30 @@ test('two daemons starting together on one home: exactly one serves', async () =
   assert.ok(!loser.output.stdout.includes('control API on'), loser.output.stdout);
 });
 
+test('a serve that fails before its gateway exists lets the home go', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-preflight-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A credentials file that is not an object fails the channel preflight,
+  // after the home is claimed and before any gateway exists.
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), '[]\n');
+
+  const failed = createStreams();
+  const code = await runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: failed.streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+  assert.equal(code, 1);
+  assert.match(failed.output.stderr, /Credentials file must contain a JSON object/);
+
+  // The claim went with the failure, not with the process: a host that
+  // calls runServe again — the dashboard, a test, an app — serves, and is
+  // not refused for a daemon that never started.
+  await rm(path.join(home, '.stratus', 'credentials.json'));
+  const { stderr } = await withServedApi(home, async () => {});
+  assert.doesNotMatch(stderr, /already running/);
+});
+
 test('a discovery file left by a daemon that died does not refuse the next one', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-stale-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });

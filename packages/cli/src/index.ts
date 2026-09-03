@@ -6025,6 +6025,7 @@ const loadSlackAdapter = async (): Promise<SlackAdapterFactory | undefined> => {
 };
 
 type ControlApiFactory = typeof import('@stratusagent/control-api').createControlApi;
+type GatewayFactory = typeof import('@stratusagent/gateway').createGateway;
 
 /**
  * Loads the optional control-API package, or undefined when it is not
@@ -6123,8 +6124,7 @@ export const runServe = async (
 
   // Before anything of this daemon's is written or opened: a second daemon
   // on this home is refused here, with no log line, no store, and no sweep
-  // or firing of its own. Held until the finally at the bottom, which runs
-  // after the store has closed.
+  // or firing of its own.
   let claim: HomeClaim;
   try {
     claim = claimHome(env);
@@ -6134,15 +6134,25 @@ export const runServe = async (
     }
     throw error;
   }
-  // The paths that throw before the try/finally below leave through here.
-  const orRelease = async <T>(work: () => T | Promise<T>): Promise<T> => {
-    try {
-      return await work();
-    } catch (error) {
-      claim.release();
-      throw error;
-    }
-  };
+  try {
+    return await serveHeldHome(command, streams, env, createGateway);
+  } finally {
+    // After everything: the store closed by stop(), or whatever a throw
+    // reached — a preflight that rejected before the gateway existed
+    // included, so a host that calls runServe again is not refused for a
+    // daemon that never started. And never sooner, so a replacement cannot
+    // open the store while this one still writes.
+    claim.release();
+  }
+};
+
+/** Everything `stratus serve` does once it holds the home. */
+const serveHeldHome = async (
+  command: ParsedServeCommand,
+  streams: CliStreams,
+  env: CliEnvironment,
+  createGateway: GatewayFactory,
+): Promise<number> => {
   // Under a service manager the daemon's stdout is gone, so everything it
   // says is also written to ~/.stratus/logs — that file is what `stratus
   // logs` reads, and the only record of an overnight run.
@@ -6341,7 +6351,7 @@ export const runServe = async (
     log(`approvals: remote — gated calls are parked and asked in Slack (${describeApprovers(approvalsConfig, askable)})`);
   }
 
-  const gateway = await orRelease(() => createGateway({
+  const gateway = createGateway({
     env,
     approvals,
     ...(Object.keys(pluginsConfig).length > 0
@@ -6364,7 +6374,7 @@ export const runServe = async (
     ...(channels.length > 0 ? { channels } : {}),
     log,
     warn,
-  }));
+  });
 
   if (command.events) {
     gateway.bus.subscribe((event) => {
@@ -6426,7 +6436,7 @@ export const runServe = async (
     });
   }
 
-  await orRelease(() => gateway.start());
+  await gateway.start();
 
   // The roster is only known once the gateway has loaded it, and in remote
   // mode an agent no channel can ask for is the quietest failure this
@@ -6491,10 +6501,6 @@ export const runServe = async (
     await gateway.stop();
     return 0;
   } finally {
-    // After the stop above has closed the store — or, on a throw, after
-    // whatever was reached — so a replacement daemon cannot open it while
-    // this one still writes.
-    claim.release();
     if (redirectTimer) {
       clearInterval(redirectTimer);
     }
