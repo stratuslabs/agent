@@ -234,6 +234,20 @@ export class BrowserSessionPool {
    * had no context to close.
    */
   async release(sessionId: string): Promise<boolean> {
+    // Through the admission queue, like everything else that changes the
+    // pool: a release that ran alongside an admission could close a
+    // browser the admission was about to open its context in — the
+    // dropped session being the last one the browser had, as far as the
+    // release could see.
+    const released = this.admission.then(
+      () => this.releaseNow(sessionId),
+      () => this.releaseNow(sessionId),
+    );
+    this.admission = released.then(() => undefined, () => undefined);
+    return released;
+  }
+
+  private async releaseNow(sessionId: string): Promise<boolean> {
     const entry = this.contexts.get(sessionId);
     if (!entry) {
       return false;
