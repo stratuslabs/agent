@@ -7862,8 +7862,13 @@ test('a stop delivered to the whole process group after a restart drains the rep
   let output = '';
   daemon.stdout?.on('data', (chunk: Buffer) => { output += chunk.toString(); });
   daemon.stderr?.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+  // `close`, not `exit`: it fires once the process has ended *and* its
+  // piped streams have closed, so everything it and the replacement (which
+  // inherits the same pipes) wrote is in `output` by the time this settles.
+  // After `exit` alone, a final chunk can still be in flight on a loaded
+  // runner.
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-    daemon.once('exit', (code, signal) => resolve({ code, signal }));
+    daemon.once('close', (code, signal) => resolve({ code, signal }));
   });
   const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
   const info = async (): Promise<{ pid?: number; url: string } | undefined> => {
