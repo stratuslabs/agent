@@ -241,9 +241,12 @@ export interface SchedulerRuntime {
    * normally follows a firing rides on the firing's own promise, which
    * died with that process; without this, the row stayed listed as a
    * schedule until the next restart's sweep. A row that still has a slot,
-   * or is not a one-shot, is left alone.
+   * or is not a one-shot, is left alone — and so is one whose last firing
+   * was not `sessionId`: the schedule id comes from session metadata, which
+   * a row written before the public door refused the daemon's own keys
+   * could carry from a caller, and a firing may retire only its own row.
    */
-  retireSpentOneShot(scheduleId: string): void;
+  retireSpentOneShot(scheduleId: string, sessionId: string): void;
 }
 
 export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): SchedulerRuntime => {
@@ -567,9 +570,9 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     async drain() {
       await Promise.allSettled([...inflight]);
     },
-    retireSpentOneShot(scheduleId) {
+    retireSpentOneShot(scheduleId, sessionId) {
       const record = store.get(scheduleId);
-      if (!record || record.cadence.kind !== 'at' || record.nextFireAt) {
+      if (!record || record.cadence.kind !== 'at' || record.nextFireAt || record.lastSessionId !== sessionId) {
         return;
       }
       store.delete(record.id);

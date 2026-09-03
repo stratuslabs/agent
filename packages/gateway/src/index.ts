@@ -1976,12 +1976,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         await store.save(session);
 
         const runner = runnerFor(await runtimeForAgent(source));
-        await runner.recoverPendingApproval(sessionId, { denyPending: expired });
-        // A recovered firing's row outlived the process that would have
-        // retired it; the scheduler decides whether there is anything to do.
-        const scheduleId = session.metadata?.[SCHEDULE_ID_METADATA_KEY];
-        if (typeof scheduleId === 'string') {
-          scheduler.retireSpentOneShot(scheduleId);
+        try {
+          await runner.recoverPendingApproval(sessionId, { denyPending: expired });
+        } finally {
+          // A recovered firing's row outlived the process that would have
+          // retired it, and the firing is over either way — a recovery that
+          // failed has durably failed its session, which is as finished as
+          // completing. The scheduler decides whether there is a row to
+          // retire, and only this firing's own.
+          const scheduleId = session.metadata?.[SCHEDULE_ID_METADATA_KEY];
+          if (typeof scheduleId === 'string') {
+            scheduler.retireSpentOneShot(scheduleId, sessionId);
+          }
         }
       } catch (error) {
         warn(`could not recover parked session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
