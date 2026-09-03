@@ -6996,7 +6996,10 @@ test('a second serve on a home whose daemon is serving is refused before it open
     const code = await runCli({
       argv: ['serve', '--no-events', '--api-port', '0'],
       streams,
-      env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+      // A token exported for some remote gateway. It must not matter: the
+      // refusal is the home's own lock, not a probe of the local API that
+      // this token would fail with a 401.
+      env: { homeDir: home, cwd: home, processEnv: { STRATUS_GATEWAY_TOKEN: 'for-another-gateway' }, shutdownSignal: controller.signal },
     });
     clearTimeout(timer);
 
@@ -7015,13 +7018,37 @@ test('a second serve on a home whose daemon is serving is refused before it open
   });
 });
 
+test('two daemons starting together on one home: exactly one serves', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-race-'));
+  // Neither has bound, so the discovery file exists for neither; only a
+  // claim taken before anything opens can settle this. Both are shut down
+  // after a moment — the loser has exited long before — and the exit codes
+  // say which happened.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2_000);
+  const start = () => {
+    const { streams, output } = createStreams();
+    return runCli({
+      argv: ['serve', '--no-events', '--api-port', '0'],
+      streams,
+      env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+    }).then((code) => ({ code, output }));
+  };
+  const [a, b] = await Promise.all([start(), start()]);
+  clearTimeout(timer);
+
+  assert.deepEqual([a.code, b.code].sort(), [0, 1]);
+  const loser = a.code === 1 ? a : b;
+  assert.match(loser.output.stderr, /already running for this home — one that is still starting, or still draining/);
+  assert.ok(!loser.output.stdout.includes('control API on'), loser.output.stdout);
+});
+
 test('a discovery file left by a daemon that died does not refuse the next one', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-stale-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   // A SIGKILLed daemon removes nothing, and its pid is anyone's next. The
-  // refusal needs both proofs — the pid alive and the URL answering — so a
-  // file naming a dead process, or a live one that is not a daemon, is
-  // only ever overwritten by the daemon that starts.
+  // refusal is the home's lock, which died with the daemon; the file is
+  // read only to name a holder, and a dead pid names nobody.
   const gone = spawn(process.execPath, ['-e', '']);
   await once(gone, 'exit');
   await writeFile(

@@ -55,6 +55,12 @@ import {
 } from './schedules.ts';
 
 export {
+  claimHome,
+  homeLockPath,
+  HomeClaimedError,
+  type HomeClaim,
+} from './lock.ts';
+export {
   SqliteScheduleStore,
   createSchedulerRuntime,
   isScheduleSessionId,

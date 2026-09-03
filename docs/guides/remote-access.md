@@ -44,6 +44,9 @@ Two files appear while it is serving, both `0600`:
 | `~/.stratus/gateway-token` | The bearer token clients authenticate with |
 | `~/.stratus/gateway.json` | Where the daemon is reachable — url, host, port, pid — removed on a clean stop |
 
+A third, `~/.stratus/stratusd.lock`, is the daemon's exclusive claim on the
+home for as long as it runs; see [One daemon per home](./always-on.md#one-daemon-per-home).
+
 ## The dashboard
 
 ```bash

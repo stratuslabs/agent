@@ -31,7 +31,7 @@ import {
 // Type-only: the gateway itself is imported lazily (it pulls in node:sqlite
 // and the whole runner stack), and a serve-only policy seam must not make
 // `stratus run` pay for it.
-import type { ApprovalTransport, GatewayChannelAdapter } from '@stratusagent/gateway';
+import type { ApprovalTransport, GatewayChannelAdapter, HomeClaim } from '@stratusagent/gateway';
 import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
 import {
   createFileCommandWhitelist,
@@ -5824,38 +5824,26 @@ const processAlive = (pid: number): boolean => {
 };
 
 /**
- * Refuse to start a daemon over one already serving this home.
+ * The error for a home another daemon holds (see `claimHome` in
+ * @stratusagent/gateway — the claim is what decides; this only says who).
  *
- * Two daemons on one `~/.stratus` share a session store and a schedule
- * table with nothing coordinating them: each slot fires in whichever
- * process claims it first, and each start sweep re-asks the approvals the
- * other is holding. Reproduced against a running daemon: a second `stratus
- * serve` lost the port to the first, and the next scheduled firing ran in
- * the second, where no channel could ask or report. The API is a required
- * channel now, so a lost port ends the daemon — but only when the ports
- * collide, and the database is shared whatever the port.
- *
- * The discovery file is the evidence, held to two proofs: the pid it
- * names is alive AND its URL answers /health with this home's token. A
- * daemon that was SIGKILLed leaves the file behind, and its pid can be
- * reused by anything, so either alone would refuse a start that is fine.
- * A daemon started with --no-api writes no discovery file and is invisible
- * here.
+ * The discovery file names the holder when it has one to name: a daemon
+ * that has bound its API. Read for the message alone, and only trusted as
+ * far as a live pid — a daemon still starting has not written it, a
+ * daemon draining its last turn has already removed it, and a SIGKILLed
+ * one leaves it behind for the next pid to inherit. Not probed over HTTP:
+ * a `STRATUS_GATEWAY_TOKEN` exported for some remote gateway would answer
+ * 401 for the local one, and the claim needs no second opinion.
  */
-const refuseIfDaemonServing = async (env: CliEnvironment): Promise<void> => {
+const describeHeldHome = async (env: CliEnvironment): Promise<string> => {
   const info = await readGatewayInfo(env);
-  if (info?.pid === undefined || !processAlive(info.pid)) {
-    return;
-  }
-  const fetchImpl = env.fetch ?? globalThis.fetch;
-  if (typeof fetchImpl !== 'function' || !(await gatewayAnswering(env, info.url, fetchImpl))) {
-    return;
-  }
-  throw new Error(
-    `stratusd is already running for this home (pid ${info.pid}, ${info.url}). Two daemons on one ~/.stratus `
-      + 'would each fire the other\'s schedules and re-ask its approvals. Stop it first: `stratus service stop` '
-      + 'if it is the installed service, otherwise Ctrl+C where it runs.',
-  );
+  const holder = info?.pid !== undefined && processAlive(info.pid)
+    ? ` (pid ${info.pid}, ${info.url})`
+    : ' — one that is still starting, or still draining its last turns';
+  return `stratusd is already running for this home${holder}. Two daemons on one ~/.stratus `
+    + 'would each fire the other\'s schedules and re-ask its approvals. Stop it first: `stratus service stop` '
+    + 'if it is the installed service, otherwise Ctrl+C where it runs — and let it finish; it holds the home until '
+    + 'its last turn is written.';
 };
 
 /**
@@ -6128,14 +6116,33 @@ export const runServe = async (
     await truncateRedirectLogs(logsDirPath(env)).catch(() => undefined);
   }
 
-  // Before the store opens: a second daemon on this home is refused with
-  // nothing of its own written, and no sweep or firing started.
-  await refuseIfDaemonServing(env);
-
   // Loaded lazily: the gateway pulls in node:sqlite, which every other CLI
   // command neither needs nor should pay for (Node still prints an
   // experimental warning for it).
-  const { createGateway } = await import('@stratusagent/gateway');
+  const { createGateway, claimHome, HomeClaimedError } = await import('@stratusagent/gateway');
+
+  // Before anything of this daemon's is written or opened: a second daemon
+  // on this home is refused here, with no log line, no store, and no sweep
+  // or firing of its own. Held until the finally at the bottom, which runs
+  // after the store has closed.
+  let claim: HomeClaim;
+  try {
+    claim = claimHome(env);
+  } catch (error) {
+    if (error instanceof HomeClaimedError) {
+      throw new Error(await describeHeldHome(env));
+    }
+    throw error;
+  }
+  // The paths that throw before the try/finally below leave through here.
+  const orRelease = async <T>(work: () => T | Promise<T>): Promise<T> => {
+    try {
+      return await work();
+    } catch (error) {
+      claim.release();
+      throw error;
+    }
+  };
   // Under a service manager the daemon's stdout is gone, so everything it
   // says is also written to ~/.stratus/logs — that file is what `stratus
   // logs` reads, and the only record of an overnight run.
@@ -6334,7 +6341,7 @@ export const runServe = async (
     log(`approvals: remote — gated calls are parked and asked in Slack (${describeApprovers(approvalsConfig, askable)})`);
   }
 
-  const gateway = createGateway({
+  const gateway = await orRelease(() => createGateway({
     env,
     approvals,
     ...(Object.keys(pluginsConfig).length > 0
@@ -6357,7 +6364,7 @@ export const runServe = async (
     ...(channels.length > 0 ? { channels } : {}),
     log,
     warn,
-  });
+  }));
 
   if (command.events) {
     gateway.bus.subscribe((event) => {
@@ -6419,7 +6426,7 @@ export const runServe = async (
     });
   }
 
-  await gateway.start();
+  await orRelease(() => gateway.start());
 
   // The roster is only known once the gateway has loaded it, and in remote
   // mode an agent no channel can ask for is the quietest failure this
@@ -6484,6 +6491,10 @@ export const runServe = async (
     await gateway.stop();
     return 0;
   } finally {
+    // After the stop above has closed the store — or, on a throw, after
+    // whatever was reached — so a replacement daemon cannot open it while
+    // this one still writes.
+    claim.release();
     if (redirectTimer) {
       clearInterval(redirectTimer);
     }

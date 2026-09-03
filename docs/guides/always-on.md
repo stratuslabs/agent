@@ -69,7 +69,7 @@ reboot.
 
 ## One daemon per home
 
-`stratus serve` refuses to start while another daemon is serving the same
+`stratus serve` refuses to start while another daemon holds the same
 `~/.stratus`:
 
 ```
@@ -78,12 +78,16 @@ Error: stratusd is already running for this home (pid 4242, http://127.0.0.1:412
 
 Two daemons on one home would share the session store and the schedule
 table with nothing coordinating them — each slot fires in whichever process
-claims it first, and each start sweep re-asks the approvals the other is
-holding. The evidence is `~/.stratus/gateway.json`, which the control API
-writes when it binds: the refusal needs the pid it names to be alive *and*
-its URL to answer, so a file left behind by a daemon that was killed is
-overwritten, never obeyed. A daemon started with `--no-api` writes no
-discovery file and is invisible to this check.
+claims it first, each start sweep re-asks the approvals the other is
+holding, and the newer one fails as abandoned the turns the older one is
+still running. The claim is `~/.stratus/stratusd.lock`, an SQLite file the
+daemon holds in exclusive locking mode from before it opens the store until
+after the store closes. That makes it atomic between two daemons starting
+together, keeps a daemon that is still draining its last turns holding the
+home against its replacement (the refusal then says so, since there is no
+address to name yet), and means a daemon that died released it with its
+file descriptors — there is no stale lock to clean up. `gateway.json` is
+read only to name the holder.
 
 The control API is a required channel: a daemon that cannot bind its port
 stops instead of serving without one, with an error naming the port and
