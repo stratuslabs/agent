@@ -291,6 +291,14 @@ const flagsOf = (token: string): { long?: string; shorts: string[] } => {
 };
 
 const deniesFlag = (denied: string[], token: string): boolean => {
+  // The token as written, minus any `=value`, so a deny list can name a
+  // short flag whole (`-c`) as well as by its letter — `git -c` is the
+  // entry `ALWAYS_DENIED_FLAGS` was written for, and letter-by-letter
+  // matching alone never reached it.
+  const [spelled] = token.split('=');
+  if (spelled !== undefined && denied.includes(spelled)) {
+    return true;
+  }
   const { long, shorts } = flagsOf(token);
   if (long && denied.includes(long)) {
     return true;
@@ -382,9 +390,19 @@ export const findMatchingScope = (
  * reads `args` as the invocation's leading tokens, so a scope that skipped
  * over `-p` to reach `build` could never match the command it was approved
  * for — every later `mkdir -p …` asked again, under a log line promising it
- * would not. A leading flag the scope must refuse (a destructive one, or one
- * the safe list excludes for this command) means there is no scope to
- * store, and the answer counts once.
+ * would not.
+ *
+ * A flag-first scope is exact on its positionals, though: it carries every
+ * one of them and refuses any more. Nothing here knows which flags take a
+ * separate value, so in `git --git-dir /x status` the first positional is
+ * `/x`, not `status`; a scope of `git --git-dir /x` with a free subcommand
+ * behind it would have approved every git command against that repository
+ * on the strength of one `status`. Exactness costs a prompt for `cp -r src
+ * elsewhere` after `cp -r src dist` was approved, which is the direction to
+ * fail in. A leading flag the scope must refuse (a destructive one, one the
+ * safe list excludes for this command, or one that turns something else
+ * into a program) means there is no scope to store, and the answer counts
+ * once.
  */
 export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope | undefined => {
   if (analysis.disqualifiedBy || analysis.base === undefined) {
@@ -403,7 +421,9 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
   if (leading.some((token) => deniesFlag([...ALWAYS_DENIED_FLAGS, ...DESTRUCTIVE_FLAGS, ...inherited], token))) {
     return undefined;
   }
-  const args = [...leading, ...(first === undefined ? [] : [first])];
+  const positionals = tokens.filter((token) => !token.startsWith('-'));
+  const exact = leading.length > 0;
+  const args = exact ? [...leading, ...positionals] : (first === undefined ? [] : [first]);
   const deniedArgs = sameScope.flatMap((scope) => scope.deniedArgs ?? []);
   // Only when every safe scope for this command names one: a persisted
   // scope must be no wider than the built-in, and an allowlist from one of
@@ -419,8 +439,9 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
     ...(deniedArgs.length > 0 ? { deniedArgs: [...new Set(deniedArgs)] } : {}),
     // A persisted scope cannot be wider than the safe list's own for the
     // same command: approving `git branch` once must not turn creating a
-    // branch into something that runs unattended forever after.
-    ...(sameScope.some((scope) => scope.listOnly) ? { listOnly: true } : {}),
+    // branch into something that runs unattended forever after. A
+    // flag-first scope is exact on positionals for the reason above.
+    ...(exact || sameScope.some((scope) => scope.listOnly) ? { listOnly: true } : {}),
     ...(allowedFlags ? { allowedFlags } : {}),
     // Git's syntax, so git's rule: elsewhere a leading `+` is an ordinary
     // argument (`chmod +x`) and refusing it would only cost a prompt for no

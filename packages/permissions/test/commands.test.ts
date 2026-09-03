@@ -220,9 +220,11 @@ test('a scope approved for a flag-first command covers that command', () => {
   // scope persisted for `mkdir -p build` matched `mkdir build` and never
   // the command that was approved, and every later `mkdir -p …` asked
   // again under a log line promising it would not.
+  // Exact on its positionals — all of them, and no more — so what the log
+  // and the whitelist listing say is the command minus its trailing flags.
   const cases: Array<[command: string, described: string]> = [
     ['mkdir -p build', 'mkdir -p build'],
-    ['cp -r src dist', 'cp -r src'],
+    ['cp -r src dist', 'cp -r src dist'],
     ['ls -la docs', 'ls -la docs'],
     ['curl -sL https://example.com', 'curl -sL https://example.com'],
   ];
@@ -231,7 +233,7 @@ test('a scope approved for a flag-first command covers that command', () => {
     const scope = normalizeCommandScope(analysis);
     assert.ok(scope, `${command} reduces to a scope`);
     assert.equal(matchesScope(analysis, scope), true, `the scope for "${command}" covers it`);
-    // What the log and the whitelist listing say now names the flags too.
+    assert.equal(matchesScope(analyzeCommand(`${command} extra`), scope), false, `the scope for "${command}" stops at its arguments`);
     assert.equal(describeCommandScope(scope), described);
   }
   // Positional-first commands are unchanged: the subcommand stays the scope.
@@ -239,6 +241,17 @@ test('a scope approved for a flag-first command covers that command', () => {
   assert.deepEqual(normalizeCommandScope(analyzeCommand('mkdir -p build'))?.args, ['-p', 'build']);
   // A leading flag the scope would have to refuse leaves nothing to store.
   assert.equal(normalizeCommandScope(analyzeCommand('rm -rf build')), undefined);
+  // Nothing here knows which flags take a value, and a value-taking flag
+  // ahead of the subcommand is exactly how a scope would end up approving
+  // more than it read: exact positionals mean `git --git-dir /x status`
+  // covers that command and not `git --git-dir /x checkout main`.
+  const gitDir = normalizeCommandScope(analyzeCommand('git --git-dir /x status'));
+  assert.deepEqual(gitDir?.args, ['--git-dir', '/x', 'status']);
+  assert.equal(matchesScope(analyzeCommand('git --git-dir /x checkout main'), gitDir!), false);
+  // And `-c`, which turns git config into a program, is refused as written
+  // — the deny list names the short flag whole, and it has to match that way.
+  assert.equal(normalizeCommandScope(analyzeCommand('git -c color.ui=always status')), undefined);
+  assert.equal(normalizeCommandScope(analyzeCommand('git -c core.pager=evil')), undefined);
   // And a leading flag the safe list excludes for this command is refused
   // rather than smuggled into the prefix where the deny list used to not look.
   assert.equal(normalizeCommandScope(analyzeCommand('git --force branch')), undefined);
@@ -265,6 +278,7 @@ test('always allow on a flag-first command runs it unattended next time', async 
     commands: { whitelist: createFileCommandWhitelist({ directory }) },
   });
   assert.equal(await second.approve(contextFor('mkdir -p build')), true);
+  assert.equal(await second.approve(contextFor('mkdir -p build extra')), false, 'a flag-first scope is exact on its arguments');
   assert.equal(await second.approve(contextFor('mkdir -pf build')), false, 'a destructive letter in the bundle still refuses');
   assert.equal(await second.approve(contextFor('rm -rf build')), false);
 });
