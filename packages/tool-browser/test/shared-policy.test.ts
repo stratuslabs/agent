@@ -36,8 +36,7 @@ const session: Session = {
  */
 const proxyHonouringDriver = (): BrowserDriver => ({
   async launch(options) {
-    const proxy = new URL(options.proxy.server);
-    const fetchThroughProxy = (target: string): Promise<void> => new Promise((resolve, reject) => {
+    const fetchThroughProxy = (proxy: URL, target: string): Promise<void> => new Promise((resolve, reject) => {
       const request = http.request(
         { host: proxy.hostname, port: Number(proxy.port), method: 'GET', path: target },
         (response) => {
@@ -60,14 +59,17 @@ const proxyHonouringDriver = (): BrowserDriver => ({
     });
 
     return {
-      async newContext() {
+      async newContext(contextOptions) {
+        // A context's own proxy when it has one, the browser's otherwise —
+        // which is what Chromium does.
+        const proxy = new URL(contextOptions?.proxy?.server ?? options.proxy.server);
         return {
           async newPage() {
             let current = 'about:blank';
             return {
               async goto(url: string) {
                 if (url.startsWith('http://')) {
-                  await fetchThroughProxy(url);
+                  await fetchThroughProxy(proxy, url);
                 }
                 current = url;
                 return { status: () => 200 };
