@@ -391,12 +391,15 @@ export class BrowserSessionPool {
   }
 
   private async shutBrowser(entry: BrowserEntry): Promise<void> {
-    try {
-      await entry.browser.close();
-    } catch {
-      // Same as a context: already gone is fine.
-    }
-    await entry.proxy.close();
+    // The proxy alongside the browser, not after it: a browser whose close
+    // never settles is exactly the one being retired here, and its proxy
+    // is a listening socket nothing else would ever close.
+    await Promise.all([
+      entry.browser.close().catch(() => {
+        // Same as a context: already gone is fine.
+      }),
+      entry.proxy.close(),
+    ]);
   }
 
   /** Everything, for shutdown. */

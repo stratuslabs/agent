@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import net from 'node:net';
 
 import {
   BrowserSessionPool,
@@ -235,6 +236,46 @@ test('a browser whose last context never finishes closing is retired at once, an
 
   await pool.pageFor('a', 2);
   assert.equal(launches, 2, 'the next call got a fresh browser, not the wedged one');
+});
+
+test('a browser whose close never settles still has its proxy closed', async (t) => {
+  let proxyUrl = '';
+  const driver: BrowserDriver = {
+    async launch(options) {
+      proxyUrl = options.proxy.server;
+      return {
+        async newContext() {
+          const context: BrowserContextLike = {
+            async newPage() {
+              return stubPage();
+            },
+            async close() {},
+          };
+          return context;
+        },
+        close: () => new Promise<never>(() => {}),
+      };
+    },
+  };
+  const pool = new BrowserSessionPool({ driver, idleMs: 60_000 });
+  await pool.pageFor('a', 1);
+  const proxy = new URL(proxyUrl);
+  const reaches = (): Promise<boolean> =>
+    new Promise((resolve) => {
+      const socket = net.connect(Number(proxy.port), proxy.hostname);
+      socket.once('connect', () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.once('error', () => resolve(false));
+    });
+  assert.equal(await reaches(), true, 'the proxy is listening while the browser is up');
+
+  // Not awaited: the browser's close never settles, so neither does this.
+  void pool.release('a');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(await reaches(), false, 'the proxy was closed without waiting on the browser');
+  t.after(() => undefined);
 });
 
 test('releasing an unresponsive page neither waits for another conversation\'s admission nor closes the browser it is being admitted into', async (t) => {
