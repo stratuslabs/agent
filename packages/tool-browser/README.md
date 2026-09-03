@@ -58,7 +58,7 @@ fails that one call with a message naming the fix.
 | `allowPrivateAddresses` | `false` | Reach non-global addresses. The trusted-workstation posture. |
 | `idleMs` | `300000` | Close a conversation's context after this much quiet. |
 | `maxContexts` | `4` | Contexts at once; the least recently used goes first. |
-| `maxTextBytes` | `100000` | Cap on `browser.read`, then a `truncated` marker. |
+| `maxTextBytes` | `100000` | Cap on `browser.read`, then a `truncated` marker. A call's own `maxBytes` may ask for less, never more. |
 | `navigationTimeoutMs` | `30000` | Per navigation and per action. |
 | `workspaceRoot` | supplied by the daemon | Where screenshots go: `<root>/<agent-id>/screenshots`. |
 

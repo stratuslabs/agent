@@ -64,6 +64,23 @@ test('web.fetch returns a page as readable text', async (t) => {
   );
 });
 
+test('a call may narrow maxBytes, never raise it', async (t) => {
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('x'.repeat(10_000));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+
+  const tool = await fetchTool({ allowedHosts: ['localhost'], maxBytes: 500 });
+  const lifted = await tool.execute({ url: `http://localhost:${port}/`, maxBytes: 1_000_000 }, session) as JsonObject;
+  assert.equal(String(lifted.text).length, 500, 'a bigger maxBytes does not lift the cap');
+  assert.equal(lifted.truncated, true);
+  const narrowed = await tool.execute({ url: `http://localhost:${port}/`, maxBytes: 50 }, session) as JsonObject;
+  assert.equal(String(narrowed.text).length, 50);
+});
+
 test('a redirect into an internal address is refused at the hop, not at the first URL', async (t) => {
   const internal = http.createServer((_request, response) => {
     response.writeHead(200, { 'content-type': 'text/plain' });
