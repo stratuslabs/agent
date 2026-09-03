@@ -280,6 +280,31 @@ test('searching one file searches that file, not its neighbours', async () => {
   assert.equal((wide.matches as unknown[]).length, 2);
 });
 
+test('a large file named outright is searched, and one a walk skips is named in the result', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-large-'));
+  await mkdir(path.join(root, 'logs'), { recursive: true });
+  // Over the walk limit, with the only needle on its last line.
+  await writeFile(path.join(root, 'logs', 'big.log'), `${'x'.repeat(1_200_000)}\nneedle at the end\n`);
+  await writeFile(path.join(root, 'logs', 'small.log'), 'nothing here\n');
+
+  const tools = await registryFor({ roots: [root] });
+  const session = sessionFor('ava');
+
+  const named = await run(tools, 'fs.search', { query: 'needle', path: 'logs/big.log' }, session) as JsonObject;
+  assert.deepEqual(
+    (named.matches as Array<{ path: string; line: number }>).map((match) => [match.path, match.line]),
+    [[path.join('logs', 'big.log'), 2]],
+  );
+  assert.equal(named.skipped, undefined);
+
+  const walked = await run(tools, 'fs.search', { query: 'needle', path: 'logs' }, session) as JsonObject;
+  assert.deepEqual(walked.matches, []);
+  const skipped = walked.skipped as Array<{ path: string; bytes: number; reason: string }>;
+  assert.equal(skipped.length, 1);
+  assert.equal(skipped[0]!.path, path.join('logs', 'big.log'));
+  assert.match(skipped[0]!.reason, /over the 1 MB walk limit/);
+});
+
 test('a search pattern is literal text, so no query can stall the process', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-redos-'));
   await writeFile(path.join(root, 'notes.md'), `a(b)c ${'a'.repeat(4_000)}\n`);

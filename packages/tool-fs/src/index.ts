@@ -1,5 +1,6 @@
 import { constants } from 'node:fs';
-import { mkdir, readdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, stat } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -244,6 +245,29 @@ const matcherFor = (query: string, options: { caseSensitive?: boolean; wholeWord
   );
 };
 
+/**
+ * A text file a line at a time, or `undefined` once when it turns out to be
+ * binary — decided on the first chunk, the way `fs.read` decides on what it
+ * read. Streamed so a file named outright can be any size.
+ */
+const readLines = async function* (file: string): AsyncGenerator<string | undefined> {
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const probe = Buffer.alloc(8_192);
+    const { bytesRead } = await handle.read(probe, 0, probe.length, 0);
+    if (looksBinary(probe.subarray(0, bytesRead))) {
+      yield undefined;
+      return;
+    }
+    const lines = createInterface({ input: handle.createReadStream({ start: 0 }), crlfDelay: Infinity });
+    for await (const line of lines) {
+      yield line;
+    }
+  } finally {
+    await handle.close();
+  }
+};
+
 const walkFiles = async function* (directory: string, depth = 0): AsyncGenerator<string> {
   if (depth > 12) {
     return;
@@ -301,6 +325,12 @@ const createSearchTool = (config: JsonObject): Tool => ({
     });
 
     const matches: SearchMatch[] = [];
+    // What the walk looked past, said outright. A file over the size
+    // limit used to vanish from the result: a search of a directory holding
+    // one 6.7 MB log came back with no matches and no hint that the log
+    // was never opened, and a summary written from that is confidently
+    // wrong in the way a silently clipped read is.
+    const skipped: Array<{ path: string; bytes: number; reason: string }> = [];
     let truncated = false;
     // A file is searched as itself. Falling back to its parent would answer
     // a question nobody asked — `{ path: 'notes/today.md' }` coming back
@@ -313,13 +343,39 @@ const createSearchTool = (config: JsonObject): Tool => ({
       // us directly can.
       throw new Error(`${resolved.path} is not a regular file.`);
     }
-    const files = resolved.kind === 'directory'
-      ? walkFiles(resolved.path)
-      : (async function* single() {
-          yield resolved.path;
-        })();
+    const record = (file: string, index: number, line: string): boolean => {
+      if (matches.length >= limit) {
+        truncated = true;
+        return false;
+      }
+      matches.push({
+        path: relativeTo(resolved.root, file),
+        line: index + 1,
+        text: line.length > 400 ? `${line.slice(0, 400)}…` : line,
+      });
+      return true;
+    };
 
-    for await (const file of files) {
+    if (resolved.kind === 'file') {
+      // A file named outright is searched whatever its size — the caller
+      // asked about this file, not about a limit meant for a walk — and
+      // streamed a line at a time, so the size limit's reason (a directory
+      // full of large files read whole) does not apply.
+      let index = 0;
+      for await (const line of readLines(resolved.path)) {
+        if (line === undefined) {
+          skipped.push({ path: relativeTo(resolved.root, resolved.path), bytes: (await stat(resolved.path)).size, reason: 'binary' });
+          break;
+        }
+        if (pattern.test(line) && !record(resolved.path, index, line)) {
+          break;
+        }
+        index += 1;
+      }
+      return { query, matches, truncated, ...(skipped.length > 0 ? { skipped } : {}) };
+    }
+
+    for await (const file of walkFiles(resolved.path)) {
       if (matches.length >= limit) {
         truncated = true;
         break;
@@ -328,6 +384,11 @@ const createSearchTool = (config: JsonObject): Tool => ({
       try {
         const info = await stat(file);
         if (info.size > DEFAULT_MAX_SEARCH_FILE_BYTES) {
+          skipped.push({
+            path: relativeTo(resolved.root, file),
+            bytes: info.size,
+            reason: `over the ${DEFAULT_MAX_SEARCH_FILE_BYTES / 1_000_000} MB walk limit — search it by name to read it whole`,
+          });
           continue;
         }
         contents = await readFile(file);
@@ -339,22 +400,13 @@ const createSearchTool = (config: JsonObject): Tool => ({
       }
       const lines = contents.toString('utf8').split('\n');
       for (const [index, line] of lines.entries()) {
-        if (!pattern.test(line)) {
-          continue;
-        }
-        if (matches.length >= limit) {
-          truncated = true;
+        if (pattern.test(line) && !record(file, index, line)) {
           break;
         }
-        matches.push({
-          path: relativeTo(resolved.root, file),
-          line: index + 1,
-          text: line.length > 400 ? `${line.slice(0, 400)}…` : line,
-        });
       }
     }
 
-    return { query, matches, truncated };
+    return { query, matches, truncated, ...(skipped.length > 0 ? { skipped } : {}) };
   },
 });
 
