@@ -512,3 +512,49 @@ test('a scheduled firing that ignores its abort does not hold the restart foreve
   assert.ok(warnings.some((line) => /a scheduled firing did not stop/.test(line)), warnings.join('\n'));
   await gateway.stop();
 });
+
+test('a plugin whose dispose never settles does not hold the restart, and the host is told', async () => {
+  const home = await newHome();
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-reload-dispose-'));
+  const directory = path.join(root, 'stratus-plugin-stuck');
+  await mkdir(path.join(directory, 'dist'), { recursive: true });
+  await mkdir(path.join(directory, 'skills'), { recursive: true });
+  await writeFile(path.join(directory, 'package.json'), JSON.stringify({
+    name: 'stratus-plugin-stuck',
+    stratus: { pluginVersion: 1, contributes: { skills: [{ id: 'triage', path: './skills/triage.md' }] } },
+  }));
+  await writeFile(path.join(directory, 'skills', 'triage.md'), '---\ndescription: Use when sorting.\n---\n\n# triage\n');
+  const host: OptionalModuleHost = {
+    resolve: () => pathToFileURL(path.join(directory, 'dist', 'index.js')).href,
+    // The likeliest reason to restart is a plugin that misbehaves — and
+    // this one will not let go of whatever it holds.
+    async import() {
+      return { createPlugin: () => ({ name: 'stuck', setup() {}, dispose: () => new Promise<void>(() => {}) }) };
+    },
+  };
+
+  let handOff!: (outcome: RestartOutcome) => void;
+  const restarted = new Promise<RestartOutcome>((resolve) => { handOff = resolve; });
+  const warnings: string[] = [];
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    plugins: { 'stratus-plugin-stuck': { enabled: true } },
+    pluginHost: host,
+    log: () => {},
+    warn: (line) => warnings.push(line),
+    onRestart: (outcome) => handOff(outcome),
+  });
+  await gateway.start();
+  assert.ok(gateway.plugins().some((plugin) => plugin.package === 'stratus-plugin-stuck' && plugin.error === undefined));
+
+  gateway.restart({ drainTimeoutMs: 50 });
+  const outcome = await Promise.race([
+    restarted,
+    new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 5_000)),
+  ]);
+  assert.notEqual(outcome, 'hung', 'the restart waited on a dispose that will never settle');
+  assert.deepEqual(outcome, { drained: false });
+  assert.ok(warnings.some((line) => /a plugin did not release what it holds within 50ms/.test(line)), warnings.join('\n'));
+  await gateway.stop();
+});

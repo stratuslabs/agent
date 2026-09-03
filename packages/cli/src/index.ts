@@ -6833,6 +6833,8 @@ const serveHeldHome = async (
   // the outcome is kept and the wait below released, and the tail of this
   // function decides what "come back" means for this process.
   let restart: RestartOutcome | undefined;
+  /** A signal or the host's abort asked for a stop — set when the wait ends for that reason. */
+  let stopRequested = false;
   let requestShutdown: () => void = () => {};
   const shutdownRequested = new Promise<void>((resolve) => {
     requestShutdown = resolve;
@@ -6993,6 +6995,13 @@ const serveHeldHome = async (
       }
     });
 
+    // Decided now, before the stop below: a restart's drain can still be
+    // running when a stop signal releases this wait, and `onRestart` then
+    // fires during that stop. A daemon told to stop does not come back,
+    // whatever it was told before.
+    if (!restart) {
+      stopRequested = true;
+    }
     if (restart) {
       // Already stopped: the gateway drained and closed before handing the
       // process over, and the stop() below finds nothing to do. Said here,
@@ -7022,7 +7031,7 @@ const serveHeldHome = async (
     await logWriter?.flush();
   }
 
-  if (!restart) {
+  if (!restart || stopRequested) {
     return 0;
   }
   if (!restart.drained) {

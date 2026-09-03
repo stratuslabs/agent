@@ -7570,3 +7570,63 @@ test('serve stops rather than serve without the API it was asked for', async () 
     assert.ok(!output.stdout.includes('Press Ctrl+C to stop.'), output.stdout);
   });
 });
+
+test('a stop signal during a restart\'s drain stops the daemon; it does not come back', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-stop-mid-restart-'));
+  await mkdir(path.join(serveHome, '.stratus', 'agents'), { recursive: true });
+  await writeFile(
+    path.join(serveHome, '.stratus', 'agents', 'ava.md'),
+    '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n',
+  );
+  // One turn held open, so the restart's drain is still running when the
+  // stop arrives — the window in which a stop used to be answered with a
+  // fresh daemon.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let turnStarted!: () => void;
+  const started = new Promise<void>((resolve) => { turnStarted = resolve; });
+  const fetchImpl = (async () => {
+    turnStarted();
+    await held;
+    return new Response(
+      JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'done' } }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof fetch;
+
+  const watched = watchedServeStreams();
+  const controller = new AbortController();
+  let respawns = 0;
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: watched.streams,
+    env: {
+      homeDir: serveHome,
+      cwd: serveHome,
+      processEnv: { OPENAI_API_KEY: 'sk-test' },
+      fetch: fetchImpl,
+      shutdownSignal: controller.signal,
+      serveRespawn: async () => {
+        respawns += 1;
+        return 0;
+      },
+    },
+  });
+
+  const base = await watched.apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  const queued = await postJson(`${base}/api/v1/sessions/s-held/messages`, token, { message: 'take your time', agentId: 'ava' });
+  assert.equal(queued.status, 202, queued.body);
+  await started;
+  const accepted = await postJson(`${base}/api/v1/restart`, token, { reason: 'test', drainTimeoutMs: 60_000 });
+  assert.equal(accepted.status, 202, accepted.body);
+
+  // The stop lands mid-drain; then the held turn is let finish.
+  controller.abort();
+  release();
+
+  assert.equal(await serving, 0);
+  assert.equal(respawns, 0, 'a daemon told to stop came back');
+  assert.match(watched.output.stdout, /Stopping — draining in-flight turns\./);
+  assert.ok(!watched.output.stdout.includes('Restarting stratusd.'), watched.output.stdout);
+});

@@ -545,10 +545,12 @@ export interface RestartStatus {
 export interface RestartOutcome {
   reason?: string;
   /**
-   * Whether every turn finished — inside the window, or after being
-   * aborted at it. False means a turn ignored its abort for a whole second
-   * window and the gateway shut down around it; a host should exit the
-   * process rather than start a new daemon beside a turn still writing.
+   * Whether everything let go — every turn finished inside the window or
+   * after being aborted at it, and every plugin released what it held.
+   * False means a turn ignored its abort for a whole second window, or a
+   * plugin's dispose never settled, and the gateway shut down around it; a
+   * host should exit the process rather than start a new daemon beside a
+   * turn still writing or a plugin still holding a browser or a socket.
    */
   drained: boolean;
 }
@@ -2622,8 +2624,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
     // After the turns that might still be using them. A plugin holding a
     // browser is the reason this exists, and closing it out from under a
-    // running screenshot would fail that turn rather than tidy up.
-    await disposePlugins();
+    // running screenshot would fail that turn rather than tidy up. Bounded
+    // for a restart, whose likeliest reason is a plugin that misbehaves:
+    // a dispose that never settles must not be what keeps the daemon from
+    // coming back, and a plugin still holding on is one more thing the
+    // host should not start a new daemon beside.
+    const disposal = disposePlugins();
+    if (abortAfterMs === undefined) {
+      await disposal;
+    } else if (!(await settlesWithin(disposal, abortAfterMs))) {
+      warn(`restart: a plugin did not release what it holds within ${abortAfterMs}ms; shutting down around it`);
+      drained = false;
+    }
     closeStores();
     log('stratusd stopped');
     return drained;

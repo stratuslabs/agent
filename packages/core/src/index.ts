@@ -1493,16 +1493,27 @@ export class SkillRegistry {
    * skills, aliases, and the contested set together, so the alias rules
    * the build applied are exactly the ones that serve. Synchronous, so a
    * `read` in flight sees either the old set or the new one, never a
-   * half-swapped map. The body cache starts empty: a reloaded skill may be
-   * a replaced file, and a read already underway keeps the promise it
-   * holds. `next` is consumed — emptied, not shared — so nothing can go on
-   * mutating this registry through it.
+   * half-swapped map. A cached body survives only for a `Skill` object the
+   * next set registers unchanged — a plugin's, re-registered by a host that
+   * did not reload the plugin — and is dropped for one built afresh, since
+   * that is a file that may have been replaced. Dropping a plugin's too
+   * would serve a package's edited prose under a name and description
+   * staged before the edit, without the restart a plugin change requires.
+   * A read already underway keeps the promise it holds either way. `next`
+   * is consumed — emptied, not shared — so nothing can go on mutating this
+   * registry through it.
    */
   replaceWith(next: SkillRegistry): void {
+    const kept = new Map<string, Promise<string>>();
+    for (const [id, body] of this.bodies) {
+      if (next.skills.get(id) === this.skills.get(id)) {
+        kept.set(id, body);
+      }
+    }
     this.skills = next.skills;
     this.aliases = next.aliases;
     this.contestedAliases = next.contestedAliases;
-    this.bodies = new Map();
+    this.bodies = kept;
     next.skills = new Map();
     next.aliases = new Map();
     next.contestedAliases = new Set();
