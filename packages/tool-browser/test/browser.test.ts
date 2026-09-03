@@ -330,7 +330,9 @@ test('a refusal is reported once, to the conversation whose page was browsing, a
     });
   assert.equal(await through(), 403);
 
-  const reported = await tool('browser.read').execute({}, sessionFor('first')) as JsonObject;
+  // Every result reports, the act included — the next result is the next
+  // result, whichever tool produced it.
+  const reported = await tool('browser.act').execute({ action: 'click', selector: '#go' }, sessionFor('first')) as JsonObject;
   assert.match(String((reported.blockedRequests as string[])[0]), /localhost/);
   const again = await tool('browser.read').execute({}, sessionFor('first')) as JsonObject;
   assert.equal(again.blockedRequests, undefined, 'a refusal is reported once');

@@ -246,7 +246,13 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       // picture in Slack rather than a path nobody can open. One key rather
       // than a `path` alias beside it — two words for one thing is how a
       // convention stops being one.
-      return { file: target, url: page.url(), title: await page.title() };
+      const blockedRequests = refusalsFor(runtime, session);
+      return {
+        file: target,
+        url: page.url(),
+        title: await page.title(),
+        ...(blockedRequests.length > 0 ? { blockedRequests } : {}),
+      };
     },
   };
 
@@ -280,7 +286,14 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       } else {
         throw new Error(`Unsupported action: ${String(input.action)}. Use click or type.`);
       }
-      return { action: input.action, selector, url: page.url(), title: await page.title() };
+      const blockedRequests = refusalsFor(runtime, session);
+      return {
+        action: input.action,
+        selector,
+        url: page.url(),
+        title: await page.title(),
+        ...(blockedRequests.length > 0 ? { blockedRequests } : {}),
+      };
     },
   };
 
