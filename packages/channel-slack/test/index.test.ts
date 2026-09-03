@@ -1944,6 +1944,52 @@ test('a recovered turn claims the queued placeholder before its routing is read'
   assert.equal(web.updates.find((entry) => entry.text === 'the message\'s own reply')?.ts, 'bot-ts-2');
 });
 
+test('a turn with no renderer that outruns the attachment cap says so', async () => {
+  // Nothing drains the queue of an unrendered turn's files until its
+  // outcome arrives, so the queue is bounded — but attachments that never
+  // reach the thread with nothing in the log is the hardest kind of loss
+  // to work out afterwards.
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-file-cap-'));
+  const shots: string[] = [];
+  for (let index = 0; index < 21; index += 1) {
+    const shot = path.join(root, `shot-${index}.png`);
+    await writeFile(shot, `bytes ${index}`);
+    shots.push(shot);
+  }
+  const warnings: string[] = [];
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (line) => warnings.push(line),
+  });
+  await adapter.start(gateway);
+  const sessionId = 'slack:ava:T1:C1:100.1';
+  await gateway.bus.emit({
+    type: 'tool.completed',
+    sessionId,
+    result: { callId: 'c1', toolName: 'browser.screenshot', ok: true, output: { files: shots } },
+  });
+  await gateway.bus.emit({ type: 'session.completed', sessionId });
+  await adapter.stop();
+
+  assert.equal(
+    warnings.filter((line) => /21 files/.test(line) && /last 20/.test(line)).length,
+    1,
+    `the dropped attachment was reported: ${warnings.join(' | ')}`,
+  );
+  // The cap still holds: what is kept is the last twenty, in order.
+  assert.deepEqual(web.uploads.map((entry) => entry.filename), shots.slice(1).map((shot) => path.basename(shot)));
+});
+
 test('a recovered turn that produced a file and no text still has the file posted', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-file-only-'));
   const shot = path.join(root, 'only.png');

@@ -16,6 +16,15 @@ import {
 const SLACK_MAX_MESSAGE_CHARS = 4000;
 const DEFAULT_EDIT_INTERVAL_MS = 1000;
 const DEDUPE_CAPACITY = 2000;
+/**
+ * How many files an unrendered turn may queue for its outcome. Nothing
+ * drains that queue until the outcome arrives, so a session whose outcome
+ * this process never sees would otherwise grow it for the life of the
+ * daemon. Twenty is well past what one turn produces in practice, and
+ * passing it is reported rather than swallowed.
+ */
+const MAX_UNRENDERED_FILES = 20;
+
 const PLACEHOLDER_TEXT = '…';
 /** What a turn that produced no text puts in its message, wherever it is posted from. */
 const NO_REPLY_TEXT = '(no reply)';
@@ -1616,7 +1625,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         if (event.type === 'tool.completed' && event.result.ok && (foreign || !head)) {
           const produced = collectFilePaths(event.result);
           if (produced.length > 0) {
-            unrenderedFiles.set(event.sessionId, [...(unrenderedFiles.get(event.sessionId) ?? []), ...produced].slice(-20));
+            const held = [...(unrenderedFiles.get(event.sessionId) ?? []), ...produced];
+            // Said out loud when it bites: these are files somebody asked
+            // for, and attachments that never arrive with nothing in the
+            // log is the hardest kind of loss to work out afterwards.
+            if (held.length > MAX_UNRENDERED_FILES) {
+              warn(`slack: a turn with no renderer has produced ${held.length} files; only the last ${MAX_UNRENDERED_FILES} will be posted to its thread`);
+            }
+            unrenderedFiles.set(event.sessionId, held.slice(-MAX_UNRENDERED_FILES));
           }
         }
         // Claimed here, synchronously, rather than inside the report: the
