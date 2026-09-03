@@ -6214,7 +6214,7 @@ test('a unit that cannot be read is not reported as uninstalled', async () => {
   assert.match(String(status?.detail), /could not be read/);
 });
 
-test('a failed removal does not take setup down with it', async () => {
+test('a failed removal is reported, not crashed through, and setup still saves', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await installService({ platform: 'linux', homeDir: home, run: async () => ({ code: 0, stdout: '', stderr: '' }) });
@@ -6238,9 +6238,17 @@ test('a failed removal does not take setup down with it', async () => {
     },
   });
 
-  assert.equal(exitCode, 0);
+  // The optional service must not take setup DOWN with it — the rejection
+  // used to escape after the config was already written, and still must
+  // not. But a unit that stays in place after the user said "do not run it
+  // for me" starts a daemon at login they asked not to have, and `stratus
+  // service uninstall` answers 1 for the same failure. Setup does too: the
+  // install and the removal are the same step with opposite signs.
+  assert.equal(exitCode, 1);
   assert.match(output.stderr, /Could not remove the always-on service/);
   assert.match(output.stderr, /still in place/);
+  // And the settings it had already written are still there.
+  assert.ok(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
 });
 
 test('rotation truncates the service manager redirect files', async () => {
