@@ -698,11 +698,26 @@ export interface NamedCredentials {
   agents: Record<string, Record<string, string>>;
 }
 
+/**
+ * A map keyed by names that come from outside, with no prototype behind it.
+ *
+ * Credential names and agent ids are user-controlled keys, and on an
+ * ordinary object that makes two things go wrong at once: writing
+ * `__proto__` assigns through the inherited setter instead of creating an
+ * entry (so a store reports success and `JSON.stringify` drops the key),
+ * and reading `toString` returns a **function** off `Object.prototype`
+ * rather than the `string | undefined` this resolver promises. A
+ * null-prototype map has neither hazard, whatever ends up in the file — and
+ * that matters more than any name rule a writer applies, because the file
+ * can be hand-edited and the next writer of it may not be this CLI.
+ */
+const emptyNameMap = <T>(): Record<string, T> => Object.create(null) as Record<string, T>;
+
 const readNameMap = (value: unknown): Record<string, string> => {
+  const entries = emptyNameMap<string>();
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return {};
+    return entries;
   }
-  const entries: Record<string, string> = {};
   for (const [name, entry] of Object.entries(value as Record<string, unknown>)) {
     if (typeof entry === 'string') {
       entries[name] = entry;
@@ -715,10 +730,10 @@ export const loadNamedCredentials = async (env: StateEnvironment): Promise<Named
   const raw = await loadRawCredentialsFile(env);
   const named = raw.named;
   if (typeof named !== 'object' || named === null || Array.isArray(named)) {
-    return { shared: {}, agents: {} };
+    return { shared: emptyNameMap<string>(), agents: emptyNameMap<Record<string, string>>() };
   }
   const block = named as Record<string, unknown>;
-  const agents: Record<string, Record<string, string>> = {};
+  const agents = emptyNameMap<Record<string, string>>();
   if (typeof block.agents === 'object' && block.agents !== null && !Array.isArray(block.agents)) {
     for (const [agentId, entry] of Object.entries(block.agents as Record<string, unknown>)) {
       const names = readNameMap(entry);
@@ -762,7 +777,11 @@ export const createFileCredentialResolver = (
   async resolve(agent, name) {
     assertCredentialAllowed(agent, name);
     const named = await loadNamedCredentials(env);
-    return named.agents[agent.id]?.[name] ?? named.shared[name] ?? processEnv[name];
+    const value = named.agents[agent.id]?.[name] ?? named.shared[name] ?? processEnv[name];
+    // `process.env` is somebody else's object and does have a prototype, so
+    // this is the one lookup above that could still answer with a function.
+    // A resolver promises a string or nothing.
+    return typeof value === 'string' ? value : undefined;
   },
 });
 

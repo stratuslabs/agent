@@ -172,6 +172,34 @@ applies to `web.*` exactly as it does everywhere else.
 | `site` | one normalized hostname | Matches that host and anything under it, on label boundaries: `example.com` matches `docs.example.com` and **not** `notexample.com`. Already lower-cased, trailing dot removed, IDN in A-label form. Not a query operator — never splice `site:` into the query. |
 | `freshness` | `{ duration, ms, since }` | An age, resolved to an instant once per call. `since` is the oldest a result may be. |
 
+### What `publishedAt` may be
+
+An **ISO 8601 instant**, and the shape is checked before anything is parsed
+— because `new Date(value)` is not a validator. It reads `03/04/2026` as
+4 March without ever saying whether the backend meant March or April, and it
+silently *corrects* `2026-02-30` into 2 March. A lenient parse therefore does
+not fail to date a result, it **invents** a date, and a `freshness` filter
+then keeps or drops the result on the strength of it.
+
+| Accepted | Read as |
+| --- | --- |
+| `2026-09-01T09:00:00Z` | itself |
+| `2026-09-01T11:00:00+02:00`, `…+0200` | the same instant, in UTC |
+| `2026-09-01` | UTC midnight |
+
+Everything else becomes absent, which under `freshness` means the result is
+dropped: a locale-formatted date, a day that does not exist, and a
+**zone-less** `2026-09-01T10:00:00` — that last one is *local* time to
+whatever machine parses it, so the same string is two different instants on
+two daemons, which is the disagreement this package exists to remove. Convert
+your vendor's format; that is the one job a backend cannot hand back.
+
+A date with no time is accepted rather than refused because plenty of
+backends only have a day, and refusing them would silently empty every
+`freshness` search against such a backend. Reading it as midnight errs
+towards calling a page slightly older than it is, which is the safe
+direction.
+
 Results older than `freshness` are excluded, **and so are results with no
 known date** — which is the case every backend produces without being asked.
 Leaving that unsaid would let two conforming adapters return different sets

@@ -8381,6 +8381,33 @@ test('stratus credential remove forgets one, and says so when there is nothing t
   assert.deepEqual(stored.named?.agents, {});
 });
 
+test('a credential name that could never be stored or resolved is refused at parse time', () => {
+  // `__proto__` is the one that actually breaks: on an ordinary object it
+  // assigns through the inherited setter, so a store would report success,
+  // `JSON.stringify` would drop the key, and resolution would report it
+  // missing forever. The store keys prototype-free maps so it survives one
+  // anyway; this rule is what stops it being stored in the first place.
+  assert.throws(() => parseCommand(['credential', 'set', '__proto__']), /is not a credential name/);
+  assert.throws(() => parseCommand(['credential', 'set', 'has spaces']), /Unknown option|is not a credential name/);
+  assert.throws(() => parseCommand(['credential', 'set', 'search/apiKey']), /is not a credential name/);
+  assert.throws(() => parseCommand(['credential', 'set', '9lives']), /is not a credential name/);
+
+  // The two conventions actually in use both pass.
+  assert.equal(parseCommand(['credential', 'set', 'search.apiKey']).command, 'credential');
+  assert.equal(parseCommand(['credential', 'set', 'SLACK_TOKEN']).command, 'credential');
+
+  // The id goes through the agents package's own rule rather than a second
+  // one written here — it already rejects the names that would key nothing.
+  assert.throws(
+    () => parseCommand(['credential', 'set', 'search.apiKey', '--agent', '__proto__']),
+    /cannot be an agent id/,
+  );
+  assert.equal(
+    parseCommand(['credential', 'set', 'search.apiKey', '--agent', 'ava']).command,
+    'credential',
+  );
+});
+
 test('a credential value is never taken from the command line', () => {
   // A secret in argv is a secret in shell history and in every `ps` on the
   // machine, so there is deliberately no flag that carries one.

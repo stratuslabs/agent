@@ -897,10 +897,9 @@ test('named credentials live in their own namespace, beside the sign-ins and the
   // named credential, and a named save must not clobber the others.
   await saveCredentials(env, { anthropic: { type: 'api_key', value: 'sk-ant-2' } });
 
-  assert.deepEqual(await loadNamedCredentials(env), {
-    shared: { 'search.apiKey': 'shared-key' },
-    agents: { ava: { 'search.apiKey': 'ava-key' } },
-  });
+  const loaded = await loadNamedCredentials(env);
+  assert.deepEqual({ ...loaded.shared }, { 'search.apiKey': 'shared-key' });
+  assert.deepEqual({ ...loaded.agents.ava }, { 'search.apiKey': 'ava-key' });
   assert.equal((await loadCredentials(env)).anthropic?.value, 'sk-ant-2');
   assert.deepEqual(await loadChannelCredentials(env), { slack: { ava: { appToken: 'xapp-1', botToken: 'xoxb-1' } } });
 
@@ -965,5 +964,46 @@ test('a credentials file with a malformed named block reads as empty rather than
     path.join(home, '.stratus', 'credentials.json'),
     JSON.stringify({ named: { shared: 'not-an-object', agents: { ava: { 'search.apiKey': 42 } } } }),
   );
-  assert.deepEqual(await loadNamedCredentials(env), { shared: {}, agents: {} });
+  const empty = await loadNamedCredentials(env);
+  assert.deepEqual(Object.keys(empty.shared), []);
+  assert.deepEqual(Object.keys(empty.agents), []);
+});
+
+test('credential names are keys from outside, so the maps holding them have no prototype', async () => {
+  const { createFileCredentialResolver, loadNamedCredentials, saveNamedCredentials } = await import('../src/index.ts');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-named-proto-'));
+  const env = { homeDir: home };
+
+  // A hand-edited file, or one written by something that is not this CLI.
+  // On an ordinary object `__proto__` assigns through the inherited setter
+  // rather than creating an entry, and `toString` reads back as a function
+  // — neither of which a `string | undefined` resolver can survive.
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Written as raw JSON text on purpose: `{ __proto__: … }` in a JavaScript
+  // object literal is the prototype-setter syntax and would never put the
+  // key in the file. `JSON.parse` makes it an ordinary own property, which
+  // is exactly how it reaches a store from disk.
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    '{"named":{"shared":{"__proto__":"polluted","search.apiKey":"real"},"agents":{}}}',
+  );
+
+  const named = await loadNamedCredentials(env);
+  assert.equal(Object.getPrototypeOf(named.shared), null);
+  assert.equal(Object.getPrototypeOf(named.agents), null);
+  // The odd key round-trips as ordinary data rather than vanishing.
+  assert.equal(named.shared['__proto__'], 'polluted');
+  assert.equal(named.shared['search.apiKey'], 'real');
+  assert.equal(({} as Record<string, unknown>).polluted, undefined, 'Object.prototype was written to');
+
+  await saveNamedCredentials(env, named);
+  const reread = await loadNamedCredentials(env);
+  assert.equal(reread.shared['__proto__'], 'polluted');
+
+  // And a name that only exists on Object.prototype resolves to nothing,
+  // never to a function.
+  const resolver = createFileCredentialResolver(env, {});
+  const agent = { id: 'ava', name: 'Ava', credentials: ['toString', 'constructor'] };
+  assert.equal(await resolver.resolve(agent, 'toString'), undefined);
+  assert.equal(await resolver.resolve(agent, 'constructor'), undefined);
 });

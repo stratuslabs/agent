@@ -71,6 +71,7 @@ import {
   formatSoul,
   generateAgentName,
   isLoadableSkillId,
+  isValidAgentId,
   parseSoul,
   type ParsedSoul,
 } from '@stratusagent/agents';
@@ -501,6 +502,16 @@ export interface ParsedSkillValidateCommand {
 export interface ParsedSkillsCommand {
   command: 'skills';
 }
+
+/**
+ * What a credential name may be: the two conventions in use, and nothing
+ * that would be awkward in a soul's `credentials:` list — `search.apiKey`
+ * and environment-style `SLACK_TOKEN`. Leading letter required, which also
+ * happens to exclude `__proto__`; the store does not *rely* on that (it
+ * keys prototype-free maps), because a credentials file can be written by
+ * something other than this command.
+ */
+export const CREDENTIAL_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/;
 
 export interface ParsedCredentialCommand {
   command: 'credential';
@@ -1420,6 +1431,26 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     }
     if (subcommand !== 'list' && name === undefined) {
       throw new Error(`credential ${subcommand} needs a credential name — for a search backend that is search.apiKey.`);
+    }
+    // A name keys a map that a soul's `credentials:` list also names, so the
+    // two spellings have to be able to meet. The store itself is
+    // prototype-safe whatever lands in it; this rule is what stops a typo —
+    // or a name no soul could ever write — from being stored and then
+    // reported missing forever.
+    if (name !== undefined && !CREDENTIAL_NAME_PATTERN.test(name)) {
+      throw new Error(
+        `${JSON.stringify(name)} is not a credential name. Use letters, digits, dots, dashes, or underscores, `
+        + 'starting with a letter — search.apiKey, or an environment-style SLACK_TOKEN.',
+      );
+    }
+    // The agents package's own rule, not a second one: it is already the
+    // answer to "what may key a plain object", and it rejects the names —
+    // `__proto__`, `toString` — that would store a credential nothing could
+    // ever resolve.
+    if (agentId !== undefined && !isValidAgentId(agentId)) {
+      throw new Error(
+        `${JSON.stringify(agentId)} cannot be an agent id, so a credential stored under it could never be resolved.`,
+      );
     }
     return {
       command: 'credential',

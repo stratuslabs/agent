@@ -98,11 +98,51 @@ test('freshness is measured back from the instant the request is made, in UTC', 
 test('publishedAt becomes a UTC instant, and anything unparseable becomes nothing at all', () => {
   assert.equal(normalizePublishedAt('2026-09-01T09:00:00Z'), '2026-09-01T09:00:00.000Z');
   assert.equal(normalizePublishedAt('2026-09-01T11:00:00+02:00'), '2026-09-01T09:00:00.000Z');
-  // Never a guess: `03/04/2026` has not said whether that is March or
-  // April, and neither reading is worth asserting to an agent.
+  // The same offset spelled the other legal ISO way.
+  assert.equal(normalizePublishedAt('2026-09-01T11:00:00+0200'), '2026-09-01T09:00:00.000Z');
+  // A day with no time is read as UTC midnight, which is what ISO 8601 and
+  // JavaScript both say it is. Refusing it would empty every freshness
+  // search against a backend that only has days.
+  assert.equal(normalizePublishedAt('2026-09-01'), '2026-09-01T00:00:00.000Z');
   assert.equal(normalizePublishedAt('yesterday'), undefined);
   assert.equal(normalizePublishedAt(''), undefined);
   assert.equal(normalizePublishedAt(undefined), undefined);
+});
+
+test('a lenient date parse invents dates, so the shape is checked before anything is parsed', () => {
+  // `new Date` is not a validator. Each of these parses happily and answers
+  // with a date the backend never gave — and under `freshness` that date
+  // then decides whether the result is kept.
+  assert.equal(new Date('03/04/2026').toISOString(), '2026-03-04T00:00:00.000Z');
+  assert.equal(new Date('2026-02-30').toISOString(), '2026-03-02T00:00:00.000Z');
+
+  // Locale-formatted: never said whether it meant March or April.
+  assert.equal(normalizePublishedAt('03/04/2026'), undefined);
+  // A day that does not exist, rolled forward rather than refused.
+  assert.equal(normalizePublishedAt('2026-02-30'), undefined);
+  assert.equal(normalizePublishedAt('2026-13-01'), undefined);
+  assert.equal(normalizePublishedAt('2025-02-29'), undefined);
+  // 2024 is a leap year, so this one is real.
+  assert.equal(normalizePublishedAt('2024-02-29'), '2024-02-29T00:00:00.000Z');
+  // No zone is local time, so the same string is two instants on two
+  // daemons — the disagreement this package exists to remove.
+  assert.equal(normalizePublishedAt('2026-09-01T10:00:00'), undefined);
+  assert.equal(normalizePublishedAt('2026-09-01T25:00:00Z'), undefined);
+});
+
+test('an invented date cannot survive a freshness filter, because it is never a date at all', () => {
+  const { options } = parseSearchCall({ query: 'k', freshness: 'P7D' }, NOW);
+  const results = normalizeSearchResults(
+    [
+      { title: 'Locale-formatted', url: 'https://example.com/a', publishedAt: '03/04/2026' },
+      { title: 'Real and fresh', url: 'https://example.com/b', publishedAt: '2026-09-02T18:00:00Z' },
+    ],
+    options,
+  );
+  // The first row read as 4 March under a lenient parse — six months stale,
+  // so it would have been dropped for the wrong reason. Reversed dates would
+  // have kept it for the wrong reason. Either way the answer was luck.
+  assert.deepEqual(results.map((entry) => entry.title), ['Real and fresh']);
 });
 
 test('snippets arrive as plain text, whatever decoration the vendor sent', () => {

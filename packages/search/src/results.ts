@@ -39,21 +39,65 @@ export const plainSnippet = (value: string): string =>
   value.replace(/<\/?[a-zA-Z][^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 
 /**
+ * A date-time this contract will accept: a calendar date, optionally with a
+ * time that carries an explicit zone.
+ *
+ * The zone is mandatory once there is a time, because a zone-less
+ * `2026-09-01T10:00:00` is *local* time to whatever machine parses it — the
+ * same string becomes two different instants on two daemons, which is the
+ * disagreement this package exists to remove.
+ */
+const ISO_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2}))?$/;
+
+/**
  * An instant, or nothing.
  *
  * `publishedAt` is an ISO 8601 instant in UTC when the backend supplies one
  * and absent when it does not — never a guess, never a locale-formatted
- * date. Anything that will not parse is treated as absent rather than
- * corrected, and under `freshness` that means the result is dropped: a
- * backend handing back `03/04/2026` has not said whether that is March or
- * April, and neither reading is worth asserting to an agent that is about
- * to call the answer recent.
+ * date. Under `freshness` that means the result is dropped, which is why
+ * this has to be strict rather than merely tolerant: **`new Date(value)` is
+ * not a validator.** It reads `03/04/2026` as 4 March without ever saying
+ * whether the backend meant March or April, and it silently *corrects*
+ * `2026-02-30` into 2 March — so a lenient parse does not fail to date a
+ * result, it invents a date, and then a freshness filter keeps or drops the
+ * result on the strength of it. The shape is checked first, and the
+ * calendar date is round-tripped so a day that does not exist is refused
+ * instead of rolled forward.
+ *
+ * A date with no time is accepted and read as UTC midnight, which is what
+ * ISO 8601 and JavaScript both say it is. Plenty of backends only have a
+ * day, and refusing them would silently empty every `freshness` search
+ * against such a backend; reading it as midnight errs towards calling a
+ * page slightly older than it is, which is the safe direction here.
  */
 export const normalizePublishedAt = (value: string | undefined): string | undefined => {
   if (value === undefined) {
     return undefined;
   }
-  const parsed = new Date(value);
+  const trimmed = value.trim();
+  const match = ISO_DATE_TIME.exec(trimmed);
+  if (!match) {
+    return undefined;
+  }
+  const [, year = '', month = '', day = '', hour = '0', minute = '0', second = '0', zone = 'Z'] = match;
+  // Round-tripped rather than trusted: `Date.UTC(2026, 1, 30)` answers
+  // 2 March quite happily, and a date the backend did not give is worse
+  // than no date at all.
+  const probe = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  if (
+    probe.getUTCFullYear() !== Number(year)
+    || probe.getUTCMonth() !== Number(month) - 1
+    || probe.getUTCDate() !== Number(day)
+    || Number(hour) > 23
+    || Number(minute) > 59
+    || Number(second) > 60
+  ) {
+    return undefined;
+  }
+  // `+0200` and `+02:00` are the same offset in ISO 8601, and only the
+  // second is in JavaScript's own grammar. Spelling it the way the parser
+  // requires is not a guess about what the backend meant.
+  const parsed = new Date(trimmed.replace(/([+-]\d{2})(\d{2})$/, '$1:$2'));
   const time = parsed.getTime();
   return Number.isFinite(time) ? parsed.toISOString() : undefined;
 };
