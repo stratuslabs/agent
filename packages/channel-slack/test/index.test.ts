@@ -1428,6 +1428,42 @@ test('a recovered turn that finishes ahead of a queued message has its reply pos
   const texts = [...web.posts, ...web.updates].map((entry) => entry.text);
   assert.equal(texts.filter((text) => text === 'the recovered reply').length, 1, 'the recovery\'s reply was posted once');
   assert.equal(texts.filter((text) => /the message's own reply/.test(text)).length, 1, 'the message got its own reply once');
+
+  // And in order: the placeholder the message posted first was handed to
+  // the recovery's reply (an edit keeps its place), and the message's own
+  // reply went into a fresh placeholder posted below it.
+  const placeholders = web.posts.filter((entry) => entry.text === '…');
+  assert.equal(placeholders.length, 2, 'the message opened a second placeholder below the recovered reply');
+  assert.equal(web.updates.find((entry) => entry.text === 'the recovered reply')?.ts, 'bot-ts-1');
+  assert.equal(web.updates.find((entry) => /the message's own reply/.test(entry.text))?.ts, 'bot-ts-2');
+});
+
+test('a recovered reply too long for one message is posted in full even when one of its parts is refused', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },
+  ]);
+  const reply = `${'a'.repeat(3_000)}\n${'b'.repeat(3_000)}\n${'c'.repeat(3_000)}`;
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply,
+  });
+  // Slack refuses the second part only.
+  const post = web.chat.postMessage.bind(web.chat);
+  let parts = 0;
+  web.chat.postMessage = async (args) => {
+    parts += 1;
+    if (parts === 2) {
+      throw new Error('ratelimited');
+    }
+    return post(args);
+  };
+  await adapter.start(gateway);
+  await gateway.bus.emit({ type: 'session.completed', sessionId: 'slack:ava:T1:C1:100.1' });
+  await adapter.stop();
+
+  const posted = web.posts.map((entry) => entry.text);
+  assert.deepEqual(posted, ['a'.repeat(3_000), 'c'.repeat(3_000)], 'the parts after the refused one were still posted');
 });
 
 test('a failure the running turn is already rendering is not reported twice', async () => {

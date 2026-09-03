@@ -173,6 +173,12 @@ class ReplyRenderer {
   private pendingEdit: NodeJS.Timeout | undefined;
   private editChain: Promise<void> = Promise.resolve();
   private uploadChain: Promise<void> = Promise.resolve();
+  /**
+   * A handover in progress (`yieldTo`): edits and the finalize wait for it,
+   * so a turn that finishes while its placeholder is being given away
+   * writes into the fresh one rather than over the reply it was given to.
+   */
+  private handover: Promise<void> = Promise.resolve();
   private finalized = false;
   private readonly web: SlackWebLike;
   private readonly channel: string;
@@ -317,18 +323,21 @@ class ReplyRenderer {
   }
 
   private queueEdit(text: string): void {
-    const ref = this.ref;
-    if (!ref) {
-      return;
-    }
     this.editChain = this.editChain
-      .then(() => this.web.chat.update({ channel: ref.channel, ts: ref.ts, text }))
+      .then(() => this.handover)
+      .then(() => {
+        // Read after the handover, not before: the placeholder may have
+        // changed hands while this edit waited its turn.
+        const ref = this.ref;
+        return ref ? this.web.chat.update({ channel: ref.channel, ts: ref.ts, text }) : undefined;
+      })
       .then(() => undefined)
       .catch((error) => this.warn(`chat.update failed: ${error instanceof Error ? error.message : String(error)}`));
   }
 
   /** Replace the placeholder with the final reply, splitting if oversized. */
   async finalize(reply: string): Promise<void> {
+    await this.handover;
     this.finalized = true;
     if (this.pendingEdit) {
       clearTimeout(this.pendingEdit);
@@ -354,6 +363,53 @@ class ReplyRenderer {
 
   async fail(message: string): Promise<void> {
     await this.finalize(`Something went wrong: ${message}`);
+  }
+
+  /**
+   * Hand the placeholder to a turn that finished ahead of this one — the
+   * recovery this renderer was queued behind — and open a fresh one below
+   * it for this turn. Slack keeps a message's place when it is edited, so
+   * the earlier turn's reply lands above this turn's, in the order the
+   * conversation happened; posted as a new message instead, it would sit
+   * below a placeholder that was posted first. False when there is no
+   * placeholder to hand over (never opened, or already finished), and the
+   * caller posts the reply itself.
+   */
+  async yieldTo(chunks: readonly string[]): Promise<boolean> {
+    const [first, ...rest] = chunks;
+    const given = this.ref;
+    if (this.finalized || !given || first === undefined) {
+      return false;
+    }
+    const work = (async (): Promise<void> => {
+      await this.editChain;
+      try {
+        await this.web.chat.update({ channel: given.channel, ts: given.ts, text: first });
+      } catch (error) {
+        this.warn(`chat.update failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      for (const chunk of rest) {
+        try {
+          await this.web.chat.postMessage({
+            channel: this.channel,
+            text: chunk,
+            ...(this.threadTs ? { thread_ts: this.threadTs } : {}),
+          });
+        } catch (error) {
+          this.warn(`chat.postMessage failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      try {
+        await this.open();
+      } catch (error) {
+        // The reply it was given stays; this turn's own reply then lands
+        // over it, which is the older failure mode, not a new one.
+        this.warn(`could not reopen a placeholder: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    })();
+    this.handover = work;
+    await work;
+    return true;
   }
 }
 
@@ -963,8 +1019,39 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * The routing has to come from the durable session, because the only
    * in-memory copy died with the process that had it.
    */
+  /**
+   * Post a turn's outcome into its thread ahead of a renderer queued behind
+   * it, when there is one — through that renderer's placeholder, so the
+   * thread reads in order — and as fresh messages otherwise. Each chunk on
+   * its own, the way `finalize` posts overflow: one refused chunk must not
+   * cost the rest of the answer.
+   */
+  const postAheadOf = async (
+    behind: ReplyRenderer | undefined,
+    connection: AgentConnection,
+    channel: string,
+    thread: string | undefined,
+    chunks: readonly string[],
+  ): Promise<void> => {
+    if (behind && await behind.yieldTo(chunks)) {
+      return;
+    }
+    for (const chunk of chunks) {
+      try {
+        await connection.web.chat.postMessage({
+          channel,
+          text: chunk,
+          ...(thread ? { thread_ts: thread } : {}),
+        });
+      } catch (error) {
+        warn(`slack: could not post part of a turn's outcome: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  };
+
   const reportUnrenderedFailure = async (
     event: Extract<StratusEvent, { type: 'session.failed' }>,
+    behind: ReplyRenderer | undefined,
   ): Promise<void> => {
     const gateway = gatewayRef;
     if (!gateway?.sessionRouting) {
@@ -991,15 +1078,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return;
     }
     const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
-    try {
-      await connection.web.chat.postMessage({
-        channel: metadata.slackChannel,
-        text: `Something went wrong: ${event.error}`,
-        ...(thread ? { thread_ts: thread } : {}),
-      });
-    } catch (error) {
-      warn(`slack: could not report a failed turn: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    await postAheadOf(behind, connection, metadata.slackChannel, thread, splitForSlack(`Something went wrong: ${event.error}`));
   };
 
   /**
@@ -1013,6 +1092,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const reportUnrenderedReply = async (
     event: Extract<StratusEvent, { type: 'session.completed' }>,
+    behind: ReplyRenderer | undefined,
   ): Promise<void> => {
     const gateway = gatewayRef;
     if (!gateway?.sessionRouting) {
@@ -1034,18 +1114,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return;
     }
     const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
-    try {
-      for (const chunk of splitForSlack(routing.reply)) {
-        await connection.web.chat.postMessage({
-          channel: metadata.slackChannel,
-          text: chunk,
-          ...(thread ? { thread_ts: thread } : {}),
-        });
-      }
-      log(`slack: posted the reply of a turn finished after a restart to ${metadata.slackChannel}`);
-    } catch (error) {
-      warn(`slack: could not post a finished turn's reply: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    await postAheadOf(behind, connection, metadata.slackChannel, thread, splitForSlack(routing.reply));
+    log(`slack: posted the reply of a turn finished after a restart to ${metadata.slackChannel}`);
   };
 
   const handleInteractive = async (connection: AgentConnection, args: SlackSocketEventArgs): Promise<void> => {
@@ -1309,13 +1379,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
             head.turnStarted = true;
           }
         }
-        const rendered = renderers.get(event.sessionId)?.[0]?.turnStarted === true;
+        // A renderer at the head that has not seen its turn start is
+        // queued behind the turn ending now, and its placeholder is
+        // already in the thread: the outcome goes through it, so the
+        // thread reads in the order the conversation happened.
+        const head = renderers.get(event.sessionId)?.[0];
+        const rendered = head?.turnStarted === true;
         if (event.type === 'session.failed' && !rendered) {
-          track(reportUnrenderedFailure(event));
+          track(reportUnrenderedFailure(event, head));
           return;
         }
         if (event.type === 'session.completed' && !rendered) {
-          track(reportUnrenderedReply(event));
+          track(reportUnrenderedReply(event, head));
           return;
         }
         if ('sessionId' in event) {
