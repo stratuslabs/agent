@@ -9,6 +9,7 @@ This package sits on top of the core executor contract and runs compatible tools
 - `defineLocalCommandTool(...)` for tools that resolve to a local command invocation
 - `createLocalCommandExecutor(...)` for running those tools through `child_process.spawn`
 - structured stdout, stderr, exit code, timeout, and duration capture
+- a per-stream output cap — 10 MB unless the executor (`maxOutputBytes` option) or the invocation (`maxOutputBytes`) says otherwise — enforced as the output is read, with `stdoutTruncated` / `stderrTruncated` on the execution when the command wrote more
 - fallback to direct execution for normal in-memory tools
 
 ## Example
