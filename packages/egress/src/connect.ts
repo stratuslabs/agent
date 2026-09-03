@@ -356,6 +356,10 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
       socket.on('close', () => sockets.delete(socket));
     });
     response.on('close', () => upstream.destroy());
+    // And the other direction: an upstream that is destroyed — by `close()`,
+    // or by the target going away — ends the browser's response rather
+    // than leaving it waiting on a body that will never finish.
+    upstream.on('close', () => response.destroy());
     request.pipe(upstream);
   });
 
@@ -374,6 +378,10 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
       for (const socket of sockets) {
         socket.destroy();
       }
+      // The browser's own connections to this proxy too: `server.close()`
+      // waits for every keep-alive connection to end on its own, and a
+      // browser mid-page has no reason to end one.
+      server.closeAllConnections();
       await new Promise<void>((resolve) => {
         server.close(() => resolve());
       });
