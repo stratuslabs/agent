@@ -256,7 +256,10 @@ const matcherFor = (query: string, options: { caseSensitive?: boolean; wholeWord
  * as its first `MAX_LINE_CHARS` characters and the rest is discarded to the
  * next newline; the line says so through `clipped` — said there rather
  * than inferred from its length, because a line of exactly
- * `MAX_LINE_CHARS` was searched whole.
+ * `MAX_LINE_CHARS` was searched whole. Characters are Unicode code points,
+ * not UTF-16 code units: counted by `length`, a line of half a million
+ * emoji would have been clipped at a "million characters" it never
+ * reached, and the cut could land between the halves of a pair.
  *
  * Opened through `openContained`, like `fs.read`: the containment check
  * captured the file's identity, and a name repointed between that check
@@ -278,9 +281,39 @@ interface OpenedLines {
   lines: AsyncGenerator<LineRead | undefined>;
 }
 
-/** A line that ended inside the chunk that pushed it past the limit is clipped like any other. */
+const isHighSurrogate = (code: number): boolean => code >= 0xd800 && code <= 0xdbff;
+const isLowSurrogate = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff;
+
+/** Code points, not code units — only ever asked of text that might be over the limit. */
+const codePointLength = (text: string): number => {
+  let pairs = 0;
+  for (let index = 0; index < text.length - 1; index += 1) {
+    if (isHighSurrogate(text.charCodeAt(index)) && isLowSurrogate(text.charCodeAt(index + 1))) {
+      pairs += 1;
+      index += 1;
+    }
+  }
+  return text.length - pairs;
+};
+
+/** The first `count` code points of `text`, never ending inside a pair. */
+const firstCodePoints = (text: string, count: number): string => {
+  let units = 0;
+  for (let seen = 0; seen < count && units < text.length; seen += 1) {
+    units += isHighSurrogate(text.charCodeAt(units)) && units + 1 < text.length && isLowSurrogate(text.charCodeAt(units + 1)) ? 2 : 1;
+  }
+  return text.slice(0, units);
+};
+
+/**
+ * A line clipped to the limit when it is over it, in code points. `length`
+ * is a ceiling on code points, so a line within it in code units is within
+ * it and is not counted.
+ */
 const bounded = (text: string): LineRead =>
-  text.length > MAX_LINE_CHARS ? { text: text.slice(0, MAX_LINE_CHARS), clipped: true } : { text, clipped: false };
+  text.length > MAX_LINE_CHARS && codePointLength(text) > MAX_LINE_CHARS
+    ? { text: firstCodePoints(text, MAX_LINE_CHARS), clipped: true }
+    : { text, clipped: false };
 
 const openLines = async (resolved: ResolvedPath): Promise<OpenedLines> => {
   const handle = await openContained(resolved, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
@@ -311,8 +344,11 @@ const linesOf = async function* (handle: Awaited<ReturnType<typeof open>>): Asyn
         if (newline === -1) {
           if (!discarding) {
             carry += text.slice(from);
-            if (carry.length > MAX_LINE_CHARS) {
-              carry = carry.slice(0, MAX_LINE_CHARS);
+            // Decoded chunks end on whole code points (the decoder holds a
+            // partial sequence back), so a pair is never split across them.
+            const clipped = bounded(carry);
+            if (clipped.clipped) {
+              carry = clipped.text;
               discarding = true;
             }
           }

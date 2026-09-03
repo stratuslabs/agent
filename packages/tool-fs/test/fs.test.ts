@@ -336,6 +336,13 @@ test('a line of exactly the limit was searched whole, and the result does not sa
 
   const over = await run(tools, 'fs.search', { query: needle, path: 'over.txt' }, session) as JsonObject;
   assert.equal(over.skippedTotal, 1);
+
+  // Characters, not UTF-16 code units: 600,000 emoji are 1.2 million
+  // units and 600,000 characters, and the needle after them is found.
+  await writeFile(path.join(root, 'emoji.txt'), `${'😀'.repeat(600_000)}${needle}\n`);
+  const astral = await run(tools, 'fs.search', { query: needle, path: 'emoji.txt' }, session) as JsonObject;
+  assert.equal((astral.matches as unknown[]).length, 1, 'a line of 600,000 characters is within the limit');
+  assert.equal(astral.skipped, undefined);
 });
 
 test('a named file that turns binary after its first pages is reported as binary, with nothing matched', async () => {
