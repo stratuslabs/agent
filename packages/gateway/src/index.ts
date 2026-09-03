@@ -1684,6 +1684,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // announced restart must be able to cut short at the window.
       const idle = new AbortController();
       turnControllers.add(idle);
+      if (abortingTurns) {
+        idle.abort(new RunAbortedError(RESTARTING_TURN_ERROR));
+      }
       try {
         return await run(idle.signal);
       } finally {
@@ -1693,6 +1696,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     const controller = new AbortController();
     turnControllers.add(controller);
+    if (abortingTurns) {
+      controller.abort(new RunAbortedError(RESTARTING_TURN_ERROR));
+    }
     // The external reason travels: a caller that aborted with its own
     // `RunAbortedError` gets it recorded on the session, like the watchdog's.
     const onExternalAbort = (): void => controller.abort(external?.reason);
@@ -1858,6 +1864,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * abandoned by the next one.
    */
   const turnControllers = new Set<AbortController>();
+  /**
+   * Set once a restart's window has closed and the turns in it were
+   * aborted. A turn that starts after that — one queued behind the
+   * aborted turn on the same session, accepted before the announcement —
+   * is aborted the moment it gets its controller, with the same reason,
+   * rather than running unseen until the shutdown closes the store under
+   * it and leaves it recorded as nothing at all.
+   */
+  let abortingTurns = false;
   /** Set once `restart()` announced; the refusal a caller reads says why. */
   let restartStatus: RestartStatus | undefined;
   const refusal = (): Error => new Error(restartStatus
@@ -2627,6 +2642,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // The watchdog's own mechanism: the runner fails each session with
       // the reason on the signal, saves it, and emits session.failed —
       // so the next daemon finds a finished turn, not an abandoned one.
+      // Before the loop, so a turn queued behind one aborted here, which
+      // starts as soon as that one settles, is aborted the same way.
+      abortingTurns = true;
       for (const controller of turnControllers) {
         controller.abort(new RunAbortedError(RESTARTING_TURN_ERROR));
       }
@@ -2755,6 +2773,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         throw new Error('The gateway is already stopping, and a stop does not come back on its own.');
       }
       const requested = request.drainTimeoutMs ?? options.restartDrainTimeoutMs ?? DEFAULT_RESTART_DRAIN_TIMEOUT_MS;
+      // Checked here and not only at the HTTP route: a host calling this
+      // directly with a negative or NaN window would get a timer that
+      // fires at once, aborting every turn it meant to let finish. Refused
+      // before anything is announced, so a bad argument is not a restart.
+      if (!Number.isFinite(requested) || requested < 0) {
+        throw new Error(`The restart drain window must be a non-negative number of milliseconds, not ${String(requested)}.`);
+      }
       // Above Node's maximum timer delay a setTimeout fires at once, so a
       // window asked for as "very long" would abort every turn immediately
       // — the same clamp the approval timeout gets, for the same reason.

@@ -618,3 +618,75 @@ test('a channel whose stop rejects, or a plugin whose dispose rejects, leaves th
   // And with nothing misbehaving, the same daemon reports drained.
   assert.deepEqual((await outcomeOf({ plugin: false, channel: false })).outcome, { drained: true });
 });
+
+test('a turn queued behind the one aborted at the window is aborted too, not left running unrecorded', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+
+  // Every provider call blocks until its request's signal aborts: the
+  // running turn and the one queued behind it on the same session alike.
+  let calls = 0;
+  let firstCall!: () => void;
+  const started = new Promise<void>((resolve) => { firstCall = resolve; });
+  const fetchImpl = ((_url: unknown, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      calls += 1;
+      firstCall();
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    })) as typeof fetch;
+
+  let handOff!: (outcome: RestartOutcome) => void;
+  const restarted = new Promise<RestartOutcome>((resolve) => { handOff = resolve; });
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, log: () => {}, warn: () => {}, onRestart: (outcome) => handOff(outcome) });
+  await gateway.start();
+
+  // Single-flight per session: the second message waits behind the first.
+  const running = gateway.dispatch({ sessionId: 'queued', agentId: 'ava', userMessage: 'first' });
+  const queued = gateway.dispatch({ sessionId: 'queued', agentId: 'ava', userMessage: 'second' });
+  await started;
+  gateway.restart({ drainTimeoutMs: 50 });
+
+  const isRestartAbort = (error: Error): boolean => error instanceof RunAbortedError && error.message === RESTARTING_TURN_ERROR;
+  await assert.rejects(running, isRestartAbort);
+  // The gate has a way to lose: unaborted, the queued turn blocks on its
+  // provider forever and the restart only ends by shutting down around it.
+  const second = await Promise.race([
+    queued.then(() => 'completed', (error: Error) => (isRestartAbort(error) ? 'aborted' : `failed: ${error.message}`)),
+    new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 5_000)),
+  ]);
+  assert.equal(second, 'aborted');
+  assert.deepEqual(await restarted, { drained: true });
+  await gateway.stop();
+
+  const next = createGateway({ env: { homeDir: home, cwd: home, processEnv: {} }, idleTimeoutMs: 0, log: () => {}, warn: () => {} });
+  await next.start();
+  try {
+    const stored = await next.store.get('queued');
+    assert.equal(stored?.status, 'failed');
+    assert.equal(stored?.lastError, RESTARTING_TURN_ERROR);
+  } finally {
+    await next.stop();
+  }
+});
+
+test('a restart asked for with a window that is not a number of milliseconds is refused, and is not a restart', async () => {
+  const home = await newHome();
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    log: () => {},
+    warn: () => {},
+    onRestart: () => {},
+  });
+  await gateway.start();
+  try {
+    assert.throws(() => gateway.restart({ drainTimeoutMs: -1 }), /non-negative number of milliseconds, not -1/);
+    assert.throws(() => gateway.restart({ drainTimeoutMs: Number.NaN }), /not NaN/);
+    // Refused before anything was announced: still serving.
+    const session = await gateway.dispatch({ sessionId: 'still-up', userMessage: 'hello' });
+    assert.equal(session.status, 'completed');
+  } finally {
+    await gateway.stop();
+  }
+});
