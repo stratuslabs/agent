@@ -293,7 +293,13 @@ export class BrowserSessionPool {
     // — which opens a replacement the moment this returns — not when a
     // close that may never settle does, and never after the replacement
     // has state of its own under the same id.
-    this.options.onEvicted?.({ sessionId: entry.sessionId, reason });
+    try {
+      this.options.onEvicted?.({ sessionId: entry.sessionId, reason });
+    } catch (error) {
+      // A listener's failure is its own; the context and browser below are
+      // no longer tracked anywhere and would leak if it stopped this drop.
+      this.options.onError?.(error);
+    }
     try {
       await entry.context.close();
     } catch {

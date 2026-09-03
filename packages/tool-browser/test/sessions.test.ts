@@ -120,6 +120,50 @@ test('an idle sweep that reaches a context its session has already replaced leav
   assert.equal(pool.browserCount, 1, 'and so is the browser it lives in');
 });
 
+test('an eviction listener that throws is reported, and the context and browser are still closed', async (t) => {
+  let closedContexts = 0;
+  let closedBrowsers = 0;
+  const errors: unknown[] = [];
+  const driver: BrowserDriver = {
+    async launch() {
+      return {
+        async newContext() {
+          const context: BrowserContextLike = {
+            async newPage() {
+              return stubPage();
+            },
+            async close() {
+              closedContexts += 1;
+            },
+          };
+          return context;
+        },
+        async close() {
+          closedBrowsers += 1;
+        },
+      };
+    },
+  };
+  const pool = new BrowserSessionPool({
+    driver,
+    idleMs: 60_000,
+    onEvicted: () => {
+      throw new Error('the listener is broken');
+    },
+    onError: (error) => {
+      errors.push(error);
+    },
+  });
+  t.after(() => pool.close());
+
+  await pool.pageFor('a', 1);
+  assert.equal(await pool.release('a'), true);
+  assert.equal(closedContexts, 1, 'the context was closed despite the listener');
+  assert.equal(closedBrowsers, 1, 'and the browser, which nothing held any more');
+  assert.equal(errors.length, 1);
+  assert.match(String((errors[0] as Error).message), /the listener is broken/);
+});
+
 test('releasing an unresponsive page neither waits for another conversation\'s admission nor closes the browser it is being admitted into', async (t) => {
   // The second context to be opened blocks until the test lets it through:
   // a `newContext` that hangs, the way a wedged Chromium does.
