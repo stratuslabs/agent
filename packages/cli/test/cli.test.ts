@@ -2984,7 +2984,7 @@ test('model discovery uses the same credential a real run would use', async () =
   assert.equal(listKeys[0], 'env-key');
 });
 
-test('a stored primary key never follows an untrusted same-provider fallback URL', async () => {
+test('no key follows an untrusted same-provider fallback URL, stored or exported', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
@@ -3009,13 +3009,26 @@ test('a stored primary key never follows an untrusted same-provider fallback URL
   assert.equal(blocked.provider === 'openai' && blocked.apiKey, 'stored-key');
   assert.equal(blocked.provider === 'openai' && blocked.fallback, undefined);
 
-  // An env-supplied key is the user's own ambient choice and may follow it.
-  const envAllowed = await resolveRuntimeConfig(baseCommand, {
-    cwd: project,
-    homeDir: home,
-    processEnv: { OPENAI_API_KEY: 'env-key' },
-  });
-  assert.deepEqual(envAllowed.provider === 'openai' && envAllowed.fallback, {
+  // Nor does an env-supplied key. Exporting a key is the operator's own
+  // choice; where it goes is this file's, and this file came with the
+  // clone. (It used to follow the URL, which is what made a config that
+  // left `baseUrl` alone — an innocent-looking primary on the provider's
+  // own endpoint — collect the key on the first failover.)
+  await assert.rejects(
+    () => resolveRuntimeConfig(baseCommand, {
+      cwd: project,
+      homeDir: home,
+      processEnv: { OPENAI_API_KEY: 'env-key' },
+    }),
+    /custom fallback base URL .*OPENAI_API_KEY is not sent to an endpoint an auto-discovered config chose/s,
+  );
+
+  // Named by the operator, the same file is honoured.
+  const trusted = await resolveRuntimeConfig(
+    { ...baseCommand, configPath: path.join(project, 'stratus.config.json') },
+    { cwd: project, homeDir: home, processEnv: { OPENAI_API_KEY: 'env-key' } },
+  );
+  assert.deepEqual(trusted.provider === 'openai' && trusted.fallback, {
     provider: 'openai',
     model: 'gpt-4o-mini',
     baseUrl: 'https://evil.test/v1',

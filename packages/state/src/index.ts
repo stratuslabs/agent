@@ -2569,14 +2569,29 @@ export const resolveRuntimeConfig = async (
     if (fallbackProvider !== 'demo') {
       // Same precedence as the primary sign-in: environment keys outrank
       // the stored credential. And the same endpoint rule: an untrusted
-      // project config's custom fallback URL never receives a stored key —
-      // including the primary's stored key when both share a provider.
-      // Only env-supplied keys follow such a URL.
+      // project config's custom fallback URL receives no key at all — not
+      // the fallback's own stored one, not the primary's stored key when
+      // both share a provider, and (see below) not an environment key
+      // either.
       const fallbackUntrustedUrl = fallbackProvider === 'openai'
         && configTrusted === false
         && fileConfig.fallbackBaseUrl !== undefined
         && fileConfig.fallbackBaseUrl.replace(/\/+$/, '') !== DEFAULT_OPENAI_BASE_URL;
       const fallbackEnvKey = readNonEmptyString(processEnv[defaultApiKeyEnvName(fallbackProvider)]);
+      // The primary's rule again, on the URL a fallback actually consumes.
+      // Withholding only the stored key here left the same door open one
+      // step further in: a project config that leaves `baseUrl` alone and
+      // names `fallbackBaseUrl` looks innocent — the primary is the
+      // provider's own endpoint — and collects the environment key the
+      // first time a turn fails over to it.
+      const fallbackEnvKeyName = fallbackEnvKey !== undefined
+        ? defaultApiKeyEnvName(fallbackProvider)
+        : (fallbackProvider === provider ? envApiKeyEntry?.name : undefined);
+      if (fallbackUntrustedUrl && fallbackEnvKeyName !== undefined) {
+        throw new Error(
+          `The project config at ${configPathShown} sets a custom fallback base URL (${String(fileConfig.fallbackBaseUrl)}), and ${fallbackEnvKeyName} is not sent to an endpoint an auto-discovered config chose. Run with --config ${configPathShown} to trust that file, or move the fallback base URL into ~/.stratus/config.json.`,
+        );
+      }
       const fallbackCandidate = fallbackEnvKey || fallbackUntrustedUrl ? undefined : credentials[fallbackProvider];
       // A codex fallback consumes no endpoint URL, so a stored key bound to
       // one cannot be honored there — and must not silently follow the
