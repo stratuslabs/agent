@@ -5,7 +5,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { EventBus, ToolRegistry, type JsonObject, type Plugin, type Tool } from '@stratusagent/core';
+import {
+  EnvCredentialResolver,
+  EventBus,
+  matchesToolAllowlist,
+  ToolRegistry,
+  type JsonObject,
+  type Plugin,
+  type Tool,
+} from '@stratusagent/core';
 
 import { loadOptionalModule, loadPlugins, type OptionalModuleHost } from '../src/index.ts';
 
@@ -414,4 +422,170 @@ test('a plugin can require the setting the host supplies', async () => {
   // thing the loader was about to supply.
   assert.deepEqual(result.failures, []);
   assert.deepEqual(received, { workspaceRoot: '/home/ada/.stratus/workspaces' });
+});
+
+test('a third-party search plugin registers web.search gated even though its manifest says safe', async () => {
+  const host = await fakeHost({
+    'stratus-plugin-orbit-search': {
+      manifest: { stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'web.search', risk: 'safe' }] } } },
+      module: pluginModule('orbit-search', (tools) => tools.register(tool('web.search', 'safe'))),
+    },
+  });
+
+  const tools = new ToolRegistry();
+  const result = await loadPlugins({
+    config: { 'stratus-plugin-orbit-search': {} },
+    host,
+    tools,
+    bus: new EventBus(),
+  });
+
+  assert.deepEqual(result.failures, []);
+  // `web.*` is first-party today, so this is the floor holding across a
+  // namespace whose other tools ship from this repository: the glob widens
+  // what an agent can *reach* when an operator installs a backend, and never
+  // what it can do unapproved.
+  assert.equal(tools.get('web.search')?.risk, 'gated');
+  assert.equal(result.loaded[0]?.tools[0]?.risk, 'gated');
+
+  // And a soul that already says `web.*` picks it up with no soul edit —
+  // which is the behaviour an operator expects and the reason the glob
+  // exists.
+  assert.ok(matchesToolAllowlist('web.search', ['web.*']));
+  assert.ok(matchesToolAllowlist('web.search', ['web.search']));
+  assert.ok(!matchesToolAllowlist('web.search', ['web.fetch']));
+});
+
+test('a plugin’s setup receives the host’s credential resolver, and a host that omits it hands over nothing', async () => {
+  const seen: Array<string | undefined> = [];
+  const host = await fakeHost({
+    'stratus-plugin-orbit-search': {
+      manifest: {
+        stratus: {
+          pluginVersion: 1,
+          contributes: { tools: [{ name: 'web.search', risk: 'safe' }] },
+          credentials: ['search.apiKey'],
+        },
+      },
+      module: {
+        createPlugin: (): Plugin => ({
+          name: 'orbit-search',
+          setup(context) {
+            // The seam that makes per-agent keys possible: a plugin declares
+            // what it needs by name in its manifest and receives a resolver,
+            // so it never reaches into ambient environment for one.
+            seen.push(context.credentials === undefined ? undefined : 'resolver');
+            context.tools.register(tool('web.search', 'safe'));
+          },
+        }),
+      },
+    },
+  });
+
+  const resolver = new EnvCredentialResolver({ 'search.apiKey': 'a-key' });
+  await loadPlugins({
+    config: { 'stratus-plugin-orbit-search': {} },
+    host,
+    tools: new ToolRegistry(),
+    bus: new EventBus(),
+    credentials: resolver,
+  });
+  await loadPlugins({
+    config: { 'stratus-plugin-orbit-search': {} },
+    host,
+    tools: new ToolRegistry(),
+    bus: new EventBus(),
+  });
+
+  assert.deepEqual(seen, ['resolver', undefined]);
+});
+
+test('a plugin resolves only the credentials its own manifest declares, not everything the agent allowlists', async () => {
+  const asked: Array<{ name: string; ok: boolean }> = [];
+  const attempt = async (credentials: NonNullable<Parameters<typeof loadPlugins>[0]['credentials']>, name: string) => {
+    try {
+      await credentials.resolve({ id: 'ava', name: 'Ava', credentials: ['search.apiKey', 'github.token'] }, name);
+      asked.push({ name, ok: true });
+    } catch (error) {
+      asked.push({ name, ok: false });
+      throw error;
+    }
+  };
+
+  let refusal = '';
+  const host = await fakeHost({
+    'stratus-plugin-orbit-search': {
+      manifest: {
+        stratus: {
+          pluginVersion: 1,
+          contributes: { tools: [{ name: 'web.search', risk: 'safe' }] },
+          credentials: ['search.apiKey'],
+        },
+      },
+      module: {
+        createPlugin: (): Plugin => ({
+          name: 'orbit-search',
+          async setup(context) {
+            const credentials = context.credentials;
+            assert.ok(credentials);
+            await attempt(credentials, 'search.apiKey');
+            // The agent allowlists `github.token` — for some *other*
+            // plugin. Validating package.json before import says what this
+            // plugin claims; it says nothing about what setup() then asks
+            // for, which is the whole reason the tool registry is
+            // manifest-bound too.
+            await attempt(credentials, 'github.token').catch((error: Error) => {
+              refusal = error.message;
+            });
+            context.tools.register(tool('web.search', 'safe'));
+          },
+        }),
+      },
+    },
+  });
+
+  const result = await loadPlugins({
+    config: { 'stratus-plugin-orbit-search': {} },
+    host,
+    tools: new ToolRegistry(),
+    bus: new EventBus(),
+    credentials: new EnvCredentialResolver({ 'search.apiKey': 'orbit-key', 'github.token': 'ghp-secret' }),
+  });
+
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(asked, [{ name: 'search.apiKey', ok: true }, { name: 'github.token', ok: false }]);
+  assert.match(refusal, /asked for credential github\.token, which its manifest does not declare/);
+  // And the refusal is the manifest's doing, so the value never went past it.
+  assert.ok(!refusal.includes('ghp-secret'));
+});
+
+test('a plugin that declares no credentials can resolve none, however the host is configured', async () => {
+  let refusal = '';
+  const host = await fakeHost({
+    'stratus-plugin-quiet': {
+      manifest: { stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'quiet.ping', risk: 'gated' }] } } },
+      module: {
+        createPlugin: (): Plugin => ({
+          name: 'quiet',
+          async setup(context) {
+            await context.credentials?.resolve({ id: 'ava', name: 'Ava', credentials: ['search.apiKey'] }, 'search.apiKey')
+              .catch((error: Error) => {
+                refusal = error.message;
+              });
+            context.tools.register(tool('quiet.ping', 'gated'));
+          },
+        }),
+      },
+    },
+  });
+
+  await loadPlugins({
+    config: { 'stratus-plugin-quiet': {} },
+    host,
+    tools: new ToolRegistry(),
+    bus: new EventBus(),
+    credentials: new EnvCredentialResolver({ 'search.apiKey': 'orbit-key' }),
+  });
+
+  assert.match(refusal, /which its manifest does not declare/);
 });

@@ -71,6 +71,7 @@ import {
   formatSoul,
   generateAgentName,
   isLoadableSkillId,
+  isValidAgentId,
   parseSoul,
   type ParsedSoul,
 } from '@stratusagent/agents';
@@ -80,6 +81,7 @@ import {
   claimSoulFile,
   collectAvailableModels as collectModels,
   createDemoTool,
+  createFileCredentialResolver,
   createFileMemoryStore,
   createRuntimeProvider,
   credentialsPath,
@@ -92,6 +94,7 @@ import {
   globalConfigPath,
   loadChannelCredentials,
   loadCredentials,
+  loadNamedCredentials,
   discoverSkillsInDirectory,
   installSkillsFromDirectory,
   loadOperatorSkills,
@@ -117,6 +120,7 @@ import {
   saveConfigFile,
   readTrustedConfigBlock,
   saveCredentials,
+  saveNamedCredentials,
   servedRuntimes,
   CREDENTIAL_PROVIDER_NAMES,
   verifyProviderKey,
@@ -499,6 +503,25 @@ export interface ParsedSkillsCommand {
   command: 'skills';
 }
 
+/**
+ * What a credential name may be: the two conventions in use, and nothing
+ * that would be awkward in a soul's `credentials:` list — `search.apiKey`
+ * and environment-style `SLACK_TOKEN`. Leading letter required, which also
+ * happens to exclude `__proto__`; the store does not *rely* on that (it
+ * keys prototype-free maps), because a credentials file can be written by
+ * something other than this command.
+ */
+export const CREDENTIAL_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/;
+
+export interface ParsedCredentialCommand {
+  command: 'credential';
+  action: 'set' | 'list' | 'remove';
+  /** The credential name — `search.apiKey` and whatever the ecosystem asks for next. */
+  name?: string;
+  /** Store or remove this agent's own entry rather than the fleet's shared one. */
+  agentId?: string;
+}
+
 export interface ParsedSkillReloadCommand {
   command: 'skill-reload';
   /** A daemon's control API URL; default: the one `~/.stratus/gateway.json` names. */
@@ -604,6 +627,7 @@ export type ParsedCommand =
   | ParsedSkillValidateCommand
   | ParsedSkillsCommand
   | ParsedSkillReloadCommand
+  | ParsedCredentialCommand
   | ParsedRestartCommand
   | ParsedSchedulesCommand
   | ParsedDoctorCommand
@@ -750,6 +774,8 @@ Usage:
   stratus restart
   stratus schedules
   stratus schedules cancel <id>
+  printf %s "$BRAVE_KEY" | stratus credential set search.apiKey
+  stratus credentials
   stratus doctor
   stratus update
   stratus update --check
@@ -819,6 +845,17 @@ Commands:
                    ones finish for up to --drain-timeout <seconds> (default
                    30), then comes back with sessions, schedules, and
                    channels intact, under the service manager or not
+  credential set   Store a named credential an agent can resolve — a search
+                   backend asks for search.apiKey. The value is read from
+                   stdin, never from a flag, so it stays out of your shell
+                   history: printf %s "$KEY" | stratus credential set
+                   search.apiKey. --agent <id> stores one agent's own key,
+                   which outranks the shared entry for that agent. Storing
+                   grants nothing: the soul still needs credentials: [name]
+  credentials      List stored credential names and which agents have their
+                   own — names only, never values (also: credential list)
+  credential remove
+                   Forget one (--agent <id> for that agent's own entry)
   schedules        List every schedule the fleet has set — cadence, prompt,
                    pre-authorized destination, next firing — straight from the
                    daemon's database (--format json). "stratus schedules
@@ -940,6 +977,26 @@ const readPromptFromStdin = async (stdin: NodeJS.ReadableStream): Promise<string
   }
 
   return data.trim();
+};
+
+/**
+ * Stdin exactly as it arrived, for a value where whitespace may be part of
+ * it.
+ *
+ * `readPromptFromStdin` trims, which is right for a prompt and wrong for a
+ * secret: a key whose real value has a leading space would be stored as a
+ * *different* key, reported as stored, and then fail authentication with
+ * nothing to look at — this command never prints a value back.
+ */
+const readSecretFromStdin = async (stdin: NodeJS.ReadableStream): Promise<string> => {
+  stdin.setEncoding('utf8');
+
+  let data = '';
+  for await (const chunk of stdin) {
+    data += chunk;
+  }
+
+  return data;
 };
 
 const readOptionValue = (tokens: string[], index: number, flag: string): string => {
@@ -1358,6 +1415,68 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       format,
       ...(agentId ? { agentId } : {}),
       ...(sessionId ? { sessionId } : {}),
+    };
+  }
+
+  if (command === 'credentials' || command === 'credential') {
+    const [subcommand, ...credentialRest] = command === 'credentials' ? ['list', ...rest] : rest;
+    if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
+      return { command: 'help' };
+    }
+    if (subcommand !== 'set' && subcommand !== 'list' && subcommand !== 'remove') {
+      throw new Error(`No credential subcommand named ${JSON.stringify(subcommand)}. It is set, list, or remove.`);
+    }
+    let name: string | undefined;
+    let agentId: string | undefined;
+    for (let index = 0; index < credentialRest.length; index += 1) {
+      const token = credentialRest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--agent') {
+        agentId = readOptionValue(credentialRest, index, '--agent');
+        index += 1;
+        continue;
+      }
+      if (token.startsWith('--')) {
+        throw new Error(`Unknown option: ${token}`);
+      }
+      if (name !== undefined) {
+        throw new Error(`credential ${subcommand} takes one credential name; got both ${JSON.stringify(name)} and ${JSON.stringify(token)}.`);
+      }
+      name = token;
+    }
+    if (subcommand !== 'list' && name === undefined) {
+      throw new Error(`credential ${subcommand} needs a credential name — for a search backend that is search.apiKey.`);
+    }
+    // A name keys a map that a soul's `credentials:` list also names, so the
+    // two spellings have to be able to meet. The store itself is
+    // prototype-safe whatever lands in it; this rule is what stops a typo —
+    // or a name no soul could ever write — from being stored and then
+    // reported missing forever.
+    if (name !== undefined && !CREDENTIAL_NAME_PATTERN.test(name)) {
+      throw new Error(
+        `${JSON.stringify(name)} is not a credential name. Use letters, digits, dots, dashes, or underscores, `
+        + 'starting with a letter — search.apiKey, or an environment-style SLACK_TOKEN.',
+      );
+    }
+    // The agents package's own rule, not a second one: it is already the
+    // answer to "what may key a plain object", and it rejects the names —
+    // `__proto__`, `toString` — that would store a credential nothing could
+    // ever resolve.
+    if (agentId !== undefined && !isValidAgentId(agentId)) {
+      throw new Error(
+        `${JSON.stringify(agentId)} cannot be an agent id, so a credential stored under it could never be resolved.`,
+      );
+    }
+    return {
+      command: 'credential',
+      action: subcommand,
+      ...(name !== undefined ? { name } : {}),
+      ...(agentId !== undefined ? { agentId } : {}),
     };
   }
 
@@ -2009,6 +2128,7 @@ const createAgentRuntime = async (
       tools,
       skills,
       bus,
+      credentials: createFileCredentialResolver(runEnv),
       workspaceRoot: workspacesDirPath(runEnv),
     });
     loadedPlugins.push(...result.loaded);
@@ -5756,6 +5876,114 @@ export const runSchedules = async (
 };
 
 /**
+ * `stratus credential set|list|remove`: the place a named credential goes.
+ *
+ * A credential nobody can add is a credential nobody has, which is why this
+ * exists at all — a search backend asks for `search.apiKey` and until now
+ * there was nowhere to put one. Three rules it keeps, all of them
+ * deliberate:
+ *
+ * The value is read from **stdin, never from a flag**. A secret in argv is
+ * a secret in shell history and in every `ps` on the machine.
+ *
+ * Nothing here ever prints a value back. `list` reports names and which
+ * agents have their own, the same posture the control API's credential read
+ * already keeps.
+ *
+ * And storing one grants no agent anything: the agent's soul still has to
+ * list the name under `credentials:`, which is the per-identity gate.
+ */
+export const runCredential = async (
+  command: ParsedCredentialCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const named = await loadNamedCredentials(env);
+
+  if (command.action === 'list') {
+    const shared = Object.keys(named.shared).sort();
+    const agents = Object.entries(named.agents).sort(([a], [b]) => a.localeCompare(b));
+    if (shared.length === 0 && agents.length === 0) {
+      writeLine(streams.stdout, `No named credentials stored in ${credentialsPath(env)}.`);
+      writeLine(streams.stdout, 'A search backend wants `stratus credential set search.apiKey`.');
+      return 0;
+    }
+    if (shared.length > 0) {
+      writeLine(streams.stdout, 'Shared with the whole fleet:');
+      for (const name of shared) {
+        writeLine(streams.stdout, `  ${name}`);
+      }
+    }
+    for (const [agentId, entries] of agents) {
+      writeLine(streams.stdout, `Only ${agentId}:`);
+      for (const name of Object.keys(entries).sort()) {
+        writeLine(streams.stdout, `  ${name}`);
+      }
+    }
+    // Names, never values — and say so, so nobody goes looking for a flag
+    // that prints one.
+    writeLine(streams.stdout, '');
+    writeLine(streams.stdout, `Values are never printed. They live in ${credentialsPath(env)}, readable only by you.`);
+    return 0;
+  }
+
+  const name = command.name ?? '';
+
+  if (command.action === 'remove') {
+    const scope = command.agentId;
+    const store = scope === undefined ? named.shared : named.agents[scope];
+    if (!store || store[name] === undefined) {
+      writeLine(
+        streams.stderr,
+        scope === undefined
+          ? `No shared credential named ${name}. \`stratus credentials\` lists what is stored.`
+          : `Agent ${scope} has no credential of its own named ${name}. \`stratus credentials\` lists what is stored.`,
+      );
+      return 1;
+    }
+    delete store[name];
+    if (scope !== undefined && Object.keys(store).length === 0) {
+      delete named.agents[scope];
+    }
+    await saveNamedCredentials(env, named);
+    writeLine(streams.stdout, scope === undefined ? `Removed ${name}.` : `Removed ${name} for ${scope}.`);
+    return 0;
+  }
+
+  writeLine(
+    streams.stderr,
+    `Reading the value for ${name} from stdin — it is never taken from the command line, where it would land in your shell history. Ctrl-D when done.`,
+  );
+  const arrived = env.stdin ?? await readSecretFromStdin(env.stdinStream ?? process.stdin);
+  // One trailing line terminator and nothing else. `echo "$KEY" |` appends a
+  // newline that is not part of the key and `printf %s` appends nothing, so
+  // both spellings have to work — while a key whose own value ends in a
+  // space must survive either of them, which a blanket trim would not allow.
+  const value = arrived.replace(/\r?\n$/, '');
+  if (value.trim().length === 0) {
+    writeLine(streams.stderr, `Nothing arrived on stdin, so ${name} was not stored. Pipe the value in: \`printf %s "$KEY" | stratus credential set ${name}\`.`);
+    return 1;
+  }
+
+  if (command.agentId === undefined) {
+    named.shared[name] = value;
+  } else {
+    named.agents[command.agentId] = { ...(named.agents[command.agentId] ?? {}), [name]: value };
+  }
+  await saveNamedCredentials(env, named);
+  writeLine(
+    streams.stdout,
+    command.agentId === undefined
+      ? `Stored ${name} in ${credentialsPath(env)} (readable only by you).`
+      : `Stored ${name} for ${command.agentId} in ${credentialsPath(env)} (readable only by you). It outranks the shared entry for that agent.`,
+  );
+  // Storing grants nothing: the soul is the second gate, and an operator
+  // who stops here gets "not allowed to access credential" on every call.
+  writeLine(streams.stdout, `Each agent that may use it still needs \`credentials: [${name}]\` in its soul.`);
+  return 0;
+};
+
+/**
  * `stratus skill validate <target>`: the install-time check, run without
  * installing — for an author about to publish a skill, or an operator
  * asking why one was refused. A local path is a skill directory or a
@@ -7514,6 +7742,7 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
           || command.command === 'run'
           || command.command === 'skill-add'
           || command.command === 'dashboard'
+          || (command.command === 'credential' && command.action !== 'list')
           || (command.command === 'schedules' && command.action === 'cancel')
           || (command.command === 'service' && (command.action === 'install' || command.action === 'start'));
         if (writesState) {
@@ -7561,6 +7790,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'skills') {
       return await runSkills(streams, resolvedEnv);
+    }
+
+    if (command.command === 'credential') {
+      return await runCredential(command, streams, resolvedEnv);
     }
 
     if (command.command === 'skill-reload') {

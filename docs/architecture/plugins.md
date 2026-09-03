@@ -61,11 +61,20 @@ export interface Plugin {
 }
 ```
 
-`PluginContext` is `{ bus, tools }` plus an optional `log` / `warn` pair —
-the host's log, which in the daemon is the structured file `stratus logs`
-reads; a host that omits them leaves a plugin to its own stderr — and
-`AgentRunner.initialize` calls `plugins.loadAll({ bus, tools })` with nothing
-else. **So four of the seven kinds have an interface but no registration path.**
+`PluginContext` is `{ bus, tools }` plus three optional slots: a `log` /
+`warn` pair — the host's log, which in the daemon is the structured file
+`stratus logs` reads; a host that omits them leaves a plugin to its own
+stderr — and a `credentials` resolver, scoped per call to the agent whose
+call the plugin is serving, so a plugin declares what it needs by name in its
+manifest instead of reaching into ambient environment. That resolver is the
+first half of kernel change 9 to land, and it landed because
+[13](../roadmap/13-search.md) needed it: a search backend must reach the
+*calling* agent's key, which a `search(query, options)` seam could not
+express. A host that omits it leaves a plugin needing a key with no way to
+get one, and such a plugin must fail the call naming what is missing rather
+than falling back to the environment. `AgentRunner.initialize` still calls
+`plugins.loadAll({ bus, tools })` with nothing else.
+**So four of the seven kinds have an interface but no registration path.**
 An implementation of `ChannelAdapter` exists (`@stratusagent/channel-slack`),
 and the way it reaches the runtime is that the CLI constructs it and hands it to
 `createGateway({ channels: [...] })` — the host wires it, not the plugin. The
@@ -398,7 +407,16 @@ narrow. They are not a sandbox, and this document does not claim one:
   make the defaults above it unusable.
 - **A plugin gets a scoped credential resolver and its own config block, so it
   never needs `process.env`** — it declares what it needs by name in the
-  manifest and receives exactly that. Read what this does and does not buy.
+  manifest and receives exactly that, through `PluginContext.credentials`,
+  which resolves per call against the agent making it. "Exactly that" is
+  **enforced, not advisory**: the resolver handed to `setup` is bound to the
+  manifest's `credentials` list, for the same reason `context.tools` is
+  bound to its `contributes` list — validating `package.json` before import
+  says what a plugin claims and says nothing about what `setup()` then asks
+  for. A plugin declaring only `search.apiKey` cannot read a `github.token`
+  the calling agent happens to allowlist for some other plugin. Two gates,
+  in order, answering different questions: did this *code* declare the name,
+  and was this *agent* granted it. Read what this does and does not buy.
   It does not *prevent* a plugin from reading `process.env`: in-process code
   can, and no interface we hand it changes that. What it buys is that an honest
   plugin never has to, so its manifest is a true statement of what it uses and
@@ -445,6 +463,7 @@ carry a security invariant the kernel's promises rest on:
 | `tool-shell` | command scoping, control-operator defeat, environment scrubbing |
 | `tool-browser` | request-level address validation against SSRF and DNS rebinding |
 | `tool-web` | the same address policy, shared with `tool-browser`, not re-derived |
+| `search` | the `web.search` contract — no backend and no vendor, just the shape every backend obeys |
 
 Two of those invariants turned out to belong outside the packs that own them,
 and both live in the monorepo for the same reason the packs do. The **address
@@ -486,7 +505,12 @@ The ecosystem this is for, by contribution kind:
 
 Search is the deliberate example of something that stays outside: every backend
 needs a vendor key and a commercial relationship, so core ships `web.fetch` and
-the ecosystem ships `web.search`. The
+the ecosystem ships `web.search`. **The contract for it is first-party even
+though the backends are not** — `@stratusagent/search` publishes the tool
+name, the option meanings, and the result envelope, so two backends written
+by different authors are interchangeable behind one soul allowlist
+([13](../roadmap/13-search.md)). A capability that stays outside still needs
+its shape decided in here, or the ecosystem half is worth nothing. The
 [MCP bridge](../roadmap/11-mcp.md) is the highest-leverage single entry in this
 table — one plugin that mounts any MCP server's tools under kernel policy makes
 the ecosystem non-empty on the day it lands.

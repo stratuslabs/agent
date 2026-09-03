@@ -118,6 +118,12 @@ log, and an address bar is one that gets noticed when it changes.
 | POST | `/credentials/verify` | Live-check a key before storing it: `{ provider, key, type?, baseUrl? }` |
 | PUT | `/credentials/:provider` | Store an `api_key`, or an `oauth_token` for Anthropic (a Claude setup token) or Codex (a marker that the machine's `codex login` sign-in serves runs — the value is never read). A codex key refuses a `baseUrl`: the harness owns its endpoints, so a bound key could never be honored there |
 | PUT | `/credentials/channels/:channel` | Store a channel's tokens (today: `slack`) |
+
+**Named credentials are not on this API.** The `search.apiKey` an agent
+resolves through its soul's `credentials:` list lives in the same file under
+its own `named` namespace, and today `stratus credential set` is the only way
+to write one. Adding it here belongs with the settings surface in the fleet
+console, not bolted on beside the provider sign-ins.
 | GET/PUT | `/config` | Settings, whitelisted to keys this API owns |
 
 `POST /credentials/verify` reports `ok`, `rejected`, or `unreachable`, and

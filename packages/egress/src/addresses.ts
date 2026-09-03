@@ -42,6 +42,29 @@ export interface EgressPolicy {
 
 const DEFAULT_SCHEMES = ['http:', 'https:'];
 
+/**
+ * The policy a plugin's settings describe.
+ *
+ * Every tool that reaches the network reads the same two keys out of its
+ * own config block, and this used to be a hand-rolled copy per package.
+ * They are not a preference: `allowedHosts` is an access boundary between
+ * agents, so a third copy of "what do these two settings mean" would be a
+ * third answer to a security question. Typed structurally rather than
+ * against `JsonObject` so this package keeps its zero dependencies.
+ *
+ * Anything that is not the expected type is dropped rather than guessed at
+ * — a misspelled `allowedHosts: "localhost"` opens nothing.
+ */
+export const egressPolicyFrom = (settings: {
+  allowPrivateAddresses?: unknown;
+  allowedHosts?: unknown;
+} | undefined): EgressPolicy => ({
+  ...(settings?.allowPrivateAddresses === true ? { allowPrivateAddresses: true } : {}),
+  ...(Array.isArray(settings?.allowedHosts)
+    ? { allowedHosts: settings.allowedHosts.filter((entry): entry is string => typeof entry === 'string') }
+    : {}),
+});
+
 const parseIPv4 = (value: string): number[] | undefined => {
   const parts = value.split('.');
   if (parts.length !== 4) {

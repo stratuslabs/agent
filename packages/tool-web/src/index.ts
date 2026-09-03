@@ -1,6 +1,7 @@
 import type { JsonObject, Plugin, Session, Tool } from '@stratusagent/core';
 import {
   assertRequestAllowed,
+  egressPolicyFrom,
   requestThroughPolicy,
   type EgressPolicy,
 } from '@stratusagent/egress';
@@ -42,12 +43,7 @@ const settingsFor = (config: JsonObject, session: Session) => {
   // is a decision about that agent, and closing over it at setup would
   // give the exemption to everyone.
   const resolved = resolvePluginAgentConfig(config, session.agent.id);
-  const policy: EgressPolicy = {
-    ...(resolved.allowPrivateAddresses === true ? { allowPrivateAddresses: true } : {}),
-    ...(Array.isArray(resolved.allowedHosts)
-      ? { allowedHosts: resolved.allowedHosts.filter((entry): entry is string => typeof entry === 'string') }
-      : {}),
-  };
+  const policy: EgressPolicy = egressPolicyFrom(resolved);
   return {
     policy,
     maxBytes: asNumber(resolved.maxBytes, DEFAULT_MAX_BYTES),

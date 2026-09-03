@@ -80,6 +80,7 @@ import {
 } from '@stratusagent/plugins';
 import {
   createDemoTool,
+  createFileCredentialResolver,
   createFileMemoryStore,
   createRuntimeProvider,
   DEFAULT_STRATUS_AGENT,
@@ -2441,6 +2442,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       tools,
       skills: skillCatalog,
       bus,
+      // The file-backed resolver, so a plugin needing a key reaches the
+      // *calling* agent's — its allowlist checked, its own entry before the
+      // fleet's shared one.
+      credentials: createFileCredentialResolver(env),
       workspaceRoot: workspacesDirPath(env),
       // The structured log, so a plugin's lifecycle lines — an MCP server
       // that dropped, a reconnect that failed — are in `stratus logs` and

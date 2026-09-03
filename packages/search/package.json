@@ -1,0 +1,53 @@
+{
+  "name": "@stratusagent/search",
+  "version": "0.10.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit --project tsconfig.test.json",
+    "test": "node --test --experimental-strip-types"
+  },
+  "engines": {
+    "node": ">=22.13 <23 || >=23.4"
+  },
+  "dependencies": {
+    "@stratusagent/core": "workspace:*",
+    "@stratusagent/egress": "workspace:*",
+    "@stratusagent/plugins": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stratuslabs/agent.git",
+    "directory": "packages/search"
+  },
+  "description": "The Stratus Agent web.search contract: one tool shape, one option meaning, and one result envelope that every search backend obeys",
+  "keywords": [
+    "stratus",
+    "agent",
+    "ai",
+    "llm",
+    "search",
+    "web-search",
+    "tools"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

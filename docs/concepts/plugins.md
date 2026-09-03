@@ -78,6 +78,11 @@ them is a precedent for a plugin that wants one.
   server's tools under the same policy. See [MCP](../guides/mcp.md).
 - [`@stratusagent/egress`](../../packages/egress) — the shared address
   policy both network packs use; arrives as their dependency.
+- [`@stratusagent/search`](../../packages/search) — the `web.search`
+  contract: the tool name, the option meanings, and the result envelope a
+  search backend implements. No backend and no vendor ship here; a backend
+  is a plugin somebody else publishes, and this is what makes two of them
+  interchangeable. See [Tools](../guides/tools.md#searching-the-web).
 
 [`stratus setup`](../start/setup.md#what-save--finish-offers) offers these
 installs at **Save & finish** when your own answers imply them, and does it

@@ -15,6 +15,25 @@ linked own the full story.
   under `channels.slack.<agentId>` and are never resolvable through an
   agent's own credential allowlist — an agent must not be able to read the
   tokens of the transport carrying it. ([Slack](../guides/slack.md))
+- **Named credentials are the opposite case, and share the file without
+  sharing the door.** `search.apiKey` and its kind live under `named` and
+  *are* resolved through an agent's allowlist, because they are an agent
+  capability rather than the daemon's own — the agent's own entry first,
+  then the fleet's shared one, then the environment. A soul that does not
+  list a name cannot reach it. Channel tokens stay out of that path
+  entirely; a namespace next door is not a way in.
+  ([Tools](../guides/tools.md#searching-the-web))
+- **The credentials file is replaced, never rewritten in place.** A named
+  credential is resolved per tool call so that a rotated key needs no
+  restart, which means the file has a concurrent reader — and a truncate
+  followed by a write leaves a window where that reader sees an empty file.
+  Each write lands in a `0600` temporary beside it and is renamed over the
+  destination, so a reader sees the old document or the new one and a crash
+  mid-write leaves the old credentials rather than none.
+- **A credential value is never taken from the command line and never
+  printed back.** `stratus credential set` reads it from stdin, because a
+  secret in argv is a secret in shell history and in every `ps` on the
+  machine; `stratus credentials` reports names only.
 
 ## What a cloned repo cannot decide
 
@@ -27,6 +46,10 @@ gets to make. ([Configuration](../reference/config.md))
 
 ## What an agent can reach
 
+- **A plugin resolves only the credentials its own manifest declares.**
+  Installing two plugins does not let one read the other's key, even when
+  the same agent allowlists both — the resolver a plugin is handed is bound
+  to its manifest, and the agent's soul list applies behind it.
 - **Two gates on every plugin-provided capability**: a trusted config
   enables the plugin, and the agent's own soul lists what it may call.
   The built-ins (echo, memory, delegation, schedules) register without a
@@ -42,6 +65,11 @@ gets to make. ([Configuration](../reference/config.md))
   link-local, IPv6 unique-local, and their IPv4-mapped and NAT64
   spellings — validated on the connection, so a redirect or DNS answer
   cannot walk an agent into a metadata endpoint. ([Tools](../guides/tools.md))
+- **Third-party text is labelled as such.** `web.search` results — titles
+  and snippets written by whoever owns the page, selected by a ranker —
+  come back in an envelope that says so. It is a label, not a defence
+  against prompt injection, and it does not make acting on that text safe.
+  ([Tools](../guides/tools.md#searching-the-web))
 - **`tool-shell` and stdio MCP servers get a replaced environment**: the
   daemon's own env vars, where API keys live, are not there to read.
 
@@ -54,7 +82,11 @@ gets to make. ([Configuration](../reference/config.md))
   request — so skim a log before sharing it. ([Logs](../guides/logs.md))
 - **No control API endpoint returns a secret.** Credential reads report
   presence, type, and bound endpoint; session reads strip the Anthropic
-  raw-turn cache. ([Control API](../../packages/control-api/README.md))
+  raw-turn cache. Named credentials are not on that API at all yet — the
+  CLI is the only way to add one. ([Control API](../../packages/control-api/README.md))
+- **The daemon log records that a search ran and against which backend,
+  never the query** — a query is user content, and the log is a trace
+  rather than a second transcript.
 
 ## The network posture
 

@@ -7,6 +7,7 @@ import type {
   AgentDefinition,
   AgentMemoryStore,
   AvatarTheme,
+  CredentialResolver,
   JsonObject,
   JsonValue,
   MemoryEntry,
@@ -18,6 +19,7 @@ import type {
   SkillRegistry,
 } from '@stratusagent/core';
 import {
+  assertCredentialAllowed,
   boundMemoryList,
   boundMemoryRead,
   clampMemoryRecallLimit,
@@ -594,11 +596,38 @@ const loadRawCredentialsFile = async (env: StateEnvironment): Promise<Record<str
   return parsed as Record<string, unknown>;
 };
 
+// Written beside the destination and renamed over it, never truncated and
+// rewritten in place.
+//
+// `writeFile` opens with O_TRUNC, so between the truncate and the write the
+// file on disk is empty — and this file now has a *concurrent reader*, since
+// a named credential is resolved per tool call so that a rotated key needs
+// no restart. In place, a rotation makes every search in that window fail
+// with "Unexpected end of JSON input"; measured, that was 62 failures in
+// 983 reads. A rename is atomic, so a reader sees the old document or the
+// new one and never half of either — and a crash mid-write leaves the old
+// credentials rather than none.
+//
+// What this does not buy: two processes each doing a read-modify-write can
+// still lose one another's update, which is why the control API serializes
+// its own writes. Atomicity is about what a *reader* can observe.
 const writeRawCredentialsFile = async (env: StateEnvironment, contents: Record<string, unknown>): Promise<void> => {
   const filePath = credentialsPath(env);
   await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(contents, null, 2)}\n`, { mode: 0o600 });
-  await chmod(filePath, 0o600);
+  // Unique per write, so two writers never share a temporary file.
+  const temporary = `${filePath}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, `${JSON.stringify(contents, null, 2)}\n`, { mode: 0o600 });
+    // Before the rename rather than after: the destination must never exist
+    // at a looser mode, even briefly. `writeFile`'s mode applies only when
+    // it creates the file, so the explicit chmod stays.
+    await chmod(temporary, 0o600);
+    await rename(temporary, filePath);
+  } catch (error) {
+    // A failed write must not leave a file holding credentials behind.
+    await rm(temporary, { force: true });
+    throw error;
+  }
 };
 
 // Credentials never live in a project directory or a shell profile — they
@@ -669,6 +698,119 @@ export const saveChannelCredentials = async (
   existing.channels = channels;
   await writeRawCredentialsFile(env, existing);
 };
+
+/**
+ * Credentials an agent resolves by name — the `search.apiKey` a search
+ * backend asks for, and whatever the ecosystem asks for next.
+ *
+ * A separate namespace from the provider sign-ins above, because these are
+ * a different kind of thing: a sign-in is the daemon's own, selected by
+ * config resolution and bound to an endpoint, while a named credential is
+ * an *agent capability* gated by that agent's `credentials:` allowlist.
+ *
+ * `shared` is the fleet's; `agents` holds one map per agent, consulted
+ * first. That ordering is what lets two agents search the one installed
+ * backend on their own accounts. The `agents` key can never collide with a
+ * credential name because the two live at different depths.
+ *
+ * Channel tokens stay out of this path. They are gateway infrastructure
+ * secrets living under `channels.slack.<agentId>` precisely so an agent
+ * cannot read the tokens of the transport carrying it, and a named
+ * namespace next door must not become a way in.
+ */
+export interface NamedCredentials {
+  /** Fleet-wide, by credential name. */
+  shared: Record<string, string>;
+  /** Per agent, by agent id then credential name. Consulted before `shared`. */
+  agents: Record<string, Record<string, string>>;
+}
+
+/**
+ * A map keyed by names that come from outside, with no prototype behind it.
+ *
+ * Credential names and agent ids are user-controlled keys, and on an
+ * ordinary object that makes two things go wrong at once: writing
+ * `__proto__` assigns through the inherited setter instead of creating an
+ * entry (so a store reports success and `JSON.stringify` drops the key),
+ * and reading `toString` returns a **function** off `Object.prototype`
+ * rather than the `string | undefined` this resolver promises. A
+ * null-prototype map has neither hazard, whatever ends up in the file — and
+ * that matters more than any name rule a writer applies, because the file
+ * can be hand-edited and the next writer of it may not be this CLI.
+ */
+const emptyNameMap = <T>(): Record<string, T> => Object.create(null) as Record<string, T>;
+
+const readNameMap = (value: unknown): Record<string, string> => {
+  const entries = emptyNameMap<string>();
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return entries;
+  }
+  for (const [name, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entry === 'string') {
+      entries[name] = entry;
+    }
+  }
+  return entries;
+};
+
+export const loadNamedCredentials = async (env: StateEnvironment): Promise<NamedCredentials> => {
+  const raw = await loadRawCredentialsFile(env);
+  const named = raw.named;
+  if (typeof named !== 'object' || named === null || Array.isArray(named)) {
+    return { shared: emptyNameMap<string>(), agents: emptyNameMap<Record<string, string>>() };
+  }
+  const block = named as Record<string, unknown>;
+  const agents = emptyNameMap<Record<string, string>>();
+  if (typeof block.agents === 'object' && block.agents !== null && !Array.isArray(block.agents)) {
+    for (const [agentId, entry] of Object.entries(block.agents as Record<string, unknown>)) {
+      const names = readNameMap(entry);
+      if (Object.keys(names).length > 0) {
+        agents[agentId] = names;
+      }
+    }
+  }
+  return { shared: readNameMap(block.shared), agents };
+};
+
+export const saveNamedCredentials = async (
+  env: StateEnvironment,
+  named: NamedCredentials,
+): Promise<void> => {
+  const existing = await loadRawCredentialsFile(env);
+  existing.named = { shared: named.shared, agents: named.agents };
+  await writeRawCredentialsFile(env, existing);
+};
+
+/**
+ * The resolver a daemon actually installs: the credentials file first, the
+ * environment behind it.
+ *
+ * It keeps `EnvCredentialResolver`'s allowlist check exactly — through the
+ * kernel's own `assertCredentialAllowed`, so there is one implementation of
+ * what an agent's `credentials:` list means — and falls back to the
+ * environment so setups that export a name today keep working.
+ *
+ * The file is read **per resolve** rather than captured at construction.
+ * That is deliberate on both counts: a key rotated at three in the morning
+ * takes effect on the next call instead of the next restart, and the read
+ * is one small file per tool call that wanted a credential, which is not a
+ * hot path. Per-agent keys are a lookup order rather than an interface
+ * change, because `CredentialResolver.resolve` already takes the agent.
+ */
+export const createFileCredentialResolver = (
+  env: StateEnvironment,
+  processEnv: Record<string, string | undefined> = readProcessEnv(env),
+): CredentialResolver => ({
+  async resolve(agent, name) {
+    assertCredentialAllowed(agent, name);
+    const named = await loadNamedCredentials(env);
+    const value = named.agents[agent.id]?.[name] ?? named.shared[name] ?? processEnv[name];
+    // `process.env` is somebody else's object and does have a prototype, so
+    // this is the one lookup above that could still answer with a function.
+    // A resolver promises a string or nothing.
+    return typeof value === 'string' ? value : undefined;
+  },
+});
 
 // Memory used to live under the working directory. Fold any such file into
 // the global store the first time a run happens from that directory, then

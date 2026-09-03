@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "allowImportingTsExtensions": true,
+    "rootDir": "."
+  },
+  // Every test file, the shared backend fixtures included: a fixture that
+  // is not typechecked is a fixture that stops matching the contract it
+  // exists to prove.
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts"
+  ],
+  "exclude": [
+    "dist"
+  ]
+}

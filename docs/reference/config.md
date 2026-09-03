@@ -51,6 +51,15 @@ Credentials stored by setup live in `~/.stratus/credentials.json`
 endpoint is never sent to an endpoint a project-local config selects. See
 [Security](../concepts/security.md).
 
+That file also holds **named credentials** — the `search.apiKey` a search
+backend asks for, and whatever the ecosystem asks for next. They are a
+different kind of thing from a provider sign-in: a sign-in is the daemon's
+own, while a named credential is an *agent* capability, gated by that
+agent's `credentials:` soul list and resolved per call — the agent's own
+entry first, then the fleet's shared one, then the environment. Add one with
+[`stratus credential set`](./cli.md); never write a key into a config file,
+which is a file people commit.
+
 ## Prompt caching
 
 `promptCache` marks the stable head of each Anthropic request — the tool
