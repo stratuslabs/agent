@@ -25,7 +25,7 @@ import {
   SAFE_COMMAND_SCOPES,
   type CommandScope,
 } from './commands.ts';
-import type { CommandWhitelistStore } from './whitelist.ts';
+import { WhitelistUnreadableError, type CommandWhitelistStore } from './whitelist.ts';
 
 export {
   analyzeCommand,
@@ -42,6 +42,7 @@ export {
 export {
   createFileCommandWhitelist,
   whitelistPathFor,
+  WhitelistUnreadableError,
   type CommandWhitelistStore,
 } from './whitelist.ts';
 
@@ -574,7 +575,24 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           // asks again.
           sessionScopes.set(session.agent.id, [...(sessionScopes.get(session.agent.id) ?? []), scope]);
           if (commands?.whitelist) {
-            await commands.whitelist.remember(session.agent.id, scope);
+            try {
+              await commands.whitelist.remember(session.agent.id, scope);
+            } catch (error) {
+              if (!(error instanceof WhitelistUnreadableError)) {
+                throw error;
+              }
+              // The answer stands for as long as tier one does — this
+              // process, for this agent, which is what the person's
+              // "always" means without a file — and the file that would
+              // carry it past a restart is not written over grants nobody
+              // can read. The line says both.
+              return report(
+                context,
+                true,
+                `${call.toolName} was approved, and "${describeCommandScope(scope)}" runs without asking for ${session.agent.id} until the daemon restarts — not saved: ${error.message}`,
+                command,
+              );
+            }
             commands.onScopeRemembered?.({ agentId: session.agent.id, scope });
           }
           return report(

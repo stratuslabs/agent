@@ -72,7 +72,12 @@ the answer counts once and the next call asks again.
 
 The whitelist file is `0600` and per agent: it decides what runs with nobody
 watching, so neither another account on the machine nor another agent
-inherits it. Delete an entry to withdraw the permission.
+inherits it. Delete an entry to withdraw the permission. A file that exists
+but no longer parses — a hand edit gone wrong — is ignored with one warning
+in the daemon's log, and no "always" answer is written over it until it is
+fixed and the daemon restarted: the answer still holds the way any "always"
+does until then — for that agent, for the life of the daemon — and the log
+line says it was not saved.
 
 ## What the log records about a command
 

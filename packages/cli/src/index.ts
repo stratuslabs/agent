@@ -6254,7 +6254,10 @@ export const runServe = async (
   // a tool that carries no command string is judged by its risk exactly as
   // before. The whitelist lives beside the agent's soul, per agent.
   const commands = {
-    whitelist: createFileCommandWhitelist({ directory: agentsDirPath(env) }),
+    // A whitelist that exists and will not read is said here, once, and
+    // never written over — the daemon's log is where a grant list going
+    // quiet would otherwise go unnoticed.
+    whitelist: createFileCommandWhitelist({ directory: agentsDirPath(env), warn }),
     onScopeRemembered: ({ agentId, scope }: { agentId: string; scope: CommandScope }) => {
       // An approval that widens what runs unattended, for every future
       // session, is precisely the decision that must not be the one leaving
