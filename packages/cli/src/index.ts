@@ -6627,13 +6627,13 @@ export const runServe = async (
     }
     throw error;
   }
-  let code: number;
+  let outcome: ServeOutcome;
   try {
     // The one daemon the claim cannot see: one that predates it.
     if (await legacyDaemonServing(env)) {
       throw new HomeHeldError(await describeHeldHome(env));
     }
-    code = await serveHeldHome(command, streams, env, createGateway);
+    outcome = await serveHeldHome(command, streams, env, createGateway);
   } finally {
     // After everything: the store closed by stop(), or whatever a throw
     // reached — a preflight that rejected before the gateway existed
@@ -6646,19 +6646,32 @@ export const runServe = async (
   // it next. A daemon the supervisor started asks it for the next one by
   // exiting; the first daemon becomes the supervisor itself. Either way the
   // process the service manager (or the terminal) started is what stays.
-  if (code === RESTART_EXIT_CODE && !readProcessEnv(env)[SUPERVISED_ENV]) {
-    return superviseRestarts(command, streams, env);
+  if (outcome.code === RESTART_EXIT_CODE && !readProcessEnv(env)[SUPERVISED_ENV]) {
+    return superviseRestarts(outcome.respawnAs, streams, env);
   }
-  return code;
+  return outcome.code;
 };
 
 /** Everything `stratus serve` does once it holds the home. */
+/** How a served daemon ended, and what to start in its place if it asked for one. */
+interface ServeOutcome {
+  code: number;
+  /**
+   * The serve command a replacement runs with. The one this daemon ran
+   * with, except that a request for any free port (`--api-port 0`, or the
+   * config's `api.port: 0`) becomes the port actually bound: a replacement
+   * that picked a fresh one would leave every dashboard page reconnecting
+   * to the old address, and `gateway.json` the only thing that knew.
+   */
+  respawnAs: ParsedServeCommand;
+}
+
 const serveHeldHome = async (
   command: ParsedServeCommand,
   streams: CliStreams,
   env: CliEnvironment,
   createGateway: GatewayFactory,
-): Promise<number> => {
+): Promise<ServeOutcome> => {
   // Under a service manager the daemon's stdout is gone, so everything it
   // says is also written to ~/.stratus/logs — that file is what `stratus
   // logs` reads, and the only record of an overnight run.
@@ -6703,6 +6716,8 @@ const serveHeldHome = async (
   // Typed as the seam, not as whatever the first push happens to be: the
   // list holds the control API and the Slack adapter alike.
   const controlApiChannels: GatewayChannelAdapter[] = [];
+  /** The API adapter itself, for the address it bound; the list above is typed as the seam. */
+  let boundApi: { readonly url: string | undefined } | undefined;
   if (apiWanted) {
     const createControlApi = await loadControlApi();
     // Resolved into locals first. Inlined, `a ?? b !== undefined` parses as
@@ -6713,14 +6728,16 @@ const serveHeldHome = async (
     const apiHost = command.apiHost ?? apiConfig.host;
     const apiPort = command.apiPort ?? apiConfig.port;
     if (createControlApi) {
-      controlApiChannels.push(createControlApi({
+      const api = createControlApi({
         env,
         ...(apiHost !== undefined ? { host: apiHost } : {}),
         ...(apiPort !== undefined ? { port: apiPort } : {}),
         ...(command.configPath ? { configPath: command.configPath } : {}),
         log,
         warn,
-      }));
+      });
+      boundApi = api;
+      controlApiChannels.push(api);
     } else if (command.api === true || apiConfig.enabled === true) {
       // Only when someone asked for it explicitly. A daemon that was never
       // told to serve an API should not complain about not having one.
@@ -6962,6 +6979,10 @@ const serveHeldHome = async (
 
   await gateway.start();
 
+  // Read now, while the API is bound: its stop forgets the address, and
+  // a restart's respawn needs it (see ServeOutcome).
+  const boundApiPort = boundApi?.url !== undefined ? Number(new URL(boundApi.url).port) : undefined;
+
   // Under one finally from here: a throw anywhere after the start — a
   // host's writable refusing a line, say — must still stop the gateway
   // before the claim on the home is released, or a live gateway would be
@@ -7062,18 +7083,22 @@ const serveHeldHome = async (
     await logWriter?.flush();
   }
 
+  const askedForAnyPort = (command.apiPort ?? apiConfig.port) === 0;
+  const respawnAs: ParsedServeCommand = askedForAnyPort && boundApiPort !== undefined && Number.isInteger(boundApiPort) && boundApiPort > 0
+    ? { ...command, apiPort: boundApiPort }
+    : command;
   if (!restart || stopRequested) {
-    return 0;
+    return { code: 0, respawnAs };
   }
   if (!restart.drained) {
     (env.exitProcess ?? process.exit)(UNDRAINED_RESTART_EXIT_CODE);
-    return UNDRAINED_RESTART_EXIT_CODE;
+    return { code: UNDRAINED_RESTART_EXIT_CODE, respawnAs };
   }
   // Asked to come back. Whether this process starts the next daemon or
   // exits for its supervisor to is `runServe`'s decision, after the home
   // is released: the claim is held until this returns, and a daemon
   // started before that would be refused as a second one on the home.
-  return RESTART_EXIT_CODE;
+  return { code: RESTART_EXIT_CODE, respawnAs };
 };
 
 export const runCli = async ({ argv, streams = process, env = {} }: CliRunOptions): Promise<number> => {

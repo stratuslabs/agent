@@ -7270,9 +7270,14 @@ test('runCli serve comes back from an announced restart by supervising a fresh d
   assert.equal(accepted.status, 202, accepted.body);
 
   // The command's exit is the last daemon's exit: the supervisor started
-  // one, it stopped cleanly, and there was nothing more to start.
+  // one, it stopped cleanly, and there was nothing more to start. And it
+  // was started on the port this daemon actually bound, not on "any free
+  // port" again — a replacement on a fresh port would strand every
+  // dashboard page reconnecting to this one.
   assert.equal(await serving, 0);
-  assert.deepEqual(respawned, [['serve', '--no-events', '--api-port', '0']]);
+  const boundPort = new URL(base).port;
+  assert.notEqual(boundPort, '0');
+  assert.deepEqual(respawned, [['serve', '--no-events', '--api-port', boundPort]]);
   assert.match(watched.output.stdout, /restart requested \(test\) — refusing new turns/);
   assert.match(watched.output.stdout, /stratusd stopped/);
   assert.match(watched.output.stdout, /restarting stratusd \(test\)/);

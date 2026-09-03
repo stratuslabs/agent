@@ -93,7 +93,8 @@ than a surprise, and one that costs the fleet as little as it can.
    in the foreground, and under `--no-login`, where a clean exit is never
    brought back. `stratus service stop`, Ctrl+C, and SIGTERM still reach
    the daemon through it. The cost is one idle Node process for the rest of
-   the run.
+   the run. A daemon that asked for any free port (`--api-port 0`) comes
+   back on the port it had, so a dashboard page reconnects to it.
 
 What comes back is what a stop-and-start brings back: durable sessions,
 schedules with their catch-up sweep, and channels reconnected. The
