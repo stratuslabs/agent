@@ -230,7 +230,14 @@ contract: you opt out deliberately rather than being quietly excused.
 The shared tool applies `count`, `site`, and `freshness` to whatever you
 return, validates every result URL against the address policy, strips markup
 from snippets, and turns `publishedAt` into a UTC instant (dropping anything
-that will not parse, rather than guessing). Send the options upstream anyway
+that will not parse, rather than guessing).
+
+Pass your vendor's decorated snippet straight through — highlight markup is
+expected. Inline formatting is **removed**, not replaced with a space,
+because vendors highlight the matched *substring*: `un<strong>expected</strong>`
+reads back as `unexpected`, and `<strong>kettle</strong>.` keeps its full
+stop attached. Anything that is not inline formatting becomes a space
+instead, so two table cells never fuse into `AlphaBeta`. Send the options upstream anyway
 where your vendor supports them — native filtering ranks better than a filter
 applied afterwards — but the guarantee does not rest on your having done so.
 

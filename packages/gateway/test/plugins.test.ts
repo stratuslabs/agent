@@ -348,3 +348,84 @@ test('a tool a plugin registers after load — discovery on reconnect — is rep
     await gateway.stop();
   }
 });
+
+test('the daemon hands a plugin a credential resolver bound to the calling agent', async () => {
+  const home = await newHome();
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  // Two agents, both allowlisting the name; only one has a key of its own.
+  for (const [id, name] of [['ava', 'Ava'], ['juno', 'Juno']]) {
+    await writeFile(
+      path.join(home, '.stratus', 'agents', `${id}.md`),
+      `---\nid: ${id}\nname: ${name}\ntools: [web.*]\ncredentials: [search.apiKey]\n---\n\nYou research things.\n`,
+    );
+  }
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ named: { shared: { 'search.apiKey': 'fleet-key' }, agents: { ava: { 'search.apiKey': 'ava-key' } } } }),
+  );
+
+  let resolver: { resolve(agent: { id: string; name: string; credentials?: string[] }, name: string): Promise<string | undefined> } | undefined;
+  const host = await hostFor({
+    'stratus-plugin-demosearch': {
+      manifest: {
+        stratus: {
+          pluginVersion: 1,
+          contributes: { tools: [{ name: 'web.search', risk: 'safe' }] },
+          credentials: ['search.apiKey'],
+        },
+      },
+      module: {
+        createPlugin: () => ({
+          name: 'demosearch',
+          setup(context: { tools: { register(tool: unknown): void }; credentials?: typeof resolver }) {
+            resolver = context.credentials;
+            context.tools.register({
+              name: 'web.search',
+              risk: 'safe',
+              async execute() {
+                return null;
+              },
+            });
+          },
+        }),
+      },
+    },
+  });
+
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+    plugins: { 'stratus-plugin-demosearch': { enabled: true } },
+    pluginHost: host,
+    log: () => undefined,
+    warn: () => undefined,
+  });
+
+  await gateway.start();
+  try {
+    // The line under test is one call site in the daemon, and without it a
+    // search backend has no way to reach any key at all — while every unit
+    // test around it still passes.
+    assert.ok(resolver, 'the daemon gave the plugin no credential resolver');
+
+    const ava = { id: 'ava', name: 'Ava', credentials: ['search.apiKey'] };
+    const juno = { id: 'juno', name: 'Juno', credentials: ['search.apiKey'] };
+    // Read from the real credentials file, and per agent: its own entry
+    // before the fleet's shared one.
+    assert.equal(await resolver.resolve(ava, 'search.apiKey'), 'ava-key');
+    assert.equal(await resolver.resolve(juno, 'search.apiKey'), 'fleet-key');
+
+    // Both gates still bind through the daemon's resolver: the soul's list…
+    await assert.rejects(
+      () => resolver!.resolve({ id: 'bare', name: 'Bare' }, 'search.apiKey'),
+      /not allowed to access credential/,
+    );
+    // …and the plugin's own manifest.
+    await assert.rejects(
+      () => resolver!.resolve(ava, 'github.token'),
+      /which its manifest does not declare/,
+    );
+  } finally {
+    await gateway.stop();
+  }
+});

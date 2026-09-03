@@ -183,5 +183,44 @@ test('the extractor keeps prose and drops furniture', () => {
   assert.equal(htmlToText('<p>tea &amp; toast &#8212; &#x2764;</p>'), 'tea & toast — ❤');
   assert.equal(htmlToText('<p>caf&eacute;</p>'), 'caf&eacute;');
   assert.equal(htmlToText('<!-- hidden --><p>shown</p>'), 'shown');
+  // Inline formatting is removed, not spaced out. Every element that
+  // separates words became a newline before this point, so a space here
+  // would rewrite the page: `un expected` is a word the page does not
+  // contain, and a model reading the extraction cannot tell it from one
+  // that does.
+  assert.equal(htmlToText('<p>un<em>expected</em> results</p>'), 'unexpected results');
+  assert.equal(htmlToText('<p>The <strong>kettle</strong>.</p>'), 'The kettle.');
+  assert.equal(htmlToText('<p>see <a href="/x">the docs</a>, then stop</p>'), 'see the docs, then stop');
+  // …while everything that is not inline formatting still separates, which
+  // is what the default has to be: the block list above does not name
+  // `td`, `dd`, or `option`, and no list names a custom element, so
+  // deleting the unrecognised ones glues two values into one.
+  assert.equal(htmlToText('<ul><li>one</li><li>two</li></ul>'), '- one\n- two');
+  assert.equal(htmlToText('<table><tr><td>Alpha</td><td>Beta</td></tr></table>'), 'Alpha Beta');
+  assert.equal(htmlToText('<dl><dt>Term</dt><dd>Definition</dd></dl>'), 'Term Definition');
+  assert.equal(htmlToText('<select><option>A</option><option>B</option></select>'), 'A B');
+  assert.equal(htmlToText('<my-widget>Alpha</my-widget><my-widget>Beta</my-widget>'), 'Alpha Beta');
+  // A doctype goes with the comments rather than through a blanket sweep,
+  // because that sweep reads `5 < 10 and 20 > 15` as a tag and deletes the
+  // middle of the sentence.
+  assert.equal(htmlToText('<!doctype html><p>hi</p>'), 'hi');
+  assert.equal(htmlToText('<p>5 < 10 and 20 > 15</p>'), '5 < 10 and 20 > 15');
+  // A ruby annotation prints *above* its base text rather than beside it,
+  // so joining the two invents a token the page never shows — 東京 fused
+  // with its own furigana. `sub` and `sup` are the contrast, and stay
+  // joined: `H2O` is one token and that is the point.
+  assert.equal(htmlToText('<p><ruby>東京<rt>とうきょう</rt></ruby>へ行く</p>'), '東京 とうきょう へ行く');
+  assert.equal(htmlToText('<p>H<sub>2</sub>O and x<sup>2</sup></p>'), 'H2O and x2');
+  // The tag name is read whole: stopping at the first punctuation classifies
+  // `<a:widget>` as the inline `a` and deletes it, and a namespaced element
+  // is exactly the unknown tag the separator default exists for.
+  assert.equal(htmlToText('<a:widget>Alpha</a:widget><a:widget>Beta</a:widget>'), 'Alpha Beta');
+  assert.equal(htmlToText('<o:p>Alpha</o:p><o:p>Beta</o:p>'), 'Alpha Beta');
+  assert.equal(htmlToText('<p>un<STRONG>expected</STRONG></p>'), 'unexpected');
+  assert.equal(htmlToText('<p>I <3 you > them</p>'), 'I <3 you > them');
+  // `q` draws a character of its own from the stylesheet, so it neither
+  // fuses two quotations nor detaches the comma after one.
+  assert.equal(htmlToText('<p>He said <q>yes</q>, then left.</p>'), 'He said "yes", then left.');
+  assert.equal(htmlToText('<p><q>yes</q><q>no</q></p>'), '"yes""no"');
   assert.equal(htmlToText('<script>var x = "<p>trap</p>";</script><p>real</p>'), 'real');
 });
