@@ -291,6 +291,14 @@ const flagsOf = (token: string): { long?: string; shorts: string[] } => {
 };
 
 const deniesFlag = (denied: string[], token: string): boolean => {
+  // The token as written, minus any `=value`, so a deny list can name a
+  // short flag whole (`-c`) as well as by its letter — `git -c` is the
+  // entry `ALWAYS_DENIED_FLAGS` was written for, and letter-by-letter
+  // matching alone never reached it.
+  const [spelled] = token.split('=');
+  if (spelled !== undefined && denied.includes(spelled)) {
+    return true;
+  }
   const { long, shorts } = flagsOf(token);
   if (long && denied.includes(long)) {
     return true;
@@ -329,6 +337,23 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
   }
 
   const denied = [...ALWAYS_DENIED_FLAGS, ...(scope.deniedFlags ?? [])];
+  // A required token can itself be a flag or a refspec — an exact scope
+  // carries the whole approved command — and a whitelist file is
+  // hand-editable, so the prefix is held to the same rules as the rest.
+  for (const token of args.slice(0, required.length)) {
+    if (token.startsWith('-')) {
+      if (deniesFlag(denied, token)) {
+        return false;
+      }
+      continue;
+    }
+    if (scope.deniedArgs?.includes(token)) {
+      return false;
+    }
+    if (scope.denyRefspecForms && (token.startsWith(':') || token.startsWith('+'))) {
+      return false;
+    }
+  }
   const rest = args.slice(required.length);
   for (const token of rest) {
     if (token.startsWith('-')) {
@@ -368,16 +393,110 @@ export const findMatchingScope = (
  * make the distinction real, and inheriting anything the safe list already
  * excludes for the same command so a persisted scope can never erase a
  * flag distinction the built-in list draws.
+ *
+ * Any flags standing between the command and that argument are part of the
+ * scope too: `mkdir -p build` persists `mkdir -p build`. `matchesScope`
+ * reads `args` as the invocation's leading tokens, so a scope that skipped
+ * over `-p` to reach `build` could never match the command it was approved
+ * for — every later `mkdir -p …` asked again, under a log line promising it
+ * would not.
+ *
+ * A flag-first scope is the approved command exactly, though — every token
+ * in order, and nothing more or less. Nothing here knows which flags take a
+ * separate value, so in `git --git-dir /x status` the first positional is
+ * `/x`, not `status`: a scope of `git --git-dir /x` with a free subcommand
+ * behind it would have approved every git command against that repository
+ * on the strength of one `status`, and a scope that let trailing flags vary
+ * would have let `git -C repo branch --list` cover `--unset-upstream`, since
+ * the subcommand whose constraints should apply cannot be found. Exactness
+ * costs a prompt for `cp -r src elsewhere` after `cp -r src dist` was
+ * approved, which is the direction to fail in.
+ *
+ * And the command must be one the engine could ever run unattended: a
+ * destructive flag, one the safe list excludes for this base command (any
+ * subcommand's, since which one applies is unknowable), one that turns
+ * something else into a program, or a refspec form means there is no scope
+ * to store — "always" on `git --no-pager push origin :main` must not turn a
+ * branch delete into something that runs without asking — and the answer
+ * counts once.
  */
 export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope | undefined => {
   if (analysis.disqualifiedBy || analysis.base === undefined) {
     return undefined;
   }
-  const first = analysis.tokens.slice(1).find((token) => !token.startsWith('-'));
-  const args = first === undefined ? [] : [first];
+  const tokens = analysis.tokens.slice(1);
+  const firstIndex = tokens.findIndex((token) => !token.startsWith('-'));
+  const first = firstIndex === -1 ? undefined : tokens[firstIndex];
+  const refspecs = analysis.base === 'git';
+
+  if (firstIndex !== 0 && tokens.length > 0) {
+    // Flag-first: the exact command, held to every constraint the safe
+    // list draws for this base command, because the subcommand that would
+    // pick between them cannot be identified past a flag of unknown arity.
+    const forBase = SAFE_COMMAND_SCOPES.filter((scope) => scope.command === analysis.base);
+    const denied = [...ALWAYS_DENIED_FLAGS, ...DESTRUCTIVE_FLAGS, ...forBase.flatMap((scope) => scope.deniedFlags ?? [])];
+    const deniedArgs = forBase.flatMap((scope) => scope.deniedArgs ?? []);
+    for (const token of tokens) {
+      if (token.startsWith('-') ? deniesFlag(denied, token) : deniedArgs.includes(token)) {
+        return undefined;
+      }
+      if (refspecs && !token.startsWith('-') && (token.startsWith(':') || token.startsWith('+'))) {
+        return undefined;
+      }
+      // Nor anything the shell reads differently quoted and unquoted.
+      // Tokens are stored unquoted, so `chmod -R 600 'file*'` and
+      // `chmod -R 600 file*` are one scope to this engine and two commands
+      // to `sh -c` — one touches a file named file*, the other every file
+      // that matches — and `mkdir -p safe # other` and `mkdir -p safe '#'
+      // other` are one scope and two commands the other way round, since
+      // an unquoted `#` ends the command the shell runs. The characters are
+      // refused rather than the quoting remembered, since a scope that ran
+      // unattended on how a command was spelled would be a new kind of
+      // rule; the cost is a prompt each time for a URL with a `?` or a
+      // `find` with a pattern.
+      if (/[*?[\]{}~$\\#]/.test(token)) {
+        return undefined;
+      }
+    }
+    // The positive constraints too. A safe scope that says what its
+    // subcommand may do — `git branch` is list-only, with the listing
+    // flags named — applies wherever that subcommand stands among the
+    // tokens, or `git --no-pager branch release` would persist the branch
+    // creation that `git branch release` never does. Which token is the
+    // subcommand is still unknowable in general; a name that turns out to
+    // be some flag's value costs a prompt, never a grant.
+    for (const scope of forBase) {
+      const subcommand = scope.args ?? [];
+      if (subcommand.length === 0 || (!scope.listOnly && !scope.allowedFlags)) {
+        continue;
+      }
+      const at = tokens.findIndex((token, index) =>
+        !token.startsWith('-') && subcommand.every((part, offset) => tokens[index + offset] === part));
+      if (at === -1) {
+        continue;
+      }
+      for (const token of tokens.slice(at + subcommand.length)) {
+        if (token.startsWith('-') ? scope.allowedFlags !== undefined && !allowsFlag(scope.allowedFlags, token) : scope.listOnly) {
+          return undefined;
+        }
+      }
+    }
+    return {
+      command: analysis.base,
+      args: [...tokens],
+      deniedFlags: [...new Set([...DESTRUCTIVE_FLAGS, ...forBase.flatMap((scope) => scope.deniedFlags ?? [])])],
+      ...(deniedArgs.length > 0 ? { deniedArgs: [...new Set(deniedArgs)] } : {}),
+      // Nothing beyond the command as approved: no positional, no flag.
+      listOnly: true,
+      allowedFlags: [],
+      ...(refspecs ? { denyRefspecForms: true } : {}),
+    };
+  }
+
   const sameScope = SAFE_COMMAND_SCOPES
-    .filter((scope) => scope.command === analysis.base && (scope.args ?? []).join(' ') === args.join(' '));
+    .filter((scope) => scope.command === analysis.base && (scope.args ?? []).join(' ') === (first ?? ''));
   const inherited = sameScope.flatMap((scope) => scope.deniedFlags ?? []);
+  const args = first === undefined ? [] : [first];
   const deniedArgs = sameScope.flatMap((scope) => scope.deniedArgs ?? []);
   // Only when every safe scope for this command names one: a persisted
   // scope must be no wider than the built-in, and an allowlist from one of
@@ -399,7 +518,7 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
     // Git's syntax, so git's rule: elsewhere a leading `+` is an ordinary
     // argument (`chmod +x`) and refusing it would only cost a prompt for no
     // safety.
-    ...(analysis.base === 'git' ? { denyRefspecForms: true } : {}),
+    ...(refspecs ? { denyRefspecForms: true } : {}),
   };
 };
 

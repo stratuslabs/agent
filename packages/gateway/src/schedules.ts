@@ -234,6 +234,19 @@ export interface SchedulerRuntime {
   stop(): void;
   /** Settles when every firing this scheduler started has finished. */
   drain(): Promise<void>;
+  /**
+   * Retire a spent one-shot whose firing has just finished in THIS process
+   * without having been started by it — a firing parked on a human when
+   * the last daemon died and recovered by this one. The retirement that
+   * normally follows a firing rides on the firing's own promise, which
+   * died with that process; without this, the row stayed listed as a
+   * schedule until the next restart's sweep. A row that still has a slot,
+   * or is not a one-shot, is left alone — and so is one whose last firing
+   * was not `sessionId`: the schedule id comes from session metadata, which
+   * a row written before the public door refused the daemon's own keys
+   * could carry from a caller, and a firing may retire only its own row.
+   */
+  retireSpentOneShot(scheduleId: string, sessionId: string): void;
 }
 
 export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): SchedulerRuntime => {
@@ -400,9 +413,17 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       // stalling the whole boot. (A concurrent cancel makes the claim
       // no-op, which is fine: skipped and gone both mean "not replayed".)
       const next = skipToFuture(record.cadence, slotDate, now);
-      log(`schedule ${record.id}: missed firing(s) while the daemon was down; skipping to ${next ? next.toISOString() : 'never'}`);
+      // Two ways here, and the line says which. A slot this daemon deferred
+      // under the per-agent cap has been due every tick since; its window
+      // closing is the running turn outlasting the cadence, not downtime —
+      // and the line that blamed downtime for it sent an operator to look
+      // for a restart that never happened.
+      const deferralKey = `${record.id}:${slot}`;
+      log(deferralsWarned.has(deferralKey)
+        ? `schedule ${record.id}: the firing deferred by the per-agent cap (slot ${slot}) outlasted its window; skipping to ${next ? next.toISOString() : 'never'}`
+        : `schedule ${record.id}: missed firing(s) while the daemon was down; skipping to ${next ? next.toISOString() : 'never'}`);
       store.claimSlot(withNextFire(record, next), slot);
-      deferralsWarned.delete(`${record.id}:${slot}`);
+      deferralsWarned.delete(deferralKey);
       return;
     }
 
@@ -556,6 +577,14 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     },
     async drain() {
       await Promise.allSettled([...inflight]);
+    },
+    retireSpentOneShot(scheduleId, sessionId) {
+      const record = store.get(scheduleId);
+      if (!record || record.cadence.kind !== 'at' || record.nextFireAt || record.lastSessionId !== sessionId) {
+        return;
+      }
+      store.delete(record.id);
+      log(`schedule ${record.id}: one-shot's recovered firing finished; removing`);
     },
   };
 };

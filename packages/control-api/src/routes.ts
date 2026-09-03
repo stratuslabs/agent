@@ -702,6 +702,21 @@ export const routes: Route[] = [
         // then failing where only the event stream can see it.
         throw new ApiError(404, 'agent_not_found', `No agent with id ${agentId}.`);
       }
+      // The stored agent is held to the roster too. A soul removed since
+      // the conversation started is the same failure one door later: the
+      // dispatch rejects "Agent not found" with nobody awaiting it, the
+      // caller holds a 202 and a turn id, and the session record shows
+      // nothing — the message is not even on it. Seen against a running
+      // daemon: `session.failed` on the event stream, and a session still
+      // reading `completed` with the message that failed absent from it.
+      if (existing && !context.gateway.agents().some((agent) => agent.id === existing.agent.id)) {
+        throw new ApiError(
+          404,
+          'agent_not_found',
+          `Session ${sessionId} belongs to agent ${existing.agent.id}, which is not on the roster now. `
+            + 'Restore its soul under ~/.stratus/agents and reload the roster, or start a new session with an agent that is.',
+        );
+      }
       // After the agent checks, deliberately: the length budget spends the
       // agent id this session addresses, and that only means anything once
       // the id is known to be a real one off the roster.
