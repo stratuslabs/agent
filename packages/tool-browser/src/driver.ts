@@ -38,7 +38,11 @@ export interface BrowserContextLike {
 }
 
 export interface BrowserLike {
-  newContext(options?: { viewport?: { width: number; height: number } }): Promise<BrowserContextLike>;
+  newContext(options?: {
+    viewport?: { width: number; height: number };
+    /** A proxy for this context alone, overriding the one the browser was launched with. */
+    proxy?: { server: string; bypass: string };
+  }): Promise<BrowserContextLike>;
   close(): Promise<void>;
 }
 

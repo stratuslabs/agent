@@ -127,11 +127,16 @@ interface BrowserRuntime {
  * of the policy: the scheme guard inside the browser, and the proxy that
  * owns the connections. Reported to the agent because a page that renders
  * empty because its requests were blocked is otherwise a mystery it retries.
+ *
+ * Each refusal is reported once — this drains what it reports — so a
+ * result names what happened since the last one, not everything that ever
+ * did. Called once per result, for the same reason.
  */
-const refusalsFor = (runtime: BrowserRuntime, session: Session): string[] => [
-  ...(runtime.blocked.get(session.id) ?? []),
-  ...runtime.pool.refusalsFor(session.id),
-].slice(-10);
+const refusalsFor = (runtime: BrowserRuntime, session: Session): string[] => {
+  const inBrowser = runtime.blocked.get(session.id) ?? [];
+  runtime.blocked.delete(session.id);
+  return [...inBrowser, ...runtime.pool.refusalsFor(session.id)].slice(-10);
+};
 
 /**
  * Bound a page operation Playwright does not bound itself. `evaluate` and
@@ -234,13 +239,17 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       const settings = settingsFor(config, session);
       const page = await runtime.pageFor(session);
       const status = await navigate(page, String(input.url ?? ''), settings.policy, settings.navigationTimeoutMs);
+      // Everything that can still fail first, and the drain last: the
+      // refusal list is emptied by reading it, so a `title()` that throws
+      // after the drain would take the refusals with it and no result
+      // would ever carry them.
+      const title = await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs);
+      const blockedRequests = refusalsFor(runtime, session);
       return {
         url: page.url(),
         ...(status === undefined ? {} : { status }),
-        title: await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs),
-        ...(refusalsFor(runtime, session).length > 0
-          ? { blockedRequests: refusalsFor(runtime, session) }
-          : {}),
+        title,
+        ...(blockedRequests.length > 0 ? { blockedRequests } : {}),
       };
     },
   };
@@ -264,14 +273,14 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
         typeof extracted === 'string' ? extracted : '',
         narrowed(input.maxBytes, settings.maxTextBytes),
       );
+      const title = await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs);
+      const blockedRequests = refusalsFor(runtime, session);
       return {
         url: page.url(),
-        title: await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs),
+        title,
         text,
         truncated,
-        ...(refusalsFor(runtime, session).length > 0
-          ? { blockedRequests: refusalsFor(runtime, session) }
-          : {}),
+        ...(blockedRequests.length > 0 ? { blockedRequests } : {}),
       };
     },
   };
@@ -298,10 +307,13 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       // picture in Slack rather than a path nobody can open. One key rather
       // than a `path` alias beside it — two words for one thing is how a
       // convention stops being one.
+      const title = await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs);
+      const blockedRequests = refusalsFor(runtime, session);
       return {
         file: target,
         url: page.url(),
-        title: await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs),
+        title,
+        ...(blockedRequests.length > 0 ? { blockedRequests } : {}),
       };
     },
   };
@@ -336,11 +348,14 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       } else {
         throw new Error(`Unsupported action: ${String(input.action)}. Use click or type.`);
       }
+      const title = await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs);
+      const blockedRequests = refusalsFor(runtime, session);
       return {
         action: input.action,
         selector,
         url: page.url(),
-        title: await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs),
+        title,
+        ...(blockedRequests.length > 0 ? { blockedRequests } : {}),
       };
     },
   };

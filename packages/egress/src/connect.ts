@@ -210,8 +210,19 @@ export interface EgressProxy {
   /** `http://127.0.0.1:<port>` — what a browser is launched pointing at. */
   url: string;
   port: number;
-  /** Requests this proxy refused, newest last. Surfaced to the agent as the reason a page is blank. */
+  /**
+   * Requests this proxy refused, newest last — the most recent hundred,
+   * because a page refused something on every load must not grow the
+   * daemon's memory for the life of the browser. Surfaced to the agent as
+   * the reason a page is blank.
+   */
   refusals: string[];
+  /**
+   * How many refusals there have ever been, so a consumer that reports
+   * them can tell which entries are new since it last looked, whatever
+   * `refusals` has since dropped.
+   */
+  readonly refusalCount: number;
   close(): Promise<void>;
 }
 
@@ -250,6 +261,8 @@ const parseAuthority = (authority: string): { host: string; port: number } | und
   return { host: groups.host, port };
 };
 
+const MAX_RETAINED_REFUSALS = 100;
+
 export const createEgressProxy = async (
   policy: EgressPolicy = {},
   options: {
@@ -262,6 +275,14 @@ export const createEgressProxy = async (
   } = {},
 ): Promise<EgressProxy> => {
   const refusals: string[] = [];
+  let refusalCount = 0;
+  const refuse = (reason: string): void => {
+    refusals.push(reason);
+    refusalCount += 1;
+    if (refusals.length > MAX_RETAINED_REFUSALS) {
+      refusals.splice(0, refusals.length - MAX_RETAINED_REFUSALS);
+    }
+  };
   const sockets = new Set<net.Socket>();
   const lookup = options.lookup ?? ((hostname: string) => dns.promises.lookup(hostname, { all: true, verbatim: true }));
 
@@ -329,7 +350,7 @@ export const createEgressProxy = async (
       },
       (error: unknown) => {
         const reason = error instanceof Error ? error.message : String(error);
-        refusals.push(reason);
+        refuse(reason);
         // 403 rather than a dropped socket: the page sees a refusal it can
         // render, and the reason reaches the agent through `refusals`.
         clientSocket.end(`HTTP/1.1 403 Forbidden\r\n\r\n${reason}`);
@@ -344,7 +365,7 @@ export const createEgressProxy = async (
       target = assertRequestAllowed(request.url ?? '', policy);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      refusals.push(reason);
+      refuse(reason);
       response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
       response.end(reason);
       return;
@@ -365,7 +386,7 @@ export const createEgressProxy = async (
       },
     );
     upstream.on('error', (error) => {
-      refusals.push(error.message);
+      refuse(error.message);
       if (!response.headersSent) {
         response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
       }
@@ -399,6 +420,9 @@ export const createEgressProxy = async (
     url: `http://127.0.0.1:${port}`,
     port,
     refusals,
+    get refusalCount() {
+      return refusalCount;
+    },
     async close() {
       // Stop accepting first, then tear down: a connection accepted after
       // the sweep below would be one nothing here ever destroys, and
