@@ -979,6 +979,26 @@ const readPromptFromStdin = async (stdin: NodeJS.ReadableStream): Promise<string
   return data.trim();
 };
 
+/**
+ * Stdin exactly as it arrived, for a value where whitespace may be part of
+ * it.
+ *
+ * `readPromptFromStdin` trims, which is right for a prompt and wrong for a
+ * secret: a key whose real value has a leading space would be stored as a
+ * *different* key, reported as stored, and then fail authentication with
+ * nothing to look at — this command never prints a value back.
+ */
+const readSecretFromStdin = async (stdin: NodeJS.ReadableStream): Promise<string> => {
+  stdin.setEncoding('utf8');
+
+  let data = '';
+  for await (const chunk of stdin) {
+    data += chunk;
+  }
+
+  return data;
+};
+
 const readOptionValue = (tokens: string[], index: number, flag: string): string => {
   const value = tokens[index + 1];
   if (!value) {
@@ -5934,8 +5954,13 @@ export const runCredential = async (
     streams.stderr,
     `Reading the value for ${name} from stdin — it is never taken from the command line, where it would land in your shell history. Ctrl-D when done.`,
   );
-  const value = (env.stdin ?? await readPromptFromStdin(env.stdinStream ?? process.stdin)).trim();
-  if (value.length === 0) {
+  const arrived = env.stdin ?? await readSecretFromStdin(env.stdinStream ?? process.stdin);
+  // One trailing line terminator and nothing else. `echo "$KEY" |` appends a
+  // newline that is not part of the key and `printf %s` appends nothing, so
+  // both spellings have to work — while a key whose own value ends in a
+  // space must survive either of them, which a blanket trim would not allow.
+  const value = arrived.replace(/\r?\n$/, '');
+  if (value.trim().length === 0) {
     writeLine(streams.stderr, `Nothing arrived on stdin, so ${name} was not stored. Pipe the value in: \`printf %s "$KEY" | stratus credential set ${name}\`.`);
     return 1;
   }

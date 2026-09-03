@@ -10,7 +10,7 @@
 
 import type { JsonObject } from '@stratusagent/core';
 
-import type { SearchFreshness, SearchOptions } from './contract.ts';
+import { WEB_SEARCH_TOOL_NAME, type SearchFreshness, type SearchOptions } from './contract.ts';
 
 export const SEARCH_COUNT_DEFAULT = 10;
 export const SEARCH_COUNT_MAX = 50;
@@ -137,6 +137,15 @@ export const hostMatchesSite = (host: string, site: string): boolean => {
   return normalized === site || normalized.endsWith(`.${site}`);
 };
 
+/**
+ * Every field a call may carry. A misspelled option is refused rather than
+ * ignored, for the reason the rest of this file is strict: `freshnes: "P7D"`
+ * read as "no freshness filter" runs an unrestricted search that *succeeds*,
+ * and the agent then says the answer is recent. A silently dropped option is
+ * the same failure as a silently ignored one, arriving one step earlier.
+ */
+const KNOWN_FIELDS = ['query', 'count', 'site', 'freshness'] as const;
+
 const requireString = (value: unknown, field: string): string => {
   if (typeof value !== 'string') {
     throw new SearchOptionError(`${field} must be a string; got ${value === null ? 'null' : typeof value}.`);
@@ -163,6 +172,14 @@ export interface ParsedSearchCall {
  * not a syntax error.
  */
 export const parseSearchCall = (input: JsonObject, now: Date): ParsedSearchCall => {
+  const unknown = Object.keys(input).filter((key) => !(KNOWN_FIELDS as readonly string[]).includes(key));
+  if (unknown.length > 0) {
+    throw new SearchOptionError(
+      `${unknown.join(', ')} ${unknown.length === 1 ? 'is not a field' : 'are not fields'} of ${WEB_SEARCH_TOOL_NAME}. `
+      + `It takes ${KNOWN_FIELDS.join(', ')}.`,
+    );
+  }
+
   const query = requireString(input.query, 'query').trim();
   if (query.length === 0) {
     throw new SearchOptionError('query is required and must not be empty.');

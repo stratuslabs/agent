@@ -168,6 +168,10 @@ export const createWebSearchTool = (options: WebSearchToolOptions): Tool => {
         },
       },
       required: ['query'],
+      // Told to the model up front, as well as enforced when the call
+      // arrives: a misspelled option that is quietly dropped runs a search
+      // nobody asked for and reports success.
+      additionalProperties: false,
     },
     async execute(input, session, context) {
       const settings = resolvePluginAgentConfig(options.config, session.agent.id);

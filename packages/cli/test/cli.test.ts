@@ -8421,6 +8421,34 @@ test('a credential value is never taken from the command line', () => {
   );
 });
 
+test('a credential value keeps its own whitespace, and loses only the newline a pipe added', async () => {
+  const stored = async (stdin: string): Promise<string | undefined> => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cred-ws-'));
+    await runCli({
+      argv: ['credential', 'set', 'search.apiKey'],
+      streams: createStreams().streams,
+      env: { homeDir: home, cwd: home, processEnv: {}, stdin },
+    });
+    const file = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8')) as {
+      named?: { shared?: Record<string, string> };
+    };
+    return file.named?.shared?.['search.apiKey'];
+  };
+
+  // `echo "$KEY" |` appends a newline that is not part of the key; so does
+  // a CRLF pipe. `printf %s` appends nothing. All three must store the key.
+  assert.equal(await stored('secret-value\n'), 'secret-value');
+  assert.equal(await stored('secret-value\r\n'), 'secret-value');
+  assert.equal(await stored('secret-value'), 'secret-value');
+
+  // And a key whose own value carries whitespace is stored as it is: a
+  // blanket trim would store a *different* secret, report success, and then
+  // fail authentication with nothing to look at, since no value is ever
+  // printed back.
+  assert.equal(await stored('  padded-secret  \n'), '  padded-secret  ');
+  assert.equal(await stored('two\nlines\n'), 'two\nlines');
+});
+
 test('credential set with nothing on stdin stores nothing and says how to pipe it in', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cred-empty-'));
   const { streams, output } = createStreams();

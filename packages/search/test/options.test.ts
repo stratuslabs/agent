@@ -23,6 +23,21 @@ test('the query is literal text: operators, quotes, and minus signs come through
   assert.equal(parseSearchCall({ query: '  kettles  ' }, NOW).query, 'kettles');
 });
 
+test('a misspelled option is refused, not quietly dropped into an unfiltered search', () => {
+  // The failure this prevents: `freshnes` read as "no freshness filter"
+  // runs an unrestricted search that *succeeds*, and the agent then says
+  // the answer is recent. A dropped option is a silently ignored one
+  // arriving a step earlier.
+  assert.throws(
+    () => parseSearchCall({ query: 'k', freshnes: 'P7D' }, NOW),
+    /freshnes is not a field of web\.search\. It takes query, count, site, freshness\./,
+  );
+  assert.throws(() => parseSearchCall({ query: 'k', domain: 'example.com' }, NOW), /domain is not a field/);
+  assert.throws(() => parseSearchCall({ query: 'k', a: 1, b: 2 }, NOW), /a, b are not fields/);
+  // The four it does take, together.
+  assert.doesNotThrow(() => parseSearchCall({ query: 'k', count: 5, site: 'example.com', freshness: 'P7D' }, NOW));
+});
+
 test('an empty or missing query is refused rather than searched for', () => {
   assert.throws(() => parseSearchCall({ query: '   ' }, NOW), /query is required/);
   assert.throws(() => parseSearchCall({}, NOW), /query must be a string/);

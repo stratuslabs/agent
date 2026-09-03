@@ -172,6 +172,13 @@ applies to `web.*` exactly as it does everywhere else.
 | `site` | one normalized hostname | Matches that host and anything under it, on label boundaries: `example.com` matches `docs.example.com` and **not** `notexample.com`. Already lower-cased, trailing dot removed, IDN in A-label form. Not a query operator — never splice `site:` into the query. |
 | `freshness` | `{ duration, ms, since }` | An age, resolved to an instant once per call. `since` is the oldest a result may be. |
 
+A call carrying any **other** field is refused naming it. The caller is a
+model writing JSON, so `freshnes: "P7D"` is a realistic mistake — and read as
+"no freshness filter" it runs an unrestricted search that *succeeds*, after
+which the agent says the answer is recent. A dropped option is a silently
+ignored one arriving a step earlier, and this table is strict for that reason
+throughout.
+
 ### What `publishedAt` may be
 
 An **ISO 8601 instant**, and the shape is checked before anything is parsed

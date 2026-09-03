@@ -106,6 +106,10 @@ a secret in argv is a secret in your shell history and in every `ps` on the
 machine. Nothing prints a stored value back: `stratus credentials` reports
 names and which agents have their own.
 
+It strips **one trailing newline and nothing else**, so `echo "$KEY" |` and
+`printf %s "$KEY" |` both store the same key, and a key whose own value
+begins or ends with a space is stored as it is rather than quietly altered.
+
 Tool plugins have no flags: what is installed is a config decision
 (`plugins` in a trusted config) and what an agent may call is a soul
 decision (`tools:`). Neither is something a single run should be able to
