@@ -32,6 +32,7 @@ import {
 // Type-only: the gateway itself is imported lazily (it pulls in node:sqlite
 // and the whole runner stack), and a serve-only policy seam must not make
 // `stratus run` pay for it.
+import type { DashboardSession } from '@stratusagent/control-api';
 import type { ApprovalTransport, GatewayChannelAdapter, HomeClaim, RestartOutcome } from '@stratusagent/gateway';
 import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
 import {
@@ -227,13 +228,15 @@ export interface CliEnvironment {
    * with its exit code. Injected so tests never spawn a process; the
    * default runs this CLI's own entrypoint with the serve arguments given.
    */
-  serveRespawn?: (argv: string[], boundApiPort: number | undefined) => Promise<RespawnResult>;
+  serveRespawn?: (argv: string[], handoff: RestartHandoff) => Promise<RespawnResult>;
   /**
-   * How a supervised daemon tells its supervisor the control API port it
-   * bound (tests). The default sends it over the IPC channel the
-   * supervisor opened, and does nothing where there is none.
+   * The link between a supervised daemon and its supervisor (tests): what
+   * the daemon sends up — the port it bound, the dashboard sessions it
+   * hands on — and what it receives. The default is the IPC channel a
+   * supervisor opens when it spawns a daemon, and does nothing where
+   * there is none.
    */
-  reportBoundApiPort?: (port: number) => void;
+  supervisorLink?: SupervisorLink;
   /** Ends the process at once (tests). Default `process.exit`. */
   exitProcess?: (code: number) => void;
   /** Runs launchctl/systemctl. Injected so tests never touch the real one. */
@@ -248,10 +251,33 @@ export interface CliEnvironment {
   packageVersionFetcher?: PackageVersionFetcher;
 }
 
-/** How a daemon the supervisor started ended, and the API port it bound if it said. */
+/** What a daemon and its supervisor say to each other. See SupervisorLink. */
+export type SupervisorMessage =
+  | { type: 'stratusd.bound-api-port'; port: number }
+  | { type: 'stratusd.sessions'; sessions: DashboardSession[] };
+
+/** One end of the daemon–supervisor channel. */
+export interface SupervisorLink {
+  send(message: SupervisorMessage): void;
+  receive(handler: (message: SupervisorMessage) => void): void;
+}
+
+/**
+ * What a supervisor hands the daemon it starts: the port its predecessor
+ * bound (a hint, see BOUND_API_PORT_ENV) and the dashboard sessions the
+ * predecessor had live when it stopped, so `stratus restart` does not log
+ * a browser out. In memory end to end; nothing here is written down.
+ */
+export interface RestartHandoff {
+  boundApiPort?: number;
+  sessions: DashboardSession[];
+}
+
+/** How a daemon the supervisor started ended, and what it handed back before it did. */
 export interface RespawnResult {
   code: number;
   boundApiPort?: number;
+  sessions?: DashboardSession[];
 }
 
 export interface PackageInstallResult {
@@ -6523,20 +6549,54 @@ const SUPERVISED_ENV = 'STRATUS_SERVE_SUPERVISED';
  */
 const BOUND_API_PORT_ENV = 'STRATUS_SERVE_BOUND_API_PORT';
 
-/**
- * The message a supervised daemon sends its supervisor over the IPC channel
- * once its control API is bound, so the supervisor carries *that* port to
- * the next daemon rather than the one the first daemon had: a config edited
- * to a fixed port and back leaves dashboard pages on the last address.
- */
-const BOUND_API_PORT_MESSAGE = 'stratusd.bound-api-port';
+const isDashboardSession = (value: unknown): value is DashboardSession =>
+  typeof value === 'object' && value !== null
+  && typeof (value as { id?: unknown }).id === 'string'
+  && typeof (value as { expiresAt?: unknown }).expiresAt === 'number';
 
-const defaultReportBoundApiPort = (port: number): void => {
-  // Only where a supervisor is listening: the channel exists exactly when
-  // this process was started by one.
-  if (typeof process.send === 'function' && process.channel) {
-    process.send({ type: BOUND_API_PORT_MESSAGE, port });
+/** Shape-checked, because the other end of an IPC channel is still another process. */
+const isSupervisorMessage = (value: unknown): value is SupervisorMessage => {
+  if (typeof value !== 'object' || value === null) {
+    return false;
   }
+  const message = value as { type?: unknown; port?: unknown; sessions?: unknown };
+  if (message.type === 'stratusd.bound-api-port') {
+    return typeof message.port === 'number' && Number.isInteger(message.port) && message.port > 0;
+  }
+  if (message.type === 'stratusd.sessions') {
+    return Array.isArray(message.sessions) && message.sessions.every(isDashboardSession);
+  }
+  return false;
+};
+
+/**
+ * The IPC channel a supervisor opens when it spawns a daemon: what a
+ * supervised daemon says up it (the port it bound, so the supervisor
+ * carries *that* port to the next daemon rather than the first one's; the
+ * dashboard sessions it hands on) and what comes down it. Where there is
+ * no channel — the first daemon, or one a service manager started — there
+ * is no one to say it to, and nothing is said.
+ */
+const defaultSupervisorLink: SupervisorLink = {
+  send(message) {
+    if (typeof process.send === 'function' && process.channel) {
+      process.send(message);
+    }
+  },
+  receive(handler) {
+    const channel = process.channel;
+    if (!channel) {
+      return;
+    }
+    process.on('message', (message: unknown) => {
+      if (isSupervisorMessage(message)) {
+        handler(message);
+      }
+    });
+    // A 'message' listener refs the channel, which would keep this process
+    // alive after its drain; the daemon's own work is what holds it open.
+    channel.unref?.();
+  },
 };
 
 /**
@@ -6582,19 +6642,28 @@ export const restartEntrypoint = (moduleUrl: string): string => {
  * hold in the foreground and under `--no-login`, where nothing else would
  * bring a clean exit back.
  */
-const defaultServeRespawn = (env: CliEnvironment) => (argv: string[], boundApiPort: number | undefined): Promise<RespawnResult> =>
+const defaultServeRespawn = (env: CliEnvironment) => (argv: string[], handoff: RestartHandoff): Promise<RespawnResult> =>
   new Promise((resolve, reject) => {
     const entrypoint = restartEntrypoint(import.meta.url);
-    // The daemon's own streams, plus an IPC channel for the one thing it
-    // has to tell its supervisor: the port it bound.
+    // The daemon's own streams, plus an IPC channel for what it and its
+    // supervisor have to tell each other. See SupervisorLink.
     const child = spawn(process.execPath, [...process.execArgv, entrypoint, ...argv], {
       stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
       env: {
         ...process.env,
         [SUPERVISED_ENV]: '1',
-        ...(boundApiPort !== undefined ? { [BOUND_API_PORT_ENV]: String(boundApiPort) } : {}),
+        ...(handoff.boundApiPort !== undefined ? { [BOUND_API_PORT_ENV]: String(handoff.boundApiPort) } : {}),
       },
     });
+    if (handoff.sessions.length > 0 && child.connected) {
+      // Queued in the channel until the daemon listens, which it does
+      // before its API is up; the API holds them until it can adopt them.
+      // A send that fails (the daemon died before reading) is not this
+      // supervisor's failure: the exit below reports what happened, and a
+      // daemon that never took them simply comes up signed out.
+      const sessions: SupervisorMessage = { type: 'stratusd.sessions', sessions: handoff.sessions };
+      child.send(sessions, () => undefined);
+    }
     const forward = (signal: NodeJS.Signals) => (): void => {
       child.kill(signal);
     };
@@ -6611,13 +6680,16 @@ const defaultServeRespawn = (env: CliEnvironment) => (argv: string[], boundApiPo
       process.off('SIGINT', onInt);
       env.shutdownSignal?.removeEventListener('abort', onAbort);
     };
-    let reported: number | undefined;
-    child.on('message', (message) => {
-      const port = typeof message === 'object' && message !== null && (message as { type?: unknown }).type === BOUND_API_PORT_MESSAGE
-        ? (message as { port?: unknown }).port
-        : undefined;
-      if (typeof port === 'number' && Number.isInteger(port) && port > 0) {
-        reported = port;
+    let reportedPort: number | undefined;
+    let handedBack: DashboardSession[] | undefined;
+    child.on('message', (message: unknown) => {
+      if (!isSupervisorMessage(message)) {
+        return;
+      }
+      if (message.type === 'stratusd.bound-api-port') {
+        reportedPort = message.port;
+      } else {
+        handedBack = message.sessions;
       }
     });
     child.once('error', (error) => {
@@ -6627,7 +6699,11 @@ const defaultServeRespawn = (env: CliEnvironment) => (argv: string[], boundApiPo
     child.once('exit', (code, signal) => {
       done();
       // Killed by a signal is a stop, not a request to come back.
-      resolve({ code: code ?? (signal ? 1 : 0), ...(reported !== undefined ? { boundApiPort: reported } : {}) });
+      resolve({
+        code: code ?? (signal ? 1 : 0),
+        ...(reportedPort !== undefined ? { boundApiPort: reportedPort } : {}),
+        ...(handedBack !== undefined ? { sessions: handedBack } : {}),
+      });
     });
   });
 
@@ -6639,20 +6715,27 @@ const defaultServeRespawn = (env: CliEnvironment) => (argv: string[], boundApiPo
  */
 const superviseRestarts = async (
   command: ParsedServeCommand,
-  boundApiPort: number | undefined,
+  first: RestartHandoff,
   streams: CliStreams,
   env: CliEnvironment,
 ): Promise<number> => {
   const respawn = env.serveRespawn ?? defaultServeRespawn(env);
-  // The hint follows the daemons: each one that said what it bound is
-  // what the next one is told, so a config edited to a fixed port and back
-  // hands on the last address, not the first.
-  let hint = boundApiPort;
+  // The hand-off follows the daemons: the port each one said it bound is
+  // what the next one is told (so a config edited to a fixed port and
+  // back hands on the last address, not the first), and the sessions are
+  // whatever the last one handed back — a daemon that handed nothing
+  // hands nothing on.
+  let handoff = first;
   let result: RespawnResult;
   do {
     writeLine(streams.stdout, 'Restarting stratusd.');
-    result = await respawn(serveArgv(command), hint);
-    hint = result.boundApiPort ?? hint;
+    result = await respawn(serveArgv(command), handoff);
+    handoff = {
+      ...(result.boundApiPort !== undefined || handoff.boundApiPort !== undefined
+        ? { boundApiPort: result.boundApiPort ?? handoff.boundApiPort }
+        : {}),
+      sessions: result.sessions ?? [],
+    };
   } while (result.code === RESTART_EXIT_CODE);
   return result.code;
 };
@@ -6708,7 +6791,12 @@ export const runServe = async (
   // exiting; the first daemon becomes the supervisor itself. Either way the
   // process the service manager (or the terminal) started is what stays.
   if (outcome.code === RESTART_EXIT_CODE && !readProcessEnv(env)[SUPERVISED_ENV]) {
-    return superviseRestarts(command, outcome.boundApiPort, streams, env);
+    return superviseRestarts(
+      command,
+      { ...(outcome.boundApiPort !== undefined ? { boundApiPort: outcome.boundApiPort } : {}), sessions: outcome.sessions },
+      streams,
+      env,
+    );
   }
   return outcome.code;
 };
@@ -6719,6 +6807,8 @@ interface ServeOutcome {
   code: number;
   /** The control API port this daemon bound, if it served one. See BOUND_API_PORT_ENV. */
   boundApiPort?: number;
+  /** The dashboard sessions live when it stopped, for the replacement. See RestartHandoff. */
+  sessions: DashboardSession[];
 }
 
 const serveHeldHome = async (
@@ -6771,8 +6861,12 @@ const serveHeldHome = async (
   // Typed as the seam, not as whatever the first push happens to be: the
   // list holds the control API and the Slack adapter alike.
   const controlApiChannels: GatewayChannelAdapter[] = [];
-  /** The API adapter itself, for the address it bound; the list above is typed as the seam. */
-  let boundApi: { readonly url: string | undefined } | undefined;
+  /** The API adapter itself, for what the seam does not carry: its address, and the sessions it hands across a restart. */
+  let boundApi: {
+    readonly url: string | undefined;
+    adoptSessions(sessions: DashboardSession[]): void;
+    sessionsAtStop(): DashboardSession[];
+  } | undefined;
   if (apiWanted) {
     const createControlApi = await loadControlApi();
     // Resolved into locals first. Inlined, `a ?? b !== undefined` parses as
@@ -6806,6 +6900,19 @@ const serveHeldHome = async (
         + 'Run `npm install -g @stratusagent/control-api` to bring it online; starting without it.',
       );
     }
+  }
+
+  // Listening before anything else is awaited: what the supervisor hands
+  // this daemon is queued in the channel until then, and the API keeps it
+  // until it is serving.
+  const supervised = Boolean(readProcessEnv(env)[SUPERVISED_ENV]);
+  const link = env.supervisorLink ?? defaultSupervisorLink;
+  if (supervised) {
+    link.receive((message) => {
+      if (message.type === 'stratusd.sessions') {
+        boundApi?.adoptSessions(message.sessions);
+      }
+    });
   }
 
   const channelCredentials = await loadChannelCredentials(env);
@@ -7042,8 +7149,8 @@ const serveHeldHome = async (
   // Read now, while the API is bound: its stop forgets the address, and
   // a restart's respawn needs it (see ServeOutcome).
   const boundApiPort = boundApi?.url !== undefined ? Number(new URL(boundApi.url).port) : undefined;
-  if (readProcessEnv(env)[SUPERVISED_ENV] && boundApiPort !== undefined && Number.isInteger(boundApiPort) && boundApiPort > 0) {
-    (env.reportBoundApiPort ?? defaultReportBoundApiPort)(boundApiPort);
+  if (supervised && boundApiPort !== undefined && Number.isInteger(boundApiPort) && boundApiPort > 0) {
+    link.send({ type: 'stratusd.bound-api-port', port: boundApiPort });
   }
 
   // Under one finally from here: a throw anywhere after the start — a
@@ -7150,17 +7257,24 @@ const serveHeldHome = async (
     ? { boundApiPort }
     : {};
   if (!restart || stopRequested) {
-    return { code: 0, ...bound };
+    return { code: 0, ...bound, sessions: [] };
   }
   if (!restart.drained) {
     (env.exitProcess ?? process.exit)(UNDRAINED_RESTART_EXIT_CODE);
-    return { code: UNDRAINED_RESTART_EXIT_CODE, ...bound };
+    return { code: UNDRAINED_RESTART_EXIT_CODE, ...bound, sessions: [] };
+  }
+  // Coming back: the browser sessions live at the stop go to the
+  // replacement — up the channel to the supervisor when this daemon has
+  // one, else with the outcome to the supervisor this process becomes.
+  const sessions = boundApi?.sessionsAtStop() ?? [];
+  if (supervised && sessions.length > 0) {
+    link.send({ type: 'stratusd.sessions', sessions });
   }
   // Asked to come back. Whether this process starts the next daemon or
   // exits for its supervisor to is `runServe`'s decision, after the home
   // is released: the claim is held until this returns, and a daemon
   // started before that would be refused as a second one on the home.
-  return { code: RESTART_EXIT_CODE, ...bound };
+  return { code: RESTART_EXIT_CODE, ...bound, sessions };
 };
 
 export const runCli = async ({ argv, streams = process, env = {} }: CliRunOptions): Promise<number> => {

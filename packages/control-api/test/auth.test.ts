@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { allowedOrigins, ensureGatewayToken } from '../src/auth.ts';
-import { authority } from '../src/index.ts';
+import { allowedOrigins, createAuthenticator, ensureGatewayToken, SESSION_COOKIE } from '../src/auth.ts';
+import { authority, createControlApi } from '../src/index.ts';
 import { newHome, openSocket, rawGet, rawPost, startApi } from './harness.ts';
 
 /**
@@ -410,6 +410,82 @@ test('a session minted through TLS is Secure; a loopback one is not', async () =
     // And not on loopback, where a Secure cookie would never come back and
     // the flag would break every request while reading as hardening.
     assert.doesNotMatch(direct.setCookie ?? '', /Secure/);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('an authenticator hands its live sessions on with the expiry each was minted with, and drops one already expired', () => {
+  let clock = 1_000_000;
+  const old = createAuthenticator({ token: 'gateway-token', now: () => clock });
+  const kept = old.redeemOneTimeToken(old.mintOneTimeToken());
+  const stale = old.redeemOneTimeToken(old.mintOneTimeToken());
+  assert.ok(kept && stale);
+
+  const handed = old.exportSessions();
+  assert.deepEqual(handed.map((session) => session.id).sort(), [kept, stale].sort());
+  const keptExpiry = handed.find((session) => session.id === kept)?.expiresAt;
+  assert.ok(keptExpiry !== undefined && keptExpiry > clock);
+
+  // The replacement comes up later. A hand-off extends nothing: the
+  // session keeps its own expiry, and one that ran out on the way is not
+  // taken on for the next sweep to find.
+  clock += 60_000;
+  const replacement = createAuthenticator({ token: 'gateway-token', now: () => clock });
+  replacement.adoptSessions([
+    { id: kept, expiresAt: keptExpiry },
+    { id: stale, expiresAt: clock - 1 },
+  ]);
+  assert.equal(replacement.sessionCount(), 1);
+  assert.deepEqual(
+    replacement.authenticate({ headers: { cookie: `${SESSION_COOKIE}=${kept}` } }),
+    { kind: 'cookie', sessionId: kept },
+  );
+  assert.equal(replacement.authenticate({ headers: { cookie: `${SESSION_COOKIE}=${stale}` } }), undefined);
+  assert.deepEqual(replacement.exportSessions(), [{ id: kept, expiresAt: keptExpiry }]);
+
+  // And at its own expiry the adopted session goes the way a minted one does.
+  clock = keptExpiry;
+  assert.equal(replacement.authenticate({ headers: { cookie: `${SESSION_COOKIE}=${kept}` } }), undefined);
+});
+
+test('a session handed to a control API authenticates there, whether adopted before or after it starts, and is handed on when it stops', async () => {
+  const harness = await startApi();
+  const home = harness.home;
+  try {
+    const cookie = await signIn(harness);
+    const sessionId = cookie.slice(`${SESSION_COOKIE}=`.length);
+
+    // Adopted into a serving API: live at once.
+    const handed = { id: 'handed-while-serving', expiresAt: Date.now() + 60_000 };
+    harness.api.adoptSessions([handed]);
+    const adopted = await harness.call('/api/v1/health', { auth: 'cookie', cookie: `${SESSION_COOKIE}=${handed.id}` });
+    assert.equal(adopted.status, 200);
+
+    // Stopped for a restart: what was live goes with it, and nothing is on disk.
+    await harness.api.stop();
+    const atStop = harness.api.sessionsAtStop();
+    assert.deepEqual(atStop.map((session) => session.id).sort(), [handed.id, sessionId].sort());
+    const stratusDir = path.join(home, '.stratus');
+    for (const entry of await readdir(stratusDir)) {
+      const contents = await readFile(path.join(stratusDir, entry), 'utf8').catch(() => '');
+      assert.ok(!contents.includes(sessionId), `${entry} must not carry a session id`);
+    }
+
+    // Adopted into the replacement before it starts: held until it serves.
+    const replacement = createControlApi({ env: { homeDir: home, cwd: home, processEnv: {} }, port: 0 });
+    replacement.adoptSessions(atStop);
+    await replacement.start(harness.gateway);
+    try {
+      assert.ok(replacement.url);
+      const port = Number(new URL(replacement.url).port);
+      const withCookie = await rawGet(port, '/api/v1/health', { cookie });
+      assert.equal(withCookie.status, 200);
+      const stranger = await rawGet(port, '/api/v1/health', { cookie: `${SESSION_COOKIE}=not-handed` });
+      assert.equal(stranger.status, 401);
+    } finally {
+      await replacement.stop();
+    }
   } finally {
     await harness.stop();
   }

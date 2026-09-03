@@ -60,8 +60,10 @@ upgrade, so `/api/v1/events` authenticates the same way. It carries no
 cookie would simply never be sent back — the flag would read as hardening
 while breaking every request. TLS is a tunnel's job.
 
-Sessions live in memory, so restarting the daemon signs the browser out. Run
-`stratus dashboard` again.
+Sessions live in memory and are never written to disk. An announced restart
+(`stratus restart`, `POST /restart`) hands them from the stopping process to
+the one replacing it, so the browser stays signed in; a crash or a plain
+stop-and-start signs it out. Run `stratus dashboard` again for a new link.
 
 **Origin binding.** `SameSite` matching ignores ports, so a page served from
 another port on the same host counts as the same site and its requests carry
@@ -153,7 +155,11 @@ once it is back up"), lets in-flight turns finish for `drainTimeoutMs`
 (default 30 000), aborts what is still running at the end of it (the session
 is saved as failed with `Run aborted: stratusd is restarting`), stops, and
 comes back — this API's connections and event streams included, so a client
-reconnects. `~/.stratus/gateway.json` is rewritten by the new process. What
+reconnects, and a dashboard session still authenticates: the stopping daemon
+hands its live sessions to the replacement in memory, over the channel
+between the two processes, and never writes them down (a crash or a plain
+stop still signs the browser out). `~/.stratus/gateway.json` is rewritten by
+the new process. What
 needs a restart and what does not is tabled in
 [Always on](../../docs/guides/always-on.md#what-needs-a-restart-and-what-does-not).
 

@@ -161,15 +161,25 @@ export interface AuthenticatorOptions {
   now?: () => number;
 }
 
+/** A browser session, as handed from one daemon process to the next. */
+export interface DashboardSession {
+  id: string;
+  /** Epoch milliseconds; a handed session keeps the expiry it was minted with. */
+  expiresAt: number;
+}
+
 /**
  * Everything the API knows about who may talk to it: the bearer token, the
  * browser sessions minted from it, and the one-time tokens that bootstrap
  * those sessions.
  *
- * Sessions live in memory on purpose. A daemon restart logs the browser out,
- * which is honest — the process that vouched for it is gone — and it keeps
- * the API from growing a second durable secret store beside the credentials
- * file.
+ * Sessions live in memory on purpose, and are never written down: the API
+ * must not grow a second durable secret store beside the credentials file.
+ * An announced restart hands them from the stopping process to the one
+ * replacing it (`exportSessions` / `adoptSessions`, over the supervisor's
+ * IPC channel), so `stratus restart` does not log the dashboard out. A
+ * crash or a plain stop still does, which is honest — the process that
+ * vouched for the session is gone, and nothing on disk says otherwise.
  */
 export const createAuthenticator = (options: AuthenticatorOptions) => {
   const now = options.now ?? Date.now;
@@ -266,6 +276,26 @@ export const createAuthenticator = (options: AuthenticatorOptions) => {
     sessionCount(): number {
       sweep();
       return sessions.size;
+    },
+
+    /** Every live session, for the hand-off to a replacement process. Never for disk. */
+    exportSessions(): DashboardSession[] {
+      sweep();
+      return [...sessions].map(([id, session]) => ({ id, expiresAt: session.expiresAt }));
+    },
+
+    /**
+     * Sessions a predecessor handed over, each with the expiry it was
+     * minted with — a hand-off extends nothing. One already expired is
+     * dropped rather than kept for the next sweep to find.
+     */
+    adoptSessions(handed: DashboardSession[]): void {
+      const at = now();
+      for (const session of handed) {
+        if (session.expiresAt > at) {
+          sessions.set(session.id, { expiresAt: session.expiresAt });
+        }
+      }
     },
   };
 };
