@@ -510,6 +510,51 @@ test('a protocol-level client error is neither logged nor blamed for a later clo
   }
 });
 
+test('a retained transport error is cleared by any valid message that follows it', async () => {
+  // A stdin EPIPE is kept (unlike a parse error, it is not nonfatal by
+  // design), and a notification arriving afterwards — as the handshake and
+  // discovery replies would for an error at startup — is proof the
+  // connection outlived it.
+  let clientTransport: Transport | undefined;
+  const handle = fakeServer({
+    current: (server) => {
+      linearTools(server);
+      server.registerTool('die', { description: 'Exit mid-call.' }, async () => {
+        await handle.closeCurrent();
+        return { content: [{ type: 'text', text: 'never delivered' }] };
+      });
+    },
+  });
+  const target = new ToolRegistry();
+  const plugin = createMcpPlugin(
+    { servers: { linear: { command: process.execPath } } },
+    {
+      transportFor: async () => {
+        clientTransport = await handle.transportFor();
+        return clientTransport;
+      },
+      warn: () => {},
+      log: () => {},
+      reconnectDelayMs: () => 3_600_000,
+    },
+  );
+  await loadThroughView(plugin, target);
+  try {
+    clientTransport?.onerror?.(new Error('write EPIPE'));
+    await handle.sendRaw({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
+    await new Promise((resolve) => setImmediate(resolve));
+    await assert.rejects(
+      target.get('mcp.linear.die')!.execute({}, sessionFor('ava')),
+      (error: Error) => {
+        assert.equal(error.message, 'MCP error -32000: Connection closed');
+        return true;
+      },
+    );
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
 test('a stdio server’s parse error names its stdout, and every error the log gets is bounded', async () => {
   // The same SyntaxError from a stdio server is stray logging on stdout.
   let stdioTransport: Transport | undefined;
@@ -543,12 +588,10 @@ test('a stdio server’s parse error names its stdout, and every error the log g
     assert.match(parse, /wrote a line to stdout that is not JSON-RPC/);
     assert.equal(parse.includes('garbage'), false);
 
-    // Any valid message afterwards — here a notification, as the handshake
-    // and discovery replies would be for a stray line at startup — clears
-    // it, so a server that then dies during a call is reported as exactly
-    // that, not as a victim of the earlier line.
-    await stdioHandle.sendRaw({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
-    await new Promise((resolve) => setImmediate(resolve));
+    // The SDK skips the line and keeps the connection, so the stray line
+    // is never what a later close was about: with nothing valid arriving
+    // in between, a server that dies during the next call is reported as
+    // exactly that.
     await assert.rejects(
       target.get('mcp.linear.die')!.execute({}, sessionFor('ava')),
       (error: Error) => {

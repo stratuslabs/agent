@@ -650,9 +650,10 @@ interface ServerState {
    * oversized reply is the case that found this: the SDK's stdio reader
    * refuses a single message over its buffer limit and closes the
    * connection, and without this the agent saw the closure, the log saw
-   * nothing, and every retry did it again. Cleared by any valid message
-   * that arrives afterwards — the handshake's, discovery's, a call's — an
-   * error the connection outlived is not the reason it later closed.
+   * nothing, and every retry did it again. A nonfatal parse error is never
+   * kept, and any valid message that arrives afterwards — the handshake's,
+   * discovery's, a call's — clears what was: an error the connection
+   * outlived is not the reason it later closed.
    */
   lastTransportError: string | undefined;
   attempt: number;
@@ -945,8 +946,14 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
           return;
         }
         const described = describeTransportError(error, state.spec);
-        state.lastTransportError = described;
         warn(`mcp server ${state.spec.name} transport error: ${described}`);
+        // A parse error is nonfatal by the SDK's design — the reader skips
+        // the line and keeps the connection — so it is never what a later
+        // close was about, and remembering it would blame a server that
+        // died mid-call on a stray line it printed a minute earlier.
+        if (!(error instanceof SyntaxError)) {
+          state.lastTransportError = described;
+        }
       };
       // A valid message after the error is proof the connection outlived
       // it. On the message hook rather than on a completed call: a stray
