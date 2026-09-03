@@ -337,11 +337,20 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
   }
 
   const denied = [...ALWAYS_DENIED_FLAGS, ...(scope.deniedFlags ?? [])];
-  // A required token can itself be a flag — the ones that preceded the
-  // first positional when the scope was approved — and a whitelist file is
-  // hand-editable, so the prefix is held to the deny list like the rest.
+  // A required token can itself be a flag or a refspec — an exact scope
+  // carries the whole approved command — and a whitelist file is
+  // hand-editable, so the prefix is held to the same rules as the rest.
   for (const token of args.slice(0, required.length)) {
-    if (token.startsWith('-') && deniesFlag(denied, token)) {
+    if (token.startsWith('-')) {
+      if (deniesFlag(denied, token)) {
+        return false;
+      }
+      continue;
+    }
+    if (scope.deniedArgs?.includes(token)) {
+      return false;
+    }
+    if (scope.denyRefspecForms && (token.startsWith(':') || token.startsWith('+'))) {
       return false;
     }
   }
@@ -392,17 +401,24 @@ export const findMatchingScope = (
  * for — every later `mkdir -p …` asked again, under a log line promising it
  * would not.
  *
- * A flag-first scope is exact on its positionals, though: it carries every
- * one of them and refuses any more. Nothing here knows which flags take a
+ * A flag-first scope is the approved command exactly, though — every token
+ * in order, and nothing more or less. Nothing here knows which flags take a
  * separate value, so in `git --git-dir /x status` the first positional is
- * `/x`, not `status`; a scope of `git --git-dir /x` with a free subcommand
+ * `/x`, not `status`: a scope of `git --git-dir /x` with a free subcommand
  * behind it would have approved every git command against that repository
- * on the strength of one `status`. Exactness costs a prompt for `cp -r src
- * elsewhere` after `cp -r src dist` was approved, which is the direction to
- * fail in. A leading flag the scope must refuse (a destructive one, one the
- * safe list excludes for this command, or one that turns something else
- * into a program) means there is no scope to store, and the answer counts
- * once.
+ * on the strength of one `status`, and a scope that let trailing flags vary
+ * would have let `git -C repo branch --list` cover `--unset-upstream`, since
+ * the subcommand whose constraints should apply cannot be found. Exactness
+ * costs a prompt for `cp -r src elsewhere` after `cp -r src dist` was
+ * approved, which is the direction to fail in.
+ *
+ * And the command must be one the engine could ever run unattended: a
+ * destructive flag, one the safe list excludes for this base command (any
+ * subcommand's, since which one applies is unknowable), one that turns
+ * something else into a program, or a refspec form means there is no scope
+ * to store — "always" on `git --no-pager push origin :main` must not turn a
+ * branch delete into something that runs without asking — and the answer
+ * counts once.
  */
 export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope | undefined => {
   if (analysis.disqualifiedBy || analysis.base === undefined) {
@@ -411,19 +427,39 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
   const tokens = analysis.tokens.slice(1);
   const firstIndex = tokens.findIndex((token) => !token.startsWith('-'));
   const first = firstIndex === -1 ? undefined : tokens[firstIndex];
-  const leading = firstIndex === -1 ? tokens : tokens.slice(0, firstIndex);
-  // Inheritance keys on the positional alone: `git --no-pager branch` must
-  // pick up `git branch`'s listing-only constraint, or approving it once
-  // would persist a wider grant than the safe list's for the same command.
+  const refspecs = analysis.base === 'git';
+
+  if (firstIndex !== 0 && tokens.length > 0) {
+    // Flag-first: the exact command, held to every constraint the safe
+    // list draws for this base command, because the subcommand that would
+    // pick between them cannot be identified past a flag of unknown arity.
+    const forBase = SAFE_COMMAND_SCOPES.filter((scope) => scope.command === analysis.base);
+    const denied = [...ALWAYS_DENIED_FLAGS, ...DESTRUCTIVE_FLAGS, ...forBase.flatMap((scope) => scope.deniedFlags ?? [])];
+    const deniedArgs = forBase.flatMap((scope) => scope.deniedArgs ?? []);
+    for (const token of tokens) {
+      if (token.startsWith('-') ? deniesFlag(denied, token) : deniedArgs.includes(token)) {
+        return undefined;
+      }
+      if (refspecs && !token.startsWith('-') && (token.startsWith(':') || token.startsWith('+'))) {
+        return undefined;
+      }
+    }
+    return {
+      command: analysis.base,
+      args: [...tokens],
+      deniedFlags: [...new Set([...DESTRUCTIVE_FLAGS, ...forBase.flatMap((scope) => scope.deniedFlags ?? [])])],
+      ...(deniedArgs.length > 0 ? { deniedArgs: [...new Set(deniedArgs)] } : {}),
+      // Nothing beyond the command as approved: no positional, no flag.
+      listOnly: true,
+      allowedFlags: [],
+      ...(refspecs ? { denyRefspecForms: true } : {}),
+    };
+  }
+
   const sameScope = SAFE_COMMAND_SCOPES
     .filter((scope) => scope.command === analysis.base && (scope.args ?? []).join(' ') === (first ?? ''));
   const inherited = sameScope.flatMap((scope) => scope.deniedFlags ?? []);
-  if (leading.some((token) => deniesFlag([...ALWAYS_DENIED_FLAGS, ...DESTRUCTIVE_FLAGS, ...inherited], token))) {
-    return undefined;
-  }
-  const positionals = tokens.filter((token) => !token.startsWith('-'));
-  const exact = leading.length > 0;
-  const args = exact ? [...leading, ...positionals] : (first === undefined ? [] : [first]);
+  const args = first === undefined ? [] : [first];
   const deniedArgs = sameScope.flatMap((scope) => scope.deniedArgs ?? []);
   // Only when every safe scope for this command names one: a persisted
   // scope must be no wider than the built-in, and an allowlist from one of
@@ -439,14 +475,13 @@ export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope |
     ...(deniedArgs.length > 0 ? { deniedArgs: [...new Set(deniedArgs)] } : {}),
     // A persisted scope cannot be wider than the safe list's own for the
     // same command: approving `git branch` once must not turn creating a
-    // branch into something that runs unattended forever after. A
-    // flag-first scope is exact on positionals for the reason above.
-    ...(exact || sameScope.some((scope) => scope.listOnly) ? { listOnly: true } : {}),
+    // branch into something that runs unattended forever after.
+    ...(sameScope.some((scope) => scope.listOnly) ? { listOnly: true } : {}),
     ...(allowedFlags ? { allowedFlags } : {}),
     // Git's syntax, so git's rule: elsewhere a leading `+` is an ordinary
     // argument (`chmod +x`) and refusing it would only cost a prompt for no
     // safety.
-    ...(analysis.base === 'git' ? { denyRefspecForms: true } : {}),
+    ...(refspecs ? { denyRefspecForms: true } : {}),
   };
 };
 

@@ -220,22 +220,44 @@ test('a scope approved for a flag-first command covers that command', () => {
   // scope persisted for `mkdir -p build` matched `mkdir build` and never
   // the command that was approved, and every later `mkdir -p …` asked
   // again under a log line promising it would not.
-  // Exact on its positionals — all of them, and no more — so what the log
-  // and the whitelist listing say is the command minus its trailing flags.
-  const cases: Array<[command: string, described: string]> = [
-    ['mkdir -p build', 'mkdir -p build'],
-    ['cp -r src dist', 'cp -r src dist'],
-    ['ls -la docs', 'ls -la docs'],
-    ['curl -sL https://example.com', 'curl -sL https://example.com'],
+  // The approved command exactly — every token in order, nothing more or
+  // less — so what the log and the whitelist listing say is the command.
+  const cases = [
+    'mkdir -p build',
+    'cp -r src dist',
+    'cp -r src --preserve=mode dist',
+    'ls -la docs',
+    'curl -sL https://example.com',
+    'git --no-pager branch --list',
   ];
-  for (const [command, described] of cases) {
+  for (const command of cases) {
     const analysis = analyzeCommand(command);
     const scope = normalizeCommandScope(analysis);
     assert.ok(scope, `${command} reduces to a scope`);
     assert.equal(matchesScope(analysis, scope), true, `the scope for "${command}" covers it`);
-    assert.equal(matchesScope(analyzeCommand(`${command} extra`), scope), false, `the scope for "${command}" stops at its arguments`);
-    assert.equal(describeCommandScope(scope), described);
+    assert.equal(matchesScope(analyzeCommand(`${command} extra`), scope), false, `the scope for "${command}" admits no further argument`);
+    assert.equal(matchesScope(analyzeCommand(`${command} -v`), scope), false, `the scope for "${command}" admits no further flag`);
+    assert.equal(describeCommandScope(scope), command);
   }
+  // Interleaved flags stay where they were: the scope for a command with
+  // one is not the scope for the command without it, in either direction.
+  const preserving = normalizeCommandScope(analyzeCommand('cp -r src --preserve=mode dist'));
+  assert.equal(matchesScope(analyzeCommand('cp -r src dist'), preserving!), false);
+  // A subcommand behind a flag of unknown arity cannot lend its constraints,
+  // so nothing varies: `--unset-upstream` mutates config, and the safe
+  // list's `git branch` scope would have refused it had it been reachable.
+  const listing = normalizeCommandScope(analyzeCommand('git --no-pager branch --list'));
+  assert.equal(matchesScope(analyzeCommand('git --no-pager branch --unset-upstream'), listing!), false);
+  // Which subcommand's constraints apply is unknowable, so all of them do:
+  // `-C` is git's change-directory flag, but it is also `git branch`'s copy
+  // flag, and the safe list denies that letter — so this is not persisted,
+  // and asks each time. The conservative side of the same rule.
+  assert.equal(normalizeCommandScope(analyzeCommand('git -C repo branch --list')), undefined);
+  // And a command the engine could never run unattended is not persisted at
+  // all, whatever its prefix: a refspec delete, a safe-list-denied argument.
+  assert.equal(normalizeCommandScope(analyzeCommand('git --no-pager push origin :main')), undefined);
+  assert.equal(normalizeCommandScope(analyzeCommand('git --no-pager push origin +main')), undefined);
+  assert.equal(normalizeCommandScope(analyzeCommand('git --no-pager remote add origin x')), undefined);
   // Positional-first commands are unchanged: the subcommand stays the scope.
   assert.deepEqual(normalizeCommandScope(analyzeCommand('git push -u origin main'))?.args, ['push']);
   assert.deepEqual(normalizeCommandScope(analyzeCommand('mkdir -p build'))?.args, ['-p', 'build']);

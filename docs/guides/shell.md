@@ -51,16 +51,18 @@ git push origin :main       # a branch delete, with no flag involved
 git push origin +main       # a forced update, likewise
 ```
 
-Flags that come before that first argument are part of the scope, and such a
-scope is exact on its arguments: approving `mkdir -p build` stores
-`mkdir -p build`, which is what the log line names, and covers that command
-with any further non-destructive flags — not `mkdir -p build other`, and not
-`cp -r src elsewhere` after `cp -r src dist`. Nothing knows which flags take
-a value, so a looser rule would have let one approved `git --git-dir /x
-status` cover every git command against that repository. A flag in that
-position that the scope must refuse — a destructive one like `rm -rf build`,
-or `git -c`, which turns config into a program — leaves nothing safe to
-store, so the answer counts once and the next call asks again.
+A command whose first argument is preceded by a flag is stored exactly as
+approved: `mkdir -p build` stores `mkdir -p build`, which is what the log
+line names, and covers that command and nothing else — not `mkdir -p build
+other`, not `mkdir -p build -v`, and not `cp -r src elsewhere` after
+`cp -r src dist`. Nothing knows which flags take a value, so past such a
+flag the engine cannot tell which argument is the subcommand whose rules
+should apply; a looser scope would have let one approved `git --git-dir /x
+status` cover every git command against that repository. A command in that
+shape that could never run unattended — a destructive flag as in
+`rm -rf build`, `git -c`, which turns config into a program, or a refspec
+delete like `git --no-pager push origin :main` — is not stored at all, so
+the answer counts once and the next call asks again.
 
 The whitelist file is `0600` and per agent: it decides what runs with nobody
 watching, so neither another account on the machine nor another agent
