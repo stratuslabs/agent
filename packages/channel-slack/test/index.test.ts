@@ -1438,6 +1438,129 @@ test('a recovered turn that finishes ahead of a queued message has its reply pos
   assert.equal(web.updates.find((entry) => /the message's own reply/.test(entry.text))?.ts, 'bot-ts-2');
 });
 
+test('a recovered reply whose placeholder edit Slack refuses is posted as a message of its own, and the message keeps its placeholder', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const update = web.chat.update.bind(web.chat);
+  web.chat.update = async (args) => {
+    if (args.text === 'the recovered reply') {
+      throw new Error('message_not_found');
+    }
+    return update(args);
+  };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the recovered reply',
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  assert.equal(web.posts.filter((entry) => entry.text === 'the recovered reply').length, 1, 'the recovered reply was posted instead');
+  assert.equal(web.posts.filter((entry) => entry.text === '…').length, 1, 'the placeholder was not handed over, so none was reopened');
+  assert.equal(web.updates.find((entry) => /the message's own reply/.test(entry.text))?.ts, 'bot-ts-1');
+});
+
+test('what the recovery streamed into the queued placeholder does not follow it into the fresh one', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  // The queued turn's own streaming edit, once it lands in the fresh
+  // placeholder — the gate, with a way to lose.
+  let streamed!: (text: string) => void;
+  const streamedEdit = new Promise<string>((resolve) => { streamed = resolve; });
+  const update = web.chat.update.bind(web.chat);
+  web.chat.update = async (args) => {
+    if (args.ts === 'bot-ts-2') {
+      streamed(args.text);
+    }
+    return update(args);
+  };
+  const gateway = createStubGateway(async ({ sessionId }) => {
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'own partial' } });
+    const seen = await Promise.race([
+      streamedEdit,
+      new Promise<string>((resolve) => setTimeout(() => resolve('no streamed edit reached the fresh placeholder'), 2_000)),
+    ]);
+    assert.equal(seen, 'own partial', 'the fresh placeholder shows only this turn\'s stream');
+    return sessionWithReply(sessionId, 'the message\'s own reply');
+  });
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    // The recovery streams into the placeholder at the head of the queue
+    // — the queued message's — and then finishes.
+    await gateway.bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: 'recovered partial' } });
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the recovered reply',
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  assert.ok(!web.updates.some((entry) => entry.ts === 'bot-ts-2' && /recovered partial/.test(entry.text)), 'the recovery\'s stream never reached the fresh placeholder');
+  assert.equal(web.updates.find((entry) => entry.ts === 'bot-ts-2' && /the message's own reply/.test(entry.text))?.text, 'the message\'s own reply');
+});
+
+test('a handover whose fresh placeholder Slack refuses leaves the recovered reply standing, and the message posts its own', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const post = web.chat.postMessage.bind(web.chat);
+  let placeholders = 0;
+  web.chat.postMessage = async (args) => {
+    if (args.text === '…' && ++placeholders === 2) {
+      throw new Error('ratelimited');
+    }
+    return post(args);
+  };
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the recovered reply',
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  const first = web.updates.filter((entry) => entry.ts === 'bot-ts-1').map((entry) => entry.text);
+  assert.deepEqual(first, ['the recovered reply'], 'nothing wrote over the reply the placeholder was handed to');
+  assert.equal(web.posts.filter((entry) => entry.text === 'the message\'s own reply').length, 1, 'the message posted its reply as a message of its own');
+});
+
 test('a recovered reply too long for one message is posted in full even when one of its parts is refused', async () => {
   const { web, gateway, adapter } = approvalAdapter([
     { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },

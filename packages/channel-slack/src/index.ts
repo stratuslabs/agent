@@ -179,6 +179,13 @@ class ReplyRenderer {
    * writes into the fresh one rather than over the reply it was given to.
    */
   private handover: Promise<void> = Promise.resolve();
+  /**
+   * Bumped by a handover. An edit scheduled before it carries the text of
+   * the turn that was handed over — the recovery's stream, routed to this
+   * renderer while it was at the head of the queue — and must not land in
+   * the placeholder opened for this turn.
+   */
+  private generation = 0;
   private finalized = false;
   private readonly web: SlackWebLike;
   private readonly channel: string;
@@ -198,6 +205,25 @@ class ReplyRenderer {
     this.threadTs = threadTs;
     this.editIntervalMs = editIntervalMs;
     this.warn = warn;
+  }
+
+  /**
+   * The gateway has begun this renderer's turn. Whatever was streamed here
+   * before now belonged to the turn ahead of it on the session chain — a
+   * recovery's stream, routed to this renderer because it was at the head
+   * of the queue — and is dropped, edits already scheduled for it
+   * included, so this turn's placeholder starts empty.
+   */
+  beginTurn(): void {
+    this.turnStarted = true;
+    if (this.pendingEdit) {
+      clearTimeout(this.pendingEdit);
+      this.pendingEdit = undefined;
+    }
+    this.buffer = '';
+    this.toolLine = undefined;
+    this.turnBreakPending = false;
+    this.generation += 1;
   }
 
   async open(): Promise<void> {
@@ -306,7 +332,9 @@ class ReplyRenderer {
   }
 
   private scheduleEdit(): void {
-    if (!this.ref || this.pendingEdit) {
+    // Not gated on having a placeholder: during a handover there is none
+    // for a moment, and the edit reads the fresh one when its turn comes.
+    if (this.pendingEdit) {
       return;
     }
     const elapsed = Date.now() - this.lastEditAt;
@@ -323,13 +351,17 @@ class ReplyRenderer {
   }
 
   private queueEdit(text: string): void {
+    const generation = this.generation;
     this.editChain = this.editChain
       .then(() => this.handover)
       .then(() => {
         // Read after the handover, not before: the placeholder may have
-        // changed hands while this edit waited its turn.
+        // changed hands while this edit waited its turn — and the text
+        // may belong to the turn that was handed over.
         const ref = this.ref;
-        return ref ? this.web.chat.update({ channel: ref.channel, ts: ref.ts, text }) : undefined;
+        return ref && generation === this.generation
+          ? this.web.chat.update({ channel: ref.channel, ts: ref.ts, text })
+          : undefined;
       })
       .then(() => undefined)
       .catch((error) => this.warn(`chat.update failed: ${error instanceof Error ? error.message : String(error)}`));
@@ -345,10 +377,15 @@ class ReplyRenderer {
     }
     const text = reply.trim().length > 0 ? reply : '(no reply)';
     const chunks = splitForSlack(text);
-    this.queueEdit(chunks[0] ?? '(no reply)');
+    // No placeholder — a handover could not open a fresh one — and the
+    // reply is a message of its own rather than nothing at all.
+    const rest = this.ref ? chunks.slice(1) : chunks;
+    if (this.ref) {
+      this.queueEdit(chunks[0] ?? '(no reply)');
+    }
     await this.editChain;
     await this.uploadChain;
-    for (const chunk of chunks.slice(1)) {
+    for (const chunk of rest) {
       try {
         await this.web.chat.postMessage({
           channel: this.channel,
@@ -381,13 +418,22 @@ class ReplyRenderer {
     if (this.finalized || !given || first === undefined) {
       return false;
     }
-    const work = (async (): Promise<void> => {
+    const work = (async (): Promise<boolean> => {
       await this.editChain;
       try {
         await this.web.chat.update({ channel: given.channel, ts: given.ts, text: first });
       } catch (error) {
+        // Not handed over: the placeholder is still this turn's, and the
+        // caller posts the reply as messages of its own.
         this.warn(`chat.update failed: ${error instanceof Error ? error.message : String(error)}`);
+        return false;
       }
+      // The placeholder is the earlier turn's now, and the reference goes
+      // before the reopen, so a reopen that fails cannot leave this turn
+      // writing over the reply just handed over. (What was streamed into
+      // it is dealt with by `beginTurn`, at the boundary that actually
+      // separates the two turns' output.)
+      this.ref = undefined;
       for (const chunk of rest) {
         try {
           await this.web.chat.postMessage({
@@ -402,14 +448,14 @@ class ReplyRenderer {
       try {
         await this.open();
       } catch (error) {
-        // The reply it was given stays; this turn's own reply then lands
-        // over it, which is the older failure mode, not a new one.
+        // No placeholder for this turn, then: its reply is posted as a
+        // message of its own when it comes (see `finalize`).
         this.warn(`could not reopen a placeholder: ${error instanceof Error ? error.message : String(error)}`);
       }
+      return true;
     })();
-    this.handover = work;
-    await work;
-    return true;
+    this.handover = work.then(() => undefined);
+    return work;
   }
 }
 
@@ -1374,10 +1420,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // for a foreign turn that both starts and ends after the message
         // was queued, which the chain's order rules out for a recovery.
         if (event.type === 'session.updated' && event.status === 'running') {
-          const head = renderers.get(event.sessionId)?.[0];
-          if (head) {
-            head.turnStarted = true;
-          }
+          renderers.get(event.sessionId)?.[0]?.beginTurn();
         }
         // A renderer at the head that has not seen its turn start is
         // queued behind the turn ending now, and its placeholder is
