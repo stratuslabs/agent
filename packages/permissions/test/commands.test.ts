@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -210,6 +210,44 @@ test('always allow persists a scope per agent, and a later session reads it back
   assert.equal(await second.approve(contextFor('git push --force')), false);
   // And it is that agent's whitelist, not a machine-wide one.
   assert.equal(await second.approve(contextFor('git push origin release', 'juno')), false);
+});
+
+test('a whitelist that exists but will not read is said once, ignored, and never written over', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'stratus-whitelist-bad-'));
+  const warnings: string[] = [];
+  const whitelist = createFileCommandWhitelist({ directory, warn: (line) => warnings.push(line) });
+
+  // No file is the ordinary starting state, and not a warning. (Another
+  // agent's, since a read is cached for the life of the store.)
+  assert.deepEqual(await whitelist.scopesFor('juno'), []);
+  assert.deepEqual(warnings, []);
+
+  // A hand edit gone wrong — one trailing comma. Reproduced against a
+  // running daemon: the file read as empty with no line about it, and the
+  // next "always" wrote a single new scope over every grant it held.
+  const file = whitelistPathFor(directory, 'ava');
+  const broken = '{\n  "version": 1,\n  "scopes": [],\n}\n';
+  await writeFile(file, broken);
+
+  const decisions: PermissionDecision[] = [];
+  let asked = 0;
+  const policy = createPermissionPolicy({
+    mode: 'interactive',
+    ask: async () => { asked += 1; return 'always'; },
+    onDecision: (decision) => decisions.push(decision),
+    commands: { whitelist, onScopeRemembered: () => assert.fail('nothing was remembered durably') },
+  });
+
+  assert.equal(await policy.approve(contextFor('git push origin main')), true);
+  assert.equal(warnings.length, 1, warnings.join('\n'));
+  assert.match(warnings[0] ?? '', /ava\.whitelist\.json could not be read \(.*\); its scopes are ignored and "always" answers for ava are not saved/);
+  assert.equal(await readFile(file, 'utf8'), broken, 'the file is not written over');
+  assert.match(decisions.at(-1)?.reason ?? '', /runs without asking for the rest of this session — not saved: .*could not be read/);
+
+  // The answer still holds for the session, and the file is said once.
+  assert.equal(await policy.approve(contextFor('git push origin release')), true);
+  assert.equal(asked, 1);
+  assert.equal(warnings.length, 1);
 });
 
 test('a persisted scope cannot erase a distinction the safe list already draws', () => {

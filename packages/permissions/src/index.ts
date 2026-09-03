@@ -25,7 +25,7 @@ import {
   SAFE_COMMAND_SCOPES,
   type CommandScope,
 } from './commands.ts';
-import type { CommandWhitelistStore } from './whitelist.ts';
+import { WhitelistUnreadableError, type CommandWhitelistStore } from './whitelist.ts';
 
 export {
   analyzeCommand,
@@ -42,6 +42,7 @@ export {
 export {
   createFileCommandWhitelist,
   whitelistPathFor,
+  WhitelistUnreadableError,
   type CommandWhitelistStore,
 } from './whitelist.ts';
 
@@ -574,7 +575,22 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           // asks again.
           sessionScopes.set(session.agent.id, [...(sessionScopes.get(session.agent.id) ?? []), scope]);
           if (commands?.whitelist) {
-            await commands.whitelist.remember(session.agent.id, scope);
+            try {
+              await commands.whitelist.remember(session.agent.id, scope);
+            } catch (error) {
+              if (!(error instanceof WhitelistUnreadableError)) {
+                throw error;
+              }
+              // The answer stands for this session — the person gave it —
+              // and the file that would carry it further is not written
+              // over grants nobody can read. The line says both.
+              return report(
+                context,
+                true,
+                `${call.toolName} was approved, and "${describeCommandScope(scope)}" runs without asking for the rest of this session — not saved: ${error.message}`,
+                command,
+              );
+            }
             commands.onScopeRemembered?.({ agentId: session.agent.id, scope });
           }
           return report(

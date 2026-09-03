@@ -27,6 +27,18 @@ export const whitelistPathFor = (directory: string, agentId: string): string =>
   path.join(directory, `${agentId}.whitelist.json`);
 
 /**
+ * Thrown by `remember` for an agent whose whitelist exists but could not be
+ * read. The policy catches it by type: the answer still holds for the
+ * session, and the log says why it was not saved.
+ */
+export class WhitelistUnreadableError extends Error {
+  constructor(file: string, reason: string) {
+    super(`${file} could not be read (${reason}), so nothing is written over it. Fix the file and restart the daemon.`);
+    this.name = 'WhitelistUnreadableError';
+  }
+}
+
+/**
  * The persistent half of the three-tier resolution, on disk.
  *
  * Written `0600` with an explicit `chmod`, like every other file in
@@ -41,8 +53,18 @@ export const whitelistPathFor = (directory: string, agentId: string): string =>
  * file whose edits grant permissions, and the same bargain the credential
  * store makes.
  */
-export const createFileCommandWhitelist = (options: { directory: string }): CommandWhitelistStore => {
+export const createFileCommandWhitelist = (options: {
+  directory: string;
+  /**
+   * Where to say that a whitelist exists but could not be read. Once per
+   * agent per process; a host that omits it gets the same behavior with
+   * no line about it.
+   */
+  warn?: (line: string) => void;
+}): CommandWhitelistStore => {
   const cache = new Map<string, CommandScope[]>();
+  /** Files that exist and could not be read, by agent — never written over. */
+  const unreadable = new Map<string, string>();
 
   const read = async (agentId: string): Promise<CommandScope[]> => {
     const cached = cache.get(agentId);
@@ -50,21 +72,33 @@ export const createFileCommandWhitelist = (options: { directory: string }): Comm
       return cached;
     }
     let scopes: CommandScope[] = [];
+    // The agent id is a validated invariant by the time it reaches any
+    // path join (see 03) — it is a single path segment or it was refused
+    // at the parse boundary, so this does not re-check it.
+    const file = whitelistPathFor(options.directory, agentId);
     try {
-      // The agent id is a validated invariant by the time it reaches any
-      // path join (see 03) — it is a single path segment or it was refused
-      // at the parse boundary, so this does not re-check it.
-      const raw = await readFile(whitelistPathFor(options.directory, agentId), 'utf8');
+      const raw = await readFile(file, 'utf8');
       const parsed = JSON.parse(raw) as Partial<WhitelistFile>;
       scopes = Array.isArray(parsed.scopes)
         ? parsed.scopes.map(parseCommandScope).filter((scope): scope is CommandScope => scope !== undefined)
         : [];
-    } catch {
-      // No whitelist, or one that will not parse. Both mean the same thing
-      // to a caller — no stored scopes — and neither is worth failing a
+    } catch (error) {
+      // No whitelist means no stored scopes, and is not worth failing a
       // turn over: the fallback is asking a human, which is where an agent
-      // with no whitelist starts anyway.
+      // with no whitelist starts anyway. A whitelist that exists and will
+      // not read is the same to this call and not the same to the file:
+      // one hand-edited comma made a grant list read as empty with no line
+      // about it, and the next "always" wrote a single new scope over
+      // every grant it held. So it is said once, and `remember` refuses.
       scopes = [];
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        const reason = error instanceof Error ? error.message : String(error);
+        unreadable.set(agentId, reason);
+        options.warn?.(
+          `${file} could not be read (${reason}); its scopes are ignored and "always" answers for ${agentId} `
+            + 'are not saved over it until it is fixed and the daemon restarted.',
+        );
+      }
     }
     cache.set(agentId, scopes);
     return scopes;
@@ -76,6 +110,10 @@ export const createFileCommandWhitelist = (options: { directory: string }): Comm
     },
     async remember(agentId, scope) {
       const scopes = await read(agentId);
+      const reason = unreadable.get(agentId);
+      if (reason !== undefined) {
+        throw new WhitelistUnreadableError(whitelistPathFor(options.directory, agentId), reason);
+      }
       if (scopes.some((existing) => sameScope(existing, scope))) {
         return;
       }
