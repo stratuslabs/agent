@@ -920,7 +920,7 @@ export const routes: Route[] = [
       // The daemon's own config, not whatever the working directory holds:
       // otherwise the catalog probes a different provider or base URL than
       // the one dispatches actually resolve to.
-      const { config } = await discoverActiveConfig(context.env, () => {}, context.configPath);
+      const { config, location } = await discoverActiveConfig(context.env, () => {}, context.configPath);
       // And the *resolved* default rather than the config's copy of it. Which
       // provider is default decides who may use the generic `STRATUS_API_KEY`
       // and the configured `apiKeyEnv`, and a daemon started with
@@ -947,11 +947,22 @@ export const routes: Route[] = [
       // anthropic with no base URL of its own, and the fallback handed the
       // Anthropic key to the OpenAI URL.
       const configApplies = provider !== undefined && (config.provider ?? 'openai') === provider;
+      // ...and only from a config the operator chose. `resolveRuntimeConfig`
+      // refuses to send a key to an endpoint an auto-discovered
+      // `stratus.config.json` named, and that refusal arrives here as a
+      // rejection — caught two lines up, which is precisely what makes this
+      // fallback run. Reinstating the file's `baseUrl` and `apiKeyEnv` from
+      // the raw config would hand a catalog probe the secret the resolution
+      // just declined to send, on nothing more than a dashboard page load.
+      // Without them the probe goes to the provider's own endpoint with the
+      // provider's own variable, which is what a machine with no project
+      // config does anyway.
+      const configChosen = location?.trusted !== false;
       // The codex runtime carries no endpoint at all — the harness owns its
       // endpoints — so only the other providers have one to pass along.
       const baseUrl = (resolved && resolved.provider !== 'codex' ? resolved.baseUrl : undefined)
-        ?? (configApplies ? config.baseUrl : undefined);
-      const apiKeyEnv = resolved?.apiKeyEnvVar ?? (configApplies ? config.apiKeyEnv : undefined);
+        ?? (configApplies && configChosen ? config.baseUrl : undefined);
+      const apiKeyEnv = resolved?.apiKeyEnvVar ?? (configApplies && configChosen ? config.apiKeyEnv : undefined);
       const credentials = await loadCredentials(context.env);
       const models = await collectAvailableModels(
         {
