@@ -61,9 +61,12 @@ should apply; a looser scope would have let one approved `git --git-dir /x
 status` cover every git command against that repository. A command in that
 shape that could never run unattended — a destructive flag as in
 `rm -rf build`, `git -c`, which turns config into a program, a refspec
-delete like `git --no-pager push origin :main`, or a form the safe list
+delete like `git --no-pager push origin :main`, a form the safe list
 refuses for a subcommand it can see, like the branch creation in
-`git --no-pager branch release` — is not stored at all, so
+`git --no-pager branch release`, or a token the shell would expand (a
+glob, a brace, a `~`, a `$`), since quoting is not part of what is stored
+and `chmod -R 600 'file*'` is not `chmod -R 600 file*` — is not stored at
+all, so
 the answer counts once and the next call asks again.
 
 The whitelist file is `0600` and per agent: it decides what runs with nobody

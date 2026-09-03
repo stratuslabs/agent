@@ -262,6 +262,20 @@ test('a scope approved for a flag-first command covers that command', () => {
   assert.equal(normalizeCommandScope(analyzeCommand('git --no-pager tag v1.0')), undefined);
   assert.equal(normalizeCommandScope(analyzeCommand('git --no-pager branch --list --sort=-committerdate')) !== undefined, true);
   assert.deepEqual(normalizeCommandScope(analyzeCommand('git --no-pager remote -v'))?.args, ['--no-pager', 'remote', '-v']);
+  // Quoting is not stored, so nothing the shell would expand is: the
+  // engine cannot tell `'file*'` from `file*`, and `sh -c` can.
+  assert.equal(normalizeCommandScope(analyzeCommand("chmod -R 600 'file*'")), undefined);
+  assert.equal(normalizeCommandScope(analyzeCommand('chmod -R 600 file*')), undefined);
+  assert.equal(normalizeCommandScope(analyzeCommand("find -L . -name '*.ts'")), undefined);
+  assert.equal(normalizeCommandScope(analyzeCommand("curl -sL 'https://example.com/?a=b'")), undefined);
+  assert.equal(normalizeCommandScope(analyzeCommand('ls -la ~/notes')), undefined);
+  assert.equal(normalizeCommandScope(analyzeCommand('ls -la $HOME')), undefined);
+  // A quoted token that the shell would not expand persists as the one
+  // token it is, and matches only the same spelling.
+  const spaced = normalizeCommandScope(analyzeCommand("mkdir -p 'my dir'"));
+  assert.deepEqual(spaced?.args, ['-p', 'my dir']);
+  assert.equal(matchesScope(analyzeCommand('mkdir -p "my dir"'), spaced!), true);
+  assert.equal(matchesScope(analyzeCommand('mkdir -p my dir'), spaced!), false);
   // And a command the engine could never run unattended is not persisted at
   // all, whatever its prefix: a refspec delete, a safe-list-denied argument.
   assert.equal(normalizeCommandScope(analyzeCommand('git --no-pager push origin :main')), undefined);
