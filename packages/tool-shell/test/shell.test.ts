@@ -99,6 +99,12 @@ test('commands start in the pinned working directory', async () => {
   assert.match(String(result.stdout), /marker\.txt/);
 });
 
+test('the cap is handed to the executor, so a flood is dropped as it is read', async () => {
+  const tool = createShellTool({ maxOutputBytes: 200 });
+  const invocation = await tool.createCommand({ command: 'true' }, session());
+  assert.equal(invocation.maxOutputBytes, 200);
+});
+
 test('output is capped with a marker rather than returned whole', async () => {
   const tools = await registryFor({ maxOutputBytes: 200 });
   const result = await runCommand(tools, 'printf "x%.0s" $(seq 1 5000)');
