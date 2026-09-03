@@ -423,11 +423,18 @@ class ReplyRenderer {
    */
   async yieldTo(chunks: readonly string[]): Promise<boolean> {
     const [first, ...rest] = chunks;
-    const given = this.ref;
-    if (this.finalized || !given || first === undefined) {
+    if (first === undefined) {
       return false;
     }
-    const work = (async (): Promise<boolean> => {
+    // One handover at a time: two turns ahead of this one finishing close
+    // together would otherwise both take the placeholder as they found it,
+    // and the second would write over the first's reply. Each waits for
+    // the one before it and takes the placeholder that reopen left.
+    const work = this.handover.then(async (): Promise<boolean> => {
+      const given = this.ref;
+      if (this.finalized || !given) {
+        return false;
+      }
       await this.editChain;
       try {
         await this.web.chat.update({ channel: given.channel, ts: given.ts, text: first });
@@ -462,8 +469,8 @@ class ReplyRenderer {
         this.warn(`could not reopen a placeholder: ${error instanceof Error ? error.message : String(error)}`);
       }
       return true;
-    })();
-    this.handover = work.then(() => undefined);
+    });
+    this.handover = work.then(() => undefined, () => undefined);
     return work;
   }
 }
@@ -686,6 +693,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // to the FIRST registered renderer (the running turn), never a later
   // message's placeholder. Each handler removes exactly its own renderer.
   const renderers = new Map<string, ReplyRenderer[]>();
+  /**
+   * Files a turn nobody here rendered produced — a recovery's screenshot,
+   * say — keyed by session, waiting for the turn's outcome to be posted so
+   * they can follow it into the thread. A rendered turn's files go through
+   * its renderer as they are produced; these have no renderer to go through.
+   */
+  const unrenderedFiles = new Map<string, string[]>();
   // In-flight turns, so stop() can drain: a reply mid-render should reach
   // Slack before the sockets go away.
   const inflight = new Set<Promise<void>>();
@@ -1104,6 +1118,30 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
   };
 
+  /** Post the files an unrendered turn produced into its thread, in order. */
+  const uploadUnrenderedFiles = async (
+    connection: AgentConnection,
+    channel: string,
+    thread: string | undefined,
+    sessionId: string,
+  ): Promise<void> => {
+    const paths = unrenderedFiles.get(sessionId) ?? [];
+    unrenderedFiles.delete(sessionId);
+    for (const filePath of paths) {
+      try {
+        const data = await readFile(filePath);
+        await connection.web.files.uploadV2({
+          channel_id: channel,
+          file: data,
+          filename: path.basename(filePath),
+          ...(thread ? { thread_ts: thread } : {}),
+        });
+      } catch (error) {
+        warn(`files.uploadV2 failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  };
+
   const reportUnrenderedFailure = async (
     event: Extract<StratusEvent, { type: 'session.failed' }>,
     behind: ReplyRenderer | undefined,
@@ -1134,6 +1172,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
     await postAheadOf(behind, connection, metadata.slackChannel, thread, splitForSlack(`Something went wrong: ${event.error}`));
+    await uploadUnrenderedFiles(connection, metadata.slackChannel, thread, event.sessionId);
   };
 
   /**
@@ -1170,6 +1209,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
     await postAheadOf(behind, connection, metadata.slackChannel, thread, splitForSlack(routing.reply));
+    await uploadUnrenderedFiles(connection, metadata.slackChannel, thread, event.sessionId);
     log(`slack: posted the reply of a turn finished after a restart to ${metadata.slackChannel}`);
   };
 
@@ -1436,6 +1476,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         const head = renderers.get(event.sessionId)?.[0];
         const exact = gateway.activeTurnId !== undefined;
         const active = gateway.activeTurnId?.(event.sessionId);
+        // A file a turn with no renderer produced is kept for its outcome
+        // (a renderer at the head, though not the turn's own, uploads what
+        // it is handed as it goes, the way it always has).
+        if (event.type === 'tool.completed' && event.result.ok && !head) {
+          const produced = collectFilePaths(event.result);
+          if (produced.length > 0) {
+            unrenderedFiles.set(event.sessionId, [...(unrenderedFiles.get(event.sessionId) ?? []), ...produced].slice(-20));
+          }
+        }
         if (event.type === 'session.updated' && event.status === 'running' && head && (!exact || active === head.turnId)) {
           head.beginTurn();
         }

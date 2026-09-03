@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import { EventBus, type ApprovalAnswer, type Session, type StratusEvent } from '@stratusagent/core';
 import type { GatewayLike } from '@stratusagent/channels';
@@ -1610,6 +1613,70 @@ test('a turn another surface dispatched to the thread\'s session is not taken fo
   const texts = [...web.posts, ...web.updates].map((entry) => entry.text);
   assert.equal(texts.filter((text) => text === 'the dashboard turn\'s reply').length, 1, 'the foreign turn\'s reply reached the thread once');
   assert.equal(texts.filter((text) => /the message's own reply/.test(text)).length, 1, 'and the message got its own reply once');
+});
+
+test('two turns finishing ahead of a queued message each get their own place in the thread, in order', async () => {
+  // Two control-API turns on the thread's session finish back to back
+  // while a Slack message waits behind them: the first takes the queued
+  // placeholder, the second the one reopened after it, and the message's
+  // own reply lands in a third below both.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    return stubDispatch.call(gateway, input);
+  };
+  let outcomes = 0;
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: `outcome ${++outcomes}`,
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  const textsOn = (ts: string): string[] => web.updates.filter((entry) => entry.ts === ts).map((entry) => entry.text);
+  assert.equal(web.posts.filter((entry) => entry.text === '…').length, 3, 'a placeholder for each turn, in order');
+  assert.deepEqual(textsOn('bot-ts-1'), ['outcome 1']);
+  assert.deepEqual(textsOn('bot-ts-2'), ['outcome 2']);
+  assert.deepEqual(textsOn('bot-ts-3'), ['the message\'s own reply']);
+});
+
+test('a file a recovered turn produced follows its reply into the thread', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-recovered-file-'));
+  const shot = path.join(root, 'page.png');
+  await writeFile(shot, 'png bytes');
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },
+  ]);
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'Here is the screenshot.',
+  });
+  await adapter.start(gateway);
+
+  // The recovered turn's screenshot: a tool result nobody was rendering.
+  await gateway.bus.emit({
+    type: 'tool.completed',
+    sessionId: 'slack:ava:T1:C1:100.1',
+    result: { callId: 'c1', toolName: 'browser.screenshot', ok: true, output: { file: shot } },
+  });
+  await gateway.bus.emit({ type: 'session.completed', sessionId: 'slack:ava:T1:C1:100.1' });
+  await adapter.stop();
+
+  assert.equal(web.posts.at(-1)?.text, 'Here is the screenshot.');
+  assert.deepEqual(web.uploads.map((entry) => [entry.filename, entry.contents]), [['page.png', 'png bytes']]);
 });
 
 test('a recovered reply too long for one message is posted in full even when one of its parts is refused', async () => {
