@@ -278,6 +278,14 @@ export class BrowserSessionPool {
     // taking "its" session out of the set then would take the replacement's,
     // and close the browser under it.
     this.browsers.get(entry.browserKey)?.sessions.delete(entry.sessionId);
+    // Reported here too, before the close rather than after it: the
+    // eviction is the pool forgetting the context, which has just happened,
+    // and a listener keying per-session state on it (the plugin's list of
+    // what a page was refused) must clear that state before the next call
+    // — which opens a replacement the moment this returns — not when a
+    // close that may never settle does, and never after the replacement
+    // has state of its own under the same id.
+    this.options.onEvicted?.({ sessionId: entry.sessionId, reason });
     try {
       await entry.context.close();
     } catch {
@@ -289,7 +297,6 @@ export class BrowserSessionPool {
       // idle overnight is the leak this pack is most likely to cause.
       await this.closeBrowserIfUnused(browser);
     }
-    this.options.onEvicted?.({ sessionId: entry.sessionId, reason });
   }
 
   /** Close a browser no session holds and no admission is about to. */

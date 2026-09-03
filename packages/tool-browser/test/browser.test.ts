@@ -149,6 +149,7 @@ test('giving up on a page is itself bounded, when even closing its context hangs
   let reads = 0;
   let contexts = 0;
   let closes = 0;
+  const routes: Array<(route: RouteLike) => void | Promise<void>> = [];
   const driver: BrowserDriver = {
     async launch() {
       return {
@@ -173,7 +174,9 @@ test('giving up on a page is itself bounded, when even closing its context hangs
                 },
                 async click() {},
                 async fill() {},
-                async route() {},
+                async route(_pattern, handler) {
+                  routes.push(handler);
+                },
                 async close() {},
               };
             },
@@ -191,8 +194,16 @@ test('giving up on a page is itself bounded, when even closing its context hangs
   const read = tools.get('browser.read') as Tool;
   const session = sessionFor('wedged');
 
+  // The page that is about to hang was refused something first.
+  await tools.get('browser.goto')!.execute({ url: 'https://example.com/' }, session);
+  await routes[0]!({
+    request: () => ({ url: () => 'file:///etc/passwd' }),
+    async abort() {},
+    async continue() {},
+  });
+
   const outcome = await Promise.race([
-    read.execute({ url: 'https://example.com/' }, session).then(() => 'answered', (error: Error) => error.message),
+    read.execute({}, session).then(() => 'answered', (error: Error) => error.message),
     new Promise<string>((resolve) => setTimeout(() => resolve('still waiting'), 2_000)),
   ]);
   assert.match(outcome, /did not answer for its text within 50ms.*fresh page/);
@@ -200,6 +211,9 @@ test('giving up on a page is itself bounded, when even closing its context hangs
   const again = await read.execute({ url: 'https://example.com/' }, session) as JsonObject;
   assert.equal(again.text, 'answered');
   assert.equal(contexts, 2, 'the second call ran in a fresh context');
+  // The refusal belonged to the page that was given up on; the fresh page
+  // is not told about it, even though the old context never finished closing.
+  assert.equal(again.blockedRequests, undefined, 'the abandoned page\'s refusals went with it');
 });
 
 test('one browser, a context per conversation, dropped when idle', async (t) => {
