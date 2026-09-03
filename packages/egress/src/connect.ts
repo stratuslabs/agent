@@ -375,6 +375,12 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
     port,
     refusals,
     async close() {
+      // Stop accepting first, then tear down: a connection accepted after
+      // the sweep below would be one nothing here ever destroys, and
+      // `server.close()` would wait on it — the hang this is meant to end.
+      const closed = new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
       for (const socket of sockets) {
         socket.destroy();
       }
@@ -382,9 +388,7 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
       // waits for every keep-alive connection to end on its own, and a
       // browser mid-page has no reason to end one.
       server.closeAllConnections();
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-      });
+      await closed;
     },
   };
 };
