@@ -116,6 +116,77 @@ test('the browser proxy refuses a request the policy refuses, and forwards one i
   assert.match(allowed.body, /internal service reached: \/ok/);
 });
 
+test('a proxied connection the browser abandons is torn down upstream, and close() tears down the rest', async (t) => {
+  // A server that never stops talking: the only way its socket closes is
+  // if the proxy closes it.
+  const upstreamClosed: Array<() => void> = [];
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.write('start ');
+    const timer = setInterval(() => response.write('x'), 20);
+    response.socket?.on('close', () => {
+      clearInterval(timer);
+      upstreamClosed.shift()?.();
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => {
+    // Force-closed: a connection this test proves was leaked would
+    // otherwise hold `server.close()` open forever.
+    server.closeAllConnections();
+    server.close(() => resolve());
+  }));
+  const port = (server.address() as AddressInfo).port;
+  const proxy = await createEgressProxy({ allowedHosts: ['localhost'] });
+  t.after(() => proxy.close());
+
+  // A bounded wait for the upstream socket to close — the gate, with a way
+  // to lose: an upstream nobody tears down fails the assertion at 3s.
+  const nextUpstreamClose = (): Promise<'closed' | 'still open'> =>
+    new Promise((resolve) => {
+      const timer = setTimeout(() => resolve('still open'), 3_000);
+      upstreamClosed.push(() => {
+        clearTimeout(timer);
+        resolve('closed');
+      });
+    });
+
+  const abandon = (): Promise<void> =>
+    new Promise((resolve, reject) => {
+      const request = http.request(
+        { host: '127.0.0.1', port: proxy.port, method: 'GET', path: `http://localhost:${port}/forever` },
+        (response) => {
+          response.once('data', () => {
+            // What a browser does with a page it left: the socket goes,
+            // without an end.
+            request.destroy();
+            resolve();
+          });
+        },
+      );
+      request.on('error', reject);
+      request.end();
+    });
+
+  const first = nextUpstreamClose();
+  await abandon();
+  assert.equal(await first, 'closed', 'the upstream socket is torn down when the browser side is');
+
+  // A connection still in use when the proxy closes goes with it.
+  const second = nextUpstreamClose();
+  await new Promise<void>((resolve, reject) => {
+    const request = http.request(
+      { host: '127.0.0.1', port: proxy.port, method: 'GET', path: `http://localhost:${port}/forever` },
+      (response) => response.once('data', () => resolve()),
+    );
+    request.on('error', () => {});
+    request.on('error', reject);
+    request.end();
+  });
+  await proxy.close();
+  assert.equal(await second, 'closed', 'close() tears down the upstream sockets it still has');
+});
+
 test('a browser is launched pinned to the proxy, loopback included', () => {
   const args = chromiumProxyArgs({ url: 'http://127.0.0.1:9999' });
   assert.ok(args.includes('--proxy-server=http://127.0.0.1:9999'));

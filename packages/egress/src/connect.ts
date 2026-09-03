@@ -293,6 +293,14 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
         clientSocket.pipe(upstream);
         upstream.on('error', () => clientSocket.destroy());
         clientSocket.on('error', () => upstream.destroy());
+        // Either end going away takes the other with it. `pipe` alone does
+        // not: a browser that abandons a page mid-transfer destroys its
+        // socket without ending it, and the upstream half stayed open for
+        // as long as the server kept talking — which for a server that
+        // never stops is forever, and an open socket is what kept a
+        // stopped daemon's process alive.
+        clientSocket.on('close', () => upstream.destroy());
+        upstream.on('close', () => clientSocket.destroy());
       },
       (error: unknown) => {
         const reason = error instanceof Error ? error.message : String(error);
@@ -338,6 +346,16 @@ export const createEgressProxy = async (policy: EgressPolicy = {}): Promise<Egre
       }
       response.end(error.message);
     });
+    // The same coupling as the CONNECT path, for plain HTTP: the browser's
+    // side closing — a page navigated away from, a tab closed — ends the
+    // upstream exchange, and the upstream socket is tracked so `close()`
+    // finds it. Without this, a never-ending response was read by a
+    // request nobody would ever collect.
+    upstream.on('socket', (socket) => {
+      sockets.add(socket);
+      socket.on('close', () => sockets.delete(socket));
+    });
+    response.on('close', () => upstream.destroy());
     request.pipe(upstream);
   });
 
