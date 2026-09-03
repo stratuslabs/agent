@@ -51,6 +51,11 @@ git push origin :main       # a branch delete, with no flag involved
 git push origin +main       # a forced update, likewise
 ```
 
+Flags that come before that first argument are part of the scope: approving
+`mkdir -p build` stores `mkdir -p build`, and that is what the log line
+names. A destructive flag in that position — `rm -rf build` — leaves nothing
+safe to store, so the answer counts once and the next call asks again.
+
 The whitelist file is `0600` and per agent: it decides what runs with nobody
 watching, so neither another account on the machine nor another agent
 inherits it. Delete an entry to withdraw the permission.

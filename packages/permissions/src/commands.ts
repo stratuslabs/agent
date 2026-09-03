@@ -329,6 +329,14 @@ export const matchesScope = (analysis: CommandAnalysis, scope: CommandScope): bo
   }
 
   const denied = [...ALWAYS_DENIED_FLAGS, ...(scope.deniedFlags ?? [])];
+  // A required token can itself be a flag — the ones that preceded the
+  // first positional when the scope was approved — and a whitelist file is
+  // hand-editable, so the prefix is held to the deny list like the rest.
+  for (const token of args.slice(0, required.length)) {
+    if (token.startsWith('-') && deniesFlag(denied, token)) {
+      return false;
+    }
+  }
   const rest = args.slice(required.length);
   for (const token of rest) {
     if (token.startsWith('-')) {
@@ -368,16 +376,34 @@ export const findMatchingScope = (
  * make the distinction real, and inheriting anything the safe list already
  * excludes for the same command so a persisted scope can never erase a
  * flag distinction the built-in list draws.
+ *
+ * Any flags standing between the command and that argument are part of the
+ * scope too: `mkdir -p build` persists `mkdir -p build`. `matchesScope`
+ * reads `args` as the invocation's leading tokens, so a scope that skipped
+ * over `-p` to reach `build` could never match the command it was approved
+ * for — every later `mkdir -p …` asked again, under a log line promising it
+ * would not. A leading flag the scope must refuse (a destructive one, or one
+ * the safe list excludes for this command) means there is no scope to
+ * store, and the answer counts once.
  */
 export const normalizeCommandScope = (analysis: CommandAnalysis): CommandScope | undefined => {
   if (analysis.disqualifiedBy || analysis.base === undefined) {
     return undefined;
   }
-  const first = analysis.tokens.slice(1).find((token) => !token.startsWith('-'));
-  const args = first === undefined ? [] : [first];
+  const tokens = analysis.tokens.slice(1);
+  const firstIndex = tokens.findIndex((token) => !token.startsWith('-'));
+  const first = firstIndex === -1 ? undefined : tokens[firstIndex];
+  const leading = firstIndex === -1 ? tokens : tokens.slice(0, firstIndex);
+  // Inheritance keys on the positional alone: `git --no-pager branch` must
+  // pick up `git branch`'s listing-only constraint, or approving it once
+  // would persist a wider grant than the safe list's for the same command.
   const sameScope = SAFE_COMMAND_SCOPES
-    .filter((scope) => scope.command === analysis.base && (scope.args ?? []).join(' ') === args.join(' '));
+    .filter((scope) => scope.command === analysis.base && (scope.args ?? []).join(' ') === (first ?? ''));
   const inherited = sameScope.flatMap((scope) => scope.deniedFlags ?? []);
+  if (leading.some((token) => deniesFlag([...ALWAYS_DENIED_FLAGS, ...DESTRUCTIVE_FLAGS, ...inherited], token))) {
+    return undefined;
+  }
+  const args = [...leading, ...(first === undefined ? [] : [first])];
   const deniedArgs = sameScope.flatMap((scope) => scope.deniedArgs ?? []);
   // Only when every safe scope for this command names one: a persisted
   // scope must be no wider than the built-in, and an allowlist from one of

@@ -10,6 +10,8 @@ import {
   analyzeCommand,
   createFileCommandWhitelist,
   createPermissionPolicy,
+  describeCommandScope,
+  matchesScope,
   normalizeCommandScope,
   whitelistPathFor,
   type CommandScope,
@@ -210,6 +212,61 @@ test('always allow persists a scope per agent, and a later session reads it back
   assert.equal(await second.approve(contextFor('git push --force')), false);
   // And it is that agent's whitelist, not a machine-wide one.
   assert.equal(await second.approve(contextFor('git push origin release', 'juno')), false);
+});
+
+test('a scope approved for a flag-first command covers that command', () => {
+  // The scope used to skip over the flags to reach the first positional,
+  // while the matcher reads a scope's args as the leading tokens — so the
+  // scope persisted for `mkdir -p build` matched `mkdir build` and never
+  // the command that was approved, and every later `mkdir -p …` asked
+  // again under a log line promising it would not.
+  const cases: Array<[command: string, described: string]> = [
+    ['mkdir -p build', 'mkdir -p build'],
+    ['cp -r src dist', 'cp -r src'],
+    ['ls -la docs', 'ls -la docs'],
+    ['curl -sL https://example.com', 'curl -sL https://example.com'],
+  ];
+  for (const [command, described] of cases) {
+    const analysis = analyzeCommand(command);
+    const scope = normalizeCommandScope(analysis);
+    assert.ok(scope, `${command} reduces to a scope`);
+    assert.equal(matchesScope(analysis, scope), true, `the scope for "${command}" covers it`);
+    // What the log and the whitelist listing say now names the flags too.
+    assert.equal(describeCommandScope(scope), described);
+  }
+  // Positional-first commands are unchanged: the subcommand stays the scope.
+  assert.deepEqual(normalizeCommandScope(analyzeCommand('git push -u origin main'))?.args, ['push']);
+  assert.deepEqual(normalizeCommandScope(analyzeCommand('mkdir -p build'))?.args, ['-p', 'build']);
+  // A leading flag the scope would have to refuse leaves nothing to store.
+  assert.equal(normalizeCommandScope(analyzeCommand('rm -rf build')), undefined);
+  // And a leading flag the safe list excludes for this command is refused
+  // rather than smuggled into the prefix where the deny list used to not look.
+  assert.equal(normalizeCommandScope(analyzeCommand('git --force branch')), undefined);
+  const branchScope = normalizeCommandScope(analyzeCommand('git --no-pager branch'));
+  assert.equal(branchScope?.listOnly, true, 'inherits the listing-only constraint by its positional');
+  assert.equal(matchesScope(analyzeCommand('git --no-pager branch release'), branchScope!), false);
+});
+
+test('always allow on a flag-first command runs it unattended next time', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'stratus-whitelist-'));
+  const whitelist = createFileCommandWhitelist({ directory });
+  const decisions: PermissionDecision[] = [];
+  const first = createPermissionPolicy({
+    mode: 'interactive',
+    ask: async () => 'always',
+    onDecision: (decision) => decisions.push(decision),
+    commands: { whitelist },
+  });
+  assert.equal(await first.approve(contextFor('mkdir -p build')), true);
+  assert.match(decisions[0]?.reason ?? '', /"mkdir -p build" now runs without asking/);
+
+  const second = createPermissionPolicy({
+    mode: 'headless',
+    commands: { whitelist: createFileCommandWhitelist({ directory }) },
+  });
+  assert.equal(await second.approve(contextFor('mkdir -p build')), true);
+  assert.equal(await second.approve(contextFor('mkdir -pf build')), false, 'a destructive letter in the bundle still refuses');
+  assert.equal(await second.approve(contextFor('rm -rf build')), false);
 });
 
 test('a persisted scope cannot erase a distinction the safe list already draws', () => {
