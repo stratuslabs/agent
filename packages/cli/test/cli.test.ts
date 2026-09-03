@@ -7875,11 +7875,13 @@ test('a stop delivered to the whole process group after a restart drains the rep
   };
 
   try {
-    // Bounded polls, far above what a loaded runner needs: the gate is the
-    // daemon publishing itself, and a daemon that never does fails here
-    // rather than hanging the suite.
+    // One deadline per wait, far above what a loaded runner needs: the
+    // gate is the daemon publishing itself, and a daemon that never does
+    // fails here rather than hanging the suite. A deadline rather than an
+    // attempt count, because an attempt can now take as long as a health
+    // check's own timeout.
     let first: { pid?: number; url: string } | undefined;
-    for (let attempt = 0; attempt < 300 && !first; attempt += 1) {
+    for (const deadline = Date.now() + 30_000; !first && Date.now() < deadline;) {
       first = await info();
       if (!first) await sleep(100);
     }
@@ -7888,7 +7890,7 @@ test('a stop delivered to the whole process group after a restart drains the rep
     assert.equal((await postJson(`${first.url}/api/v1/restart`, token, { reason: 'test' })).status, 202);
 
     let second: { pid?: number; url: string } | undefined;
-    for (let attempt = 0; attempt < 300 && !second; attempt += 1) {
+    for (const deadline = Date.now() + 30_000; !second && Date.now() < deadline;) {
       const current = await info();
       if (current && current.pid !== first.pid && await getStatus(`${current.url}/api/v1/health`, token).catch(() => 0) === 200) {
         second = current;
@@ -7903,7 +7905,13 @@ test('a stop delivered to the whole process group after a restart drains the rep
     assert.equal(second.url, first.url);
 
     process.kill(-(daemon.pid as number), 'SIGTERM');
-    const result = await Promise.race([exited, sleep(30_000).then(() => 'hung' as const)]);
+    // The losing timer is cleared: left armed, it would hold the test
+    // worker open for the rest of its 30 seconds after a clean exit.
+    let hung: NodeJS.Timeout | undefined;
+    const result = await Promise.race([
+      exited,
+      new Promise<'hung'>((resolve) => { hung = setTimeout(() => resolve('hung'), 30_000); }),
+    ]).finally(() => clearTimeout(hung));
     assert.notEqual(result, 'hung', `the daemon did not exit after a group stop:\n${output}`);
     assert.deepEqual(result, { code: 0, signal: null }, output);
     // The replacement drained rather than dying to the repeated signal.
