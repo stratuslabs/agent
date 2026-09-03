@@ -319,7 +319,7 @@ const openLines = async (resolved: ResolvedPath): Promise<OpenedLines> => {
   const handle = await openContained(resolved, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
   try {
     const { size } = await handle.stat();
-    return { size, lines: linesOf(handle) };
+    return { size, lines: linesOf(handle, size) };
   } catch (error) {
     await handle.close();
     throw error;
@@ -327,12 +327,19 @@ const openLines = async (resolved: ResolvedPath): Promise<OpenedLines> => {
 };
 
 /** Owns `handle`: closes it when the lines run out, or when the caller stops early. */
-const linesOf = async function* (handle: Awaited<ReturnType<typeof open>>): AsyncGenerator<LineRead | undefined> {
+const linesOf = async function* (handle: Awaited<ReturnType<typeof open>>, size: number): AsyncGenerator<LineRead | undefined> {
   try {
+    if (size === 0) {
+      return;
+    }
     const decoder = new StringDecoder('utf8');
     let carry = '';
     let discarding = false;
-    for await (const chunk of handle.createReadStream({ start: 0, highWaterMark: 64 * 1024 })) {
+    // Bounded to the size the file had when it was opened: a log being
+    // appended to would otherwise be read for as long as its writer stays
+    // ahead, and the result's `bytes` would name a size the search had
+    // long passed. One call searches one finite snapshot.
+    for await (const chunk of handle.createReadStream({ start: 0, end: size - 1, highWaterMark: 64 * 1024 })) {
       if (looksBinary(chunk as Buffer)) {
         yield undefined;
         return;
