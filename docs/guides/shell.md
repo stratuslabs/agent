@@ -51,6 +51,25 @@ git push origin :main       # a branch delete, with no flag involved
 git push origin +main       # a forced update, likewise
 ```
 
+A command whose first argument is preceded by a flag is stored exactly as
+approved: `mkdir -p build` stores `mkdir -p build`, which is what the log
+line names, and covers that command and nothing else — not `mkdir -p build
+other`, not `mkdir -p build -v`, and not `cp -r src elsewhere` after
+`cp -r src dist`. Nothing knows which flags take a value, so past such a
+flag the engine cannot tell which argument is the subcommand whose rules
+should apply; a looser scope would have let one approved `git --git-dir /x
+status` cover every git command against that repository. A command in that
+shape that could never run unattended — a destructive flag as in
+`rm -rf build`, `git -c`, which turns config into a program, a refspec
+delete like `git --no-pager push origin :main`, a form the safe list
+refuses for a subcommand it can see, like the branch creation in
+`git --no-pager branch release`, or a token the shell reads differently
+quoted and unquoted (a glob, a brace, a `~`, a `$`, a `#`), since quoting
+is not part of what is stored and `chmod -R 600 'file*'` is not
+`chmod -R 600 file*` — is not stored at
+all, so
+the answer counts once and the next call asks again.
+
 The whitelist file is `0600` and per agent: it decides what runs with nobody
 watching, so neither another account on the machine nor another agent
 inherits it. Delete an entry to withdraw the permission.
