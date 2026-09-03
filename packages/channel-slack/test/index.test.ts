@@ -153,6 +153,7 @@ const createStubGateway = (
   reply: (input: { sessionId: string; userMessage: string }) => Promise<Session> | Session,
 ): StubGateway => {
   const bus = new EventBus();
+  const activeTurns = new Map<string, string>();
   const gateway: StubGateway = {
     bus,
     dispatches: [],
@@ -183,12 +184,20 @@ const createStubGateway = (
         ...(input.agentId ? { agentId: input.agentId } : {}),
         userMessage: input.userMessage,
       });
-      // As the gateway does: the session reports `running` as the turn
-      // begins, which is how the adapter knows the turn at the head of the
-      // chain is the one it dispatched.
-      await bus.emit({ type: 'session.updated', sessionId: input.sessionId, status: 'running' });
-      return reply({ sessionId: input.sessionId, userMessage: input.userMessage });
+      // As the gateway does: the caller's turn id is the session's active
+      // turn for as long as the turn runs, and the session reports
+      // `running` as the turn begins.
+      if (input.turnId !== undefined) {
+        activeTurns.set(input.sessionId, input.turnId);
+      }
+      try {
+        await bus.emit({ type: 'session.updated', sessionId: input.sessionId, status: 'running' });
+        return await reply({ sessionId: input.sessionId, userMessage: input.userMessage });
+      } finally {
+        activeTurns.delete(input.sessionId);
+      }
     },
+    activeTurnId: (sessionId) => activeTurns.get(sessionId),
   };
   return gateway;
 };
@@ -1559,6 +1568,48 @@ test('a handover whose fresh placeholder Slack refuses leaves the recovered repl
   const first = web.updates.filter((entry) => entry.ts === 'bot-ts-1').map((entry) => entry.text);
   assert.deepEqual(first, ['the recovered reply'], 'nothing wrote over the reply the placeholder was handed to');
   assert.equal(web.posts.filter((entry) => entry.text === 'the message\'s own reply').length, 1, 'the message posted its reply as a message of its own');
+});
+
+test('a turn another surface dispatched to the thread\'s session is not taken for the queued message\'s, and its reply is posted', async () => {
+  // The dashboard (or the control API) dispatches to this Slack thread's
+  // session; a Slack message arrives while that turn is in its preflight,
+  // so the message's renderer is queued before the foreign turn reports
+  // `running`. The foreign turn is not the renderer's, however it looks
+  // from the order of events, and its outcome belongs in the thread.
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  const stubActiveTurn = gateway.activeTurnId!;
+  let foreign: string | undefined;
+  gateway.activeTurnId = (sessionId) => foreign ?? stubActiveTurn(sessionId);
+  gateway.dispatch = async (input) => {
+    // The foreign turn runs first on the session chain, under an id of its
+    // own, and finishes before the queued message's turn starts.
+    foreign = 'dashboard-turn';
+    await gateway.bus.emit({ type: 'session.updated', sessionId: input.sessionId, status: 'running' });
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    foreign = undefined;
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+    reply: 'the dashboard turn\'s reply',
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  const texts = [...web.posts, ...web.updates].map((entry) => entry.text);
+  assert.equal(texts.filter((text) => text === 'the dashboard turn\'s reply').length, 1, 'the foreign turn\'s reply reached the thread once');
+  assert.equal(texts.filter((text) => /the message's own reply/.test(text)).length, 1, 'and the message got its own reply once');
 });
 
 test('a recovered reply too long for one message is posted in full even when one of its parts is refused', async () => {

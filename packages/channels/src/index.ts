@@ -95,9 +95,23 @@ export interface GatewayLike {
     userMessage: string;
     metadata?: JsonObject;
     signal?: AbortSignal;
+    /**
+     * Caller-chosen id for this turn, so the adapter can tell its own turn's
+     * events from another caller's on the same session — see `activeTurnId`.
+     */
+    turnId?: string;
   }): Promise<Session>;
   readonly bus: EventBus;
   agents(): AgentDefinition[];
+  /**
+   * The `turnId` of the turn currently running on a session, if its caller
+   * named one. Optional: a host that omits it leaves the adapter to guess
+   * which turn an outcome belongs to from the order events arrive in, which
+   * is right for every turn the adapter started itself and wrong for a turn
+   * another surface dispatched to the same session while a message of the
+   * adapter's was queued behind it.
+   */
+  activeTurnId?(sessionId: string): string | undefined;
   /**
    * Where a durable session came from, or undefined if there is no such
    * session.

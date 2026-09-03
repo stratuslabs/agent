@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -165,6 +166,14 @@ class ReplyRenderer {
    * on a human — and its completion is not this renderer's to swallow.
    */
   turnStarted = false;
+  /**
+   * The id this renderer's turn is dispatched under. A gateway that reports
+   * its active turn (`activeTurnId`) lets the adapter match an outcome to
+   * this renderer exactly, rather than to whichever turn reported `running`
+   * next — which, for a session another surface can also dispatch to, may
+   * not be this one.
+   */
+  readonly turnId: string = randomUUID();
   private buffer = '';
   private turnBreakPending = false;
   private toolLine: string | undefined;
@@ -1319,6 +1328,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         sessionId,
         agentId: connection.config.agentId,
         userMessage,
+        turnId: renderer.turnId,
         metadata: {
           channel: 'slack',
           team,
@@ -1410,24 +1420,32 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // turn, so a message arriving while a recovery is still ahead of
         // it on the session chain has a renderer at the head while the
         // recovery finishes — and the recovery's reply would be swallowed
-        // as rendered when nothing rendered it. The gateway reports the
-        // session `running` as each turn begins (after the message is
-        // durable, before any provider work), so a renderer that has seen
-        // that owns the turn ending now, and one that has not is waiting
-        // behind whoever does. `StratusEvent` carries no turn identifier
-        // (the gap 05's WS envelope closes with `{ sessionId, turnId,
-        // event }`), so this is the nearest thing to one: it is wrong only
-        // for a foreign turn that both starts and ends after the message
-        // was queued, which the chain's order rules out for a recovery.
-        if (event.type === 'session.updated' && event.status === 'running') {
-          renderers.get(event.sessionId)?.[0]?.beginTurn();
+        // as rendered when nothing rendered it.
+        //
+        // Which turn is running is exact when the gateway says so: every
+        // turn this adapter dispatches carries its renderer's `turnId`, and
+        // `activeTurnId` names the one on the session now (`StratusEvent`
+        // itself carries no turn identifier), so a turn another surface
+        // dispatched to the same session is never taken for this adapter's,
+        // whatever order the two started in. A gateway without that answer
+        // leaves the order of events: the session reports `running` as
+        // each turn begins, and the next `running` is taken to be the
+        // head renderer's — right for a recovery, which is always ahead of
+        // the message queued behind it, and wrong only for a foreign turn
+        // that starts after the message was queued.
+        const head = renderers.get(event.sessionId)?.[0];
+        const exact = gateway.activeTurnId !== undefined;
+        const active = gateway.activeTurnId?.(event.sessionId);
+        if (event.type === 'session.updated' && event.status === 'running' && head && (!exact || active === head.turnId)) {
+          head.beginTurn();
         }
         // A renderer at the head that has not seen its turn start is
         // queued behind the turn ending now, and its placeholder is
         // already in the thread: the outcome goes through it, so the
         // thread reads in the order the conversation happened.
-        const head = renderers.get(event.sessionId)?.[0];
-        const rendered = head?.turnStarted === true;
+        const rendered = exact
+          ? active !== undefined && (renderers.get(event.sessionId) ?? []).some((renderer) => renderer.turnId === active)
+          : head?.turnStarted === true;
         if (event.type === 'session.failed' && !rendered) {
           track(reportUnrenderedFailure(event, head));
           return;
