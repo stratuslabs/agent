@@ -107,6 +107,8 @@ const guardRequests = async (
 
 interface BrowserRuntime {
   pool: BrowserSessionPool;
+  /** `title`, `evaluate`, and their like on a page, bounded by the session's navigation timeout. */
+  ask<T>(session: Session, page: PageLike, what: string, work: () => Promise<T>, timeoutMs: number): Promise<T>;
   /**
    * What each conversation's own page was refused, keyed by session.
    *
@@ -130,6 +132,55 @@ const refusalsFor = (runtime: BrowserRuntime, session: Session): string[] => [
   ...(runtime.blocked.get(session.id) ?? []),
   ...runtime.pool.refusalsFor(session.id),
 ].slice(-10);
+
+/**
+ * Bound a page operation Playwright does not bound itself. `evaluate` and
+ * `title` run on the page's main thread, and a page whose script is
+ * spinning never answers either — `browser.read` on one hung until the idle
+ * sweep happened to close the context under it: forty seconds in a probe,
+ * five minutes at the default `idleMs`, on a call a human had approved.
+ * The page will not come back, so its context is closed and the error says
+ * the next call opens a fresh one.
+ */
+const answeredWithin = async <T>(
+  work: Promise<T>,
+  timeoutMs: number,
+  describe: () => string,
+  giveUp: () => Promise<void>,
+): Promise<T> => {
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(describe())), timeoutMs);
+  });
+  try {
+    return await Promise.race([work, expired]);
+  } catch (error) {
+    if (timer !== undefined && error instanceof Error && error.message === describe()) {
+      // The abandoned operation settles later, when the context goes;
+      // nobody is listening for that, and it must not surface as unhandled.
+      work.catch(() => {});
+      // The teardown is bounded too: closing a context on a transport this
+      // wedged can hang the way the page did, and waiting on it would make
+      // the timeout a promise this call still broke. Past the bound the
+      // close carries on unwaited — the pool forgot the context the moment
+      // the release began, so the next call opens a fresh one either way.
+      await within(giveUp().catch(() => undefined), timeoutMs);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/** Resolves when `work` settles or `ms` pass, whichever is first. */
+const within = (work: Promise<void>, ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    void work.then(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
 
 const truncate = (value: string, maxBytes: number): { text: string; truncated: boolean } =>
   Buffer.byteLength(value, 'utf8') <= maxBytes
@@ -186,7 +237,7 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       return {
         url: page.url(),
         ...(status === undefined ? {} : { status }),
-        title: await page.title(),
+        title: await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs),
         ...(refusalsFor(runtime, session).length > 0
           ? { blockedRequests: refusalsFor(runtime, session) }
           : {}),
@@ -208,14 +259,14 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       if (typeof input.url === 'string' && input.url.length > 0) {
         await navigate(page, input.url, settings.policy, settings.navigationTimeoutMs);
       }
-      const extracted = await page.evaluate(READABLE_TEXT_SCRIPT);
+      const extracted = await runtime.ask(session, page, 'its text', () => page.evaluate(READABLE_TEXT_SCRIPT), settings.navigationTimeoutMs);
       const { text, truncated } = truncate(
         typeof extracted === 'string' ? extracted : '',
         narrowed(input.maxBytes, settings.maxTextBytes),
       );
       return {
         url: page.url(),
-        title: await page.title(),
+        title: await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs),
         text,
         truncated,
         ...(refusalsFor(runtime, session).length > 0
@@ -247,7 +298,11 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       // picture in Slack rather than a path nobody can open. One key rather
       // than a `path` alias beside it — two words for one thing is how a
       // convention stops being one.
-      return { file: target, url: page.url(), title: await page.title() };
+      return {
+        file: target,
+        url: page.url(),
+        title: await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs),
+      };
     },
   };
 
@@ -281,7 +336,12 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       } else {
         throw new Error(`Unsupported action: ${String(input.action)}. Use click or type.`);
       }
-      return { action: input.action, selector, url: page.url(), title: await page.title() };
+      return {
+        action: input.action,
+        selector,
+        url: page.url(),
+        title: await runtime.ask(session, page, 'its title', () => page.title(), settings.navigationTimeoutMs),
+      };
     },
   };
 
@@ -331,6 +391,15 @@ export const createBrowserPlugin = (
   const runtime: BrowserRuntime = {
     pool,
     blocked,
+    ask(session, page, what, work, timeoutMs) {
+      return answeredWithin(
+        work(),
+        timeoutMs,
+        () => `The page at ${page.url()} did not answer for ${what} within ${timeoutMs}ms — its script is busy. `
+          + 'Its browser context was closed; the next call opens a fresh page.',
+        () => pool.release(session.id, page).then(() => undefined),
+      );
+    },
     async pageFor(session) {
       const settings = settingsFor(config, session);
       // The agent's own policy decides which browser serves it: a proxy is

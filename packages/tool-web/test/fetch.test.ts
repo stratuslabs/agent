@@ -64,6 +64,34 @@ test('web.fetch returns a page as readable text', async (t) => {
   );
 });
 
+test('the timeout bounds the whole exchange, redirects included', async (t) => {
+  // Each hop answers well inside the timeout on its own; only the chain
+  // exceeds it. A timer per hop would let this one through.
+  const server = http.createServer((request, response) => {
+    const n = Number(new URL(request.url ?? '/', 'http://x').searchParams.get('n') ?? 0);
+    setTimeout(() => {
+      if (n >= 3) {
+        response.writeHead(200, { 'content-type': 'text/plain' });
+        response.end('finally');
+      } else {
+        response.writeHead(302, { location: `/?n=${n + 1}` });
+        response.end();
+      }
+    }, 150);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as AddressInfo).port;
+
+  const tool = await fetchTool({ allowedHosts: ['localhost'], timeoutMs: 300 });
+  const startedAt = Date.now();
+  await assert.rejects(
+    tool.execute({ url: `http://localhost:${port}/` }, session),
+    /Timed out after 300ms across \d redirect\(s\)/,
+  );
+  assert.ok(Date.now() - startedAt < 600, `gave up after ${Date.now() - startedAt}ms, not at the budget`);
+});
+
 test('a call may narrow maxBytes, never raise it', async (t) => {
   const server = http.createServer((_request, response) => {
     response.writeHead(200, { 'content-type': 'text/plain' });
