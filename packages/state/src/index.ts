@@ -2285,6 +2285,14 @@ const findEscapingSymlink = async (directory: string): Promise<string | undefine
  * written for the provider named in that file, so it only counts when the
  * file still describes the provider being resolved.
  *
+ * **An untrusted config does not get to name it.** Choosing which variable
+ * is read is choosing which of the machine's secrets this process picks up,
+ * and an auto-discovered `stratus.config.json` ships in any repository
+ * somebody clones — `apiKeyEnv: "AWS_SECRET_ACCESS_KEY"` in a cloned repo
+ * is not a provider setting, it is a request to go and fetch something
+ * else. `STRATUS_API_KEY_ENV` still names one, because the environment is
+ * the operator's own.
+ *
  * Exported because diagnostics have to name the variable that actually
  * won: re-deriving this rule elsewhere drifts, and a warning that blames
  * the wrong variable leaves the real override — and its billing — in place.
@@ -2294,11 +2302,13 @@ export const apiKeyEnvNameFor = (
   fileConfig: StratusConfigFile,
   fileConfigApplies: boolean,
   env: StateEnvironment = {},
+  configTrusted?: boolean,
 ): string => {
   const processEnv = readProcessEnv(env);
+  const fromFile = fileConfigApplies && configTrusted !== false ? fileConfig.apiKeyEnv : undefined;
   return String(
     readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
-      ?? (fileConfigApplies ? fileConfig.apiKeyEnv : undefined)
+      ?? fromFile
       ?? defaultApiKeyEnvName(provider),
   );
 };
@@ -2372,7 +2382,19 @@ export const resolveRuntimeConfig = async (
         ? DEFAULT_CODEX_MODEL
         : DEFAULT_OPENAI_MODEL);
 
-  const apiKeyEnvName = apiKeyEnvNameFor(provider as CredentialProviderName, fileConfig, fileConfigApplies, env);
+  const apiKeyEnvName = apiKeyEnvNameFor(provider as CredentialProviderName, fileConfig, fileConfigApplies, env, configTrusted);
+  // Read off the answer rather than re-deriving the rule that produced it:
+  // an untrusted config named a variable and something else won. There is
+  // no warning channel here (`resolveRuntimeConfig` takes no logger), so
+  // the one place this can be said is the error someone gets when no key
+  // resolves — which is exactly the case where the substitution is why
+  // they are stuck.
+  const ignoredApiKeyEnv = configTrusted === false
+    && fileConfigApplies
+    && typeof fileConfig.apiKeyEnv === 'string'
+    && fileConfig.apiKeyEnv !== apiKeyEnvName
+    ? fileConfig.apiKeyEnv
+    : undefined;
 
   const credentials = await loadCredentials(env);
 
@@ -2447,6 +2469,23 @@ export const resolveRuntimeConfig = async (
       `Your saved ${provider} sign-in is bound to ${boundBaseUrl} and is not sent to ${explicitBaseUrl}. Set ${apiKeyEnvName} or STRATUS_API_KEY to use that endpoint.`,
     );
   }
+  // The other half of the rule the stored sign-in has always followed: an
+  // endpoint an auto-discovered project config chose is not a place this
+  // process sends a secret. The stored key was already withheld there;
+  // an environment key was not, so a cloned repository shipping a
+  // `stratus.config.json` with its own `baseUrl` collected whatever key
+  // the operator had exported, in their own shell, for their own work.
+  //
+  // Refused rather than quietly redirected to the default endpoint: a
+  // project that legitimately points at a local model is a real setup, and
+  // silently talking to the official API instead would be a surprising bill
+  // and a leaked prompt. The two ways to say "I meant this file" are both
+  // named, and both are the operator's own act rather than the repository's.
+  if (untrustedCustomBaseUrl && envApiKeyEntry) {
+    throw new Error(
+      `The project config at ${configPathShown} sets a custom base URL (${String(fileConfig.baseUrl)}), and ${envApiKeyEntry.name} is not sent to an endpoint an auto-discovered config chose. Run with --config ${configPathShown} to trust that file, or move the base URL into ~/.stratus/config.json.`,
+    );
+  }
 
   const baseUrl = boundBaseUrl
     ?? explicitBaseUrl
@@ -2458,7 +2497,7 @@ export const resolveRuntimeConfig = async (
   if (!apiKey && !authToken && !codexSubscription) {
     if (untrustedCustomBaseUrl && credentials[provider as CredentialProviderName]) {
       throw new Error(
-        `The project config at ${configPathShown} sets a custom base URL (${fileConfig.baseUrl}), so your saved sign-in is not sent to it. Set ${apiKeyEnvName} or STRATUS_API_KEY to use this endpoint, or run with --config to trust the file explicitly.`,
+        `The project config at ${configPathShown} sets a custom base URL (${fileConfig.baseUrl}), so your saved sign-in is not sent to it. Run with --config ${configPathShown} to trust that file, or move the base URL into ~/.stratus/config.json.`,
       );
     }
     if (provider === 'codex') {
@@ -2467,7 +2506,10 @@ export const resolveRuntimeConfig = async (
       );
     }
     throw new Error(
-      `Missing API key for provider=${provider}. Run \`stratus setup\` to sign in, or set STRATUS_API_KEY or ${apiKeyEnvName}.`,
+      `Missing API key for provider=${provider}. Run \`stratus setup\` to sign in, or set STRATUS_API_KEY or ${apiKeyEnvName}.`
+      + (ignoredApiKeyEnv !== undefined
+        ? ` (The project config at ${configPathShown} asks for ${ignoredApiKeyEnv}, which an auto-discovered config does not get to choose — it decides which of this machine's secrets the process reads. Run with --config ${configPathShown} to trust that file.)`
+        : ''),
     );
   }
 
@@ -2542,14 +2584,29 @@ export const resolveRuntimeConfig = async (
     if (fallbackProvider !== 'demo') {
       // Same precedence as the primary sign-in: environment keys outrank
       // the stored credential. And the same endpoint rule: an untrusted
-      // project config's custom fallback URL never receives a stored key —
-      // including the primary's stored key when both share a provider.
-      // Only env-supplied keys follow such a URL.
+      // project config's custom fallback URL receives no key at all — not
+      // the fallback's own stored one, not the primary's stored key when
+      // both share a provider, and (see below) not an environment key
+      // either.
       const fallbackUntrustedUrl = fallbackProvider === 'openai'
         && configTrusted === false
         && fileConfig.fallbackBaseUrl !== undefined
         && fileConfig.fallbackBaseUrl.replace(/\/+$/, '') !== DEFAULT_OPENAI_BASE_URL;
       const fallbackEnvKey = readNonEmptyString(processEnv[defaultApiKeyEnvName(fallbackProvider)]);
+      // The primary's rule again, on the URL a fallback actually consumes.
+      // Withholding only the stored key here left the same door open one
+      // step further in: a project config that leaves `baseUrl` alone and
+      // names `fallbackBaseUrl` looks innocent — the primary is the
+      // provider's own endpoint — and collects the environment key the
+      // first time a turn fails over to it.
+      const fallbackEnvKeyName = fallbackEnvKey !== undefined
+        ? defaultApiKeyEnvName(fallbackProvider)
+        : (fallbackProvider === provider ? envApiKeyEntry?.name : undefined);
+      if (fallbackUntrustedUrl && fallbackEnvKeyName !== undefined) {
+        throw new Error(
+          `The project config at ${configPathShown} sets a custom fallback base URL (${String(fileConfig.fallbackBaseUrl)}), and ${fallbackEnvKeyName} is not sent to an endpoint an auto-discovered config chose. Run with --config ${configPathShown} to trust that file, or move the fallback base URL into ~/.stratus/config.json.`,
+        );
+      }
       const fallbackCandidate = fallbackEnvKey || fallbackUntrustedUrl ? undefined : credentials[fallbackProvider];
       // A codex fallback consumes no endpoint URL, so a stored key bound to
       // one cannot be honored there — and must not silently follow the

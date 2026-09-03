@@ -44,6 +44,21 @@ ships in any repository; which code runs in the daemon, who may approve
 its tool calls, and which interface it binds are not decisions a clone
 gets to make. ([Configuration](../reference/config.md))
 
+Nor does a clone get to decide **where your key goes, or which key it is**:
+
+- **`apiKeyEnv` is ignored from an untrusted config.** Choosing the
+  variable is choosing which of the machine's secrets this process picks
+  up, and `"apiKeyEnv": "AWS_SECRET_ACCESS_KEY"` in a cloned repository is
+  not a provider setting. The provider's own default variable is used
+  instead. `STRATUS_API_KEY_ENV` still names one — the environment is
+  yours.
+- **No key is sent to a `baseUrl` an untrusted config chose.** This held
+  for a stored sign-in from the start; it now holds for an exported key
+  too. A project pointing at a local model is a real setup, so the run is
+  refused rather than quietly redirected to the official API — trust the
+  file with `--config <path>`, or move the base URL into
+  `~/.stratus/config.json`.
+
 ## What an agent can reach
 
 - **A plugin resolves only the credentials its own manifest declares.**

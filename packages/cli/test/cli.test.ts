@@ -1777,11 +1777,19 @@ test('an unnamed soul keeps the same generated identity across invocations', asy
 
 test('resolveRuntimeConfig treats provider-less config settings as openai-specific', async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
-  await writeFile(path.join(tempDir, 'stratus.config.json'), JSON.stringify({
+  const configPath = path.join(tempDir, 'stratus.config.json');
+  await writeFile(configPath, JSON.stringify({
     model: 'gpt-4.1-mini',
     baseUrl: 'https://example.test/v1',
     apiKeyEnv: 'CUSTOM_OPENAI_KEY',
   }));
+
+  // Named rather than auto-discovered, because the subject here is which
+  // *provider* a legacy config's settings apply to. `apiKeyEnv` and a
+  // custom `baseUrl` are honoured only from a config the operator chose
+  // (see the untrusted-endpoint tests in @stratusagent/state), and leaving
+  // this one to auto-discovery would test that rule instead of this one.
+  const configured = { configPath };
 
   // Legacy configs predate the anthropic provider, so their settings must
   // not leak into an anthropic run...
@@ -1791,6 +1799,7 @@ test('resolveRuntimeConfig treats provider-less config settings as openai-specif
     provider: 'anthropic',
     format: 'text',
     events: true,
+    ...configured,
   }, {
     cwd: tempDir,
     homeDir: tempHome,
@@ -1811,6 +1820,7 @@ test('resolveRuntimeConfig treats provider-less config settings as openai-specif
     provider: 'openai',
     format: 'text',
     events: true,
+    ...configured,
   }, {
     cwd: tempDir,
     homeDir: tempHome,
@@ -2974,7 +2984,7 @@ test('model discovery uses the same credential a real run would use', async () =
   assert.equal(listKeys[0], 'env-key');
 });
 
-test('a stored primary key never follows an untrusted same-provider fallback URL', async () => {
+test('no key follows an untrusted same-provider fallback URL, stored or exported', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
@@ -2999,13 +3009,26 @@ test('a stored primary key never follows an untrusted same-provider fallback URL
   assert.equal(blocked.provider === 'openai' && blocked.apiKey, 'stored-key');
   assert.equal(blocked.provider === 'openai' && blocked.fallback, undefined);
 
-  // An env-supplied key is the user's own ambient choice and may follow it.
-  const envAllowed = await resolveRuntimeConfig(baseCommand, {
-    cwd: project,
-    homeDir: home,
-    processEnv: { OPENAI_API_KEY: 'env-key' },
-  });
-  assert.deepEqual(envAllowed.provider === 'openai' && envAllowed.fallback, {
+  // Nor does an env-supplied key. Exporting a key is the operator's own
+  // choice; where it goes is this file's, and this file came with the
+  // clone. (It used to follow the URL, which is what made a config that
+  // left `baseUrl` alone — an innocent-looking primary on the provider's
+  // own endpoint — collect the key on the first failover.)
+  await assert.rejects(
+    () => resolveRuntimeConfig(baseCommand, {
+      cwd: project,
+      homeDir: home,
+      processEnv: { OPENAI_API_KEY: 'env-key' },
+    }),
+    /custom fallback base URL .*OPENAI_API_KEY is not sent to an endpoint an auto-discovered config chose/s,
+  );
+
+  // Named by the operator, the same file is honoured.
+  const trusted = await resolveRuntimeConfig(
+    { ...baseCommand, configPath: path.join(project, 'stratus.config.json') },
+    { cwd: project, homeDir: home, processEnv: { OPENAI_API_KEY: 'env-key' } },
+  );
+  assert.deepEqual(trusted.provider === 'openai' && trusted.fallback, {
     provider: 'openai',
     model: 'gpt-4o-mini',
     baseUrl: 'https://evil.test/v1',

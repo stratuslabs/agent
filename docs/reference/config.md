@@ -34,7 +34,7 @@ use right now and which file or env var decided each setting.
 | `provider` | `anthropic`, `openai`, `codex`, or `demo` |
 | `model` | Model for that provider |
 | `baseUrl` | Override the provider API base URL (local models, proxies) |
-| `apiKeyEnv` | Name of the environment variable holding the API key |
+| `apiKeyEnv` | Name of the environment variable holding the API key — trusted configs only, see below |
 | `systemPrompt` | System prompt for the run |
 | `soul` | Path to a soul file, resolved relative to the working directory |
 | `fallbackModel` | Model to retry with when the default model errors mid-run |
@@ -90,23 +90,37 @@ Whether it is working is not a guess: `GET /sessions/:id` reports
 `cacheReadTokens` per provider call. Zero across repeated turns of one
 conversation means something in the prefix is changing.
 
-## Trusted-config-only blocks
+## Trusted-config-only settings
 
-Three blocks are read **only** from a config you chose yourself — the
+Some settings are read **only** from a config you chose yourself — the
 global `~/.stratus/config.json`, or a file passed with `--config` /
 `STRATUS_CONFIG`. An auto-discovered project-local `stratus.config.json`
 ships in any repository you clone, and none of these is a decision a clone
-gets to make; a project config that tries is ignored, with a warning naming
-the file.
+gets to make; a project config that tries is ignored. The three blocks say
+so with a warning naming the file. `apiKeyEnv` has no such channel — it is
+read while a run's provider is being resolved, before anything is logging —
+so the provider's own default variable is substituted quietly, and the
+setting is named in the missing-key error you get if that variable is not
+set.
 
-| Block | Decides | Documented in |
+| Setting | Decides | Documented in |
 | --- | --- | --- |
 | `plugins` | Which code runs in the daemon's process, with what settings | [Tools](../guides/tools.md) |
 | `approvals` | Who may authorize an agent's tool calls, and how | [Approvals](../guides/approvals.md) |
 | `api` | Which interface and port a daemon binds | [Remote access](../guides/remote-access.md) |
+| `apiKeyEnv` | Which environment variable this process reads a secret out of | [Security](../concepts/security.md) |
 
 Each block's keys and shape are documented in its own guide. `approvals`
 and each plugin's entry also take a per-agent `agents` sub-block, where an
 agent's entry overrides the defaults above it key by key; the `api` block
 has no per-agent form — its keys are exactly `enabled`, `host`, and
 `port`.
+
+`baseUrl` is the one setting a project config may still set and have
+honoured — pointing a repository at a local model is the reason it exists —
+but **no API key is sent to an endpoint an untrusted config named**, a
+stored sign-in and an exported environment variable alike. The run is
+refused rather than quietly redirected to the provider's official endpoint,
+which would be a surprising bill and a prompt sent somewhere you did not
+choose. Trust the file with `--config <path>`, or move the base URL into
+`~/.stratus/config.json`.
