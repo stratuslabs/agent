@@ -255,15 +255,21 @@ export class BrowserSessionPool {
    * the only way past it is a fresh page. Returns false when the session
    * had no context to close.
    */
-  async release(sessionId: string): Promise<boolean> {
+  async release(sessionId: string, page?: PageLike): Promise<boolean> {
     // Not through the admission queue: the caller has already waited the
     // page's full timeout, and an admission ahead in the queue is bounded
     // by nothing — a launch or `newContext` that hangs would hold this
     // call, and the tool call above it, past any promise the timeout made.
     // What the queue protected against, a browser closed under an
     // admission that had chosen it, `BrowserEntry.admitting` covers.
+    //
+    // The page, when the caller names one, has to be the one the session
+    // still holds: the sweep may have dropped the page that timed out and a
+    // concurrent call opened a healthy replacement under the same id
+    // before the timeout fired, and that replacement is not what stopped
+    // answering.
     const entry = this.contexts.get(sessionId);
-    if (!entry) {
+    if (!entry || (page !== undefined && entry.page !== page)) {
       return false;
     }
     await this.drop(entry, 'unresponsive');
@@ -300,23 +306,41 @@ export class BrowserSessionPool {
       // no longer tracked anywhere and would leak if it stopped this drop.
       this.options.onError?.(error);
     }
-    try {
-      await entry.context.close();
-    } catch {
-      // A context that is already gone is the outcome we wanted.
-    }
+    // The browser goes with its last conversation: a Chromium sitting idle
+    // overnight is the leak this pack is most likely to cause. Retired from
+    // the pool now, in the same step, and closed alongside the context
+    // rather than after it: a context whose close never settles (the case
+    // `answeredWithin` stops waiting on) would otherwise leave a possibly
+    // wedged browser registered for the next call to be handed, when that
+    // call was promised a fresh one.
     const browser = this.browsers.get(entry.browserKey);
-    if (browser) {
-      // The browser goes with its last conversation: a Chromium sitting
-      // idle overnight is the leak this pack is most likely to cause.
-      await this.closeBrowserIfUnused(browser);
+    const retired = browser !== undefined && this.retireIfUnused(browser);
+    const closingContext = entry.context.close().catch(() => {
+      // A context that is already gone is the outcome we wanted.
+    });
+    if (retired && browser) {
+      await this.shutBrowser(browser);
     }
+    await closingContext;
+  }
+
+  /**
+   * Take a browser no session holds and no admission is about to out of the
+   * pool — synchronously, so the next call launches afresh — and say
+   * whether it did. The caller then closes it with `shutBrowser`.
+   */
+  private retireIfUnused(entry: BrowserEntry): boolean {
+    if (entry.sessions.size === 0 && entry.admitting === 0 && this.browsers.get(entry.key) === entry) {
+      this.retireBrowser(entry);
+      return true;
+    }
+    return false;
   }
 
   /** Close a browser no session holds and no admission is about to. */
   private async closeBrowserIfUnused(entry: BrowserEntry): Promise<void> {
-    if (entry.sessions.size === 0 && entry.admitting === 0 && this.browsers.get(entry.key) === entry) {
-      await this.closeBrowser(entry);
+    if (this.retireIfUnused(entry)) {
+      await this.shutBrowser(entry);
     }
   }
 
@@ -355,16 +379,24 @@ export class BrowserSessionPool {
   }
 
   private async closeBrowser(entry: BrowserEntry): Promise<void> {
+    this.retireBrowser(entry);
+    await this.shutBrowser(entry);
+  }
+
+  private retireBrowser(entry: BrowserEntry): void {
     this.browsers.delete(entry.key);
+    if (this.browsers.size === 0) {
+      this.disarmSweep();
+    }
+  }
+
+  private async shutBrowser(entry: BrowserEntry): Promise<void> {
     try {
       await entry.browser.close();
     } catch {
       // Same as a context: already gone is fine.
     }
     await entry.proxy.close();
-    if (this.browsers.size === 0) {
-      this.disarmSweep();
-    }
   }
 
   /** Everything, for shutdown. */

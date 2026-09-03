@@ -71,7 +71,10 @@ test('a release whose context close settles late does not take the browser from 
 
   finishClose();
   assert.equal(await stale, true);
-  assert.equal(closedBrowsers, 0, 'the browser the fresh context lives in is still up');
+  // The first browser went with its last context — retired the moment the
+  // release began, without waiting on the close — and the replacement
+  // lives in a fresh one, which the late-settling close leaves alone.
+  assert.equal(closedBrowsers, 1, 'only the browser the stale context lived in was closed');
   assert.equal(pool.browserCount, 1);
   assert.equal(pool.size, 1);
 });
@@ -162,6 +165,76 @@ test('an eviction listener that throws is reported, and the context and browser 
   assert.equal(closedBrowsers, 1, 'and the browser, which nothing held any more');
   assert.equal(errors.length, 1);
   assert.match(String((errors[0] as Error).message), /the listener is broken/);
+});
+
+test('a release names the page that timed out, and leaves a replacement that took its place alone', async (t) => {
+  const driver: BrowserDriver = {
+    async launch() {
+      return {
+        async newContext() {
+          const context: BrowserContextLike = {
+            async newPage() {
+              return stubPage();
+            },
+            async close() {},
+          };
+          return context;
+        },
+        async close() {},
+      };
+    },
+  };
+  const pool = new BrowserSessionPool({ driver, idleMs: 60_000 });
+  t.after(() => pool.close());
+
+  const first = await pool.pageFor('a', 1);
+  assert.equal(await pool.release('a'), true);
+  const replacement = await pool.pageFor('a', 2);
+  assert.notEqual(replacement, first);
+
+  // The timeout that belonged to the first page fires now, after the
+  // sweep took that page and a concurrent call opened this one.
+  assert.equal(await pool.release('a', first), false, 'the page named is gone; nothing to release');
+  assert.equal(pool.size, 1, 'the replacement is still held');
+  assert.equal(await pool.release('a', replacement), true);
+  assert.equal(pool.size, 0);
+});
+
+test('a browser whose last context never finishes closing is retired at once, and the next call launches afresh', async (t) => {
+  let launches = 0;
+  let closedBrowsers = 0;
+  const driver: BrowserDriver = {
+    async launch() {
+      launches += 1;
+      const held = launches === 1;
+      return {
+        async newContext() {
+          const context: BrowserContextLike = {
+            async newPage() {
+              return stubPage();
+            },
+            close: () => (held ? new Promise<never>(() => {}) : Promise.resolve()),
+          };
+          return context;
+        },
+        async close() {
+          closedBrowsers += 1;
+        },
+      };
+    },
+  };
+  const pool = new BrowserSessionPool({ driver, idleMs: 60_000 });
+  t.after(() => pool.close());
+
+  await pool.pageFor('a', 1);
+  // Not awaited: the context's close never settles, so neither does this.
+  void pool.release('a');
+  assert.equal(pool.browserCount, 0, 'the browser left the pool with its last context');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(closedBrowsers, 1, 'and was closed without waiting on the context');
+
+  await pool.pageFor('a', 2);
+  assert.equal(launches, 2, 'the next call got a fresh browser, not the wedged one');
 });
 
 test('releasing an unresponsive page neither waits for another conversation\'s admission nor closes the browser it is being admitted into', async (t) => {

@@ -393,7 +393,7 @@ export const createBrowserPlugin = (
         timeoutMs,
         () => `The page at ${page.url()} did not answer for ${what} within ${timeoutMs}ms — its script is busy. `
           + 'Its browser context was closed; the next call opens a fresh page.',
-        () => pool.release(session.id).then(() => undefined),
+        () => pool.release(session.id, page).then(() => undefined),
       );
     },
     async pageFor(session) {
