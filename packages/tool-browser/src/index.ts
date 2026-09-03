@@ -155,13 +155,28 @@ const answeredWithin = async <T>(
       // The abandoned operation settles later, when the context goes;
       // nobody is listening for that, and it must not surface as unhandled.
       work.catch(() => {});
-      await giveUp();
+      // The teardown is bounded too: closing a context on a transport this
+      // wedged can hang the way the page did, and waiting on it would make
+      // the timeout a promise this call still broke. Past the bound the
+      // close carries on unwaited — the pool forgot the context the moment
+      // the release began, so the next call opens a fresh one either way.
+      await within(giveUp().catch(() => undefined), timeoutMs);
     }
     throw error;
   } finally {
     clearTimeout(timer);
   }
 };
+
+/** Resolves when `work` settles or `ms` pass, whichever is first. */
+const within = (work: Promise<void>, ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    void work.then(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
 
 const truncate = (value: string, maxBytes: number): { text: string; truncated: boolean } =>
   Buffer.byteLength(value, 'utf8') <= maxBytes

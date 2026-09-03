@@ -141,6 +141,67 @@ test('a page whose script never yields is given up on within the timeout, and th
   assert.equal(recorder.contexts, 2, 'the second call ran in a fresh context');
 });
 
+test('giving up on a page is itself bounded, when even closing its context hangs', async (t) => {
+  // A transport wedged enough that the first `context.close()` never
+  // settles either. The call still comes back within the timeout with the
+  // same error, and the next call runs in a fresh context; the close
+  // carries on unwaited.
+  let reads = 0;
+  let contexts = 0;
+  let closes = 0;
+  const driver: BrowserDriver = {
+    async launch() {
+      return {
+        async newContext() {
+          contexts += 1;
+          return {
+            async newPage() {
+              return {
+                async goto() {
+                  return { status: () => 200 };
+                },
+                url: () => 'https://example.com/',
+                async title() {
+                  return 'Example Domain';
+                },
+                async content() {
+                  return '';
+                },
+                evaluate: () => (reads++ === 0 ? new Promise<never>(() => {}) : Promise.resolve('answered')),
+                async screenshot() {
+                  return Buffer.from('png');
+                },
+                async click() {},
+                async fill() {},
+                async route() {},
+                async close() {},
+              };
+            },
+            close: () => (closes++ === 0 ? new Promise<never>(() => {}) : Promise.resolve()),
+          };
+        },
+        async close() {},
+      };
+    },
+  };
+  const tools = new ToolRegistry();
+  const plugin = createBrowserPlugin({ allowedHosts: ['example.com'], navigationTimeoutMs: 50 }, { driver });
+  await plugin.setup({ bus: { emit: async () => undefined, subscribe: () => () => undefined } as never, tools });
+  t.after(() => plugin.dispose());
+  const read = tools.get('browser.read') as Tool;
+  const session = sessionFor('wedged');
+
+  const outcome = await Promise.race([
+    read.execute({ url: 'https://example.com/' }, session).then(() => 'answered', (error: Error) => error.message),
+    new Promise<string>((resolve) => setTimeout(() => resolve('still waiting'), 2_000)),
+  ]);
+  assert.match(outcome, /did not answer for its text within 50ms.*fresh page/);
+
+  const again = await read.execute({ url: 'https://example.com/' }, session) as JsonObject;
+  assert.equal(again.text, 'answered');
+  assert.equal(contexts, 2, 'the second call ran in a fresh context');
+});
+
 test('one browser, a context per conversation, dropped when idle', async (t) => {
   const recorder = emptyRecorder();
   const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'], idleMs: 60_000 }, recorder);
