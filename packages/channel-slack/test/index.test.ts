@@ -1802,6 +1802,73 @@ test('each unrendered turn\'s files go with its own reply, even when two finish 
   );
 });
 
+test('a recovered turn\'s file lands above the reply of the message queued behind it', async () => {
+  // A recovery finishes with a screenshot and nothing to say while a newer
+  // Slack message waits behind it. An upload is a new message, so the file
+  // would sit under the newer turn's answer unless the recovery takes the
+  // placeholder that is already in the thread.
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-order-file-'));
+  const shot = path.join(root, 'recovered.png');
+  await writeFile(shot, 'png bytes');
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const order: string[] = [];
+  const post = web.chat.postMessage.bind(web.chat);
+  web.chat.postMessage = async (args) => {
+    order.push(`post:${args.text}`);
+    return post(args);
+  };
+  const update = web.chat.update.bind(web.chat);
+  web.chat.update = async (args) => {
+    order.push(`update:${args.ts}:${args.text}`);
+    return update(args);
+  };
+  const upload = web.files.uploadV2.bind(web.files);
+  web.files.uploadV2 = async (args) => {
+    order.push(`upload:${args.filename}`);
+    return upload(args);
+  };
+
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'the message\'s own reply'));
+  const stubDispatch = gateway.dispatch;
+  gateway.dispatch = async (input) => {
+    // The recovery is the running turn while this dispatch waits behind it.
+    const stubActiveTurn = gateway.activeTurnId!;
+    gateway.activeTurnId = () => 'recovered-turn';
+    await gateway.bus.emit({
+      type: 'tool.completed',
+      sessionId: input.sessionId,
+      result: { callId: 'c1', toolName: 'browser.screenshot', ok: true, output: { file: shot } },
+    });
+    await gateway.bus.emit({ type: 'session.completed', sessionId: input.sessionId });
+    gateway.activeTurnId = stubActiveTurn;
+    return stubDispatch.call(gateway, input);
+  };
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1' },
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> and another thing'));
+  await adapter.stop();
+
+  // The recovery took the queued placeholder (an edit keeps its place), its
+  // file follows, and the message's own reply lands in a placeholder opened
+  // below both.
+  assert.equal(order.indexOf('update:bot-ts-1:(no reply)') >= 0, true, order.join(', '));
+  assert.ok(
+    order.indexOf('upload:recovered.png') < order.indexOf("update:bot-ts-2:the message's own reply"),
+    `the recovered file came before the newer turn's reply: ${order.join(', ')}`,
+  );
+  assert.equal(web.uploads.length, 1);
+});
+
 test('a recovered turn that produced a file and no text still has the file posted', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-slack-file-only-'));
   const shot = path.join(root, 'only.png');
