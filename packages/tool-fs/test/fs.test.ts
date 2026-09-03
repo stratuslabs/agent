@@ -338,6 +338,21 @@ test('a line of exactly the limit was searched whole, and the result does not sa
   assert.equal(over.skippedTotal, 1);
 });
 
+test('a named file that turns binary after its first pages is reported as binary, with nothing matched', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-latebinary-'));
+  // Text for well past the first 8 KB — a needle in it — and then a NUL.
+  await writeFile(
+    path.join(root, 'mixed.bin'),
+    Buffer.concat([Buffer.from(`needle here\n${'plain text\n'.repeat(4_000)}`), Buffer.from([0, 1, 2, 3])]),
+  );
+  const tools = await registryFor({ roots: [root] });
+  const result = await run(tools, 'fs.search', { query: 'needle', path: 'mixed.bin' }, sessionFor('ava')) as JsonObject;
+  assert.deepEqual(result.matches, [], 'a match in the text before the NUL is not a result of a text file');
+  const skipped = result.skipped as Array<{ path: string; bytes: number; reason: string }>;
+  assert.equal(skipped[0]?.reason, 'binary');
+  assert.equal(skipped[0]?.bytes, 11 + 11 * 4_000 + 1 + 4);
+});
+
 test('the skipped list is capped, and the count says how many there were', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-skipmany-'));
   const big = 'x'.repeat(1_000_001);

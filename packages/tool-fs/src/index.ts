@@ -247,19 +247,23 @@ const matcherFor = (query: string, options: { caseSensitive?: boolean; wholeWord
 
 /**
  * A text file a line at a time, or `undefined` once when it turns out to be
- * binary — decided on the first chunk, the way `fs.read` decides on what it
- * read. Streamed in chunks so a file named outright can be any size, and
- * so can a line: a minified file or a base64 log is one line for megabytes,
- * and a reader that accumulates a whole line before yielding it holds the
- * whole file after all. A line past `MAX_LINE_CHARS` is yielded as its
- * first `MAX_LINE_CHARS` characters and the rest is discarded to the next
- * newline; the line says so through `clipped` — said there rather than
- * inferred from its length, because a line of exactly `MAX_LINE_CHARS` was
- * searched whole.
+ * binary — decided on every chunk as it streams, since a file that starts
+ * as text and turns binary later was read whole and judged whole before
+ * it was streamed. Streamed in chunks so a file named outright can be any
+ * size, and so can a line: a minified file or a base64 log is one line for
+ * megabytes, and a reader that accumulates a whole line before yielding it
+ * holds the whole file after all. A line past `MAX_LINE_CHARS` is yielded
+ * as its first `MAX_LINE_CHARS` characters and the rest is discarded to the
+ * next newline; the line says so through `clipped` — said there rather
+ * than inferred from its length, because a line of exactly
+ * `MAX_LINE_CHARS` was searched whole.
  *
  * Opened through `openContained`, like `fs.read`: the containment check
  * captured the file's identity, and a name repointed between that check
- * and this open is refused here rather than read.
+ * and this open is refused here rather than read. The size comes from the
+ * open descriptor for the same reason — a `stat` of the name afterwards is
+ * fresh evidence about whatever the name points at by then, which after a
+ * log rotation is a different file or none.
  */
 const MAX_LINE_CHARS = 1_000_000;
 
@@ -268,23 +272,38 @@ interface LineRead {
   clipped: boolean;
 }
 
+interface OpenedLines {
+  /** The size of the file that was opened, in bytes. */
+  size: number;
+  lines: AsyncGenerator<LineRead | undefined>;
+}
+
 /** A line that ended inside the chunk that pushed it past the limit is clipped like any other. */
 const bounded = (text: string): LineRead =>
   text.length > MAX_LINE_CHARS ? { text: text.slice(0, MAX_LINE_CHARS), clipped: true } : { text, clipped: false };
 
-const readLines = async function* (resolved: ResolvedPath): AsyncGenerator<LineRead | undefined> {
+const openLines = async (resolved: ResolvedPath): Promise<OpenedLines> => {
   const handle = await openContained(resolved, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
   try {
-    const probe = Buffer.alloc(8_192);
-    const { bytesRead } = await handle.read(probe, 0, probe.length, 0);
-    if (looksBinary(probe.subarray(0, bytesRead))) {
-      yield undefined;
-      return;
-    }
+    const { size } = await handle.stat();
+    return { size, lines: linesOf(handle) };
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+};
+
+/** Owns `handle`: closes it when the lines run out, or when the caller stops early. */
+const linesOf = async function* (handle: Awaited<ReturnType<typeof open>>): AsyncGenerator<LineRead | undefined> {
+  try {
     const decoder = new StringDecoder('utf8');
     let carry = '';
     let discarding = false;
     for await (const chunk of handle.createReadStream({ start: 0, highWaterMark: 64 * 1024 })) {
+      if (looksBinary(chunk as Buffer)) {
+        yield undefined;
+        return;
+      }
       const text = decoder.write(chunk as Buffer);
       let from = 0;
       for (;;) {
@@ -428,9 +447,16 @@ const createSearchTool = (config: JsonObject): Tool => ({
       // full of large files read whole) does not apply.
       let index = 0;
       let clipped = false;
-      for await (const line of readLines(resolved)) {
+      const { size, lines } = await openLines(resolved);
+      const before = matches.length;
+      for await (const line of lines) {
         if (line === undefined) {
-          skip({ path: relativeTo(resolved.root, resolved.path), bytes: (await stat(resolved.path)).size, reason: 'binary' });
+          // Binary after all: what matched in the text before the first
+          // NUL is not a search result of a text file, because this is
+          // not one.
+          matches.splice(before);
+          clipped = false;
+          skip({ path: relativeTo(resolved.root, resolved.path), bytes: size, reason: 'binary' });
           break;
         }
         clipped ||= line.clipped;
@@ -442,7 +468,7 @@ const createSearchTool = (config: JsonObject): Tool => ({
       if (clipped) {
         skip({
           path: relativeTo(resolved.root, resolved.path),
-          bytes: (await stat(resolved.path)).size,
+          bytes: size,
           reason: `a line longer than ${MAX_LINE_CHARS / 1_000_000} million characters was searched in its first ${MAX_LINE_CHARS / 1_000_000} million only`,
         });
       }
