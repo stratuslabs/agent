@@ -15,6 +15,7 @@ import {
   ORPHANED_DELEGATION_ERROR,
   RESERVED_SESSION_METADATA_KEYS,
   createGateway,
+  SqliteScheduleStore,
   SqliteSessionStore,
   type ApprovalTransport,
   type GatewayChannelAdapter,
@@ -3668,4 +3669,175 @@ test('a parked session is only an orphan when both halves say it was delegated',
   after.close();
   assert.equal(session?.status, 'completed');
   assert.notEqual(session?.lastError, ORPHANED_DELEGATION_ERROR);
+});
+
+test('a one-shot whose parked firing is recovered after a restart is retired when that firing finishes', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const dbPath = path.join(home, 'sessions.db');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+
+  // What a kill leaves behind when a one-shot's firing was parked on a
+  // human: the row spent (its slot consumed before the dispatch), kept only
+  // as the approval's scope, and the firing's session checkpointed.
+  const firingId = 'schedule:once-1:2026-01-01T00:00:00.000Z';
+  const schedules = new SqliteScheduleStore(dbPath);
+  schedules.insert({
+    id: 'once-1',
+    agentId: 'ava',
+    cadence: { kind: 'at', at: '2026-01-01T00:00:00.000Z' },
+    prompt: 'do the thing',
+    createdAt: '2025-12-31T00:00:00.000Z',
+    lastFiredAt: '2026-01-01T00:00:00.100Z',
+    lastSessionId: firingId,
+  });
+  schedules.close();
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  await seed.create({
+    id: firingId,
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval',
+    messages: [
+      { id: 'm1', role: 'user', content: 'do the thing', createdAt: now },
+      { id: 'm2', role: 'assistant', content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: 'one' } }] },
+    ],
+    metadata: {
+      scheduled: true,
+      scheduleId: 'once-1',
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: 'one' } },
+        remaining: [],
+        parkedAt: now,
+      },
+    },
+  });
+  seed.close();
+
+  const gateway = createGateway({ env, idleTimeoutMs: 0, sessionDbPath: dbPath, selection: { provider: 'demo' } });
+  const recovered = nextEvent(gateway.bus, 'session.completed');
+  await gateway.start();
+  try {
+    // The start sweep keeps the row while the firing is parked; the firing
+    // is then recovered and finishes in this process — which is exactly the
+    // process that has no firing promise to retire the row from.
+    await settles(recovered, 'the recovered firing');
+    // The retirement follows the runner's return, a step after the event
+    // above; wait for the row, with a way to lose.
+    const retired = new Promise<void>((resolve) => {
+      const check = (): void => {
+        if (gateway.schedules().length === 0) {
+          resolve();
+        } else {
+          setTimeout(check, 10);
+        }
+      };
+      check();
+    });
+    await settles(retired, 'the spent one-shot being retired with its firing');
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a recovered firing retires only its own one-shot row, and does so even when the recovery fails', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const dbPath = path.join(home, 'sessions.db');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: demo\n---\n\nYou are Ava.\n');
+
+  // Two spent one-shots, each the scope of a parked firing. The first
+  // firing's checkpoint is at a turn past the budget, so its recovery fails
+  // durably rather than completing; the second stays parked throughout.
+  // And an ordinary parked session — a row from before the public door
+  // refused the daemon's own keys — carries the second schedule's id in its
+  // metadata, which must not let it retire a row that is not its own.
+  const failingFiring = 'schedule:once-fail:2026-01-01T00:00:00.000Z';
+  const parkedFiring = 'schedule:once-parked:2026-01-01T00:00:00.000Z';
+  const schedules = new SqliteScheduleStore(dbPath);
+  for (const [id, lastSessionId] of [['once-fail', failingFiring], ['once-parked', parkedFiring]] as const) {
+    schedules.insert({
+      id,
+      agentId: 'ava',
+      cadence: { kind: 'at', at: '2026-01-01T00:00:00.000Z' },
+      prompt: 'do the thing',
+      createdAt: '2025-12-31T00:00:00.000Z',
+      lastFiredAt: '2026-01-01T00:00:00.100Z',
+      lastSessionId,
+    });
+  }
+  schedules.close();
+  const seed = new SqliteSessionStore(dbPath);
+  const now = new Date().toISOString();
+  const parked = (id: string, metadata: Record<string, unknown>, turn: number) => ({
+    id,
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'pending_approval' as const,
+    messages: [
+      { id: 'm1', role: 'user' as const, content: 'do the thing', createdAt: now },
+      { id: 'm2', role: 'assistant' as const, content: '', createdAt: now, toolCalls: [{ id: 'c1', toolName: 'demo.echo', input: { text: id } }] },
+    ],
+    metadata: {
+      ...metadata,
+      [PENDING_APPROVAL_METADATA_KEY]: {
+        call: { id: 'c1', toolName: 'demo.echo', input: { text: id } },
+        remaining: [],
+        parkedAt: now,
+        turn,
+      },
+    },
+  });
+  await seed.create(parked(failingFiring, { scheduled: true, scheduleId: 'once-fail' }, 1_000));
+  await seed.create(parked(parkedFiring, { scheduled: true, scheduleId: 'once-parked' }, 1));
+  await seed.create(parked('web:ava:legacy', { scheduleId: 'once-parked' }, 1));
+  seed.close();
+
+  // The second firing's re-asked approval is never answered — it parks on
+  // the gateway's own transport, which stop() settles at the end.
+  const gateway = createGateway({
+    env,
+    idleTimeoutMs: 0,
+    sessionDbPath: dbPath,
+    selection: { provider: 'demo' },
+    maxTurns: 5,
+    approvalTimeoutMs: 0,
+    approvals: (transport) => ({
+      approve: async ({ session, call, risk }) => (session.id === parkedFiring
+        ? (await transport.request({ session, call, risk })) !== 'deny'
+        : true),
+    }),
+  });
+  const closed = new Set<string>();
+  const bothClosed = new Promise<void>((resolve) => {
+    gateway.bus.subscribe((event) => {
+      if (event.type === 'session.failed' || event.type === 'session.completed') {
+        closed.add(event.sessionId);
+        if (closed.has(failingFiring) && closed.has('web:ava:legacy')) {
+          resolve();
+        }
+      }
+    });
+  });
+  await gateway.start();
+  try {
+    await settles(bothClosed, 'the failing firing and the legacy session being closed out');
+    const retired = new Promise<void>((resolve) => {
+      const check = (): void => {
+        if (!gateway.schedules().some((record) => record.id === 'once-fail')) {
+          resolve();
+        } else {
+          setTimeout(check, 10);
+        }
+      };
+      check();
+    });
+    await settles(retired, 'the failed firing\'s row being retired');
+    // The failed firing retired its row; the legacy session, whatever its
+    // metadata says, retired nothing.
+    assert.deepEqual(gateway.schedules().map((record) => record.id), ['once-parked']);
+    const stored = await gateway.store.get(failingFiring);
+    assert.equal(stored?.status, 'failed');
+  } finally {
+    await gateway.stop();
+  }
 });
