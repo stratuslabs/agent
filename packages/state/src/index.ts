@@ -2285,6 +2285,14 @@ const findEscapingSymlink = async (directory: string): Promise<string | undefine
  * written for the provider named in that file, so it only counts when the
  * file still describes the provider being resolved.
  *
+ * **An untrusted config does not get to name it.** Choosing which variable
+ * is read is choosing which of the machine's secrets this process picks up,
+ * and an auto-discovered `stratus.config.json` ships in any repository
+ * somebody clones — `apiKeyEnv: "AWS_SECRET_ACCESS_KEY"` in a cloned repo
+ * is not a provider setting, it is a request to go and fetch something
+ * else. `STRATUS_API_KEY_ENV` still names one, because the environment is
+ * the operator's own.
+ *
  * Exported because diagnostics have to name the variable that actually
  * won: re-deriving this rule elsewhere drifts, and a warning that blames
  * the wrong variable leaves the real override — and its billing — in place.
@@ -2294,11 +2302,13 @@ export const apiKeyEnvNameFor = (
   fileConfig: StratusConfigFile,
   fileConfigApplies: boolean,
   env: StateEnvironment = {},
+  configTrusted?: boolean,
 ): string => {
   const processEnv = readProcessEnv(env);
+  const fromFile = fileConfigApplies && configTrusted !== false ? fileConfig.apiKeyEnv : undefined;
   return String(
     readNonEmptyString(processEnv.STRATUS_API_KEY_ENV)
-      ?? (fileConfigApplies ? fileConfig.apiKeyEnv : undefined)
+      ?? fromFile
       ?? defaultApiKeyEnvName(provider),
   );
 };
@@ -2372,7 +2382,7 @@ export const resolveRuntimeConfig = async (
         ? DEFAULT_CODEX_MODEL
         : DEFAULT_OPENAI_MODEL);
 
-  const apiKeyEnvName = apiKeyEnvNameFor(provider as CredentialProviderName, fileConfig, fileConfigApplies, env);
+  const apiKeyEnvName = apiKeyEnvNameFor(provider as CredentialProviderName, fileConfig, fileConfigApplies, env, configTrusted);
 
   const credentials = await loadCredentials(env);
 
@@ -2447,6 +2457,23 @@ export const resolveRuntimeConfig = async (
       `Your saved ${provider} sign-in is bound to ${boundBaseUrl} and is not sent to ${explicitBaseUrl}. Set ${apiKeyEnvName} or STRATUS_API_KEY to use that endpoint.`,
     );
   }
+  // The other half of the rule the stored sign-in has always followed: an
+  // endpoint an auto-discovered project config chose is not a place this
+  // process sends a secret. The stored key was already withheld there;
+  // an environment key was not, so a cloned repository shipping a
+  // `stratus.config.json` with its own `baseUrl` collected whatever key
+  // the operator had exported, in their own shell, for their own work.
+  //
+  // Refused rather than quietly redirected to the default endpoint: a
+  // project that legitimately points at a local model is a real setup, and
+  // silently talking to the official API instead would be a surprising bill
+  // and a leaked prompt. The two ways to say "I meant this file" are both
+  // named, and both are the operator's own act rather than the repository's.
+  if (untrustedCustomBaseUrl && envApiKeyEntry) {
+    throw new Error(
+      `The project config at ${configPathShown} sets a custom base URL (${String(fileConfig.baseUrl)}), and ${envApiKeyEntry.name} is not sent to an endpoint an auto-discovered config chose. Run with --config ${configPathShown} to trust that file, or move the base URL into ~/.stratus/config.json.`,
+    );
+  }
 
   const baseUrl = boundBaseUrl
     ?? explicitBaseUrl
@@ -2458,7 +2485,7 @@ export const resolveRuntimeConfig = async (
   if (!apiKey && !authToken && !codexSubscription) {
     if (untrustedCustomBaseUrl && credentials[provider as CredentialProviderName]) {
       throw new Error(
-        `The project config at ${configPathShown} sets a custom base URL (${fileConfig.baseUrl}), so your saved sign-in is not sent to it. Set ${apiKeyEnvName} or STRATUS_API_KEY to use this endpoint, or run with --config to trust the file explicitly.`,
+        `The project config at ${configPathShown} sets a custom base URL (${fileConfig.baseUrl}), so your saved sign-in is not sent to it. Run with --config ${configPathShown} to trust that file, or move the base URL into ~/.stratus/config.json.`,
       );
     }
     if (provider === 'codex') {
