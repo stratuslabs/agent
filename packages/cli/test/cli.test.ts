@@ -7983,3 +7983,74 @@ test('a second stop signal while the drain is running is ignored, not fatal', as
   assert.equal(await serving, 0);
   assert.match(base.output.stdout, /stratusd stopped/);
 });
+
+test('a second stop signal is still not fatal when the stream its warning goes to throws', async () => {
+  // The warning is said from signal dispatch, outside runServe's promise
+  // and its finally. A host that embeds runServe with a stderr whose
+  // write throws would otherwise turn the repeated signal into an
+  // uncaught exception — ending the process mid-drain by another route.
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-signal-throwing-stream-'));
+  await mkdir(path.join(serveHome, '.stratus', 'agents'), { recursive: true });
+  await writeFile(
+    path.join(serveHome, '.stratus', 'agents', 'ava.md'),
+    '---\nname: Ava\nid: ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n',
+  );
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let turnStarted!: () => void;
+  const started = new Promise<void>((resolve) => { turnStarted = resolve; });
+  const fetchImpl = (async () => {
+    turnStarted();
+    await held;
+    return new Response(
+      JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'done' } }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof fetch;
+
+  const base = createStreams();
+  let draining!: () => void;
+  const drainStarted = new Promise<void>((resolve) => { draining = resolve; });
+  let threw!: () => void;
+  const warningThrew = new Promise<void>((resolve) => { threw = resolve; });
+  let announceApi!: (url: string) => void;
+  const apiUrl = new Promise<string>((resolve) => { announceApi = resolve; });
+  const streams = {
+    stdout: {
+      write(chunk: string) {
+        const match = /control API on (http:\/\/\S+)/.exec(chunk);
+        if (match?.[1]) announceApi(match[1]);
+        if (chunk.includes('Stopping — draining in-flight turns.')) draining();
+        return base.streams.stdout.write(chunk);
+      },
+    },
+    stderr: {
+      write(chunk: string) {
+        if (chunk.includes('stop signal received while draining')) {
+          threw();
+          throw new Error('stderr is gone');
+        }
+        return base.streams.stderr.write(chunk);
+      },
+    },
+  };
+
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams,
+    env: { homeDir: serveHome, cwd: serveHome, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
+  });
+  const url = await apiUrl;
+  const token = (await readFile(path.join(serveHome, '.stratus', 'gateway-token'), 'utf8')).trim();
+  assert.equal((await postJson(`${url}/api/v1/sessions/s-held/messages`, token, { message: 'take your time', agentId: 'ava' })).status, 202);
+  await started;
+
+  process.kill(process.pid, 'SIGTERM');
+  await drainStarted;
+  process.kill(process.pid, 'SIGTERM');
+  await warningThrew;
+  release();
+
+  assert.equal(await serving, 0);
+  assert.match(base.output.stdout, /stratusd stopped/);
+});

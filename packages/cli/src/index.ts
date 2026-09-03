@@ -7117,7 +7117,15 @@ const serveHeldHome = async (
         stopRequested = true;
         if (!repeatWarned) {
           repeatWarned = true;
-          warn('stop signal received while draining; still draining, and this daemon will not come back (SIGKILL ends it at once)');
+          // Said from signal dispatch, outside the promise and its finally:
+          // a stream that throws on write (a host's injected stderr) would
+          // otherwise end the process from here — mid-drain, the very
+          // thing this handler exists to prevent. The word is best effort.
+          try {
+            warn('stop signal received while draining; still draining, and this daemon will not come back (SIGKILL ends it at once)');
+          } catch {
+            // Nothing to say it to; the drain is what matters.
+          }
         }
       };
       // `on`, never `once`, and not removed until the drain is over (the
