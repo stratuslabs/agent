@@ -386,6 +386,12 @@ const awaitPrompt = async (
   ask: NonNullable<PermissionPolicyOptions['ask']>,
   command: string | undefined,
   origin: string | undefined,
+  /**
+   * What answering "always" will actually do, decided by the caller — which
+   * is the only place that knows. Offering a lifetime the engine will not
+   * create is the same defect as hiding one it will.
+   */
+  alwaysMeans: string,
 ): Promise<ApprovalAnswer | typeof ABORTED> => {
   const { call, risk, session } = context;
   // The command, when there is one: for a shell call the tool name is the
@@ -407,13 +413,8 @@ const awaitPrompt = async (
     : argumentSummary !== undefined
       ? `${acting} (${risk}): ${argumentSummary}`
       : `${acting} (${risk})`;
-  const always = command !== undefined
-    ? 'always this scope'
-    : origin !== undefined
-      ? 'always this site'
-      : 'always this session';
   const pending = ask(
-    `Allow ${what} for ${session.agent.name}? [y]es / [a]lways (${always}) / [N]o: `,
+    `Allow ${what} for ${session.agent.name}? [y]es / [a]lways (${alwaysMeans}) / [N]o: `,
   );
   // The answer is never read after this point if the turn ends first,
   // so a late yes cannot execute a tool for work that no longer exists.
@@ -685,9 +686,23 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // refusal is reported — is deliberately shared, so a decision made in
       // Slack and one typed at a terminal cannot drift into meaning
       // different things.
+      // What "always" is going to mean for *this* call, worked out where
+      // the answer is: a `dangerous` tool remembers nothing whatever is
+      // clicked, and an origin-scoped call with no page to name remembers
+      // nothing either. Labelling both "always this session" offers a grant
+      // the engine will not create.
+      const alwaysMeans = risk === 'dangerous'
+        ? 'not remembered — a dangerous tool asks every time'
+        : command !== undefined
+          ? 'always this scope'
+          : scopedByOrigin
+            ? origin !== undefined
+              ? 'always this site'
+              : 'not remembered — there is no page to grant'
+            : 'always this session';
       const answer = mode === 'remote'
         ? await awaitRemote(context, request!, origin)
-        : await awaitPrompt(context, ask!, command, origin);
+        : await awaitPrompt(context, ask!, command, origin, alwaysMeans);
 
       if (answer === ABORTED) {
         return report(context, false, `${call.toolName} was cancelled while awaiting approval`);

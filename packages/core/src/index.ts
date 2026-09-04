@@ -2747,22 +2747,30 @@ export class AgentRunner {
     }
 
     /**
-     * Where this call would act, read before anything asynchronous.
+     * Where this call was judged, captured the instant the policy answered.
      *
      * `Tool.originFor` says a call is judged by the page its conversation
      * is on, and the approval is not the last thing between that judgement
      * and the act: clearing the checkpoint is a store write, and
      * `tool.called` is delivered to every subscriber, awaited, before the
      * executor is reached. A page that navigates inside all that would be
-     * clicked on having been judged somewhere else — the policy's own
-     * re-read cannot see past its own return.
+     * clicked on having been judged somewhere else, and the policy's own
+     * re-read cannot see past its own return. So the seam's contract is
+     * enforced where the dispatch happens, which is the only place that
+     * can — read again below, immediately before the executor.
      *
-     * So the seam's contract is enforced where the dispatch happens, which
-     * is the only place that can: read again below, immediately before the
-     * executor, and refuse if the conversation moved. A tool that does not
-     * answer this reads `undefined` both times and is unaffected.
+     * Read *after* the policy rather than before it, and that is not a
+     * detail: a policy judges the page as it stands when it decides, which
+     * is deliberately after it has loaded whatever grants it consults. A
+     * snapshot taken before the call would disagree with the answer for
+     * every page that moved during that load, and would refuse an action
+     * the policy had just correctly allowed. Nothing awaits between the
+     * policy's return and this line, so the two agree by construction.
+     *
+     * A tool that does not answer this reads `undefined` both times and is
+     * unaffected.
      */
-    const originWhenJudged = originForSession(tool, session);
+    let originWhenJudged: string | undefined;
 
     let approved: boolean;
     try {
@@ -2774,6 +2782,7 @@ export class AgentRunner {
         ...(signal ? { signal } : {}),
         ...(options.parkedAt ? { parkedAt: options.parkedAt } : {}),
       });
+      originWhenJudged = originForSession(tool, session);
     } finally {
       // Cleared before anything executes and on every exit — an abort that
       // throws out of the policy must not leave the session looking parked

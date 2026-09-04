@@ -511,3 +511,45 @@ test('a page that moves while the grant is being written still does not get clic
   // The grant is the site the approver read, and only that one.
   assert.deepEqual(granted, [{ origin: 'https://app.example.com' }]);
 });
+
+test('the prompt offers only the grant the answer will actually create', async () => {
+  const asked: string[] = [];
+  const policy = createPermissionPolicy({
+    mode: 'interactive',
+    ask: async (question) => {
+      asked.push(question);
+      return 'always';
+    },
+  });
+
+  // A page to name: "always" grants that site.
+  assert.equal(await policy.approve(actOn(() => 'https://app.example.com/')), true);
+  assert.match(asked[0] ?? '', /always this site/);
+
+  // No page to name — never navigated, or the sweep closed the context.
+  // The engine runs the call and remembers nothing, so offering "always
+  // this session" would be a grant the answer does not create.
+  assert.equal(await policy.approve(actOn(() => undefined)), true);
+  assert.match(asked[1] ?? '', /no page to grant/);
+  assert.doesNotMatch(asked[1] ?? '', /always this session/);
+
+  // And the tier that never remembers anything says so too.
+  const destructive: Tool = {
+    name: 'mcp.vendor.wipe',
+    risk: 'dangerous',
+    async execute() {
+      return null;
+    },
+  };
+  assert.equal(
+    await policy.approve({
+      session: sessionFor('ava'),
+      call: { id: 'call-5', toolName: 'mcp.vendor.wipe', input: {} },
+      tool: destructive,
+      risk: 'dangerous',
+    }),
+    true,
+  );
+  assert.match(asked[2] ?? '', /a dangerous tool asks every time/);
+  assert.doesNotMatch(asked[2] ?? '', /always this session/);
+});

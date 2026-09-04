@@ -201,3 +201,58 @@ test('a tool that names no origin is dispatched exactly as before', async () => 
   assert.equal(executed, 1);
   assert.equal(session.messages.filter((message) => message.role === 'tool')[0]?.toolResult?.ok, true);
 });
+
+test('the dispatch check uses the origin the policy judged, not one from before it', async () => {
+  // A policy reads the page as it stands when it decides, which is after it
+  // has loaded whatever grants it consults. A snapshot taken before the
+  // call would disagree for every page that moved during that load — and
+  // would refuse an action the policy had just correctly allowed.
+  let page = 'https://app.example.com/reports';
+  let executed = 0;
+  const act: Tool = {
+    name: 'browser.act',
+    risk: 'gated',
+    originFor: () => page,
+    async execute() {
+      executed += 1;
+      return { clicked: true };
+    },
+  };
+  const tools = new ToolRegistry();
+  tools.register(act);
+
+  let turn = 0;
+  const provider: ModelProvider = {
+    name: 'scripted',
+    async generate(): Promise<ProviderResponse> {
+      turn += 1;
+      return turn === 1
+        ? { parts: [{ type: 'tool-call', call: { id: 'c1', toolName: 'browser.act', input: {} } }] }
+        : { parts: [{ type: 'text', text: 'done' }] };
+    },
+  };
+
+  const runner = new AgentRunner({
+    provider,
+    tools,
+    store: new InMemorySessionStore(),
+    approvals: {
+      // Stands in for the grant load: the policy yields, the page moves,
+      // and the policy then judges — and allows — where it ended up.
+      async approve() {
+        await Promise.resolve();
+        page = 'https://other.example.com/';
+        return true;
+      },
+    },
+  });
+  await runner.initialize();
+  const session = await runner.run({
+    sessionId: 'judged-1',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'go',
+  });
+
+  assert.equal(executed, 1, 'an action the policy allowed was refused at dispatch');
+  assert.equal(session.messages.filter((message) => message.role === 'tool')[0]?.toolResult?.ok, true);
+});
