@@ -709,9 +709,6 @@ const MRKDWN_REWRITES: ReadonlyArray<readonly [RegExp, string]> = [
  */
 const MARKDOWN_HEADING = /^ {0,3}#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/gm;
 
-/** One emphasis run and nothing else — `*Title*`, not `Some *word* here`. */
-const WHOLLY_BOLD = /^\*[^*]+\*$/;
-
 const convertInline = (segment: string): string => {
   let converted = segment;
   for (const [pattern, replacement] of MRKDWN_REWRITES) {
@@ -735,23 +732,37 @@ const convertInline = (segment: string): string => {
  * snippet, not a heading. A heading that merely *contains* code is a
  * heading, and its code goes along untouched.
  *
- * Emphasis inside is already converted by here. A heading a model wrote as
- * `## **Title**` is bold by now, and wrapping it again would print the
- * asterisks rather than render them. Nothing is stripped to get there: an
- * asterisk in a heading may be the text itself (`# glob *.ts`), and a reply
- * that reads oddly beats a reply that says something else.
+ * Emphasis inside is already converted by here, so the line is only wrapped
+ * when it carries no `*` of its own. Slack has one bold delimiter and no
+ * way to nest it: wrapping `*Run* the thing` again yields `**Run* the
+ * thing*`, which it renders as literal asterisks rather than as anything
+ * bold. A heading that already contains emphasis therefore keeps exactly
+ * the emphasis it has — `## **Title**` is bold by now and needs nothing
+ * more, and `# glob *.ts` keeps an asterisk that was never a marker at all.
+ * An unbolded heading reads fine; a heading full of stray asterisks does
+ * not, and one with characters removed to make room is worse than both.
+ *
+ * Scanning is a cursor rather than a search: `replace` reports matches in
+ * increasing offset, and the spans were collected in that order too, so
+ * neither has to be looked at twice. The same work as a scan per heading,
+ * without its quadratic on a reply that is mostly headings and snippets.
  */
-const convertHeadings = (text: string, code: ReadonlyArray<readonly [number, number]>): string =>
-  text.replace(MARKDOWN_HEADING, (line, body: string, offset: number) => {
-    if (code.some(([from, to]) => offset >= from && offset < to)) {
+const convertHeadings = (text: string, code: ReadonlyArray<readonly [number, number]>): string => {
+  let span = 0;
+  return text.replace(MARKDOWN_HEADING, (line, body: string, offset: number) => {
+    while (span < code.length && (code[span]?.[1] ?? 0) <= offset) {
+      span += 1;
+    }
+    if (offset >= (code[span]?.[0] ?? Number.POSITIVE_INFINITY)) {
       return line;
     }
     const heading = body.trim();
     if (heading.length === 0) {
       return line;
     }
-    return WHOLLY_BOLD.test(heading) ? heading : `*${heading}*`;
+    return heading.includes('*') ? heading : `*${heading}*`;
   });
+};
 
 /**
  * Markdown as a model writes it, in the spelling Slack actually renders.

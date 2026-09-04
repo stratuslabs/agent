@@ -390,6 +390,7 @@ test('a heading is found on the reply\'s own lines, not inside each fragment inl
   const reply = [
     '`status` # not a heading',
     '## Run `npm test` now',
+    '## **Run** `npm test` now',
     '```sh',
     '# a real comment',
     '```',
@@ -411,6 +412,10 @@ test('a heading is found on the reply\'s own lines, not inside each fragment inl
     '`status` # not a heading',
     // And this whole line is one heading, code and all.
     '*Run `npm test` now*',
+    // But a heading that already carries emphasis keeps the emphasis it
+    // has: Slack has one bold delimiter and no way to nest it, so wrapping
+    // this again would print `**Run* …*` instead of rendering anything.
+    '*Run* `npm test` now',
     // While a hash whose line begins inside a fence is somebody's comment.
     '```sh',
     '# a real comment',
@@ -451,7 +456,11 @@ test('a reply keeps every character it was written with, whatever the markers ar
     // A closing hash run is only closing syntax when it is spaced off the
     // text; `C#` is the name of a language.
     '*C#*',
-    '*glob *.ts*',
+    // Not bolded, because Slack cannot nest its one bold delimiter and the
+    // asterisk here is the text. Unbolded reads fine; `*glob *.ts*` would
+    // render as stray asterisks, and deleting one to make room would say
+    // something the agent did not.
+    'glob *.ts',
     // A longer delimiter is what carries a shorter one, for a span and a
     // fence alike — the run that closes it has to be exactly as long.
     'a ``span with a ` inside`` stays whole',
