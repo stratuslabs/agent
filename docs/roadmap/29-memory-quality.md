@@ -66,6 +66,20 @@ Three things make this the moment rather than later:
     bitemporal distinction outright.
   - **`trust` and `origin`** — `user`, `agent`, or `external`, plus the session
     and the tool it came through.
+
+    **An entry with no `trust` is `unknown`, and `unknown` is not `agent`.**
+    Every entry on an upgraded install lacks the field, including anything
+    written after reading a hostile page under today's code, so a default of
+    "trusted" would preserve the exact laundering path this step closes — on
+    the whole existing corpus, which is the only corpus anyone has. Defaulting
+    to `external` is wrong in the other direction and not merely
+    over-cautious: it would label everything the operator ever told the agent,
+    and every line they hand-added under decision 5's promise, as web content,
+    which is false and empties the external label of meaning by making it
+    universal. So `unknown` renders under its own label — recorded before
+    origins were tracked — outside the framing that presents a fact as the
+    agent's own conclusion. It is the honest statement, it closes the path,
+    and it drains by itself as entries written afterwards carry the field.
   - **`pinned`** — see the injection change below.
   - **`supersedes`** — see the next bullet.
 
@@ -116,6 +130,18 @@ Three things make this the moment rather than later:
     makes 14's thesis true rather than aspirational: the current recency slice
     is recall that happens *to* an agent, and it is what the spec argued
     against.
+
+    **The index inherits its entries' labels**, and that generalizes to an
+    invariant the whole step is held to: *nothing in the prompt derived from
+    an external entry renders outside the external label*. `about` keys are
+    model-written text on a tainted entry — an instruction-shaped topic name
+    is exactly what a hostile page would induce — so a topic any external
+    entry contributes renders under the external label and never in the plain
+    index, appearing in both regions when trusted entries contribute it too
+    rather than being merged into one unlabelled line. Stated as an invariant
+    rather than a patch on this block, because the index is only the first
+    derived view: a count, a last-updated stamp, or whatever a later step
+    renders from entries inherits the same rule for free.
   - **A recency tail**, smaller than today's twenty and bounded in bytes, so a
     cold store with nothing pinned and nothing indexed still behaves as it does
     now.
@@ -169,10 +195,22 @@ Three things make this the moment rather than later:
 - **An evaluation harness, in scope from the start.** A fixture corpus of
   synthetic agent lifetimes with labelled ground truth, weighted toward the
   cases that separate a working memory from a plausible one: superseded facts,
-  direct contradictions, entity aliases, temporal queries ("what did I believe
-  in March"), and **negative cases the agent must not recall**. Metrics:
-  recall@k, precision of the injected slice, staleness rate (share of injected
-  facts already superseded), tokens per useful fact.
+  direct contradictions, entity aliases, validity-scoped queries, and
+  **negative cases the agent must not recall**. Metrics: recall@k, precision of
+  the injected slice, staleness rate (share of injected facts already
+  superseded), tokens per useful fact.
+
+  **The temporal case is scoped to validity, not to supersession**, and the
+  distinction is what makes it scoreable at all. A superseded entry is not
+  live: it leaves `list` and `search` by the read rule above, and `audit` is
+  the operator's read — so "what did I believe in March" names no retrieval
+  path the agent has, and a corpus requiring it would be scoring a recall
+  nothing can perform. What *is* answerable is a live entry whose
+  `validUntil` has passed — still in the record, still findable, and correctly
+  excluded from what is true now. That is the temporal behavior this step
+  actually ships, so that is what the corpus measures. An agent-accessible
+  as-of read over retired beliefs is a real question and is in Open questions,
+  where its own hazard is named.
 
   It runs deterministically under `node --test` against both store
   implementations, with no live model in the default path. It is not a
@@ -242,6 +280,17 @@ Three things make this the moment rather than later:
 - **A JSONL line carrying only the four required fields loads, recalls, and
   reaches the injected prompt** — the hand-edit promise re-asserted against the
   wider shape, which is the thing a richer schema is most likely to break.
+- **That same line renders under the unknown-origin label, never as the
+  agent's own conclusion** — asserted against the rendered prompt, because the
+  whole existing corpus is that line, and a default of trusted would carry the
+  laundering path forward across every upgrade.
+- **An `about` key on an external entry never appears in the plain index** —
+  asserted with an instruction-shaped topic name against the rendered prompt,
+  which is the only place the leak is visible: the entry itself is labelled
+  correctly the whole time.
+- **A live entry whose `validUntil` has passed is excluded from what is true
+  now and still findable by `search`** — the temporal behavior the corpus
+  scores, and the one that separates validity from supersession.
 - An entry that supersedes another: only the successor is live in `list`,
   `search`, and the injected prompt; `audit` shows both and names which
   replaced which.
@@ -283,6 +332,14 @@ Three things make this the moment rather than later:
 
 ## Open questions
 
+- **Should the agent get an as-of read over retired beliefs?** Supersession
+  makes the old entry unreachable to the agent by design, and "what did I
+  think before" is a question worth answering. The hazard is that the obvious
+  implementation is the laundering path in a different costume: a read that
+  returns retracted content puts it back in the context, where it reads as
+  something the agent knows rather than something it stopped believing.
+  Anything built here has to render a retired fact as retired, and that is a
+  design worth its own argument rather than a parameter on `search`.
 - **Does the index block belong in the prompt, or behind a `memory.topics`
   tool?** In the prompt it costs tokens every turn; behind a tool it costs a
   round trip and depends on the agent choosing to call it. Leaning prompt,
