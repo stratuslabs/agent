@@ -733,34 +733,54 @@ const convertInline = (segment: string): string => {
  * heading, and its code goes along untouched.
  *
  * Emphasis inside is already converted by here, so the line is only wrapped
- * when it carries no `*` of its own. Slack has one bold delimiter and no
- * way to nest it: wrapping `*Run* the thing` again yields `**Run* the
- * thing*`, which it renders as literal asterisks rather than as anything
- * bold. A heading that already contains emphasis therefore keeps exactly
- * the emphasis it has — `## **Title**` is bold by now and needs nothing
- * more, and `# glob *.ts` keeps an asterisk that was never a marker at all.
- * An unbolded heading reads fine; a heading full of stray asterisks does
- * not, and one with characters removed to make room is worse than both.
+ * when nothing in it can pair with the wrapper. Slack has one bold
+ * delimiter and no way to nest it: wrapping `*Run* the thing` again yields
+ * `**Run* the thing*`, which it renders as literal asterisks rather than as
+ * anything bold. A heading that already carries emphasis therefore keeps
+ * exactly the emphasis it has — `## **Title**` is bold by now and needs
+ * nothing more, and `# glob *.ts` keeps an asterisk that was never a marker
+ * at all. An unbolded heading reads fine; a heading full of stray asterisks
+ * does not, and one with characters removed to make room is worse than both.
  *
- * Scanning is a cursor rather than a search: `replace` reports matches in
+ * An asterisk inside a code span is not one of those: Slack does not read
+ * markup there, so it cannot pair with anything, and ``## Match `*.ts` files``
+ * is bolded like any other heading.
+ *
+ * Both walks are cursors rather than searches: `replace` reports matches in
  * increasing offset, and the spans were collected in that order too, so
  * neither has to be looked at twice. The same work as a scan per heading,
  * without its quadratic on a reply that is mostly headings and snippets.
  */
 const convertHeadings = (text: string, code: ReadonlyArray<readonly [number, number]>): string => {
   let span = 0;
+  const startsInside = (position: number, from: number): boolean =>
+    position >= (code[from]?.[0] ?? Number.POSITIVE_INFINITY);
+
   return text.replace(MARKDOWN_HEADING, (line, body: string, offset: number) => {
     while (span < code.length && (code[span]?.[1] ?? 0) <= offset) {
       span += 1;
     }
-    if (offset >= (code[span]?.[0] ?? Number.POSITIVE_INFINITY)) {
+    // A `#` whose line begins inside a span is a comment in somebody's code.
+    if (startsInside(offset, span)) {
       return line;
     }
     const heading = body.trim();
     if (heading.length === 0) {
       return line;
     }
-    return heading.includes('*') ? heading : `*${heading}*`;
+    // The line's own spans, walked from where the heading cursor already
+    // stands rather than from the beginning.
+    let within = span;
+    for (let at = line.indexOf('*'); at !== -1; at = line.indexOf('*', at + 1)) {
+      const position = offset + at;
+      while (within < code.length && (code[within]?.[1] ?? 0) <= position) {
+        within += 1;
+      }
+      if (!startsInside(position, within)) {
+        return heading;
+      }
+    }
+    return `*${heading}*`;
   });
 };
 

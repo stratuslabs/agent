@@ -391,6 +391,7 @@ test('a heading is found on the reply\'s own lines, not inside each fragment inl
     '`status` # not a heading',
     '## Run `npm test` now',
     '## **Run** `npm test` now',
+    '## Match `*.ts` files',
     '```sh',
     '# a real comment',
     '```',
@@ -416,6 +417,9 @@ test('a heading is found on the reply\'s own lines, not inside each fragment inl
     // has: Slack has one bold delimiter and no way to nest it, so wrapping
     // this again would print `**Run* …*` instead of rendering anything.
     '*Run* `npm test` now',
+    // An asterisk inside a span is not emphasis Slack could pair with, so
+    // this heading is bolded like any other.
+    '*Match `*.ts` files*',
     // While a hash whose line begins inside a fence is somebody's comment.
     '```sh',
     '# a real comment',
