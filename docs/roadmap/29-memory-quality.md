@@ -3,9 +3,10 @@
 ## Goal
 
 Memory that is still useful in year two: entries that know enough about
-themselves to be superseded, ranked, and trusted; an injected slice chosen by
-what the agent knows rather than by what the clock says; and a benchmark that
-turns every later tuning decision into a measurement instead of an argument.
+themselves to be superseded, ranked, and bounded by validity; an injected slice
+chosen by what the agent knows rather than by what the clock says; and a
+benchmark that turns every later tuning decision into a measurement instead of
+an argument.
 
 ## Why now
 
@@ -18,12 +19,11 @@ Recency is the weakest selection policy available. It is uncorrelated with the
 conversation, it silently drops everything older, and it spends tokens every
 turn to do both. It is also the only policy the current entry shape can
 support: a `MemoryEntry` is `{ id, agentId, content, createdAt }` plus opaque
-metadata, so nothing downstream can tell a preference from an observation, a
-current fact from a superseded one, or something the user said from something a
-web page said. Every ranking idea dies at the same place — there is nothing to
-rank on.
+metadata, so nothing downstream can tell a preference from an observation, or a
+current fact from a superseded one. Every ranking idea dies at the same place —
+there is nothing to rank on.
 
-Three things make this the moment rather than later:
+Two things make this the moment rather than later:
 
 - **Every open question in 14 and 21 is a tuning question with no way to settle
   it.** Automatic recall at turn start, decay, slice size, consolidation
@@ -31,17 +31,15 @@ Three things make this the moment rather than later:
   by argument, and each one relitigated in a PR review costs more than the
   harness that would answer it.
 - **[21](./21-team-knowledge.md) is about to add a second scope and a second
-  writer.** Whatever an entry must carry — provenance, validity, authorship,
-  supersession — is far cheaper to add while there is one scope and one writer
-  than after a shared pool exists with its own rendering and its own mutation
-  policy.
-- **The laundering path is live today.** [13](./13-search.md) landed its
-  untrusted marking in the `web.search` result envelope rather than as a kernel
-  field, and 14 named memory as the second consumer that would justify
-  promoting it. Memory is the one channel carrying model-authored text *across*
-  the turn boundary: an agent that reads a hostile page and remembers what it
-  said has moved that text past every check the turn applied, into a later
-  prompt where it reads as the agent's own prior conclusion.
+  writer.** Whatever an entry must carry — validity, authorship, supersession —
+  is far cheaper to add while there is one scope and one writer than after a
+  shared pool exists with its own rendering and its own mutation policy.
+
+**Depends on [30](./30-provenance.md)** for the trust label an entry carries and
+for how a labelled region renders. The two were one step until review made the
+split obvious: every round after the first found another hole in the provenance
+half while the quality half stood, which is what a different blast radius and a
+different review look like.
 
 ## Scope
 
@@ -68,46 +66,42 @@ Three things make this the moment rather than later:
     **An entry outside its validity window leaves the injected slice and stays
     findable by `search`** — one rule, both bounds. A `validUntil` in the past
     is the case that motivates it; a `validFrom` in the future is the same
-    error running the other way, and an entry that is not true yet reaching
-    the pinned core or the index would be presented as true now, which is
-    exactly the confusion the two fields exist to prevent. Stated as one
-    policy rather than left to the implementation, because excluding and
-    downranking produce different prompts and different harness numbers — a
-    step that leaves the choice open cannot be measured against itself. Being
-    outside the window is not deletion: the entry is in the record, in
-    `search`, and in `audit`; it is not what is true now, which is the only
-    claim the injected slice makes.
-  - **`trust` and `origin`** — `user`, `agent`, or `external`, plus the session
-    and the tool it came through.
-
-    **An entry with no `trust` is `unknown`, and `unknown` is not `agent`.**
-    Every entry on an upgraded install lacks the field, including anything
-    written after reading a hostile page under today's code, so a default of
-    "trusted" would preserve the exact laundering path this step closes — on
-    the whole existing corpus, which is the only corpus anyone has. Defaulting
-    to `external` is wrong in the other direction and not merely
-    over-cautious: it would label everything the operator ever told the agent,
-    and every line they hand-added under decision 5's promise, as web content,
-    which is false and empties the external label of meaning by making it
-    universal. So `unknown` renders under its own label — recorded before
-    origins were tracked — outside the framing that presents a fact as the
-    agent's own conclusion. It is the honest statement, it closes the path,
-    and it drains by itself as entries written afterwards carry the field.
-  - **`pinned`** — see the injection change below.
-  - **`supersedes`** — see the next bullet.
+    error running the other way, and an entry that is not true yet reaching the
+    pinned core or the index would be presented as true now, which is exactly
+    the confusion the two fields exist to prevent. Stated as one policy rather
+    than left to the implementation, because excluding and downranking produce
+    different prompts and different harness numbers — a step that leaves the
+    choice open cannot be measured against itself. Being outside the window is
+    not deletion: the entry is in the record, in `search`, and in `audit`; it
+    is not what is true now, which is the only claim the injected slice makes.
+  - **`trust` and `origin`** — defined by [30](./30-provenance.md), carried
+    here. The entry is where the label lives; what sets it, how it propagates,
+    and how a labelled region renders are 30's.
+  - **`supersedes`** — see the record lane below.
 
   **Every field lives in the JSONL, never only in the index.** The derived
   claim is the load-bearing property of 14's design and this step does not get
   to spend it.
 
-- **Supersession as a record, not a rewrite.** `memory.remember` accepts
-  `supersedes: [id]`, and a supersession is a tombstone that names its
-  successor — the same lane `forget` already appends to, so `liveEntriesFor`
-  gains no new concept. The read rule is that a superseded entry is not live:
-  it leaves `list`, `search`, and therefore the prompt, exactly as a forgotten
-  one does.
+- **The record lane grows two more record types, and pinning is one of them.**
+  14's file holds entries and tombstones; `forget` appends rather than
+  rewrites, because `O_APPEND` is the whole concurrency model and decision 5
+  promises the file stays hand-editable. Anything that *changes* an entry has
+  to be a record, never a field write:
 
-  What this fixes is the failure that makes long-lived memory useless.
+  - **Supersession** — a tombstone naming its successor, so `liveEntriesFor`
+    gains no new concept. A superseded entry is not live: it leaves `list`,
+    `search`, and therefore the prompt, exactly as a forgotten one does.
+  - **Pin and unpin** — a record naming the entry. `pinned` cannot be a field
+    on the entry: pinning is a toggle, from the agent and from the operator's
+    CLI and console, and a toggle on an append-only line is a rewrite. This
+    was a field in the first draft of this spec and that was simply wrong.
+
+  [30](./30-provenance.md)'s operator trust re-assertion is a third record in
+  the same lane, which is what makes an upgraded install's `unknown` corpus
+  recoverable rather than permanent.
+
+  What supersession fixes is the failure that makes long-lived memory useless.
   Remembering "the deploy runs on Postgres now" leaves "the deploy runs on
   MySQL" in the store today, and both land in the same prompt with nothing to
   separate them. Belief revision is the normal case for an agent that runs for
@@ -115,18 +109,18 @@ Three things make this the moment rather than later:
   entry stays visible in `audit` with the entry that replaced it, which is
   strictly more than a delete would leave behind.
 
-  **Every `supersedes` id must resolve to a live entry the caller owns, before
-  anything is appended**, and this is a security requirement rather than
+  **Every id a record names must resolve to a live entry the caller owns,
+  before anything is appended**, and this is a security requirement rather than
   input hygiene. `liveEntriesFor` computes its forgotten set from *every*
-  tombstone in the file with no agent filter — deliberately, so that a
-  hand-edited file where a tombstone precedes its entry still means forgotten
-  — and ownership is enforced only inside `forget`'s write path, which
-  resolves the entry from the caller's own live set first. Supersession is the
-  **second writer into that lane**, and a second writer that skips the check
-  lets agent A retire agent B's memory by naming its id: gone from B's `list`,
-  its `search`, and its prompt, with B's own `forget` never called. That is
-  the per-agent boundary — the access model the whole store rests on —
-  breached by a field on a `safe` tool.
+  tombstone in the file with no agent filter — deliberately, so a hand-edited
+  file where a tombstone precedes its entry still means forgotten — and
+  ownership is enforced only inside `forget`'s write path, which resolves the
+  entry from the caller's own live set first. These are the **second and third
+  writers into that lane**, and a writer that skips the check lets agent A
+  retire agent B's memory by naming its id: gone from B's `list`, its `search`,
+  and its prompt, with B's own `forget` never called. That is the per-agent
+  boundary — the access model the whole store rests on — breached by a field on
+  a `safe` tool.
 
   The write-path check is the requirement. Worth pricing alongside it:
   `liveEntriesFor` honouring only tombstones whose `agentId` matches the
@@ -162,19 +156,8 @@ Three things make this the moment rather than later:
     `memory.recall` from a guess into a targeted read. This is the block that
     makes 14's thesis true rather than aspirational: the current recency slice
     is recall that happens *to* an agent, and it is what the spec argued
-    against.
-
-    **The index inherits its entries' labels**, and that generalizes to an
-    invariant the whole step is held to: *nothing in the prompt derived from
-    an external entry renders outside the external label*. `about` keys are
-    model-written text on a tainted entry — an instruction-shaped topic name
-    is exactly what a hostile page would induce — so a topic any external
-    entry contributes renders under the external label and never in the plain
-    index, appearing in both regions when trusted entries contribute it too
-    rather than being merged into one unlabelled line. Stated as an invariant
-    rather than a patch on this block, because the index is only the first
-    derived view: a count, a last-updated stamp, or whatever a later step
-    renders from entries inherits the same rule for free.
+    against. It renders under [30](./30-provenance.md)'s labelling invariant
+    like every other view derived from entries.
   - **A recency tail**, smaller than today's twenty and bounded in bytes, so a
     cold store with nothing pinned and nothing indexed still behaves as it does
     now.
@@ -194,69 +177,53 @@ Three things make this the moment rather than later:
   [19](./19-registration-seams.md) becomes an additive capability rather than a
   contract break.
 
-- **The untrusted marking, promoted to the kernel and carried out the far
-  side.** A taint field on `ToolResult` — the promotion 13 deferred and named
-  this as the consumer for.
-
-  **The producer rule is a rule, not a list**: a result is tainted when it
-  carries content the agent did not author and the operator did not configure.
-  An enumerated list is how the newest tool silently arrives untainted, and the
-  first draft of this spec proved the point by naming `web.search`,
-  `web.fetch`, and the [11](./11-mcp.md) bridge while omitting the browser —
-  where `browser.read` returns page `innerText` and `goto`, `read`,
-  `screenshot`, and `act` all return a page-supplied `title`. That is the most
-  attacker-controlled surface of the four, reached by a page the agent was
-  merely pointed at. Every one of those is a producer, and so is the next tool
-  that reads something a stranger wrote.
-
-  An entry written in a session that has seen a
-  tainted result is stored `trust: 'external'`, and external-origin facts
-  render in their **own labelled block**: recorded from external sources, to be
-  read as reports rather than as the agent's own conclusions.
-
-  The propagation rule is deliberately coarse and errs toward over-marking
-  (see Design sketch). A fact wrongly marked external is a fact the model
-  treats with slightly more suspicion; a fact wrongly marked trusted is the
-  attack.
-
 - **Usage telemetry in the index, and only in the index.** `lastRecalledAt` and
   `recallCount` are observations about reading, not facts the agent learned, so
   they stay out of the record. The documented consequence is exact: deleting
   the index loses your usage statistics, never your memories. Ranking may use
   them; **nothing deletes on them**.
 
-- **An evaluation harness, in scope from the start.** A fixture corpus of
-  synthetic agent lifetimes with labelled ground truth, weighted toward the
-  cases that separate a working memory from a plausible one: superseded facts,
-  direct contradictions, entity aliases, validity-scoped queries, and
-  **negative cases the agent must not recall**. Metrics: recall@k, precision of
-  the injected slice, staleness rate (share of injected facts already
-  superseded), tokens per useful fact.
+- **An evaluation harness, in scope from the start — with a stated ground truth
+  and a stated definition of better.** A criterion requiring "before-and-after
+  numbers" is satisfiable by a number that measures nothing, so this says which
+  number.
 
-  **The temporal case is scoped to validity, not to supersession**, and the
-  distinction is what makes it scoreable at all. A superseded entry is not
-  live: it leaves `list` and `search` by the read rule above, and `audit` is
-  the operator's read — so "what did I believe in March" names no retrieval
-  path the agent has, and a corpus requiring it would be scoring a recall
-  nothing can perform. What *is* answerable is a live entry whose
-  `validUntil` has passed — still in the record, still findable, and correctly
-  excluded from what is true now. That is the temporal behavior this step
-  actually ships, so that is what the corpus measures. An agent-accessible
-  as-of read over retired beliefs is a real question and is in Open questions,
-  where its own hazard is named.
+  **The corpus carries per-turn relevance labels.** Each turn of a synthetic
+  agent lifetime names the facts a competent agent should have had in context
+  for it. That label set is what precision is measured against — without it,
+  "precision of the injected slice" has no denominator, because injection here
+  is not query-driven (automatic retrieval is out, below).
+
+  What the deterministic harness scores, and what each number means:
+
+  - **Precision of the injected slice** against those labels — the primary
+    number, and the one 29 is claiming to improve.
+  - **Tokens per relevant fact injected** — the paired number, because a policy
+    that wins precision by injecting more has not won. Both move or neither
+    counts.
+  - **Staleness rate** — the share of injected facts that are superseded or
+    outside their validity window. A correctness number, not a tuning one: it
+    goes to zero.
+  - **Negatives kept out** — the labelled facts that must not appear.
+  - **Recall@k over `search`**, scoped honestly: with `recency` mandatory this
+    tests the matching contract, the bounded-read rule, and parity between the
+    two store implementations. It is not a measure of 29's selection policy and
+    is not the headline number; it becomes one when a `relevance` strategy
+    lands behind [19](./19-registration-seams.md).
+
+  **Better means: precision up and staleness down at no more tokens per
+  relevant fact**, against the recency policy this step replaces, on the same
+  corpus. The landing PR carries both sides of that comparison.
 
   It runs deterministically under `node --test` against both store
-  implementations, with no live model in the default path. It is not a
-  follow-up: a step that changes the selection policy and cannot say by how
-  much it improved has not established anything, and the PR that lands this is
-  required to carry the before-and-after numbers for the policy it replaces.
+  implementations, with no live model in the default path.
 
 - **`stratus memory`** — `list`, `search`, `forget`, `audit`, `pin`, `export`,
   `import`. [17](./17-fleet-console.md) owns the console view and still does;
   this is the terminal half, and the export path is what the harness needs to
-  run a corpus in the first place. **An imported entry lands as `external`**
-  unless the operator explicitly says otherwise, because import is exactly the
-  shape of the laundering problem above with a human in the middle.
+  run a corpus in the first place. **An imported entry lands `external`** per
+  [30](./30-provenance.md) unless the operator explicitly says otherwise —
+  import is the laundering problem with a human in the middle.
 
 **Out:**
 
@@ -278,6 +245,7 @@ Three things make this the moment rather than later:
   unmeasurable today. Building the ruler before the tuning is the whole point
   of the ordering here; 14 left this open leaning no, and this step's harness
   is what changes the answer from a preference to a result.
+- **The provenance contract.** That is [30](./30-provenance.md).
 - **The shared scope.** That is [21](./21-team-knowledge.md), and it should
   land on this entry shape rather than beside it.
 - **Deletion.** Nothing in this step deletes anything. Decay ranks; validity
@@ -289,58 +257,13 @@ Three things make this the moment rather than later:
   `INDEX_SCHEMA_VERSION`, which 14 already defined as a rebuild trigger rather
   than an error. There is no data migration to write, because the file the
   upgrade must not forget is the file the new code already reads.
-- **Taint propagates per session, not per fact.** The runner knows a turn saw
-  untrusted content; it does not track which words in a later `memory.remember`
-  came from it, and a design that claimed to would be lying. So: once a session
-  has seen untrusted content, entries written later in that session are
-  `external`. Coarse, over-marking, and the failure direction is the safe one.
-- **A session is tainted by what enters its context, not only by what a tool
-  returned.** A tainted `ToolResult` is one source; **an `external` entry
-  arriving through the injected memory block or through a `memory.recall`
-  result is another**, which means `search` has to carry `trust` out with each
-  entry rather than content alone. Without this the store launders its own
-  contents on the next restart: a fresh session reads an external fact from
-  the prompt, restates it, remembers it — and the new entry is `agent`,
-  because that session never called a network tool. The round trip through
-  memory is the cheapest version of the whole attack, and it is available to
-  anything that can wait a session.
-- **`external` propagates; `unknown` does not**, and the asymmetry is the
-  decision rather than an oversight. `external` is a positive claim that
-  content came from a stranger, so anything written in its presence inherits
-  it. `unknown` is a statement about *missing metadata on old entries* — and
-  since every legacy entry is `unknown` and legacy entries are what an
-  upgraded install injects, propagating it would mark every fact every
-  upgraded agent ever writes again, permanently. That is the same
-  make-the-label-universal failure the `unknown` default exists to avoid,
-  arriving through the back door.
-- **Taint crosses a delegation.** `createDelegateTool` starts the target's
-  session with the parent's text as `userMessage` and metadata carrying depth,
-  delegator, and root session — so a tainted parent hands attacker-influenced
-  text to a teammate whose session has seen nothing, and the teammate stores
-  it as its own conclusion. A per-session rule with no delegation clause is a
-  cross-agent laundering path, which is worse than the single-agent one it
-  replaces: the roster's separate identities are what make the launder
-  convincing. The parent's taint rides in the delegation metadata beside the
-  keys already there. [24](./24-sub-agents.md) is unaffected — a sub-agent
-  writes no memory at all — but that is a different tool, and its rule does
-  not cover this one.
-
-  **It crosses in both directions**, and stating only the outbound half was
-  its own hole. An untainted parent delegates, the target reads a hostile
-  page, and the target's reply comes back as the `agent.delegate` result — so
-  the delegate result is tainted when the target's session became tainted,
-  and the parent inherits it on receipt. This is the general producer rule
-  applied to a reply rather than a page: a delegate result carries content
-  the parent did not author and its operator did not configure. Naming it
-  anyway, because a clause that reads as the complete statement of how taint
-  crosses delegation is where the next implementer will stop.
 - **The pinned cap refuses, on the same reasoning as the per-entry byte cap.**
   14 refuses an over-cap fact rather than truncating it because a half-stored
   fact is worse than a refused one. A silently evicted pin is the same mistake
   with a different unit.
 - **`memory.pin` is `safe`**, by the rule that already covers `remember` and
-  `forget`: the agent's own notes, tombstoned rather than destroyed, keyed to
-  the agent. The operator can pin and unpin through the CLI and the console.
+  `forget`: the agent's own notes, appended rather than destroyed, keyed to the
+  agent. The operator can pin and unpin through the CLI and the console.
 - **The corpus is fixtures, not recordings.** Real transcripts would carry
   conversation content into the repository and would be unlicensable to share;
   synthetic lifetimes are also the only way to have labelled negatives, which
@@ -353,17 +276,9 @@ Three things make this the moment rather than later:
 - **A JSONL line carrying only the four required fields loads, recalls, and
   reaches the injected prompt** — the hand-edit promise re-asserted against the
   wider shape, which is the thing a richer schema is most likely to break.
-- **That same line renders under the unknown-origin label, never as the
-  agent's own conclusion** — asserted against the rendered prompt, because the
-  whole existing corpus is that line, and a default of trusted would carry the
-  laundering path forward across every upgrade.
-- **An `about` key on an external entry never appears in the plain index** —
-  asserted with an instruction-shaped topic name against the rendered prompt,
-  which is the only place the leak is visible: the entry itself is labelled
-  correctly the whole time.
 - **A live entry whose `validUntil` has passed is excluded from what is true
-  now and still findable by `search`** — the temporal behavior the corpus
-  scores, and the one that separates validity from supersession.
+  now and still findable by `search`** — the behavior the corpus scores, and
+  the one that separates validity from supersession.
 - **The same for an entry whose `validFrom` is still in the future**, pinned
   included: a fact that is not true yet must not reach the pinned core, the
   index, or the tail. One rule, both bounds, and the future case is the one an
@@ -371,39 +286,19 @@ Three things make this the moment rather than later:
 - An entry that supersedes another: only the successor is live in `list`,
   `search`, and the injected prompt; `audit` shows both and names which
   replaced which.
+- **Pinning and unpinning leave the entry's own line byte-identical** — the
+  criterion that fails if `pinned` is implemented as a field write, which is
+  the convenient implementation and breaks `O_APPEND` and decision 5 together.
 - **A pin past the cap is refused naming the cap, and no existing pin is
   dropped** — asserted, because eviction is the convenient implementation.
+- **An agent naming another agent's entry id in `supersedes` — or in a pin — is
+  refused, and that entry stays live in its owner's `list`, `search`, and
+  prompt** — the per-agent boundary asserted against the victim's reads rather
+  than the attacker's error, since a refusal that still appended the record
+  would pass an error-message test.
 - Over a store of ten thousand entries, the injected slice stays within budget
   and contains the pinned core and the index; the recency tail is what shrinks.
   The pinned set is never pushed out by volume.
-- **A fact written after a `web.fetch` in the same session is marked external
-  and renders in the labelled block** — asserted against the rendered prompt
-  rather than the stored entry, because the entry is the half that would pass
-  either way.
-- **The same holds after `browser.read`**, asserted separately rather than
-  assumed from the `web.fetch` case. Two different plugins own those two
-  results, so one passing says nothing about the other, and the browser is the
-  producer a list-shaped taint contract loses first.
-- **A fresh session that reads an external entry — from the injected block or
-  from `memory.recall` — and then remembers something writes `external`, not
-  `agent`.** The round trip through the store on a later restart is the
-  cheapest version of the whole attack, and it passes every taint test that
-  only exercises tool results.
-- **A session that has seen only `unknown` entries still writes `agent`** —
-  the other half of that rule, and the one that stops an upgraded install
-  marking every fact it will ever write again.
-- **An agent tainted by a fetch delegates; the target's `memory.remember`
-  writes `external`** — the cross-agent path, asserted end to end, because
-  every single-session taint test passes while it is open.
-- **And the return leg: an untainted parent delegates, the target fetches, and
-  the parent's next `memory.remember` writes `external`.** Asserted
-  separately, because the outbound test passes with the inbound half missing
-  and reads like coverage.
-- **An agent naming another agent's entry id in `supersedes` is refused, and
-  that entry stays live in its owner's `list`, `search`, and prompt** — the
-  per-agent boundary asserted against the victim's reads rather than the
-  attacker's error, since a refusal that still appended the tombstone would
-  pass an error-message test.
 - **Exactly one `memory`-kind section reaches the Anthropic placement, and all
   three blocks arrive at the tail** — the criterion that fails if the blocks
   are ever split into sibling sections, which drops two of them from the
@@ -416,11 +311,13 @@ Three things make this the moment rather than later:
   while no fact is lost** — the derived claim, re-proved at the wider schema.
 - The harness runs in CI, deterministically, against both stores, and a
   regression in injected-slice precision fails the run.
-- **The PR carries the harness's numbers for the recency policy it replaces and
-  the policy it lands** — without them "better" is unfalsifiable, and this
-  criterion is the one that makes the step mean anything.
+- **The PR carries precision, tokens per relevant fact, and staleness rate for
+  the recency policy it replaces and the policy it lands** — the three numbers
+  "better" is defined as, on the same corpus. Without them the claim is
+  unfalsifiable, and this criterion is the one that makes the step mean
+  anything.
 - `export` then `import` into an empty store reproduces the same recall
-  results, and imported entries are `external` unless explicitly flagged.
+  results.
 - Agent A cannot read agent B's entries with every new field in play, the test
   naming both agents rather than asserting an empty result an unrelated bug
   would also produce.
@@ -430,10 +327,10 @@ Three things make this the moment rather than later:
 ## Open questions
 
 - **Should the agent get an as-of read over retired beliefs?** Supersession
-  makes the old entry unreachable to the agent by design, and "what did I
-  think before" is a question worth answering. The hazard is that the obvious
-  implementation is the laundering path in a different costume: a read that
-  returns retracted content puts it back in the context, where it reads as
+  makes the old entry unreachable to the agent by design, and "what did I think
+  before" is a question worth answering. The hazard is that the obvious
+  implementation is a laundering path in a different costume: a read that
+  returns retracted content puts it back in context, where it reads as
   something the agent knows rather than something it stopped believing.
   Anything built here has to render a retired fact as retired, and that is a
   design worth its own argument rather than a parameter on `search`.
@@ -446,21 +343,11 @@ Three things make this the moment rather than later:
   of remembering: extraction is the knowledge graph arriving through a side
   door, and the agent writing the fact is the party that knows what it is
   about.
-- **Should `kind` gate injection eligibility, or only ranking?** Episodic
-  entries are the ones that age fastest and also the ones that carry "what
-  happened last time", which is often exactly what is wanted.
-- **Is session-level taint too coarse to be useful?** An agent that fetches one
-  page at the start of a long session marks everything after it external. The
-  finer version needs per-turn provenance the runner does not currently keep,
-  and adding it is a kernel change worth pricing separately.
-- **Should any `kind` be exempt from expiry?** The policy itself is settled in
-  Scope — an expired entry leaves the injected slice and stays findable by
-  `search` — because leaving it open contradicted the acceptance criterion
-  that requires exclusion, and downranking and excluding produce different
-  prompts and different harness numbers, so an implementation cannot satisfy
-  both. What is genuinely open is narrower: `episodic` entries carry "what
-  happened last time", which does not stop being true when it stops being
-  current, and an exemption for them is arguable on its own.
+- **Should `kind` gate injection eligibility, or only ranking — and should any
+  `kind` be exempt from expiry?** Both questions are the same one about
+  `episodic` entries: they age fastest, and they carry "what happened last
+  time", which does not stop being true when it stops being current. The expiry
+  *policy* is settled in Scope; the exemption is arguable on its own.
 - **Does [21](./21-team-knowledge.md)'s `MemoryScope` need a third `project`
   variant designed now?** An agent working across three repositories wants
   repository-scoped facts, and retrofitting a third variant into a union that
