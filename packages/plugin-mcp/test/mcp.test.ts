@@ -30,6 +30,7 @@ import { ManifestBoundToolRegistry, parsePluginManifest } from '@stratusagent/pl
 import {
   createMcpPlugin,
   normalizeCallResult,
+  PLUGIN_MCP_VERSION,
   sanitizeToolSegment,
   sealedStdioEnv,
   pathGrant,
@@ -128,6 +129,24 @@ const pluginFor = (handle: FakeServerHandle, config: JsonObject = {}, options: M
     { servers: { linear: { url: 'http://127.0.0.1:9/unused' } }, ...config },
     { transportFor: () => handle.transportFor(), warn: () => {}, log: () => {}, ...options },
   );
+
+test('the version the bridge introduces itself with is the version it was published as', async () => {
+  // PLUGIN_MCP_VERSION is a second copy of a number that lives in
+  // package.json, and it is the one somebody else's server sees: it is the
+  // `clientInfo.version` of every handshake, which a server may log or key
+  // compatibility on. A release bumps the manifest; nothing makes it bump the
+  // constant, and nothing fails if it does not. Same reasoning, and same
+  // test, as the CLI's and the control API's own version pins.
+  const manifest = JSON.parse(
+    await readFile(path.join(packageRoot, 'package.json'), 'utf8'),
+  ) as { version: string };
+
+  assert.equal(
+    PLUGIN_MCP_VERSION,
+    manifest.version,
+    'PLUGIN_MCP_VERSION drifted from package.json — the bridge would introduce itself as a version it is not',
+  );
+});
 
 test('discovered tools register as mcp.<server>.<tool>, gated even when the server calls them read-only', async () => {
   const handle = fakeServer({ current: linearTools });

@@ -30,8 +30,12 @@ import {
  * manifests on a release, like CLI_VERSION and CONTROL_API_VERSION — a
  * server that logs or keys compatibility on clientInfo.version otherwise
  * goes on seeing the release this literal was last touched at.
+ *
+ * Exported for the same reason theirs are: so a test can pin it to
+ * package.json, because nothing else fails when a release bumps the
+ * manifest and leaves the literal behind.
  */
-const PLUGIN_MCP_VERSION = '0.10.0';
+export const PLUGIN_MCP_VERSION = '0.10.0';
 
 export { bridgedToolName, normalizeCallResult, sanitizeToolSegment, SERVER_NAME_PATTERN } from './normalize.ts';
 export { sealedStdioEnv, pathGrant, resolveCommandPath };
