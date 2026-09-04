@@ -340,6 +340,131 @@ test('streaming deltas edit the placeholder before the final reply lands', async
   assert.equal(texts.at(-1), 'Done. All set.');
 });
 
+test('a reply written in Markdown reaches Slack in the markup Slack renders', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  // What a model actually writes. Slack's mrkdwn spells every one of these
+  // differently, and sent as-is they reach the reader as literal asterisks,
+  // hashes and brackets — which is what the thread in #agents looked like.
+  const reply = [
+    '## Four things',
+    '',
+    '1. **Name mismatch.** The persona says *memory.remember*.',
+    '2. ~~Dropped~~ — see [the guide](https://example.com/docs).',
+    '3. ***Both at once***, and `**code**` is left alone.',
+    '',
+    '```js',
+    'const bold = "**not bold**"; // # not a heading',
+    '```',
+  ].join('\n');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> format something'));
+  await adapter.stop();
+
+  assert.equal(web.updates.at(-1)?.text, [
+    '*Four things*',
+    '',
+    '1. *Name mismatch.* The persona says _memory.remember_.',
+    '2. ~Dropped~ — see <https://example.com/docs|the guide>.',
+    '3. *_Both at once_*, and `**code**` is left alone.',
+    '',
+    '```js',
+    'const bold = "**not bold**"; // # not a heading',
+    '```',
+  ].join('\n'));
+});
+
+test('a reply keeps every character it was written with, whatever the markers around it', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  // Each line is a place a rewrite could quietly change what the agent
+  // said. A reply that reads oddly is survivable; one that says something
+  // else is not.
+  const reply = [
+    '# C#',
+    '# glob *.ts',
+    'a ``span with a ` inside`` stays whole',
+    'use the ` character on its own, then **bold**',
+    '````',
+    '```',
+    '**inner fence**',
+    '```',
+    '````',
+  ].join('\n');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> mind the edges'));
+  await adapter.stop();
+
+  assert.equal(web.updates.at(-1)?.text, [
+    // A closing hash run is only closing syntax when it is spaced off the
+    // text; `C#` is the name of a language.
+    '*C#*',
+    '*glob *.ts*',
+    // A longer delimiter is what carries a shorter one, for a span and a
+    // fence alike — the run that closes it has to be exactly as long.
+    'a ``span with a ` inside`` stays whole',
+    'use the ` character on its own, then *bold*',
+    '````',
+    '```',
+    '**inner fence**',
+    '```',
+    '````',
+  ].join('\n'));
+});
+
+test('a streamed placeholder is converted too, and a half-written marker stays literal', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const bus = new EventBus();
+
+  const gateway: GatewayLike = {
+    bus,
+    resolveApproval: () => false,
+    agents: () => [{ id: 'ava', name: 'Ava' }],
+    async dispatch(input) {
+      // Mid-stream, the closing marker has not arrived yet. Nothing may be
+      // rewritten on the guess that it will: an edit is what the reader is
+      // looking at, not a draft nobody sees.
+      await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: '**Almost' } });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: ' there**' } });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return sessionWithReply(input.sessionId, '**Done**');
+    },
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> stream markdown'));
+  await adapter.stop();
+
+  const texts = web.updates.map((update) => update.text);
+  assert.ok(texts.includes('**Almost'), `expected the unclosed marker to stand, got ${JSON.stringify(texts)}`);
+  assert.ok(texts.includes('*Almost there*'), `expected the closed pair to convert, got ${JSON.stringify(texts)}`);
+  assert.equal(texts.at(-1), '*Done*');
+});
+
 test('two agents in one thread hold separate sessions with their own identities', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();

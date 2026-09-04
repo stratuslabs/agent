@@ -39,6 +39,12 @@ which is canonical for the Slack surface.
   `channels.slack.<agentId>` in `~/.stratus/credentials.json` and are never
   resolved through the agent-scoped credential allowlist — an agent must not
   be able to read the tokens of the transport carrying it.
+- **Replies are translated to Slack's markup.** Agents write Markdown; Slack
+  renders mrkdwn, where bold is `*one asterisk*` and headings do not exist. The
+  adapter converts on the way out, leaving code spans and fences as written —
+  so a soul does not need a "you are on Slack" rule to be readable there. The
+  full list of what is converted is in the
+  [`@stratusagent/channel-slack` README](../../packages/channel-slack/README.md).
 - **Approval buttons** — with [`--approvals remote`](./approvals.md), a gated
   tool call parks the turn and asks in its thread with **Allow once** /
   **Always allow** / **Deny**. Clicks are authorized by *who clicked*, never
