@@ -476,7 +476,9 @@ one shared table of hostile URLs, which is what fails if it is ever forked. The
 policy, disagreeing with the first the day either changed. The shell pack
 contributes the command string (`Tool.commandFor`) and nothing else, and the
 browser pack contributes the origin of the page a conversation is on
-(`Tool.originFor`) on the same terms.
+(`Tool.originFor`) on the same terms. A tool offers **one** of those hooks
+or none — with two, the engine judges it by neither and asks every time,
+because how two grants compose on one call is a decision nobody has made.
 
 **First-party, outside.** Same authors, separate repositories:
 

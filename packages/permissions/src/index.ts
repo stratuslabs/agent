@@ -552,7 +552,32 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // its arguments. Resolved before anything else so that the tool-wide
       // "always" below can never apply to it: one yes to `git status` must
       // not become a standing yes to every command the shell can run.
-      const command = risk === 'gated' ? context.tool.commandFor?.(call.input) : undefined;
+      // A tool that offers more than one scope hook is judged by none of
+      // them, and asks like any other gated call.
+      //
+      // Each hook narrows a call along one axis — what it runs, where it
+      // sends, what site it acts on — and each grant answers only its own
+      // question. Composing them needs a decision nobody has made: a call
+      // with two axes could reasonably need every applicable scope to
+      // authorize it, or the narrowest, and picking silently is how a
+      // grant on one axis waves through a call unapproved on the other.
+      // Falling back to a human is the answer that cannot be wrong while
+      // that decision is unmade.
+      //
+      // Nothing offers two today (`shell.run` a command, `message.send` a
+      // destination, `browser.act` an origin), so this changes nothing now
+      // — it is here so that adding one cannot quietly open that door. The
+      // guard first covered only `commandFor`, and left exactly this hole
+      // for `destinationFor`; one rule over all three has no such corner.
+      const singlyScoped = [
+        context.tool.commandFor,
+        context.tool.destinationFor,
+        context.tool.originFor,
+      ].filter((hook) => hook !== undefined).length <= 1;
+
+      const command = risk === 'gated' && singlyScoped
+        ? context.tool.commandFor?.(call.input)
+        : undefined;
       const analysis = command === undefined ? undefined : analyzeCommand(command);
 
       // Whether this tool is judged by *where* it acts, and where it is
@@ -568,14 +593,9 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // approved on a page whose origin could not be named would fall back
       // to a standing yes to `browser.act` on every site, which is exactly
       // the grant per-origin scopes exist to replace.
-      // A tool that offers both is judged by the command and only the
-      // command: two engines over one call would need a rule for which
-      // wins, and the honest one — the narrower — is what a single engine
-      // already gives. Nothing offers both today; this is what keeps that
-      // true if something ever does.
       const scopedByOrigin = risk === 'gated'
-        && context.tool.originFor !== undefined
-        && context.tool.commandFor === undefined;
+        && singlyScoped
+        && context.tool.originFor !== undefined;
       // The grants first, and where the page is *after* them. Read the
       // other way round, the store's disk read sits between the two, and a
       // page that redirects inside it has a grant for site A allow a click
@@ -652,7 +672,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // refusal because an unattended firing is exactly when it applies.
       // `gated` only: a destination cannot launder a `dangerous` call, the
       // same way no argument shape makes `rm -rf` a read.
-      if (risk === 'gated' && destinations) {
+      if (risk === 'gated' && singlyScoped && destinations) {
         const destination = context.tool.destinationFor?.(call.input);
         if (destination !== undefined
           && await destinations.isPreauthorized(session, destination)) {

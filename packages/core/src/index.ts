@@ -1050,6 +1050,11 @@ export interface Tool {
    * permission engine refuses one for any tool that offers this hook, even
    * on a call where it answers nothing, so one yes to a page can never
    * become a standing yes to every page.
+   *
+   * Offer **one** scope hook or none. A tool exposing two — this and
+   * `commandFor`, say — is judged by neither and asks every time: each
+   * grant answers only its own question, and how two of them compose on
+   * one call is a decision nobody has made.
    */
   originFor?(session: Session): string | undefined;
   execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue>;

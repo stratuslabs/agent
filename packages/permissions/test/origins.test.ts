@@ -286,39 +286,76 @@ test('an unreadable whitelist holds an origin for the process and says it was no
   assert.equal(await readFile(file, 'utf8'), '{\n  "version": 1,\n  "scopes": [],\n}\n');
 });
 
-test('a tool offering both hooks is judged by the command, not laundered by a site', async () => {
-  // Nothing offers both today. The rule exists so that adding one later
-  // cannot turn an origin grant into a way past the command engine: two
-  // engines over one call need a rule for which wins, and the narrower one
-  // is the only honest answer.
-  const both: Tool = {
-    name: 'odd.tool',
-    risk: 'gated',
-    commandFor: (input) => (typeof input.command === 'string' ? input.command : undefined),
-    originFor: () => 'https://app.example.com',
-    async execute() {
-      return null;
-    },
-  };
+test('a tool offering more than one scope hook is judged by none of them', async () => {
+  // Nothing offers two today. The rule exists so that adding one later
+  // cannot let a grant on one axis wave through a call unapproved on
+  // another — each grant answers only its own question, and composing them
+  // is a decision nobody has made.
+  const decisions: PermissionDecision[] = [];
   const policy = createPermissionPolicy({
     mode: 'headless',
+    onDecision: (decision) => decisions.push(decision),
     origins: {
       whitelist: {
         originsFor: async () => [{ origin: 'https://app.example.com' }],
         rememberOrigin: async () => {},
       },
     },
+    // The schedule carve-out, which is what lets an approved destination
+    // run unattended in the first place.
+    destinations: { isPreauthorized: () => true },
+  });
+  const approve = (tool: Tool, input: Record<string, string>) => policy.approve({
+    session: sessionFor('ava'),
+    call: { id: 'call-3', toolName: tool.name, input },
+    tool,
+    risk: 'gated',
   });
 
+  // An origin grant must not carry a command nobody vetted...
   assert.equal(
-    await policy.approve({
-      session: sessionFor('ava'),
-      call: { id: 'call-3', toolName: 'odd.tool', input: { command: 'rm -rf /srv/data' } },
-      tool: both,
+    await approve({
+      name: 'odd.shell',
       risk: 'gated',
-    }),
+      commandFor: (input) => (typeof input.command === 'string' ? input.command : undefined),
+      originFor: () => 'https://app.example.com',
+      async execute() {
+        return null;
+      },
+    }, { command: 'rm -rf /srv/data' }),
     false,
   );
+
+  // ...nor a destination pre-authorization carry an origin nobody granted,
+  // which is the direction the first version of this guard left open: it
+  // named `commandFor` and forgot `destinationFor`.
+  assert.equal(
+    await approve({
+      name: 'odd.send',
+      risk: 'gated',
+      destinationFor: () => 'slack:C-OPS',
+      originFor: () => 'https://evil.example.com',
+      async execute() {
+        return null;
+      },
+    }, {}),
+    false,
+  );
+
+  // And a tool with exactly one hook is scoped as before, so the rule
+  // narrows nothing that works today.
+  assert.equal(
+    await approve({
+      name: 'plain.send',
+      risk: 'gated',
+      destinationFor: () => 'slack:C-OPS',
+      async execute() {
+        return null;
+      },
+    }, {}),
+    true,
+  );
+  assert.match(decisions.at(-1)?.reason ?? '', /pre-authorized when this schedule was approved/);
 });
 
 test('two grants for one agent settling together both survive', async () => {
