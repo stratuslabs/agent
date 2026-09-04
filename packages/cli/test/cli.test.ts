@@ -78,9 +78,13 @@ const createStreams = () => {
 
 test('the version the CLI reports is the version it was published as', async () => {
   // CLI_VERSION is a second copy of a number that lives in package.json,
-  // and it is the one people see: the setup header draws it and the
-  // dashboard serves it from /api/status. A release bumps the manifest;
-  // nothing makes it bump the constant, and nothing fails if it does not.
+  // and it is the one people see: the setup header draws it, `stratus
+  // version` prints it, and the upgrade check compares it against the
+  // registry — so a stale one also hides an available upgrade. (The version
+  // the *dashboard* shows is a different constant, CONTROL_API_VERSION,
+  // served from `GET /api/v1/health`; this one never reaches that page.)
+  // A release bumps the manifest; nothing makes it bump the constant, and
+  // nothing fails if it does not.
   const manifest = JSON.parse(
     await readFile(new URL('../package.json', import.meta.url), 'utf8'),
   ) as { version: string };
