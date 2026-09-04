@@ -87,9 +87,10 @@ large stays none of its business, and
 [02](./02-slack-channel.md)'s "the room is not a conversation" rule is what
 keeps the blast radius of overhearing to conversations somebody invited the
 agent into. Also out: DMs (addressed by construction), reading a thread's
-history from the platform's own API (overhearing accumulates forward from the
-mention; backfilling what was said before the agent arrived is its own
-decision, with its own privacy answer), and any cross-agent shared view — each
+history from the platform's own API — overhearing accumulates forward from
+the mention, and backfilling what was said *before* the agent arrived is a
+different mechanism with a different consent question, tracked in #147 — and
+any cross-agent shared view — each
 agent overhears into its own session, as sessions have always been.
 
 ## Design sketch
