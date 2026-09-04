@@ -619,9 +619,9 @@ const truncateForSlack = (text: string): string =>
  * point of writing a span as ``code with a ` in it`` and a fence as ````
  * when the block itself contains ```.
  */
-const closingBacktickRun = (text: string, from: number, length: number): number => {
+const closingBacktickRun = (text: string, from: number, length: number, limit: number): number => {
   const run = '`'.repeat(length);
-  for (let at = text.indexOf(run, from); at !== -1; at = text.indexOf(run, at + 1)) {
+  for (let at = text.indexOf(run, from); at !== -1 && at + length <= limit; at = text.indexOf(run, at + 1)) {
     if (text[at - 1] !== '`' && text[at + length] !== '`') {
       return at;
     }
@@ -638,12 +638,22 @@ const closingBacktickRun = (text: string, from: number, length: number): number 
  * the same rule for a span and for a fence and is why a longer delimiter
  * can carry a shorter one inside it.
  *
+ * A span may close on a later line, and is protected the whole way. That
+ * looks wasteful — two stray backticks paragraphs apart become one long
+ * "span" whose contents are left unconverted — and it was briefly changed
+ * to end a span at its line for exactly that reason. That was wrong, and
+ * the reason is the rule this whole file answers to: what Slack does with
+ * the message decides, not what Markdown says. Slack pairs those backticks
+ * too, so the text between them is what it renders as code, and rewriting
+ * a `**bold**` in there would alter the contents of somebody's snippet.
+ * Leaving prose unconverted is a cosmetic loss; changing what a reader is
+ * told is code is not, so the doubt resolves toward protecting more.
+ *
  * A fence with no closer runs to the end on purpose: a model that forgets
  * to close one, and every partially streamed block on its way to being
  * closed, would otherwise have its contents rewritten as prose. One or two
- * unmatched backticks are the opposite case — literal text, as they are in
- * Markdown, since "use the ` character" must not swallow the rest of the
- * message.
+ * unmatched backticks are the opposite case — literal text, since "use the
+ * ` character" must not swallow what follows.
  */
 const proseAndCode = (text: string): string[] => {
   const segments: string[] = [];
@@ -658,7 +668,7 @@ const proseAndCode = (text: string): string[] => {
     while (text[open + length] === '`') {
       length += 1;
     }
-    const close = closingBacktickRun(text, open + length, length);
+    const close = closingBacktickRun(text, open + length, length, text.length);
     if (close === -1) {
       if (length < 3) {
         cursor = open + length;
@@ -706,28 +716,136 @@ const MRKDWN_REWRITES: ReadonlyArray<readonly [RegExp, string]> = [
  * The optional closing hashes have to be spaced off the text, as Markdown
  * requires: without that, `# C#` is a heading whose name loses its last
  * character.
+ *
+ * What they and any trailing spaces cover is captured rather than dropped,
+ * because dropping is only right when they are the heading's own syntax. A
+ * heading that opens a code span reaches its end inside one, and there the
+ * same characters are the snippet: `` # show `value # `` has a hash that
+ * belongs to whoever wrote the code.
  */
-const MARKDOWN_HEADING = /^ {0,3}#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/gm;
+const MARKDOWN_HEADING = /^ {0,3}#{1,6}[ \t]+(.+?)((?:[ \t]+#+)?[ \t]*)$/gm;
 
-/** One emphasis run and nothing else — `*Title*`, not `Some *word* here`. */
-const WHOLLY_BOLD = /^\*[^*]+\*$/;
-
-const convertProse = (segment: string): string => {
+const convertInline = (segment: string): string => {
   let converted = segment;
   for (const [pattern, replacement] of MRKDWN_REWRITES) {
     converted = converted.replace(pattern, replacement);
   }
-  // Last, so the heading's own text is already converted. A heading a model
-  // wrote as `## **Title**` is bold by then, and wrapping it again would
-  // print the asterisks rather than render them. Nothing is stripped to get
-  // there: an asterisk in a heading may be the text itself (`# glob *.ts`),
-  // and a reply that reads oddly beats a reply that says something else.
-  return converted.replace(MARKDOWN_HEADING, (line, body: string) => {
-    const text = body.trim();
-    if (text.length === 0) {
+  return converted;
+};
+
+/**
+ * Headings, found on the text's own lines rather than inside each prose
+ * fragment.
+ *
+ * A fragment is not a line: inline code cuts one in two, and the halves
+ * begin wherever the code ended. Matched per fragment, `^` then lied in
+ * both directions — the tail of `` `status` # not a heading `` looked like a
+ * line of its own and lost its hash, and ``## Run `npm test` now`` was only
+ * ever half a line, so only the half before the code was wrapped.
+ *
+ * So the whole text is matched instead, with the code spans it now contains
+ * passed in: a `#` whose line begins inside one is a comment in somebody's
+ * snippet, not a heading. A heading that merely *contains* code is a
+ * heading, and its code goes along untouched.
+ *
+ * Emphasis inside is already converted by here, so the line is only wrapped
+ * when nothing in it can pair with the wrapper. Slack has one bold
+ * delimiter and no way to nest it: wrapping `*Run* the thing` again yields
+ * `**Run* the thing*`, which it renders as literal asterisks rather than as
+ * anything bold. A heading that already carries emphasis therefore keeps
+ * exactly the emphasis it has — `## **Title**` is bold by now and needs
+ * nothing more, and `# glob *.ts` keeps an asterisk that was never a marker
+ * at all. An unbolded heading reads fine; a heading full of stray asterisks
+ * does not, and one with characters removed to make room is worse than both.
+ *
+ * An asterisk inside a code span is not one of those: Slack does not read
+ * markup there, so it cannot pair with anything, and ``## Match `*.ts` files``
+ * is bolded like any other heading.
+ *
+ * Both walks are cursors rather than searches: `replace` reports matches in
+ * increasing offset, and the spans were collected in that order too, so
+ * neither has to be looked at twice. The same work as a scan per heading,
+ * without its quadratic on a reply that is mostly headings and snippets.
+ */
+/** What could pair with a heading's wrapper, or with something out of sight. */
+const PAIRABLE_MARKER = /[*`]/g;
+
+const convertHeadings = (text: string, code: ReadonlyArray<readonly [number, number]>): string => {
+  let span = 0;
+  const startsInside = (position: number, from: number): boolean =>
+    position >= (code[from]?.[0] ?? Number.POSITIVE_INFINITY);
+
+  return text.replace(MARKDOWN_HEADING, (line, body: string, tail: string, offset: number) => {
+    while (span < code.length && (code[span]?.[1] ?? 0) <= offset) {
+      span += 1;
+    }
+    // A `#` whose line begins inside a span is a comment in somebody's code.
+    if (startsInside(offset, span)) {
       return line;
     }
-    return WHOLLY_BOLD.test(text) ? text : `*${text}*`;
+    const heading = body.trim();
+    if (heading.length === 0) {
+      return line;
+    }
+    // Where everything this would drop from the line's end begins: the
+    // closing hashes and spaces the pattern captured, and whatever else
+    // `trimEnd` would take with them. The two are not the same set — the
+    // pattern knows only spaces and tabs, while trimming also takes a
+    // no-break space, an ideographic space, and the rest of what
+    // ECMAScript counts as whitespace — and the difference is exactly
+    // where a character goes missing.
+    //
+    // Dropping any of it is the heading's own syntax being removed, but
+    // only while it is the heading's: a line that opens a span reaches its
+    // end inside one, and there the same characters are somebody's
+    // snippet. Nothing on this line is safe to strip then, so it is left
+    // exactly as written. (The front needs no such care: the body starts
+    // where the hashes stop, which this line has already been shown to
+    // reach in prose.)
+    const dropped = tail.length + (body.length - body.trimEnd().length);
+    if (dropped > 0) {
+      const droppedAt = offset + line.length - dropped;
+      let over = span;
+      while (over < code.length && (code[over]?.[1] ?? 0) <= droppedAt) {
+        over += 1;
+      }
+      if (startsInside(droppedAt, over)) {
+        return line;
+      }
+    }
+    // Anything left on the line that a delimiter could pair with, walked
+    // from where the heading cursor already stands rather than from the
+    // beginning. An asterisk is the obvious one — it would pair with the
+    // wrapper. A backtick counts too: one this side found no partner for is
+    // a literal character here, but Slack parses the message itself and may
+    // pair it with a backtick further down, and the wrapper's closing `*`
+    // would then be written inside what Slack reads as code, where it is
+    // ignored — leaving the opening one with nothing to close it. Both are
+    // spent characters inside a span, which is why the ranges are consulted
+    // rather than the text alone.
+    let within = span;
+    for (const marker of line.matchAll(PAIRABLE_MARKER)) {
+      const position = offset + (marker.index ?? 0);
+      while (within < code.length && (code[within]?.[1] ?? 0) <= position) {
+        within += 1;
+      }
+      if (!startsInside(position, within)) {
+        return heading;
+      }
+    }
+    // Both markers have to land in prose, not just the opening one. A fence
+    // opened on this line — by a model mid-answer, or by a block still being
+    // streamed — runs past its end, so the closing `*` would be written
+    // inside the code and ignored there, leaving the opening one unpaired.
+    // The line began in prose or this never ran, so it is the end that is
+    // in question: where the marker would go, one past the line's last
+    // character, and not that character itself — a span that closes exactly
+    // at the line's end leaves the marker just outside it, which is fine.
+    const closer = offset + line.length;
+    while (within < code.length && (code[within]?.[1] ?? 0) <= closer) {
+      within += 1;
+    }
+    return startsInside(closer, within) ? heading : `*${heading}*`;
   });
 };
 
@@ -745,10 +863,30 @@ const convertProse = (segment: string): string => {
  * already mean in mrkdwn what they mean in Markdown; rewriting them would
  * add ways to be wrong and fix nothing.
  */
-const toSlackMrkdwn = (text: string): string =>
-  proseAndCode(text)
-    .map((segment, index) => (index % 2 === 1 ? segment : convertProse(segment)))
-    .join('');
+const toSlackMrkdwn = (text: string): string => {
+  // Where each code span ends up in the converted text, which is not where
+  // it started: the prose before it changes length as it is rewritten.
+  const code: Array<readonly [number, number]> = [];
+  const segments = proseAndCode(text);
+  let converted = '';
+  segments.forEach((segment, index) => {
+    if (index % 2 === 1) {
+      // A code segment that ends the text is the unterminated fence: every
+      // closed run is followed by a prose slice, even an empty one. It has
+      // no end to be past, so nothing may be appended after it either —
+      // recording the end as it looks would say a marker placed at the
+      // text's end was safely outside.
+      const ends = index === segments.length - 1
+        ? Number.POSITIVE_INFINITY
+        : converted.length + segment.length;
+      code.push([converted.length, ends]);
+      converted += segment;
+      return;
+    }
+    converted += convertInline(segment);
+  });
+  return convertHeadings(converted, code);
+};
 
 const splitForSlack = (text: string): string[] => {
   if (text.length <= SLACK_MAX_MESSAGE_CHARS) {

@@ -382,6 +382,83 @@ test('a reply written in Markdown reaches Slack in the markup Slack renders', as
   ].join('\n'));
 });
 
+test('a heading is found on the reply\'s own lines, not inside each fragment inline code leaves behind', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  // Inline code cuts a line into fragments, and a fragment is not a line.
+  // Matched per fragment, `^` lies in both directions at once.
+  const reply = [
+    '`status` # not a heading',
+    '## Run `npm test` now',
+    '## **Run** `npm test` now',
+    '## Match `*.ts` files',
+    '# Inspect `first',
+    'second`',
+    '# Inspect ```third',
+    'fourth```',
+    '## Run `npm test`',
+    '# show `value #',
+    'next`',
+    '# show `other ',
+    'lines`',
+    '```sh',
+    '# a real comment',
+    '```',
+  ].join('\n');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> mind the line'));
+  await adapter.stop();
+
+  assert.equal(web.updates.at(-1)?.text, [
+    // The tail of this line is not a line, so its hash is text.
+    '`status` # not a heading',
+    // And this whole line is one heading, code and all.
+    '*Run `npm test` now*',
+    // But a heading that already carries emphasis keeps the emphasis it
+    // has: Slack has one bold delimiter and no way to nest it, so wrapping
+    // this again would print `**Run* …*` instead of rendering anything.
+    '*Run* `npm test` now',
+    // An asterisk inside a span is not emphasis Slack could pair with, so
+    // this heading is bolded like any other.
+    '*Match `*.ts` files*',
+    // Not wrapped, because of the backtick this side found no partner for.
+    // Slack parses the message itself and may pair it with the one below,
+    // and the closing `*` would then sit inside what Slack reads as code,
+    // where it is ignored — leaving the opening one with nothing to close.
+    'Inspect `first',
+    'second`',
+    // Nor over a fence opened on the line, which runs past its end — the
+    // closing `*` would be written inside the code, where Slack ignores it.
+    'Inspect ```third',
+    'fourth```',
+    // But a span that closes on the line is no obstacle: the marker goes
+    // just past it, in prose, so this heading is bolded.
+    '*Run `npm test`*',
+    // And nothing on this line is stripped at all. Closing hashes are the
+    // heading's own syntax only while they are the heading's: this line
+    // ends inside a span, where the same hash is somebody's snippet.
+    '# show `value #',
+    'next`',
+    // The same for a no-break space, which the pattern's `[ \t]` does not
+    // know about but `trim` takes anyway — the gap between those two sets
+    // is exactly where a character goes missing.
+    '# show `other ',
+    'lines`',
+    // While a hash whose line begins inside a fence is somebody's comment.
+    '```sh',
+    '# a real comment',
+    '```',
+  ].join('\n'));
+});
+
 test('a reply keeps every character it was written with, whatever the markers around it', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
@@ -392,7 +469,9 @@ test('a reply keeps every character it was written with, whatever the markers ar
     '# C#',
     '# glob *.ts',
     'a ``span with a ` inside`` stays whole',
-    'use the ` character on its own, then **bold**',
+    'a span may close a line later: `first',
+    '**second**` — and its contents are still its own',
+    'one ` with no partner anywhere is a character, then **bold**',
     '````',
     '```',
     '**inner fence**',
@@ -415,11 +494,22 @@ test('a reply keeps every character it was written with, whatever the markers ar
     // A closing hash run is only closing syntax when it is spaced off the
     // text; `C#` is the name of a language.
     '*C#*',
-    '*glob *.ts*',
+    // Not bolded, because Slack cannot nest its one bold delimiter and the
+    // asterisk here is the text. Unbolded reads fine; `*glob *.ts*` would
+    // render as stray asterisks, and deleting one to make room would say
+    // something the agent did not.
+    'glob *.ts',
     // A longer delimiter is what carries a shorter one, for a span and a
     // fence alike — the run that closes it has to be exactly as long.
     'a ``span with a ` inside`` stays whole',
-    'use the ` character on its own, then *bold*',
+    // Slack pairs these across the newline, so what is between them is what
+    // it renders as code. Converting the `**second**` would rewrite the
+    // contents of somebody's snippet — a worse outcome than the prose in
+    // there going unconverted, which is only cosmetic.
+    'a span may close a line later: `first',
+    '**second**` — and its contents are still its own',
+    // With no partner anywhere, though, it is just a character.
+    'one ` with no partner anywhere is a character, then *bold*',
     '````',
     '```',
     '**inner fence**',
@@ -463,6 +553,52 @@ test('a streamed placeholder is converted too, and a half-written marker stays l
   assert.ok(texts.includes('**Almost'), `expected the unclosed marker to stand, got ${JSON.stringify(texts)}`);
   assert.ok(texts.includes('*Almost there*'), `expected the closed pair to convert, got ${JSON.stringify(texts)}`);
   assert.equal(texts.at(-1), '*Done*');
+});
+
+test('a heading is not bolded over a fence the stream has only opened', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const bus = new EventBus();
+
+  const gateway: GatewayLike = {
+    bus,
+    resolveApproval: () => false,
+    agents: () => [{ id: 'ava', name: 'Ava' }],
+    async dispatch(input) {
+      // The edit a reader is looking at while a block is still arriving. The
+      // fence has no end yet, so everything after it is code as far as Slack
+      // is concerned — a closing `*` written there is ignored, and the one
+      // before the fence would be left with nothing to close it.
+      await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: '# Inspect ```first' } });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: '\nsecond```\n## After' } });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return sessionWithReply(input.sessionId, '# Inspect ```first\nsecond```\n## After');
+    },
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> stream a fence'));
+  await adapter.stop();
+
+  const texts = web.updates.map((update) => update.text);
+  assert.ok(
+    texts.includes('Inspect ```first'),
+    `expected the half-arrived fence to leave its heading alone, got ${JSON.stringify(texts)}`,
+  );
+  assert.ok(
+    !texts.some((text) => text.includes('*Inspect')),
+    `no edit may bold a heading over an unclosed fence, got ${JSON.stringify(texts)}`,
+  );
+  // Closed, the fence is still no place for the marker — but the heading
+  // below it, which owns its whole line, is bolded.
+  assert.equal(texts.at(-1), 'Inspect ```first\nsecond```\n*After*');
 });
 
 test('two agents in one thread hold separate sessions with their own identities', async () => {
