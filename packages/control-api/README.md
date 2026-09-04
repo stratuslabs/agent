@@ -449,18 +449,23 @@ every command for the rest of the session. The call runs; the grant is not
 remembered.
 
 So one grant is written to disk beside the agent's soul and the other lives
-in a `Set` for as long as the process does. A client that renders `always` as
-one button is therefore promising something whose duration it cannot know —
-and **nothing in this API tells it which it got**. `POST /approvals` answers `{ ok: true }`, and the
-`tool.approval-resolved` event carries the `answer` that was submitted plus a
-`reason` of `decided`, `timeout`, `cancelled`, or `undeliverable` — which is
-why the request stopped being pending, not how long the grant lasts. The
-daemon logs the difference (a remembered command scope or origin is logged as
-one); an API client cannot see it.
+in a `Set` for as long as the process does. Between *those two*, a client
+rendering `always` as one button is promising something whose duration it
+cannot know — and **nothing in this API tells it which it got**. `POST
+/approvals` answers `{ ok: true }`, and the `tool.approval-resolved` event
+carries the `answer` that was submitted plus a `reason` of `decided`,
+`timeout`, `cancelled`, or `undeliverable` — which is why the request stopped
+being pending, not how long the grant lasts. The daemon logs the difference
+(a remembered command scope or origin is logged as one); an API client cannot
+see it.
 
-So word the button for the weaker guarantee. "Allow" is honest for every
-lifetime; "always allow" is only true for the scoped cases, and a client
-cannot tell in advance that it is in one of them.
+The one-shot case is the exception, and the only one: `oneShot: true` on the
+request says in advance that `always` will remember nothing, so a client can
+and should stop offering it there.
+
+So for everything else, word the button for the weaker guarantee. "Allow" is
+honest for every lifetime; "always allow" is only true for the scoped cases,
+and a client cannot tell in advance that it is in one of them.
 
 ### Two invariants worth stating
 
