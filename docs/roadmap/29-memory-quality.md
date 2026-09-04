@@ -171,6 +171,20 @@ different review look like.
     agent still know the basics after a year with no search at all, and the cap
     **refuses rather than evicts**: a pinned set that silently drops its oldest
     member is a pin that does not mean anything.
+
+    **The cap needs a replay rule as well as a write-path check**, because
+    check-then-append is not atomic here. The CLI and the daemon build
+    separate stores over the same file and coordinate by `O_APPEND` alone —
+    that is the stated concurrency model, not an oversight — so two processes
+    pinning near the limit can both read the same total, both accept, and both
+    append. The write path refusing is the common case and stays the rule; for
+    the race it cannot see, **replay decides deterministically: pins take
+    effect in `(createdAt, id)` order until the cap, and the remainder are
+    recorded but inert**, visible in `audit` like anything else the record
+    holds. Both stores compute the same effective set from the same file,
+    which is the property that matters — the alternative is an injected slice
+    that either overruns its budget or drops a pin by whichever order it
+    happened to read.
   - **A memory index** — not facts, but what the agent *knows about*: entity
     names from `about`, counts, last-updated. Roughly a thousand tokens' worth
     of budget tells the agent the shape of its own store, which is what turns
@@ -245,6 +259,17 @@ different review look like.
   run a corpus in the first place. **An imported entry lands `external`** per
   [30](./30-provenance.md) unless the operator explicitly says otherwise —
   import is the laundering problem with a human in the middle.
+
+  **So a round trip preserves entries and order, not labels**, and the two
+  statements have to be read together or they contradict each other: `search`
+  returns each entry's trust, and import deliberately re-labels, so a round
+  trip that expected identical provenance would be asserting the safety rule
+  does not work. The default trip is for the harness, which cares about which
+  entries come back in which order. The operator flag that preserves
+  provenance is for the other job — moving an agent to a new machine, where
+  re-labelling a corpus the operator already owns as `external` is the wrong
+  answer — and that path preserves trust because a person vouched for the
+  file.
 
 **Out:**
 
@@ -343,8 +368,16 @@ different review look like.
   "better" is defined as, on the same corpus. Without them the claim is
   unfalsifiable, and this criterion is the one that makes the step mean
   anything.
-- `export` then `import` into an empty store reproduces the same recall
-  results.
+- **`export` then `import` into an empty store returns the same entries in the
+  same order**, with provenance re-labelled per 30 — the comparison is
+  deliberately over entries and order, since expecting labels to survive would
+  assert that the import safety rule does not work. **Under the operator's
+  preserving flag, trust survives too**, which is the migration path and the
+  half a default-only test never reaches.
+- **Two processes pinning concurrently at the cap produce one effective pinned
+  set, identical in both**, with the overflow recorded and inert rather than
+  either process's write silently winning — the race the write-path check
+  cannot see, since `O_APPEND` is the only coordination between them.
 - Agent A cannot read agent B's entries with every new field in play, the test
   naming both agents rather than asserting an empty result an unrelated bug
   would also produce.
