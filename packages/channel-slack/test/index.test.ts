@@ -455,8 +455,9 @@ test('a reply keeps every character it was written with, whatever the markers ar
     '# C#',
     '# glob *.ts',
     'a ``span with a ` inside`` stays whole',
-    'use the ` character on its own, then **bold**',
-    'and another ` one lines later — **still converted**',
+    'a span may close a line later: `first',
+    '**second**` — and its contents are still its own',
+    'one ` with no partner anywhere is a character, then **bold**',
     '````',
     '```',
     '**inner fence**',
@@ -487,10 +488,14 @@ test('a reply keeps every character it was written with, whatever the markers ar
     // A longer delimiter is what carries a shorter one, for a span and a
     // fence alike — the run that closes it has to be exactly as long.
     'a ``span with a ` inside`` stays whole',
-    'use the ` character on its own, then *bold*',
-    // Two stray backticks on different lines are two characters, not a span
-    // swallowing the paragraph between them with its conversion.
-    'and another ` one lines later — *still converted*',
+    // Slack pairs these across the newline, so what is between them is what
+    // it renders as code. Converting the `**second**` would rewrite the
+    // contents of somebody's snippet — a worse outcome than the prose in
+    // there going unconverted, which is only cosmetic.
+    'a span may close a line later: `first',
+    '**second**` — and its contents are still its own',
+    // With no partner anywhere, though, it is just a character.
+    'one ` with no partner anywhere is a character, then *bold*',
     '````',
     '```',
     '**inner fence**',

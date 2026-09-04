@@ -638,18 +638,22 @@ const closingBacktickRun = (text: string, from: number, length: number, limit: n
  * the same rule for a span and for a fence and is why a longer delimiter
  * can carry a shorter one inside it.
  *
- * A span closes on its own line and a fence is the only thing that runs
- * past a newline. Letting a span cross one costs twice over: two stray
- * backticks on different lines pair into a "span" that swallows every
- * paragraph between them, converting none of it, and a heading whose line
- * opens such a span gets its closing `*` written inside the code — where
- * Slack ignores it, leaving the opening marker with nothing to close it.
+ * A span may close on a later line, and is protected the whole way. That
+ * looks wasteful — two stray backticks paragraphs apart become one long
+ * "span" whose contents are left unconverted — and it was briefly changed
+ * to end a span at its line for exactly that reason. That was wrong, and
+ * the reason is the rule this whole file answers to: what Slack does with
+ * the message decides, not what Markdown says. Slack pairs those backticks
+ * too, so the text between them is what it renders as code, and rewriting
+ * a `**bold**` in there would alter the contents of somebody's snippet.
+ * Leaving prose unconverted is a cosmetic loss; changing what a reader is
+ * told is code is not, so the doubt resolves toward protecting more.
  *
  * A fence with no closer runs to the end on purpose: a model that forgets
  * to close one, and every partially streamed block on its way to being
  * closed, would otherwise have its contents rewritten as prose. One or two
- * unmatched backticks are the opposite case — literal text, as they are in
- * Markdown, since "use the ` character" must not swallow what follows.
+ * unmatched backticks are the opposite case — literal text, since "use the
+ * ` character" must not swallow what follows.
  */
 const proseAndCode = (text: string): string[] => {
   const segments: string[] = [];
@@ -664,9 +668,7 @@ const proseAndCode = (text: string): string[] => {
     while (text[open + length] === '`') {
       length += 1;
     }
-    const newline = text.indexOf('\n', open + length);
-    const limit = length >= 3 || newline === -1 ? text.length : newline;
-    const close = closingBacktickRun(text, open + length, length, limit);
+    const close = closingBacktickRun(text, open + length, length, text.length);
     if (close === -1) {
       if (length < 3) {
         cursor = open + length;
