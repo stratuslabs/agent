@@ -123,6 +123,21 @@ different review look like.
     the second being the worse half, since it loses a fact on a crash in a
     store whose whole posture is that nothing is lost. One record has no
     in-between state to reason about.
+
+    **The retirement is scoped to the successor's validity window**, which is
+    the only reading that keeps supersession and validity from cancelling each
+    other. A successor dated from next Monday retiring its predecessor today
+    would leave neither fact available as true now — the old one retired, the
+    new one excluded from injection as not-yet-valid — so the agent forgets
+    something it still believes and gains nothing in exchange. The superseded
+    entry is therefore not live exactly while its successor is: before
+    Monday the old fact stands, after Monday the new one does, and a successor
+    that is already expired never displaces anything. Both stores compute this
+    from the record and the clock alone, so it stays a pure function.
+
+    Rejecting a not-yet-valid supersession at the write path would be the
+    simpler rule and forbids the case the feature is for: recording a change
+    you already know is coming is exactly what `validFrom` exists to express.
   - **Pin and unpin** — a record naming the entry. `pinned` cannot be a field
     on the entry: pinning is a toggle, from the agent and from the operator's
     CLI and console, and a toggle on an append-only line is a rewrite. This
@@ -383,6 +398,10 @@ different review look like.
   it** — one record, so there is no state where an entry is retired with its
   replacement missing. Asserted by interrupting between logical writes, which
   is the failure a two-append implementation has and this one cannot.
+- **A supersession dated from next week leaves the old fact live until then,
+  and the new one live after** — with an already-expired successor displacing
+  nothing. The failure this catches is both facts vanishing from the prompt at
+  once, which is what an unscoped retirement does to a future-dated revision.
 - **Pinning and unpinning leave the entry's own line byte-identical** — the
   criterion that fails if `pinned` is implemented as a field write, which is
   the convenient implementation and breaks `O_APPEND` and decision 5 together.

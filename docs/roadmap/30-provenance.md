@@ -16,12 +16,21 @@ promotion. Both were right to wait for a consumer. The consumer arrived:
 [29](./29-memory-quality.md) cannot render a trust label it has no way to
 compute.
 
-The gap is live today, and it is not theoretical. Memory is the one channel
-that carries model-authored text *across* the turn boundary: an agent that
-reads a hostile page and remembers what it said has moved that text past every
-check the turn applied, into a later prompt where it reads as something the
-agent concluded. Nothing in the system currently marks it, and nothing can,
-because the marking stops at one plugin's result envelope.
+The gap is live today, and it is not theoretical. Memory carries model-authored
+text *across* the turn boundary: an agent that reads a hostile page and
+remembers what it said has moved that text past every check the turn applied,
+into a later prompt where it reads as something the agent concluded. Nothing in
+the system currently marks it, and nothing can, because the marking stops at one
+plugin's result envelope.
+
+**Memory is the principal such channel, not the only one**, and earlier drafts
+of this step said "the only" — which was wrong in a way worth correcting rather
+than softening. An agent can `fs.write` fetched text into its workspace and
+`fs.read` it back in a later session, where the file carries no provenance and
+the content arrives looking like the agent's own notes. The filesystem is a
+durable store the agent controls, so it is a laundering channel by
+construction, and a step that closed memory while claiming completeness would
+be advertising a boundary it does not have.
 
 This is its own step rather than a section inside 29 because of what it
 touches: `ToolResult` in `core`, the executor, four tool plugins, both harness
@@ -231,6 +240,20 @@ half stood.
     memory; its **reply text** is a separate channel into the parent and is
     not covered by either rule. Named here so 24 inherits the answer instead
     of rediscovering it.
+- **A tainted-write ledger, so the filesystem round trip closes too.** While a
+  session is at `external` or `unknown`, the paths it writes through `fs.write`
+  are recorded against the agent, and a later `fs.read` of one of those paths
+  taints the reading session at the recorded label. Small — a set of paths per
+  agent, in the agent's own state, next to the roots `tool-fs` already resolves
+  per call — and it covers the realistic sequence: fetch, write, read back next
+  week, remember.
+
+  **What it does not cover, said plainly**: a copy under another name, a file
+  a different process wrote, or content pasted through some path the ledger
+  never saw. Full filesystem provenance means carrying labels on bytes across
+  a surface the agent does not exclusively own, which is a different project.
+  This closes the sequence an agent can perform by itself, which is the one
+  that matters here, and leaves the rest named rather than implied.
 - **Three trust values on a memory entry — `user`, `agent`, `external` — and
   `unknown` for an entry that carries none.** `unknown` is not `agent`:
   defaulting absent provenance to trusted carries the laundering path forward
@@ -258,12 +281,15 @@ half stood.
   only: an agent re-labelling its own memory as trusted is the attack writing
   its own permission slip.
 - **Rendering, as an invariant rather than a per-block rule**: *nothing in the
-  prompt derived from an `external` entry renders outside the external label*.
-  External facts render in their own labelled region — recorded from external
-  sources, to be read as reports rather than as the agent's own conclusions —
-  and so does anything derived from them, 29's topic index included, since
-  `about` keys are model-written text on a tainted entry and an
-  instruction-shaped topic name is exactly what a hostile page would induce. As
+  prompt derived from an entry renders under a higher label than that entry
+  carries*. Stated over the ordering rather than over `external` alone,
+  because `unknown` stopped being only a legacy artifact the moment an
+  unauthorized sender's message started producing it — a stranger in a Slack
+  thread can now induce an `unknown` entry with an instruction-shaped `about`,
+  and an invariant naming only `external` would let that topic through into
+  the plain index with the warning stripped. Each label gets its own region;
+  facts and everything derived from them, 29's topic index included, render in
+  the region their source earns. As
   an invariant it covers the derived views a later step adds for free.
 
 **Out:**
@@ -345,9 +371,14 @@ half stood.
   roll over a store that still has `unknown` entries in its recency tail and
   the new session is `unknown` on its first turn, correctly, which is the
   result that catches anyone who thinks rollover alone is the remedy.
-- **An external entry's `about` key never appears in the plain topic index** —
-  asserted with an instruction-shaped topic name, against the rendered prompt,
-  which is the only place the leak shows.
+- **Neither an `external` nor an `unknown` entry's `about` key appears in the
+  plain topic index** — asserted with an instruction-shaped topic name against
+  the rendered prompt, which is the only place the leak shows, and asserted at
+  both labels, since a stranger's message now produces the `unknown` one.
+- **Write-then-read across sessions**: a tainted session `fs.write`s fetched
+  text, a fresh session reads that path and remembers — and the entry is
+  `external`, not `agent`. The sequence an agent can perform unaided, and the
+  one that makes "memory is the only channel" false.
 - **A legacy entry with no `trust` renders under the unknown label, never as
   the agent's own conclusion.**
 - **An operator's re-assertion record moves an entry out of `unknown`, and an
