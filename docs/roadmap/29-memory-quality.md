@@ -58,6 +58,18 @@ different review look like.
   - **`about`** — the entities a fact concerns. This is what makes "everything
     I know about the deploy pipeline" a lookup rather than a guess at query
     terms, and it is what the index block below is built from.
+
+    **`about` participates in matching, in both stores.** Search matches query
+    tokens against `content` alone today, so without this the index block
+    advertises a topic the search cannot find: an entry reading "it now uses
+    Postgres" with `about: ["deploy pipeline"]` would be listed under that
+    topic and then miss the very query the listing invites. That also breaks
+    the entity-alias case in the corpus, which is precisely the case `about`
+    exists to serve — an alias in `about` matching a pronoun in `content` is
+    the point, not an edge. The FTS `tokens` column and
+    `memoryQueryMatches` both cover content plus `about` keys, tokenized by
+    the shared tokenizer, with parity coverage: an implementation that
+    searched one and not the other would be a divergence, not a preference.
   - **`validFrom` / `validUntil`** — validity is a different axis from
     `createdAt`, which is transaction time. Conflating them is why assistants
     confidently report where someone used to work. Two optional fields buy the
@@ -74,6 +86,15 @@ different review look like.
     choice open cannot be measured against itself. Being outside the window is
     not deletion: the entry is in the record, in `search`, and in `audit`; it
     is not what is true now, which is the only claim the injected slice makes.
+
+    **`memory.recall` says so when a hit is out of window.** `createRecallTool`
+    projects a hit to `id`, `content`, and `createdAt` and nothing else, so an
+    implementation could satisfy the injection rule above and still hand the
+    model an expired fact that reads exactly like a current one — the
+    confusion the two fields exist to prevent, arriving through the other
+    door. Keeping an out-of-window entry findable is right; returning it
+    *unmarked* is not. The recall result carries validity status and renders
+    it.
   - **`trust` and `origin`** — defined by [30](./30-provenance.md), carried
     here. The entry is where the label lives; what sets it, how it propagates,
     and how a labelled region renders are 30's.
@@ -283,6 +304,12 @@ different review look like.
   included: a fact that is not true yet must not reach the pinned core, the
   index, or the tail. One rule, both bounds, and the future case is the one an
   expiry-shaped implementation forgets.
+- **A `memory.recall` hit that is out of window comes back marked as such** —
+  because the injection rule passes while recall still hands the model an
+  expired fact indistinguishable from a current one.
+- **A query matching only an entry's `about` key returns that entry, in both
+  stores** — the alias case the topic index advertises, and the one that fails
+  today with matching over `content` alone.
 - An entry that supersedes another: only the successor is live in `list`,
   `search`, and the injected prompt; `audit` shows both and names which
   replaced which.

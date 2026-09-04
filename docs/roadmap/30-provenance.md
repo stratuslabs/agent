@@ -38,6 +38,28 @@ half stood.
 - **A taint field on `ToolResult`**, in `core`. The promotion 13 deferred. It
   says the result carries content from outside the trust boundary; it does not
   say what a consumer should do about it, which is each consumer's business.
+- **And a producer-facing channel to set it, because the field alone is not
+  one.** `Tool.execute` returns `Promise<JsonValue>` and `DefaultExecutor`
+  builds the result with `successResult(call, output)` — so a plugin has no
+  typed way to mark its own output, and an executor that infers the mark from
+  the tool's name or its output shape is the enumerated list this step
+  rejects, rebuilt one layer down. Two channels, and the repo already has the
+  exact precedent in `risk` versus `commandFor`:
+
+  - **A declaration on the tool**, the way `risk` classifies a tool: this
+    tool's output carries content from outside the boundary. `browser.read`
+    and `web.fetch` are that statically.
+  - **A per-call mark**, the way `commandFor` classifies a *call*, for tools
+    whose output is only sometimes external — an `fs.read` of a file the agent
+    downloaded, an MCP tool with mixed responses. It rides on
+    `ExecutionContext` as a sink the tool may call, the way
+    [18](./18-usage-accounting.md)'s `onUsage` does, so the return type does
+    not change.
+
+  The executor promotes whichever fired into the `ToolResult`. A newly
+  registered third-party tool that declares itself a producer must be tainted
+  with no change to kernel code — that is the test that proves this is a
+  contract rather than a list.
 - **The producer rule is a rule, not a list.** A result is tainted when it
   carries content **written by a party the operator has not authorized** —
   a web page, a search snippet, an MCP server's response, a document the agent
@@ -74,6 +96,16 @@ half stood.
   rides in session metadata the way `DELEGATION_DEPTH_METADATA_KEY` already
   does, or is recomputable from `session.messages`; either way it survives what
   the session survives.
+- **A session resumed from before this step writes `unknown`, not `agent`.**
+  Persisted sessions predating the upgrade carry `ToolResult`s with no taint
+  field — including results that already hold hostile page content — and
+  treating that absence as untainted keeps the laundering path open for every
+  pre-upgrade transcript, which is the one corpus guaranteed to exist on the
+  day this ships. It is the same reasoning as `unknown` on a legacy entry and
+  gets the same answer: absence of provenance is not evidence of trust. Marking
+  those sessions `external` outright would be the other overcorrection, and the
+  scope here is small and self-draining — only sessions that span the upgrade,
+  only until they end.
 - **Propagation, stated in every direction it travels**, because each one of
   these was found separately and each passed the tests written for the others:
 
@@ -173,6 +205,13 @@ half stood.
   hook lands in the runner's loop, where it would never fire for either.
 - **Taint survives a daemon restart mid-session**: a session tainted before the
   restart still writes `external` after it.
+- **A session resumed from a pre-upgrade transcript containing external content
+  writes `unknown`, not `agent`** — the upgrade case, which every fresh-install
+  test passes straight over.
+- **A newly registered third-party tool that declares itself a producer is
+  tainted with no change to kernel code**, and one that marks a single call
+  through the context sink taints only that call — the pair that proves the
+  producer channel is a contract rather than a list the executor keeps.
 - **A fresh session that reads an `external` entry — injected or recalled — and
   then remembers writes `external`, not `agent`.**
 - **A session that has seen only `unknown` entries still writes `agent`.**
