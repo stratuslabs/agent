@@ -65,13 +65,18 @@ Three things make this the moment rather than later:
     confidently report where someone used to work. Two optional fields buy the
     bitemporal distinction outright.
 
-    **An entry whose `validUntil` has passed leaves the injected slice and
-    stays findable by `search`.** One policy, stated here rather than left to
-    the implementation, because excluding and downranking produce different
-    prompts and different harness numbers — a step that leaves the choice open
-    cannot be measured against itself. Expiry is not deletion: the entry is in
-    the record, in `search`, and in `audit`; it has stopped being what is true
-    now, which is the only claim the injected slice makes.
+    **An entry outside its validity window leaves the injected slice and stays
+    findable by `search`** — one rule, both bounds. A `validUntil` in the past
+    is the case that motivates it; a `validFrom` in the future is the same
+    error running the other way, and an entry that is not true yet reaching
+    the pinned core or the index would be presented as true now, which is
+    exactly the confusion the two fields exist to prevent. Stated as one
+    policy rather than left to the implementation, because excluding and
+    downranking produce different prompts and different harness numbers — a
+    step that leaves the choice open cannot be measured against itself. Being
+    outside the window is not deletion: the entry is in the record, in
+    `search`, and in `audit`; it is not what is true now, which is the only
+    claim the injected slice makes.
   - **`trust` and `origin`** — `user`, `agent`, or `external`, plus the session
     and the tool it came through.
 
@@ -109,6 +114,26 @@ Three things make this the moment rather than later:
   a year, and an append-only store is the right place to model it — the old
   entry stays visible in `audit` with the entry that replaced it, which is
   strictly more than a delete would leave behind.
+
+  **Every `supersedes` id must resolve to a live entry the caller owns, before
+  anything is appended**, and this is a security requirement rather than
+  input hygiene. `liveEntriesFor` computes its forgotten set from *every*
+  tombstone in the file with no agent filter — deliberately, so that a
+  hand-edited file where a tombstone precedes its entry still means forgotten
+  — and ownership is enforced only inside `forget`'s write path, which
+  resolves the entry from the caller's own live set first. Supersession is the
+  **second writer into that lane**, and a second writer that skips the check
+  lets agent A retire agent B's memory by naming its id: gone from B's `list`,
+  its `search`, and its prompt, with B's own `forget` never called. That is
+  the per-agent boundary — the access model the whole store rests on —
+  breached by a field on a `safe` tool.
+
+  The write-path check is the requirement. Worth pricing alongside it:
+  `liveEntriesFor` honouring only tombstones whose `agentId` matches the
+  entry's would make the boundary **structural** rather than a rule every
+  future writer has to remember, and the tombstone already carries the field.
+  The order-independence the current comment protects survives that change;
+  what it gives up is one hand-edited-file case nobody has asked for.
 
   Contradiction *detection* is a maintenance-pass job and explicitly not a turn
   job. This step ships the mechanism, not the detector.
@@ -299,6 +324,16 @@ Three things make this the moment rather than later:
   keys already there. [24](./24-sub-agents.md) is unaffected — a sub-agent
   writes no memory at all — but that is a different tool, and its rule does
   not cover this one.
+
+  **It crosses in both directions**, and stating only the outbound half was
+  its own hole. An untainted parent delegates, the target reads a hostile
+  page, and the target's reply comes back as the `agent.delegate` result — so
+  the delegate result is tainted when the target's session became tainted,
+  and the parent inherits it on receipt. This is the general producer rule
+  applied to a reply rather than a page: a delegate result carries content
+  the parent did not author and its operator did not configure. Naming it
+  anyway, because a clause that reads as the complete statement of how taint
+  crosses delegation is where the next implementer will stop.
 - **The pinned cap refuses, on the same reasoning as the per-entry byte cap.**
   14 refuses an over-cap fact rather than truncating it because a half-stored
   fact is worse than a refused one. A silently evicted pin is the same mistake
@@ -329,6 +364,10 @@ Three things make this the moment rather than later:
 - **A live entry whose `validUntil` has passed is excluded from what is true
   now and still findable by `search`** — the temporal behavior the corpus
   scores, and the one that separates validity from supersession.
+- **The same for an entry whose `validFrom` is still in the future**, pinned
+  included: a fact that is not true yet must not reach the pinned core, the
+  index, or the tail. One rule, both bounds, and the future case is the one an
+  expiry-shaped implementation forgets.
 - An entry that supersedes another: only the successor is live in `list`,
   `search`, and the injected prompt; `audit` shows both and names which
   replaced which.
@@ -356,6 +395,15 @@ Three things make this the moment rather than later:
 - **An agent tainted by a fetch delegates; the target's `memory.remember`
   writes `external`** — the cross-agent path, asserted end to end, because
   every single-session taint test passes while it is open.
+- **And the return leg: an untainted parent delegates, the target fetches, and
+  the parent's next `memory.remember` writes `external`.** Asserted
+  separately, because the outbound test passes with the inbound half missing
+  and reads like coverage.
+- **An agent naming another agent's entry id in `supersedes` is refused, and
+  that entry stays live in its owner's `list`, `search`, and prompt** — the
+  per-agent boundary asserted against the victim's reads rather than the
+  attacker's error, since a refusal that still appended the tombstone would
+  pass an error-message test.
 - **Exactly one `memory`-kind section reaches the Anthropic placement, and all
   three blocks arrive at the tail** — the criterion that fails if the blocks
   are ever split into sibling sections, which drops two of them from the
