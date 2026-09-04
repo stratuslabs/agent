@@ -320,3 +320,35 @@ test('a tool offering both hooks is judged by the command, not laundered by a si
     false,
   );
 });
+
+test('two grants for one agent settling together both survive', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-race-'));
+  const whitelist = createFileCommandWhitelist({ directory });
+
+  // Every grant is read-add-write, and the read yields — so two answers
+  // resolved in the same moment both saw the file before either changed
+  // it. One file holding both kinds is what makes the loss cross-cutting:
+  // a shell "always" landing second would delete a site grant nobody
+  // revoked, and on the next restart it is simply gone.
+  await Promise.all([
+    whitelist.remember('ava', { command: 'git', args: ['push'] }),
+    whitelist.rememberOrigin('ava', { origin: 'https://app.example.com' }),
+    whitelist.rememberOrigin('ava', { origin: 'https://admin.example.com' }),
+  ]);
+
+  const stored = JSON.parse(await readFile(whitelistPathFor(directory, 'ava'), 'utf8')) as {
+    scopes: CommandScope[];
+    origins: OriginScope[];
+  };
+  assert.deepEqual(stored.scopes.map((scope) => scope.args), [['push']]);
+  assert.deepEqual(
+    stored.origins.map((scope) => scope.origin).sort(),
+    ['https://admin.example.com', 'https://app.example.com'],
+  );
+
+  // And a fresh store — a restarted daemon — reads back everything that
+  // was granted, rather than whichever write happened to land last.
+  const reread = createFileCommandWhitelist({ directory });
+  assert.equal((await reread.scopesFor('ava')).length, 1);
+  assert.equal((await reread.originsFor('ava')).length, 2);
+});

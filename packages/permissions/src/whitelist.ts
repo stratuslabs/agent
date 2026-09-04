@@ -173,6 +173,32 @@ export const createFileCommandWhitelist = (options: {
     await chmod(target, 0o600);
   };
 
+  /**
+   * Read-modify-write runs one at a time per agent.
+   *
+   * Every grant is "read what is there, add one, write it all back", and
+   * the read yields — so two answers settling together both saw the file
+   * before either changed it, and the second write drops the first grant.
+   * It bites hardest across the two kinds now that one file holds both: a
+   * shell "always" and a browser "always" resolved in the same moment, and
+   * whichever landed second silently deleted the other agent's site grant.
+   * Serializing also means only one `writeFile` is ever open on the file,
+   * so two overlapping writes cannot leave a mixed one behind.
+   *
+   * A queue, like the browser pool's admission: the work is short, and the
+   * alternative (reserving and unwinding) is the same serialization with
+   * more ways to leak a reservation. The tail swallows failures, so one
+   * grant that throws does not reject every grant queued behind it — the
+   * caller still sees its own rejection, because that is `queued`.
+   */
+  const writes = new Map<string, Promise<unknown>>();
+
+  const serialized = <T>(agentId: string, work: () => Promise<T>): Promise<T> => {
+    const queued = (writes.get(agentId) ?? Promise.resolve()).then(work, work);
+    writes.set(agentId, queued.then(() => undefined, () => undefined));
+    return queued;
+  };
+
   /** Nothing is written over a grant list nobody could read. */
   const refuseIfUnreadable = (agentId: string): void => {
     const reason = unreadable.get(agentId);
@@ -186,23 +212,30 @@ export const createFileCommandWhitelist = (options: {
       return [...(await read(agentId)).scopes];
     },
     async remember(agentId, scope) {
-      const grants = await read(agentId);
-      refuseIfUnreadable(agentId);
-      if (grants.scopes.some((existing) => sameScope(existing, scope))) {
-        return;
-      }
-      await save(agentId, { ...grants, scopes: [...grants.scopes, scope] });
+      // The read is inside the queue, not before it: a grant that started
+      // from a snapshot taken before the one ahead of it saved would write
+      // that one back out of existence, which is the whole race.
+      return serialized(agentId, async () => {
+        const grants = await read(agentId);
+        refuseIfUnreadable(agentId);
+        if (grants.scopes.some((existing) => sameScope(existing, scope))) {
+          return;
+        }
+        await save(agentId, { ...grants, scopes: [...grants.scopes, scope] });
+      });
     },
     async originsFor(agentId) {
       return [...(await read(agentId)).origins];
     },
     async rememberOrigin(agentId, scope) {
-      const grants = await read(agentId);
-      refuseIfUnreadable(agentId);
-      if (grants.origins.some((existing) => sameOriginScope(existing, scope))) {
-        return;
-      }
-      await save(agentId, { ...grants, origins: [...grants.origins, scope] });
+      return serialized(agentId, async () => {
+        const grants = await read(agentId);
+        refuseIfUnreadable(agentId);
+        if (grants.origins.some((existing) => sameOriginScope(existing, scope))) {
+          return;
+        }
+        await save(agentId, { ...grants, origins: [...grants.origins, scope] });
+      });
     },
   };
 };

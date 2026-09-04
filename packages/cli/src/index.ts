@@ -16,6 +16,7 @@ import {
   missingSkillRequirements,
   type AgentDefinition,
   type AgentMemoryStore,
+  type ApprovalContext,
   type ApprovalPolicy,
   type AvatarTheme,
   type JsonObject,
@@ -2002,6 +2003,22 @@ export const warnOnCredentialOverride = async (
   }
 };
 
+/**
+ * What a local prompt asks about: the tool, where it would act when that is
+ * a question at all, and the arguments.
+ *
+ * The origin is not in the arguments and cannot be — a `browser.act` call
+ * carries a CSS selector, and `#submit` is equally "load more results" and
+ * "confirm purchase". A prompt that showed only the selector would be
+ * asking someone to authorize an effect whose location it withheld, which
+ * is the same reason the daemon's prompt and the Slack request name it.
+ */
+export const describeApprovalCall = (context: ApprovalContext): string => {
+  const origin = context.tool.originFor?.(context.session);
+  return `${context.call.toolName}${origin ? ` on ${origin}` : ''}`
+    + ` with input ${JSON.stringify(context.call.input)}`;
+};
+
 const createApprovalPolicy = (
   mode: CliApprovalMode,
   streams: CliStreams,
@@ -2024,20 +2041,20 @@ const createApprovalPolicy = (
   // asker — two readers on one stream would race for the same bytes.
   if (ask) {
     return {
-      async approve({ call }) {
-        const answer = await ask(`Approve tool call ${call.toolName} with input ${JSON.stringify(call.input)}? [y/N] `);
+      async approve(context) {
+        const answer = await ask(`Approve tool call ${describeApprovalCall(context)}? [y/N] `);
         return /^y(es)?$/i.test(answer.trim());
       },
     };
   }
 
   return {
-    async approve({ call }) {
+    async approve(context) {
       const input = env.approvalInput ?? process.stdin;
       const readline = createInterface({ input, terminal: false });
 
       // Prompt on stderr so stdout stays parseable (e.g. --format json).
-      streams.stderr.write(`Approve tool call ${call.toolName} with input ${JSON.stringify(call.input)}? [y/N] `);
+      streams.stderr.write(`Approve tool call ${describeApprovalCall(context)}? [y/N] `);
 
       try {
         const answer = await new Promise<string>((resolve) => {
