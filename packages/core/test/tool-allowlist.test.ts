@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   AgentRunner,
+  EventBus,
   InMemorySessionStore,
   matchesToolAllowlist,
   originOf,
@@ -107,4 +108,96 @@ test('an origin is scheme, host, and port — and nothing without one is named',
   for (const raw of ['about:blank', 'file:///etc/passwd', 'data:text/html,x', 'not a url', '']) {
     assert.equal(originOf(raw), undefined, raw);
   }
+});
+
+test('a call is not dispatched once the page it was judged on has moved', async () => {
+  // The approval is not the last thing between the judgement and the act:
+  // clearing the checkpoint is a store write, and `tool.called` is awaited
+  // through every subscriber. A page that navigates in there would be
+  // clicked on having been judged somewhere else, and no re-read inside the
+  // policy can see past its own return.
+  let page = 'https://app.example.com/reports';
+  let executed = 0;
+  const act: Tool = {
+    name: 'browser.act',
+    risk: 'gated',
+    originFor: () => page,
+    async execute() {
+      executed += 1;
+      return { clicked: true };
+    },
+  };
+  const tools = new ToolRegistry();
+  tools.register(act);
+
+  let turn = 0;
+  const provider: ModelProvider = {
+    name: 'scripted',
+    async generate(): Promise<ProviderResponse> {
+      turn += 1;
+      return turn === 1
+        ? { parts: [{ type: 'tool-call', call: { id: 'c1', toolName: 'browser.act', input: { selector: '#submit' } } }] }
+        : { parts: [{ type: 'text', text: 'done' }] };
+    },
+  };
+
+  const bus = new EventBus();
+  // The subscriber *is* the window: `emit` awaits each one, so a handler
+  // that yields is exactly the gap a redirect fits into.
+  bus.subscribe(async (event) => {
+    if (event.type === 'tool.called') {
+      await Promise.resolve();
+      page = 'https://checkout.example.com/confirm';
+    }
+  });
+
+  const runner = new AgentRunner({ provider, tools, bus, store: new InMemorySessionStore() });
+  await runner.initialize();
+  const session = await runner.run({
+    sessionId: 'moved-1',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'go',
+  });
+
+  assert.equal(executed, 0, 'the click ran on a page nobody judged');
+  const result = session.messages.filter((message) => message.role === 'tool')[0]?.toolResult;
+  assert.equal(result?.ok, false);
+  assert.match(result?.error ?? '', /judged on https:\/\/app\.example\.com/);
+  assert.match(result?.error ?? '', /now on https:\/\/checkout\.example\.com/);
+});
+
+test('a tool that names no origin is dispatched exactly as before', async () => {
+  let executed = 0;
+  const echo: Tool = {
+    name: 'demo.echo',
+    risk: 'gated',
+    async execute() {
+      executed += 1;
+      return { ran: 'demo.echo' };
+    },
+  };
+  const tools = new ToolRegistry();
+  tools.register(echo);
+
+  let turn = 0;
+  const provider: ModelProvider = {
+    name: 'scripted',
+    async generate(): Promise<ProviderResponse> {
+      turn += 1;
+      return turn === 1
+        ? { parts: [{ type: 'tool-call', call: { id: 'c1', toolName: 'demo.echo', input: {} } }] }
+        : { parts: [{ type: 'text', text: 'done' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools, store: new InMemorySessionStore() });
+  await runner.initialize();
+  const session = await runner.run({
+    sessionId: 'plain-1',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'go',
+  });
+
+  assert.equal(executed, 1);
+  assert.equal(session.messages.filter((message) => message.role === 'tool')[0]?.toolResult?.ok, true);
 });

@@ -126,10 +126,15 @@ has exactly one spelling and a homograph is not a second way to write it.
   the page ran off to. What the check stops is the *click* landing somewhere
   you were not shown.
 
-  What is left is the moment between that last check and the click itself. A
-  page that navigates *itself* right there is not caught, and nothing inside
-  the tool can catch it; a scope is a bound on where an agent may aim, not a
-  lock on the page.
+  And once more at the moment of dispatch, by the kernel — the approval is
+  not the last wait either, since clearing the checkpoint writes to the
+  session store and the `tool.called` event is delivered to every subscriber
+  before the tool is reached.
+
+  What is left is the instant between that dispatch check and the click
+  landing inside the browser. A page that navigates *itself* right there is
+  not caught, and nothing can catch it: a scope is a bound on where an agent
+  may aim, not a lock on the page.
 - **`allowedHosts` is a different question.** The address policy decides
   which hosts the browser may *reach* at all, including for `browser.goto`
   and every subresource ([Tools](./tools.md), and

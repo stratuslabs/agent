@@ -287,6 +287,17 @@ export const originOf = (rawUrl: string): string | undefined => {
 };
 
 /**
+ * Where a tool's call would act for this session, in `originOf` form, or
+ * nothing when the tool does not answer that. Normalized rather than taken
+ * as written, so every comparison of an origin in this codebase is of the
+ * same thing.
+ */
+const originForSession = (tool: Pick<Tool, 'originFor'>, session: Session): string | undefined => {
+  const reported = tool.originFor?.(session);
+  return reported === undefined ? undefined : originOf(reported);
+};
+
+/**
  * Whether an agent's `tools:` allowlist permits a tool name.
  *
  * Two entry forms, and the glob is why this is a function rather than a
@@ -2735,6 +2746,24 @@ export class AgentRunner {
       });
     }
 
+    /**
+     * Where this call would act, read before anything asynchronous.
+     *
+     * `Tool.originFor` says a call is judged by the page its conversation
+     * is on, and the approval is not the last thing between that judgement
+     * and the act: clearing the checkpoint is a store write, and
+     * `tool.called` is delivered to every subscriber, awaited, before the
+     * executor is reached. A page that navigates inside all that would be
+     * clicked on having been judged somewhere else — the policy's own
+     * re-read cannot see past its own return.
+     *
+     * So the seam's contract is enforced where the dispatch happens, which
+     * is the only place that can: read again below, immediately before the
+     * executor, and refuse if the conversation moved. A tool that does not
+     * answer this reads `undefined` both times and is unaffected.
+     */
+    const originWhenJudged = originForSession(tool, session);
+
     let approved: boolean;
     try {
       approved = await this.approvals.approve({
@@ -2767,6 +2796,29 @@ export class AgentRunner {
 
     throwIfAborted(signal);
     await this.bus.emit({ type: 'tool.called', sessionId: session.id, call });
+
+    // The last thing before the executor, and after the emission above
+    // rather than before it, because that emission is itself a wait on
+    // whatever the host subscribed. A refusal here is a failed result, not
+    // a denial: `tool.called` has been announced, and settling it with
+    // `tool.completed` keeps the pairing every consumer reads — the
+    // watchdog's phase, the channel's live line. The agent is told plainly,
+    // because this is a page that moved rather than a permission it lacks.
+    const originNow = originForSession(tool, session);
+    if (originNow !== originWhenJudged) {
+      const result: ToolResult = {
+        callId: call.id,
+        toolName: call.toolName,
+        ok: false,
+        output: null,
+        error: `${call.toolName} was judged on ${originWhenJudged ?? 'a page with no origin'} and this `
+          + `conversation is now on ${originNow ?? 'no page'}, so it did not run. `
+          + 'Check where the page is and call again.',
+      };
+      await this.bus.emit({ type: 'tool.completed', sessionId: session.id, result });
+      return result;
+    }
+
     const result = await this.executor.execute(call, tool, session, signal ? { signal } : undefined);
     await this.bus.emit({ type: 'tool.completed', sessionId: session.id, result });
     return result;
