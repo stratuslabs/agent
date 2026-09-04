@@ -152,6 +152,18 @@ half stood.
     cross-agent version is the *more* effective attack, because the roster's
     separate identities are what make "your teammate concluded this"
     convincing.
+
+    **A delegate result carries the target session's label, whatever it is** —
+    not only `external`. A target whose own injected memory was `unknown`
+    replies from content the parent never saw and cannot assess, and a clause
+    written in terms of tainted-or-not lets the parent take that reply as
+    `agent`, which is the least-trusted rule broken at the one boundary where
+    the parent has least visibility. The parent takes the lower of its own
+    label and the result's, by the same ordering as everything else here.
+    Writing this clause twice in terms of `external` alone, after the ordering
+    replaced the binary, was the drafting error worth naming: a rule stated as
+    a lattice has to be applied as one everywhere, and every place that still
+    says "tainted" is a place it was not.
   - **A sub-agent's reply, when [24](./24-sub-agents.md) lands.** 24 marks a
     sub-agent's memory *proposals* untrusted and guarantees it writes no
     memory; its **reply text** is a separate channel into the parent and is
@@ -165,6 +177,17 @@ half stood.
   told the agent, and every line they hand-added under decision 5's promise, as
   web content. `unknown` renders under its own label: recorded before origins
   were tracked.
+- **`origin` is descriptive, and small enough to say completely here**: the
+  session the entry was written in, and the name of the tool whose result the
+  session was tainted by, when there was one. Both optional; both absent on a
+  legacy entry and on anything hand-added, which is exactly what `unknown`
+  already says. It answers "where did this come from" for an operator reading
+  [17](./17-fleet-console.md)'s memory view, and it is **not** a security
+  control — `trust` is the control, and nothing decides anything from `origin`.
+  It travels with the entry through export and import as ordinary data. Said
+  here because [29](./29-memory-quality.md) carries the field on the strength
+  of this step defining it, and a field promised by one spec and defined by
+  neither is one two stores will implement differently.
 - **An operator can re-assert an entry's trust**, through a record in
   [29](./29-memory-quality.md)'s append-only lane rather than by rewriting a
   line. Without it an upgraded agent's corpus is `unknown` **forever** —
@@ -240,6 +263,9 @@ half stood.
   and an untainted parent whose target fetched writes `external` after the
   reply. Asserted separately — the outbound test passes with the inbound half
   missing and reads like coverage.
+- **A target whose own memory was `unknown` returns a reply that makes the
+  parent `unknown`** — the return leg at a label that is not `external`, which
+  every test written around tainted-or-not passes straight over.
 - **A user's message does not taint the session**, so an agent that is simply
   talking to its operator writes `agent` — the criterion that fails if the
   producer rule is read literally enough to swallow everything.

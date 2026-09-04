@@ -150,6 +150,21 @@ different review look like.
   The order-independence the current comment protects survives that change;
   what it gives up is one hand-edited-file case nobody has asked for.
 
+  **Concurrent supersession of the same entry needs no winner, and picking one
+  would be wrong.** The invariant is about the entry being *retired*, not about
+  its replacement being unique: `liveEntriesFor` drops an entry if any
+  tombstone anywhere names it, so two processes superseding E concurrently both
+  retire it, in either order, with no race to resolve — that order-independence
+  is the property 14 built the forgotten set for. What they also produce is two
+  live successors, and both should stay live: each is a fact the agent wrote,
+  and retiring one to make the other unique would delete a write nobody asked
+  to retract, in a step whose whole posture is that nothing is deleted. Two
+  successors that disagree are a **contradiction in content**, which is the
+  maintenance pass's job — not a storage race, and not something a
+  `(createdAt, id)` tie-break can adjudicate, because it has no idea which
+  belief is right. The pin cap needs a replay rule because a *budget* is a
+  scarce resource two writers can overspend; supersession has no budget.
+
   Contradiction *detection* is a maintenance-pass job and explicitly not a turn
   job. This step ships the mechanism, not the detector.
 
@@ -335,9 +350,13 @@ different review look like.
 - **A query matching only an entry's `about` key returns that entry, in both
   stores** — the alias case the topic index advertises, and the one that fails
   today with matching over `content` alone.
-- An entry that supersedes another: only the successor is live in `list`,
-  `search`, and the injected prompt; `audit` shows both and names which
-  replaced which.
+- An entry that supersedes another: the superseded entry is not live in
+  `list`, `search`, or the injected prompt, and its successor is; `audit` shows
+  both and names which replaced which.
+- **Two processes superseding the same entry concurrently retire it once and
+  leave both successors live** — the invariant is the retirement, not a unique
+  replacement, and a test expecting one successor would be asserting a
+  guarantee this design deliberately does not make.
 - **Pinning and unpinning leave the entry's own line byte-identical** — the
   criterion that fails if `pinned` is implemented as a field write, which is
   the convenient implementation and breaks `O_APPEND` and decision 5 together.
