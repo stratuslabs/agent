@@ -204,7 +204,19 @@ export type ProviderDelta =
  * - `gated` — a human should decide when nobody is watching: anything that
  *   acts on the world outside Stratus — the filesystem, the network,
  *   another service — or writes where other people read.
- * - `dangerous` — destructive or hard to undo.
+ * - `dangerous` — destructive or hard to undo, and **outside the scope
+ *   engine entirely**: no `commandFor`, `destinationFor`, or `originFor`
+ *   narrows it, and no answer is remembered, so a human decides every time
+ *   or it is refused.
+ *
+ * No first-party tool declares `dangerous` any more. `browser.act` was its
+ * only member, and it was there because no scope model existed for a click
+ * rather than because a click is worse than a shell — per-origin scopes
+ * gave it one, and it is `gated` now. The tier stays because its real
+ * constituency was never the tools in this repository: a plugin manifest
+ * may declare it, and an operator's `toolRisks` may raise a bridged MCP
+ * tool to it, which is the only way to say "never unattended, whatever
+ * scopes exist" about somebody else's code.
  *
  * Provider spend is deliberately not the line. Every turn spends: a message
  * arriving in Slack causes a provider call nobody approved, so a policy
@@ -240,6 +252,50 @@ export const atLeastAsRisky = (risk: ToolRisk, floor: ToolRisk): boolean =>
 /** `risk`, raised to `floor` when it sits below it. Never lowers anything. */
 export const raiseRiskTo = (risk: ToolRisk, floor: ToolRisk): ToolRisk =>
   atLeastAsRisky(risk, floor) ? risk : floor;
+
+/**
+ * The origin of a URL — scheme, host, and port, and nothing else — or
+ * nothing when it does not have one this codebase is willing to name.
+ *
+ * The canonical form of what `Tool.originFor` returns, and therefore the
+ * canonical form of what an origin scope is compared against: the browser
+ * pack derives one from the page a conversation is on, the permission
+ * engine parses one out of a hand-edited grant file, and a second reading
+ * of "same site" between those two would be a grant that matches on one
+ * side and not the other. It lives here for the same reason
+ * `matchesToolAllowlist` does — with the seam whose contract it defines.
+ *
+ * Only `http:` and `https:` produce one. `about:blank`, `file:`, and
+ * `data:` have no meaningful origin (the URL parser answers the string
+ * `"null"` for them), and a grant that could be spelled `null` would cover
+ * every one of them at once.
+ *
+ * Note what is dropped, because it is what makes an origin nameable: no
+ * path, no query, no fragment, no credentials. A host is normalized the
+ * way the URL parser normalizes it — lowercased, and IDN hosts in their
+ * punycode form — so a homograph spelling of an approved host cannot be a
+ * second way to write the same grant.
+ */
+export const originOf = (rawUrl: string): string | undefined => {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return undefined;
+  }
+  return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : undefined;
+};
+
+/**
+ * Where a tool's call would act for this session, in `originOf` form, or
+ * nothing when the tool does not answer that. Normalized rather than taken
+ * as written, so every comparison of an origin in this codebase is of the
+ * same thing.
+ */
+const originForSession = (tool: Pick<Tool, 'originFor'>, session: Session): string | undefined => {
+  const reported = tool.originFor?.(session);
+  return reported === undefined ? undefined : originOf(reported);
+};
 
 /**
  * Whether an agent's `tools:` allowlist permits a tool name.
@@ -974,6 +1030,33 @@ export interface Tool {
    * not asked) is judged by `risk` alone.
    */
   destinationFor?(input: JsonObject): string | undefined;
+  /**
+   * The origin this invocation would act on, for a tool whose blast radius
+   * is a site rather than a command or a recipient — `browser.act`, whose
+   * effect lives in the page it is pointed at. In the form `originOf`
+   * returns: `https://app.example.com`, scheme and host and port only.
+   *
+   * **Deliberately not given the call's input**, which is the difference
+   * between this and its two siblings. A CSS selector describes nothing —
+   * `click("#submit")` is equally "load more results" and "confirm
+   * purchase" — so the only thing about a browser action that an operator
+   * can read and mean is *where* it happens, and that has to come from the
+   * page the conversation is already on. An input parameter would be the
+   * agent's claim about where it is, which is exactly the thing a scope
+   * must not take on trust.
+   *
+   * Exposing this is a request to be judged by the origin, and it is also
+   * a statement that the tool must never receive a tool-wide grant: the
+   * permission engine refuses one for any tool that offers this hook, even
+   * on a call where it answers nothing, so one yes to a page can never
+   * become a standing yes to every page.
+   *
+   * Offer **one** scope hook or none. A tool exposing two — this and
+   * `commandFor`, say — is judged by neither and asks every time: each
+   * grant answers only its own question, and how two of them compose on
+   * one call is a decision nobody has made.
+   */
+  originFor?(session: Session): string | undefined;
   execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue>;
 }
 
@@ -1175,6 +1258,21 @@ export type StratusEvent =
       requestId: string;
       call: ToolCall;
       risk: ToolRisk;
+      /**
+       * The origin this call would act on, for a tool judged by one
+       * (`Tool.originFor`). Carried because the call's own arguments do not
+       * say: a renderer showing `browser.act` with `{"selector":"#submit"}`
+       * and an **Always allow** button would be asking somebody to widen a
+       * site they were never shown.
+       */
+      origin?: string;
+      /**
+       * True when answering `always` runs this call once and remembers
+       * nothing. A renderer must not offer an unconditional "always" for
+       * one of these — the button would promise a standing grant the engine
+       * will not create. See `Tool.originFor` and `ToolRisk`.
+       */
+      oneShot?: boolean;
       metadata?: JsonObject;
       /**
        * When the request gives up and denies itself, ISO-8601. Absent when
@@ -2660,6 +2758,32 @@ export class AgentRunner {
       });
     }
 
+    /**
+     * Where this call was judged, captured the instant the policy answered.
+     *
+     * `Tool.originFor` says a call is judged by the page its conversation
+     * is on, and the approval is not the last thing between that judgement
+     * and the act: clearing the checkpoint is a store write, and
+     * `tool.called` is delivered to every subscriber, awaited, before the
+     * executor is reached. A page that navigates inside all that would be
+     * clicked on having been judged somewhere else, and the policy's own
+     * re-read cannot see past its own return. So the seam's contract is
+     * enforced where the dispatch happens, which is the only place that
+     * can — read again below, immediately before the executor.
+     *
+     * Read *after* the policy rather than before it, and that is not a
+     * detail: a policy judges the page as it stands when it decides, which
+     * is deliberately after it has loaded whatever grants it consults. A
+     * snapshot taken before the call would disagree with the answer for
+     * every page that moved during that load, and would refuse an action
+     * the policy had just correctly allowed. Nothing awaits between the
+     * policy's return and this line, so the two agree by construction.
+     *
+     * A tool that does not answer this reads `undefined` both times and is
+     * unaffected.
+     */
+    let originWhenJudged: string | undefined;
+
     let approved: boolean;
     try {
       approved = await this.approvals.approve({
@@ -2670,6 +2794,7 @@ export class AgentRunner {
         ...(signal ? { signal } : {}),
         ...(options.parkedAt ? { parkedAt: options.parkedAt } : {}),
       });
+      originWhenJudged = originForSession(tool, session);
     } finally {
       // Cleared before anything executes and on every exit — an abort that
       // throws out of the policy must not leave the session looking parked
@@ -2692,6 +2817,29 @@ export class AgentRunner {
 
     throwIfAborted(signal);
     await this.bus.emit({ type: 'tool.called', sessionId: session.id, call });
+
+    // The last thing before the executor, and after the emission above
+    // rather than before it, because that emission is itself a wait on
+    // whatever the host subscribed. A refusal here is a failed result, not
+    // a denial: `tool.called` has been announced, and settling it with
+    // `tool.completed` keeps the pairing every consumer reads — the
+    // watchdog's phase, the channel's live line. The agent is told plainly,
+    // because this is a page that moved rather than a permission it lacks.
+    const originNow = originForSession(tool, session);
+    if (originNow !== originWhenJudged) {
+      const result: ToolResult = {
+        callId: call.id,
+        toolName: call.toolName,
+        ok: false,
+        output: null,
+        error: `${call.toolName} was judged on ${originWhenJudged ?? 'a page with no origin'} and this `
+          + `conversation is now on ${originNow ?? 'no page'}, so it did not run. `
+          + 'Check where the page is and call again.',
+      };
+      await this.bus.emit({ type: 'tool.completed', sessionId: session.id, result });
+      return result;
+    }
+
     const result = await this.executor.execute(call, tool, session, signal ? { signal } : undefined);
     await this.bus.emit({ type: 'tool.completed', sessionId: session.id, result });
     return result;

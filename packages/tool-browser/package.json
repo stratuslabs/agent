@@ -71,7 +71,7 @@
         },
         {
           "name": "browser.act",
-          "risk": "dangerous"
+          "risk": "gated"
         }
       ]
     },

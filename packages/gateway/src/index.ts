@@ -437,6 +437,17 @@ export interface GatewayApprovalRequest {
   call: { id: string; toolName: string; input: JsonObject };
   risk: ToolRisk;
   /**
+   * The site this call would act on, for a tool judged by one
+   * (`Tool.originFor`). Passed straight through to whatever renders the
+   * request, because the call's arguments do not say where a click lands.
+   */
+  origin?: string;
+  /**
+   * True when answering `always` runs this call once and remembers
+   * nothing, so a renderer can stop offering one. Passed straight through.
+   */
+  oneShot?: boolean;
+  /**
    * When this call first parked, if a restart is re-asking it. The wait is
    * measured from here, so a request keeps the window it started with
    * instead of winning a fresh one — otherwise a daemon that restarts a
@@ -465,6 +476,10 @@ export interface PendingApproval {
   agentId: string;
   call: { id: string; toolName: string; input: JsonObject };
   risk: ToolRisk;
+  /** The site it would act on, for a tool judged by one. */
+  origin?: string;
+  /** True when `always` on this call remembers nothing — see the event. */
+  oneShot?: boolean;
   /** When this call parked, ISO-8601. */
   parkedAt: string;
   /**
@@ -1111,6 +1126,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         agentId: request.session.agent.id,
         call: request.call,
         risk: request.risk,
+        ...(request.origin !== undefined ? { origin: request.origin } : {}),
+        ...(request.oneShot ? { oneShot: true } : {}),
         parkedAt: request.parkedAt ?? new Date().toISOString(),
         ...(expiresAt ? { expiresAt } : {}),
         ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
@@ -1160,6 +1177,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       requestId,
       call: request.call,
       risk: request.risk,
+      ...(request.origin !== undefined ? { origin: request.origin } : {}),
+      ...(request.oneShot ? { oneShot: true } : {}),
       ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
       ...(expiresAt ? { expiresAt } : {}),
     });

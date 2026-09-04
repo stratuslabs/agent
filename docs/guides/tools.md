@@ -73,7 +73,7 @@ shell is installed.
 | [`@stratusagent/tool-shell`](../../packages/tool-shell) | `shell.run` | `gated`, then [judged per command](./shell.md) |
 | [`@stratusagent/tool-web`](../../packages/tool-web) | `web.fetch` | `gated` |
 | [`@stratusagent/tool-browser`](../../packages/tool-browser) | `browser.goto`, `.read`, `.screenshot` | `gated` |
-| | `browser.act` | `dangerous` — always a human |
+| | `browser.act` | `gated`, then [judged per site](./browser.md) |
 | [`@stratusagent/plugin-mcp`](../../packages/plugin-mcp) | `mcp.<server>.<tool>` — any MCP server's tools, [discovered at connect](./mcp.md) | `gated`, whatever the server says; per-tool `toolRisks` overrides |
 | a search backend plugin, [against the `web.search` contract](../../packages/search) | `web.search` | `gated` — the third-party floor, whatever the backend's manifest says |
 
@@ -88,6 +88,13 @@ risk levels. Four things are worth knowing here:
 - **`tool-shell` replaces the environment.** The command gets exactly what
   you granted (`passEnv`, `env`) and nothing else — the daemon's own
   environment, where `ANTHROPIC_API_KEY` lives, is not there to read.
+- **`browser.act` is judged by the site it acts on.** A CSS selector
+  describes nothing — `#submit` is equally "load more results" and "confirm
+  purchase" — so the scope is the origin of the page the conversation is
+  already on, never anything the call claims about itself. That is what lets
+  an installed service click at all; it used to be `dangerous`, which meant
+  a human every time and a refusal in `headless`. See
+  [Browser actions](./browser.md).
 - **`tool-web` and `tool-browser` refuse local addresses.** Both share one
   policy — [`@stratusagent/egress`](../../packages/egress) — `http:`/`https:`
   only, and no loopback, RFC 1918, link-local (`169.254.169.254`), or IPv6

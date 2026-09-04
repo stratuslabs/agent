@@ -417,31 +417,64 @@ different lifetimes, and which one the approver got depends on the tool:**
   remembers a *command scope*, durable and per agent. Approving `git push
   origin main` persists `git push` minus its destructive forms, so `git push
   --force` still asks. That grant survives restarts.
+- For a tool judged by an **origin** — `browser.act` today — it remembers
+  that origin, durable and per agent, in the same file. Approving a click on
+  `https://app.example.com/reports` persists `https://app.example.com`, so
+  `https://admin.example.com` still asks. It rides as `origin` on both the
+  `tool.approval-requested` event and the `GET /approvals` rows, and a
+  client offering **Always allow** must render it: the call's arguments are
+  a CSS selector and say nothing about which site is being widened.
+- For a **one-shot** request, it is not remembered at all: the call runs
+  once and the next one asks again. Three cases reach this — a `dangerous`
+  tool, which means a human every time whatever is answered; a call judged
+  by an origin whose conversation has no page to grant; and a command this
+  daemon's parser cannot reduce to a scope, such as a pipe or a subshell. This is the
+  one lifetime a client *can* tell in advance: `tool.approval-requested`
+  and the `GET /approvals` rows carry **`oneShot: true`** for it. **A client
+  must not offer an unconditional "always" on such a request** — it does
+  exactly what `once` does, under a label promising a grant nobody gets.
+  The Slack channel drops the button and says why; the dashboard does the
+  same. `POST /approvals` still *accepts* `always` on such a request — the
+  endpoint takes all three answers whatever was rendered — and the engine
+  treats it as `once`, which is also how the resolved message describes it.
 - For **every other tool**, it is remembered against the tool name in memory,
   and lasts until the session ends **or the daemon restarts, whichever comes
   first**. Sessions are durable and restarts are not; a session resumed in a
   new process asks again, so this is strictly weaker than "for this
   conversation".
 
-There is a third outcome behind the same answer: a command this daemon's
-parser cannot reduce to a scope — a pipe, a subshell, an unbalanced quote —
-is approved *once*, because widening to the bare tool would hand the agent
-every command for the rest of the session. The call runs; the grant is not
-remembered.
+That third case is the oldest of them: a command this daemon's parser
+cannot reduce to a scope is approved *once*, because widening to the bare
+tool would hand the agent every command for the rest of the session. The
+call runs; the grant is not remembered — and, like the other two, the
+request says so in advance with `oneShot`.
 
 So one grant is written to disk beside the agent's soul and the other lives
-in a `Set` for as long as the process does. A client that renders `always` as
-one button is therefore promising something whose duration it cannot know —
-and **nothing in this API tells it which it got**. `POST /approvals` answers `{ ok: true }`, and the
-`tool.approval-resolved` event carries the `answer` that was submitted plus a
-`reason` of `decided`, `timeout`, `cancelled`, or `undeliverable` — which is
-why the request stopped being pending, not how long the grant lasts. The
-daemon logs the difference (a remembered command scope is logged as one); an
-API client cannot see it.
+in a `Set` for as long as the process does. Between *those two*, a client
+rendering `always` as one button is promising something whose duration it
+cannot know — and **nothing in this API tells it which it got**. `POST
+/approvals` answers `{ ok: true }`, and the `tool.approval-resolved` event
+carries the `answer` that was submitted plus a `reason` of `decided`,
+`timeout`, `cancelled`, or `undeliverable` — which is why the request stopped
+being pending, not how long the grant lasts. The daemon logs the difference
+(a remembered command scope or origin is logged as one); an API client cannot
+see it.
 
-So word the button for the weaker guarantee. "Allow" is honest for both
-lifetimes; "always allow" is only true for the command-scope case, and a
-client cannot tell in advance that it is in that case.
+The one-shot case is the exception, and the only one: `oneShot: true` on the
+request says in advance that `always` will remember nothing, so a client can
+and should stop offering it there. It does not say *why* — three shapes
+reach it, and only the `dangerous` one is visible from the request's `risk`.
+
+Note also that "past a restart" is the normal case for a scoped grant and
+not a guarantee: the daemon does not write over a whitelist it could not
+read, and a policy can be built without one. A surface reporting the
+outcome has already sent its message by the time that is known, so it
+should state the floor — remembered for this session at least — and leave
+the exact lifetime to the daemon's log.
+
+So for everything else, word the button for the weaker guarantee. "Allow" is
+honest for every lifetime; "always allow" is only true for the scoped cases,
+and a client cannot tell in advance that it is in one of them.
 
 ### Two invariants worth stating
 

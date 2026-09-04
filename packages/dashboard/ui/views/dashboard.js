@@ -50,7 +50,11 @@ const approvalCard = () => {
         el('div', { class: 'row' },
           agent ? avatar(agent, 24) : null,
           el('div', { class: 'grow' },
-            el('div', { class: 'title' }, `${agent?.name ?? request.agentId} wants to run ${request.call.toolName}`),
+            // The site, for a call judged by one. The input below is a CSS
+            // selector for `browser.act` and says nothing about where the
+            // click lands — which is exactly what **Always allow** widens.
+            el('div', { class: 'title' }, `${agent?.name ?? request.agentId} wants to run ${request.call.toolName}`
+              + `${request.origin ? ` on ${request.origin}` : ''}`),
             el('div', { class: 'sub' },
               request.expiresAt ? `expires ${until(request.expiresAt)}` : 'no expiry',
               ` · parked ${ago(request.parkedAt)}`),
@@ -58,9 +62,18 @@ const approvalCard = () => {
           el('span', { class: `pill risk-${request.risk}` }, request.risk),
         ),
         el('div', { class: 'cmd' }, JSON.stringify(request.call.input)),
+        // No **Always allow** where the engine would not remember the
+        // answer — a `dangerous` tool, or a browser action with no page to
+        // grant. There it does exactly what **Allow once** does, under a
+        // label promising a standing grant nobody gets.
+        request.oneShot
+          ? el('div', { class: 'sub' }, 'An approval covers this call only — nothing about it is remembered.')
+          : null,
         el('div', { class: 'actions' },
           el('button', { class: 'primary small', onClick: () => decide(request.requestId, 'once') }, 'Allow once'),
-          el('button', { class: 'small', onClick: () => decide(request.requestId, 'always') }, 'Always allow'),
+          request.oneShot
+            ? null
+            : el('button', { class: 'small', onClick: () => decide(request.requestId, 'always') }, 'Always allow'),
           el('button', { class: 'small danger', onClick: () => decide(request.requestId, 'deny') }, 'Deny'),
         ),
       );
