@@ -14,13 +14,16 @@
     "scopes": {
       "bot": [
         "app_mentions:read",
+        "channels:history",
         "channels:read",
         "chat:write",
         "files:write",
+        "groups:history",
         "groups:read",
         "im:history",
         "im:read",
         "im:write",
+        "mpim:history",
         "mpim:read",
         "users:read"
       ]
@@ -30,7 +33,10 @@
     "event_subscriptions": {
       "bot_events": [
         "app_mention",
-        "message.im"
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "message.mpim"
       ]
     },
     "interactivity": {

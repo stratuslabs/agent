@@ -973,6 +973,31 @@ const APPROVAL_INPUT_LIMIT = 1400;
 const APPROVAL_SUMMARY_LIMIT = 160;
 
 /**
+ * Subtypes that are still a person saying something, rather than Slack
+ * narrating the channel. Everything else a `subtype` marks — an edit, a
+ * deletion, a join, a pinned file — is bookkeeping, and an agent following
+ * a thread must not answer bookkeeping.
+ *
+ * These two are here because both are ordinary follow-ups: `file_share` is
+ * a message that happens to carry an attachment (asking a question with the
+ * log attached is the normal way to ask it), and `thread_broadcast` is a
+ * thread reply the author also sent to the channel.
+ */
+const HUMAN_MESSAGE_SUBTYPES = new Set(['file_share', 'thread_broadcast']);
+
+const isPersonSpeaking = (event: SlackInboundEvent): boolean =>
+  event.subtype === undefined || HUMAN_MESSAGE_SUBTYPES.has(event.subtype);
+
+/**
+ * Whether `text` addresses a bot user by name. Slack writes a mention as
+ * `<@U123>` markup whoever typed it, so this is the same question for an
+ * `app_mention` event and for a plain channel message the app now also
+ * sees.
+ */
+const mentions = (text: string, botUserId: string): boolean =>
+  botUserId.length > 0 && text.includes(`<@${botUserId}>`);
+
+/**
  * Slack's three markup characters. Tool input is written by a model, so it
  * reaches this message as untrusted text: unescaped, `<@U123>` becomes a
  * real mention and `<!channel>` a real broadcast, letting an agent ping a
@@ -1117,6 +1142,14 @@ interface AgentConnection {
  * (DMs: the DM channel id alone), so threads are resumable conversations
  * and two agents sharing a thread keep fully separate sessions. Replies
  * stream via placeholder-then-edit, throttled for chat.update limits.
+ *
+ * A mention starts a thread conversation; inside one, the agent keeps
+ * listening without being tagged again — see `couldBeFollowUp` and
+ * `answersFollowUp` for exactly whose reply an untagged message is. That
+ * needs the app to be subscribed to `message.channels` / `message.groups`
+ * / `message.mpim` (the shipped manifest is); an app installed before
+ * those were in it receives only `app_mention` and behaves as it always
+ * did, which makes the workspace's own grant the switch.
  */
 export const createSlackChannelAdapter = (options: SlackAdapterOptions): ChannelAdapter => {
   const log = options.log ?? (() => {});
@@ -1802,6 +1835,91 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
   };
 
+  /**
+   * The cheap half of "is this untagged channel message ours?", answered
+   * before the message is even deduped so the ordinary traffic of a
+   * channel the app sits in costs nothing.
+   *
+   * Two rules, both about not barging in:
+   *
+   * - **Only inside a thread.** An agent follows a conversation it was
+   *   brought into; it does not answer the room. A message with no
+   *   `thread_ts` starts a thread or stands alone, and is a follow-up to
+   *   nothing.
+   * - **Not when somebody else was named.** Tagging an agent hands it the
+   *   question, and the agent that had it is no longer being asked — two
+   *   answers to one message is exactly what a thread with a roster in it
+   *   must never produce. Only agents this adapter carries can be told
+   *   apart by their bot ids; one served by another daemon is invisible
+   *   here, and both would answer.
+   */
+  const couldBeFollowUp = (connection: AgentConnection, event: SlackInboundEvent, text: string): boolean => {
+    if (!event.thread_ts) {
+      return false;
+    }
+    return !connections.some((other) => other !== connection && mentions(text, other.botUserId));
+  };
+
+  /**
+   * Whether an untagged reply in a thread is this agent's to answer.
+   *
+   * Being in the thread is the first half: a session under this thread's
+   * key exists only because someone mentioned this agent here, so an agent
+   * follows up only in conversations it was invited into, and stops when
+   * the thread is gone. `sessionRouting` is the durable record of that —
+   * a restart forgets nothing.
+   *
+   * Whose turn it is, is the second. In a thread with several agents an
+   * unaddressed reply belongs to **whoever spoke last**, the way it does
+   * between people: answer the voice that just answered you, and tag
+   * someone by name to change that. `updatedAt` orders the agents' sessions
+   * for exactly that question — a turn is the agent speaking — so tagging a
+   * second agent hands it the thread from its own next turn on, with no
+   * handover state to keep or to lose.
+   *
+   * Silence is the tie-break, and only a contested thread can reach it: a
+   * host whose routing carries no `updatedAt` cannot order two agents, and
+   * guessing would put two answers under one message. The agent alone in
+   * its thread — which is nearly every thread — never asks the question.
+   */
+  const answersFollowUp = async (
+    connection: AgentConnection,
+    parts: { team: string; conversation: string; thread: string },
+  ): Promise<boolean> => {
+    const gateway = gatewayRef;
+    if (!gateway?.sessionRouting || !parts.thread) {
+      return false;
+    }
+    const keyFor = (agentId: string): string => channelSessionKey({
+      channel: 'slack',
+      agentId,
+      team: parts.team,
+      conversation: parts.conversation,
+      thread: parts.thread,
+    });
+    const mine = await gateway.sessionRouting(keyFor(connection.config.agentId));
+    if (!mine) {
+      return false;
+    }
+    // Live connections, not every configured agent: an agent whose app
+    // failed to connect cannot answer anything, and leaving the thread
+    // silent because the last speaker is offline is the bug this whole
+    // change exists to remove.
+    for (const other of connections) {
+      if (other === connection) {
+        continue;
+      }
+      const theirs = await gateway.sessionRouting(keyFor(other.config.agentId));
+      if (!theirs) {
+        continue;
+      }
+      if (mine.updatedAt === undefined || theirs.updatedAt === undefined || theirs.updatedAt >= mine.updatedAt) {
+        return false;
+      }
+    }
+    return true;
+  };
+
   const handleInbound = async (connection: AgentConnection, args: SlackSocketEventArgs): Promise<void> => {
     // Ack immediately: Slack redelivers unacked envelopes, and a turn can
     // outlive the ack window many times over.
@@ -1809,19 +1927,30 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
     const gateway = gatewayRef;
     const event = args.event;
-    if (!gateway || !event || !event.user || event.bot_id || event.subtype) {
+    if (!gateway || !event || !event.user || event.bot_id || !isPersonSpeaking(event)) {
       return;
     }
     const isDm = event.channel_type === 'im';
-    if (event.type !== 'app_mention' && !(event.type === 'message' && isDm)) {
-      // Mention-only outside DMs.
+    if (event.type !== 'app_mention' && event.type !== 'message') {
       return;
     }
     if (event.user === connection.botUserId) {
       return;
     }
 
-    const eventKey = `${connection.config.agentId}:${args.body?.event_id ?? args.envelope_id ?? `${event.channel}:${event.ts}`}`;
+    const text = event.text ?? '';
+    const addressed = isDm || mentions(text, connection.botUserId);
+    if (!addressed && !couldBeFollowUp(connection, event, text)) {
+      return;
+    }
+
+    // One Slack MESSAGE, not one delivery. An app subscribed to both
+    // `app_mention` and `message.channels` is told about a mention twice —
+    // two envelopes carrying two event ids — so keying this on the event
+    // id would run the turn twice the moment thread follow-through was
+    // switched on. `(channel, ts)` names the message itself, and a
+    // redelivery (what the event id was here for) repeats both.
+    const eventKey = `${connection.config.agentId}:${event.channel}:${event.ts}`;
     if (alreadySeen(eventKey)) {
       return;
     }
@@ -1839,6 +1968,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       conversation: event.channel,
       ...(thread ? { thread } : {}),
     });
+
+    // The one asynchronous half of addressing, deliberately after the
+    // dedupe: it reads sessions, and two deliveries of one message must
+    // not both get as far as asking.
+    if (!addressed && !(await answersFollowUp(connection, { team, conversation: event.channel, thread: event.thread_ts ?? '' }))) {
+      return;
+    }
 
     // Everything up to (and including) the dispatch call is serialized per
     // session in Slack receipt order: the user lookups and placeholder

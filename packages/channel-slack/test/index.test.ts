@@ -635,6 +635,194 @@ test('two agents in one thread hold separate sessions with their own identities'
   ]);
 });
 
+/**
+ * A plain channel message, the shape `message.channels` delivers — the
+ * event an app only receives once it has been granted the channel history
+ * scopes, and the one an untagged thread reply arrives as.
+ */
+const channelMessage = (input: { text: string; ts: string; thread?: string; user?: string }) => ({
+  body: { team_id: 'T1', event_id: `evt-msg-${input.ts}` },
+  event: {
+    type: 'message',
+    channel_type: 'channel',
+    user: input.user ?? 'U-DYLAN',
+    text: input.text,
+    ts: input.ts,
+    channel: 'C1',
+    ...(input.thread ? { thread_ts: input.thread } : {}),
+  },
+});
+
+/** `sessionRouting` over a map of session id → when that agent last spoke there. */
+const routingOver = (spoke: Map<string, string>) => async (sessionId: string) => {
+  const updatedAt = spoke.get(sessionId);
+  return updatedAt === undefined
+    ? undefined
+    : { agentId: sessionId.split(':')[1] ?? '', metadata: {}, updatedAt };
+};
+
+test('an untagged reply in a thread reaches the agent already in it, and nothing else does', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'still here'));
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:500.0', '2026-01-01T00:00:00.000Z']]));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  // The thread is the address: no mention in it anywhere.
+  await socket.deliver('message', channelMessage({ text: 'and the second one?', ts: '500.9', thread: '500.0' }));
+  // The room is not a conversation. A channel message outside any thread
+  // is not a follow-up to anything, however much the app can now see.
+  await socket.deliver('message', channelMessage({ text: 'morning all', ts: '600.1' }));
+  // Nor is a thread this agent was never invited into.
+  await socket.deliver('message', channelMessage({ text: 'ping?', ts: '700.1', thread: '700.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches, [
+    { sessionId: 'slack:ava:T1:C1:500.0', agentId: 'ava', userMessage: 'Dylan: and the second one?' },
+  ]);
+  assert.equal(web.posts[0]?.thread_ts, '500.0');
+});
+
+test('a follow-up with a file attached is still a follow-up; an edited message is not', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'looking'));
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:520.0', '2026-01-01T00:00:00.000Z']]));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  // Asking with the log attached is how the question gets asked.
+  const shared = channelMessage({ text: "here's the log", ts: '520.1', thread: '520.0' });
+  await socket.deliver('message', { ...shared, event: { ...shared.event, subtype: 'file_share' } });
+  // Slack narrating the channel is not somebody speaking in it.
+  const edited = channelMessage({ text: 'never mind', ts: '520.2', thread: '520.0' });
+  await socket.deliver('message', { ...edited, event: { ...edited.event, subtype: 'message_changed' } });
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ["Dylan: here's the log"]);
+});
+
+test('a mention delivered as both an app_mention and a channel message runs one turn', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'once'));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  // Slack tells a subscriber of both about one message twice, under two
+  // event ids — the message itself is what may only be answered once.
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-mention' },
+    event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-AVA> do it', ts: '800.1', channel: 'C1' },
+  });
+  await socket.deliver('message', channelMessage({ text: '<@B-AVA> do it', ts: '800.1' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.sessionId), ['slack:ava:T1:C1:800.1']);
+});
+
+test('in a shared thread an untagged reply goes to whoever spoke last, and a mention hands the thread over', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const spoke = new Map([
+    ['slack:ava:T1:C1:900.0', '2026-01-01T00:00:01.000Z'],
+    ['slack:bea:T1:C1:900.0', '2026-01-01T00:00:00.000Z'],
+  ]);
+  gateway.sessionRouting = routingOver(spoke);
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // Both apps are in the channel, so both are told about every message.
+  const followUp = channelMessage({ text: 'say more', ts: '900.1', thread: '900.0' });
+  await socketAva.deliver('message', followUp);
+  await socketBea.deliver('message', followUp);
+
+  // Naming Bea hands her the question — and Ava, who had it, is not also
+  // being asked.
+  const handover = channelMessage({ text: '<@B-BEA> what do you think?', ts: '900.2', thread: '900.0' });
+  await socketAva.deliver('message', handover);
+  await socketBea.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-handover' },
+    event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-BEA> what do you think?', ts: '900.2', thread_ts: '900.0', channel: 'C1' },
+  });
+  spoke.set('slack:bea:T1:C1:900.0', '2026-01-01T00:00:02.000Z');
+
+  // …so the next untagged reply is hers, with nothing handed over but the
+  // order the two sessions were last written in.
+  const afterHandover = channelMessage({ text: 'go on', ts: '900.3', thread: '900.0' });
+  await socketAva.deliver('message', afterHandover);
+  await socketBea.deliver('message', afterHandover);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: say more'],
+    ['bea', 'Dylan: what do you think?'],
+    ['bea', 'Dylan: go on'],
+  ]);
+});
+
+test('a contested thread the gateway cannot order stays silent rather than answering twice', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  // A host whose routing carries no `updatedAt`: both agents are in the
+  // thread, and neither can be shown to have spoken last.
+  const engaged = new Set(['slack:ava:T1:C1:910.0', 'slack:bea:T1:C1:910.0']);
+  gateway.sessionRouting = async (sessionId: string) =>
+    engaged.has(sessionId) ? { agentId: sessionId.split(':')[1] ?? '', metadata: {} } : undefined;
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  const followUp = channelMessage({ text: 'thoughts?', ts: '910.1', thread: '910.0' });
+  await socketAva.deliver('message', followUp);
+  await socketBea.deliver('message', followUp);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches, []);
+});
+
 test('a failed turn edits the placeholder into an error note instead of going silent', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

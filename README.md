@@ -36,7 +36,7 @@ line, 23.4+) — details in [Installation](docs/start/installation.md).
 | | Capability | |
 | --- | --- | --- |
 | 🕐 | **Always on** — the whole roster as a daemon that survives reboots, with durable sessions | [Always on](docs/guides/always-on.md) |
-| 💬 | **Live in Slack** — each agent its own app: avatar, presence, DMs, resumable threads, streaming replies | [Slack](docs/guides/slack.md) |
+| 💬 | **Live in Slack** — each agent its own app: avatar, presence, DMs, threads it keeps following without being re-tagged, streaming replies | [Slack](docs/guides/slack.md) |
 | 🧠 | **Remember** — memory keyed to the agent, searched and pruned by the agent itself | [Memory](docs/concepts/memory.md) |
 | 🛠 | **Use real tools** — files, a shell, the web, a browser; each an opt-in plugin, allowlisted per agent | [Tools](docs/guides/tools.md) |
 | 🔌 | **Mount MCP servers** — the whole MCP ecosystem under Stratus policy | [MCP](docs/guides/mcp.md) |

@@ -401,6 +401,12 @@ export interface SessionRouting {
   agentId: string;
   /** The metadata the dispatching surface attached to the session. */
   metadata: JsonObject;
+  /**
+   * When the session last changed, ISO-8601 — when its agent last took a
+   * turn in that conversation. Optional in the adapter-facing shape, so a
+   * host that cannot answer simply does not; this gateway always can.
+   */
+  updatedAt?: string;
   /** The latest turn's text (`latestTurnReply`), when it produced any — see `@stratusagent/channels`. */
   reply?: string;
 }
@@ -2799,6 +2805,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       return {
         agentId: session.agent.id,
         metadata: session.metadata ?? {},
+        updatedAt: session.updatedAt,
         ...(reply !== undefined ? { reply } : {}),
       };
     },

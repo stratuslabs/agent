@@ -28,10 +28,32 @@ without echoing them, verifies each against Slack, and stores them for the
 daemon. Nothing to hand-edit.
 
 The full app setup — creating the app from the manifest, scopes, Socket
-Mode, and how the adapter behaves (mention-only in channels, free-form in
-DMs, streaming edits, session keys) — is documented in the
+Mode, and how the adapter behaves (who a message is for, free-form DMs,
+streaming edits, session keys) — is documented in the
 [`@stratusagent/channel-slack` README](../../packages/channel-slack/README.md),
 which is canonical for the Slack surface.
+
+## Talking to an agent
+
+Mention it — `@Ava what's blocking the release?` — and it answers in a
+thread. **Inside that thread you do not have to mention it again**: replies
+reach it the way replying to a colleague reaches them, and so do replies
+from anyone else in the thread. Outside a thread it stays quiet; a channel
+message nobody addressed to it is not its business.
+
+Threads with more than one agent follow the rule people already use: an
+untagged reply goes to **whoever spoke last**, and mentioning another agent
+moves the conversation to them. Each agent keeps its own session, so one
+tagged in halfway through knows only what it is told from there — say what
+it needs in the message that brings it in. The full set of rules, and the
+two edges around them, is [Who a message is
+for](../../packages/channel-slack/README.md#who-a-message-is-for).
+
+An app installed before this shipped needs the `channels:history` /
+`groups:history` / `mpim:history` scopes and the `message.*` events added
+once (the manifest `stratus setup` prints already has them) — until then it
+answers mentions and DMs and nothing else, which is also how you keep an
+agent mention-only on purpose.
 
 ## Worth knowing
 
