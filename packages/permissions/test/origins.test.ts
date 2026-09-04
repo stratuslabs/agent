@@ -682,3 +682,51 @@ test('a command that cannot be reduced to a scope is a one-shot request too', as
   assert.match(asked[0] ?? '', /cannot be reduced to a scope/);
   assert.doesNotMatch(asked[0] ?? '', /always this scope/);
 });
+
+test('a multi-hook tool cannot fall back to a tool-wide grant either', async () => {
+  const asked: string[] = [];
+  const requests: Array<{ oneShot?: boolean }> = [];
+  const both = (): Tool => ({
+    name: 'odd.tool',
+    risk: 'gated',
+    destinationFor: () => 'slack:C-OPS',
+    originFor: () => 'https://app.example.com',
+    async execute() {
+      return null;
+    },
+  });
+  const call = (tool: Tool): ApprovalContext => ({
+    session: sessionFor('ava'),
+    call: { id: 'call-8', toolName: 'odd.tool', input: {} },
+    tool,
+    risk: 'gated',
+  });
+
+  // Turning the scope engines off is only half the rule: the tool-wide
+  // "always" is what an unscoped tool falls back to, and reaching it would
+  // buy a session of unattended calls with neither scope consulted — worse
+  // than the hole the rule was written to close.
+  const local = createPermissionPolicy({
+    mode: 'interactive',
+    ask: async (question) => {
+      asked.push(question);
+      return 'always';
+    },
+  });
+  assert.equal(await local.approve(call(both())), true);
+  assert.equal(await local.approve(call(both())), true);
+  assert.equal(await local.approve(call(both())), true);
+  assert.equal(asked.length, 3, 'a tool-wide grant was stored for a multi-hook tool');
+  assert.match(asked[0] ?? '', /more than one kind of scope/);
+
+  // And the remote request says so, so no transport offers the button.
+  const remote = createPermissionPolicy({
+    mode: 'remote',
+    request: async (request) => {
+      requests.push({ ...(request.oneShot === undefined ? {} : { oneShot: request.oneShot }) });
+      return 'always';
+    },
+  });
+  assert.equal(await remote.approve(call(both())), true);
+  assert.deepEqual(requests[0], { oneShot: true });
+});

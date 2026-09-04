@@ -35,9 +35,20 @@ interface WhitelistFile {
   version: number;
   scopes: CommandScope[];
   /**
-   * Optional, and the version stays 1 deliberately: a daemon that predates
-   * origin scopes reads a file carrying them as a file of command scopes,
-   * which is exactly right — it has no `browser.act` to judge with them.
+   * Optional, and the version stays 1 — but only the *reading* direction is
+   * clean, and the claim has to say so. A daemon predating origin scopes
+   * reads a file carrying them as a file of command scopes, which is right:
+   * it has no `browser.act` to judge with them. Its next `remember` then
+   * rewrites the file without this key, so rolling a daemon back and
+   * approving one shell command there discards every origin grant.
+   *
+   * Not guarded here, and deliberately. What would prevent it is the state
+   * schema stamp, which makes a rolled-back build refuse to write under
+   * `~/.stratus` at all — reserved for migrations, and far too blunt for an
+   * additive key. The loss also fails in the safe direction: a grant that
+   * vanishes means the call asks again, or is refused in `headless`, and
+   * the log names the site it fell outside. `docs/guides/updating.md` says
+   * so where rolling back is documented.
    */
   origins?: OriginScope[];
 }

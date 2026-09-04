@@ -569,11 +569,19 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // — it is here so that adding one cannot quietly open that door. The
       // guard first covered only `commandFor`, and left exactly this hole
       // for `destinationFor`; one rule over all three has no such corner.
-      const singlyScoped = [
+      const scopeHooks = [
         context.tool.commandFor,
         context.tool.destinationFor,
         context.tool.originFor,
-      ].filter((hook) => hook !== undefined).length <= 1;
+      ].filter((hook) => hook !== undefined).length;
+      const singlyScoped = scopeHooks <= 1;
+      // Turning the scope engines off is only half of it. The tool-wide
+      // "always" is what a tool with no scope at all falls back to, and
+      // letting a multi-hook tool reach it would be worse than the hole
+      // this rule closed: one yes, and then a session of unattended calls
+      // with neither scope consulted. A tool that asked to be judged by a
+      // scope does not get to be judged by nothing instead.
+      const multiplyScoped = scopeHooks > 1;
 
       const command = risk === 'gated' && singlyScoped
         ? context.tool.commandFor?.(call.input)
@@ -650,6 +658,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         }
       } else if (risk !== 'dangerous'
         && !scopedByOrigin
+        && !multiplyScoped
         && alwaysAllowed.has(sessionKey(session.id, call.toolName))) {
         return report(context, true, `${call.toolName} was approved for the rest of this session`);
       }
@@ -735,14 +744,17 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // of the analysis, and the branch below reuses this exact value.
       const commandScope = analysis ? normalizeCommandScope(analysis) : undefined;
       const oneShot = risk === 'dangerous'
+        || multiplyScoped
         || (scopedByOrigin && origin === undefined)
         || (analysis !== undefined && commandScope === undefined);
       const alwaysMeans = oneShot
         ? risk === 'dangerous'
           ? 'not remembered — a dangerous tool asks every time'
-          : analysis !== undefined
-            ? 'not remembered — this command cannot be reduced to a scope'
-            : 'not remembered — there is no page to grant'
+          : multiplyScoped
+            ? 'not remembered — this tool names more than one kind of scope'
+            : analysis !== undefined
+              ? 'not remembered — this command cannot be reduced to a scope'
+              : 'not remembered — there is no page to grant'
         : command !== undefined
           ? 'always this scope'
           : scopedByOrigin
@@ -900,6 +912,15 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           // it deliberate); it is now what it says.
           return allowUnlessMoved(
             `${call.toolName} was approved once; a dangerous tool is never remembered, so it will ask again`,
+          );
+        }
+        if (multiplyScoped) {
+          // The other half of the multi-hook rule. Storing a tool-wide
+          // grant here would be the engine answering "how do two scopes
+          // compose?" with "they do not apply", which is the one answer
+          // nobody would choose deliberately.
+          return allowUnlessMoved(
+            `${call.toolName} was approved once; it names more than one kind of scope, so it will ask again`,
           );
         }
         alwaysAllowed.add(sessionKey(session.id, call.toolName));
