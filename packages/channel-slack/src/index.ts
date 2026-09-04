@@ -619,9 +619,9 @@ const truncateForSlack = (text: string): string =>
  * point of writing a span as ``code with a ` in it`` and a fence as ````
  * when the block itself contains ```.
  */
-const closingBacktickRun = (text: string, from: number, length: number): number => {
+const closingBacktickRun = (text: string, from: number, length: number, limit: number): number => {
   const run = '`'.repeat(length);
-  for (let at = text.indexOf(run, from); at !== -1; at = text.indexOf(run, at + 1)) {
+  for (let at = text.indexOf(run, from); at !== -1 && at + length <= limit; at = text.indexOf(run, at + 1)) {
     if (text[at - 1] !== '`' && text[at + length] !== '`') {
       return at;
     }
@@ -638,12 +638,18 @@ const closingBacktickRun = (text: string, from: number, length: number): number 
  * the same rule for a span and for a fence and is why a longer delimiter
  * can carry a shorter one inside it.
  *
+ * A span closes on its own line and a fence is the only thing that runs
+ * past a newline. Letting a span cross one costs twice over: two stray
+ * backticks on different lines pair into a "span" that swallows every
+ * paragraph between them, converting none of it, and a heading whose line
+ * opens such a span gets its closing `*` written inside the code — where
+ * Slack ignores it, leaving the opening marker with nothing to close it.
+ *
  * A fence with no closer runs to the end on purpose: a model that forgets
  * to close one, and every partially streamed block on its way to being
  * closed, would otherwise have its contents rewritten as prose. One or two
  * unmatched backticks are the opposite case — literal text, as they are in
- * Markdown, since "use the ` character" must not swallow the rest of the
- * message.
+ * Markdown, since "use the ` character" must not swallow what follows.
  */
 const proseAndCode = (text: string): string[] => {
   const segments: string[] = [];
@@ -658,7 +664,9 @@ const proseAndCode = (text: string): string[] => {
     while (text[open + length] === '`') {
       length += 1;
     }
-    const close = closingBacktickRun(text, open + length, length);
+    const newline = text.indexOf('\n', open + length);
+    const limit = length >= 3 || newline === -1 ? text.length : newline;
+    const close = closingBacktickRun(text, open + length, length, limit);
     if (close === -1) {
       if (length < 3) {
         cursor = open + length;
@@ -751,6 +759,9 @@ const convertInline = (segment: string): string => {
  * neither has to be looked at twice. The same work as a scan per heading,
  * without its quadratic on a reply that is mostly headings and snippets.
  */
+/** What could pair with a heading's wrapper, or with something out of sight. */
+const PAIRABLE_MARKER = /[*`]/g;
+
 const convertHeadings = (text: string, code: ReadonlyArray<readonly [number, number]>): string => {
   let span = 0;
   const startsInside = (position: number, from: number): boolean =>
@@ -768,11 +779,19 @@ const convertHeadings = (text: string, code: ReadonlyArray<readonly [number, num
     if (heading.length === 0) {
       return line;
     }
-    // The line's own spans, walked from where the heading cursor already
-    // stands rather than from the beginning.
+    // Anything left on the line that a delimiter could pair with, walked
+    // from where the heading cursor already stands rather than from the
+    // beginning. An asterisk is the obvious one — it would pair with the
+    // wrapper. A backtick counts too: one this side found no partner for is
+    // a literal character here, but Slack parses the message itself and may
+    // pair it with a backtick further down, and the wrapper's closing `*`
+    // would then be written inside what Slack reads as code, where it is
+    // ignored — leaving the opening one with nothing to close it. Both are
+    // spent characters inside a span, which is why the ranges are consulted
+    // rather than the text alone.
     let within = span;
-    for (let at = line.indexOf('*'); at !== -1; at = line.indexOf('*', at + 1)) {
-      const position = offset + at;
+    for (const marker of line.matchAll(PAIRABLE_MARKER)) {
+      const position = offset + (marker.index ?? 0);
       while (within < code.length && (code[within]?.[1] ?? 0) <= position) {
         within += 1;
       }

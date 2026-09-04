@@ -392,6 +392,8 @@ test('a heading is found on the reply\'s own lines, not inside each fragment inl
     '## Run `npm test` now',
     '## **Run** `npm test` now',
     '## Match `*.ts` files',
+    '# Inspect `first',
+    'second`',
     '```sh',
     '# a real comment',
     '```',
@@ -420,6 +422,12 @@ test('a heading is found on the reply\'s own lines, not inside each fragment inl
     // An asterisk inside a span is not emphasis Slack could pair with, so
     // this heading is bolded like any other.
     '*Match `*.ts` files*',
+    // Not wrapped, because of the backtick this side found no partner for.
+    // Slack parses the message itself and may pair it with the one below,
+    // and the closing `*` would then sit inside what Slack reads as code,
+    // where it is ignored — leaving the opening one with nothing to close.
+    'Inspect `first',
+    'second`',
     // While a hash whose line begins inside a fence is somebody's comment.
     '```sh',
     '# a real comment',
@@ -438,6 +446,7 @@ test('a reply keeps every character it was written with, whatever the markers ar
     '# glob *.ts',
     'a ``span with a ` inside`` stays whole',
     'use the ` character on its own, then **bold**',
+    'and another ` one lines later — **still converted**',
     '````',
     '```',
     '**inner fence**',
@@ -469,6 +478,9 @@ test('a reply keeps every character it was written with, whatever the markers ar
     // fence alike — the run that closes it has to be exactly as long.
     'a ``span with a ` inside`` stays whole',
     'use the ` character on its own, then *bold*',
+    // Two stray backticks on different lines are two characters, not a span
+    // swallowing the paragraph between them with its conversion.
+    'and another ` one lines later — *still converted*',
     '````',
     '```',
     '**inner fence**',
