@@ -113,13 +113,18 @@ has exactly one spelling and a homograph is not a second way to write it.
   for that conversation, with nothing between that read and the decision —
   not even the disk read that loads your grants, because a page redirecting
   inside *that* gap would have a grant for one site allow a click on
-  another. It is read *again* after a human answers, since an approval can
-  be outstanding for fifteen minutes. A conversation that moved refuses:
-  nothing runs, and an "always" answered on the old page grants nothing.
+  another. It is read *again* as the last thing before the call is allowed
+  to run — an approval can be outstanding for fifteen minutes, and writing
+  the grant takes time of its own. A conversation that moved refuses:
 
   ```text
-  browser.act was approved on https://app.example.com, but the conversation is on https://checkout.example.com now — it did not run, and nothing was granted
+  browser.act was approved on https://app.example.com, but the conversation is on https://checkout.example.com now — it did not run
   ```
+
+  An **Always allow** answered just before the page moved still remembers
+  the site you were shown — you read it and said always — and never the one
+  the page ran off to. What the check stops is the *click* landing somewhere
+  you were not shown.
 
   What is left is the moment between that last check and the click itself. A
   page that navigates *itself* right there is not caught, and nothing inside

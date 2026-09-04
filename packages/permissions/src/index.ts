@@ -706,38 +706,51 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         );
       }
 
-      // The origin above was read before the wait, and the wait is a human's
-      // — fifteen minutes by default, unbounded when the timeout is zero.
-      // A page that navigates inside it (a redirect, a meta refresh, a
-      // script) would have a yes given for site A execute a click on site
-      // B, and an "always" persist A while the click landed on B. The
-      // approver answered a question about a page; if it is not that page
-      // any more, there is no answer to act on.
-      //
-      // So it is read again, and a conversation that moved refuses:
-      // nothing runs and nothing is granted, because the grant would be for
-      // a call that is no longer the call. Re-asking is not the fix — that
-      // is a second question with the same race behind it. This is also why
-      // the window the docs admit to is decision-to-click and not
-      // approval-wait-plus-click.
-      if (scopedByOrigin) {
-        const settled = originScopeFor(context.tool.originFor?.(session) ?? '')?.origin;
-        if (settled !== origin) {
-          const approvedOn = origin ?? 'a page with no origin';
-          return report(
-            context,
-            false,
-            settled === undefined
-              ? `${call.toolName} was approved on ${approvedOn}, and that page is no longer open`
-                + ' — it did not run, and nothing was granted'
-              : `${call.toolName} was approved on ${approvedOn}, but the conversation is on ${settled} now`
-                + ' — it did not run, and nothing was granted',
-            undefined,
-            undefined,
-            origin,
-          );
+      /**
+       * Allow — unless the conversation moved out from under the answer.
+       *
+       * The origin was read before the wait, and the wait is a human's:
+       * fifteen minutes by default, unbounded when the timeout is zero. A
+       * page that navigates inside it (a redirect, a meta refresh, a
+       * script) would have a yes given for site A land a click on site B,
+       * with the prompt still naming A. The approver answered a question
+       * about a page; if it is not that page any more, there is no answer
+       * to act on, and re-asking is not the fix — that is a second question
+       * with the same race behind it.
+       *
+       * Every path out of the approval goes through this, and it is the
+       * *last* thing each of them does, because the answer is not the last
+       * yield: persisting a grant is a disk write, and a store somebody
+       * else wrote has no bound at all. Checking once when the answer
+       * arrives would leave exactly that window open. One chokepoint, so a
+       * path added later cannot quietly skip it.
+       *
+       * A grant persisted before the page moved is kept, and that is not a
+       * hole: the approver read that site and said always. What must not
+       * happen is the *click* landing somewhere they never saw.
+       */
+      const allowUnlessMoved = (reason: string, forCommand?: string): boolean => {
+        if (!scopedByOrigin) {
+          return report(context, true, reason, forCommand, undefined, origin);
         }
-      }
+        const settled = originScopeFor(context.tool.originFor?.(session) ?? '')?.origin;
+        if (settled === origin) {
+          return report(context, true, reason, forCommand, undefined, origin);
+        }
+        const approvedOn = origin ?? 'a page with no origin';
+        return report(
+          context,
+          false,
+          settled === undefined
+            ? `${call.toolName} was approved on ${approvedOn}, and that page is no longer open`
+              + ' — it did not run'
+            : `${call.toolName} was approved on ${approvedOn}, but the conversation is on ${settled} now`
+              + ' — it did not run',
+          undefined,
+          undefined,
+          origin,
+        );
+      };
 
       if (answer === 'always') {
         if (scopedByOrigin) {
@@ -747,9 +760,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             // nothing is widened. Falling back to the tool-wide grant here
             // would turn "always on this page" into "always on every page",
             // which is the grant this whole engine replaced.
-            return report(
-              context,
-              true,
+            return allowUnlessMoved(
               `${call.toolName} was approved once; there is no page origin to remember, so it will ask again`,
             );
           }
@@ -764,24 +775,14 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               // Same bargain the command half makes: the answer holds for
               // this process, and the file that would carry it past a
               // restart is not written over grants nobody can read.
-              return report(
-                context,
-                true,
+              return allowUnlessMoved(
                 `${call.toolName} was approved, and ${describeOriginScope(originScope)} is acted on without asking for ${session.agent.id} until the daemon restarts — not saved: ${error.message}`,
-                undefined,
-                undefined,
-                origin,
               );
             }
             origins.onScopeRemembered?.({ agentId: session.agent.id, scope: originScope });
           }
-          return report(
-            context,
-            true,
+          return allowUnlessMoved(
             `${call.toolName} was approved, and ${describeOriginScope(originScope)} is now acted on without asking`,
-            undefined,
-            undefined,
-            origin,
           );
         }
         const scope = analysis ? normalizeCommandScope(analysis) : undefined;
@@ -791,9 +792,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           // the tool-wide grant here: the approver widened one command they
           // read, and remembering `shell.run` instead would hand the agent
           // every command for the rest of the session.
-          return report(
-            context,
-            true,
+          return allowUnlessMoved(
             `${call.toolName} was approved once; it cannot be reduced to a scope, so it will ask again`,
             command,
           );
@@ -816,18 +815,14 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               // "always" means without a file — and the file that would
               // carry it past a restart is not written over grants nobody
               // can read. The line says both.
-              return report(
-                context,
-                true,
+              return allowUnlessMoved(
                 `${call.toolName} was approved, and "${describeCommandScope(scope)}" runs without asking for ${session.agent.id} until the daemon restarts — not saved: ${error.message}`,
                 command,
               );
             }
             commands.onScopeRemembered?.({ agentId: session.agent.id, scope });
           }
-          return report(
-            context,
-            true,
+          return allowUnlessMoved(
             `${call.toolName} was approved, and "${describeCommandScope(scope)}" now runs without asking`,
             command,
           );
@@ -840,17 +835,15 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
           // somebody else's code. A session-wide grant made that a promise
           // about the first call only (28 names this and calls tightening
           // it deliberate); it is now what it says.
-          return report(
-            context,
-            true,
+          return allowUnlessMoved(
             `${call.toolName} was approved once; a dangerous tool is never remembered, so it will ask again`,
           );
         }
         alwaysAllowed.add(sessionKey(session.id, call.toolName));
-        return report(context, true, `${call.toolName} was approved for the rest of this session`);
+        return allowUnlessMoved(`${call.toolName} was approved for the rest of this session`);
       }
 
-      return report(context, true, `${call.toolName} was approved once`, command, undefined, origin);
+      return allowUnlessMoved(`${call.toolName} was approved once`, command);
     },
   };
 };

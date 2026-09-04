@@ -387,14 +387,16 @@ test('a page that moves while the approval is outstanding runs nothing and grant
   assert.match(asked[0] ?? '', /browser\.act on https:\/\/app\.example\.com/);
 
   // The yes was for that page. It is not that page any more, so the click
-  // does not land on the site nobody was shown — and the "always" widens
-  // nothing, rather than persisting the approved site while acting on
-  // another one.
+  // does not land on the site nobody was shown.
   assert.match(decisions[0]?.reason ?? '', /approved on https:\/\/app\.example\.com/);
   assert.match(decisions[0]?.reason ?? '', /on https:\/\/checkout\.example\.com now/);
-  assert.match(decisions[0]?.reason ?? '', /nothing was granted/);
-  assert.deepEqual(remembered, []);
-  assert.deepEqual(granted, []);
+  assert.match(decisions[0]?.reason ?? '', /it did not run/);
+
+  // What the approver read and said always to is remembered, and it is the
+  // only thing that is: a grant for the site the page ran away to would be
+  // a permission nobody was ever shown.
+  assert.deepEqual(remembered, [{ origin: 'https://app.example.com' }]);
+  assert.deepEqual(granted, [{ origin: 'https://app.example.com' }]);
 });
 
 test('a page closed while the approval is outstanding says so rather than clicking a fresh one', async () => {
@@ -478,4 +480,34 @@ test('a dangerous tool is never remembered, however the human answered', async (
   assert.equal(await policy.approve(wipe()), true);
   assert.equal(asked.length, 3);
   assert.match(decisions[0]?.reason ?? '', /a dangerous tool is never remembered, so it will ask again/);
+});
+
+test('a page that moves while the grant is being written still does not get clicked', async () => {
+  const decisions: PermissionDecision[] = [];
+  const granted: OriginScope[] = [];
+  let page: string | undefined = 'https://app.example.com/reports';
+
+  const policy = createPermissionPolicy({
+    mode: 'interactive',
+    ask: async () => 'always',
+    onDecision: (decision) => decisions.push(decision),
+    origins: {
+      whitelist: {
+        originsFor: async () => [...granted],
+        // The answer is not the last yield: persisting is a disk write, and
+        // a store somebody else wrote has no bound at all. Checking only
+        // when the answer arrives leaves exactly this window open.
+        rememberOrigin: async (_agentId, scope) => {
+          page = 'https://checkout.example.com/confirm';
+          granted.push(scope);
+        },
+      },
+    },
+  });
+
+  assert.equal(await policy.approve(actOn(() => page)), false);
+  assert.match(decisions[0]?.reason ?? '', /approved on https:\/\/app\.example\.com/);
+  assert.match(decisions[0]?.reason ?? '', /on https:\/\/checkout\.example\.com now/);
+  // The grant is the site the approver read, and only that one.
+  assert.deepEqual(granted, [{ origin: 'https://app.example.com' }]);
 });
