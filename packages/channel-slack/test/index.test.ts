@@ -382,6 +382,42 @@ test('a reply written in Markdown reaches Slack in the markup Slack renders', as
   ].join('\n'));
 });
 
+test('a heading is found on the reply\'s own lines, not inside each fragment inline code leaves behind', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  // Inline code cuts a line into fragments, and a fragment is not a line.
+  // Matched per fragment, `^` lies in both directions at once.
+  const reply = [
+    '`status` # not a heading',
+    '## Run `npm test` now',
+    '```sh',
+    '# a real comment',
+    '```',
+  ].join('\n');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> mind the line'));
+  await adapter.stop();
+
+  assert.equal(web.updates.at(-1)?.text, [
+    // The tail of this line is not a line, so its hash is text.
+    '`status` # not a heading',
+    // And this whole line is one heading, code and all.
+    '*Run `npm test` now*',
+    // While a hash whose line begins inside a fence is somebody's comment.
+    '```sh',
+    '# a real comment',
+    '```',
+  ].join('\n'));
+});
+
 test('a reply keeps every character it was written with, whatever the markers around it', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

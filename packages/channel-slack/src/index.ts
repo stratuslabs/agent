@@ -712,24 +712,46 @@ const MARKDOWN_HEADING = /^ {0,3}#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/gm;
 /** One emphasis run and nothing else — `*Title*`, not `Some *word* here`. */
 const WHOLLY_BOLD = /^\*[^*]+\*$/;
 
-const convertProse = (segment: string): string => {
+const convertInline = (segment: string): string => {
   let converted = segment;
   for (const [pattern, replacement] of MRKDWN_REWRITES) {
     converted = converted.replace(pattern, replacement);
   }
-  // Last, so the heading's own text is already converted. A heading a model
-  // wrote as `## **Title**` is bold by then, and wrapping it again would
-  // print the asterisks rather than render them. Nothing is stripped to get
-  // there: an asterisk in a heading may be the text itself (`# glob *.ts`),
-  // and a reply that reads oddly beats a reply that says something else.
-  return converted.replace(MARKDOWN_HEADING, (line, body: string) => {
-    const text = body.trim();
-    if (text.length === 0) {
+  return converted;
+};
+
+/**
+ * Headings, found on the text's own lines rather than inside each prose
+ * fragment.
+ *
+ * A fragment is not a line: inline code cuts one in two, and the halves
+ * begin wherever the code ended. Matched per fragment, `^` then lied in
+ * both directions — the tail of `` `status` # not a heading `` looked like a
+ * line of its own and lost its hash, and ``## Run `npm test` now`` was only
+ * ever half a line, so only the half before the code was wrapped.
+ *
+ * So the whole text is matched instead, with the code spans it now contains
+ * passed in: a `#` whose line begins inside one is a comment in somebody's
+ * snippet, not a heading. A heading that merely *contains* code is a
+ * heading, and its code goes along untouched.
+ *
+ * Emphasis inside is already converted by here. A heading a model wrote as
+ * `## **Title**` is bold by now, and wrapping it again would print the
+ * asterisks rather than render them. Nothing is stripped to get there: an
+ * asterisk in a heading may be the text itself (`# glob *.ts`), and a reply
+ * that reads oddly beats a reply that says something else.
+ */
+const convertHeadings = (text: string, code: ReadonlyArray<readonly [number, number]>): string =>
+  text.replace(MARKDOWN_HEADING, (line, body: string, offset: number) => {
+    if (code.some(([from, to]) => offset >= from && offset < to)) {
       return line;
     }
-    return WHOLLY_BOLD.test(text) ? text : `*${text}*`;
+    const heading = body.trim();
+    if (heading.length === 0) {
+      return line;
+    }
+    return WHOLLY_BOLD.test(heading) ? heading : `*${heading}*`;
   });
-};
 
 /**
  * Markdown as a model writes it, in the spelling Slack actually renders.
@@ -745,10 +767,21 @@ const convertProse = (segment: string): string => {
  * already mean in mrkdwn what they mean in Markdown; rewriting them would
  * add ways to be wrong and fix nothing.
  */
-const toSlackMrkdwn = (text: string): string =>
-  proseAndCode(text)
-    .map((segment, index) => (index % 2 === 1 ? segment : convertProse(segment)))
-    .join('');
+const toSlackMrkdwn = (text: string): string => {
+  // Where each code span ends up in the converted text, which is not where
+  // it started: the prose before it changes length as it is rewritten.
+  const code: Array<readonly [number, number]> = [];
+  let converted = '';
+  proseAndCode(text).forEach((segment, index) => {
+    if (index % 2 === 1) {
+      code.push([converted.length, converted.length + segment.length]);
+      converted += segment;
+      return;
+    }
+    converted += convertInline(segment);
+  });
+  return convertHeadings(converted, code);
+};
 
 const splitForSlack = (text: string): string[] => {
   if (text.length <= SLACK_MAX_MESSAGE_CHARS) {
