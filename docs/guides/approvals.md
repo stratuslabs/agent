@@ -162,10 +162,13 @@ warning naming the file.
   the tool.** For an ordinary tool it lasts for the session: it stops that
   tool asking again in the same conversation, and it is forgotten when the
   daemon restarts. For a call judged by a *scope* it persists that scope
-  instead, in `~/.stratus/agents/<id>.whitelist.json`, and that survives a
-  restart — a command scope for `shell.run` (see
+  instead, in `~/.stratus/agents/<id>.whitelist.json`, and a saved one
+  survives a restart — a command scope for `shell.run` (see
   [Shell commands](./shell.md)), an origin for `browser.act` (see
-  [Browser actions](./browser.md)). A scoped tool never gets the tool-wide
+  [Browser actions](./browser.md)). When that file exists and no longer
+  parses it is never written over, so the answer holds only until the
+  daemon stops; the log line says which happened, and the Slack message
+  cannot, because it is sent before the write is attempted. A scoped tool never gets the tool-wide
   grant, whatever the answer: one yes to `git status` must not become a yes
   to every command, and one yes to a page must not become a yes to every
   page.
