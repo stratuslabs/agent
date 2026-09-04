@@ -876,6 +876,7 @@ const approvalBlocks = (
   requestId: string,
   input: JsonObject,
   origin: string | undefined,
+  oneShot: boolean,
 ): SlackBlock[] => {
   const invocation = renderInvocation(input);
   return [
@@ -904,15 +905,33 @@ const approvalBlocks = (
           elements: [{ type: 'mrkdwn', text: ':warning: Arguments shown are truncated — the full call is longer than this.' }],
         }]
       : []),
+    // Why there is no second button, when there is no second button.
+    ...(oneShot
+      ? [{
+          type: 'context',
+          elements: [{
+            type: 'mrkdwn',
+            text: ':lock: An approval covers this call only — nothing about it is remembered.',
+          }],
+        }]
+      : []),
     {
       type: 'actions',
       // The request id rides on every button rather than in the message
       // reference: Slack gives the value back verbatim, so the gateway is
       // asked about the request that was actually rendered, never one
       // re-derived from a channel and timestamp.
+      //
+      // **Always allow** is absent when the engine would not remember the
+      // answer — a `dangerous` tool, or a browser action with no page to
+      // grant. Offering it there is worse than useless: it does exactly
+      // what **Allow once** does, under a label promising a standing grant
+      // nobody gets.
       elements: [
-        { type: 'button', action_id: 'stratus_approve_once', text: { type: 'plain_text', text: 'Allow once' }, value: requestId },
-        { type: 'button', action_id: 'stratus_approve_always', text: { type: 'plain_text', text: 'Always allow' }, value: requestId, style: 'primary' },
+        { type: 'button', action_id: 'stratus_approve_once', text: { type: 'plain_text', text: 'Allow once' }, value: requestId, ...(oneShot ? { style: 'primary' } : {}) },
+        ...(oneShot
+          ? []
+          : [{ type: 'button', action_id: 'stratus_approve_always', text: { type: 'plain_text', text: 'Always allow' }, value: requestId, style: 'primary' }]),
         { type: 'button', action_id: 'stratus_deny', text: { type: 'plain_text', text: 'Deny' }, value: requestId, style: 'danger' },
       ],
     },
@@ -1234,6 +1253,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           event.requestId,
           event.call.input,
           event.origin,
+          event.oneShot === true,
         ),
       });
       post = posted.ts

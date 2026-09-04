@@ -108,7 +108,9 @@ has exactly one spelling and a homograph is not a second way to write it.
   navigated yet is on `about:blank`, which has no origin — so the call asks,
   and an "always" answered on it runs the call and widens nothing.
   `browser.act` never receives a tool-wide grant, on any answer: one yes to a
-  page must never become a yes to every page.
+  page must never become a yes to every page. Because nothing would be
+  remembered, such a request is not offered **Always allow** at all — it
+  says that the approval covers this call only.
 - **The site is read when the call is judged**, from the page the pool holds
   for that conversation, with nothing between that read and the decision —
   not even the disk read that loads your grants, because a page redirecting

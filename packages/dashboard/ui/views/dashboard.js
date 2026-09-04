@@ -62,9 +62,18 @@ const approvalCard = () => {
           el('span', { class: `pill risk-${request.risk}` }, request.risk),
         ),
         el('div', { class: 'cmd' }, JSON.stringify(request.call.input)),
+        // No **Always allow** where the engine would not remember the
+        // answer — a `dangerous` tool, or a browser action with no page to
+        // grant. There it does exactly what **Allow once** does, under a
+        // label promising a standing grant nobody gets.
+        request.oneShot
+          ? el('div', { class: 'sub' }, 'An approval covers this call only — nothing about it is remembered.')
+          : null,
         el('div', { class: 'actions' },
           el('button', { class: 'primary small', onClick: () => decide(request.requestId, 'once') }, 'Allow once'),
-          el('button', { class: 'small', onClick: () => decide(request.requestId, 'always') }, 'Always allow'),
+          request.oneShot
+            ? null
+            : el('button', { class: 'small', onClick: () => decide(request.requestId, 'always') }, 'Always allow'),
           el('button', { class: 'small danger', onClick: () => decide(request.requestId, 'deny') }, 'Deny'),
         ),
       );

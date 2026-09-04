@@ -1272,6 +1272,39 @@ test('the approval prompt shows what is actually being approved', async () => {
   await adapter.stop();
 });
 
+test('a one-shot request is not offered an Always allow button', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({
+    call: { id: 'c1', toolName: 'mcp.vendor.wipe', input: {} },
+    risk: 'dangerous',
+    oneShot: true,
+  }));
+
+  // The engine remembers nothing here, so the button would do exactly what
+  // Allow once does under a label promising a standing grant nobody gets.
+  const posted = web.posts.at(-1);
+  assert.deepEqual(buttonIds(posted?.blocks), ['stratus_approve_once', 'stratus_deny']);
+  assert.ok(
+    (posted?.blocks ?? []).some((block) => block.type === 'context'),
+    'the prompt does not say why the choice is missing',
+  );
+
+  // An ordinary gated call still gets all three.
+  gateway.pendingApprovals.add('req-2');
+  await gateway.bus.emit(approvalRequest({ requestId: 'req-2' }));
+  assert.deepEqual(
+    buttonIds(web.posts.at(-1)?.blocks),
+    ['stratus_approve_once', 'stratus_approve_always', 'stratus_deny'],
+  );
+
+  await adapter.stop();
+});
+
 test('an always answered on a dangerous call is recorded as the one-shot it is', async () => {
   const { socket, web, gateway, adapter } = approvalAdapter([
     { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },

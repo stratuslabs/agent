@@ -1261,6 +1261,13 @@ export type StratusEvent =
        * site they were never shown.
        */
       origin?: string;
+      /**
+       * True when answering `always` runs this call once and remembers
+       * nothing. A renderer must not offer an unconditional "always" for
+       * one of these — the button would promise a standing grant the engine
+       * will not create. See `Tool.originFor` and `ToolRisk`.
+       */
+      oneShot?: boolean;
       metadata?: JsonObject;
       /**
        * When the request gives up and denies itself, ISO-8601. Absent when

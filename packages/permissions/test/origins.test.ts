@@ -553,3 +553,46 @@ test('the prompt offers only the grant the answer will actually create', async (
   assert.match(asked[2] ?? '', /a dangerous tool asks every time/);
   assert.doesNotMatch(asked[2] ?? '', /always this session/);
 });
+
+test('a remote request says when answering always would remember nothing', async () => {
+  const requests: Array<{ oneShot?: boolean; origin?: string }> = [];
+  const policy = createPermissionPolicy({
+    mode: 'remote',
+    request: async (request) => {
+      requests.push({
+        ...(request.oneShot === undefined ? {} : { oneShot: request.oneShot }),
+        ...(request.origin === undefined ? {} : { origin: request.origin }),
+      });
+      return 'always';
+    },
+  });
+
+  // A page to grant: the transport may offer a standing grant, because one
+  // is what the answer creates.
+  assert.equal(await policy.approve(actOn(() => 'https://app.example.com/')), true);
+  assert.deepEqual(requests[0], { origin: 'https://app.example.com' });
+
+  // No page to grant, and the dangerous tier: the engine remembers nothing
+  // either way, so a transport offering "always" would be promising a
+  // grant nobody gets.
+  assert.equal(await policy.approve(actOn(() => undefined)), true);
+  assert.deepEqual(requests[1], { oneShot: true });
+
+  const destructive: Tool = {
+    name: 'mcp.vendor.wipe',
+    risk: 'dangerous',
+    async execute() {
+      return null;
+    },
+  };
+  assert.equal(
+    await policy.approve({
+      session: sessionFor('ava'),
+      call: { id: 'call-6', toolName: 'mcp.vendor.wipe', input: {} },
+      tool: destructive,
+      risk: 'dangerous',
+    }),
+    true,
+  );
+  assert.deepEqual(requests[2], { oneShot: true });
+});

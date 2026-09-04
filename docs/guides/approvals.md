@@ -47,7 +47,10 @@ A `dangerous` call asks **every time**, and **Always allow** on one does not
 change that: the call runs, and nothing is remembered. That is stricter than
 it used to be — the session-wide grant applied to `dangerous` too, which made
 "always a human" a promise about the first call only — and the tier is worth
-having only if it means what it says.
+having only if it means what it says. Requests like this are not *offered*
+**Always allow** at all: Slack, the dashboard, and the terminal prompt each
+say that an approval covers the one call, rather than showing a button that
+does nothing extra.
 
 The line is *acting outside Stratus* — the filesystem, the network, another
 service — not cost. Every turn spends provider tokens, including the one

@@ -105,6 +105,19 @@ export interface ApprovalRequest {
    */
   origin?: string;
   /**
+   * True when answering `always` runs this call once and remembers
+   * nothing — a `dangerous` tool, which asks every time whatever is
+   * clicked, or a call judged by origin whose conversation has no page to
+   * grant. A transport MUST NOT offer an unconditional "always" for one of
+   * these: a button promising a standing grant that the engine will not
+   * create is the same defect as a record understating one it did.
+   *
+   * Absent is the ordinary case, where `always` remembers *something* —
+   * which of the two lifetimes is still not knowable here, and is why the
+   * wording for that case has to cover both.
+   */
+  oneShot?: boolean;
+  /**
    * When this call first parked, if it is being re-asked after a restart.
    * A transport that imposes a deadline measures from here rather than
    * granting a fresh window.
@@ -447,6 +460,7 @@ const awaitRemote = async (
   context: ApprovalContext,
   request: ApprovalRequester,
   origin: string | undefined,
+  oneShot: boolean,
 ): Promise<ApprovalAnswer | typeof ABORTED> => {
   const pending = request({
     session: context.session,
@@ -454,6 +468,7 @@ const awaitRemote = async (
     tool: context.tool,
     risk: context.risk,
     ...(origin !== undefined ? { origin } : {}),
+    ...(oneShot ? { oneShot } : {}),
     ...(context.parkedAt ? { parkedAt: context.parkedAt } : {}),
     ...(context.signal ? { signal: context.signal } : {}),
   }).then(
@@ -686,22 +701,23 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // refusal is reported — is deliberately shared, so a decision made in
       // Slack and one typed at a terminal cannot drift into meaning
       // different things.
-      // What "always" is going to mean for *this* call, worked out where
-      // the answer is: a `dangerous` tool remembers nothing whatever is
-      // clicked, and an origin-scoped call with no page to name remembers
-      // nothing either. Labelling both "always this session" offers a grant
-      // the engine will not create.
-      const alwaysMeans = risk === 'dangerous'
-        ? 'not remembered — a dangerous tool asks every time'
+      // Whether answering "always" would remember anything at all, decided
+      // here because this is where the answer is: a `dangerous` tool never
+      // remembers, and an origin-scoped call with no page has nothing to
+      // remember. Both are certain before anyone is asked, so both surfaces
+      // can stop offering a grant the engine will not create.
+      const oneShot = risk === 'dangerous' || (scopedByOrigin && origin === undefined);
+      const alwaysMeans = oneShot
+        ? risk === 'dangerous'
+          ? 'not remembered — a dangerous tool asks every time'
+          : 'not remembered — there is no page to grant'
         : command !== undefined
           ? 'always this scope'
           : scopedByOrigin
-            ? origin !== undefined
-              ? 'always this site'
-              : 'not remembered — there is no page to grant'
+            ? 'always this site'
             : 'always this session';
       const answer = mode === 'remote'
-        ? await awaitRemote(context, request!, origin)
+        ? await awaitRemote(context, request!, origin, oneShot)
         : await awaitPrompt(context, ask!, command, origin, alwaysMeans);
 
       if (answer === ABORTED) {

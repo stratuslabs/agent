@@ -424,12 +424,16 @@ different lifetimes, and which one the approver got depends on the tool:**
   `tool.approval-requested` event and the `GET /approvals` rows, and a
   client offering **Always allow** must render it: the call's arguments are
   a CSS selector and say nothing about which site is being widened.
-- For a **`dangerous`** tool, it is not remembered at all: the call runs
-  once and the next one asks again. That tier means a human every time, and
-  no answer changes it. This is the one lifetime a client *can* tell in
-  advance, because the risk is on the request — the Slack channel renders
-  it as "Allowed once" rather than as a grant, and a client offering
-  **Always allow** should do the same.
+- For a **one-shot** request, it is not remembered at all: the call runs
+  once and the next one asks again. Two cases reach this — a `dangerous`
+  tool, which means a human every time whatever is answered, and a call
+  judged by an origin whose conversation has no page to grant. This is the
+  one lifetime a client *can* tell in advance: `tool.approval-requested`
+  and the `GET /approvals` rows carry **`oneShot: true`** for it. **A client
+  must not offer an unconditional "always" on such a request** — it does
+  exactly what `once` does, under a label promising a grant nobody gets.
+  The Slack channel drops the button and says why; the dashboard does the
+  same.
 - For **every other tool**, it is remembered against the tool name in memory,
   and lasts until the session ends **or the daemon restarts, whichever comes
   first**. Sessions are durable and restarts are not; a session resumed in a
