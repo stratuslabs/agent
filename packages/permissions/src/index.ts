@@ -612,7 +612,9 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             );
           }
         }
-      } else if (!scopedByOrigin && alwaysAllowed.has(sessionKey(session.id, call.toolName))) {
+      } else if (risk !== 'dangerous'
+        && !scopedByOrigin
+        && alwaysAllowed.has(sessionKey(session.id, call.toolName))) {
         return report(context, true, `${call.toolName} was approved for the rest of this session`);
       }
 
@@ -828,6 +830,20 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             true,
             `${call.toolName} was approved, and "${describeCommandScope(scope)}" now runs without asking`,
             command,
+          );
+        }
+        if (risk === 'dangerous') {
+          // The tier means "a human every time, whatever scopes exist", and
+          // it kept that name in this change on exactly that basis — no
+          // first-party tool is in it any more, so what it is *for* is an
+          // operator's `toolRisks` or a plugin manifest saying it about
+          // somebody else's code. A session-wide grant made that a promise
+          // about the first call only (28 names this and calls tightening
+          // it deliberate); it is now what it says.
+          return report(
+            context,
+            true,
+            `${call.toolName} was approved once; a dangerous tool is never remembered, so it will ask again`,
           );
         }
         alwaysAllowed.add(sessionKey(session.id, call.toolName));

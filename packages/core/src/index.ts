@@ -206,7 +206,8 @@ export type ProviderDelta =
  *   another service — or writes where other people read.
  * - `dangerous` — destructive or hard to undo, and **outside the scope
  *   engine entirely**: no `commandFor`, `destinationFor`, or `originFor`
- *   narrows it, so a human decides every time or it is refused.
+ *   narrows it, and no answer is remembered, so a human decides every time
+ *   or it is refused.
  *
  * No first-party tool declares `dangerous` any more. `browser.act` was its
  * only member, and it was there because no scope model existed for a click

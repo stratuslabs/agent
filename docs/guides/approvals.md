@@ -43,6 +43,12 @@ somebody else's code — but no first-party tool declares it. `browser.act`
 was its one member, and it was there because no scope model existed for a
 click rather than because a click is worse than a shell command.
 
+A `dangerous` call asks **every time**, and **Always allow** on one does not
+change that: the call runs, and nothing is remembered. That is stricter than
+it used to be — the session-wide grant applied to `dangerous` too, which made
+"always a human" a promise about the first call only — and the tier is worth
+having only if it means what it says.
+
 The line is *acting outside Stratus* — the filesystem, the network, another
 service — not cost. Every turn spends provider tokens, including the one
 that decided to call a tool, so a policy that gated on spend would have to

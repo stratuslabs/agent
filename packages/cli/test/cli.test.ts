@@ -20,6 +20,7 @@ import {
   withoutSqliteExperimentalWarning,
   CLI_VERSION,
   createLogWriter,
+  createApprovalPolicy,
   currentLogPosition,
   describeApprovalCall,
   eventDetail,
@@ -8541,4 +8542,51 @@ test('a local approval prompt names the site a browser action would act on', () 
     }),
     'demo.echo with input {"text":"hi"}',
   );
+});
+
+test('a local y/N does not run a browser action once the page has moved under it', async () => {
+  // `--approvals ask` is a separate policy from the daemon's, and a y/N at
+  // a terminal takes as long as it takes. A redirect between the question
+  // and the answer would have a yes given for one site click on another,
+  // with the prompt still naming the first.
+  let page: string | undefined = 'https://app.example.com/reports';
+  const act = (): Tool => ({
+    name: 'browser.act',
+    risk: 'gated',
+    originFor: () => page,
+    async execute() {
+      return null;
+    },
+  });
+  const session = {
+    id: 'local',
+    agent: { id: 'ava', name: 'Ava' },
+    status: 'running',
+    messages: [],
+    createdAt: '2026-09-04T00:00:00.000Z',
+    updatedAt: '2026-09-04T00:00:00.000Z',
+  } as unknown as Session;
+  const contextFor = (tool: Tool) => ({
+    session,
+    call: { id: 'c1', toolName: 'browser.act', input: { action: 'click', selector: '#submit' } },
+    tool,
+    risk: 'gated' as const,
+  });
+
+  const moved = createStreams();
+  const movedPolicy = createApprovalPolicy('ask', moved.streams, {}, async () => {
+    page = 'https://checkout.example.com/confirm';
+    return 'y';
+  });
+  assert.equal(await movedPolicy.approve(contextFor(act())), false);
+  // Somebody typed `y` and is owed a reason nothing happened.
+  assert.match(moved.output.stderr, /approved on https:\/\/app\.example\.com/);
+  assert.match(moved.output.stderr, /is on https:\/\/checkout\.example\.com now/);
+
+  // The page holding still is the ordinary case, and it runs.
+  page = 'https://app.example.com/reports';
+  const steady = createStreams();
+  const steadyPolicy = createApprovalPolicy('ask', steady.streams, {}, async () => 'y');
+  assert.equal(await steadyPolicy.approve(contextFor(act())), true);
+  assert.equal(steady.output.stderr, '');
 });

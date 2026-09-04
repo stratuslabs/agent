@@ -443,3 +443,39 @@ test('a page that moves while the grants are being read is judged on where it en
   assert.match(decisions[0]?.reason ?? '', /called on https:\/\/checkout\.example\.com/);
   assert.equal(decisions[0]?.origin, 'https://checkout.example.com');
 });
+
+test('a dangerous tool is never remembered, however the human answered', async () => {
+  const asked: string[] = [];
+  const decisions: PermissionDecision[] = [];
+  const destructive: Tool = {
+    name: 'mcp.vendor.wipe',
+    risk: 'dangerous',
+    async execute() {
+      return null;
+    },
+  };
+  const wipe = (): ApprovalContext => ({
+    session: sessionFor('ava'),
+    call: { id: 'call-4', toolName: 'mcp.vendor.wipe', input: {} },
+    tool: destructive,
+    risk: 'dangerous',
+  });
+  const policy = createPermissionPolicy({
+    mode: 'interactive',
+    ask: async (question) => {
+      asked.push(question);
+      return 'always';
+    },
+    onDecision: (decision) => decisions.push(decision),
+  });
+
+  // Nothing first-party is in this tier any more, so what it is for is an
+  // operator's `toolRisks` or a plugin manifest saying "never unattended"
+  // about somebody else's code. A session-wide grant made that a promise
+  // about the first call only.
+  assert.equal(await policy.approve(wipe()), true);
+  assert.equal(await policy.approve(wipe()), true);
+  assert.equal(await policy.approve(wipe()), true);
+  assert.equal(asked.length, 3);
+  assert.match(decisions[0]?.reason ?? '', /a dangerous tool is never remembered, so it will ask again/);
+});
