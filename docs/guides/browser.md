@@ -60,9 +60,11 @@ at your permissions. Anything not granted asks, and in
 ## Granting a site
 
 In `remote` mode, **Always allow** on a `browser.act` request persists that
-origin. The prompt names the site — the arguments are a selector and say
-nothing about where the click lands, so the site is shown next to the tool
-name rather than left for the approver to infer.
+origin, and it **survives a restart** — unlike the same button on an
+ordinary tool, which is forgotten when the daemon stops. The prompt names
+the site: the arguments are a selector and say nothing about where the
+click lands, so the site is shown next to the tool name rather than left
+for the approver to infer.
 
 For a `headless` daemon nothing is ever asked, so the grant is written by
 hand. The file is per agent, `0600`, and read once at startup:
@@ -108,10 +110,20 @@ has exactly one spelling and a homograph is not a second way to write it.
   `browser.act` never receives a tool-wide grant, on any answer: one yes to a
   page must never become a yes to every page.
 - **The site is read when the call is judged**, from the page the pool holds
-  for that conversation. A page that navigates *itself* in the moment
-  between the decision and the click — a timed redirect — is not re-checked.
-  The window is small and nothing inside the tool can close it; a scope is a
-  bound on where an agent may aim, not a lock on the page.
+  for that conversation, and read *again* after a human answers — an
+  approval can be outstanding for fifteen minutes, and a page that
+  redirected inside that wait would have a yes given for one site click on
+  another. A conversation that moved refuses: nothing runs, and an "always"
+  answered on the old page grants nothing.
+
+  ```text
+  browser.act was approved on https://app.example.com, but the conversation is on https://checkout.example.com now — it did not run, and nothing was granted
+  ```
+
+  What is left is the moment between that last check and the click itself. A
+  page that navigates *itself* right there is not caught, and nothing inside
+  the tool can catch it; a scope is a bound on where an agent may aim, not a
+  lock on the page.
 - **`allowedHosts` is a different question.** The address policy decides
   which hosts the browser may *reach* at all, including for `browser.goto`
   and every subresource ([Tools](./tools.md), and

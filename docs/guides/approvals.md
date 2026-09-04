@@ -168,7 +168,10 @@ the prompt) and truncated with a visible notice when they are long.
 For `browser.act` it also shows the **site**, beside the tool name. The
 arguments there are a CSS selector, which says nothing about where a click
 lands — and the site is the thing **Always allow** widens, so an approver
-who was not shown it would be granting something they cannot see.
+who was not shown it would be granting something they cannot see. The site
+is checked again when the answer comes back: a page that redirected while
+the request was outstanding refuses rather than acting on a yes given for
+somewhere else.
 
 Requests are also denied — visibly, with a reason — when they expire, when
 the turn is cancelled, when the daemon shuts down, and when a turn reaches

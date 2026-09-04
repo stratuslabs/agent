@@ -799,14 +799,25 @@ const APPROVAL_ACTIONS: Record<string, ApprovalAnswer> = {
 };
 
 /**
- * How an approval request reads once it is settled. `always` deliberately
- * says "this session" out loud: the button is the shortest path to widening
- * what an agent does unattended, and an approver should see the scope they
- * granted in the record of granting it.
+ * How an approval request reads once it is settled. `always` says out loud
+ * how long it lasts: the button is the shortest path to widening what an
+ * agent does unattended, and an approver should see the scope they granted
+ * in the record of granting it.
+ *
+ * It says both lifetimes because this adapter cannot tell which one it
+ * got, and the honest line is the one that is true either way. A call
+ * judged by a scope — a shell command, a browser site — persists that
+ * scope in the agent's whitelist and keeps it across restarts; every other
+ * tool is remembered in memory until the session ends or the daemon
+ * restarts. Nothing on the bus distinguishes them: the policy returns a
+ * boolean, and `tool.approval-resolved` carries the answer that was
+ * submitted, not how long the grant lasts. Claiming only the session
+ * lifetime, as this line used to, tells an approver a durable grant
+ * revokes itself.
  */
 const OUTCOME_TEXT: Record<string, string> = {
   'decided:once': 'Allowed once',
-  'decided:always': 'Allowed for the rest of this session',
+  'decided:always': 'Allowed and remembered — for this session, and past a restart where the call carries a scope',
   'decided:deny': 'Denied',
   'timeout:deny': 'Expired without an answer — denied',
   // Covers both endings that reach here: the turn was aborted, and the

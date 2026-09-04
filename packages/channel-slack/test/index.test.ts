@@ -1076,7 +1076,7 @@ test('a parked call is asked in the thread it came from, with three buttons', as
   // decision with nowhere to land.
   const update = web.updates.at(-1);
   assert.equal(buttonIds(update?.blocks).length, 0);
-  assert.match(update?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+  assert.match(update?.text ?? '', /Allowed and remembered — .*? by <@U-DYLAN>/);
 
   await adapter.stop();
 });
@@ -1535,14 +1535,14 @@ test('a click on a message that already carries its outcome does not overwrite i
   await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
 
   const settled = web.updates.at(-1);
-  assert.match(settled?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+  assert.match(settled?.text ?? '', /Allowed and remembered — .*? by <@U-DYLAN>/);
   const updatesAfterDecision = web.updates.length;
 
   // The same button, clicked again — the message now carries the outcome.
   await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN', { settled: true }));
 
   assert.equal(web.updates.length, updatesAfterDecision, 'the settled message is left exactly as it was');
-  assert.match(web.updates.at(-1)?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+  assert.match(web.updates.at(-1)?.text ?? '', /Allowed and remembered — .*? by <@U-DYLAN>/);
   assert.match(web.ephemerals.at(-1)?.text ?? '', /no longer pending/);
 
   await adapter.stop();
@@ -2526,7 +2526,7 @@ test('an update Slack applied but never confirmed does not lose its outcome', as
 
   await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
   const outcome = web.updates.at(-1);
-  assert.match(outcome?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+  assert.match(outcome?.text ?? '', /Allowed and remembered — .*? by <@U-DYLAN>/);
   const updatesAfterOutcome = web.updates.length;
 
   // A later click on that message, which now carries the decision.
@@ -2534,7 +2534,7 @@ test('an update Slack applied but never confirmed does not lose its outcome', as
   await adapter.stop();
 
   assert.equal(web.updates.length, updatesAfterOutcome, 'the decision is left exactly as Slack stored it');
-  assert.match(web.updates.at(-1)?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+  assert.match(web.updates.at(-1)?.text ?? '', /Allowed and remembered — .*? by <@U-DYLAN>/);
 });
 
 // ---- addressable outbound (step 10) -----------------------------------------

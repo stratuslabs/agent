@@ -352,3 +352,67 @@ test('two grants for one agent settling together both survive', async () => {
   assert.equal((await reread.scopesFor('ava')).length, 1);
   assert.equal((await reread.originsFor('ava')).length, 2);
 });
+
+test('a page that moves while the approval is outstanding runs nothing and grants nothing', async () => {
+  const remembered: OriginScope[] = [];
+  const granted: OriginScope[] = [];
+  const decisions: PermissionDecision[] = [];
+  let page: string | undefined = 'https://app.example.com/reports';
+  const asked: string[] = [];
+
+  const policy = createPermissionPolicy({
+    mode: 'interactive',
+    // A human takes minutes; the remote wait is fifteen by default and
+    // unbounded when the timeout is zero. The page is live for all of it,
+    // so a redirect inside the wait is what this stands in for.
+    ask: async (question) => {
+      asked.push(question);
+      page = 'https://checkout.example.com/confirm';
+      return 'always';
+    },
+    onDecision: (decision) => decisions.push(decision),
+    origins: {
+      whitelist: {
+        originsFor: async () => [...granted],
+        rememberOrigin: async (_agentId, scope) => {
+          granted.push(scope);
+        },
+      },
+      onScopeRemembered: (event) => remembered.push(event.scope),
+    },
+  });
+
+  // The prompt named the site the approver was answering about.
+  assert.equal(await policy.approve(actOn(() => page)), false);
+  assert.match(asked[0] ?? '', /browser\.act on https:\/\/app\.example\.com/);
+
+  // The yes was for that page. It is not that page any more, so the click
+  // does not land on the site nobody was shown — and the "always" widens
+  // nothing, rather than persisting the approved site while acting on
+  // another one.
+  assert.match(decisions[0]?.reason ?? '', /approved on https:\/\/app\.example\.com/);
+  assert.match(decisions[0]?.reason ?? '', /on https:\/\/checkout\.example\.com now/);
+  assert.match(decisions[0]?.reason ?? '', /nothing was granted/);
+  assert.deepEqual(remembered, []);
+  assert.deepEqual(granted, []);
+});
+
+test('a page closed while the approval is outstanding says so rather than clicking a fresh one', async () => {
+  const decisions: PermissionDecision[] = [];
+  let page: string | undefined = 'https://app.example.com/reports';
+  const policy = createPermissionPolicy({
+    mode: 'interactive',
+    // The idle sweep closes a quiet context after five minutes by default,
+    // which is inside a fifteen-minute approval window: executing anyway
+    // would click a fresh `about:blank`, and the selector timeout that
+    // follows explains nothing.
+    ask: async () => {
+      page = undefined;
+      return 'y';
+    },
+    onDecision: (decision) => decisions.push(decision),
+  });
+
+  assert.equal(await policy.approve(actOn(() => page)), false);
+  assert.match(decisions[0]?.reason ?? '', /that page is no longer open/);
+});

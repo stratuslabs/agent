@@ -694,6 +694,39 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         );
       }
 
+      // The origin above was read before the wait, and the wait is a human's
+      // — fifteen minutes by default, unbounded when the timeout is zero.
+      // A page that navigates inside it (a redirect, a meta refresh, a
+      // script) would have a yes given for site A execute a click on site
+      // B, and an "always" persist A while the click landed on B. The
+      // approver answered a question about a page; if it is not that page
+      // any more, there is no answer to act on.
+      //
+      // So it is read again, and a conversation that moved refuses:
+      // nothing runs and nothing is granted, because the grant would be for
+      // a call that is no longer the call. Re-asking is not the fix — that
+      // is a second question with the same race behind it. This is also why
+      // the window the docs admit to is decision-to-click and not
+      // approval-wait-plus-click.
+      if (scopedByOrigin) {
+        const settled = originScopeFor(context.tool.originFor?.(session) ?? '')?.origin;
+        if (settled !== origin) {
+          const approvedOn = origin ?? 'a page with no origin';
+          return report(
+            context,
+            false,
+            settled === undefined
+              ? `${call.toolName} was approved on ${approvedOn}, and that page is no longer open`
+                + ' — it did not run, and nothing was granted'
+              : `${call.toolName} was approved on ${approvedOn}, but the conversation is on ${settled} now`
+                + ' — it did not run, and nothing was granted',
+            undefined,
+            undefined,
+            origin,
+          );
+        }
+      }
+
       if (answer === 'always') {
         if (scopedByOrigin) {
           if (!originScope) {

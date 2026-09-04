@@ -83,9 +83,11 @@ grant on any answer, so one yes to a page is never a yes to every page.
 It makes the blast radius *nameable*, which is what one risk word gave up
 on. Two things it does not cover:
 
-- The origin is read when the call is judged. A page that navigates
-  *itself* between the decision and the click — a timed redirect — is not
-  re-checked, and nothing inside the tool can close that window.
+- The origin is read when the call is judged and again after a human
+  answers, so an approval outstanding for fifteen minutes cannot have a
+  yes given for one site land on another — a conversation that moved
+  refuses, and grants nothing. What is left is the moment between that
+  last check and the click, which nothing inside the tool can close.
 - It is checked in this process, where the pool holds the page. A browser
   driven somewhere else would need the check to happen where a compromised
   runtime cannot skip it — the concern the egress proxy already carries for
