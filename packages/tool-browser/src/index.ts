@@ -121,17 +121,25 @@ interface BrowserRuntime {
    * grants. A call that arrives with nothing recorded (a host whose runner
    * never asks) is executed as before rather than refused.
    *
+   * `null` is a *judgement*, and distinct from an absent key. A
+   * conversation judged while it had no origin at all — never navigated,
+   * or its context swept — records `null`, so a page that acquires one
+   * before the action runs is caught like any other move. An absent key
+   * means nobody asked, which is a host whose runner does not call this
+   * hook, and those execute as before rather than being refused. Letting
+   * absence stand for both, as this first did, silently skipped the check
+   * for exactly the originless case.
+   *
    * A getter with a side effect is not the house style, and it is
    * deliberate here: the alternative is `execute` reading the origin
    * itself, which would compare a value taken *after* the kernel's check
-   * rather than the one the kernel used. What that costs is bounded
-   * carefully — an entry is written only for a conversation actually on an
-   * origin, dropped when its page is evicted, and consumed by the
-   * `execute` it was written for. So the map holds at most one entry per
-   * live context (`maxContexts`, four by default), and a call that is
-   * denied leaves nothing behind that the next one does not replace.
+   * rather than the one the kernel used. What it keeps is bounded — an
+   * entry is consumed by the `execute` it was written for, dropped when
+   * its page is evicted, and the map is capped so that calls which are
+   * judged and then denied cannot accumulate one per session for the life
+   * of a daemon.
    */
-  reportedOrigins: Map<string, string>;
+  reportedOrigins: Map<string, string | null>;
   pageFor(session: Session): Promise<PageLike>;
 }
 
@@ -199,6 +207,34 @@ const within = (work: Promise<void>, ms: number): Promise<void> =>
       resolve();
     });
   });
+
+/**
+ * How many judgements are kept at once. Generous next to `maxContexts`,
+ * because a call that is judged and then *denied* never reaches the
+ * `execute` that would consume its entry, and only the next call for that
+ * conversation replaces it. Insertion-ordered, so the oldest goes first;
+ * an entry that far back describes a call long since finished, and losing
+ * it costs a check nothing was waiting on.
+ */
+const REPORTED_ORIGIN_LIMIT = 64;
+
+/** Record a judgement, oldest evicted once the cap is reached. */
+const rememberReportedOrigin = (
+  reported: Map<string, string | null>,
+  sessionId: string,
+  origin: string | null,
+): void => {
+  // Deleted first so a repeat becomes the newest again rather than keeping
+  // the position it was first inserted at.
+  reported.delete(sessionId);
+  reported.set(sessionId, origin);
+  if (reported.size > REPORTED_ORIGIN_LIMIT) {
+    const oldest = reported.keys().next().value;
+    if (oldest !== undefined) {
+      reported.delete(oldest);
+    }
+  }
+};
 
 const truncate = (value: string, maxBytes: number): { text: string; truncated: boolean } =>
   Buffer.byteLength(value, 'utf8') <= maxBytes
@@ -373,16 +409,11 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       // on — the one thing `execute` needs, and the one thing it cannot
       // work out for itself.
       //
-      // Nothing is stored for a conversation with no origin, and an older
-      // entry is dropped: there would be no page to compare against, the
-      // kernel already refuses a call whose page went away between its two
-      // reads, and an entry per session that never had one is how this map
-      // would grow without bound in a long-lived daemon.
-      if (origin === undefined) {
-        runtime.reportedOrigins.delete(session.id);
-      } else {
-        runtime.reportedOrigins.set(session.id, origin);
-      }
+      // Recorded even when there is no origin, as `null`: "judged on no
+      // page" is a fact about this call, and a page that acquires an
+      // origin before the action runs has moved just as surely as one that
+      // changed from a site to another.
+      rememberReportedOrigin(runtime.reportedOrigins, session.id, origin ?? null);
       return origin;
     },
     async execute(input, session) {
@@ -396,11 +427,12 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       // before Playwright takes over.
       const page = await runtime.pageFor(session);
       if (judgedOn !== undefined) {
-        const now = originOf(page.url());
+        const now = originOf(page.url()) ?? null;
         if (now !== judgedOn) {
           throw new Error(
-            `This conversation was on ${judgedOn} when the call was approved and is on ${now ?? 'no page'} now, `
-            + 'so nothing was clicked. Check where the page is and call again.',
+            `This conversation was on ${judgedOn ?? 'a page with no origin'} when the call was approved and is on `
+            + `${now ?? 'a page with no origin'} now, so nothing was clicked. `
+            + 'Check where the page is and call again.',
           );
         }
       }
@@ -451,7 +483,7 @@ export const createBrowserPlugin = (
   options: BrowserPluginOptions = {},
 ): Plugin & { dispose(): Promise<void>; sweepIdle(now: number): Promise<string[]> } => {
   const blocked = new Map<string, string[]>();
-  const reportedOrigins = new Map<string, string>();
+  const reportedOrigins = new Map<string, string | null>();
   const resolved = config;
   const pool = new BrowserSessionPool({
     driver: options.driver ?? createPlaywrightDriver(

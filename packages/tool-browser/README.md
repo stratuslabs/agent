@@ -86,7 +86,8 @@ on. Two things it does not cover:
 - The origin is read when the call is judged, again as the last thing
   before the call is allowed, once more by the kernel immediately before
   the tool is dispatched, and a fourth time inside `browser.act` after its
-  page is opened — so none of the waits in between can have a yes given for
+  page is opened — including when the judgement was *no page at all*, so a
+  page that appears in that window is refused rather than clicked — so none of the waits in between can have a yes given for
   one site land on another: a human's fifteen minutes, the write that
   persists a grant, the session-store checkpoint, a `tool.called`
   subscriber, or the browser launch that opening a page can trigger. A

@@ -762,11 +762,41 @@ test('the recorded origin is bounded: nothing kept for a page with none, and dro
   await tool('browser.goto').execute({ url: 'https://example.com/' }, session);
   assert.equal(act.originFor?.(session), 'https://example.com');
 
-  // The sweep takes the context, and the origin describing it goes too —
-  // so the next call is judged and executed on the fresh page rather than
-  // refused against a context that no longer exists.
+  // The sweep takes the context, so the next judgement is "no page" — and
+  // the action executes against a fresh page that is also no page, which
+  // agrees.
   await plugin.sweepIdle(Date.now() + 10 * 60_000);
   assert.equal(act.originFor?.(session), undefined);
   const result = await act.execute({ action: 'click', selector: '#submit' }, session) as JsonObject;
+  assert.equal(result.action, 'click');
+});
+
+test('a call judged on no page at all is still refused if one appears before it acts', async (t) => {
+  // "Judged with no origin" and "never judged" are different facts, and
+  // letting an absent entry stand for both skipped the check for exactly
+  // the originless case: a page acquiring an origin between the judgement
+  // and the action would be clicked on having been shown to nobody.
+  const recorder = emptyRecorder();
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'] }, recorder);
+  t.after(() => plugin.dispose());
+  const act = tool('browser.act');
+  const session = sessionFor('appearing');
+
+  // What the kernel asks before dispatch, on a conversation that has never
+  // navigated: no origin.
+  assert.equal(act.originFor?.(session), undefined);
+  // ...and a page arrives before the action opens it.
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, session);
+
+  await assert.rejects(
+    () => act.execute({ action: 'click', selector: '#submit' }, session),
+    /was on a page with no origin when the call was approved and is on https:\/\/example\.com now/,
+  );
+
+  // And a call nobody judged at all still runs: an absent entry means the
+  // host's runner never asked, which is not the same as a judgement.
+  const unjudged = sessionFor('unjudged');
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, unjudged);
+  const result = await act.execute({ action: 'click', selector: '#submit' }, unjudged) as JsonObject;
   assert.equal(result.action, 'click');
 });
