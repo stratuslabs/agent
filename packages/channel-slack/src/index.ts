@@ -1341,7 +1341,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     approvalPosts.delete(event.requestId);
 
-    const outcome = OUTCOME_TEXT[`${event.reason}:${event.answer}`] ?? 'Resolved';
+    // `dangerous` is the one lifetime this adapter *can* tell, because the
+    // risk rode in on the request: that tier means a human every time, so
+    // an "always" answered on one runs the call and remembers nothing. The
+    // general line below has to hedge between two lifetimes it cannot
+    // distinguish; this one must not, or the record of the decision claims
+    // a standing grant that does not exist.
+    const outcome = post.risk === 'dangerous' && event.reason === 'decided' && event.answer === 'always'
+      ? 'Allowed once — a dangerous tool is never remembered'
+      : OUTCOME_TEXT[`${event.reason}:${event.answer}`] ?? 'Resolved';
     const by = event.actor ? ` by <@${event.actor}>` : '';
     const text = `*${escapeSlackText(post.agentName)}* — \`${escapeSlackText(post.toolName)}\` (${post.risk}): ${outcome}${by}.`;
     try {

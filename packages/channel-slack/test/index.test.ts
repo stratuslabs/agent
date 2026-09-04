@@ -1272,6 +1272,31 @@ test('the approval prompt shows what is actually being approved', async () => {
   await adapter.stop();
 });
 
+test('an always answered on a dangerous call is recorded as the one-shot it is', async () => {
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({
+    call: { id: 'c1', toolName: 'mcp.vendor.wipe', input: {} },
+    risk: 'dangerous',
+  }));
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
+
+  // The tier means a human every time, so the engine runs the call and
+  // remembers nothing. The general line hedges between two lifetimes this
+  // adapter cannot tell apart; this one it can, from the risk on the
+  // request, and a record claiming a grant that does not exist is the kind
+  // of audit line somebody acts on.
+  const settled = web.updates.at(-1)?.text ?? '';
+  assert.match(settled, /Allowed once — a dangerous tool is never remembered/);
+  assert.doesNotMatch(settled, /remembered — for this session/);
+
+  await adapter.stop();
+});
+
 test('the approval prompt names the site a browser action would act on', async () => {
   const { web, gateway, adapter } = approvalAdapter([
     { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
