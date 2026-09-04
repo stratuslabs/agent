@@ -6,7 +6,7 @@ Slack adapter for Stratus agents. **One Slack app per agent** — Slack has no w
 - **Streaming replies**: post a placeholder, edit as deltas arrive (throttled for `chat.update` limits), show `⚙ tool…` status lines, finalize with the full reply — split across messages when it outgrows one.
 - **Markdown is translated to Slack's mrkdwn** on the way out — `**bold**` to `*bold*`, `*italic*` to `_italic_`, `~~struck~~` to `~struck~`, `[text](https://…)` to `<https://…|text>`, and a `#` heading to a bold line, since mrkdwn has no headings. Code spans and fences are left exactly as written, an unclosed fence included, so a `**` inside a snippet stays part of the snippet — a run of N backticks opens code and only a run of exactly N closes it, which is what lets ``a span with a ` in it`` and a ````-fence holding a ```-fence work. One or two unmatched backticks are literal text, as they are in Markdown. Anything whose spelling already matches — lists, block quotes, inline code — is untouched. A marker still being streamed stays literal until its closing half arrives.
 - **Mention-only in channels, free-form in DMs.** Inbound mentions of other users are humanized to `@Display Name` for the model; redeliveries are deduped so a slow turn never runs twice.
-- **Approval buttons** for the gateway's `remote` permission mode: a gated tool call parks the turn and asks in its thread with **Allow once** / **Always allow** / **Deny**. See [Approving tool calls](#approving-tool-calls) — clicks are authorized by *who clicked*, never by who can see the message.
+- **Approval buttons** for the gateway's `remote` permission mode: a gated tool call parks the turn and asks in its thread with **Allow once** / **Always allow** / **Deny**. See [Approving tool calls](#approving-tool-calls) — clicks are authorized by *who clicked*, never by who can see the message, and **Always allow** is offered only where the daemon would actually remember it.
 - **Tokens are gateway infrastructure secrets**, stored in the `channels` namespace of `~/.stratus/credentials.json` — never in an agent's credential allowlist:
 
 ```json
@@ -54,6 +54,25 @@ When `stratus serve` runs with `approvals.mode: "remote"`, a gated tool call
 parks the turn and the adapter asks here. The question goes to the thread the
 turn is happening in; a turn with no Slack conversation of its own (scheduled
 work, a delegate) asks in the configured `slackChannel`.
+
+The request names the **site** for a call judged by one (`browser.act`),
+because its arguments are a CSS selector and say nothing about where a click
+lands — and that site is what **Always allow** widens.
+
+**Always allow** is left off entirely where the daemon would remember
+nothing: a `dangerous` tool, which asks every time whatever is answered; a
+browser action whose conversation has no page to grant; and a shell command
+the parser cannot reduce to a scope. The prompt says so instead, because a
+button that does exactly what **Allow once** does, under a label promising a
+standing grant, is worse than no button.
+
+The resolved message describes what the daemon did rather than which button
+was pressed — `POST /approvals` accepts `always` whatever this channel
+rendered, so the answer can arrive from somewhere else. It states the floor
+rather than the ceiling: a remembered answer lasts *at least* the session,
+and whether a scoped one also survives a restart depends on the daemon
+writing the whitelist, which is not known when the message is sent.
+`stratus logs` has the exact line.
 
 Who may answer is configured per agent, in `~/.stratus/config.json`:
 

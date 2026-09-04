@@ -58,21 +58,27 @@ rather than through it.
   shell can run." A durable tool grant for `shell.run` would be exactly the
   standing yes that comment exists to prevent. Shell keeps command scopes;
   everything else gets tool grants; nothing gets both.
-- **Never for `dangerous` — and this is a deliberate tightening, not a
-  preserved invariant.** Today the tool-wide "always" has no risk guard, so a
-  `dangerous` tool can already receive a session-scoped grant; "always a human,
-  in every mode" is really *always a human the first time, and not necessarily
-  again within that session*. Making that grant durable would stretch a
-  once-per-session concession into a permanent one, which is a different
-  decision than the one anybody made. If a standing grant for `dangerous` is
-  wanted later it should be argued for on its own, not inherited from this
-  step.
+- **Never for `dangerous`.** This was written as a tightening still to come:
+  the tool-wide "always" had no risk guard, so a `dangerous` tool could
+  receive a session-scoped grant, and "always a human, in every mode" was
+  really *always a human the first time, and not necessarily again within
+  that session*. **That tightening has since landed** — an "always" answered
+  on a `dangerous` tool now runs the call once and remembers nothing — so the
+  session-scoped concession this bullet worked around no longer exists, and
+  a durable grant for `dangerous` would be a widening from a standing start.
+  If one is wanted it should be argued for on its own, not inherited from
+  this step.
 
   The narrower question — whether `browser.act` should be `dangerous` at all —
-  is a real one and is not settled here. `dangerous` currently stands in for
-  *no scope model exists for this*, rather than *this is categorically worse
-  than a shell*, and a scope model would move it to `gated`. That belongs with
-  the tool, not with this step.
+  was a real one and has since been answered where it belonged, with the tool:
+  `dangerous` was standing in for *no scope model exists for this* rather than
+  for *categorically worse than a shell*, and per-origin scopes gave it one, so
+  it is `gated` and judged per site ([browser actions](../guides/browser.md)).
+  Nothing first-party declares `dangerous` now — the tier is what an operator's
+  `toolRisks` or a plugin's manifest uses to say "never unattended" about
+  somebody else's code — so the exclusion above is written for those, and the
+  same structural rule already holds for `originFor` as for `commandFor`: a
+  tool that offers either never receives a tool-wide grant.
 - **Not a config key.** A grant is something an operator answered in front of a
   specific request, with the risk in front of them. A list in a config file is
   a different object with different provenance, and if that is wanted it is

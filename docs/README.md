@@ -16,6 +16,7 @@ tree is where the depth lives.
 | Give agents files, a shell, the web, a browser | [Tools](./guides/tools.md) |
 | Let an agent search the web, or write a search backend | [Tools](./guides/tools.md#searching-the-web) · [`search`](../packages/search/README.md) |
 | Control which shell commands run unattended | [Shell commands](./guides/shell.md) |
+| Control which sites an agent may click on unattended | [Browser actions](./guides/browser.md) |
 | Teach an agent a procedure | [Skills](./guides/skills.md) |
 | Write a skill that works on every agent, or check one against the spec | [Skill format](./reference/skill-format.md) |
 | Decide what runs unattended and approve the rest from Slack | [Approvals](./guides/approvals.md) |

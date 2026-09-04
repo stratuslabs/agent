@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { JsonObject, JsonValue, Plugin, Session, Tool } from '@stratusagent/core';
+import { originOf, type JsonObject, type JsonValue, type Plugin, type Session, type Tool } from '@stratusagent/core';
 import { assertRequestAllowed, egressPolicyFrom, type EgressPolicy } from '@stratusagent/egress';
 import { resolvePluginAgentConfig, type OptionalModuleHost } from '@stratusagent/plugins';
 
@@ -111,6 +111,35 @@ interface BrowserRuntime {
    * isolation exists to prevent.
    */
   blocked: Map<string, string[]>;
+  /**
+   * The origin each conversation was last *reported* to be on, written by
+   * `browser.act`'s `originFor` and consumed by its `execute`.
+   *
+   * The kernel reads `originFor` immediately before it dispatches, so this
+   * holds the origin the call was judged on — which is what lets `execute`
+   * check the page it opens without the tool knowing anything about
+   * grants. A call that arrives with nothing recorded (a host whose runner
+   * never asks) is executed as before rather than refused.
+   *
+   * `null` is a *judgement*, and distinct from an absent key. A
+   * conversation judged while it had no origin at all — never navigated,
+   * or its context swept — records `null`, so a page that acquires one
+   * before the action runs is caught like any other move. An absent key
+   * means nobody asked, which is a host whose runner does not call this
+   * hook, and those execute as before rather than being refused. Letting
+   * absence stand for both, as this first did, silently skipped the check
+   * for exactly the originless case.
+   *
+   * A getter with a side effect is not the house style, and it is
+   * deliberate here: the alternative is `execute` reading the origin
+   * itself, which would compare a value taken *after* the kernel's check
+   * rather than the one the kernel used. What it keeps is bounded — an
+   * entry is consumed by the `execute` it was written for, dropped when
+   * its page is evicted, and the map is capped so that calls which are
+   * judged and then denied cannot accumulate one per session for the life
+   * of a daemon.
+   */
+  reportedOrigins: Map<string, string | null>;
   pageFor(session: Session): Promise<PageLike>;
 }
 
@@ -178,6 +207,34 @@ const within = (work: Promise<void>, ms: number): Promise<void> =>
       resolve();
     });
   });
+
+/**
+ * How many judgements are kept at once. Generous next to `maxContexts`,
+ * because a call that is judged and then *denied* never reaches the
+ * `execute` that would consume its entry, and only the next call for that
+ * conversation replaces it. Insertion-ordered, so the oldest goes first;
+ * an entry that far back describes a call long since finished, and losing
+ * it costs a check nothing was waiting on.
+ */
+const REPORTED_ORIGIN_LIMIT = 64;
+
+/** Record a judgement, oldest evicted once the cap is reached. */
+const rememberReportedOrigin = (
+  reported: Map<string, string | null>,
+  sessionId: string,
+  origin: string | null,
+): void => {
+  // Deleted first so a repeat becomes the newest again rather than keeping
+  // the position it was first inserted at.
+  reported.delete(sessionId);
+  reported.set(sessionId, origin);
+  if (reported.size > REPORTED_ORIGIN_LIMIT) {
+    const oldest = reported.keys().next().value;
+    if (oldest !== undefined) {
+      reported.delete(oldest);
+    }
+  }
+};
 
 const truncate = (value: string, maxBytes: number): { text: string; truncated: boolean } =>
   Buffer.byteLength(value, 'utf8') <= maxBytes
@@ -313,10 +370,14 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
   const act: Tool = {
     name: 'browser.act',
     description: 'Click or type on the current page.',
-    // Dangerous, and the only one here that is: navigating and reading can
-    // be undone by navigating somewhere else, while a click submits, buys,
-    // and deletes. No selector makes that reversible.
-    risk: 'dangerous',
+    // `gated`, and judged per site — see `originFor` below. It was
+    // `dangerous` (a human every time, in every mode, so an installed
+    // service could never click anything at all), and that was standing in
+    // for "no scope model exists for this" rather than for "worse than a
+    // shell": a shell command can be far more destructive than a click and
+    // runs unattended inside command scopes, because a command string
+    // describes its own effect and a CSS selector does not.
+    risk: 'gated',
     parameters: {
       type: 'object',
       properties: {
@@ -326,9 +387,55 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       },
       required: ['action', 'selector'],
     },
+    /**
+     * Where this click would land: the origin of the page this conversation
+     * is already on, which is what the permission engine scopes the call by.
+     *
+     * From the page and never from the call, and that is the security
+     * property rather than a convenience. The input names a selector, and
+     * `#submit` is equally "load more results" and "confirm purchase" — a
+     * scope written over selectors would mean nothing. An origin *parameter*
+     * would be no better: it would be the model's claim about where it is,
+     * which is precisely the thing a grant must not take on trust.
+     *
+     * It opens no page. A conversation that has not navigated yet, or whose
+     * context the idle sweep has closed, has no origin — so no scope covers
+     * the call and it asks, which is the right way to fail.
+     */
+    originFor(session) {
+      const origin = runtime.pool.originFor(session.id);
+      // Kept for `execute` below. The kernel asks this immediately before
+      // it dispatches, so what is stored is the origin the call was judged
+      // on — the one thing `execute` needs, and the one thing it cannot
+      // work out for itself.
+      //
+      // Recorded even when there is no origin, as `null`: "judged on no
+      // page" is a fact about this call, and a page that acquires an
+      // origin before the action runs has moved just as surely as one that
+      // changed from a site to another.
+      rememberReportedOrigin(runtime.reportedOrigins, session.id, origin ?? null);
+      return origin;
+    },
     async execute(input, session) {
       const settings = settingsFor(config, session);
+      const judgedOn = runtime.reportedOrigins.get(session.id);
+      runtime.reportedOrigins.delete(session.id);
+      // Opening the page is not free: this may launch Chromium and build a
+      // context, which is seconds, and it happens *after* the kernel's
+      // check. So the page is checked once more here, against where the
+      // call was judged — the last point anything in this process can look
+      // before Playwright takes over.
       const page = await runtime.pageFor(session);
+      if (judgedOn !== undefined) {
+        const now = originOf(page.url()) ?? null;
+        if (now !== judgedOn) {
+          throw new Error(
+            `This conversation was on ${judgedOn ?? 'a page with no origin'} when the call was approved and is on `
+            + `${now ?? 'a page with no origin'} now, so nothing was clicked. `
+            + 'Check where the page is and call again.',
+          );
+        }
+      }
       const selector = String(input.selector ?? '');
       if (!selector) {
         throw new Error('selector is required.');
@@ -376,6 +483,7 @@ export const createBrowserPlugin = (
   options: BrowserPluginOptions = {},
 ): Plugin & { dispose(): Promise<void>; sweepIdle(now: number): Promise<string[]> } => {
   const blocked = new Map<string, string[]>();
+  const reportedOrigins = new Map<string, string | null>();
   const resolved = config;
   const pool = new BrowserSessionPool({
     driver: options.driver ?? createPlaywrightDriver(
@@ -390,14 +498,18 @@ export const createBrowserPlugin = (
     ...(typeof resolved.idleMs === 'number' ? { idleMs: resolved.idleMs } : {}),
     ...(typeof resolved.maxContexts === 'number' ? { maxContexts: resolved.maxContexts } : {}),
     onEvicted: ({ sessionId }) => {
-      // The page that recorded them is gone, so its refusals go with it.
+      // The page that recorded them is gone, so its refusals go with it —
+      // and so does the origin it was last reported to be on, which
+      // describes a context that no longer exists.
       blocked.delete(sessionId);
+      reportedOrigins.delete(sessionId);
     },
   });
 
   const runtime: BrowserRuntime = {
     pool,
     blocked,
+    reportedOrigins,
     ask(session, page, what, work, timeoutMs) {
       return answeredWithin(
         work(),

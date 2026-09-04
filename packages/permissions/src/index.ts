@@ -25,7 +25,17 @@ import {
   SAFE_COMMAND_SCOPES,
   type CommandScope,
 } from './commands.ts';
-import { WhitelistUnreadableError, type CommandWhitelistStore } from './whitelist.ts';
+import {
+  describeOriginScope,
+  findMatchingOriginScope,
+  originScopeFor,
+  type OriginScope,
+} from './origins.ts';
+import {
+  WhitelistUnreadableError,
+  type CommandWhitelistStore,
+  type OriginWhitelistStore,
+} from './whitelist.ts';
 
 export {
   analyzeCommand,
@@ -40,10 +50,20 @@ export {
   type CommandScope,
 } from './commands.ts';
 export {
+  describeOriginScope,
+  findMatchingOriginScope,
+  matchesOriginScope,
+  originScopeFor,
+  parseOriginScope,
+  sameOriginScope,
+  type OriginScope,
+} from './origins.ts';
+export {
   createFileCommandWhitelist,
   whitelistPathFor,
   WhitelistUnreadableError,
   type CommandWhitelistStore,
+  type OriginWhitelistStore,
 } from './whitelist.ts';
 
 /**
@@ -76,6 +96,27 @@ export interface ApprovalRequest {
   call: ToolCall;
   tool: Tool;
   risk: ToolRisk;
+  /**
+   * The origin this call would act on, for a tool judged by one
+   * (`Tool.originFor`). A transport MUST show it: the call's own arguments
+   * do not say where a click lands, so offering **Always allow** beside
+   * `browser.act` and a CSS selector would be asking somebody to widen a
+   * site they were never shown.
+   */
+  origin?: string;
+  /**
+   * True when answering `always` runs this call once and remembers
+   * nothing — a `dangerous` tool, which asks every time whatever is
+   * clicked, or a call judged by origin whose conversation has no page to
+   * grant. A transport MUST NOT offer an unconditional "always" for one of
+   * these: a button promising a standing grant that the engine will not
+   * create is the same defect as a record understating one it did.
+   *
+   * Absent is the ordinary case, where `always` remembers *something* —
+   * which of the two lifetimes is still not knowable here, and is why the
+   * wording for that case has to cover both.
+   */
+  oneShot?: boolean;
   /**
    * When this call first parked, if it is being re-asked after a restart.
    * A transport that imposes a deadline measures from here rather than
@@ -134,6 +175,15 @@ export interface PermissionDecision {
    * base-plus-subcommand, not agent-composed text.
    */
   destination?: string;
+  /**
+   * The origin this decision was about, for a tool judged by one
+   * (`Tool.originFor`). In `reason` too, on the same test `destination`
+   * passes: an origin is scheme, host, and port with no path, query, or
+   * fragment, so it is a classification of where a call landed rather than
+   * agent-composed text — which is the whole reason the scope is drawn at
+   * the origin and not at a URL.
+   */
+  origin?: string;
 }
 
 export interface PermissionPolicyOptions {
@@ -165,6 +215,14 @@ export interface PermissionPolicyOptions {
    * without it loses nothing but the schedule feature.
    */
   destinations?: DestinationScopeOptions;
+  /**
+   * The origin-scope engine, for tools that name one (`Tool.originFor`).
+   * Omitted, a browser action still cannot receive a tool-wide grant — that
+   * exclusion is structural and lives on the hook, not here — so a policy
+   * built without this asks every time, which is the honest behaviour for a
+   * host with nowhere to keep a grant.
+   */
+  origins?: OriginScopeOptions;
 }
 
 export interface DestinationScopeOptions {
@@ -198,6 +256,21 @@ export interface CommandScopeOptions {
    * decision that must not be the one leaving no trace.
    */
   onScopeRemembered?: (event: { agentId: string; scope: CommandScope }) => void;
+}
+
+export interface OriginScopeOptions {
+  /**
+   * Where "always allow" persists an origin, and where one is read back.
+   * Omitted, an origin grant lasts for this process only — which is what
+   * `headless` cannot use, since it never asks anyone in the first place.
+   *
+   * There is no `safeOrigins` beside this on purpose: `CommandScopeOptions`
+   * can default to a built-in safe list because `git status` is read-only
+   * wherever it runs, and no origin has that property. See `origins.ts`.
+   */
+  whitelist?: OriginWhitelistStore;
+  /** Called when an origin is persisted, for the same reason as above. */
+  onScopeRemembered?: (event: { agentId: string; scope: OriginScope }) => void;
 }
 
 const YES = new Set(['y', 'yes', 'always', 'a']);
@@ -325,6 +398,13 @@ const awaitPrompt = async (
   context: ApprovalContext,
   ask: NonNullable<PermissionPolicyOptions['ask']>,
   command: string | undefined,
+  origin: string | undefined,
+  /**
+   * What answering "always" will actually do, decided by the caller — which
+   * is the only place that knows. Offering a lifetime the engine will not
+   * create is the same defect as hiding one it will.
+   */
+  alwaysMeans: string,
 ): Promise<ApprovalAnswer | typeof ABORTED> => {
   const { call, risk, session } = context;
   // The command, when there is one: for a shell call the tool name is the
@@ -337,14 +417,17 @@ const awaitPrompt = async (
   // there is no command scope to show, fall back to a compact rendering of
   // the call's input, exactly as the remote (Slack) prompt already does.
   const argumentSummary = command === undefined ? summarizeInput(call.input) : undefined;
+  // The origin goes in front of the arguments rather than into them: a
+  // selector says nothing about where a click lands, and this is the half
+  // of the question "always" widens.
+  const acting = origin === undefined ? call.toolName : `${call.toolName} on ${origin}`;
   const what = command !== undefined
     ? `${call.toolName}: ${command}`
     : argumentSummary !== undefined
-      ? `${call.toolName} (${risk}): ${argumentSummary}`
-      : `${call.toolName} (${risk})`;
-  const always = command === undefined ? 'always this session' : 'always this scope';
+      ? `${acting} (${risk}): ${argumentSummary}`
+      : `${acting} (${risk})`;
   const pending = ask(
-    `Allow ${what} for ${session.agent.name}? [y]es / [a]lways (${always}) / [N]o: `,
+    `Allow ${what} for ${session.agent.name}? [y]es / [a]lways (${alwaysMeans}) / [N]o: `,
   );
   // The answer is never read after this point if the turn ends first,
   // so a late yes cannot execute a tool for work that no longer exists.
@@ -376,12 +459,16 @@ const awaitPrompt = async (
 const awaitRemote = async (
   context: ApprovalContext,
   request: ApprovalRequester,
+  origin: string | undefined,
+  oneShot: boolean,
 ): Promise<ApprovalAnswer | typeof ABORTED> => {
   const pending = request({
     session: context.session,
     call: context.call,
     tool: context.tool,
     risk: context.risk,
+    ...(origin !== undefined ? { origin } : {}),
+    ...(oneShot ? { oneShot } : {}),
     ...(context.parkedAt ? { parkedAt: context.parkedAt } : {}),
     ...(context.signal ? { signal: context.signal } : {}),
   }).then(
@@ -403,9 +490,14 @@ const awaitRemote = async (
  * after which there is nothing left but asking. A `dangerous` tool skips
  * the scope engine entirely: its risk is a statement about the tool, and no
  * argument shape makes `rm -rf` a read.
+ *
+ * A tool that names an *origin* (`Tool.originFor`) resolves through the
+ * same two grant tiers over a different vocabulary — the site the page is
+ * on, rather than the command the call would run. It has no third tier,
+ * because there is no origin that is safe to click on out of the box.
  */
 export const createPermissionPolicy = (options: PermissionPolicyOptions): ApprovalPolicy => {
-  const { mode, ask, request, onDecision, commands, destinations } = options;
+  const { mode, ask, request, onDecision, commands, destinations, origins } = options;
   if (mode === 'interactive' && !ask) {
     throw new Error('interactive permission mode needs an `ask` function to reach a human.');
   }
@@ -422,6 +514,8 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
   // with no whitelist store still has to remember an answer for the rest of
   // the session, which is what `always` means at a terminal.
   const sessionScopes = new Map<string, CommandScope[]>();
+  /** The same tier for origins, and for the same reason. */
+  const sessionOrigins = new Map<string, OriginScope[]>();
 
   const report = (
     context: ApprovalContext,
@@ -429,6 +523,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
     reason: string,
     command?: string,
     destination?: string,
+    origin?: string,
   ): boolean => {
     onDecision?.({
       allowed,
@@ -440,6 +535,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       reason,
       ...(command === undefined ? {} : { command }),
       ...(destination === undefined ? {} : { destination }),
+      ...(origin === undefined ? {} : { origin }),
     });
     return allowed;
   };
@@ -456,8 +552,80 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // its arguments. Resolved before anything else so that the tool-wide
       // "always" below can never apply to it: one yes to `git status` must
       // not become a standing yes to every command the shell can run.
-      const command = risk === 'gated' ? context.tool.commandFor?.(call.input) : undefined;
+      // A tool that offers more than one scope hook is judged by none of
+      // them, and asks like any other gated call.
+      //
+      // Each hook narrows a call along one axis — what it runs, where it
+      // sends, what site it acts on — and each grant answers only its own
+      // question. Composing them needs a decision nobody has made: a call
+      // with two axes could reasonably need every applicable scope to
+      // authorize it, or the narrowest, and picking silently is how a
+      // grant on one axis waves through a call unapproved on the other.
+      // Falling back to a human is the answer that cannot be wrong while
+      // that decision is unmade.
+      //
+      // Nothing offers two today (`shell.run` a command, `message.send` a
+      // destination, `browser.act` an origin), so this changes nothing now
+      // — it is here so that adding one cannot quietly open that door. The
+      // guard first covered only `commandFor`, and left exactly this hole
+      // for `destinationFor`; one rule over all three has no such corner.
+      const scopeHooks = [
+        context.tool.commandFor,
+        context.tool.destinationFor,
+        context.tool.originFor,
+      ].filter((hook) => hook !== undefined).length;
+      const singlyScoped = scopeHooks <= 1;
+      // Turning the scope engines off is only half of it. The tool-wide
+      // "always" is what a tool with no scope at all falls back to, and
+      // letting a multi-hook tool reach it would be worse than the hole
+      // this rule closed: one yes, and then a session of unattended calls
+      // with neither scope consulted. A tool that asked to be judged by a
+      // scope does not get to be judged by nothing instead.
+      const multiplyScoped = scopeHooks > 1;
+
+      const command = risk === 'gated' && singlyScoped
+        ? context.tool.commandFor?.(call.input)
+        : undefined;
       const analysis = command === undefined ? undefined : analyzeCommand(command);
+
+      // Whether this tool is judged by *where* it acts, and where it is
+      // acting right now. `gated` only, for the reason a destination cannot
+      // launder a `dangerous` call either: a scope narrows a tool whose
+      // risk lives in its arguments, and `dangerous` is a statement about
+      // the tool itself.
+      //
+      // The two are separate on purpose. `scopedByOrigin` is true for any
+      // tool that offers the hook, even on a call where it answers nothing
+      // — a page that has not loaded, one closed by the idle sweep — and it
+      // is what bars the tool-wide "always" below. Without that, a click
+      // approved on a page whose origin could not be named would fall back
+      // to a standing yes to `browser.act` on every site, which is exactly
+      // the grant per-origin scopes exist to replace.
+      const scopedByOrigin = risk === 'gated'
+        && singlyScoped
+        && context.tool.originFor !== undefined;
+      // The grants first, and where the page is *after* them. Read the
+      // other way round, the store's disk read sits between the two, and a
+      // page that redirects inside it has a grant for site A allow a click
+      // on site B — the same shape as the approval wait below, with a
+      // shorter gap and no bound on it at all when the store is somebody
+      // else's. There is no await between this read and the match, so the
+      // origin a grant is checked against is where the conversation is when
+      // the decision is made, not where it was.
+      const grantedOrigins = scopedByOrigin
+        ? [
+            ...(sessionOrigins.get(session.agent.id) ?? []),
+            ...(origins?.whitelist ? await origins.whitelist.originsFor(session.agent.id) : []),
+          ]
+        : [];
+      const reportedOrigin = scopedByOrigin ? context.tool.originFor?.(session) : undefined;
+      // Read through the same normalizer a grant file is read through,
+      // rather than taken as written. The hook's contract is an origin, but
+      // this is what a grant is compared against — a plugin that hands back
+      // a whole page URL should get a grant on its origin, not one that
+      // silently never matches anything.
+      const originScope = reportedOrigin === undefined ? undefined : originScopeFor(reportedOrigin);
+      const origin = originScope?.origin;
 
       if (analysis) {
         if (analysis.disqualifiedBy) {
@@ -488,15 +656,32 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             );
           }
         }
-      } else if (alwaysAllowed.has(sessionKey(session.id, call.toolName))) {
+      } else if (risk !== 'dangerous'
+        && !scopedByOrigin
+        && !multiplyScoped
+        && alwaysAllowed.has(sessionKey(session.id, call.toolName))) {
         return report(context, true, `${call.toolName} was approved for the rest of this session`);
+      }
+
+      if (origin !== undefined) {
+        const granted = findMatchingOriginScope(origin, grantedOrigins);
+        if (granted) {
+          return report(
+            context,
+            true,
+            `${call.toolName} acted on the approved site ${describeOriginScope(granted)}`,
+            undefined,
+            undefined,
+            origin,
+          );
+        }
       }
 
       // The schedule's destination scope, checked before the headless
       // refusal because an unattended firing is exactly when it applies.
       // `gated` only: a destination cannot launder a `dangerous` call, the
       // same way no argument shape makes `rm -rf` a read.
-      if (risk === 'gated' && destinations) {
+      if (risk === 'gated' && singlyScoped && destinations) {
         const destination = context.tool.destinationFor?.(call.input);
         if (destination !== undefined
           && await destinations.isPreauthorized(session, destination)) {
@@ -514,11 +699,22 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
         return report(
           context,
           false,
-          command === undefined
-            ? `${call.toolName} is ${risk} and nobody is available to approve it`
-            : `${call.toolName} was called outside every approved scope`
-              + `${analysis?.base ? ` (${analysis.base})` : ''} and nobody is available to approve it`,
+          command !== undefined
+            ? `${call.toolName} was called outside every approved scope`
+              + `${analysis?.base ? ` (${analysis.base})` : ''} and nobody is available to approve it`
+            : origin !== undefined
+              // Named, because it is the actionable half: an operator
+              // reading this at 3am needs to know which site to grant, and
+              // an origin carries no path or query to leak while saying so.
+              ? `${call.toolName} was called on ${origin}, which no approved site covers,`
+                + ' and nobody is available to approve it'
+              : scopedByOrigin
+                ? `${call.toolName} was called on a page with no origin a grant could name,`
+                  + ' and nobody is available to approve it'
+                : `${call.toolName} is ${risk} and nobody is available to approve it`,
           command,
+          undefined,
+          origin,
         );
       }
 
@@ -534,9 +730,39 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // refusal is reported — is deliberately shared, so a decision made in
       // Slack and one typed at a terminal cannot drift into meaning
       // different things.
+      // Whether answering "always" would remember anything at all, decided
+      // here because this is where the answer is: a `dangerous` tool never
+      // remembers, and an origin-scoped call with no page has nothing to
+      // remember. Both are certain before anyone is asked, so both surfaces
+      // can stop offering a grant the engine will not create.
+      // A command this parser cannot reduce to a scope — a pipe, a
+      // subshell, an unbalanced quote, a refspec delete — is the third
+      // one-shot shape, and the oldest: the branch below has always run it
+      // once and remembered nothing, because widening to the bare tool
+      // would hand the agent every command. Resolved here rather than
+      // after the answer so the question can say so; it is a pure function
+      // of the analysis, and the branch below reuses this exact value.
+      const commandScope = analysis ? normalizeCommandScope(analysis) : undefined;
+      const oneShot = risk === 'dangerous'
+        || multiplyScoped
+        || (scopedByOrigin && origin === undefined)
+        || (analysis !== undefined && commandScope === undefined);
+      const alwaysMeans = oneShot
+        ? risk === 'dangerous'
+          ? 'not remembered — a dangerous tool asks every time'
+          : multiplyScoped
+            ? 'not remembered — this tool names more than one kind of scope'
+            : analysis !== undefined
+              ? 'not remembered — this command cannot be reduced to a scope'
+              : 'not remembered — there is no page to grant'
+        : command !== undefined
+          ? 'always this scope'
+          : scopedByOrigin
+            ? 'always this site'
+            : 'always this session';
       const answer = mode === 'remote'
-        ? await awaitRemote(context, request!)
-        : await awaitPrompt(context, ask!, command);
+        ? await awaitRemote(context, request!, origin, oneShot)
+        : await awaitPrompt(context, ask!, command, origin, alwaysMeans);
 
       if (answer === ABORTED) {
         return report(context, false, `${call.toolName} was cancelled while awaiting approval`);
@@ -550,20 +776,98 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             ? `${call.toolName} was not approved`
             : `${call.toolName} was refused at the prompt`,
           command,
+          undefined,
+          origin,
         );
       }
 
+      /**
+       * Allow — unless the conversation moved out from under the answer.
+       *
+       * The origin was read before the wait, and the wait is a human's:
+       * fifteen minutes by default, unbounded when the timeout is zero. A
+       * page that navigates inside it (a redirect, a meta refresh, a
+       * script) would have a yes given for site A land a click on site B,
+       * with the prompt still naming A. The approver answered a question
+       * about a page; if it is not that page any more, there is no answer
+       * to act on, and re-asking is not the fix — that is a second question
+       * with the same race behind it.
+       *
+       * Every path out of the approval goes through this, and it is the
+       * *last* thing each of them does, because the answer is not the last
+       * yield: persisting a grant is a disk write, and a store somebody
+       * else wrote has no bound at all. Checking once when the answer
+       * arrives would leave exactly that window open. One chokepoint, so a
+       * path added later cannot quietly skip it.
+       *
+       * A grant persisted before the page moved is kept, and that is not a
+       * hole: the approver read that site and said always. What must not
+       * happen is the *click* landing somewhere they never saw.
+       */
+      const allowUnlessMoved = (reason: string, forCommand?: string): boolean => {
+        if (!scopedByOrigin) {
+          return report(context, true, reason, forCommand, undefined, origin);
+        }
+        const settled = originScopeFor(context.tool.originFor?.(session) ?? '')?.origin;
+        if (settled === origin) {
+          return report(context, true, reason, forCommand, undefined, origin);
+        }
+        const approvedOn = origin ?? 'a page with no origin';
+        return report(
+          context,
+          false,
+          settled === undefined
+            ? `${call.toolName} was approved on ${approvedOn}, and that page is no longer open`
+              + ' — it did not run'
+            : `${call.toolName} was approved on ${approvedOn}, but the conversation is on ${settled} now`
+              + ' — it did not run',
+          undefined,
+          undefined,
+          origin,
+        );
+      };
+
       if (answer === 'always') {
-        const scope = analysis ? normalizeCommandScope(analysis) : undefined;
+        if (scopedByOrigin) {
+          if (!originScope) {
+            // No origin to remember — a page that never loaded, or one
+            // whose URL has no origin this engine will name. The call runs;
+            // nothing is widened. Falling back to the tool-wide grant here
+            // would turn "always on this page" into "always on every page",
+            // which is the grant this whole engine replaced.
+            return allowUnlessMoved(
+              `${call.toolName} was approved once; there is no page origin to remember, so it will ask again`,
+            );
+          }
+          sessionOrigins.set(session.agent.id, [...(sessionOrigins.get(session.agent.id) ?? []), originScope]);
+          if (origins?.whitelist) {
+            try {
+              await origins.whitelist.rememberOrigin(session.agent.id, originScope);
+            } catch (error) {
+              if (!(error instanceof WhitelistUnreadableError)) {
+                throw error;
+              }
+              // Same bargain the command half makes: the answer holds for
+              // this process, and the file that would carry it past a
+              // restart is not written over grants nobody can read.
+              return allowUnlessMoved(
+                `${call.toolName} was approved, and ${describeOriginScope(originScope)} is acted on without asking for ${session.agent.id} until the daemon restarts — not saved: ${error.message}`,
+              );
+            }
+            origins.onScopeRemembered?.({ agentId: session.agent.id, scope: originScope });
+          }
+          return allowUnlessMoved(
+            `${call.toolName} was approved, and ${describeOriginScope(originScope)} is now acted on without asking`,
+          );
+        }
+        const scope = commandScope;
         if (analysis && !scope) {
           // A command this parser could not reduce to a scope — a pipe, a
           // subshell, an unbalanced quote. "Always" must not fall back to
           // the tool-wide grant here: the approver widened one command they
           // read, and remembering `shell.run` instead would hand the agent
           // every command for the rest of the session.
-          return report(
-            context,
-            true,
+          return allowUnlessMoved(
             `${call.toolName} was approved once; it cannot be reduced to a scope, so it will ask again`,
             command,
           );
@@ -586,27 +890,44 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
               // "always" means without a file — and the file that would
               // carry it past a restart is not written over grants nobody
               // can read. The line says both.
-              return report(
-                context,
-                true,
+              return allowUnlessMoved(
                 `${call.toolName} was approved, and "${describeCommandScope(scope)}" runs without asking for ${session.agent.id} until the daemon restarts — not saved: ${error.message}`,
                 command,
               );
             }
             commands.onScopeRemembered?.({ agentId: session.agent.id, scope });
           }
-          return report(
-            context,
-            true,
+          return allowUnlessMoved(
             `${call.toolName} was approved, and "${describeCommandScope(scope)}" now runs without asking`,
             command,
           );
         }
+        if (risk === 'dangerous') {
+          // The tier means "a human every time, whatever scopes exist", and
+          // it kept that name in this change on exactly that basis — no
+          // first-party tool is in it any more, so what it is *for* is an
+          // operator's `toolRisks` or a plugin manifest saying it about
+          // somebody else's code. A session-wide grant made that a promise
+          // about the first call only (28 names this and calls tightening
+          // it deliberate); it is now what it says.
+          return allowUnlessMoved(
+            `${call.toolName} was approved once; a dangerous tool is never remembered, so it will ask again`,
+          );
+        }
+        if (multiplyScoped) {
+          // The other half of the multi-hook rule. Storing a tool-wide
+          // grant here would be the engine answering "how do two scopes
+          // compose?" with "they do not apply", which is the one answer
+          // nobody would choose deliberately.
+          return allowUnlessMoved(
+            `${call.toolName} was approved once; it names more than one kind of scope, so it will ask again`,
+          );
+        }
         alwaysAllowed.add(sessionKey(session.id, call.toolName));
-        return report(context, true, `${call.toolName} was approved for the rest of this session`);
+        return allowUnlessMoved(`${call.toolName} was approved for the rest of this session`);
       }
 
-      return report(context, true, `${call.toolName} was approved once`, command);
+      return allowUnlessMoved(`${call.toolName} was approved once`, command);
     },
   };
 };

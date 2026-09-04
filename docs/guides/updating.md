@@ -18,6 +18,15 @@ is serving, because this path does not stop the managed service — only
 `stratus update` does. A migration needing exclusive access to shared state
 is not registered until the registry can require that bracket.)
 
+One thing a rollback does lose, and it is not stamped: an agent's
+`origins` grants. `<id>.whitelist.json` holds both kinds of grant under the
+same version, so a daemon predating [browser actions](./browser.md) reads
+it happily and drops the origins the next time an "always" answer writes to
+it. That fails in the safe direction — the calls ask again, or are refused
+in `headless` with a line naming the site — but the grants do not come back
+when you upgrade again, and you re-approve them. Copy the file first if a
+rollback is planned.
+
 The reverse direction refuses instead of guessing: against state stamped by
 a **newer** build than itself, anything that *writes* under `~/.stratus` —
 `serve`, `setup`, `chat`, `run`, `skill add`, `dashboard`,

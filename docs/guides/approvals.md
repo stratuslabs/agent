@@ -28,10 +28,33 @@ built-in tools (`demo.echo`, `memory.remember`, `memory.recall`,
 turn — see [Schedules](./schedules.md). Anything you install is where this
 starts to bite, which is what [Tools](./tools.md) is about.
 
-A **shell** is the exception to the whole paragraph, because its risk is in
-its argument rather than in its identity. `shell.run` is `gated`, and the
-permission engine then judges each command — see
-[Shell commands](./shell.md).
+Two tools are the exception to the whole paragraph, because their risk is
+in what a particular call does rather than in the tool's identity. Both are
+`gated`, and the permission engine then judges each call:
+
+- **A shell**, by the command it would run — see [Shell commands](./shell.md).
+- **`browser.act`**, by the site the conversation is on — see
+  [Browser actions](./browser.md).
+
+Nothing built in is `dangerous` any more. The tier is still there, and an
+operator's `toolRisks` or a plugin's manifest can still put a tool in it —
+it is the only way to say "never unattended, whatever scopes exist" about
+somebody else's code — but no first-party tool declares it. `browser.act`
+was its one member, and it was there because no scope model existed for a
+click rather than because a click is worse than a shell command.
+
+A `dangerous` call asks **every time**, and **Always allow** on one does not
+change that: the call runs, and nothing is remembered. Two other calls
+behave the same way — a browser action with no page to grant, and a shell
+command the parser cannot reduce to a scope — and all three are called
+**one-shot**: they are not offered **Always allow** at all, on any surface.
+Slack, the dashboard, and the terminal prompt each say that an approval
+covers the one call, rather than showing a button that does nothing extra.
+
+The `dangerous` half of that is stricter than it used to be — the
+session-wide grant applied to `dangerous` too, which made "always a human" a
+promise about the first call only — and the tier is worth having only if it
+means what it says.
 
 The line is *acting outside Stratus* — the filesystem, the network, another
 service — not cost. Every turn spends provider tokens, including the one
@@ -135,13 +158,20 @@ warning naming the file.
   you it is no longer pending *and* rewrites the message so the next reader
   is not offered a decision nothing is waiting for. A prompt nobody clicks
   stays as it is.
-- **Always allow means different things for a tool and for a command.** For
-  an ordinary tool it lasts for the session: it stops that tool asking
-  again in the same conversation, and it is forgotten when the daemon
-  restarts. For a call that carries a command — `shell.run` — it persists a
-  *scope* instead, in `~/.stratus/agents/<id>.whitelist.json`, and that
-  survives a restart. See [Shell commands](./shell.md) for what a scope
-  keeps out.
+- **Always allow means different things, and which one you get depends on
+  the tool.** For an ordinary tool it lasts for the session: it stops that
+  tool asking again in the same conversation, and it is forgotten when the
+  daemon restarts. For a call judged by a *scope* it persists that scope
+  instead, in `~/.stratus/agents/<id>.whitelist.json`, and a saved one
+  survives a restart — a command scope for `shell.run` (see
+  [Shell commands](./shell.md)), an origin for `browser.act` (see
+  [Browser actions](./browser.md)). When that file exists and no longer
+  parses it is never written over, so the answer holds only until the
+  daemon stops; the log line says which happened, and the Slack message
+  cannot, because it is sent before the write is attempted. A scoped tool never gets the tool-wide
+  grant, whatever the answer: one yes to `git status` must not become a yes
+  to every command, and one yes to a page must not become a yes to every
+  page.
 
 ## What the request shows, and how it ends
 
@@ -150,6 +180,14 @@ anything whose danger lives in what it was called with, approving a bare
 tool name is approving something you cannot see. Arguments are escaped (a
 model-written argument cannot mention or broadcast to the workspace through
 the prompt) and truncated with a visible notice when they are long.
+
+For `browser.act` it also shows the **site**, beside the tool name. The
+arguments there are a CSS selector, which says nothing about where a click
+lands — and the site is the thing **Always allow** widens, so an approver
+who was not shown it would be granting something they cannot see. The site
+is checked again when the answer comes back: a page that redirected while
+the request was outstanding refuses rather than acting on a yes given for
+somewhere else.
 
 Requests are also denied — visibly, with a reason — when they expire, when
 the turn is cancelled, when the daemon shuts down, and when a turn reaches

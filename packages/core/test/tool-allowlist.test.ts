@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 
 import {
   AgentRunner,
+  EventBus,
   InMemorySessionStore,
   matchesToolAllowlist,
+  originOf,
   ToolRegistry,
   type ModelProvider,
   type ProviderRequest,
@@ -83,4 +85,174 @@ test('an agent allowed a toolset can call every tool in it, and nothing outside 
   // invented for a tool outside the glob is still refused.
   assert.equal(results[1]?.toolResult?.ok, false);
   assert.match(results[1]?.toolResult?.error ?? '', /not permitted for agent ava: shell\.run/);
+});
+
+test('an origin is scheme, host, and port — and nothing without one is named', () => {
+  // What makes a browser action's blast radius nameable at all: no path, no
+  // query, no fragment, no credentials. A grant an operator reads as "this
+  // agent may act on app.example.com" has to mean exactly that, whichever
+  // page of the site the conversation is on.
+  assert.equal(originOf('https://app.example.com/reports/17?token=abc#top'), 'https://app.example.com');
+  assert.equal(originOf('https://user:pw@app.example.com/'), 'https://app.example.com');
+  assert.equal(originOf('https://APP.example.com'), 'https://app.example.com');
+  // The default port is not part of the origin; any other port is, because
+  // a service on another port of the same host is another service.
+  assert.equal(originOf('https://app.example.com:443/'), 'https://app.example.com');
+  assert.equal(originOf('https://app.example.com:8443/'), 'https://app.example.com:8443');
+  // One spelling per host: a homograph cannot be a second way to write an
+  // approved grant.
+  assert.equal(originOf('https://exämple.com/'), 'https://xn--exmple-cua.com');
+
+  // The URL parser answers the string "null" for all of these, and a grant
+  // that could be spelled `null` would cover every one of them at once.
+  for (const raw of ['about:blank', 'file:///etc/passwd', 'data:text/html,x', 'not a url', '']) {
+    assert.equal(originOf(raw), undefined, raw);
+  }
+});
+
+test('a call is not dispatched once the page it was judged on has moved', async () => {
+  // The approval is not the last thing between the judgement and the act:
+  // clearing the checkpoint is a store write, and `tool.called` is awaited
+  // through every subscriber. A page that navigates in there would be
+  // clicked on having been judged somewhere else, and no re-read inside the
+  // policy can see past its own return.
+  let page = 'https://app.example.com/reports';
+  let executed = 0;
+  const act: Tool = {
+    name: 'browser.act',
+    risk: 'gated',
+    originFor: () => page,
+    async execute() {
+      executed += 1;
+      return { clicked: true };
+    },
+  };
+  const tools = new ToolRegistry();
+  tools.register(act);
+
+  let turn = 0;
+  const provider: ModelProvider = {
+    name: 'scripted',
+    async generate(): Promise<ProviderResponse> {
+      turn += 1;
+      return turn === 1
+        ? { parts: [{ type: 'tool-call', call: { id: 'c1', toolName: 'browser.act', input: { selector: '#submit' } } }] }
+        : { parts: [{ type: 'text', text: 'done' }] };
+    },
+  };
+
+  const bus = new EventBus();
+  // The subscriber *is* the window: `emit` awaits each one, so a handler
+  // that yields is exactly the gap a redirect fits into.
+  bus.subscribe(async (event) => {
+    if (event.type === 'tool.called') {
+      await Promise.resolve();
+      page = 'https://checkout.example.com/confirm';
+    }
+  });
+
+  const runner = new AgentRunner({ provider, tools, bus, store: new InMemorySessionStore() });
+  await runner.initialize();
+  const session = await runner.run({
+    sessionId: 'moved-1',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'go',
+  });
+
+  assert.equal(executed, 0, 'the click ran on a page nobody judged');
+  const result = session.messages.filter((message) => message.role === 'tool')[0]?.toolResult;
+  assert.equal(result?.ok, false);
+  assert.match(result?.error ?? '', /judged on https:\/\/app\.example\.com/);
+  assert.match(result?.error ?? '', /now on https:\/\/checkout\.example\.com/);
+});
+
+test('a tool that names no origin is dispatched exactly as before', async () => {
+  let executed = 0;
+  const echo: Tool = {
+    name: 'demo.echo',
+    risk: 'gated',
+    async execute() {
+      executed += 1;
+      return { ran: 'demo.echo' };
+    },
+  };
+  const tools = new ToolRegistry();
+  tools.register(echo);
+
+  let turn = 0;
+  const provider: ModelProvider = {
+    name: 'scripted',
+    async generate(): Promise<ProviderResponse> {
+      turn += 1;
+      return turn === 1
+        ? { parts: [{ type: 'tool-call', call: { id: 'c1', toolName: 'demo.echo', input: {} } }] }
+        : { parts: [{ type: 'text', text: 'done' }] };
+    },
+  };
+
+  const runner = new AgentRunner({ provider, tools, store: new InMemorySessionStore() });
+  await runner.initialize();
+  const session = await runner.run({
+    sessionId: 'plain-1',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'go',
+  });
+
+  assert.equal(executed, 1);
+  assert.equal(session.messages.filter((message) => message.role === 'tool')[0]?.toolResult?.ok, true);
+});
+
+test('the dispatch check uses the origin the policy judged, not one from before it', async () => {
+  // A policy reads the page as it stands when it decides, which is after it
+  // has loaded whatever grants it consults. A snapshot taken before the
+  // call would disagree for every page that moved during that load — and
+  // would refuse an action the policy had just correctly allowed.
+  let page = 'https://app.example.com/reports';
+  let executed = 0;
+  const act: Tool = {
+    name: 'browser.act',
+    risk: 'gated',
+    originFor: () => page,
+    async execute() {
+      executed += 1;
+      return { clicked: true };
+    },
+  };
+  const tools = new ToolRegistry();
+  tools.register(act);
+
+  let turn = 0;
+  const provider: ModelProvider = {
+    name: 'scripted',
+    async generate(): Promise<ProviderResponse> {
+      turn += 1;
+      return turn === 1
+        ? { parts: [{ type: 'tool-call', call: { id: 'c1', toolName: 'browser.act', input: {} } }] }
+        : { parts: [{ type: 'text', text: 'done' }] };
+    },
+  };
+
+  const runner = new AgentRunner({
+    provider,
+    tools,
+    store: new InMemorySessionStore(),
+    approvals: {
+      // Stands in for the grant load: the policy yields, the page moves,
+      // and the policy then judges — and allows — where it ended up.
+      async approve() {
+        await Promise.resolve();
+        page = 'https://other.example.com/';
+        return true;
+      },
+    },
+  });
+  await runner.initialize();
+  const session = await runner.run({
+    sessionId: 'judged-1',
+    agent: { id: 'ava', name: 'Ava' },
+    userMessage: 'go',
+  });
+
+  assert.equal(executed, 1, 'an action the policy allowed was refused at dispatch');
+  assert.equal(session.messages.filter((message) => message.role === 'tool')[0]?.toolResult?.ok, true);
 });

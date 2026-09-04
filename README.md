@@ -105,7 +105,7 @@ The trust model behind that is in
 | Install and set up | [Installation](docs/start/installation.md) · [Setup](docs/start/setup.md) |
 | Run something right now | [Quickstart](docs/start/quickstart.md) |
 | Put my agents in Slack | [Slack](docs/guides/slack.md) |
-| Give agents real capability, safely | [Tools](docs/guides/tools.md) · [Shell commands](docs/guides/shell.md) · [Approvals](docs/guides/approvals.md) |
+| Give agents real capability, safely | [Tools](docs/guides/tools.md) · [Shell commands](docs/guides/shell.md) · [Browser actions](docs/guides/browser.md) · [Approvals](docs/guides/approvals.md) |
 | Let agents act on a schedule | [Schedules](docs/guides/schedules.md) |
 | Run it as a service, read its logs, upgrade it | [Always on](docs/guides/always-on.md) · [Logs](docs/guides/logs.md) · [Updating](docs/guides/updating.md) |
 | Fix a surprise | [Troubleshooting](docs/guides/troubleshooting.md) |

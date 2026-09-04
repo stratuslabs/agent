@@ -1,3 +1,4 @@
+import { originOf } from '@stratusagent/core';
 import {
   chromiumProxyOptions,
   createEgressProxy,
@@ -270,6 +271,22 @@ export class BrowserSessionPool {
       // next caller. Never on the success path: the session was just added.
       await this.closeBrowserIfUnused(entry);
     }
+  }
+
+  /**
+   * The origin of the page this conversation is on, or nothing when it has
+   * no page or the page has no origin worth naming (`about:blank` before
+   * the first navigation, a context the idle sweep has closed).
+   *
+   * Synchronous, and it opens nothing. It is read while a call is being
+   * *judged*, before the tool runs — a lookup that could launch a browser
+   * would make the permission engine start one for a call it is about to
+   * refuse, and a page opened to answer "where are you" would answer
+   * `about:blank` every time in any case.
+   */
+  originFor(sessionId: string): string | undefined {
+    const context = this.contexts.get(sessionId);
+    return context ? originOf(context.page.url()) : undefined;
   }
 
   /**

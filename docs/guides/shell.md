@@ -20,7 +20,9 @@ pack for a daemon and this page is the whole story; run it yourself and
 
 1. **Scopes approved this session**, then
 2. **the agent's whitelist** — `~/.stratus/agents/<id>.whitelist.json`,
-   written by **Always allow** — then
+   written by **Always allow**; its `scopes` array is this list, and the
+   `origins` array beside it is the same file's answer for
+   [browser actions](./browser.md) — then
 3. **the built-in safe list**: `git status`, `git log`, `git diff`,
    `git show`, `git blame`, `git rev-parse`, `git ls-files`, plus
    `git branch`, `git tag`, and `git remote` **in their listing forms

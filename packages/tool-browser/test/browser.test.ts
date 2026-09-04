@@ -367,7 +367,7 @@ test('a screenshot lands in the agent’s own workspace and comes back as a path
   );
 });
 
-test('acting is dangerous and reading is not, exactly as the manifest declares', async () => {
+test('every tool carries the risk the manifest declares, acting included', async () => {
   const manifest = (await import('../package.json', { with: { type: 'json' } })).default as {
     stratus: { contributes: { tools: Array<{ name: string; risk: string }> } };
   };
@@ -379,7 +379,10 @@ test('acting is dangerous and reading is not, exactly as the manifest declares',
     tools.list().map((tool) => [tool.name, tool.risk]),
     manifest.stratus.contributes.tools.map((entry) => [entry.name, entry.risk]),
   );
-  assert.equal(tools.get('browser.act')?.risk, 'dangerous');
+  // `gated`, and judged per site from here on. The manifest is the loader's
+  // view of the same fact, so a risk lowered in one and not the other is a
+  // tool an operator was told one thing about and got another.
+  assert.equal(tools.get('browser.act')?.risk, 'gated');
 });
 
 test('the plugin is torn down through the hook a host actually calls', async () => {
@@ -671,4 +674,129 @@ test('a context that never got a page is closed, and a browser nobody holds goes
     /has been closed/,
   );
   assert.equal(recorder.launches, 2);
+});
+
+test('the origin browser.act is judged by comes from the page, never from the call', async (t) => {
+  const recorder = emptyRecorder();
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com', 'other.example.com'] }, recorder);
+  t.after(() => plugin.dispose());
+  const act = tool('browser.act');
+  const session = sessionFor('acting');
+
+  // Before anything is navigated to there is no page, so there is no origin
+  // and no scope can cover the call. Asking must not open one either: this
+  // runs while the call is still being *judged*, and a lookup that launched
+  // a browser would start one for a call about to be refused.
+  assert.equal(act.originFor?.(session), undefined);
+  assert.equal(recorder.launches, 0);
+
+  await tool('browser.goto').execute({ url: 'https://example.com/reports/17?token=abc' }, session);
+  // The origin of where it is, not the URL: a grant an operator reads as
+  // "may act on example.com" must not carry a path or a query with it.
+  assert.equal(act.originFor?.(session), 'https://example.com');
+
+  // It follows the page. A conversation that navigates elsewhere is judged
+  // against where it now is, so a grant for one site does not travel.
+  await tool('browser.goto').execute({ url: 'https://other.example.com/' }, session);
+  assert.equal(act.originFor?.(session), 'https://other.example.com');
+
+  // And it is that conversation's page. Contexts are per conversation, and
+  // so is the question of where a click would land.
+  assert.equal(act.originFor?.(sessionFor('elsewhere')), undefined);
+
+  // A context the idle sweep has closed leaves no origin behind, rather
+  // than the last one it happened to be on.
+  await plugin.sweepIdle(Date.now() + 10 * 60_000);
+  assert.equal(act.originFor?.(session), undefined);
+});
+
+test('browser.act does not click a page that moved while its context was being opened', async (t) => {
+  // Opening the page is not free — this can launch Chromium and build a
+  // context — and it happens after the kernel's dispatch check. So the
+  // action checks once more, at the last point anything in this process
+  // can look before Playwright takes over.
+  const recorder = emptyRecorder();
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com', 'other.example.com'] }, recorder);
+  t.after(() => plugin.dispose());
+  const act = tool('browser.act');
+  const session = sessionFor('drifting');
+
+  await tool('browser.goto').execute({ url: 'https://example.com/reports' }, session);
+  // What the kernel does immediately before dispatch: ask where the call
+  // is being judged.
+  assert.equal(act.originFor?.(session), 'https://example.com');
+  // ...and the page moves before the action opens it.
+  await tool('browser.goto').execute({ url: 'https://other.example.com/' }, session);
+
+  await assert.rejects(
+    () => act.execute({ action: 'click', selector: '#submit' }, session),
+    /was on https:\/\/example\.com when the call was approved and is on https:\/\/other\.example\.com now/,
+  );
+
+  // The steady case still works, and a call nobody judged is executed as
+  // before rather than refused.
+  assert.deepEqual(
+    await act.execute({ action: 'click', selector: '#submit' }, session) as JsonObject,
+    {
+      action: 'click',
+      selector: '#submit',
+      url: 'https://other.example.com/',
+      title: 'Example Domain',
+    },
+  );
+});
+
+test('the recorded origin is bounded: nothing kept for a page with none, and dropped when one is evicted', async (t) => {
+  // `originFor` is a getter that writes, which is deliberate — but it runs
+  // on every call the kernel judges, including ones that are then denied
+  // and never execute. What it keeps has to be bounded by the contexts
+  // that exist, or a long-lived daemon accumulates an entry per session.
+  const recorder = emptyRecorder();
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'] }, recorder);
+  t.after(() => plugin.dispose());
+  const act = tool('browser.act');
+  const session = sessionFor('bounded');
+
+  // A conversation with no page records nothing at all.
+  assert.equal(act.originFor?.(session), undefined);
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, session);
+  assert.equal(act.originFor?.(session), 'https://example.com');
+
+  // The sweep takes the context, so the next judgement is "no page" — and
+  // the action executes against a fresh page that is also no page, which
+  // agrees.
+  await plugin.sweepIdle(Date.now() + 10 * 60_000);
+  assert.equal(act.originFor?.(session), undefined);
+  const result = await act.execute({ action: 'click', selector: '#submit' }, session) as JsonObject;
+  assert.equal(result.action, 'click');
+});
+
+test('a call judged on no page at all is still refused if one appears before it acts', async (t) => {
+  // "Judged with no origin" and "never judged" are different facts, and
+  // letting an absent entry stand for both skipped the check for exactly
+  // the originless case: a page acquiring an origin between the judgement
+  // and the action would be clicked on having been shown to nobody.
+  const recorder = emptyRecorder();
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'] }, recorder);
+  t.after(() => plugin.dispose());
+  const act = tool('browser.act');
+  const session = sessionFor('appearing');
+
+  // What the kernel asks before dispatch, on a conversation that has never
+  // navigated: no origin.
+  assert.equal(act.originFor?.(session), undefined);
+  // ...and a page arrives before the action opens it.
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, session);
+
+  await assert.rejects(
+    () => act.execute({ action: 'click', selector: '#submit' }, session),
+    /was on a page with no origin when the call was approved and is on https:\/\/example\.com now/,
+  );
+
+  // And a call nobody judged at all still runs: an absent entry means the
+  // host's runner never asked, which is not the same as a judgement.
+  const unjudged = sessionFor('unjudged');
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, unjudged);
+  const result = await act.execute({ action: 'click', selector: '#submit' }, unjudged) as JsonObject;
+  assert.equal(result.action, 'click');
 });

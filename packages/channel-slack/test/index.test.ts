@@ -1112,7 +1112,11 @@ test('a parked call is asked in the thread it came from, with three buttons', as
   // decision with nowhere to land.
   const update = web.updates.at(-1);
   assert.equal(buttonIds(update?.blocks).length, 0);
-  assert.match(update?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+  assert.match(update?.text ?? '', /Allowed and remembered — for this session at least by <@U-DYLAN>/);
+  // The floor, not the ceiling: a scoped grant normally survives a restart
+  // and does not when the whitelist cannot be written, which this message
+  // is sent too early to know.
+  assert.doesNotMatch(update?.text ?? '', /past a restart/);
 
   await adapter.stop();
 });
@@ -1304,6 +1308,117 @@ test('the approval prompt shows what is actually being approved', async () => {
   // The notification preview is all some approvers see before deciding
   // whether to open the thread.
   assert.match(posted?.text ?? '', /rm -rf \/srv\/data/);
+
+  await adapter.stop();
+});
+
+test('a one-shot request is not offered an Always allow button', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({
+    call: { id: 'c1', toolName: 'mcp.vendor.wipe', input: {} },
+    risk: 'dangerous',
+    oneShot: true,
+  }));
+
+  // The engine remembers nothing here, so the button would do exactly what
+  // Allow once does under a label promising a standing grant nobody gets.
+  const posted = web.posts.at(-1);
+  assert.deepEqual(buttonIds(posted?.blocks), ['stratus_approve_once', 'stratus_deny']);
+  assert.ok(
+    (posted?.blocks ?? []).some((block) => block.type === 'context'),
+    'the prompt does not say why the choice is missing',
+  );
+
+  // An ordinary gated call still gets all three.
+  gateway.pendingApprovals.add('req-2');
+  await gateway.bus.emit(approvalRequest({ requestId: 'req-2' }));
+  assert.deepEqual(
+    buttonIds(web.posts.at(-1)?.blocks),
+    ['stratus_approve_once', 'stratus_approve_always', 'stratus_deny'],
+  );
+
+  await adapter.stop();
+});
+
+test('an always answered on a dangerous call is recorded as the one-shot it is', async () => {
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({
+    call: { id: 'c1', toolName: 'mcp.vendor.wipe', input: {} },
+    risk: 'dangerous',
+    oneShot: true,
+  }));
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
+
+  // The tier means a human every time, so the engine runs the call and
+  // remembers nothing. The general line hedges between two lifetimes this
+  // adapter cannot tell apart; this one it can, from the risk on the
+  // request, and a record claiming a grant that does not exist is the kind
+  // of audit line somebody acts on.
+  const settled = web.updates.at(-1)?.text ?? '';
+  assert.match(settled, /Allowed once — a dangerous tool is never remembered/);
+  assert.doesNotMatch(settled, /remembered — for this session/);
+
+  await adapter.stop();
+});
+
+test('an originless browser action resolved as always is recorded as one-shot too', async () => {
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  // This channel offers no **Always allow** for a one-shot request, but
+  // `POST /approvals` still takes all three answers — so another client,
+  // or an older one, can submit `always` for it. The record has to describe
+  // what the engine did, not what was clicked.
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({
+    call: { id: 'c1', toolName: 'browser.act', input: { action: 'click', selector: '#submit' } },
+    oneShot: true,
+  }));
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
+
+  const settled = web.updates.at(-1)?.text ?? '';
+  assert.match(settled, /Allowed once — nothing about this call could be remembered/);
+  assert.doesNotMatch(settled, /remembered — for this session/);
+  // Not "no page": this line is shared with a shell command the parser
+  // cannot reduce to a scope, where browser wording would be nonsense.
+  assert.doesNotMatch(settled, /page/);
+
+  await adapter.stop();
+});
+
+test('the approval prompt names the site a browser action would act on', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({
+    call: { id: 'c1', toolName: 'browser.act', input: { action: 'click', selector: '#submit' } },
+    origin: 'https://app.example.com',
+  }));
+
+  // `#submit` is equally "load more results" and "confirm purchase", so the
+  // arguments alone say nothing about what is being approved — and **Always
+  // allow** widens exactly the site the prompt would otherwise omit.
+  const posted = web.posts.at(-1);
+  assert.ok(
+    sectionTexts(posted?.blocks).some((text) => text.includes('https://app.example.com')),
+    `expected the origin in the blocks, got ${JSON.stringify(sectionTexts(posted?.blocks))}`,
+  );
+  assert.match(posted?.text ?? '', /on https:\/\/app\.example\.com/);
 
   await adapter.stop();
 });
@@ -1546,14 +1661,14 @@ test('a click on a message that already carries its outcome does not overwrite i
   await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
 
   const settled = web.updates.at(-1);
-  assert.match(settled?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+  assert.match(settled?.text ?? '', /Allowed and remembered — .*? by <@U-DYLAN>/);
   const updatesAfterDecision = web.updates.length;
 
   // The same button, clicked again — the message now carries the outcome.
   await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN', { settled: true }));
 
   assert.equal(web.updates.length, updatesAfterDecision, 'the settled message is left exactly as it was');
-  assert.match(web.updates.at(-1)?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+  assert.match(web.updates.at(-1)?.text ?? '', /Allowed and remembered — .*? by <@U-DYLAN>/);
   assert.match(web.ephemerals.at(-1)?.text ?? '', /no longer pending/);
 
   await adapter.stop();
@@ -2537,7 +2652,7 @@ test('an update Slack applied but never confirmed does not lose its outcome', as
 
   await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
   const outcome = web.updates.at(-1);
-  assert.match(outcome?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+  assert.match(outcome?.text ?? '', /Allowed and remembered — .*? by <@U-DYLAN>/);
   const updatesAfterOutcome = web.updates.length;
 
   // A later click on that message, which now carries the decision.
@@ -2545,7 +2660,7 @@ test('an update Slack applied but never confirmed does not lose its outcome', as
   await adapter.stop();
 
   assert.equal(web.updates.length, updatesAfterOutcome, 'the decision is left exactly as Slack stored it');
-  assert.match(web.updates.at(-1)?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+  assert.match(web.updates.at(-1)?.text ?? '', /Allowed and remembered — .*? by <@U-DYLAN>/);
 });
 
 // ---- addressable outbound (step 10) -----------------------------------------

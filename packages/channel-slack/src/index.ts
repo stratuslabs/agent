@@ -832,14 +832,28 @@ const APPROVAL_ACTIONS: Record<string, ApprovalAnswer> = {
 };
 
 /**
- * How an approval request reads once it is settled. `always` deliberately
- * says "this session" out loud: the button is the shortest path to widening
- * what an agent does unattended, and an approver should see the scope they
- * granted in the record of granting it.
+ * How an approval request reads once it is settled. `always` says out loud
+ * how long it lasts: the button is the shortest path to widening what an
+ * agent does unattended, and an approver should see the scope they granted
+ * in the record of granting it.
+ *
+ * It states the **floor**, because that is the only thing true in every
+ * case. A call judged by a scope — a shell command, a browser site —
+ * persists that scope in the agent's whitelist and normally keeps it
+ * across restarts, but not when the daemon cannot write the file (a
+ * hand-edit that will not parse) or was built without one, and by then
+ * this message has already been sent. Nothing on the bus distinguishes
+ * any of it: the policy returns a boolean, and `tool.approval-resolved`
+ * carries the answer that was submitted, not how long the grant lasts.
+ *
+ * So it says what is always so and no more. Claiming only the session
+ * lifetime, as this line first did, tells an approver a durable grant
+ * revokes itself; claiming the restart, as it then did, promises one the
+ * daemon may have failed to save. The daemon's log has the exact line.
  */
 const OUTCOME_TEXT: Record<string, string> = {
   'decided:once': 'Allowed once',
-  'decided:always': 'Allowed for the rest of this session',
+  'decided:always': 'Allowed and remembered — for this session at least',
   'decided:deny': 'Denied',
   'timeout:deny': 'Expired without an answer — denied',
   // Covers both endings that reach here: the turn was aborted, and the
@@ -897,6 +911,8 @@ const approvalBlocks = (
   risk: string,
   requestId: string,
   input: JsonObject,
+  origin: string | undefined,
+  oneShot: boolean,
 ): SlackBlock[] => {
   const invocation = renderInvocation(input);
   return [
@@ -904,7 +920,13 @@ const approvalBlocks = (
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*${escapeSlackText(agentName)}* wants to run \`${escapeSlackText(toolName)}\` (${risk}).`,
+        // The site, when the call is judged by one. It is not in the
+        // arguments and cannot be: a `browser.act` request shows a CSS
+        // selector, which says nothing about where the click lands — and
+        // **Always allow** widens exactly that site, so an approver who was
+        // not shown it is being asked to grant something they cannot see.
+        text: `*${escapeSlackText(agentName)}* wants to run \`${escapeSlackText(toolName)}\` (${risk})`
+          + `${origin ? ` on \`${escapeSlackText(origin)}\`` : ''}.`,
       },
     },
     ...(invocation.detail
@@ -919,15 +941,33 @@ const approvalBlocks = (
           elements: [{ type: 'mrkdwn', text: ':warning: Arguments shown are truncated — the full call is longer than this.' }],
         }]
       : []),
+    // Why there is no second button, when there is no second button.
+    ...(oneShot
+      ? [{
+          type: 'context',
+          elements: [{
+            type: 'mrkdwn',
+            text: ':lock: An approval covers this call only — nothing about it is remembered.',
+          }],
+        }]
+      : []),
     {
       type: 'actions',
       // The request id rides on every button rather than in the message
       // reference: Slack gives the value back verbatim, so the gateway is
       // asked about the request that was actually rendered, never one
       // re-derived from a channel and timestamp.
+      //
+      // **Always allow** is absent when the engine would not remember the
+      // answer — a `dangerous` tool, or a browser action with no page to
+      // grant. Offering it there is worse than useless: it does exactly
+      // what **Allow once** does, under a label promising a standing grant
+      // nobody gets.
       elements: [
-        { type: 'button', action_id: 'stratus_approve_once', text: { type: 'plain_text', text: 'Allow once' }, value: requestId },
-        { type: 'button', action_id: 'stratus_approve_always', text: { type: 'plain_text', text: 'Always allow' }, value: requestId, style: 'primary' },
+        { type: 'button', action_id: 'stratus_approve_once', text: { type: 'plain_text', text: 'Allow once' }, value: requestId, ...(oneShot ? { style: 'primary' } : {}) },
+        ...(oneShot
+          ? []
+          : [{ type: 'button', action_id: 'stratus_approve_always', text: { type: 'plain_text', text: 'Always allow' }, value: requestId, style: 'primary' }]),
         { type: 'button', action_id: 'stratus_deny', text: { type: 'plain_text', text: 'Deny' }, value: requestId, style: 'danger' },
       ],
     },
@@ -942,6 +982,14 @@ interface PendingApprovalPost {
   agentName: string;
   toolName: string;
   risk: string;
+  /**
+   * Whether `always` on this request would have remembered anything —
+   * carried from the request rather than re-derived, because the outcome
+   * has to describe the answer that was actually possible. `POST
+   * /approvals` still accepts all three answers, so another client can
+   * submit `always` for a request this channel never offered it on.
+   */
+  oneShot: boolean;
   /** Bound at render time, so a later config change cannot widen a live request. */
   approvers: Set<string>;
 }
@@ -1238,10 +1286,19 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // blocks — an approval nobody can read is an approval nobody gives.
         text: escapeSlackText(
           `${agentName} wants to run ${event.call.toolName} (${event.risk})`
+          + `${event.origin ? ` on ${event.origin}` : ''}`
           + `${invocationSummary ? `: ${invocationSummary}` : ''}.`,
         ),
         ...(thread ? { thread_ts: thread } : {}),
-        blocks: approvalBlocks(agentName, event.call.toolName, event.risk, event.requestId, event.call.input),
+        blocks: approvalBlocks(
+          agentName,
+          event.call.toolName,
+          event.risk,
+          event.requestId,
+          event.call.input,
+          event.origin,
+          event.oneShot === true,
+        ),
       });
       post = posted.ts
         ? {
@@ -1252,6 +1309,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
             agentName,
             toolName: event.call.toolName,
             risk: event.risk,
+            oneShot: event.oneShot === true,
             approvers,
           }
         : undefined;
@@ -1348,7 +1406,26 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     approvalPosts.delete(event.requestId);
 
-    const outcome = OUTCOME_TEXT[`${event.reason}:${event.answer}`] ?? 'Resolved';
+    // The one lifetime this adapter *can* tell, because it rode in on the
+    // request: a one-shot call remembers nothing whatever is answered. Both
+    // shapes reach here — a `dangerous` tool, and a call judged by an
+    // origin with no page to grant — and this channel offers no **Always
+    // allow** for either, but `POST /approvals` still takes all three
+    // answers, so another client can submit one. The general line below has
+    // to hedge between two lifetimes it cannot distinguish; this one must
+    // not, or the record of the decision claims a grant that does not exist.
+    // Three shapes are one-shot and only one of them is knowable from here:
+    // `risk` rode in on the request, so a `dangerous` tool can say why. The
+    // other two — a browser action with no page to grant, and a command the
+    // parser cannot reduce to a scope — are not distinguishable without
+    // carrying a reason this adapter would only ever print, so they share a
+    // line that is true of both. Naming one of them by guess is how this
+    // read "there was no page to remember" for a shell pipeline.
+    const outcome = post.oneShot && event.reason === 'decided' && event.answer === 'always'
+      ? post.risk === 'dangerous'
+        ? 'Allowed once — a dangerous tool is never remembered'
+        : 'Allowed once — nothing about this call could be remembered'
+      : OUTCOME_TEXT[`${event.reason}:${event.answer}`] ?? 'Resolved';
     const by = event.actor ? ` by <@${event.actor}>` : '';
     const text = `*${escapeSlackText(post.agentName)}* — \`${escapeSlackText(post.toolName)}\` (${post.risk}): ${outcome}${by}.`;
     try {
