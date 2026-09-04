@@ -946,6 +946,14 @@ interface PendingApprovalPost {
   agentName: string;
   toolName: string;
   risk: string;
+  /**
+   * Whether `always` on this request would have remembered anything —
+   * carried from the request rather than re-derived, because the outcome
+   * has to describe the answer that was actually possible. `POST
+   * /approvals` still accepts all three answers, so another client can
+   * submit `always` for a request this channel never offered it on.
+   */
+  oneShot: boolean;
   /** Bound at render time, so a later config change cannot widen a live request. */
   approvers: Set<string>;
 }
@@ -1265,6 +1273,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
             agentName,
             toolName: event.call.toolName,
             risk: event.risk,
+            oneShot: event.oneShot === true,
             approvers,
           }
         : undefined;
@@ -1361,14 +1370,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     approvalPosts.delete(event.requestId);
 
-    // `dangerous` is the one lifetime this adapter *can* tell, because the
-    // risk rode in on the request: that tier means a human every time, so
-    // an "always" answered on one runs the call and remembers nothing. The
-    // general line below has to hedge between two lifetimes it cannot
-    // distinguish; this one must not, or the record of the decision claims
-    // a standing grant that does not exist.
-    const outcome = post.risk === 'dangerous' && event.reason === 'decided' && event.answer === 'always'
-      ? 'Allowed once — a dangerous tool is never remembered'
+    // The one lifetime this adapter *can* tell, because it rode in on the
+    // request: a one-shot call remembers nothing whatever is answered. Both
+    // shapes reach here — a `dangerous` tool, and a call judged by an
+    // origin with no page to grant — and this channel offers no **Always
+    // allow** for either, but `POST /approvals` still takes all three
+    // answers, so another client can submit one. The general line below has
+    // to hedge between two lifetimes it cannot distinguish; this one must
+    // not, or the record of the decision claims a grant that does not exist.
+    const outcome = post.oneShot && event.reason === 'decided' && event.answer === 'always'
+      ? post.risk === 'dangerous'
+        ? 'Allowed once — a dangerous tool is never remembered'
+        : 'Allowed once — there was no page to remember'
       : OUTCOME_TEXT[`${event.reason}:${event.answer}`] ?? 'Resolved';
     const by = event.actor ? ` by <@${event.actor}>` : '';
     const text = `*${escapeSlackText(post.agentName)}* — \`${escapeSlackText(post.toolName)}\` (${post.risk}): ${outcome}${by}.`;

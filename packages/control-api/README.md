@@ -433,7 +433,9 @@ different lifetimes, and which one the approver got depends on the tool:**
   must not offer an unconditional "always" on such a request** — it does
   exactly what `once` does, under a label promising a grant nobody gets.
   The Slack channel drops the button and says why; the dashboard does the
-  same.
+  same. `POST /approvals` still *accepts* `always` on such a request — the
+  endpoint takes all three answers whatever was rendered — and the engine
+  treats it as `once`, which is also how the resolved message describes it.
 - For **every other tool**, it is remembered against the tool name in memory,
   and lasts until the session ends **or the daemon restarts, whichever comes
   first**. Sessions are durable and restarts are not; a session resumed in a

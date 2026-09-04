@@ -1315,6 +1315,7 @@ test('an always answered on a dangerous call is recorded as the one-shot it is',
   await gateway.bus.emit(approvalRequest({
     call: { id: 'c1', toolName: 'mcp.vendor.wipe', input: {} },
     risk: 'dangerous',
+    oneShot: true,
   }));
   await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
 
@@ -1325,6 +1326,30 @@ test('an always answered on a dangerous call is recorded as the one-shot it is',
   // of audit line somebody acts on.
   const settled = web.updates.at(-1)?.text ?? '';
   assert.match(settled, /Allowed once — a dangerous tool is never remembered/);
+  assert.doesNotMatch(settled, /remembered — for this session/);
+
+  await adapter.stop();
+});
+
+test('an originless browser action resolved as always is recorded as one-shot too', async () => {
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  // This channel offers no **Always allow** for a one-shot request, but
+  // `POST /approvals` still takes all three answers — so another client,
+  // or an older one, can submit `always` for it. The record has to describe
+  // what the engine did, not what was clicked.
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({
+    call: { id: 'c1', toolName: 'browser.act', input: { action: 'click', selector: '#submit' } },
+    oneShot: true,
+  }));
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
+
+  const settled = web.updates.at(-1)?.text ?? '';
+  assert.match(settled, /Allowed once — there was no page to remember/);
   assert.doesNotMatch(settled, /remembered — for this session/);
 
   await adapter.stop();
