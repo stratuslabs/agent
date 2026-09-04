@@ -35,7 +35,7 @@ import {
  * package.json, because nothing else fails when a release bumps the
  * manifest and leaves the literal behind.
  */
-export const PLUGIN_MCP_VERSION = '0.10.0';
+export const PLUGIN_MCP_VERSION = '0.11.0';
 
 export { bridgedToolName, normalizeCallResult, sanitizeToolSegment, SERVER_NAME_PATTERN } from './normalize.ts';
 export { sealedStdioEnv, pathGrant, resolveCommandPath };
