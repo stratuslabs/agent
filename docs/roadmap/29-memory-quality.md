@@ -110,9 +110,19 @@ different review look like.
   promises the file stays hand-editable. Anything that *changes* an entry has
   to be a record, never a field write:
 
-  - **Supersession** — a tombstone naming its successor, so `liveEntriesFor`
-    gains no new concept. A superseded entry is not live: it leaves `list`,
-    `search`, and therefore the prompt, exactly as a forgotten one does.
+  - **Supersession** — **one record, not two**: the successor entry carries
+    `supersedes` itself, and that field *is* the retirement. A superseded entry
+    is not live — it leaves `list`, `search`, and therefore the prompt, exactly
+    as a forgotten one does — and `liveEntriesFor` learns to read the field
+    alongside the tombstones it already reads.
+
+    A separate tombstone plus a separate successor entry would be two appends
+    with no transaction between them, and the store's only atomicity is one
+    `O_APPEND` record. Stopping between them leaves either both beliefs live
+    (successor first) or a retirement with no replacement (tombstone first) —
+    the second being the worse half, since it loses a fact on a crash in a
+    store whose whole posture is that nothing is lost. One record has no
+    in-between state to reason about.
   - **Pin and unpin** — a record naming the entry. `pinned` cannot be a field
     on the entry: pinning is a toggle, from the agent and from the operator's
     CLI and console, and a toggle on an append-only line is a rewrite. This
@@ -357,6 +367,10 @@ different review look like.
   leave both successors live** — the invariant is the retirement, not a unique
   replacement, and a test expecting one successor would be asserting a
   guarantee this design deliberately does not make.
+- **A crash during a supersession leaves either the whole revision or none of
+  it** — one record, so there is no state where an entry is retired with its
+  replacement missing. Asserted by interrupting between logical writes, which
+  is the failure a two-append implementation has and this one cannot.
 - **Pinning and unpinning leave the entry's own line byte-identical** — the
   criterion that fails if `pinned` is implemented as a field write, which is
   the convenient implementation and breaks `O_APPEND` and decision 5 together.

@@ -35,9 +35,14 @@ half stood.
 
 **In:**
 
-- **A taint field on `ToolResult`**, in `core`. The promotion 13 deferred. It
-  says the result carries content from outside the trust boundary; it does not
-  say what a consumer should do about it, which is each consumer's business.
+- **A trust field on `ToolResult`**, in `core`. The promotion 13 deferred. It
+  carries **a value from the ordering below, not a boolean** — a result can be
+  `unknown` as easily as `external`, and a delegate reply from a target working
+  off its own legacy notes is exactly that. A binary field forces an
+  implementation to either upgrade such a reply to `agent` or overstate it as
+  `external`, and both are lies of the kind the label exists to prevent. It
+  says where the content came from; it does not say what a consumer should do
+  about it, which is each consumer's business.
 - **And a producer-facing channel to set it, because the field alone is not
   one.** `Tool.execute` returns `Promise<JsonValue>` and `DefaultExecutor`
   builds the result with `successResult(call, output)` — so a plugin has no
@@ -69,18 +74,36 @@ half stood.
   returns page `innerText` and `goto`, `read`, `screenshot`, and `act` each
   return a page-supplied `title` — the most attacker-controlled surface of the
   four, reached by a page the agent was merely pointed at.
-- **`user` is its own category and is not tainted.** The earlier phrasing —
-  "content the agent did not author and the operator did not configure" — reads
-  literally as tainting every message a person sends the agent, which would
-  make every memory external and empty the label by making it universal. A
-  message from the principal on an authenticated channel is `user`: the agent's
-  own operator, speaking to it directly, is the trust root the whole permission
-  model already assumes.
+- **`user` is its own category, and it is earned by an authorized principal —
+  never inferred from the shape of a channel.** An earlier draft said a message
+  "from the principal on an authenticated channel" is `user`, treating a DM as
+  proof of who was speaking. It is not. The Slack adapter's checks are: the
+  event has a user, is not a bot, has no subtype, is a DM or an app mention,
+  and is not the bot itself. **Nothing there establishes that the sender is the
+  agent's operator** — any member of the workspace can open a DM or type an
+  `@mention`, and under the earlier wording their message would have arrived as
+  the trust root. That is instruction-shaped content from a stranger, labelled
+  `user`, one `memory.remember` away from being the agent's own conclusion.
 
-  **What a third party's message in a shared channel is remains open** (see
-  Open questions) — a Slack channel with five members is not the same as a DM,
-  and the honest answer is not obvious. This step ships the DM case as `user`
-  and the open question as an open question rather than quietly deciding it.
+  So: `user` requires the operator to have **said who the principal is**. A
+  per-agent authorized-sender mapping is part of this step — small, an
+  allowlist of ids per bound channel — and it is the thing that makes `user`
+  mean something.
+
+  - A local CLI session is `user` with no mapping needed: the machine's owner
+    is the operator, and that is what the permission model already assumes
+    everywhere else.
+  - A channel sender the operator has authorized is `user`.
+  - **A channel sender they have not is `unknown`** — not `external`, because
+    claiming a stranger wrote it overstates what we know when the sender may
+    well be the operator who simply has not configured the mapping yet; and
+    not `user`, because that is the whole finding. `unknown` propagates under
+    the ordering, so the safe behavior holds while the claim stays honest.
+
+  This also settles what was an open question about shared channels, and
+  settles it better than the question was framed: the distinction was never DM
+  versus channel, it is authorized principal versus not. A five-member channel
+  where all five are authorized is fine; a DM from a stranger is not.
 - **The hook sits where tools execute, not in the runner's loop.** This is the
   part a reasonable implementation gets wrong. `AgentRunner.runToolCalls` looks
   like the natural place and is not: `provider-claude-code` and
@@ -103,9 +126,22 @@ half stood.
   pre-upgrade transcript, which is the one corpus guaranteed to exist on the
   day this ships. It is the same reasoning as `unknown` on a legacy entry and
   gets the same answer: absence of provenance is not evidence of trust. Marking
-  those sessions `external` outright would be the other overcorrection, and the
-  scope here is small and self-draining — only sessions that span the upgrade,
-  only until they end.
+  those sessions `external` outright would be the other overcorrection.
+
+  **"Only until they end" is not good enough, because some of them do not
+  end.** The Slack adapter keys a DM session on the DM channel id alone, so an
+  operator's ongoing conversation with an agent is *one* resumable session that
+  may run for the life of the install — and with trust monotonic within a
+  session, a pre-upgrade DM would write `unknown` forever, even once its
+  transcript held nothing but the operator's own messages. Entry re-assertion
+  cannot fix that: it re-labels entries, and this is a *session* label.
+
+  The remedy is a session boundary, not a trust upgrade: an operator-triggered
+  **rollover** that starts a fresh session for a conversation, leaving the
+  pre-upgrade prefix behind in the record where it belongs. That is honest —
+  the old session stays what it was — and it is the only move that does not
+  either strand a conversation at `unknown` or quietly raise trust over a
+  transcript nobody re-read.
 - **Propagation, stated in every direction it travels**, because each one of
   these was found separately and each passed the tests written for the others:
 
@@ -266,9 +302,16 @@ half stood.
 - **A target whose own memory was `unknown` returns a reply that makes the
   parent `unknown`** — the return leg at a label that is not `external`, which
   every test written around tainted-or-not passes straight over.
-- **A user's message does not taint the session**, so an agent that is simply
+- **An authorized principal's message does not taint the session**, so an agent
   talking to its operator writes `agent` — the criterion that fails if the
   producer rule is read literally enough to swallow everything.
+- **A message from a workspace member who is not an authorized principal makes
+  the session `unknown`**, in a DM as much as in a channel — the criterion that
+  fails if `user` is inferred from channel shape, which is what the adapter's
+  own checks would have allowed.
+- **A rolled-over session writes `agent` again where its pre-upgrade
+  predecessor wrote `unknown`**, with the old session unchanged — the case a
+  long-lived Slack DM would otherwise strand permanently.
 - **An external entry's `about` key never appears in the plain topic index** —
   asserted with an instruction-shaped topic name, against the rendered prompt,
   which is the only place the leak shows.
@@ -280,12 +323,13 @@ half stood.
 
 ## Open questions
 
-- **What is a third party's message in a shared channel?** A Slack channel with
-  five members carries text the operator did not write, and treating it as
-  `user` trusts anyone in the room while treating it as `external` taints every
-  channel conversation. Probably a per-channel operator setting, which is a
-  configuration surface this step would rather not open before someone needs
-  it.
+- **How much configuration should the authorized-principal mapping be?** The
+  question this replaced asked what a third party's message in a shared channel
+  is, and framed it as DM versus channel — the wrong axis, as the adapter's own
+  checks show, since a DM proves nothing about who is typing. Scope now says an
+  allowlist of sender ids per bound channel. What stays open is how much more
+  than that it should be: a group, a Slack user-group reference, or a "whoever
+  installed the app" default that most installs would never touch.
 - **Should tainted writes ever be `gated` rather than merely labelled?**
   Out of scope above, but the argument is real for a fleet where an agent
   browses untrusted pages all day.
