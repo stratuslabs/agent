@@ -64,6 +64,14 @@ Three things make this the moment rather than later:
     `createdAt`, which is transaction time. Conflating them is why assistants
     confidently report where someone used to work. Two optional fields buy the
     bitemporal distinction outright.
+
+    **An entry whose `validUntil` has passed leaves the injected slice and
+    stays findable by `search`.** One policy, stated here rather than left to
+    the implementation, because excluding and downranking produce different
+    prompts and different harness numbers — a step that leaves the choice open
+    cannot be measured against itself. Expiry is not deletion: the entry is in
+    the record, in `search`, and in `audit`; it has stopped being what is true
+    now, which is the only claim the injected slice makes.
   - **`trust` and `origin`** — `user`, `agent`, or `external`, plus the session
     and the tool it came through.
 
@@ -257,10 +265,40 @@ Three things make this the moment rather than later:
   than an error. There is no data migration to write, because the file the
   upgrade must not forget is the file the new code already reads.
 - **Taint propagates per session, not per fact.** The runner knows a turn saw
-  an untrusted result; it does not track which words in a later `memory.remember`
+  untrusted content; it does not track which words in a later `memory.remember`
   came from it, and a design that claimed to would be lying. So: once a session
-  has seen a tainted result, entries written later in that session are
+  has seen untrusted content, entries written later in that session are
   `external`. Coarse, over-marking, and the failure direction is the safe one.
+- **A session is tainted by what enters its context, not only by what a tool
+  returned.** A tainted `ToolResult` is one source; **an `external` entry
+  arriving through the injected memory block or through a `memory.recall`
+  result is another**, which means `search` has to carry `trust` out with each
+  entry rather than content alone. Without this the store launders its own
+  contents on the next restart: a fresh session reads an external fact from
+  the prompt, restates it, remembers it — and the new entry is `agent`,
+  because that session never called a network tool. The round trip through
+  memory is the cheapest version of the whole attack, and it is available to
+  anything that can wait a session.
+- **`external` propagates; `unknown` does not**, and the asymmetry is the
+  decision rather than an oversight. `external` is a positive claim that
+  content came from a stranger, so anything written in its presence inherits
+  it. `unknown` is a statement about *missing metadata on old entries* — and
+  since every legacy entry is `unknown` and legacy entries are what an
+  upgraded install injects, propagating it would mark every fact every
+  upgraded agent ever writes again, permanently. That is the same
+  make-the-label-universal failure the `unknown` default exists to avoid,
+  arriving through the back door.
+- **Taint crosses a delegation.** `createDelegateTool` starts the target's
+  session with the parent's text as `userMessage` and metadata carrying depth,
+  delegator, and root session — so a tainted parent hands attacker-influenced
+  text to a teammate whose session has seen nothing, and the teammate stores
+  it as its own conclusion. A per-session rule with no delegation clause is a
+  cross-agent laundering path, which is worse than the single-agent one it
+  replaces: the roster's separate identities are what make the launder
+  convincing. The parent's taint rides in the delegation metadata beside the
+  keys already there. [24](./24-sub-agents.md) is unaffected — a sub-agent
+  writes no memory at all — but that is a different tool, and its rule does
+  not cover this one.
 - **The pinned cap refuses, on the same reasoning as the per-entry byte cap.**
   14 refuses an over-cap fact rather than truncating it because a half-stored
   fact is worse than a refused one. A silently evicted pin is the same mistake
@@ -307,6 +345,17 @@ Three things make this the moment rather than later:
   assumed from the `web.fetch` case. Two different plugins own those two
   results, so one passing says nothing about the other, and the browser is the
   producer a list-shaped taint contract loses first.
+- **A fresh session that reads an external entry — from the injected block or
+  from `memory.recall` — and then remembers something writes `external`, not
+  `agent`.** The round trip through the store on a later restart is the
+  cheapest version of the whole attack, and it passes every taint test that
+  only exercises tool results.
+- **A session that has seen only `unknown` entries still writes `agent`** —
+  the other half of that rule, and the one that stops an upgraded install
+  marking every fact it will ever write again.
+- **An agent tainted by a fetch delegates; the target's `memory.remember`
+  writes `external`** — the cross-agent path, asserted end to end, because
+  every single-session taint test passes while it is open.
 - **Exactly one `memory`-kind section reaches the Anthropic placement, and all
   three blocks arrive at the tail** — the criterion that fails if the blocks
   are ever split into sibling sections, which drops two of them from the
@@ -356,9 +405,14 @@ Three things make this the moment rather than later:
   page at the start of a long session marks everything after it external. The
   finer version needs per-turn provenance the runner does not currently keep,
   and adding it is a kernel change worth pricing separately.
-- **Should `validUntil` in the past exclude an entry from injection outright,
-  or only downrank it?** Excluding is a delete wearing a timestamp, and the
-  answer probably differs by `kind`.
+- **Should any `kind` be exempt from expiry?** The policy itself is settled in
+  Scope — an expired entry leaves the injected slice and stays findable by
+  `search` — because leaving it open contradicted the acceptance criterion
+  that requires exclusion, and downranking and excluding produce different
+  prompts and different harness numbers, so an implementation cannot satisfy
+  both. What is genuinely open is narrower: `episodic` entries carry "what
+  happened last time", which does not stop being true when it stops being
+  current, and an exemption for them is arguable on its own.
 - **Does [21](./21-team-knowledge.md)'s `MemoryScope` need a third `project`
   variant designed now?** An agent working across three repositories wants
   repository-scoped facts, and retrofitting a third variant into a union that
