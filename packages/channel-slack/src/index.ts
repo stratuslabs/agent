@@ -405,7 +405,7 @@ class ReplyRenderer {
         return;
       }
       this.lastEditAt = Date.now();
-      this.queueEdit(truncateForSlack(this.currentText()));
+      this.queueEdit(messageText(this.currentText()));
     }, delay);
     this.pendingEdit.unref?.();
   }
@@ -441,7 +441,7 @@ class ReplyRenderer {
       this.pendingEdit = undefined;
     }
     const text = reply.trim().length > 0 ? reply : NO_REPLY_TEXT;
-    const chunks = splitForSlack(text);
+    const chunks = messageChunks(text);
     // No placeholder — a handover could not open a fresh one — and the
     // reply is a message of its own rather than nothing at all.
     const rest = this.ref ? chunks.slice(1) : chunks;
@@ -613,6 +613,80 @@ const truncateForSlack = (text: string): string =>
     ? text
     : `${text.slice(0, safeCutIndex(text, SLACK_MAX_MESSAGE_CHARS - 1))}…`;
 
+/**
+ * Code, left exactly as it was written. A fence or a span is the one place
+ * a reader means the characters themselves — `**` inside a shell snippet is
+ * the snippet — so the conversion below skips them. Capturing the whole
+ * delimited run splits the text into alternating prose and code.
+ *
+ * An unterminated fence runs to the end on purpose: a model that forgets to
+ * close one, and every partially streamed block on its way to being closed,
+ * would otherwise have its contents rewritten as prose.
+ */
+const CODE_RUN = /(```[\s\S]*?```|```[\s\S]*$|`[^`\n]*`)/;
+
+/**
+ * The spellings that differ, applied to prose only, in an order that matters.
+ *
+ * Single-asterisk emphasis goes first and is barred from crossing a `*`, so
+ * `**bold**` cannot be read as an italic run that happens to begin with one.
+ * Bold then rewrites what is left, and its output is never rescanned.
+ *
+ * Each delimiter has to hug its content — `3 * 4 * 5` is arithmetic, not
+ * emphasis — and none may span a line, so one stray marker cannot italicize
+ * the rest of a message.
+ */
+const MRKDWN_REWRITES: ReadonlyArray<readonly [RegExp, string]> = [
+  // Both at once, before either rule can take half of it and leave the
+  // other half as literal asterisks. Its output is why the italic rule
+  // below refuses content that already opens with an underscore.
+  [/\*\*\*([^\s*][^*\n]*[^\s*]|[^\s*])\*\*\*/g, '*_$1_*'],
+  [/(^|[^*])\*([^\s*_][^*\n]*[^\s*]|[^\s*_])\*(?!\*)/g, '$1_$2_'],
+  [/\*\*([^\s*][^*\n]*[^\s*]|[^\s*])\*\*/g, '*$1*'],
+  [/(^|[^_])__([^\s_][^_\n]*[^\s_]|[^\s_])__(?!_)/g, '$1*$2*'],
+  [/~~([^\s~][^~\n]*[^\s~]|[^\s~])~~/g, '~$1~'],
+  // The one construct Slack spells backwards. A scheme is required: a
+  // bare `[1](2)` in prose is not a link anybody meant to follow.
+  [/\[([^\]\n]+)\]\(((?:https?:\/\/|mailto:)[^()\s]+)\)/g, '<$2|$1>'],
+];
+
+/** `## Heading`, which mrkdwn has no spelling for at all. */
+const MARKDOWN_HEADING = /^ {0,3}#{1,6}[ \t]+(.+?)[ \t]*#*$/gm;
+
+const convertProse = (segment: string): string => {
+  let converted = segment;
+  for (const [pattern, replacement] of MRKDWN_REWRITES) {
+    converted = converted.replace(pattern, replacement);
+  }
+  // Last, so the heading's own text is already converted. Emphasis inside
+  // it is dropped rather than nested: the whole line is about to be bold,
+  // and `*a *b* c*` renders as neither.
+  return converted.replace(MARKDOWN_HEADING, (line, body: string) => {
+    const plain = body.replaceAll('*', '').trim();
+    return plain.length > 0 ? `*${plain}*` : line;
+  });
+};
+
+/**
+ * Markdown as a model writes it, in the spelling Slack actually renders.
+ *
+ * Slack's mrkdwn is not Markdown, and the gap is not cosmetic: `**bold**`
+ * reaches a reader as four literal asterisks, and `## Heading` as a line
+ * that starts with two hashes. Models write Markdown because that is what
+ * every other surface here renders, and a soul should not have to know
+ * which channel is carrying it, so the translation happens at the edge that
+ * does know.
+ *
+ * Only what differs is touched. Lists, block quotes, and inline code
+ * already mean in mrkdwn what they mean in Markdown; rewriting them would
+ * add ways to be wrong and fix nothing.
+ */
+const toSlackMrkdwn = (text: string): string =>
+  text
+    .split(CODE_RUN)
+    .map((segment, index) => (index % 2 === 1 ? segment : convertProse(segment)))
+    .join('');
+
 const splitForSlack = (text: string): string[] => {
   if (text.length <= SLACK_MAX_MESSAGE_CHARS) {
     return [text];
@@ -633,6 +707,23 @@ const splitForSlack = (text: string): string[] => {
   }
   return chunks;
 };
+
+/**
+ * Agent text as one Slack message: converted, then sized.
+ *
+ * These two are the only ways anything an agent wrote reaches Slack, so
+ * mrkdwn is a property of the send path rather than something each call
+ * site has to remember — the reason the streamed placeholder and the final
+ * reply cannot end up in different markup.
+ */
+const messageText = (text: string): string => truncateForSlack(toSlackMrkdwn(text));
+
+/**
+ * Agent text as however many Slack messages it takes. Converted before it
+ * is split, so a chunk is measured at the length it will be sent at, and so
+ * no rewrite is ever asked to span a boundary.
+ */
+const messageChunks = (text: string): string[] => splitForSlack(toSlackMrkdwn(text));
 
 // One rule with the gateway's `sessionRouting`, which posts the same
 // message for a turn this adapter did not start.
@@ -940,7 +1031,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const web = connection.web;
     return {
       async post(text: string): Promise<OutboundMessageRef> {
-        const chunks = splitForSlack(text.trim().length > 0 ? text : '(empty message)');
+        const chunks = messageChunks(text.trim().length > 0 ? text : '(empty message)');
         let first: OutboundMessageRef | undefined;
         for (const chunk of chunks) {
           const posted = await web.chat.postMessage({ channel: channelId, text: chunk });
@@ -951,7 +1042,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         return first ?? { channel: channelId, ts: '' };
       },
       async edit(ref: OutboundMessageRef, text: string): Promise<void> {
-        await web.chat.update({ channel: ref.channel, ts: ref.ts, text: truncateForSlack(text) });
+        await web.chat.update({ channel: ref.channel, ts: ref.ts, text: messageText(text) });
       },
       async upload(filePath: string, title?: string): Promise<void> {
         // File DATA, read here, for the same reason the renderer does it:
@@ -1292,7 +1383,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       connection,
       channel,
       thread,
-      splitForSlack(`Something went wrong: ${event.error}`),
+      messageChunks(`Something went wrong: ${event.error}`),
       () => uploadUnrenderedFiles(connection, channel, thread, files),
     );
   };
@@ -1339,7 +1430,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // last. `NO_REPLY_TEXT` is what a rendered turn with nothing to say
     // puts in its own message too. With nothing queued behind, there is no
     // order to keep and nothing to say, so the files go on their own.
-    const chunks = routing.reply ? splitForSlack(routing.reply) : [];
+    const chunks = routing.reply ? messageChunks(routing.reply) : [];
     const posting = chunks.length > 0 ? chunks : (behind && files.length > 0 ? [NO_REPLY_TEXT] : []);
     const uploads = (): Promise<void> => uploadUnrenderedFiles(connection, channel, thread, files);
     if (posting.length === 0) {
