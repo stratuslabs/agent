@@ -787,18 +787,29 @@ const convertHeadings = (text: string, code: ReadonlyArray<readonly [number, num
     if (heading.length === 0) {
       return line;
     }
-    // Where the closing hashes and trailing spaces begin. Dropping them is
-    // the heading's own syntax being removed, but only while they are the
-    // heading's: a line that opens a span ends inside it, and there they
-    // are somebody's snippet. Nothing on this line is safe to strip then,
-    // so it is left exactly as written.
-    if (tail.length > 0) {
-      const tailAt = offset + line.length - tail.length;
+    // Where everything this would drop from the line's end begins: the
+    // closing hashes and spaces the pattern captured, and whatever else
+    // `trimEnd` would take with them. The two are not the same set — the
+    // pattern knows only spaces and tabs, while trimming also takes a
+    // no-break space, an ideographic space, and the rest of what
+    // ECMAScript counts as whitespace — and the difference is exactly
+    // where a character goes missing.
+    //
+    // Dropping any of it is the heading's own syntax being removed, but
+    // only while it is the heading's: a line that opens a span reaches its
+    // end inside one, and there the same characters are somebody's
+    // snippet. Nothing on this line is safe to strip then, so it is left
+    // exactly as written. (The front needs no such care: the body starts
+    // where the hashes stop, which this line has already been shown to
+    // reach in prose.)
+    const dropped = tail.length + (body.length - body.trimEnd().length);
+    if (dropped > 0) {
+      const droppedAt = offset + line.length - dropped;
       let over = span;
-      while (over < code.length && (code[over]?.[1] ?? 0) <= tailAt) {
+      while (over < code.length && (code[over]?.[1] ?? 0) <= droppedAt) {
         over += 1;
       }
-      if (startsInside(tailAt, over)) {
+      if (startsInside(droppedAt, over)) {
         return line;
       }
     }

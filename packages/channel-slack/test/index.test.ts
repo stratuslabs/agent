@@ -399,6 +399,8 @@ test('a heading is found on the reply\'s own lines, not inside each fragment inl
     '## Run `npm test`',
     '# show `value #',
     'next`',
+    '# show `other ',
+    'lines`',
     '```sh',
     '# a real comment',
     '```',
@@ -445,6 +447,11 @@ test('a heading is found on the reply\'s own lines, not inside each fragment inl
     // ends inside a span, where the same hash is somebody's snippet.
     '# show `value #',
     'next`',
+    // The same for a no-break space, which the pattern's `[ \t]` does not
+    // know about but `trim` takes anyway — the gap between those two sets
+    // is exactly where a character goes missing.
+    '# show `other ',
+    'lines`',
     // While a hash whose line begins inside a fence is somebody's comment.
     '```sh',
     '# a real comment',
