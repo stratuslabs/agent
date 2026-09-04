@@ -382,6 +382,52 @@ test('a reply written in Markdown reaches Slack in the markup Slack renders', as
   ].join('\n'));
 });
 
+test('a reply keeps every character it was written with, whatever the markers around it', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  // Each line is a place a rewrite could quietly change what the agent
+  // said. A reply that reads oddly is survivable; one that says something
+  // else is not.
+  const reply = [
+    '# C#',
+    '# glob *.ts',
+    'a ``span with a ` inside`` stays whole',
+    'use the ` character on its own, then **bold**',
+    '````',
+    '```',
+    '**inner fence**',
+    '```',
+    '````',
+  ].join('\n');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> mind the edges'));
+  await adapter.stop();
+
+  assert.equal(web.updates.at(-1)?.text, [
+    // A closing hash run is only closing syntax when it is spaced off the
+    // text; `C#` is the name of a language.
+    '*C#*',
+    '*glob *.ts*',
+    // A longer delimiter is what carries a shorter one, for a span and a
+    // fence alike — the run that closes it has to be exactly as long.
+    'a ``span with a ` inside`` stays whole',
+    'use the ` character on its own, then *bold*',
+    '````',
+    '```',
+    '**inner fence**',
+    '```',
+    '````',
+  ].join('\n'));
+});
+
 test('a streamed placeholder is converted too, and a half-written marker stays literal', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

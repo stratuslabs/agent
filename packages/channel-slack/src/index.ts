@@ -614,16 +614,66 @@ const truncateForSlack = (text: string): string =>
     : `${text.slice(0, safeCutIndex(text, SLACK_MAX_MESSAGE_CHARS - 1))}…`;
 
 /**
- * Code, left exactly as it was written. A fence or a span is the one place
- * a reader means the characters themselves — `**` inside a shell snippet is
- * the snippet — so the conversion below skips them. Capturing the whole
- * delimited run splits the text into alternating prose and code.
- *
- * An unterminated fence runs to the end on purpose: a model that forgets to
- * close one, and every partially streamed block on its way to being closed,
- * would otherwise have its contents rewritten as prose.
+ * Where the run of exactly `length` backticks that closes an open one
+ * begins, or -1. Exactly: a longer run is not a closer, which is the whole
+ * point of writing a span as ``code with a ` in it`` and a fence as ````
+ * when the block itself contains ```.
  */
-const CODE_RUN = /(```[\s\S]*?```|```[\s\S]*$|`[^`\n]*`)/;
+const closingBacktickRun = (text: string, from: number, length: number): number => {
+  const run = '`'.repeat(length);
+  for (let at = text.indexOf(run, from); at !== -1; at = text.indexOf(run, at + 1)) {
+    if (text[at - 1] !== '`' && text[at + length] !== '`') {
+      return at;
+    }
+  }
+  return -1;
+};
+
+/**
+ * The text as alternating prose and code — even indices prose, odd code.
+ *
+ * Code is the one place a reader means the characters themselves: `**` in a
+ * shell snippet is the snippet, so nothing below rewrites it. A run of N
+ * backticks opens code and the next run of exactly N closes it, which is
+ * the same rule for a span and for a fence and is why a longer delimiter
+ * can carry a shorter one inside it.
+ *
+ * A fence with no closer runs to the end on purpose: a model that forgets
+ * to close one, and every partially streamed block on its way to being
+ * closed, would otherwise have its contents rewritten as prose. One or two
+ * unmatched backticks are the opposite case — literal text, as they are in
+ * Markdown, since "use the ` character" must not swallow the rest of the
+ * message.
+ */
+const proseAndCode = (text: string): string[] => {
+  const segments: string[] = [];
+  let prose = 0;
+  let cursor = 0;
+  while (cursor < text.length) {
+    const open = text.indexOf('`', cursor);
+    if (open === -1) {
+      break;
+    }
+    let length = 1;
+    while (text[open + length] === '`') {
+      length += 1;
+    }
+    const close = closingBacktickRun(text, open + length, length);
+    if (close === -1) {
+      if (length < 3) {
+        cursor = open + length;
+        continue;
+      }
+      segments.push(text.slice(prose, open), text.slice(open));
+      return segments;
+    }
+    segments.push(text.slice(prose, open), text.slice(open, close + length));
+    prose = close + length;
+    cursor = prose;
+  }
+  segments.push(text.slice(prose));
+  return segments;
+};
 
 /**
  * The spellings that differ, applied to prose only, in an order that matters.
@@ -650,20 +700,34 @@ const MRKDWN_REWRITES: ReadonlyArray<readonly [RegExp, string]> = [
   [/\[([^\]\n]+)\]\(((?:https?:\/\/|mailto:)[^()\s]+)\)/g, '<$2|$1>'],
 ];
 
-/** `## Heading`, which mrkdwn has no spelling for at all. */
-const MARKDOWN_HEADING = /^ {0,3}#{1,6}[ \t]+(.+?)[ \t]*#*$/gm;
+/**
+ * `## Heading`, which mrkdwn has no spelling for at all.
+ *
+ * The optional closing hashes have to be spaced off the text, as Markdown
+ * requires: without that, `# C#` is a heading whose name loses its last
+ * character.
+ */
+const MARKDOWN_HEADING = /^ {0,3}#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/gm;
+
+/** One emphasis run and nothing else — `*Title*`, not `Some *word* here`. */
+const WHOLLY_BOLD = /^\*[^*]+\*$/;
 
 const convertProse = (segment: string): string => {
   let converted = segment;
   for (const [pattern, replacement] of MRKDWN_REWRITES) {
     converted = converted.replace(pattern, replacement);
   }
-  // Last, so the heading's own text is already converted. Emphasis inside
-  // it is dropped rather than nested: the whole line is about to be bold,
-  // and `*a *b* c*` renders as neither.
+  // Last, so the heading's own text is already converted. A heading a model
+  // wrote as `## **Title**` is bold by then, and wrapping it again would
+  // print the asterisks rather than render them. Nothing is stripped to get
+  // there: an asterisk in a heading may be the text itself (`# glob *.ts`),
+  // and a reply that reads oddly beats a reply that says something else.
   return converted.replace(MARKDOWN_HEADING, (line, body: string) => {
-    const plain = body.replaceAll('*', '').trim();
-    return plain.length > 0 ? `*${plain}*` : line;
+    const text = body.trim();
+    if (text.length === 0) {
+      return line;
+    }
+    return WHOLLY_BOLD.test(text) ? text : `*${text}*`;
   });
 };
 
@@ -682,8 +746,7 @@ const convertProse = (segment: string): string => {
  * add ways to be wrong and fix nothing.
  */
 const toSlackMrkdwn = (text: string): string =>
-  text
-    .split(CODE_RUN)
+  proseAndCode(text)
     .map((segment, index) => (index % 2 === 1 ? segment : convertProse(segment)))
     .join('');
 
