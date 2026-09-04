@@ -397,6 +397,8 @@ test('a heading is found on the reply\'s own lines, not inside each fragment inl
     '# Inspect ```third',
     'fourth```',
     '## Run `npm test`',
+    '# show `value #',
+    'next`',
     '```sh',
     '# a real comment',
     '```',
@@ -438,6 +440,11 @@ test('a heading is found on the reply\'s own lines, not inside each fragment inl
     // But a span that closes on the line is no obstacle: the marker goes
     // just past it, in prose, so this heading is bolded.
     '*Run `npm test`*',
+    // And nothing on this line is stripped at all. Closing hashes are the
+    // heading's own syntax only while they are the heading's: this line
+    // ends inside a span, where the same hash is somebody's snippet.
+    '# show `value #',
+    'next`',
     // While a hash whose line begins inside a fence is somebody's comment.
     '```sh',
     '# a real comment',

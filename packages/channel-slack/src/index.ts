@@ -716,8 +716,14 @@ const MRKDWN_REWRITES: ReadonlyArray<readonly [RegExp, string]> = [
  * The optional closing hashes have to be spaced off the text, as Markdown
  * requires: without that, `# C#` is a heading whose name loses its last
  * character.
+ *
+ * What they and any trailing spaces cover is captured rather than dropped,
+ * because dropping is only right when they are the heading's own syntax. A
+ * heading that opens a code span reaches its end inside one, and there the
+ * same characters are the snippet: `` # show `value # `` has a hash that
+ * belongs to whoever wrote the code.
  */
-const MARKDOWN_HEADING = /^ {0,3}#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/gm;
+const MARKDOWN_HEADING = /^ {0,3}#{1,6}[ \t]+(.+?)((?:[ \t]+#+)?[ \t]*)$/gm;
 
 const convertInline = (segment: string): string => {
   let converted = segment;
@@ -769,7 +775,7 @@ const convertHeadings = (text: string, code: ReadonlyArray<readonly [number, num
   const startsInside = (position: number, from: number): boolean =>
     position >= (code[from]?.[0] ?? Number.POSITIVE_INFINITY);
 
-  return text.replace(MARKDOWN_HEADING, (line, body: string, offset: number) => {
+  return text.replace(MARKDOWN_HEADING, (line, body: string, tail: string, offset: number) => {
     while (span < code.length && (code[span]?.[1] ?? 0) <= offset) {
       span += 1;
     }
@@ -780,6 +786,21 @@ const convertHeadings = (text: string, code: ReadonlyArray<readonly [number, num
     const heading = body.trim();
     if (heading.length === 0) {
       return line;
+    }
+    // Where the closing hashes and trailing spaces begin. Dropping them is
+    // the heading's own syntax being removed, but only while they are the
+    // heading's: a line that opens a span ends inside it, and there they
+    // are somebody's snippet. Nothing on this line is safe to strip then,
+    // so it is left exactly as written.
+    if (tail.length > 0) {
+      const tailAt = offset + line.length - tail.length;
+      let over = span;
+      while (over < code.length && (code[over]?.[1] ?? 0) <= tailAt) {
+        over += 1;
+      }
+      if (startsInside(tailAt, over)) {
+        return line;
+      }
     }
     // Anything left on the line that a delimiter could pair with, walked
     // from where the heading cursor already stands rather than from the
