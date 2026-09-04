@@ -92,10 +92,18 @@ Three things make this the moment rather than later:
   job. This step ships the mechanism, not the detector.
 
 - **Turn injection becomes three bounded blocks instead of one recency slice.**
-  All three are rendered through [09](./09-skills.md)'s shared prompt renderer
-  as their own tagged sections, so [23](./23-prompt-caching.md)'s Anthropic
-  tail split keeps working unchanged — every one of them is volatile and none
-  of them belongs on the cached prefix.
+  They are three blocks *within* [09](./09-skills.md)'s single `memory`
+  section, not three tagged sections of their own, and that is a requirement
+  rather than a formatting preference. [23](./23-prompt-caching.md)'s Anthropic
+  placement reads `parts.find((part) => part.kind === 'memory')` and strips
+  with `parts.filter((part) => part.kind !== 'memory')`: three sections sharing
+  the kind would send the first to the tail and **drop the other two from the
+  request entirely**, and three new kinds would leave them on the cached
+  prefix, which is exactly what 23 moved memory off. One aggregate volatile
+  section is the only shape that leaves the adapter untouched, and it keeps
+  `buildPrompt`'s own reasoning — one block, joined as it has always been
+  joined — intact. If a later step needs the blocks separately placed, that is
+  a change to the adapter with its own argument, not a side effect of this one.
 
   - **Pinned core**, always present, hard-capped (2 KiB). This is what makes an
     agent still know the basics after a year with no search at all, and the cap
@@ -129,8 +137,20 @@ Three things make this the moment rather than later:
 
 - **The untrusted marking, promoted to the kernel and carried out the far
   side.** A taint field on `ToolResult` — the promotion 13 deferred and named
-  this as the consumer for — set by `web.search`, `web.fetch`, and the
-  [11](./11-mcp.md) bridge. An entry written in a session that has seen a
+  this as the consumer for.
+
+  **The producer rule is a rule, not a list**: a result is tainted when it
+  carries content the agent did not author and the operator did not configure.
+  An enumerated list is how the newest tool silently arrives untainted, and the
+  first draft of this spec proved the point by naming `web.search`,
+  `web.fetch`, and the [11](./11-mcp.md) bridge while omitting the browser —
+  where `browser.read` returns page `innerText` and `goto`, `read`,
+  `screenshot`, and `act` all return a page-supplied `title`. That is the most
+  attacker-controlled surface of the four, reached by a page the agent was
+  merely pointed at. Every one of those is a producer, and so is the next tool
+  that reads something a stranger wrote.
+
+  An entry written in a session that has seen a
   tainted result is stored `trust: 'external'`, and external-origin facts
   render in their **own labelled block**: recorded from external sources, to be
   read as reports rather than as the agent's own conclusions.
@@ -234,6 +254,14 @@ Three things make this the moment rather than later:
   and renders in the labelled block** — asserted against the rendered prompt
   rather than the stored entry, because the entry is the half that would pass
   either way.
+- **The same holds after `browser.read`**, asserted separately rather than
+  assumed from the `web.fetch` case. Two different plugins own those two
+  results, so one passing says nothing about the other, and the browser is the
+  producer a list-shaped taint contract loses first.
+- **Exactly one `memory`-kind section reaches the Anthropic placement, and all
+  three blocks arrive at the tail** — the criterion that fails if the blocks
+  are ever split into sibling sections, which drops two of them from the
+  request outright.
 - Both store implementations return the same entries in the same order for a
   `recency` read, including a `createdAt` tie. A store asked for a strategy it
   does not implement serves `recency`, reports that in the result, and does not
