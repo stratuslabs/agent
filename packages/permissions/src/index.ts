@@ -560,6 +560,20 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       const scopedByOrigin = risk === 'gated'
         && context.tool.originFor !== undefined
         && context.tool.commandFor === undefined;
+      // The grants first, and where the page is *after* them. Read the
+      // other way round, the store's disk read sits between the two, and a
+      // page that redirects inside it has a grant for site A allow a click
+      // on site B — the same shape as the approval wait below, with a
+      // shorter gap and no bound on it at all when the store is somebody
+      // else's. There is no await between this read and the match, so the
+      // origin a grant is checked against is where the conversation is when
+      // the decision is made, not where it was.
+      const grantedOrigins = scopedByOrigin
+        ? [
+            ...(sessionOrigins.get(session.agent.id) ?? []),
+            ...(origins?.whitelist ? await origins.whitelist.originsFor(session.agent.id) : []),
+          ]
+        : [];
       const reportedOrigin = scopedByOrigin ? context.tool.originFor?.(session) : undefined;
       // Read through the same normalizer a grant file is read through,
       // rather than taken as written. The hook's contract is an origin, but
@@ -603,11 +617,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       }
 
       if (origin !== undefined) {
-        const stored = origins?.whitelist ? await origins.whitelist.originsFor(session.agent.id) : [];
-        const granted = findMatchingOriginScope(origin, [
-          ...(sessionOrigins.get(session.agent.id) ?? []),
-          ...stored,
-        ]);
+        const granted = findMatchingOriginScope(origin, grantedOrigins);
         if (granted) {
           return report(
             context,

@@ -416,3 +416,30 @@ test('a page closed while the approval is outstanding says so rather than clicki
   assert.equal(await policy.approve(actOn(() => page)), false);
   assert.match(decisions[0]?.reason ?? '', /that page is no longer open/);
 });
+
+test('a page that moves while the grants are being read is judged on where it ended up', async () => {
+  const decisions: PermissionDecision[] = [];
+  let page = 'https://app.example.com/reports';
+  const policy = createPermissionPolicy({
+    mode: 'headless',
+    onDecision: (decision) => decisions.push(decision),
+    origins: {
+      whitelist: {
+        // The grant list comes off disk, and a custom store can be slower
+        // still — a network call, with no bound on it at all. Reading where
+        // the page is before that await and matching after it would let a
+        // redirect inside the gap have the grant for one site allow a click
+        // on another, with nobody asked.
+        originsFor: async () => {
+          page = 'https://checkout.example.com/confirm';
+          return [{ origin: 'https://app.example.com' }];
+        },
+        rememberOrigin: async () => {},
+      },
+    },
+  });
+
+  assert.equal(await policy.approve(actOn(() => page)), false);
+  assert.match(decisions[0]?.reason ?? '', /called on https:\/\/checkout\.example\.com/);
+  assert.equal(decisions[0]?.origin, 'https://checkout.example.com');
+});

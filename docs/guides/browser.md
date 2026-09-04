@@ -110,11 +110,12 @@ has exactly one spelling and a homograph is not a second way to write it.
   `browser.act` never receives a tool-wide grant, on any answer: one yes to a
   page must never become a yes to every page.
 - **The site is read when the call is judged**, from the page the pool holds
-  for that conversation, and read *again* after a human answers — an
-  approval can be outstanding for fifteen minutes, and a page that
-  redirected inside that wait would have a yes given for one site click on
-  another. A conversation that moved refuses: nothing runs, and an "always"
-  answered on the old page grants nothing.
+  for that conversation, with nothing between that read and the decision —
+  not even the disk read that loads your grants, because a page redirecting
+  inside *that* gap would have a grant for one site allow a click on
+  another. It is read *again* after a human answers, since an approval can
+  be outstanding for fifteen minutes. A conversation that moved refuses:
+  nothing runs, and an "always" answered on the old page grants nothing.
 
   ```text
   browser.act was approved on https://app.example.com, but the conversation is on https://checkout.example.com now — it did not run, and nothing was granted
