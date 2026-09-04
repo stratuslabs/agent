@@ -45,7 +45,54 @@ fails that one call with a message naming the fix.
 | `browser.goto` | `gated` | `interactive` asks, `remote` asks in Slack, `headless` refuses. |
 | `browser.read` | `gated` | Same. Navigating and reading reach a service outside Stratus. |
 | `browser.screenshot` | `gated` | Same. Writes a PNG into the agent's workspace and returns it as `file`, which a channel delivers as an attachment. |
-| `browser.act` | `dangerous` | Always a human, in every mode. A click submits, buys, and deletes — navigating somewhere else undoes a `goto`, and nothing undoes a click. |
+| `browser.act` | `gated`, then judged per site | `interactive` and `remote` ask, naming the site; `headless` runs it only on an origin the agent has been granted. See below. |
+
+### Acting is scoped by origin
+
+A click submits, buys, and deletes: navigating somewhere else undoes a
+`goto`, and nothing undoes a click. `browser.act` was `dangerous` for that
+reason for a long time — a human every time, in every mode, which in
+`headless` meant a flat refusal and an installed service that could never
+click anything at all.
+
+That position was hard to defend on its own terms. A shell command can be
+far more destructive than a click and *is* allowed unattended inside
+command scopes; the difference was never the blast radius, it was that a
+command string describes its own effect and a CSS selector does not.
+`click("#submit")` is equally "load more results" and "confirm purchase",
+so `dangerous` was standing in for **no scope model exists for this**.
+
+There is one now, and it is the vocabulary the address policy already
+speaks: the **origin of the page the conversation is on**.
+
+```jsonc
+// ~/.stratus/agents/ava.whitelist.json — beside the agent's soul, 0600
+{ "version": 1, "scopes": [], "origins": [{ "origin": "https://app.example.com" }] }
+```
+
+`Tool.originFor` is how the tool answers, and it is deliberately **not**
+given the call's input. An origin parameter would be the model's claim
+about where it is, which is precisely what a grant must not take on trust;
+the pool already tracks a page per conversation, so the origin comes from
+there. A conversation that has not navigated has no origin, so nothing
+covers the call and it asks — and `browser.act` never receives a tool-wide
+grant on any answer, so one yes to a page is never a yes to every page.
+
+**A per-origin scope does not make a click safe.** Acting on
+`app.example.com` still covers "delete the record" alongside "load more".
+It makes the blast radius *nameable*, which is what one risk word gave up
+on. Two things it does not cover:
+
+- The origin is read when the call is judged. A page that navigates
+  *itself* between the decision and the click — a timed redirect — is not
+  re-checked, and nothing inside the tool can close that window.
+- It is checked in this process, where the pool holds the page. A browser
+  driven somewhere else would need the check to happen where a compromised
+  runtime cannot skip it — the concern the egress proxy already carries for
+  addresses.
+
+[Browser actions](../../docs/guides/browser.md) is the operator-facing
+version of all of this.
 
 ## Settings
 

@@ -1272,6 +1272,31 @@ test('the approval prompt shows what is actually being approved', async () => {
   await adapter.stop();
 });
 
+test('the approval prompt names the site a browser action would act on', async () => {
+  const { web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({
+    call: { id: 'c1', toolName: 'browser.act', input: { action: 'click', selector: '#submit' } },
+    origin: 'https://app.example.com',
+  }));
+
+  // `#submit` is equally "load more results" and "confirm purchase", so the
+  // arguments alone say nothing about what is being approved — and **Always
+  // allow** widens exactly the site the prompt would otherwise omit.
+  const posted = web.posts.at(-1);
+  assert.ok(
+    sectionTexts(posted?.blocks).some((text) => text.includes('https://app.example.com')),
+    `expected the origin in the blocks, got ${JSON.stringify(sectionTexts(posted?.blocks))}`,
+  );
+  assert.match(posted?.text ?? '', /on https:\/\/app\.example\.com/);
+
+  await adapter.stop();
+});
+
 test('a tool argument cannot ping the workspace through the approval prompt', async () => {
   const { web, gateway, adapter } = approvalAdapter([
     { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },

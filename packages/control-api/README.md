@@ -417,6 +417,13 @@ different lifetimes, and which one the approver got depends on the tool:**
   remembers a *command scope*, durable and per agent. Approving `git push
   origin main` persists `git push` minus its destructive forms, so `git push
   --force` still asks. That grant survives restarts.
+- For a tool judged by an **origin** — `browser.act` today — it remembers
+  that origin, durable and per agent, in the same file. Approving a click on
+  `https://app.example.com/reports` persists `https://app.example.com`, so
+  `https://admin.example.com` still asks. It rides as `origin` on both the
+  `tool.approval-requested` event and the `GET /approvals` rows, and a
+  client offering **Always allow** must render it: the call's arguments are
+  a CSS selector and say nothing about which site is being widened.
 - For **every other tool**, it is remembered against the tool name in memory,
   and lasts until the session ends **or the daemon restarts, whichever comes
   first**. Sessions are durable and restarts are not; a session resumed in a
@@ -436,12 +443,12 @@ and **nothing in this API tells it which it got**. `POST /approvals` answers `{ 
 `tool.approval-resolved` event carries the `answer` that was submitted plus a
 `reason` of `decided`, `timeout`, `cancelled`, or `undeliverable` — which is
 why the request stopped being pending, not how long the grant lasts. The
-daemon logs the difference (a remembered command scope is logged as one); an
-API client cannot see it.
+daemon logs the difference (a remembered command scope or origin is logged as
+one); an API client cannot see it.
 
-So word the button for the weaker guarantee. "Allow" is honest for both
-lifetimes; "always allow" is only true for the command-scope case, and a
-client cannot tell in advance that it is in that case.
+So word the button for the weaker guarantee. "Allow" is honest for every
+lifetime; "always allow" is only true for the scoped cases, and a client
+cannot tell in advance that it is in one of them.
 
 ### Two invariants worth stating
 

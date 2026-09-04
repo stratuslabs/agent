@@ -474,7 +474,9 @@ one shared table of hostile URLs, which is what fails if it is ever forked. The
 **command scope engine** is in `@stratusagent/permissions` rather than in
 `tool-shell`: a pack that classified its own invocations would be a second
 policy, disagreeing with the first the day either changed. The shell pack
-contributes the command string (`Tool.commandFor`) and nothing else.
+contributes the command string (`Tool.commandFor`) and nothing else, and the
+browser pack contributes the origin of the page a conversation is on
+(`Tool.originFor`) on the same terms.
 
 **First-party, outside.** Same authors, separate repositories:
 

@@ -38,7 +38,9 @@ import {
   createFileCommandWhitelist,
   createPermissionPolicy,
   describeCommandScope,
+  describeOriginScope,
   type CommandScope,
+  type OriginScope,
   type PermissionDecision,
 } from '@stratusagent/permissions';
 import {
@@ -7393,14 +7395,24 @@ const serveHeldHome = async (
       log(`${agentId}: "${describeCommandScope(scope)}" now runs without asking`);
     },
   };
+  // The origin-scope engine, whose grants live in the same file as the
+  // command scopes: one place an operator looks to see what an agent may
+  // do unattended. Wired unconditionally for the same reason — a tool that
+  // names no origin is judged by its risk exactly as before.
+  const origins = {
+    whitelist: commands.whitelist,
+    onScopeRemembered: ({ agentId, scope }: { agentId: string; scope: OriginScope }) => {
+      log(`${agentId}: ${describeOriginScope(scope)} is now acted on without asking`);
+    },
+  };
   const approvals = (transport: ApprovalTransport): ApprovalPolicy => createPermissionPolicy(
     // The destination scope rides along in BOTH modes — it is what lets a
     // scheduled turn report to the channel a human approved with the
     // schedule, and headless (where every other gated call is refused) is
     // exactly the deployment it exists for.
     approvalMode === 'remote'
-      ? { mode: 'remote', request: transport.request, onDecision, commands, destinations: transport.destinations }
-      : { mode: 'headless', onDecision, commands, destinations: transport.destinations },
+      ? { mode: 'remote', request: transport.request, onDecision, commands, origins, destinations: transport.destinations }
+      : { mode: 'headless', onDecision, commands, origins, destinations: transport.destinations },
   );
 
   if (approvalMode === 'remote') {

@@ -50,7 +50,11 @@ const approvalCard = () => {
         el('div', { class: 'row' },
           agent ? avatar(agent, 24) : null,
           el('div', { class: 'grow' },
-            el('div', { class: 'title' }, `${agent?.name ?? request.agentId} wants to run ${request.call.toolName}`),
+            // The site, for a call judged by one. The input below is a CSS
+            // selector for `browser.act` and says nothing about where the
+            // click lands — which is exactly what **Always allow** widens.
+            el('div', { class: 'title' }, `${agent?.name ?? request.agentId} wants to run ${request.call.toolName}`
+              + `${request.origin ? ` on ${request.origin}` : ''}`),
             el('div', { class: 'sub' },
               request.expiresAt ? `expires ${until(request.expiresAt)}` : 'no expiry',
               ` · parked ${ago(request.parkedAt)}`),

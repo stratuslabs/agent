@@ -864,6 +864,7 @@ const approvalBlocks = (
   risk: string,
   requestId: string,
   input: JsonObject,
+  origin: string | undefined,
 ): SlackBlock[] => {
   const invocation = renderInvocation(input);
   return [
@@ -871,7 +872,13 @@ const approvalBlocks = (
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*${escapeSlackText(agentName)}* wants to run \`${escapeSlackText(toolName)}\` (${risk}).`,
+        // The site, when the call is judged by one. It is not in the
+        // arguments and cannot be: a `browser.act` request shows a CSS
+        // selector, which says nothing about where the click lands — and
+        // **Always allow** widens exactly that site, so an approver who was
+        // not shown it is being asked to grant something they cannot see.
+        text: `*${escapeSlackText(agentName)}* wants to run \`${escapeSlackText(toolName)}\` (${risk})`
+          + `${origin ? ` on \`${escapeSlackText(origin)}\`` : ''}.`,
       },
     },
     ...(invocation.detail
@@ -1205,10 +1212,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // blocks — an approval nobody can read is an approval nobody gives.
         text: escapeSlackText(
           `${agentName} wants to run ${event.call.toolName} (${event.risk})`
+          + `${event.origin ? ` on ${event.origin}` : ''}`
           + `${invocationSummary ? `: ${invocationSummary}` : ''}.`,
         ),
         ...(thread ? { thread_ts: thread } : {}),
-        blocks: approvalBlocks(agentName, event.call.toolName, event.risk, event.requestId, event.call.input),
+        blocks: approvalBlocks(
+          agentName,
+          event.call.toolName,
+          event.risk,
+          event.requestId,
+          event.call.input,
+          event.origin,
+        ),
       });
       post = posted.ts
         ? {

@@ -313,10 +313,14 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
   const act: Tool = {
     name: 'browser.act',
     description: 'Click or type on the current page.',
-    // Dangerous, and the only one here that is: navigating and reading can
-    // be undone by navigating somewhere else, while a click submits, buys,
-    // and deletes. No selector makes that reversible.
-    risk: 'dangerous',
+    // `gated`, and judged per site — see `originFor` below. It was
+    // `dangerous` (a human every time, in every mode, so an installed
+    // service could never click anything at all), and that was standing in
+    // for "no scope model exists for this" rather than for "worse than a
+    // shell": a shell command can be far more destructive than a click and
+    // runs unattended inside command scopes, because a command string
+    // describes its own effect and a CSS selector does not.
+    risk: 'gated',
     parameters: {
       type: 'object',
       properties: {
@@ -325,6 +329,24 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
         value: { type: 'string' },
       },
       required: ['action', 'selector'],
+    },
+    /**
+     * Where this click would land: the origin of the page this conversation
+     * is already on, which is what the permission engine scopes the call by.
+     *
+     * From the page and never from the call, and that is the security
+     * property rather than a convenience. The input names a selector, and
+     * `#submit` is equally "load more results" and "confirm purchase" — a
+     * scope written over selectors would mean nothing. An origin *parameter*
+     * would be no better: it would be the model's claim about where it is,
+     * which is precisely the thing a grant must not take on trust.
+     *
+     * It opens no page. A conversation that has not navigated yet, or whose
+     * context the idle sweep has closed, has no origin — so no scope covers
+     * the call and it asks, which is the right way to fail.
+     */
+    originFor(session) {
+      return runtime.pool.originFor(session.id);
     },
     async execute(input, session) {
       const settings = settingsFor(config, session);

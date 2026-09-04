@@ -5,6 +5,7 @@ import {
   AgentRunner,
   InMemorySessionStore,
   matchesToolAllowlist,
+  originOf,
   ToolRegistry,
   type ModelProvider,
   type ProviderRequest,
@@ -83,4 +84,27 @@ test('an agent allowed a toolset can call every tool in it, and nothing outside 
   // invented for a tool outside the glob is still refused.
   assert.equal(results[1]?.toolResult?.ok, false);
   assert.match(results[1]?.toolResult?.error ?? '', /not permitted for agent ava: shell\.run/);
+});
+
+test('an origin is scheme, host, and port — and nothing without one is named', () => {
+  // What makes a browser action's blast radius nameable at all: no path, no
+  // query, no fragment, no credentials. A grant an operator reads as "this
+  // agent may act on app.example.com" has to mean exactly that, whichever
+  // page of the site the conversation is on.
+  assert.equal(originOf('https://app.example.com/reports/17?token=abc#top'), 'https://app.example.com');
+  assert.equal(originOf('https://user:pw@app.example.com/'), 'https://app.example.com');
+  assert.equal(originOf('https://APP.example.com'), 'https://app.example.com');
+  // The default port is not part of the origin; any other port is, because
+  // a service on another port of the same host is another service.
+  assert.equal(originOf('https://app.example.com:443/'), 'https://app.example.com');
+  assert.equal(originOf('https://app.example.com:8443/'), 'https://app.example.com:8443');
+  // One spelling per host: a homograph cannot be a second way to write an
+  // approved grant.
+  assert.equal(originOf('https://exämple.com/'), 'https://xn--exmple-cua.com');
+
+  // The URL parser answers the string "null" for all of these, and a grant
+  // that could be spelled `null` would cover every one of them at once.
+  for (const raw of ['about:blank', 'file:///etc/passwd', 'data:text/html,x', 'not a url', '']) {
+    assert.equal(originOf(raw), undefined, raw);
+  }
 });
