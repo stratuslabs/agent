@@ -804,20 +804,23 @@ const APPROVAL_ACTIONS: Record<string, ApprovalAnswer> = {
  * agent does unattended, and an approver should see the scope they granted
  * in the record of granting it.
  *
- * It says both lifetimes because this adapter cannot tell which one it
- * got, and the honest line is the one that is true either way. A call
- * judged by a scope — a shell command, a browser site — persists that
- * scope in the agent's whitelist and keeps it across restarts; every other
- * tool is remembered in memory until the session ends or the daemon
- * restarts. Nothing on the bus distinguishes them: the policy returns a
- * boolean, and `tool.approval-resolved` carries the answer that was
- * submitted, not how long the grant lasts. Claiming only the session
- * lifetime, as this line used to, tells an approver a durable grant
- * revokes itself.
+ * It states the **floor**, because that is the only thing true in every
+ * case. A call judged by a scope — a shell command, a browser site —
+ * persists that scope in the agent's whitelist and normally keeps it
+ * across restarts, but not when the daemon cannot write the file (a
+ * hand-edit that will not parse) or was built without one, and by then
+ * this message has already been sent. Nothing on the bus distinguishes
+ * any of it: the policy returns a boolean, and `tool.approval-resolved`
+ * carries the answer that was submitted, not how long the grant lasts.
+ *
+ * So it says what is always so and no more. Claiming only the session
+ * lifetime, as this line first did, tells an approver a durable grant
+ * revokes itself; claiming the restart, as it then did, promises one the
+ * daemon may have failed to save. The daemon's log has the exact line.
  */
 const OUTCOME_TEXT: Record<string, string> = {
   'decided:once': 'Allowed once',
-  'decided:always': 'Allowed and remembered — for this session, and past a restart where the call carries a scope',
+  'decided:always': 'Allowed and remembered — for this session at least',
   'decided:deny': 'Denied',
   'timeout:deny': 'Expired without an answer — denied',
   // Covers both endings that reach here: the turn was aborted, and the
@@ -1378,10 +1381,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // answers, so another client can submit one. The general line below has
     // to hedge between two lifetimes it cannot distinguish; this one must
     // not, or the record of the decision claims a grant that does not exist.
+    // Three shapes are one-shot and only one of them is knowable from here:
+    // `risk` rode in on the request, so a `dangerous` tool can say why. The
+    // other two — a browser action with no page to grant, and a command the
+    // parser cannot reduce to a scope — are not distinguishable without
+    // carrying a reason this adapter would only ever print, so they share a
+    // line that is true of both. Naming one of them by guess is how this
+    // read "there was no page to remember" for a shell pipeline.
     const outcome = post.oneShot && event.reason === 'decided' && event.answer === 'always'
       ? post.risk === 'dangerous'
         ? 'Allowed once — a dangerous tool is never remembered'
-        : 'Allowed once — there was no page to remember'
+        : 'Allowed once — nothing about this call could be remembered'
       : OUTCOME_TEXT[`${event.reason}:${event.answer}`] ?? 'Resolved';
     const by = event.actor ? ` by <@${event.actor}>` : '';
     const text = `*${escapeSlackText(post.agentName)}* — \`${escapeSlackText(post.toolName)}\` (${post.risk}): ${outcome}${by}.`;

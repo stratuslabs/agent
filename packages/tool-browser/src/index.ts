@@ -116,13 +116,22 @@ interface BrowserRuntime {
    * `browser.act`'s `originFor` and consumed by its `execute`.
    *
    * The kernel reads `originFor` immediately before it dispatches, so this
-   * always holds the origin the call was judged on — which is what makes
-   * the check inside `execute` possible without the tool knowing anything
-   * about grants. Consumed on read, so it never outlives the call that
-   * wrote it, and a call that arrives with nothing recorded (a host whose
-   * runner never asks) is executed as before rather than refused.
+   * holds the origin the call was judged on — which is what lets `execute`
+   * check the page it opens without the tool knowing anything about
+   * grants. A call that arrives with nothing recorded (a host whose runner
+   * never asks) is executed as before rather than refused.
+   *
+   * A getter with a side effect is not the house style, and it is
+   * deliberate here: the alternative is `execute` reading the origin
+   * itself, which would compare a value taken *after* the kernel's check
+   * rather than the one the kernel used. What that costs is bounded
+   * carefully — an entry is written only for a conversation actually on an
+   * origin, dropped when its page is evicted, and consumed by the
+   * `execute` it was written for. So the map holds at most one entry per
+   * live context (`maxContexts`, four by default), and a call that is
+   * denied leaves nothing behind that the next one does not replace.
    */
-  reportedOrigins: Map<string, string | undefined>;
+  reportedOrigins: Map<string, string>;
   pageFor(session: Session): Promise<PageLike>;
 }
 
@@ -363,25 +372,35 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
       // it dispatches, so what is stored is the origin the call was judged
       // on — the one thing `execute` needs, and the one thing it cannot
       // work out for itself.
-      runtime.reportedOrigins.set(session.id, origin);
+      //
+      // Nothing is stored for a conversation with no origin, and an older
+      // entry is dropped: there would be no page to compare against, the
+      // kernel already refuses a call whose page went away between its two
+      // reads, and an entry per session that never had one is how this map
+      // would grow without bound in a long-lived daemon.
+      if (origin === undefined) {
+        runtime.reportedOrigins.delete(session.id);
+      } else {
+        runtime.reportedOrigins.set(session.id, origin);
+      }
       return origin;
     },
     async execute(input, session) {
       const settings = settingsFor(config, session);
       const judgedOn = runtime.reportedOrigins.get(session.id);
-      const wasJudged = runtime.reportedOrigins.delete(session.id);
+      runtime.reportedOrigins.delete(session.id);
       // Opening the page is not free: this may launch Chromium and build a
       // context, which is seconds, and it happens *after* the kernel's
       // check. So the page is checked once more here, against where the
       // call was judged — the last point anything in this process can look
       // before Playwright takes over.
       const page = await runtime.pageFor(session);
-      if (wasJudged) {
+      if (judgedOn !== undefined) {
         const now = originOf(page.url());
         if (now !== judgedOn) {
           throw new Error(
-            `This conversation was on ${judgedOn ?? 'a page with no origin'} when the call was approved and is `
-            + `on ${now ?? 'no page'} now, so nothing was clicked. Check where the page is and call again.`,
+            `This conversation was on ${judgedOn} when the call was approved and is on ${now ?? 'no page'} now, `
+            + 'so nothing was clicked. Check where the page is and call again.',
           );
         }
       }
@@ -432,6 +451,7 @@ export const createBrowserPlugin = (
   options: BrowserPluginOptions = {},
 ): Plugin & { dispose(): Promise<void>; sweepIdle(now: number): Promise<string[]> } => {
   const blocked = new Map<string, string[]>();
+  const reportedOrigins = new Map<string, string>();
   const resolved = config;
   const pool = new BrowserSessionPool({
     driver: options.driver ?? createPlaywrightDriver(
@@ -446,12 +466,13 @@ export const createBrowserPlugin = (
     ...(typeof resolved.idleMs === 'number' ? { idleMs: resolved.idleMs } : {}),
     ...(typeof resolved.maxContexts === 'number' ? { maxContexts: resolved.maxContexts } : {}),
     onEvicted: ({ sessionId }) => {
-      // The page that recorded them is gone, so its refusals go with it.
+      // The page that recorded them is gone, so its refusals go with it —
+      // and so does the origin it was last reported to be on, which
+      // describes a context that no longer exists.
       blocked.delete(sessionId);
+      reportedOrigins.delete(sessionId);
     },
   });
-
-  const reportedOrigins = new Map<string, string | undefined>();
 
   const runtime: BrowserRuntime = {
     pool,

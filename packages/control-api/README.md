@@ -462,7 +462,15 @@ see it.
 
 The one-shot case is the exception, and the only one: `oneShot: true` on the
 request says in advance that `always` will remember nothing, so a client can
-and should stop offering it there.
+and should stop offering it there. It does not say *why* — three shapes
+reach it, and only the `dangerous` one is visible from the request's `risk`.
+
+Note also that "past a restart" is the normal case for a scoped grant and
+not a guarantee: the daemon does not write over a whitelist it could not
+read, and a policy can be built without one. A surface reporting the
+outcome has already sent its message by the time that is known, so it
+should state the floor — remembered for this session at least — and leave
+the exact lifetime to the daemon's log.
 
 So for everything else, word the button for the weaker guarantee. "Allow" is
 honest for every lifetime; "always allow" is only true for the scoped cases,

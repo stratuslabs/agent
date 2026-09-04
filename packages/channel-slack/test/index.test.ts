@@ -1076,7 +1076,11 @@ test('a parked call is asked in the thread it came from, with three buttons', as
   // decision with nowhere to land.
   const update = web.updates.at(-1);
   assert.equal(buttonIds(update?.blocks).length, 0);
-  assert.match(update?.text ?? '', /Allowed and remembered — .*? by <@U-DYLAN>/);
+  assert.match(update?.text ?? '', /Allowed and remembered — for this session at least by <@U-DYLAN>/);
+  // The floor, not the ceiling: a scoped grant normally survives a restart
+  // and does not when the whitelist cannot be written, which this message
+  // is sent too early to know.
+  assert.doesNotMatch(update?.text ?? '', /past a restart/);
 
   await adapter.stop();
 });
@@ -1349,8 +1353,11 @@ test('an originless browser action resolved as always is recorded as one-shot to
   await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
 
   const settled = web.updates.at(-1)?.text ?? '';
-  assert.match(settled, /Allowed once — there was no page to remember/);
+  assert.match(settled, /Allowed once — nothing about this call could be remembered/);
   assert.doesNotMatch(settled, /remembered — for this session/);
+  // Not "no page": this line is shared with a shell command the parser
+  // cannot reduce to a scope, where browser wording would be nonsense.
+  assert.doesNotMatch(settled, /page/);
 
   await adapter.stop();
 });

@@ -745,3 +745,28 @@ test('browser.act does not click a page that moved while its context was being o
     },
   );
 });
+
+test('the recorded origin is bounded: nothing kept for a page with none, and dropped when one is evicted', async (t) => {
+  // `originFor` is a getter that writes, which is deliberate — but it runs
+  // on every call the kernel judges, including ones that are then denied
+  // and never execute. What it keeps has to be bounded by the contexts
+  // that exist, or a long-lived daemon accumulates an entry per session.
+  const recorder = emptyRecorder();
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com'] }, recorder);
+  t.after(() => plugin.dispose());
+  const act = tool('browser.act');
+  const session = sessionFor('bounded');
+
+  // A conversation with no page records nothing at all.
+  assert.equal(act.originFor?.(session), undefined);
+  await tool('browser.goto').execute({ url: 'https://example.com/' }, session);
+  assert.equal(act.originFor?.(session), 'https://example.com');
+
+  // The sweep takes the context, and the origin describing it goes too —
+  // so the next call is judged and executed on the fresh page rather than
+  // refused against a context that no longer exists.
+  await plugin.sweepIdle(Date.now() + 10 * 60_000);
+  assert.equal(act.originFor?.(session), undefined);
+  const result = await act.execute({ action: 'click', selector: '#submit' }, session) as JsonObject;
+  assert.equal(result.action, 'click');
+});

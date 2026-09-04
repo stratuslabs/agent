@@ -60,13 +60,19 @@ because its arguments are a CSS selector and say nothing about where a click
 lands — and that site is what **Always allow** widens.
 
 **Always allow** is left off entirely where the daemon would remember
-nothing: a `dangerous` tool, which asks every time whatever is answered, and
-a browser action whose conversation has no page to grant. The prompt says so
-instead, because a button that does exactly what **Allow once** does, under a
-label promising a standing grant, is worse than no button. The resolved
-message describes what the daemon did rather than which button was pressed —
-`POST /approvals` accepts `always` whatever this channel rendered, so the
-answer can arrive from somewhere else.
+nothing: a `dangerous` tool, which asks every time whatever is answered; a
+browser action whose conversation has no page to grant; and a shell command
+the parser cannot reduce to a scope. The prompt says so instead, because a
+button that does exactly what **Allow once** does, under a label promising a
+standing grant, is worse than no button.
+
+The resolved message describes what the daemon did rather than which button
+was pressed — `POST /approvals` accepts `always` whatever this channel
+rendered, so the answer can arrive from somewhere else. It states the floor
+rather than the ceiling: a remembered answer lasts *at least* the session,
+and whether a scoped one also survives a restart depends on the daemon
+writing the whitelist, which is not known when the message is sent.
+`stratus logs` has the exact line.
 
 Who may answer is configured per agent, in `~/.stratus/config.json`:
 
