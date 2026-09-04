@@ -121,12 +121,28 @@ half stood.
     restates it, remembers it, and the new entry is `agent` because that
     session never called a network tool. The round trip through memory is the
     cheapest version of the whole attack and needs only patience.
-  - **`external` propagates; `unknown` does not.** `external` is a positive
-    claim about a stranger's content. `unknown` is a statement about missing
-    metadata on old entries — and since every legacy entry is `unknown` and
-    legacy entries are what an upgraded install injects, propagating it would
-    mark every fact that agent ever writes again, permanently. Same
-    make-the-label-universal failure, arriving by the back door.
+  - **Trust never rises within a session.** A write carries the least trusted
+    label the session has seen: `agent` only if everything in context was
+    `user` or `agent`, `unknown` once anything unknown entered, `external`
+    once anything external did. One ordering, applied in one direction.
+
+    **This reverses an earlier draft of this step**, which said `unknown` does
+    not propagate, on the grounds that every legacy entry is `unknown` and
+    legacy entries are what an upgraded install injects — so propagating it
+    would mark every fact that agent ever writes again, and a universal label
+    carries no signal. That cost is real. It is also the smaller of the two,
+    and the argument had the direction wrong: not propagating means an agent
+    reads a legacy entry that *did* come from a hostile page, restates it, and
+    stores the restatement as `agent`. Uncertainty upgraded to trust, with the
+    original entry still correctly labelled and the copy laundered — the exact
+    path this step exists to close, walked through the one corpus every
+    upgrade has.
+
+    Nothing may raise trust except a person. The drain is the operator's
+    re-assertion record below, and it is tractable rather than a corpus-wide
+    chore: a mature install's injected slice is a 2 KiB pinned core plus a
+    topic index, so re-asserting what is pinned is enough for most sessions
+    never to see `unknown` at all.
   - **Across a delegation, both ways.** `createDelegateTool` starts the
     target's session with the parent's text as `userMessage` and metadata
     carrying depth, delegator, and root session — no taint. Outbound, a
@@ -214,7 +230,12 @@ half stood.
   producer channel is a contract rather than a list the executor keeps.
 - **A fresh session that reads an `external` entry — injected or recalled — and
   then remembers writes `external`, not `agent`.**
-- **A session that has seen only `unknown` entries still writes `agent`.**
+- **A session that has read an `unknown` entry writes `unknown`, not `agent`**
+  — trust never rising is the property, and this is the case that tempted an
+  earlier draft into an exception.
+- **A session that has read nothing but `user` and `agent` content writes
+  `agent`** — the other end, which stops the rule collapsing into "everything
+  is suspect".
 - **Both delegation directions**: a tainted parent's target writes `external`,
   and an untainted parent whose target fetched writes `external` after the
   reply. Asserted separately — the outbound test passes with the inbound half
