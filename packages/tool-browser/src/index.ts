@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { JsonObject, JsonValue, Plugin, Session, Tool } from '@stratusagent/core';
+import { originOf, type JsonObject, type JsonValue, type Plugin, type Session, type Tool } from '@stratusagent/core';
 import { assertRequestAllowed, egressPolicyFrom, type EgressPolicy } from '@stratusagent/egress';
 import { resolvePluginAgentConfig, type OptionalModuleHost } from '@stratusagent/plugins';
 
@@ -111,6 +111,18 @@ interface BrowserRuntime {
    * isolation exists to prevent.
    */
   blocked: Map<string, string[]>;
+  /**
+   * The origin each conversation was last *reported* to be on, written by
+   * `browser.act`'s `originFor` and consumed by its `execute`.
+   *
+   * The kernel reads `originFor` immediately before it dispatches, so this
+   * always holds the origin the call was judged on — which is what makes
+   * the check inside `execute` possible without the tool knowing anything
+   * about grants. Consumed on read, so it never outlives the call that
+   * wrote it, and a call that arrives with nothing recorded (a host whose
+   * runner never asks) is executed as before rather than refused.
+   */
+  reportedOrigins: Map<string, string | undefined>;
   pageFor(session: Session): Promise<PageLike>;
 }
 
@@ -346,11 +358,33 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
      * the call and it asks, which is the right way to fail.
      */
     originFor(session) {
-      return runtime.pool.originFor(session.id);
+      const origin = runtime.pool.originFor(session.id);
+      // Kept for `execute` below. The kernel asks this immediately before
+      // it dispatches, so what is stored is the origin the call was judged
+      // on — the one thing `execute` needs, and the one thing it cannot
+      // work out for itself.
+      runtime.reportedOrigins.set(session.id, origin);
+      return origin;
     },
     async execute(input, session) {
       const settings = settingsFor(config, session);
+      const judgedOn = runtime.reportedOrigins.get(session.id);
+      const wasJudged = runtime.reportedOrigins.delete(session.id);
+      // Opening the page is not free: this may launch Chromium and build a
+      // context, which is seconds, and it happens *after* the kernel's
+      // check. So the page is checked once more here, against where the
+      // call was judged — the last point anything in this process can look
+      // before Playwright takes over.
       const page = await runtime.pageFor(session);
+      if (wasJudged) {
+        const now = originOf(page.url());
+        if (now !== judgedOn) {
+          throw new Error(
+            `This conversation was on ${judgedOn ?? 'a page with no origin'} when the call was approved and is `
+            + `on ${now ?? 'no page'} now, so nothing was clicked. Check where the page is and call again.`,
+          );
+        }
+      }
       const selector = String(input.selector ?? '');
       if (!selector) {
         throw new Error('selector is required.');
@@ -417,9 +451,12 @@ export const createBrowserPlugin = (
     },
   });
 
+  const reportedOrigins = new Map<string, string | undefined>();
+
   const runtime: BrowserRuntime = {
     pool,
     blocked,
+    reportedOrigins,
     ask(session, page, what, work, timeoutMs) {
       return answeredWithin(
         work(),

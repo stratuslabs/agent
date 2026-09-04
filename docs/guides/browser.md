@@ -128,15 +128,17 @@ has exactly one spelling and a homograph is not a second way to write it.
   the page ran off to. What the check stops is the *click* landing somewhere
   you were not shown.
 
-  And once more at the moment of dispatch, by the kernel — the approval is
-  not the last wait either, since clearing the checkpoint writes to the
-  session store and the `tool.called` event is delivered to every subscriber
-  before the tool is reached.
+  Once more at the moment of dispatch, by the kernel — the approval is not
+  the last wait either, since clearing the checkpoint writes to the session
+  store and the `tool.called` event is delivered to every subscriber before
+  the tool is reached. And once more inside the action itself, after its
+  page is opened: opening one can start a browser, which is seconds, not an
+  instant.
 
-  What is left is the instant between that dispatch check and the click
-  landing inside the browser. A page that navigates *itself* right there is
-  not caught, and nothing can catch it: a scope is a bound on where an agent
-  may aim, not a lock on the page.
+  What is left is the wait *inside* the browser — Playwright looks for the
+  selector for up to `navigationTimeoutMs` — and a page that navigates
+  itself in there is not caught. Nothing outside the browser can catch it:
+  a scope is a bound on where an agent may aim, not a lock on the page.
 - **`allowedHosts` is a different question.** The address policy decides
   which hosts the browser may *reach* at all, including for `browser.goto`
   and every subresource ([Tools](./tools.md), and

@@ -44,13 +44,17 @@ was its one member, and it was there because no scope model existed for a
 click rather than because a click is worse than a shell command.
 
 A `dangerous` call asks **every time**, and **Always allow** on one does not
-change that: the call runs, and nothing is remembered. That is stricter than
-it used to be — the session-wide grant applied to `dangerous` too, which made
-"always a human" a promise about the first call only — and the tier is worth
-having only if it means what it says. Requests like this are not *offered*
-**Always allow** at all: Slack, the dashboard, and the terminal prompt each
-say that an approval covers the one call, rather than showing a button that
-does nothing extra.
+change that: the call runs, and nothing is remembered. Two other calls
+behave the same way — a browser action with no page to grant, and a shell
+command the parser cannot reduce to a scope — and all three are called
+**one-shot**: they are not offered **Always allow** at all, on any surface.
+Slack, the dashboard, and the terminal prompt each say that an approval
+covers the one call, rather than showing a button that does nothing extra.
+
+The `dangerous` half of that is stricter than it used to be — the
+session-wide grant applied to `dangerous` too, which made "always a human" a
+promise about the first call only — and the tier is worth having only if it
+means what it says.
 
 The line is *acting outside Stratus* — the filesystem, the network, another
 service — not cost. Every turn spends provider tokens, including the one

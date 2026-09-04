@@ -425,9 +425,10 @@ different lifetimes, and which one the approver got depends on the tool:**
   client offering **Always allow** must render it: the call's arguments are
   a CSS selector and say nothing about which site is being widened.
 - For a **one-shot** request, it is not remembered at all: the call runs
-  once and the next one asks again. Two cases reach this — a `dangerous`
-  tool, which means a human every time whatever is answered, and a call
-  judged by an origin whose conversation has no page to grant. This is the
+  once and the next one asks again. Three cases reach this — a `dangerous`
+  tool, which means a human every time whatever is answered; a call judged
+  by an origin whose conversation has no page to grant; and a command this
+  daemon's parser cannot reduce to a scope, such as a pipe or a subshell. This is the
   one lifetime a client *can* tell in advance: `tool.approval-requested`
   and the `GET /approvals` rows carry **`oneShot: true`** for it. **A client
   must not offer an unconditional "always" on such a request** — it does
@@ -442,11 +443,11 @@ different lifetimes, and which one the approver got depends on the tool:**
   new process asks again, so this is strictly weaker than "for this
   conversation".
 
-There is a third outcome behind the same answer: a command this daemon's
-parser cannot reduce to a scope — a pipe, a subshell, an unbalanced quote —
-is approved *once*, because widening to the bare tool would hand the agent
-every command for the rest of the session. The call runs; the grant is not
-remembered.
+That third case is the oldest of them: a command this daemon's parser
+cannot reduce to a scope is approved *once*, because widening to the bare
+tool would hand the agent every command for the rest of the session. The
+call runs; the grant is not remembered — and, like the other two, the
+request says so in advance with `oneShot`.
 
 So one grant is written to disk beside the agent's soul and the other lives
 in a `Set` for as long as the process does. Between *those two*, a client

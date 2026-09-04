@@ -709,3 +709,39 @@ test('the origin browser.act is judged by comes from the page, never from the ca
   await plugin.sweepIdle(Date.now() + 10 * 60_000);
   assert.equal(act.originFor?.(session), undefined);
 });
+
+test('browser.act does not click a page that moved while its context was being opened', async (t) => {
+  // Opening the page is not free — this can launch Chromium and build a
+  // context — and it happens after the kernel's dispatch check. So the
+  // action checks once more, at the last point anything in this process
+  // can look before Playwright takes over.
+  const recorder = emptyRecorder();
+  const { plugin, tool } = await pluginWith({ allowedHosts: ['example.com', 'other.example.com'] }, recorder);
+  t.after(() => plugin.dispose());
+  const act = tool('browser.act');
+  const session = sessionFor('drifting');
+
+  await tool('browser.goto').execute({ url: 'https://example.com/reports' }, session);
+  // What the kernel does immediately before dispatch: ask where the call
+  // is being judged.
+  assert.equal(act.originFor?.(session), 'https://example.com');
+  // ...and the page moves before the action opens it.
+  await tool('browser.goto').execute({ url: 'https://other.example.com/' }, session);
+
+  await assert.rejects(
+    () => act.execute({ action: 'click', selector: '#submit' }, session),
+    /was on https:\/\/example\.com when the call was approved and is on https:\/\/other\.example\.com now/,
+  );
+
+  // The steady case still works, and a call nobody judged is executed as
+  // before rather than refused.
+  assert.deepEqual(
+    await act.execute({ action: 'click', selector: '#submit' }, session) as JsonObject,
+    {
+      action: 'click',
+      selector: '#submit',
+      url: 'https://other.example.com/',
+      title: 'Example Domain',
+    },
+  );
+});

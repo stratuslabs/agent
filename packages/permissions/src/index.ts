@@ -706,11 +706,23 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
       // remembers, and an origin-scoped call with no page has nothing to
       // remember. Both are certain before anyone is asked, so both surfaces
       // can stop offering a grant the engine will not create.
-      const oneShot = risk === 'dangerous' || (scopedByOrigin && origin === undefined);
+      // A command this parser cannot reduce to a scope — a pipe, a
+      // subshell, an unbalanced quote, a refspec delete — is the third
+      // one-shot shape, and the oldest: the branch below has always run it
+      // once and remembered nothing, because widening to the bare tool
+      // would hand the agent every command. Resolved here rather than
+      // after the answer so the question can say so; it is a pure function
+      // of the analysis, and the branch below reuses this exact value.
+      const commandScope = analysis ? normalizeCommandScope(analysis) : undefined;
+      const oneShot = risk === 'dangerous'
+        || (scopedByOrigin && origin === undefined)
+        || (analysis !== undefined && commandScope === undefined);
       const alwaysMeans = oneShot
         ? risk === 'dangerous'
           ? 'not remembered — a dangerous tool asks every time'
-          : 'not remembered — there is no page to grant'
+          : analysis !== undefined
+            ? 'not remembered — this command cannot be reduced to a scope'
+            : 'not remembered — there is no page to grant'
         : command !== undefined
           ? 'always this scope'
           : scopedByOrigin
@@ -816,7 +828,7 @@ export const createPermissionPolicy = (options: PermissionPolicyOptions): Approv
             `${call.toolName} was approved, and ${describeOriginScope(originScope)} is now acted on without asking`,
           );
         }
-        const scope = analysis ? normalizeCommandScope(analysis) : undefined;
+        const scope = commandScope;
         if (analysis && !scope) {
           // A command this parser could not reduce to a scope — a pipe, a
           // subshell, an unbalanced quote. "Always" must not fall back to
