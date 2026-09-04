@@ -799,7 +799,19 @@ const convertHeadings = (text: string, code: ReadonlyArray<readonly [number, num
         return heading;
       }
     }
-    return `*${heading}*`;
+    // Both markers have to land in prose, not just the opening one. A fence
+    // opened on this line — by a model mid-answer, or by a block still being
+    // streamed — runs past its end, so the closing `*` would be written
+    // inside the code and ignored there, leaving the opening one unpaired.
+    // The line began in prose or this never ran, so it is the end that is
+    // in question: where the marker would go, one past the line's last
+    // character, and not that character itself — a span that closes exactly
+    // at the line's end leaves the marker just outside it, which is fine.
+    const closer = offset + line.length;
+    while (within < code.length && (code[within]?.[1] ?? 0) <= closer) {
+      within += 1;
+    }
+    return startsInside(closer, within) ? heading : `*${heading}*`;
   });
 };
 
@@ -821,10 +833,19 @@ const toSlackMrkdwn = (text: string): string => {
   // Where each code span ends up in the converted text, which is not where
   // it started: the prose before it changes length as it is rewritten.
   const code: Array<readonly [number, number]> = [];
+  const segments = proseAndCode(text);
   let converted = '';
-  proseAndCode(text).forEach((segment, index) => {
+  segments.forEach((segment, index) => {
     if (index % 2 === 1) {
-      code.push([converted.length, converted.length + segment.length]);
+      // A code segment that ends the text is the unterminated fence: every
+      // closed run is followed by a prose slice, even an empty one. It has
+      // no end to be past, so nothing may be appended after it either —
+      // recording the end as it looks would say a marker placed at the
+      // text's end was safely outside.
+      const ends = index === segments.length - 1
+        ? Number.POSITIVE_INFINITY
+        : converted.length + segment.length;
+      code.push([converted.length, ends]);
       converted += segment;
       return;
     }

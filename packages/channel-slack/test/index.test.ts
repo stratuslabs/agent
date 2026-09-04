@@ -394,6 +394,9 @@ test('a heading is found on the reply\'s own lines, not inside each fragment inl
     '## Match `*.ts` files',
     '# Inspect `first',
     'second`',
+    '# Inspect ```third',
+    'fourth```',
+    '## Run `npm test`',
     '```sh',
     '# a real comment',
     '```',
@@ -428,6 +431,13 @@ test('a heading is found on the reply\'s own lines, not inside each fragment inl
     // where it is ignored — leaving the opening one with nothing to close.
     'Inspect `first',
     'second`',
+    // Nor over a fence opened on the line, which runs past its end — the
+    // closing `*` would be written inside the code, where Slack ignores it.
+    'Inspect ```third',
+    'fourth```',
+    // But a span that closes on the line is no obstacle: the marker goes
+    // just past it, in prose, so this heading is bolded.
+    '*Run `npm test`*',
     // While a hash whose line begins inside a fence is somebody's comment.
     '```sh',
     '# a real comment',
@@ -524,6 +534,52 @@ test('a streamed placeholder is converted too, and a half-written marker stays l
   assert.ok(texts.includes('**Almost'), `expected the unclosed marker to stand, got ${JSON.stringify(texts)}`);
   assert.ok(texts.includes('*Almost there*'), `expected the closed pair to convert, got ${JSON.stringify(texts)}`);
   assert.equal(texts.at(-1), '*Done*');
+});
+
+test('a heading is not bolded over a fence the stream has only opened', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const bus = new EventBus();
+
+  const gateway: GatewayLike = {
+    bus,
+    resolveApproval: () => false,
+    agents: () => [{ id: 'ava', name: 'Ava' }],
+    async dispatch(input) {
+      // The edit a reader is looking at while a block is still arriving. The
+      // fence has no end yet, so everything after it is code as far as Slack
+      // is concerned — a closing `*` written there is ignored, and the one
+      // before the fence would be left with nothing to close it.
+      await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: '# Inspect ```first' } });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      await bus.emit({ type: 'provider.delta', sessionId: input.sessionId, delta: { type: 'text', text: '\nsecond```\n## After' } });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return sessionWithReply(input.sessionId, '# Inspect ```first\nsecond```\n## After');
+    },
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> stream a fence'));
+  await adapter.stop();
+
+  const texts = web.updates.map((update) => update.text);
+  assert.ok(
+    texts.includes('Inspect ```first'),
+    `expected the half-arrived fence to leave its heading alone, got ${JSON.stringify(texts)}`,
+  );
+  assert.ok(
+    !texts.some((text) => text.includes('*Inspect')),
+    `no edit may bold a heading over an unclosed fence, got ${JSON.stringify(texts)}`,
+  );
+  // Closed, the fence is still no place for the marker — but the heading
+  // below it, which owns its whole line, is bolded.
+  assert.equal(texts.at(-1), 'Inspect ```first\nsecond```\n*After*');
 });
 
 test('two agents in one thread hold separate sessions with their own identities', async () => {
