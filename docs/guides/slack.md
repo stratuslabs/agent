@@ -43,7 +43,10 @@ message nobody addressed to it is not its business.
 
 Threads with more than one agent follow the rule people already use: an
 untagged reply goes to **whoever spoke last**, and mentioning another agent
-moves the conversation to them. Each agent keeps its own session, so one
+moves the conversation to them. It is still a rule and not judgement, so in
+a thread where people are mostly talking to each other the agent will answer
+replies that were not meant for it — give the side conversation its own
+thread. Each agent keeps its own session, so one
 tagged in halfway through knows only what it is told from there — say what
 it needs in the message that brings it in. The full set of rules, and the
 two edges around them, is [Who a message is

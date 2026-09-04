@@ -53,12 +53,20 @@ join — is not, and nothing answers it. What is
 thread halfway through starts from what it is told then, not from what the
 other agent was told. Bring it up to speed in the message that tags it.
 
-Two edges worth knowing. An agent whose app was installed before the
+Three edges worth knowing. An agent whose app was installed before the
 history scopes below is told about mentions only, and behaves exactly as it
-always did — the workspace's grant is the switch, per app. And where a
-thread's several agents cannot be ordered — a host whose session routing
-carries no timestamps — an untagged reply is left alone rather than
-answered twice; mention the one you want.
+always did — the workspace's grant is the switch, per app. Where a thread's
+several agents cannot be ordered — a host whose session routing carries no
+timestamps — an untagged reply is left alone rather than answered twice;
+mention the one you want.
+
+And the rules above are mechanical, which shows in a thread where people are
+mostly talking to *each other*: an agent invited into one answers every
+untagged reply in it, including the ones meant for somebody else. Give the
+side conversation its own thread. Teaching an agent to read the room
+instead — to follow a thread whether or not it is being spoken to, and
+answer only when it has something to add — is
+[roadmap step 31](../../docs/roadmap/31-reading-the-room.md).
 
 ## Installing
 
