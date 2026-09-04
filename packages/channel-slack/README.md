@@ -38,9 +38,10 @@ they are the whole model:
    agent that has not been spoken to does not join in.
 4. **In a thread with several agents, an untagged reply goes to whoever
    spoke last.** The same rule people use: you are answering the voice that
-   just answered you. Naming another agent moves the conversation to them
-   from their next turn on — so a handover is one `@`, and there is no
-   "who has the thread" state for anyone to lose track of.
+   just answered you. Naming another agent moves the conversation to them —
+   so a handover is one `@`, and it takes effect the moment it is sent, not
+   whenever the turn it starts gets around to answering: an addendum typed
+   straight after it reaches the agent you just named.
 
 Everyone in the thread is talking to the same agent — a reply from a second
 person is a follow-up like any other, and channel messages reach the model

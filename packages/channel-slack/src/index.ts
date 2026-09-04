@@ -17,6 +17,13 @@ const SLACK_MAX_MESSAGE_CHARS = 4000;
 const DEFAULT_EDIT_INTERVAL_MS = 1000;
 const DEDUPE_CAPACITY = 2000;
 /**
+ * How many threads' addressees are remembered in receipt order. Past this
+ * the least recently addressed is dropped, which costs its next follow-up
+ * one session lookup — the durable answer, which is what a restart falls
+ * back to anyway.
+ */
+const THREAD_ADDRESSEE_CAPACITY = 2000;
+/**
  * How many files an unrendered turn may queue for its outcome. Nothing
  * drains that queue until the outcome arrives, so a session whose outcome
  * this process never sees would otherwise grow it for the life of the
@@ -1184,6 +1191,27 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // Socket Mode redelivers on missed acks; a slow turn must not run twice.
   const seenEvents = new Set<string>();
   const seenOrder: string[] = [];
+  /**
+   * Who each thread was last handed to, in SLACK RECEIPT ORDER — written
+   * the moment a message is accepted for an agent, before any of the work
+   * that message causes.
+   *
+   * The durable answer (`answersFollowUp`) is the agents' own sessions,
+   * and it lags: a session row is written when its turn starts, which is a
+   * display-name lookup and a placeholder post after the message that
+   * asked for it. Inside that window the persisted order still names the
+   * agent that spoke *before* the handover, so a mention of Bea followed
+   * straight away by an untagged addendum would send the addendum to Ava —
+   * and a follow-up typed on the heels of the mention that opened the
+   * thread would find no session at all and be dropped for good.
+   *
+   * Keyed by thread rather than by (agent, thread): the value is which
+   * single agent has it, so there is nothing to reconcile. Bounded and
+   * lossy on purpose — evicting an entry costs one lookup, since the
+   * sessions still hold the answer for every thread this map has
+   * forgotten, and for every thread a restart forgot.
+   */
+  const threadAddressee = new Map<string, string>();
   // Rendered approval requests, keyed by the gateway's request id — the
   // same id the buttons carry back.
   const approvalPosts = new Map<string, PendingApprovalPost>();
@@ -1835,6 +1863,28 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
   };
 
+  /** One thread, whichever agent is talking in it. */
+  const threadKeyFor = (parts: { team: string; conversation: string; thread: string }): string =>
+    `${parts.team}:${parts.conversation}:${parts.thread}`;
+
+  /**
+   * Records that `agentId` has the thread, evicting the least recently
+   * addressed once the map is full. Called before the work a message
+   * causes, so the order here is the order Slack delivered.
+   */
+  const rememberAddressee = (key: string, agentId: string): void => {
+    // Re-inserted rather than overwritten: a Map iterates in insertion
+    // order, which is what makes the first key the one to evict.
+    threadAddressee.delete(key);
+    threadAddressee.set(key, agentId);
+    if (threadAddressee.size > THREAD_ADDRESSEE_CAPACITY) {
+      const oldest = threadAddressee.keys().next();
+      if (!oldest.done) {
+        threadAddressee.delete(oldest.value);
+      }
+    }
+  };
+
   /**
    * The cheap half of "is this untagged channel message ours?", answered
    * before the message is even deduped so the ordinary traffic of a
@@ -1886,8 +1936,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     connection: AgentConnection,
     parts: { team: string; conversation: string; thread: string },
   ): Promise<boolean> => {
+    if (!parts.thread) {
+      return false;
+    }
+    // What this process has actually seen, in the order it saw it. Present
+    // for every thread spoken in since startup, and the only answer that
+    // is right inside the window before a handover reaches the store.
+    const handedTo = threadAddressee.get(threadKeyFor(parts));
+    if (handedTo !== undefined) {
+      return handedTo === connection.config.agentId;
+    }
     const gateway = gatewayRef;
-    if (!gateway?.sessionRouting || !parts.thread) {
+    if (!gateway?.sessionRouting) {
       return false;
     }
     const keyFor = (agentId: string): string => channelSessionKey({
@@ -1969,11 +2029,31 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       ...(thread ? { thread } : {}),
     });
 
-    // The one asynchronous half of addressing, deliberately after the
-    // dedupe: it reads sessions, and two deliveries of one message must
-    // not both get as far as asking.
-    if (!addressed && !(await answersFollowUp(connection, { team, conversation: event.channel, thread: event.thread_ts ?? '' }))) {
-      return;
+    // Threads only: a DM has one agent by construction, and a mention that
+    // starts a thread is the message the thread will be keyed on.
+    const threadKey = thread && !isDm ? threadKeyFor({ team, conversation: event.channel, thread }) : undefined;
+    if (addressed) {
+      // Synchronously, before the display-name lookup and the placeholder
+      // post this message is about to pay for: an addendum arriving during
+      // those must already see the handover this mention just made. Two
+      // agents named in one message leave whichever is recorded last
+      // holding it — one of the two people asked, which is the only
+      // sensible reading of a message that asked both.
+      if (threadKey) {
+        rememberAddressee(threadKey, connection.config.agentId);
+      }
+    } else {
+      // The one asynchronous half of addressing, deliberately after the
+      // dedupe: it can read sessions, and two deliveries of one message
+      // must not both get as far as asking.
+      if (!(await answersFollowUp(connection, { team, conversation: event.channel, thread: event.thread_ts ?? '' }))) {
+        return;
+      }
+      // Answered from the store rather than from memory: hold it, so the
+      // rest of the thread is ordered by receipt like any other.
+      if (threadKey) {
+        rememberAddressee(threadKey, connection.config.agentId);
+      }
     }
 
     // Everything up to (and including) the dispatch call is serialized per
@@ -2239,6 +2319,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       gatewayRef = undefined;
       connections.length = 0;
       approvalPosts.clear();
+      threadAddressee.clear();
       rendering.clear();
       resolvedWhileRendering.clear();
     },

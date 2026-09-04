@@ -776,10 +776,11 @@ test('in a shared thread an untagged reply goes to whoever spoke last, and a men
     body: { team_id: 'T1', event_id: 'evt-handover' },
     event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-BEA> what do you think?', ts: '900.2', thread_ts: '900.0', channel: 'C1' },
   });
-  spoke.set('slack:bea:T1:C1:900.0', '2026-01-01T00:00:02.000Z');
 
-  // …so the next untagged reply is hers, with nothing handed over but the
-  // order the two sessions were last written in.
+  // …so the next untagged reply is hers — and note `spoke` is untouched,
+  // so the sessions still say Ava spoke last. A handover is in force from
+  // the moment Slack delivers it, not from whenever the turn it starts
+  // gets as far as writing a session.
   const afterHandover = channelMessage({ text: 'go on', ts: '900.3', thread: '900.0' });
   await socketAva.deliver('message', afterHandover);
   await socketBea.deliver('message', afterHandover);
@@ -789,6 +790,42 @@ test('in a shared thread an untagged reply goes to whoever spoke last, and a men
     ['ava', 'Dylan: say more'],
     ['bea', 'Dylan: what do you think?'],
     ['bea', 'Dylan: go on'],
+  ]);
+});
+
+test('a follow-up typed while the opening mention is still starting is answered, not dropped', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'both, then'));
+  // Nothing durable exists yet: the mention's session is written when its
+  // turn starts, which is a placeholder post away.
+  gateway.sessionRouting = async () => undefined;
+  let release = (): void => {};
+  web.postGate = new Promise<void>((resolve) => {
+    release = () => resolve();
+  });
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-open' },
+    event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-AVA> take a look', ts: '930.0', channel: 'C1' },
+  });
+  // The placeholder is still in flight — the second thought lands inside
+  // the window where nothing has been persisted about the first.
+  await socket.deliver('message', channelMessage({ text: 'and the other one too', ts: '930.1', thread: '930.0' }));
+  release();
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
+    'Dylan: take a look',
+    'Dylan: and the other one too',
   ]);
 });
 
