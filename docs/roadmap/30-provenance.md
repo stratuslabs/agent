@@ -104,6 +104,23 @@ half stood.
   settles it better than the question was framed: the distinction was never DM
   versus channel, it is authorized principal versus not. A five-member channel
   where all five are authorized is fine; a DM from a stranger is not.
+
+  **The principal is a property of the turn, not of the session**, and getting
+  that backwards would undo the mapping entirely. A Slack thread keys one
+  session for every turn in it, so an authorized member can open a thread and
+  an unauthorized one can mention the agent inside it afterwards — same
+  session, different sender. A check that read the principal from persisted
+  session metadata would see the *first* sender forever and hand the later
+  member's content the first member's trust.
+
+  So the sender is evaluated **every turn**, and an unauthorized turn lowers
+  the session to `unknown` and leaves it there — monotonic, like everything
+  else here, and right: that content is in the transcript from then on.
+  **`runner.resume` has to carry the turn's metadata to make this possible,
+  and today it does not** — the gateway passes `metadata` to `runner.run` and
+  calls `resume` with `{ sessionId, userMessage, signal }` alone, so a resumed
+  turn currently arrives with no way to say who sent it. That is a kernel
+  change this step owns rather than an implementation detail it can assume.
 - **The hook sits where tools execute, not in the runner's loop.** This is the
   part a reasonable implementation gets wrong. `AgentRunner.runToolCalls` looks
   like the natural place and is not: `provider-claude-code` and
@@ -175,10 +192,19 @@ half stood.
     upgrade has.
 
     Nothing may raise trust except a person. The drain is the operator's
-    re-assertion record below, and it is tractable rather than a corpus-wide
-    chore: a mature install's injected slice is a 2 KiB pinned core plus a
-    topic index, so re-asserting what is pinned is enough for most sessions
-    never to see `unknown` at all.
+    re-assertion record below — and **re-asserting the pinned core alone is not
+    enough**, which an earlier draft of this bullet claimed. [29](./29-memory-quality.md)
+    keeps injecting recent entries in a tail, and on an upgraded install those
+    are legacy entries at `unknown`, so a session goes `unknown` on its first
+    turn no matter how carefully the pins were re-labelled. The drain is
+    proportional to **everything that reaches the prompt**, not to the pins.
+
+    That makes bulk re-assertion part of the operator surface rather than a
+    convenience: `stratus memory` and [17](./17-fleet-console.md) re-assert a
+    selection, not one entry at a time. It is still bounded work — an operator
+    reviews what their agent actually surfaces, once — but it is honest about
+    the size, and a claim that pinning covers it would send someone into an
+    afternoon of confusion wondering why their agent still writes `unknown`.
   - **Across a delegation, both ways.** `createDelegateTool` starts the
     target's session with the parent's text as `userMessage` and metadata
     carrying depth, delegator, and root session — no taint. Outbound, a
@@ -309,9 +335,16 @@ half stood.
   the session `unknown`**, in a DM as much as in a channel — the criterion that
   fails if `user` is inferred from channel shape, which is what the adapter's
   own checks would have allowed.
+- **A mixed-sender thread**: an authorized member opens it, an unauthorized one
+  mentions the agent later, and the turn after that writes `unknown` — the
+  criterion that fails if the principal is read from session metadata once
+  instead of from each turn's sender.
 - **A rolled-over session writes `agent` again where its pre-upgrade
-  predecessor wrote `unknown`**, with the old session unchanged — the case a
-  long-lived Slack DM would otherwise strand permanently.
+  predecessor wrote `unknown`** — over a store whose injected slice has been
+  re-asserted, with the old session unchanged. The qualifier is the criterion:
+  roll over a store that still has `unknown` entries in its recency tail and
+  the new session is `unknown` on its first turn, correctly, which is the
+  result that catches anyone who thinks rollover alone is the remedy.
 - **An external entry's `about` key never appears in the plain topic index** —
   asserted with an instruction-shaped topic name, against the rendered prompt,
   which is the only place the leak shows.

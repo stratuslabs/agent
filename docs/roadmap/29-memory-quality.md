@@ -204,12 +204,24 @@ different review look like.
     pinning near the limit can both read the same total, both accept, and both
     append. The write path refusing is the common case and stays the rule; for
     the race it cannot see, **replay decides deterministically: pins take
-    effect in `(createdAt, id)` order until the cap, and the remainder are
-    recorded but inert**, visible in `audit` like anything else the record
-    holds. Both stores compute the same effective set from the same file,
-    which is the property that matters — the alternative is an injected slice
-    that either overruns its budget or drops a pin by whichever order it
-    happened to read.
+    effect in the order their records appear in the file, until the cap, and
+    the remainder are recorded but inert**, visible in `audit` like anything
+    else the record holds. Both stores compute the same effective set from the
+    same file, which is the property that matters — the alternative is an
+    injected slice that either overruns its budget or drops a pin by whichever
+    order it happened to read.
+
+    **Append order, not `(createdAt, id)`** — a timestamp is the wrong key for
+    a budget. A pin written later with a skewed-earlier clock, or in the same
+    millisecond with a lower id, sorts *ahead* of a pin that is already
+    effective and can consume the budget out from under it, making an accepted
+    pin inert after the fact and contradicting the refusal the cap promises.
+    `O_APPEND` already supplies a total order that no later writer can insert
+    itself into, and the store already parses records in file order; using it
+    means an accepted pin stays accepted. Recall ordering keeps its
+    `(createdAt, id)` rule, which is a different question — presenting facts
+    newest-first is about meaning, and allocating a scarce budget is about
+    arrival.
   - **A memory index** — not facts, but what the agent *knows about*: entity
     names from `about`, counts, last-updated. Roughly a thousand tokens' worth
     of budget tells the agent the shape of its own store, which is what turns
@@ -411,6 +423,10 @@ different review look like.
   set, identical in both**, with the overflow recorded and inert rather than
   either process's write silently winning — the race the write-path check
   cannot see, since `O_APPEND` is the only coordination between them.
+- **A pin appended later with an earlier or tied timestamp does not displace an
+  already-effective pin** — asserted with a skewed clock and with a
+  same-millisecond tie, because a timestamp key makes the cap retroactive and
+  turns the promised refusal into a silent eviction.
 - Agent A cannot read agent B's entries with every new field in play, the test
   naming both agents rather than asserting an empty result an unrelated bug
   would also produce.
