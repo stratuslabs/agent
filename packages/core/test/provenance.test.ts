@@ -15,6 +15,7 @@ import {
   leastTrusted,
   escapeControlCharacters,
   memoryRegionHeading,
+  type TrustLevel,
   lowerSessionTrust,
   senderTrustOf,
   renderMemorySection,
@@ -93,6 +94,15 @@ test('the trust lattice combines to the least trusted label, and marking resolve
   assert.equal(leastTrusted(), 'user');
   assert.equal(leastTrusted('user', 'agent'), 'agent');
   assert.equal(leastTrusted('agent', 'unknown', 'agent'), 'unknown');
+  // A label nobody recognises — a JavaScript plugin's misspelling — ranks
+  // as unknown, never above user.
+  assert.equal(leastTrusted('user', 'externl' as TrustLevel), 'unknown');
+  assert.equal(leastTrusted('external', 'externl' as TrustLevel), 'external');
+  const misspelled = createTrustMarking({ outputTrust: 'externl' as TrustLevel });
+  assert.equal(misspelled.resolve(), 'unknown');
+  const bogusMark = createTrustMarking({});
+  bogusMark.context.markTrust?.('bogus' as TrustLevel);
+  assert.equal(bogusMark.resolve(), 'unknown');
   assert.equal(leastTrusted('unknown', 'external'), 'external');
   assert.equal(leastTrusted('external', 'user'), 'external');
 

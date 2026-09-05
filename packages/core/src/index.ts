@@ -188,8 +188,13 @@ export const isTrustLevel = (value: unknown): value is TrustLevel =>
 export const leastTrusted = (...levels: readonly TrustLevel[]): TrustLevel => {
   let lowest: TrustLevel = 'user';
   for (const level of levels) {
-    if (TRUST_LEVELS.indexOf(level) > TRUST_LEVELS.indexOf(lowest)) {
-      lowest = level;
+    // The type says every argument is a label; a JavaScript plugin's
+    // misspelled `outputTrust` says otherwise at runtime, and an index of
+    // -1 would rank it above `user`. A label nobody recognises is
+    // provenance nobody can vouch for: it ranks as `unknown`.
+    const ranked: TrustLevel = isTrustLevel(level) ? level : 'unknown';
+    if (TRUST_LEVELS.indexOf(ranked) > TRUST_LEVELS.indexOf(lowest)) {
+      lowest = ranked;
     }
   }
   return lowest;
@@ -2156,6 +2161,10 @@ export const createTrustMarking = (tool: Pick<Tool, 'outputTrust'>, context?: Ex
         upstream?.(trust);
       },
     },
+    // A declaration that is present but not a label — `externl` — is a
+    // producer that meant to say something, and reads `unknown`, never the
+    // no-declaration default. `leastTrusted` ranks it so; the `??` here
+    // only decides what an absent declaration means.
     resolve: () => leastTrusted(tool.outputTrust ?? 'agent', marked),
   };
 };
