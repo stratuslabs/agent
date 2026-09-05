@@ -3635,6 +3635,32 @@ test('a message from a configured principal arrives as user; anyone else’s is 
   ]);
 });
 
+test('a mention becomes a display name only for a principal; a stranger stays a stable id, so their profile text never rides a user turn', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const messages: string[] = [];
+  const dispatch = gateway.dispatch.bind(gateway);
+  gateway.dispatch = async (input) => {
+    messages.push(input.userMessage);
+    return dispatch(input);
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', principals: ['U-DYLAN', 'UBEA1'] }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  // The operator mentions a colleague on the list and a member who is not:
+  // the fake profile service would answer `name-USTRANGER1` for the second,
+  // and that string is the stranger's to choose. (Slack ids are
+  // alphanumeric, which is what the mention pattern matches.)
+  await socket.deliver('app_mention', mention('<@B-AVA> ask <@UBEA1> and <@USTRANGER1> about the budget', { ts: '100.1' }));
+  await adapter.stop();
+  assert.deepEqual(messages, ['Dylan: ask @name-UBEA1 and <@USTRANGER1> about the budget']);
+});
+
 test('an agent with no principals configured takes every sender as unknown, its operator’s DMs included', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

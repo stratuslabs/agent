@@ -1415,13 +1415,25 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   // Mentions arrive as <@U123> markup; the model should read names.
+  /**
+   * `<@U…>` mentions become `@name` — for principals only. A display name
+   * is text its owner typed into their profile, and a mention of a member
+   * nobody vouched for would otherwise carry that member's words into a
+   * turn labelled by its sender alone: an operator's `user` message with a
+   * stranger's chosen text inside it. A principal's profile is trusted the
+   * way their messages are; everyone else stays a stable id, which names
+   * them without quoting them.
+   */
   const humanizeMentions = async (connection: AgentConnection, text: string): Promise<string> => {
     const withoutBot = text.replaceAll(`<@${connection.botUserId}>`, '').trim();
     const mentionPattern = /<@([A-Z0-9]+)>/g;
     const ids = [...withoutBot.matchAll(mentionPattern)].map((match) => match[1]).filter((id): id is string => Boolean(id));
+    const principals = new Set(connection.config.principals ?? []);
     let result = withoutBot;
     for (const id of new Set(ids)) {
-      result = result.replaceAll(`<@${id}>`, `@${await displayNameFor(connection, id)}`);
+      if (principals.has(id)) {
+        result = result.replaceAll(`<@${id}>`, `@${await displayNameFor(connection, id)}`);
+      }
     }
     return result.trim();
   };

@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { lstat, open, realpath, stat } from 'node:fs/promises';
+import { lstat, open, realpath, stat, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -205,6 +205,24 @@ export const openContained = async (
     }
     if (truncate) {
       await handle.truncate(0);
+    }
+    if (!resolved.exists) {
+      // O_NOFOLLOW guards the final component only. A directory between
+      // the root and the name — one the resolution found missing and the
+      // caller then created — can be swapped for a link before the open,
+      // and the exclusive create then lands the file wherever the link
+      // points: another root, or nowhere allowed, and under a path the
+      // provenance ledger never recorded. The name is resolved again once
+      // the file exists; a spelling other than the one decided about is
+      // refused, and the file this call created is removed — O_EXCL
+      // guarantees it was this call's.
+      const landed = await realpath(resolved.path);
+      if (landed !== resolved.path) {
+        await unlink(resolved.path);
+        throw new PathOutsideRootError(
+          `Refusing ${resolved.path}: a directory on its path changed between the containment check and the open.`,
+        );
+      }
     }
   } catch (error) {
     await handle.close();

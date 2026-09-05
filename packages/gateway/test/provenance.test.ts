@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -18,6 +18,7 @@ import {
   type ToolCall,
 } from '@stratusagent/core';
 import { createRememberTool, MEMORY_TOOL_NAME } from '@stratusagent/agents';
+import { STATE_SCHEMA_VERSION, stateFilePath } from '@stratusagent/state';
 
 import {
   createGateway,
@@ -258,6 +259,27 @@ test('a rollover refuses a session with a turn in flight', async () => {
     });
     await assert.rejects(() => gateway.rolloverSession('busy'), /turn in flight/);
     assert.equal((await gateway.store.get('busy'))?.messages.length, 1);
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('a serving daemon stops taking work once a newer build has stamped the home', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+  try {
+    await gateway.dispatch({ sessionId: 'long-lived', userMessage: 'say hello' });
+    // A newer build was installed and ran a command; its migrations stamped
+    // the home. This daemon never restarted — and must not keep writing
+    // into formats it does not understand.
+    await mkdir(path.dirname(stateFilePath(env)), { recursive: true });
+    await writeFile(stateFilePath(env), JSON.stringify({ schemaVersion: STATE_SCHEMA_VERSION + 1, applied: [] }));
+    await assert.rejects(
+      () => gateway.dispatch({ sessionId: 'long-lived', userMessage: 'and again' }),
+      /newer Stratus build/,
+    );
   } finally {
     await gateway.stop();
   }

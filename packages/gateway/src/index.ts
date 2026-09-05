@@ -100,6 +100,7 @@ import {
   resolveConfiguredSoul,
   resolveRuntimeConfig,
   applySoulPins,
+  assertStateCompatible,
   stratusHomePath,
   workspacesDirPath,
   withLegacyDefaultMemories,
@@ -2045,6 +2046,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   const dispatchInternal = async (input: DispatchInput): Promise<Session> => {
+    // Re-read on every turn, not once at start: a newer build that stamps
+    // the home while this daemon is serving has formats this build does not
+    // understand, and a daemon that kept writing into them would be the
+    // downgrade the stamp exists to refuse — from the inside. Inside the
+    // session chain, so a turn already accepted is counted by the drain
+    // before this waits on anything. One small file read per turn.
+    await assertStateCompatible(env);
     // A dispatch whose signal fired while it queued behind another turn
     // must not touch durable state: without this check, the runner would
     // load the session, append the cancelled user message, and save it as

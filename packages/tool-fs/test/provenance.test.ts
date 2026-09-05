@@ -1,7 +1,7 @@
 import test from 'node:test';
 import { constants } from 'node:fs';
 import assert from 'node:assert/strict';
-import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -533,6 +533,25 @@ test('the ledger lives at the host’s ledgerRoot, not at whatever workspaceRoot
   const read = marking();
   await run(tools, 'fs.read', { path: 'fetched.md' }, sessionAt('ava', 'user'), read.context);
   assert.deepEqual(read.marks, ['external']);
+});
+
+test('a directory swapped for a link between the containment check and the open lands nothing', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-provenance-'));
+  const rootA = path.join(home, 'a');
+  const rootB = path.join(home, 'b');
+  await mkdir(rootA, { recursive: true });
+  await mkdir(rootB, { recursive: true });
+  // Resolved while `a/new` did not exist; then a peer created `a/new` as a
+  // link to the other root before the open.
+  const target = path.join(rootA, 'new', 'file.md');
+  await symlink(rootB, path.join(rootA, 'new'));
+  await assert.rejects(
+    () => openContained({ path: target, root: rootA, exists: false }, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC, 0o644),
+    /a directory on its path changed/,
+  );
+  // O_NOFOLLOW guards only the last component, so the create went through
+  // the link — and was taken back: nothing landed in the other root.
+  assert.deepEqual(await readdir(rootB), []);
 });
 
 test('two writes racing to create one file both land: the loser looks again and writes what is there', async () => {

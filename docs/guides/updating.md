@@ -24,7 +24,14 @@ entries, sessions, schedules, and the filesystem provenance ledger carry
 trust labels, and a build from before them would read an `external` fact as
 the agent's own conclusion and keep writing unlabelled state beside the
 labelled kind. Nothing is rewritten on the way up; on the way down, a build
-that understands schema 1 refuses to write.
+that understands schema 1 refuses to write. A daemon from *before* this
+build that is still running when the stamp advances never re-reads it — a
+stamp is checked by a build that knows to check — so it keeps serving until
+it is restarted; `stratus update` stops it first, and an install that went
+around `stratus update` should restart the service (`stratus service
+restart`). From this build on, the daemon re-reads the stamp on every
+dispatch and refuses work once a newer build has stamped the home, so the
+next bump stops a live daemon on its own.
 
 One thing a rollback does lose, and it is not stamped: an agent's
 `origins` grants. `<id>.whitelist.json` holds both kinds of grant under the
