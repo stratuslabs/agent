@@ -1,5 +1,6 @@
 import {
   createTrustMarking,
+  leastTrusted,
   type ExecutionContext,
   type Executor,
   type JsonValue,
@@ -95,11 +96,13 @@ export class DirectExecutor implements Executor {
       return successResult(call, output, marking.resolve());
     } catch (error) {
       if (this.onError) {
-        // A mapper that said where its text came from is believed; one
-        // that did not gets what the tool's channels said, never the
-        // default — the error it is wrapping may quote a server.
+        // The tool's channels set the floor: a mapper may lower the label
+        // further (it knows what it wrapped) but never raise it — the error
+        // it is wrapping may quote a server, and `failureResult`'s default
+        // is `agent`, which a mapper reaching for the helper would
+        // otherwise hand an `external` tool's error text.
         const mapped = await this.onError({ call, tool, session, error });
-        return mapped.trust === undefined ? { ...mapped, trust: marking.resolve() } : mapped;
+        return { ...mapped, trust: leastTrusted(marking.resolve(), mapped.trust ?? 'agent') };
       }
 
       return failureResult(call, error, null, marking.resolve());

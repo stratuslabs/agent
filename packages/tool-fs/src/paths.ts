@@ -187,15 +187,28 @@ export const openContained = async (
   // O_NOFOLLOW does not see a hard link — fails with EEXIST rather than
   // being truncated. The caller decides whether to look again.
   const exclusive = resolved.exists ? 0 : constants.O_EXCL;
-  const handle = await open(resolved.path, flags | O_NOFOLLOW | exclusive, mode);
-  if (resolved.identity) {
-    const info = await handle.stat();
-    if (info.dev !== resolved.identity.dev || info.ino !== resolved.identity.ino) {
-      await handle.close();
-      throw new PathOutsideRootError(
-        `Refusing ${resolved.path}: it changed between the containment check and the open.`,
-      );
+  // Truncation is deferred until the descriptor has been verified: O_TRUNC
+  // empties the file at open, before any inode comparison can run, so a
+  // name swapped for a hard link of the provenance ledger between the check
+  // and the open would be emptied first and refused second. Opened intact,
+  // checked, then truncated through the descriptor already held.
+  const truncate = (flags & constants.O_TRUNC) !== 0;
+  const handle = await open(resolved.path, (flags & ~constants.O_TRUNC) | O_NOFOLLOW | exclusive, mode);
+  try {
+    if (resolved.identity) {
+      const info = await handle.stat();
+      if (info.dev !== resolved.identity.dev || info.ino !== resolved.identity.ino) {
+        throw new PathOutsideRootError(
+          `Refusing ${resolved.path}: it changed between the containment check and the open.`,
+        );
+      }
     }
+    if (truncate) {
+      await handle.truncate(0);
+    }
+  } catch (error) {
+    await handle.close();
+    throw error;
   }
   return handle;
 };

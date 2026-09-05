@@ -463,6 +463,27 @@ test('a file that appears under a name resolved as empty is never truncated: the
   assert.match(await readFile(ledgerPath, 'utf8'), /x\.md/);
 });
 
+test('an existing target swapped for a hard link of the ledger is refused before it is truncated', async () => {
+  const { root, workspaceRoot } = await workspace();
+  const ledgerPath = path.join(workspaceRoot, 'ava', LEDGER_FILENAME);
+  await mkdir(path.dirname(ledgerPath), { recursive: true });
+  await writeFile(ledgerPath, `${JSON.stringify({ path: path.join(root, 'x.md'), trust: 'external', at: 'now' })}\n`);
+  // A resolution decided about the agent's own file, by inode...
+  const target = path.join(root, 'notes.md');
+  await writeFile(target, 'mine');
+  const info = await stat(target);
+  const resolved = { path: target, root, exists: true, kind: 'file' as const, identity: { dev: info.dev, ino: info.ino } };
+  // ...and the name swapped for a hard link of the ledger before the open.
+  await rm(target);
+  await link(ledgerPath, target);
+  await assert.rejects(
+    () => openContained(resolved, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC, 0o644),
+    /changed between the containment check and the open/,
+  );
+  // Refused with the record still in it: the truncation never ran.
+  assert.match(await readFile(ledgerPath, 'utf8'), /x\.md/);
+});
+
 test('two writes racing to create one file both land: the loser looks again and writes what is there', async () => {
   const { root, workspaceRoot } = await workspace();
   const tools = await registryFor({ roots: [root], workspaceRoot });
