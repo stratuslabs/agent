@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -327,13 +327,16 @@ test('two sessions writing one path at once never leave tainted bytes unlabelled
 test('the ledger is protected under the workspace root’s canonical path as well as the configured one', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-provenance-'));
   const realWorkspaces = path.join(home, 'volume', 'workspaces');
+  const movedWorkspaces = path.join(home, 'volume2', 'workspaces');
   await mkdir(realWorkspaces, { recursive: true });
+  await mkdir(movedWorkspaces, { recursive: true });
   // The operator moved the workspaces onto another volume and left a link.
   const linked = path.join(home, 'workspaces');
   await symlink(realWorkspaces, linked);
-  // Configured through the link; the agent's root covers the real directory,
-  // which is the spelling every resolved path arrives in.
-  const tools = await registryFor({ roots: [realWorkspaces], workspaceRoot: linked });
+  // Configured through the link; the agent's roots cover the real directory,
+  // which is the spelling every resolved path arrives in — and the second
+  // volume, for the move below.
+  const tools = await registryFor({ roots: [realWorkspaces, movedWorkspaces], workspaceRoot: linked });
 
   await run(tools, 'fs.write', { path: 'ava/notes.md', content: 'fetched' }, sessionAt('ava', 'external'));
   await assert.rejects(
@@ -343,6 +346,21 @@ test('the ledger is protected under the workspace root’s canonical path as wel
   const read = marking();
   await run(tools, 'fs.read', { path: 'ava/notes.md' }, sessionAt('ava', 'user'), read.context);
   assert.deepEqual(read.marks, ['external']);
+
+  // The operator moves the workspaces again under the running daemon and
+  // repoints the link. The ledger now lives at the new target, and a
+  // canonical spelling remembered from the first write would compare the
+  // real ledger as outside the workspace — writable.
+  await rm(linked);
+  await symlink(movedWorkspaces, linked);
+  await run(tools, 'fs.write', { path: path.join(movedWorkspaces, 'ava', 'notes.md'), content: 'fetched' }, sessionAt('ava', 'external'));
+  await assert.rejects(
+    () => run(tools, 'fs.write', { path: path.join(movedWorkspaces, 'ava', LEDGER_FILENAME), content: '' }, sessionAt('ava', 'agent')),
+    /provenance ledger/,
+  );
+  const moved = marking();
+  await run(tools, 'fs.read', { path: path.join(movedWorkspaces, 'ava', 'notes.md') }, sessionAt('ava', 'user'), moved.context);
+  assert.deepEqual(moved.marks, ['external']);
 });
 
 test('a file’s name is the tainted session’s text too: a listing or a skipped-file report that names it is marked', async () => {

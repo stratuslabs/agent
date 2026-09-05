@@ -975,22 +975,21 @@ export const createFsPlugin = (config: JsonObject = {}): Plugin => {
   // The root resolver hands back canonical paths, so the ledger is
   // protected under its canonical spelling as well as the configured one —
   // a workspace an operator moved behind a symlink would otherwise compare
-  // as outside it. Resolved on first use, not at setup: the directory may
-  // not exist yet, and a missing one has only its configured spelling.
-  let spellings: Promise<readonly string[]> | undefined;
-  const workspaceRoots = (): Promise<readonly string[]> => {
-    spellings ??= workspaceRoot === undefined
-      ? Promise.resolve([])
-      : realpath(workspaceRoot).then(
-          (canonical) => (canonical === workspaceRoot ? [workspaceRoot] : [workspaceRoot, canonical]),
-          () => {
-            // Not there yet: remember nothing, so it is looked up again
-            // once the ledger's first write has created it.
-            spellings = undefined;
-            return [workspaceRoot];
-          },
-        );
-    return spellings;
+  // as outside it. Resolved on every check, never cached: a link repointed
+  // under a running daemon would otherwise leave the ledger at its new
+  // target compared against the old one, and unprotected, for as long as
+  // the process lived. One `realpath` per write is nothing next to the
+  // write. A root that does not exist yet has only its configured spelling.
+  const workspaceRoots = async (): Promise<readonly string[]> => {
+    if (workspaceRoot === undefined) {
+      return [];
+    }
+    try {
+      const canonical = await realpath(workspaceRoot);
+      return canonical === workspaceRoot ? [workspaceRoot] : [workspaceRoot, canonical];
+    } catch {
+      return [workspaceRoot];
+    }
   };
   const serialized = createKeyedSerializer();
   return {
