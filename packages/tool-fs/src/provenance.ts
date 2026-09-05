@@ -128,6 +128,38 @@ const parseLedger = (raw: string, filePath: string): Record<string, TrustLevel> 
 };
 
 /**
+ * The label the ledger's own contents carry: the lowest label recorded in
+ * it. Every path in it was chosen by a session at `unknown` or `external`,
+ * and the ledger's own path has no record, so an agent whose roots cover
+ * its workspace could otherwise `fs.read` the ledger and get a list of
+ * attacker-chosen filenames back at `agent`. Undefined for no file or an
+ * empty one; `unknown` for a file that holds lines nothing here can read
+ * — nobody vouches for those.
+ */
+export const ledgerContentTrust = async (ledgerFilePath: string): Promise<TrustLevel | undefined> => {
+  let raw: string;
+  try {
+    raw = await readFile(ledgerFilePath, 'utf8');
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') {
+      return undefined;
+    }
+    throw error;
+  }
+  if (raw.trim().length === 0) {
+    return undefined;
+  }
+  let labels: TrustLevel[];
+  try {
+    labels = Object.values(parseLedger(raw, ledgerFilePath));
+  } catch {
+    return 'unknown';
+  }
+  return labels.length > 0 ? leastTrusted(...labels) : 'unknown';
+};
+
+/**
  * The durable ledger, one append-only JSONL file per agent at
  * `<workspaceRoot>/<agentId>/fs-provenance.jsonl`, owner-only. Each record
  * is one `O_APPEND` write, so processes that share an agent — the daemon and

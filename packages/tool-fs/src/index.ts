@@ -27,6 +27,7 @@ import {
   createFileLedger,
   createProcessLocalLedger,
   isLedgerPath,
+  ledgerContentTrust,
   type TaintedWriteLedger,
 } from './provenance.ts';
 
@@ -181,7 +182,12 @@ const createKeyedSerializer = (): KeyedSerializer => {
   };
 };
 
-const createReadTool = (config: JsonObject, ledger: TaintedWriteLedger, serialized: KeyedSerializer): Tool => ({
+const createReadTool = (
+  config: JsonObject,
+  ledger: TaintedWriteLedger,
+  workspaceRoots: () => Promise<readonly string[]>,
+  serialized: KeyedSerializer,
+): Tool => ({
   name: 'fs.read',
   description: 'Read a UTF-8 text file inside one of this agent’s roots.',
   risk: 'safe',
@@ -210,7 +216,10 @@ const createReadTool = (config: JsonObject, ledger: TaintedWriteLedger, serializ
         result: await readContained(resolved, maxBytes),
         // The result names the file's path, directories included — see
         // `withAncestors`.
-        recorded: await recordedTrustAmong(ledger, session.agent.id, [resolved.path], resolved.root, snapshot),
+        recorded: lowest(
+          await recordedTrustAmong(ledger, session.agent.id, [resolved.path], resolved.root, snapshot),
+          await ledgerContentTrustAmong(workspaceRoots, [resolved.path]),
+        ),
       };
     });
     if (recorded !== undefined) {
@@ -289,6 +298,36 @@ const recordedTrustAmong = async (
     }
   }
   return labels.length > 0 ? leastTrusted(...labels) : undefined;
+};
+
+/**
+ * The ledger is the one file under a root whose contents are tainted
+ * sessions' text by construction — the paths they chose, one per record —
+ * and whose own path has no record. A result that shows what is in it
+ * (a read, a search that matched a line) is labelled by what it holds. A
+ * listing that names it is not: the filename is fixed, and nothing in it
+ * was anyone's choice.
+ */
+const ledgerContentTrustAmong = async (
+  workspaceRoots: () => Promise<readonly string[]>,
+  absolutePaths: Iterable<string>,
+): Promise<TrustLevel | undefined> => {
+  const roots = await workspaceRoots();
+  const labels: TrustLevel[] = [];
+  for (const absolutePath of absolutePaths) {
+    if (isLedgerPath(roots, absolutePath)) {
+      const label = await ledgerContentTrust(absolutePath);
+      if (label !== undefined) {
+        labels.push(label);
+      }
+    }
+  }
+  return labels.length > 0 ? leastTrusted(...labels) : undefined;
+};
+
+const lowest = (...labels: Array<TrustLevel | undefined>): TrustLevel | undefined => {
+  const defined = labels.filter((label): label is TrustLevel => label !== undefined);
+  return defined.length > 0 ? leastTrusted(...defined) : undefined;
 };
 
 const createListTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool => ({
@@ -619,7 +658,11 @@ const walkFiles = async function* (directory: string, depth = 0): AsyncGenerator
   }
 };
 
-const createSearchTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool => ({
+const createSearchTool = (
+  config: JsonObject,
+  ledger: TaintedWriteLedger,
+  workspaceRoots: () => Promise<readonly string[]>,
+): Tool => ({
   name: 'fs.search',
   description: 'Search file contents for literal text under one of this agent’s roots.',
   risk: 'safe',
@@ -671,7 +714,10 @@ const createSearchTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool 
       }
     };
     const report = async (): Promise<JsonObject> => {
-      const recorded = await recordedTrustAmong(ledger, session.agent.id, namedFiles, resolved.root, ledgerBefore);
+      const recorded = lowest(
+        await recordedTrustAmong(ledger, session.agent.id, namedFiles, resolved.root, ledgerBefore),
+        await ledgerContentTrustAmong(workspaceRoots, namedFiles),
+      );
       if (recorded !== undefined) {
         context?.markTrust?.(recorded);
       }
@@ -950,9 +996,9 @@ export const createFsPlugin = (config: JsonObject = {}): Plugin => {
   return {
     name: '@stratusagent/tool-fs',
     setup(context) {
-      context.tools.register(createReadTool(config, ledger, serialized));
+      context.tools.register(createReadTool(config, ledger, workspaceRoots, serialized));
       context.tools.register(createListTool(config, ledger));
-      context.tools.register(createSearchTool(config, ledger));
+      context.tools.register(createSearchTool(config, ledger, workspaceRoots));
       context.tools.register(createWriteTool(config, ledger, workspaceRoots, serialized));
     },
   };

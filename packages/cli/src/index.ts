@@ -6486,7 +6486,25 @@ export const runSkillReload = async (
  * every session `unknown` on its first turn. Re-asserting the entries the
  * agent actually surfaces, once, is the bounded work that drains it.
  */
-export const runMemory = async (
+export /**
+ * A fact shown on the audit screen, one line, with every control character
+ * spelled out. This listing exists so an operator can decide what to
+ * re-assert as trusted, and an `external` entry is a page's text: one
+ * holding a newline could forge the next entry's header and label, and one
+ * holding an escape sequence could repaint the terminal it is being judged
+ * on. Same shape as JSON's escapes, so what is shown is what is stored.
+ */
+const escapeControlCharacters = (text: string): string =>
+  text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (character) => {
+    switch (character) {
+      case '\n': return '\\n';
+      case '\r': return '\\r';
+      case '\t': return '\\t';
+      default: return `\\u${character.codePointAt(0)!.toString(16).padStart(4, '0')}`;
+    }
+  });
+
+const runMemory = async (
   command: ParsedMemoryCommand,
   streams: CliStreams,
   env: CliEnvironment = {},
@@ -6532,7 +6550,7 @@ export const runMemory = async (
       const taintedBy = entry.origin?.taintedBy ? `  (tainted by ${entry.origin.taintedBy})` : '';
       const unrecorded = unlabelled(entry) ? '  (no recorded origin)' : '';
       writeLine(streams.stdout, `${entry.id}  [${memoryEntryTrust(entry)}]${taintedBy}${unrecorded}`);
-      writeLine(streams.stdout, `  ${entry.content}`);
+      writeLine(streams.stdout, `  ${escapeControlCharacters(entry.content)}`);
     }
     if (command.trust === undefined) {
       const unlabelledCount = live.filter(unlabelled).length;

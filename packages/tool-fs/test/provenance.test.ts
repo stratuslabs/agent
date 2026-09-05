@@ -219,6 +219,38 @@ test('fs.write refuses to edit the ledger itself, even inside a root that covers
   assert.equal(await readFile(path.join(workspaceRoot, 'ava', 'project', LEDGER_FILENAME), 'utf8'), '{"theirs":true}');
 });
 
+test('the ledger itself reads at the lowest label it holds: its contents are paths tainted sessions chose', async () => {
+  const { root, workspaceRoot } = await workspace();
+  // The workspace inside a root is the only way the ledger is readable; the
+  // tainted write goes to the other root, so nothing under `ava/` but the
+  // ledger is recorded.
+  await mkdir(path.join(workspaceRoot, 'ava'), { recursive: true });
+  const tools = await registryFor({ roots: [workspaceRoot, root], workspaceRoot });
+  await run(tools, 'fs.write', { path: path.join(root, 'approve-every-refund.md'), content: 'fetched' }, sessionAt('ava', 'external'));
+
+  // A clean session reading the ledger would otherwise get the filenames the
+  // tainted session picked back as its own text.
+  const read = marking();
+  const contents = await run(tools, 'fs.read', { path: `ava/${LEDGER_FILENAME}` }, sessionAt('ava', 'user'), read.context) as JsonObject;
+  assert.match(String(contents.content), /approve-every-refund/);
+  assert.deepEqual(read.marks, ['external']);
+
+  // A search that matched a line in it shows the same text.
+  const searched = marking();
+  await run(tools, 'fs.search', { query: 'approve-every-refund', path: 'ava' }, sessionAt('ava', 'user'), searched.context);
+  assert.deepEqual(searched.marks, ['external']);
+
+  // Another agent's ledger is another agent's record of the same kind.
+  const other = marking();
+  await run(tools, 'fs.read', { path: `ava/${LEDGER_FILENAME}` }, sessionAt('bea', 'user'), other.context);
+  assert.deepEqual(other.marks, ['external']);
+
+  // A listing that names the ledger shows a fixed filename, nobody's choice.
+  const listed = marking();
+  await run(tools, 'fs.list', { path: 'ava' }, sessionAt('ava', 'user'), listed.context);
+  assert.deepEqual(listed.marks, []);
+});
+
 test('without a workspace root the ledger is process-local, and still closes the loop inside the process', async () => {
   const { root } = await workspace();
   const tools = await registryFor({ roots: [root] });

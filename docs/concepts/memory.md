@@ -107,7 +107,9 @@ upgrade corpus. An entry *recorded* as `unknown` — written after a message
 from someone not configured as a principal, or after a shell command — may
 repeat what a stranger said, so the bulk command leaves it alone and
 `stratus memory list` points it out; re-assert one by id once you have read
-it. Re-asserting appends a record to the JSONL — the file is never
+it. The text listing spells control characters out (`\n`, `\u001b`), so an
+entry cannot forge a neighbour's header or repaint the screen you are
+deciding from; `--format json` carries the content as stored. Re-asserting appends a record to the JSONL — the file is never
 rewritten — and a running daemon reads it on its next turn. No tool can do this: an
 agent re-labelling its own memory as trusted would be the attack writing its
 own permission slip.

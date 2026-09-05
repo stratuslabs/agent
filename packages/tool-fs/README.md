@@ -89,7 +89,9 @@ process could race into leaving tainted bytes unlabelled — so a clean session
 rewriting the file leaves the label standing. Over-marking is the safe
 direction; to reclaim a path, remove its lines from the ledger by hand.
 The ledger is the daemon's record, and `fs.write` refuses to edit it even
-inside a root that covers it.
+inside a root that covers it; a read or search that shows what it holds is
+labelled at the lowest label in it, because its contents are the paths
+tainted sessions chose.
 
 What this does not cover, said plainly: a copy under another name, a file a
 different process or a different agent wrote, content pasted through a path
