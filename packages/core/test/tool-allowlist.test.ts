@@ -297,9 +297,23 @@ test('an allowlist entry naming no registered tool is reported, and a whole allo
     unmatchedToolAllowlist({ tools: ['mcp.linear.create_issue'] }, registered, ['mcp.*']),
     undefined,
   );
-  // The excuse reaches only as far as the namespace claims.
+  // Namespaces nest, so the overlap runs the other way too: a bridge
+  // declaring `mcp.linear.*` and an agent granted the broader `mcp.*` is
+  // still an agent whose entry selects every tool that will arrive.
+  assert.equal(
+    unmatchedToolAllowlist({ tools: ['mcp.*'] }, registered, ['mcp.linear.*']),
+    undefined,
+  );
+  assert.equal(unmatchedToolAllowlist({ tools: ['*'] }, registered, ['mcp.linear.*']), undefined);
+
+  // The excuse reaches only as far as the namespaces claim, in either
+  // direction.
   assert.deepEqual(unmatchedToolAllowlist({ tools: ['fs.*'] }, registered, ['mcp.*']), {
     unmatched: ['fs.*'],
+    none: true,
+  });
+  assert.deepEqual(unmatchedToolAllowlist({ tools: ['mcp.github.*'] }, registered, ['mcp.linear.*']), {
+    unmatched: ['mcp.github.*'],
     none: true,
   });
 });
