@@ -439,10 +439,31 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       // has the old shape and no stamp at all. Dropping everything makes
       // the next catch-up a full rebuild from the record, which is the
       // only cost a derived file can have.
-      const columns = opened.prepare('PRAGMA table_info(memory_fts)').all() as Array<{ name: string }>;
-      if (!columns.some((column) => column.name === 'trust')) {
-        opened.exec('DROP TABLE memory_fts; DROP TABLE forgotten; DROP TABLE reasserted; DROP TABLE meta;');
-        opened.exec(INDEX_SCHEMA);
+      const hasCurrentShape = (): boolean => (opened.prepare('PRAGMA table_info(memory_fts)').all() as Array<{ name: string }>)
+        .some((column) => column.name === 'trust');
+      if (!hasCurrentShape()) {
+        // Under the same write lock catch-up takes, and re-checked once it
+        // is held: the daemon and a `stratus run` opening an upgraded
+        // index at the same moment both see the old shape, and without the
+        // lock the second's drops would empty the tables the first had
+        // just rebuilt. With it, the second waits, looks again, and finds
+        // nothing to do.
+        opened.exec('BEGIN IMMEDIATE;');
+        try {
+          if (!hasCurrentShape()) {
+            opened.exec('DROP TABLE memory_fts; DROP TABLE forgotten; DROP TABLE reasserted; DROP TABLE meta;');
+            opened.exec(INDEX_SCHEMA);
+          }
+          opened.exec('COMMIT;');
+        } catch (error) {
+          try {
+            opened.exec('ROLLBACK;');
+          } catch {
+            // The transaction may never have started; the original error
+            // is the one worth reporting.
+          }
+          throw error;
+        }
       }
       return opened;
     };
