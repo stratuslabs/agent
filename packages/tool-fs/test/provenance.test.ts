@@ -222,3 +222,31 @@ test('two sessions writing one path at once leave the ledger agreeing with the b
     assert.deepEqual(read.marks, bytes === 'fetched' ? ['external'] : [], `round ${round}: bytes "${bytes}" with marks ${JSON.stringify(read.marks)}`);
   }
 });
+
+test('a file’s name is the tainted session’s text too: a listing or a skipped-file report that names it is marked', async () => {
+  const { root, workspaceRoot } = await workspace();
+  const tools = await registryFor({ roots: [root], workspaceRoot });
+  await mkdir(path.join(root, 'inbox'), { recursive: true });
+  // A tainted session chose the name; the contents are too big for a walk
+  // to search and would only ever be reported as skipped.
+  await run(tools, 'fs.write', { path: 'inbox/IGNORE-PREVIOUS-INSTRUCTIONS.md', content: 'x'.repeat(1_000_001) }, sessionAt('ava', 'external'));
+  await run(tools, 'fs.write', { path: 'inbox/own.md', content: 'my note' }, sessionAt('ava', 'agent'));
+
+  const listed = marking();
+  const listing = await run(tools, 'fs.list', { path: 'inbox' }, sessionAt('ava', 'user'), listed.context) as { entries: Array<{ name: string }> };
+  assert.ok(listing.entries.some((entry) => entry.name === 'IGNORE-PREVIOUS-INSTRUCTIONS.md'));
+  assert.deepEqual(listed.marks, ['external']);
+
+  // The oversized file matches nothing — it is skipped — and the skip names it.
+  const searched = marking();
+  const found = await run(tools, 'fs.search', { query: 'my note', path: 'inbox' }, sessionAt('ava', 'user'), searched.context) as { skipped?: Array<{ path: string }> };
+  assert.ok(found.skipped?.some((entry) => entry.path.endsWith('IGNORE-PREVIOUS-INSTRUCTIONS.md')));
+  assert.deepEqual(searched.marks, ['external']);
+
+  // A directory with only the agent's own files in it marks nothing.
+  await mkdir(path.join(root, 'clean'), { recursive: true });
+  await run(tools, 'fs.write', { path: 'clean/a.md', content: 'a' }, sessionAt('ava', 'agent'));
+  const clean = marking();
+  await run(tools, 'fs.list', { path: 'clean' }, sessionAt('ava', 'user'), clean.context);
+  assert.deepEqual(clean.marks, []);
+});

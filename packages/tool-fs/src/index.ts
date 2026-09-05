@@ -205,7 +205,30 @@ const entryKind = (entry: { isDirectory(): boolean; isFile(): boolean; isSymboli
   return 'other';
 };
 
-const createListTool = (config: JsonObject): Tool => ({
+/**
+ * The lowest recorded label among `absolutePaths`, or undefined when the
+ * ledger knows none of them. A result that names files — a listing, a
+ * search's matches and skips — is marked with it: a filename is text the
+ * writing session chose, and a tainted session may have chosen it from a
+ * page, so even a result that shows no contents carries the label.
+ */
+const recordedTrustAmong = async (
+  ledger: TaintedWriteLedger,
+  agentId: string,
+  absolutePaths: Iterable<string>,
+): Promise<TrustLevel | undefined> => {
+  const recorded = await ledger.snapshot(agentId);
+  const labels: TrustLevel[] = [];
+  for (const absolutePath of absolutePaths) {
+    const label = recorded[absolutePath];
+    if (label !== undefined) {
+      labels.push(label);
+    }
+  }
+  return labels.length > 0 ? leastTrusted(...labels) : undefined;
+};
+
+const createListTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool => ({
   name: 'fs.list',
   description: 'List a directory inside one of this agent’s roots.',
   risk: 'safe',
@@ -215,7 +238,7 @@ const createListTool = (config: JsonObject): Tool => ({
       path: { type: 'string', description: 'Defaults to the agent’s first root.' },
     },
   },
-  async execute(input, session) {
+  async execute(input, session, context) {
     const settings = settingsFor(config, session);
     const requested = typeof input.path === 'string' && input.path.length > 0 ? input.path : '.';
     const resolved = await resolveWithinRoots(settings.roots, requested, { home: settings.home });
@@ -244,6 +267,13 @@ const createListTool = (config: JsonObject): Tool => ({
         ...(size === undefined ? {} : { size }),
       };
     }));
+
+    // The names are what a tainted session chose to call its files, and the
+    // listing puts them in front of the model.
+    const recorded = await recordedTrustAmong(ledger, session.agent.id, listed.map((entry) => path.join(resolved.path, entry.name)));
+    if (recorded !== undefined) {
+      context?.markTrust?.(recorded);
+    }
 
     return {
       path: relativeTo(resolved.root, resolved.path),
@@ -544,11 +574,11 @@ const createSearchTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool 
     });
 
     const matches: SearchMatch[] = [];
-    // A match is a line of the file's content in the result, so a matched
-    // file the ledger knows taints the call the way `fs.read` of it would.
-    // Files that only got skipped or produced no match put nothing in
-    // front of the model and are not consulted.
-    const matchedFiles = new Set<string>();
+    // A match is a line of the file's content in the result, and a skipped
+    // file is named in it, so either kind of file the ledger knows taints
+    // the call the way `fs.read` of it would. A file that produced no match
+    // and was not skipped puts nothing in front of the model.
+    const namedFiles = new Set<string>();
     // What the walk looked past, said outright. A file over the size
     // limit used to vanish from the result: a search of a directory holding
     // one 6.7 MB log came back with no matches and no hint that the log
@@ -563,18 +593,14 @@ const createSearchTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool 
       skippedTotal += 1;
       if (skipped.length < MAX_SKIPPED_REPORTED) {
         skipped.push(entry);
+        // `entry.path` is relative to the root the search resolved in.
+        namedFiles.add(path.join(resolved.root, entry.path));
       }
     };
     const report = async (): Promise<JsonObject> => {
-      const labels: TrustLevel[] = [];
-      for (const file of matchedFiles) {
-        const recorded = await ledger.lookup(session.agent.id, file);
-        if (recorded !== undefined) {
-          labels.push(recorded);
-        }
-      }
-      if (labels.length > 0) {
-        context?.markTrust?.(leastTrusted(...labels));
+      const recorded = await recordedTrustAmong(ledger, session.agent.id, namedFiles);
+      if (recorded !== undefined) {
+        context?.markTrust?.(recorded);
       }
       return {
         query,
@@ -605,7 +631,7 @@ const createSearchTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool 
         line: index + 1,
         text: line.length > 400 ? `${line.slice(0, 400)}…` : line,
       });
-      matchedFiles.add(file);
+      namedFiles.add(file);
       return true;
     };
 
@@ -631,7 +657,8 @@ const createSearchTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool 
           // NUL is not a search result of a text file, because this is
           // not one.
           matches.splice(before);
-          matchedFiles.delete(resolved.path);
+          // The skip that follows names it again, as a binary file.
+          namedFiles.delete(resolved.path);
           truncated = truncatedBefore;
           clipped = false;
           skip({ path: relativeTo(resolved.root, resolved.path), bytes: size, reason: 'binary' });
@@ -837,7 +864,7 @@ export const createFsPlugin = (config: JsonObject = {}): Plugin => {
     name: '@stratusagent/tool-fs',
     setup(context) {
       context.tools.register(createReadTool(config, ledger));
-      context.tools.register(createListTool(config));
+      context.tools.register(createListTool(config, ledger));
       context.tools.register(createSearchTool(config, ledger));
       context.tools.register(createWriteTool(config, ledger, workspaceRoot));
     },

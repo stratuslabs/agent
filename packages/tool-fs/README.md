@@ -77,8 +77,9 @@ records the path in a per-agent ledger,
 `<workspaceRoot>/<agent>/fs-provenance.json` (owner-only, replaced
 atomically) — before the bytes land, so a crash or a ledger that cannot be
 written leaves a labelled path with no file rather than a file with no
-label — and a later `fs.read` or `fs.search` that puts that file's
-contents in front of the model labels the call at the recorded level — so
+label — and a later `fs.read`, `fs.search`, or `fs.list` that puts that file's
+contents — or its name, which the tainted session chose — in front of the
+model labels the call at the recorded level — so
 the reading session, and every fact it remembers afterwards, carries it. A
 truncating write from a clean session clears the record; an append keeps it.
 The ledger is the daemon's record, and `fs.write` refuses to edit it even

@@ -32,6 +32,12 @@ export interface TaintedWriteLedger {
   /** The label a read of this path carries, or undefined for a path the ledger never saw. */
   lookup(agentId: string, absolutePath: string): Promise<TrustLevel | undefined>;
   /**
+   * Every recorded path and its label, for a result that names many files
+   * at once — a listing, a search's matches and skips — read once rather
+   * than once per file.
+   */
+  snapshot(agentId: string): Promise<Record<string, TrustLevel>>;
+  /**
    * Record a write. A truncating write from a clean session (`user` or
    * `agent`) clears the path: the bytes there are now that session's. An
    * append keeps whatever label was recorded, since the tainted bytes are
@@ -83,6 +89,9 @@ export const createProcessLocalLedger = (): TaintedWriteLedger => {
   return {
     async lookup(agentId, absolutePath) {
       return byAgent.get(agentId)?.[absolutePath];
+    },
+    async snapshot(agentId) {
+      return { ...(byAgent.get(agentId) ?? {}) };
     },
     async recordWrite(agentId, absolutePath, trust, options) {
       byAgent.set(agentId, nextPaths(byAgent.get(agentId) ?? {}, absolutePath, trust, options.append));
@@ -145,6 +154,7 @@ export const createFileLedger = (workspaceRoot: string): TaintedWriteLedger => {
 
   return {
     lookup: (agentId, absolutePath) => read(agentId).then((paths) => paths[absolutePath]),
+    snapshot: (agentId) => read(agentId),
     recordWrite(agentId, absolutePath, trust, options) {
       const work = chain.then(async () => {
         const filePath = ledgerPath(agentId);
