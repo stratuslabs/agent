@@ -1291,7 +1291,9 @@ export const createDelegateTool = ({
     }
 
     delegationCount += 1;
-    const result = await runDelegated({
+    let result;
+    try {
+      result = await runDelegated({
       sessionId: `${session.id}${DELEGATED_SESSION_ID_MARKER}${target.id}:${depth + 1}:${uniqueSuffix()}`,
       agent: target,
       userMessage: prompt,
@@ -1310,7 +1312,20 @@ export const createDelegateTool = ({
       // A cancelled parent turn cancels the delegated run with it —
       // otherwise the parent cannot settle until the target gives up.
       ...(context?.signal ? { signal: context.signal } : {}),
-    });
+      });
+    } catch (error) {
+      // A failed run has no session to read a label from here, and its
+      // error text is the target's — a provider quoting the request it
+      // refused, which is the target's prompt and injected memory, whatever
+      // label those carried. The parent sees that text as a tool error, so
+      // the call is marked at the label for provenance nobody can vouch
+      // for before it is rethrown. The parent's own cancellation is the
+      // exception: that error is this process's sentence, not the target's.
+      if (!context?.signal?.aborted) {
+        context?.markTrust?.('unknown');
+      }
+      throw error;
+    }
 
     // Inbound: the reply carries the target session's label, whatever it
     // is — not only `external`. A target whose own injected memory was

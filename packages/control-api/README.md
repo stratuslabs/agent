@@ -137,7 +137,10 @@ codex `api_key` is an OpenAI platform key and is checked against the
 platform's models endpoint. Provider names on these routes are `anthropic`,
 `openai`, and `codex`.
 
-`PUT /config` does not write the `plugins` block. `GET` returns it, and a
+`PUT /config` writes the `principals` block along with the other settings —
+who counts as the operator on each channel is a trusted-config setting, and
+the only file this endpoint writes is a trusted one — so the GET-modify-PUT
+round trip keeps it. `PUT /config` does not write the `plugins` block. `GET` returns it, and a
 `PUT` carrying it back is accepted (the round trip has to work) but the value
 is ignored and the file's existing block is preserved rather than deleted by
 the replace. Enabling a plugin runs somebody else's code inside the daemon —

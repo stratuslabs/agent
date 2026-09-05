@@ -566,6 +566,17 @@ test('config round-trips, and an unknown key is refused rather than quietly kept
     assert.equal(read.config.model, 'claude-opus-5');
     assert.equal(read.path, path.join(harness.home, '.stratus', 'config.json'));
 
+    // `principals` is a setting GET returns, so PUT takes it back: the
+    // GET-modify-PUT round trip must neither reject it nor delete it.
+    const withPrincipals = await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { ...read.config, principals: { slackUsers: ['U1'] } } }),
+    });
+    assert.equal(withPrincipals.status, 200);
+    const reread = await json<{ config: Record<string, unknown> }>(await harness.call('/api/v1/config'));
+    assert.deepEqual(reread.config.principals, { slackUsers: ['U1'] });
+
     // An unknown key would be silently preserved here and silently ignored by
     // every reader — and this endpoint must not become a way to write into a
     // namespace it does not own.

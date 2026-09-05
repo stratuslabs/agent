@@ -149,6 +149,11 @@ const CONFIG_KEYS = {
   fallbackBaseUrl: 'string',
   approvals: 'object',
   api: 'object',
+  // Like `api`: GET returns it, so PUT has to take it back or the documented
+  // round trip deletes every principal assignment by omission. Validated
+  // by the loader below like the other blocks; it is a trusted-config key,
+  // and the only file this endpoint writes is a trusted one.
+  principals: 'object',
 } as const;
 
 /**
