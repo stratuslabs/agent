@@ -992,12 +992,14 @@ const APPROVAL_SUMMARY_LIMIT = 160;
  * deletion, a join, a pinned file — is bookkeeping, and an agent following
  * a thread must not answer bookkeeping.
  *
- * These two are here because both are ordinary follow-ups: `file_share` is
- * a message that happens to carry an attachment (asking a question with the
- * log attached is the normal way to ask it), and `thread_broadcast` is a
- * thread reply the author also sent to the channel.
+ * These three are here because each is an ordinary thing a person does:
+ * `file_share` is a message that happens to carry an attachment (asking a
+ * question with the log attached is the normal way to ask it),
+ * `thread_broadcast` is a thread reply the author also sent to the channel,
+ * and `me_message` is what `/me` produces — typed by a person, in their own
+ * words, and marked only by how it is rendered.
  */
-const HUMAN_MESSAGE_SUBTYPES = new Set(['file_share', 'thread_broadcast']);
+const HUMAN_MESSAGE_SUBTYPES = new Set(['file_share', 'me_message', 'thread_broadcast']);
 
 const isPersonSpeaking = (event: SlackInboundEvent): boolean =>
   event.subtype === undefined || HUMAN_MESSAGE_SUBTYPES.has(event.subtype);

@@ -695,7 +695,7 @@ test('an untagged reply in a thread reaches the agent already in it, and nothing
   assert.equal(web.posts[0]?.thread_ts, '500.0');
 });
 
-test('a follow-up with a file attached is still a follow-up; an edited message is not', async () => {
+test('a follow-up Slack marks with a subtype is still a follow-up, unless it is bookkeeping', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'looking'));
@@ -712,12 +712,18 @@ test('a follow-up with a file attached is still a follow-up; an edited message i
   // Asking with the log attached is how the question gets asked.
   const shared = channelMessage({ text: "here's the log", ts: '520.1', thread: '520.0' });
   await socket.deliver('message', { ...shared, event: { ...shared.event, subtype: 'file_share' } });
+  // `/me` is a person typing, marked only by how Slack renders it.
+  const emote = channelMessage({ text: 'is still reading it', ts: '520.2', thread: '520.0' });
+  await socket.deliver('message', { ...emote, event: { ...emote.event, subtype: 'me_message' } });
   // Slack narrating the channel is not somebody speaking in it.
-  const edited = channelMessage({ text: 'never mind', ts: '520.2', thread: '520.0' });
+  const edited = channelMessage({ text: 'never mind', ts: '520.3', thread: '520.0' });
   await socket.deliver('message', { ...edited, event: { ...edited.event, subtype: 'message_changed' } });
   await adapter.stop();
 
-  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), ["Dylan: here's the log"]);
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
+    "Dylan: here's the log",
+    'Dylan: is still reading it',
+  ]);
 });
 
 test('a mention delivered as both an app_mention and a channel message runs one turn', async () => {
