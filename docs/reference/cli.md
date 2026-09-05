@@ -43,6 +43,11 @@ stratus credentials                    # stored names, never values (also: strat
 stratus credential remove search.apiKey
 stratus schedules                      # what the fleet has scheduled (also: stratus schedule list)
 stratus schedules cancel <id>          # stop the next firing, revoke its destination
+stratus memory list ava                # every live fact, with the trust label it carries
+stratus memory list ava --trust unknown --format json
+stratus memory reassert ava --trust user --all-unknown   # re-label every fact with no recorded origin
+stratus memory reassert ava --trust agent <id>...
+stratus session rollover <session-id>  # archive a conversation's transcript and start the same id over
 stratus dashboard                      # local browser dashboard
 ```
 
@@ -60,6 +65,8 @@ stratus dashboard                      # local browser dashboard
 | `credential set`, `credentials`, `credential remove` | [Tools](../guides/tools.md#searching-the-web), [Security](../concepts/security.md) |
 | `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
 | `schedules …` | [Schedules](../guides/schedules.md) |
+| `memory list`, `memory reassert` | [Memory](../concepts/memory.md#where-a-fact-came-from) |
+| `session rollover` | [Memory](../concepts/memory.md#the-label-is-yours-to-raise-and-only-yours), [Control API](../../packages/control-api/README.md) |
 | `dashboard` | [Remote access](../guides/remote-access.md) |
 
 ## Options
@@ -85,7 +92,9 @@ stratus dashboard                      # local browser dashboard
 | `--api` | `stratus serve`: serve it even where the config says `api.enabled: false` (what `stratus dashboard` asks of the daemon it starts) |
 | `--api-host` | `stratus serve`: control API interface (default `127.0.0.1`) |
 | `--api-port` | `stratus serve`: control API port (default `4123`; `0` picks any free port). A port the daemon cannot bind stops it — it does not serve without the API |
-| `--gateway <url>` | `stratus agents`, `skill reload`, `restart`: a running daemon's control API (the last two default to the daemon `~/.stratus/gateway.json` names) |
+| `--gateway <url>` | `stratus agents`, `skill reload`, `restart`, `session rollover`: a running daemon's control API (all but `agents` default to the daemon `~/.stratus/gateway.json` names) |
+| `--trust <level>` | `stratus memory list`: show only entries at this label. `stratus memory reassert`: the label to record — `user`, `agent`, `unknown`, or `external` |
+| `--all-unknown` | `stratus memory reassert`: every live entry with no recorded origin, the upgrade case; ids may be given as well |
 | `--port`, `--host` | `stratus dashboard`: where a daemon it starts should bind |
 | `--no-open` | `stratus dashboard`: skip automatic browser opening |
 | `--token` | Bearer token for `--gateway` (default: `~/.stratus/gateway-token`, or `STRATUS_GATEWAY_TOKEN`) |

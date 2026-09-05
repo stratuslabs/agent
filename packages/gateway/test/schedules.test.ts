@@ -1006,3 +1006,97 @@ test('cancelling from the operator surface stops the next firing', async () => {
   assert.equal(gateway.schedules().length, 0);
   await gateway.stop();
 });
+
+test('a scheduler whose readiness check fails stops before it claims a slot, so no firing is spent or lost', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const past = new Date(Date.now() - 60_000).toISOString();
+  store.insert(record({ id: 'due', cadence: { kind: 'at', at: past }, nextFireAt: past }));
+  const fired: Fired[] = [];
+  const warnings: string[] = [];
+  const runtime = runtimeWith(store, {
+    dispatch: async (input) => {
+      fired.push(input);
+    },
+    // What the gateway passes: the state stamp says a newer build owns
+    // the home now.
+    ready: async () => {
+      throw new Error('~/.stratus was written by a newer Stratus build (state schema 3; this build understands 2).');
+    },
+    warn: (line) => {
+      warnings.push(line);
+    },
+  });
+  // At start the refusal propagates — a daemon whose home a newer build has
+  // stamped must not begin serving — rather than being logged and swallowed
+  // as it is for a stamp that advances under a scheduler already running.
+  await assert.rejects(() => runtime.start(), /newer Stratus build/);
+  try {
+    assert.deepEqual(fired, []);
+    assert.deepEqual(warnings, []);
+    // The slot is still there for the build that understands it.
+    assert.deepEqual(store.due(new Date().toISOString()).map((row) => row.id), ['due']);
+  } finally {
+    runtime.stop();
+    store.close();
+  }
+});
+
+test('a readiness check that fails on the first tick, after passing the preflight, still fails start', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const past = new Date(Date.now() - 60_000).toISOString();
+  store.insert(record({ id: 'due', cadence: { kind: 'at', at: past }, nextFireAt: past }));
+  const fired: Fired[] = [];
+  let checks = 0;
+  const runtime = runtimeWith(store, {
+    dispatch: async (input) => {
+      fired.push(input);
+    },
+    // The stamp advances between the start's preflight and its first tick.
+    ready: async () => {
+      checks += 1;
+      if (checks > 1) {
+        throw new Error('~/.stratus was written by a newer Stratus build (state schema 3; this build understands 2).');
+      }
+    },
+  });
+  await assert.rejects(() => runtime.start(), /newer Stratus build/);
+  try {
+    assert.equal(checks, 2);
+    assert.deepEqual(fired, []);
+    assert.deepEqual(store.due(new Date().toISOString()).map((row) => row.id), ['due']);
+  } finally {
+    runtime.stop();
+    store.close();
+  }
+});
+
+test('a stamp that advances during the spent one-shot lookup keeps the row and fails start', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const spent = record({ id: 'done', cadence: { kind: 'at', at: '2026-01-01T00:00:00Z' }, lastSessionId: 'schedule:done:x' });
+  delete spent.nextFireAt;
+  store.insert(spent);
+  let stamped = false;
+  const runtime = runtimeWith(store, {
+    // The status lookup is the await in the sweep; a newer build stamps
+    // the home while it is outstanding.
+    sessionStatus: async () => {
+      stamped = true;
+      return 'completed';
+    },
+    ready: async () => {
+      if (stamped) {
+        throw new Error('~/.stratus was written by a newer Stratus build (state schema 3; this build understands 2).');
+      }
+    },
+  });
+  await assert.rejects(() => runtime.start(), /newer Stratus build/);
+  try {
+    assert.ok(store.get('done'), "the newer build's row is not this build's to retire");
+  } finally {
+    runtime.stop();
+    store.close();
+  }
+});

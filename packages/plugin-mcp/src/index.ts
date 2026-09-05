@@ -17,6 +17,7 @@ import {
   type Tool,
   type ToolRegistry,
 } from '@stratusagent/core';
+import { createFileLedger } from '@stratusagent/plugins';
 
 import {
   bridgedToolName,
@@ -713,6 +714,12 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
   const delayFor = options.reconnectDelayMs
     ?? ((attempt: number) => Math.min(RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, RECONNECT_MAX_DELAY_MS));
   const workspaceRoot = typeof config.workspaceRoot === 'string' ? config.workspaceRoot : undefined;
+  // The same ledger `tool-fs` reads, so a server's image or audio block
+  // written here reads back labelled there: its home is the host's
+  // `ledgerRoot`, which the loader sets for both and lets neither config
+  // block move, with `workspaceRoot` the fallback for a hand-wired host.
+  const ledgerRoot = typeof config.ledgerRoot === 'string' ? config.ledgerRoot : workspaceRoot;
+  const ledger = ledgerRoot !== undefined ? createFileLedger(ledgerRoot) : undefined;
 
   if (!isObject(config.servers)) {
     throw new McpConfigError(
@@ -742,6 +749,12 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
     // namespace's declared risk (and any operator override), applied by
     // the manifest-bound view — the server's opinion of itself never
     // enters, and neither does this package's.
+    //
+    // Provenance is a different question with one answer: whatever comes
+    // back is the server's text, written by a party the operator did not
+    // author — so every bridged result is `external`, and no per-call
+    // judgement of the response shape could make it otherwise.
+    outputTrust: 'external',
     async execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue> {
       const client = state.connected ? state.client : undefined;
       if (!client) {
@@ -788,6 +801,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         tool: info.mcpName,
         agentId: session.agent.id,
         ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+        ...(ledger !== undefined ? { ledger } : {}),
       });
     },
   });

@@ -10,7 +10,7 @@ import {
 } from '../src/index.ts';
 
 const memory: MemoryEntry[] = [
-  { id: 'm1', agentId: 'ava', content: 'The user prefers short answers.', createdAt: '2026-01-01T00:00:00.000Z' },
+  { id: 'm1', agentId: 'ava', content: 'The user prefers short answers.', createdAt: '2026-01-01T00:00:00.000Z', trust: 'agent' },
 ];
 
 const skills: SkillDescriptor[] = [

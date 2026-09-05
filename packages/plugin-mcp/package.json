@@ -24,13 +24,13 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "@stratusagent/core": "workspace:*"
+    "@stratusagent/core": "workspace:*",
+    "@stratusagent/plugins": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.6.0",
     "typescript": "^5.9.3",
-    "zod": "^4.4.3",
-    "@stratusagent/plugins": "workspace:*"
+    "zod": "^4.4.3"
   },
   "license": "MIT",
   "repository": {
@@ -69,6 +69,9 @@
           "type": "object"
         },
         "workspaceRoot": {
+          "type": "string"
+        },
+        "ledgerRoot": {
           "type": "string"
         }
       },

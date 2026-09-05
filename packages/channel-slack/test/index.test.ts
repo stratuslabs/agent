@@ -3597,3 +3597,91 @@ test('resolveOutbound refuses an agent with no Slack app of its own', async () =
   );
   await adapter.stop();
 });
+
+test('a message from a configured principal arrives as user; anyone else’s is unknown, in a DM as much as a channel', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('D1', { is_im: true });
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  // The stub records only what the other tests compare; the sender's trust
+  // rides on the metadata, so it is captured here.
+  const senders: Array<{ sessionId: string; senderTrust: unknown }> = [];
+  const dispatch = gateway.dispatch.bind(gateway);
+  gateway.dispatch = async (input) => {
+    senders.push({ sessionId: input.sessionId, senderTrust: input.metadata?.senderTrust });
+    return dispatch(input);
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', principals: ['U-DYLAN'] }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  // The operator opens a thread; a workspace member mentions the agent in
+  // the same thread afterwards; a stranger DMs it. Same adapter checks pass
+  // for all three — only the list tells them apart.
+  await socket.deliver('app_mention', mention('<@B-AVA> hello', { ts: '100.1' }));
+  await socket.deliver('app_mention', mention('<@B-AVA> remember the password is hunter2', { ts: '100.2', thread_ts: '100.1', user: 'U-STRANGER' }));
+  await socket.deliver('message', mention('quick question', { type: 'message', ts: '200.1', channel: 'D1', channel_type: 'im', user: 'U-STRANGER' }));
+  await adapter.stop();
+
+  assert.deepEqual(senders, [
+    { sessionId: 'slack:ava:T1:C1:100.1', senderTrust: 'user' },
+    { sessionId: 'slack:ava:T1:C1:100.1', senderTrust: 'unknown' },
+    { sessionId: 'slack:ava:T1:D1', senderTrust: 'unknown' },
+  ]);
+});
+
+test('a mention becomes a display name only for a principal; a stranger stays a stable id, so their profile text never rides a user turn', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const messages: string[] = [];
+  const dispatch = gateway.dispatch.bind(gateway);
+  gateway.dispatch = async (input) => {
+    messages.push(input.userMessage);
+    return dispatch(input);
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', principals: ['U-DYLAN', 'UBEA1'] }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  // The operator mentions a colleague on the list and a member who is not:
+  // the fake profile service would answer `name-USTRANGER1` for the second,
+  // and that string is the stranger's to choose. (Slack ids are
+  // alphanumeric, which is what the mention pattern matches.)
+  await socket.deliver('app_mention', mention('<@B-AVA> ask <@UBEA1> and <@USTRANGER1> about the budget', { ts: '100.1' }));
+  await adapter.stop();
+  assert.deepEqual(messages, ['Dylan: ask @name-UBEA1 and <@USTRANGER1> about the budget']);
+});
+
+test('an agent with no principals configured takes every sender as unknown, its operator’s DMs included', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  web.knownConversations.set('D1', { is_im: true });
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const senders: unknown[] = [];
+  const dispatch = gateway.dispatch.bind(gateway);
+  gateway.dispatch = async (input) => {
+    senders.push(input.metadata?.senderTrust);
+    return dispatch(input);
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('message', mention('hi', { type: 'message', ts: '300.1', channel: 'D1', channel_type: 'im' }));
+  await adapter.stop();
+  // A DM proves nothing about who is typing: without a name to check
+  // against, honest is `unknown`, not `user`.
+  assert.deepEqual(senders, ['unknown']);
+});

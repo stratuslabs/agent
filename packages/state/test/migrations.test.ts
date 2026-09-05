@@ -65,7 +65,11 @@ test('a stamp from a newer build is refused, not guessed at', async () => {
   await mkdir(path.dirname(stateFilePath(env)), { recursive: true });
   await writeFile(stateFilePath(env), JSON.stringify({ schemaVersion: STATE_SCHEMA_VERSION + 1, applied: [] }));
 
-  await assert.rejects(() => assertStateCompatible(env), /newer Stratus build/);
+  // Thrown, not rejected: the gateway runs this check between the control
+  // API announcing its address and the daemon marking itself serving, and a
+  // check that yielded for I/O there was the window in which CI's restart
+  // tests were refused as "still starting".
+  assert.throws(() => assertStateCompatible(env), /newer Stratus build/);
   await assert.rejects(() => runStateMigrations(env), /newer Stratus build/);
 });
 
@@ -95,4 +99,19 @@ test('every registered migration is idempotent: applying twice equals applying o
     assert.equal(second, undefined, `${migration.id} found work on its second run`);
   }
   assert.equal((await stat(filePath)).mode & 0o777, 0o600);
+});
+
+test('provenance labels are a schema bump with nothing to rewrite, so a downgraded build refuses the home', async () => {
+  // The labels live inside records older builds already read — memory
+  // entries, sessions, schedules — and in a ledger they never open. Nothing
+  // needs rewriting; what needs to happen is that a build without the
+  // labels stops at the stamp instead of writing unlabelled state beside
+  // the labelled kind.
+  assert.equal(STATE_SCHEMA_VERSION, 2);
+  const migration = STATE_MIGRATIONS.find((candidate) => candidate.id === '0002-provenance-labels');
+  assert.ok(migration);
+  const env = { homeDir: await freshHome() };
+  const applied = await runStateMigrations(env);
+  assert.equal(applied.find((result) => result.id === '0002-provenance-labels')?.detail, undefined);
+  assert.equal((await readStateStamp(env)).schemaVersion, 2);
 });

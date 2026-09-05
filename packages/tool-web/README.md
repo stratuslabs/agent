@@ -34,6 +34,11 @@ tools: [web.fetch]
 | --- | --- | --- |
 | `web.fetch` | `gated` | `interactive` asks at the terminal, `remote` asks in Slack, `headless` refuses. It reaches a service outside Stratus at an address the agent chose, which is the line 03 draws. |
 
+Every result is labelled `external`: the body and the page-supplied title
+are a document somebody else wrote, and the session that read it — and
+every fact it remembers afterwards — carries the label
+([Memory](../../docs/concepts/memory.md#where-a-fact-came-from)).
+
 Approval decides *whether*; the address policy decides *where*, and it is
 not the same question. An approver looking at `https://example.com/report`
 has approved that URL — not the redirect it answers with.

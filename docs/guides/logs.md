@@ -19,6 +19,7 @@ stratus logs --format json       # the raw records, for jq
 09:14:02  —           stratusd ready — 3 agents, slack connected
 09:14:31  ava         session.created [slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456]
 09:14:36  ava         tool.completed tool=memory.remember ok=true [slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456]
+09:18:44  ava         session.tainted trust=external source=web.fetch [slack:ava:T01ABCDEF:C07GHIJKL:1731900000.123456]
 09:21:07  —           warning: anthropic returned 529; retrying on the fallback model
 09:40:12  —           warning: mcp server linear disconnected — its tools are unavailable until it comes back
 ```
@@ -38,7 +39,12 @@ The log records that a tool ran and that a session completed, with the
 tool's name, the agent, and the session id. Prompts, replies, and tool
 inputs are not written — what was said lives in the session store instead.
 A memory write or forget also records the **entry id** it touched (never
-the fact itself), so "when did the agent learn this" has an answer. For
+the fact itself), so "when did the agent learn this" has an answer. When a
+session's trust label drops, `session.tainted` records the new label and
+the **name** of what lowered it — a tool, or `memory`, `sender`, `legacy` —
+and never the content that did: "since when has this conversation been
+reading strangers' text" is answerable without the text being in the log.
+See [Memory](../concepts/memory.md#where-a-fact-came-from). For
 what it records about a shell command — the scope, never the command — see
 [Shell commands](./shell.md#what-the-log-records-about-a-command).
 

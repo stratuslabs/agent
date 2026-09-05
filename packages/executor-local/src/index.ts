@@ -5,16 +5,18 @@ import {
 } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 
-import type {
-  ExecutionContext,
-  Executor,
-  JsonObject,
-  JsonValue,
-  Session,
-  Tool,
-  ToolCall,
-  ToolResult,
-  ToolRisk,
+import {
+  createTrustMarking,
+  type ExecutionContext,
+  type Executor,
+  type JsonObject,
+  type JsonValue,
+  type Session,
+  type Tool,
+  type ToolCall,
+  type ToolResult,
+  type ToolRisk,
+  type TrustLevel,
 } from '@stratusagent/core';
 import {
   createDirectExecutor,
@@ -85,6 +87,12 @@ export interface LocalCommandContext {
   tool: LocalCommandTool;
   /** The turn's abort signal, for parsers that do asynchronous work. */
   signal?: AbortSignal;
+  /**
+   * The per-call producer channel, for a parser that can tell its output
+   * came from outside — see `ExecutionContext.markTrust`. A tool whose
+   * every result does declares `outputTrust` instead.
+   */
+  markTrust?: (trust: TrustLevel) => void;
 }
 
 export interface LocalCommandTool extends Tool {
@@ -99,6 +107,8 @@ export interface LocalCommandToolDefinition {
   parameters?: JsonObject;
   /** See ToolRisk in @stratusagent/core. Omitted means `gated`. */
   risk?: ToolRisk;
+  /** See Tool.outputTrust in @stratusagent/core. Omitted means `agent`. */
+  outputTrust?: TrustLevel;
   createCommand(input: ToolCall['input'], session: Session): LocalCommandInvocation | Promise<LocalCommandInvocation>;
   parseResult?(result: LocalCommandExecution, context: LocalCommandContext): JsonValue | Promise<JsonValue>;
 }
@@ -135,6 +145,7 @@ export const defineLocalCommandTool = ({
   description,
   parameters,
   risk,
+  outputTrust,
   createCommand,
   parseResult,
 }: LocalCommandToolDefinition): LocalCommandTool => ({
@@ -144,6 +155,7 @@ export const defineLocalCommandTool = ({
   // Forwarded, not dropped: this factory makes the tools that spawn
   // processes, so it is the last place a declared risk should go missing.
   ...(risk ? { risk } : {}),
+  ...(outputTrust ? { outputTrust } : {}),
   runtime: 'local-command',
   createCommand,
   ...(parseResult ? { parseResult } : {}),
@@ -176,6 +188,10 @@ export class LocalCommandExecutor implements Executor {
       return this.fallback.execute(call, tool, session, context);
     }
 
+    // Every result below carries the label the tool's channels resolve to,
+    // the failures included: a command's stderr is that command's text.
+    const marking = createTrustMarking(tool, context);
+    const trust = (): TrustLevel => marking.resolve();
     try {
       // The factory runs before any process exists, so the signal must be
       // observed here too: a cancelled turn settles even if createCommand
@@ -183,11 +199,11 @@ export class LocalCommandExecutor implements Executor {
       // to be killed — its startup side effects would already be real.
       const signal = context?.signal;
       if (signal?.aborted) {
-        return failureResult(call, `Command aborted before start: ${call.toolName}`);
+        return failureResult(call, `Command aborted before start: ${call.toolName}`, null, trust());
       }
       const invocation = await raceWithAbort(tool.createCommand(call.input, session), signal, 'Command construction');
       if (signal?.aborted) {
-        return failureResult(call, `Command aborted before start: ${call.toolName}`);
+        return failureResult(call, `Command aborted before start: ${call.toolName}`, null, trust());
       }
       const timeoutMs = resolveTimeoutMs(invocation.timeoutMs, this.defaultTimeoutMs, this.maxTimeoutMs);
       const execution = await runLocalCommand(invocation, {
@@ -202,6 +218,7 @@ export class LocalCommandExecutor implements Executor {
           call,
           `Command aborted: ${execution.command}`,
           serializeExecution(execution),
+          trust(),
         );
       }
 
@@ -210,6 +227,7 @@ export class LocalCommandExecutor implements Executor {
           call,
           `Command timed out after ${timeoutMs}ms: ${execution.command}`,
           serializeExecution(execution),
+          trust(),
         );
       }
 
@@ -218,25 +236,33 @@ export class LocalCommandExecutor implements Executor {
           call,
           `Command exited with code ${execution.exitCode}: ${execution.command}`,
           serializeExecution(execution),
+          trust(),
         );
       }
 
       try {
         // Parsing can be asynchronous too; a parser blocked at cancellation
         // must not keep the settled subprocess's turn pending.
+        const markTrust = marking.context.markTrust;
         const output = tool.parseResult
           ? await raceWithAbort(
-              tool.parseResult(execution, { call, session, tool, ...(signal ? { signal } : {}) }),
+              tool.parseResult(execution, {
+                call,
+                session,
+                tool,
+                ...(signal ? { signal } : {}),
+                ...(markTrust ? { markTrust } : {}),
+              }),
               signal,
               'Result parsing',
             )
           : serializeExecution(execution);
-        return successResult(call, output);
+        return successResult(call, output, trust());
       } catch (error) {
-        return failureResult(call, error, serializeExecution(execution));
+        return failureResult(call, error, serializeExecution(execution), trust());
       }
     } catch (error) {
-      return failureResult(call, error);
+      return failureResult(call, error, null, trust());
     }
   }
 }

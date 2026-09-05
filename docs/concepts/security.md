@@ -37,12 +37,13 @@ linked own the full story.
 
 ## What a cloned repo cannot decide
 
-The `plugins`, `approvals`, and `api` config blocks are read **only from a
-trusted config** — the global `~/.stratus/config.json` or a file you
-passed yourself. An auto-discovered project-local `stratus.config.json`
-ships in any repository; which code runs in the daemon, who may approve
-its tool calls, and which interface it binds are not decisions a clone
-gets to make. ([Configuration](../reference/config.md))
+The `plugins`, `approvals`, `principals`, and `api` config blocks are read
+**only from a trusted config** — the global `~/.stratus/config.json` or a
+file you passed yourself. An auto-discovered project-local
+`stratus.config.json` ships in any repository; which code runs in the
+daemon, who may approve its tool calls, whose messages an agent takes as
+its operator's, and which interface it binds are not decisions a clone gets
+to make. ([Configuration](../reference/config.md))
 
 Nor does a clone get to decide **where your key goes, or which key it is**:
 
@@ -80,21 +81,28 @@ Nor does a clone get to decide **where your key goes, or which key it is**:
   link-local, IPv6 unique-local, and their IPv4-mapped and NAT64
   spellings — validated on the connection, so a redirect or DNS answer
   cannot walk an agent into a metadata endpoint. ([Tools](../guides/tools.md))
-- **Third-party text is labelled as such.** `web.search` results — titles
-  and snippets written by whoever owns the page, selected by a ranker —
-  come back in an envelope that says so. It is a label, not a defence
-  against prompt injection, and it does not make acting on that text safe.
-  ([Tools](../guides/tools.md#searching-the-web))
+- **Third-party text is labelled as such, end to end.** Every tool result
+  carries a trust label — `web.fetch`, the four `browser.*` tools,
+  `web.search`, and every MCP-bridged tool declare their output `external`,
+  and `fs.read` marks a file a tainted session wrote — and the label follows
+  the content: into the session (which only ever gets less trusted), across a
+  restart, across a delegation in both directions, and into every fact the
+  session remembers, which the prompt then renders under its own heading. A
+  message from a Slack sender you have not named as a principal is `unknown`,
+  not `user`. It is a label, not a defence against prompt injection, and it
+  does not make acting on that text safe. ([Memory](./memory.md#where-a-fact-came-from))
 - **`tool-shell` and stdio MCP servers get a replaced environment**: the
   daemon's own env vars, where API keys live, are not there to read.
 
 ## What is written down
 
 - **The daemon log is a trace, not a second transcript**: tool names,
-  session ids, and memory entry ids — never prompts, replies, tool inputs,
-  or shell command text. The one qualification: a failed session records
-  the provider's error text verbatim, and providers quote the failing
-  request — so skim a log before sharing it. ([Logs](../guides/logs.md))
+  session ids, memory entry ids, and — when a session's trust label drops —
+  the label and the name of what lowered it; never prompts, replies, tool
+  inputs, shell command text, or the content that did the tainting. The one
+  qualification: a failed session records the provider's error text
+  verbatim, and providers quote the failing request — so skim a log before
+  sharing it. ([Logs](../guides/logs.md))
 - **No control API endpoint returns a secret.** Credential reads report
   presence, type, and bound endpoint; session reads strip the Anthropic
   raw-turn cache. Named credentials are not on that API at all yet — the

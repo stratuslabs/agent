@@ -47,6 +47,12 @@ fails that one call with a message naming the fix.
 | `browser.screenshot` | `gated` | Same. Writes a PNG into the agent's workspace and returns it as `file`, which a channel delivers as an attachment. |
 | `browser.act` | `gated`, then judged per site | `interactive` and `remote` ask, naming the site; `headless` runs it only on an origin the agent has been granted. See below. |
 
+All four label their output `external`: each returns a page-supplied
+`title`, and `read` returns the page's text — the most attacker-controlled
+surface in the repository, reached by a page the agent was merely pointed
+at. The session that read it, and every fact it remembers afterwards,
+carries the label ([Memory](../../docs/concepts/memory.md#where-a-fact-came-from)).
+
 ### Acting is scoped by origin
 
 A click submits, buys, and deletes: navigating somewhere else undoes a

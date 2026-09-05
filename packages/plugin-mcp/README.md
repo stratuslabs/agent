@@ -67,6 +67,23 @@ manifest declares the namespace (`toolsDiscovered: [{ "namespace": "mcp.*",
 "risk": "gated" }]`) and the plugin host enforces it at registration, on
 first connect and identically on reconnect.
 
+Provenance is a different question with one answer: whatever a bridged tool
+returns is the server's text, so every bridged result is labelled
+`external`, and the session that read it — and every fact it remembers
+afterwards — carries the label
+([Memory](../../docs/concepts/memory.md#where-a-fact-came-from)). No
+override lowers that; it is a statement about who wrote the bytes, not
+about how risky the call was.
+
+What a server *advertises* — its tool names, descriptions, and input
+schemas — is not labelled. It reaches the model as part of the tool
+definitions on every turn, and the operator put it there: mounting a server
+in a trusted config vouches for its tool surface the way installing a plugin
+vouches for the descriptions that plugin ships, and labelling text inside the
+prompt is what the provenance step rules out. Only what a call *returns* is
+content the operator did not choose. A server whose descriptions you would
+not want in front of your agent is a server not to mount.
+
 The override is the operator's, explicit and per tool, through the host's
 `toolRisks` key — sibling to `enabled`, applied by the host rather than by
 this package's code:
@@ -219,7 +236,12 @@ Tool results normalize into plain values:
 - **Images, audio, and binary resources are written into the agent's
   workspace** (`~/.stratus/workspaces/<agent>/mcp/<server>/`) and returned
   under `files` — the key channels deliver as attachments, so an image from
-  a bridged tool reaches Slack like a screenshot does.
+  a bridged tool reaches Slack like a screenshot does. Each such file is a
+  server's bytes on disk, so it is recorded in the agent's filesystem
+  provenance ledger at `external` before it is written — the same ledger
+  `@stratusagent/tool-fs` reads, at the host's `ledgerRoot`, which the daemon
+  sets for both plugins and lets neither config block move — and a later
+  `fs.read` of it carries the label the tool result did.
 - Resource links pass through under `resources`.
 - A result the server marks `isError` fails the call, like any failing tool.
 

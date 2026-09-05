@@ -94,6 +94,17 @@ export const createShellTool = (config: JsonObject = {}, options: ShellToolOptio
   const tool = defineLocalCommandTool({
     name: 'shell.run',
     description: 'Run a shell command. The command is what gets approved, so write it plainly.',
+    // `unknown`, because nobody can say: `git status` is the agent's own
+    // work and `curl https://…` is a stranger's page, and they come back
+    // through the same stdout. Labelling it `agent` would launder every
+    // fetch made through a shell past the provenance `web.fetch` enforces;
+    // labelling it `external` would call the agent's own `ls` a stranger's.
+    // Absence of provenance is not evidence of trust, so the honest label
+    // is the one for provenance nobody recorded — and a session that runs
+    // commands writes `unknown` from then on, which is the safe direction.
+    // Recognising fetching programs by name would be the enumerated list
+    // the provenance contract rejects.
+    outputTrust: 'unknown',
     // `gated`, not `dangerous`: the risk of a shell lives in its arguments,
     // and the permission engine narrows it per invocation from the command
     // string below. Marking the tool `dangerous` would mean no command
