@@ -1268,6 +1268,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * Bounded and lossy on purpose — evicting an entry costs one lookup,
    * since the sessions still hold the answer for every thread this map has
    * forgotten, and for every thread a restart forgot.
+   *
+   * One thing they cannot reconstruct: a handover made in the seconds
+   * before the daemon went down. The mention that moved the thread is
+   * recorded only here, and the newly named agent has not replied yet, so
+   * after a restart the sessions still name the previous speaker and the
+   * next untagged reply goes to them. Surviving that needs durable
+   * adapter-owned state, which the channel contract deliberately does not
+   * have — an adapter reads routing and translates events, and inventing a
+   * private store here is the wrong place to answer it. The next mention
+   * corrects it.
    */
   const threadAddressee = new Map<string, { agentId: string; ts: string }>();
   /**
