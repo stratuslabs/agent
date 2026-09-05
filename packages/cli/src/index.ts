@@ -36,7 +36,6 @@ import {
 // Type-only: the gateway itself is imported lazily (it pulls in node:sqlite
 // and the whole runner stack), and a serve-only policy seam must not make
 // `stratus run` pay for it.
-import { GATEWAY_ONLY_TOOL_NAMES } from '@stratusagent/gateway';
 import type { ApprovalTransport, GatewayChannelAdapter, HomeClaim, RestartOutcome } from '@stratusagent/gateway';
 import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
 import {
@@ -81,6 +80,7 @@ import {
   isValidAgentId,
   parseSoul,
   type ParsedSoul,
+  GATEWAY_ONLY_TOOL_NAMES,
 } from '@stratusagent/agents';
 import {
   agentsDirPath,

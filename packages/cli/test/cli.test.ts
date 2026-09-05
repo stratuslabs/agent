@@ -861,6 +861,31 @@ test('a soul listing only tools nothing provides is warned about, and still runs
   assert.match(output.stderr, /Warning: agent blair has an allowlist that grants nothing/);
 });
 
+test('the CLI never imports the gateway at module scope', async () => {
+  // `bin.ts` imports this module to call `unsupportedNodeMessage`, before
+  // anything else has a chance to fail — the whole point being to explain
+  // the Node floor rather than die with a builtin-module error further in.
+  // `@stratusagent/gateway` pulls in `node:sqlite` at module scope, so one
+  // static value import of it makes that guard fail with exactly the error
+  // it exists to replace, on every command including the ones that never
+  // touch a gateway.
+  //
+  // There is no linter here to hold that, and a value import for a list of
+  // strings is an easy thing to write by accident — this is what caught it.
+  const source = await readFile(
+    path.join(import.meta.dirname, '..', 'src', 'index.ts'),
+    'utf8',
+  );
+  const staticImports = source
+    .split('\n')
+    .filter((line) => /^import\b/.test(line) && line.includes("'@stratusagent/gateway'"));
+
+  assert.ok(staticImports.length > 0, 'the assertion below would pass vacuously');
+  for (const line of staticImports) {
+    assert.match(line, /^import type\b/, `a value import of the gateway reaches node:sqlite: ${line}`);
+  }
+});
+
 test('a daemon soul run locally is told the names are right and the process is not', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-daemon-soul-'));
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-daemon-soul-cwd-'));
