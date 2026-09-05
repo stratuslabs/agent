@@ -62,6 +62,12 @@ subscription sign-in to per-token billing.
 - **A Slack app is silent** — the daemon isn't running
   ([Always on](./always-on.md)), or the channel package isn't installed
   (`stratus serve` names it at startup).
+- **It answers mentions but not replies in its own thread** — the app was
+  installed before the channel history scopes were in the manifest, so
+  Slack tells it about mentions only. Add `channels:history` /
+  `groups:history` / `mpim:history` and the matching `message.*` events and
+  reinstall the app once; [Slack](./slack.md#talking-to-an-agent) has the
+  rest of the addressing rules.
 - **A gated tool call was refused overnight** — that is the daemon's
   honest default. [Approvals](./approvals.md) covers asking a human in
   Slack instead.

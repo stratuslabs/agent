@@ -3045,20 +3045,28 @@ const verifySlackAppToken = async (token: string, fetchImpl: typeof fetch | unde
 // package being installed.
 const SLACK_BOT_SCOPES = [
   'app_mentions:read',
+  // The history family is what lets an agent stay in a conversation it was
+  // brought into: without it Slack delivers only mentions, and a reply in
+  // the agent's own thread never reaches it. It is the workspace's switch
+  // for that — an app installed without these scopes answers mentions and
+  // nothing else, exactly as it always did.
+  'channels:history',
   // The conversations read family backs outbound destination validation
   // (conversations.info): whether a channel a schedule wants to report to
   // exists, and whether this app is a member of it.
   'channels:read',
   'chat:write',
   'files:write',
+  'groups:history',
   'groups:read',
   'im:history',
   'im:read',
   'im:write',
+  'mpim:history',
   'mpim:read',
   'users:read',
 ];
-const SLACK_BOT_EVENTS = ['app_mention', 'message.im'];
+const SLACK_BOT_EVENTS = ['app_mention', 'message.channels', 'message.groups', 'message.im', 'message.mpim'];
 
 export const slackAppManifest = (agentName: string): string => JSON.stringify({
   display_information: {

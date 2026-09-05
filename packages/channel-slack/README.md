@@ -5,7 +5,7 @@ Slack adapter for Stratus agents. **One Slack app per agent** — Slack has no w
 - **Resumable conversations**: session keys are `slack:<agent>:<team>:<channel>:<thread_ts ?? ts>` (DMs: the DM channel id) — a thread is a conversation, it survives daemon restarts, and two agents sharing a thread keep fully separate sessions. A turn parked on a human when the daemon died is re-asked after the restart, and when it finishes its reply is posted into the thread as a fresh message — the placeholder it would have edited belonged to the old process.
 - **Streaming replies**: post a placeholder, edit as deltas arrive (throttled for `chat.update` limits), show `⚙ tool…` status lines, finalize with the full reply — split across messages when it outgrows one.
 - **Markdown is translated to Slack's mrkdwn** on the way out — `**bold**` to `*bold*`, `*italic*` to `_italic_`, `~~struck~~` to `~struck~`, `[text](https://…)` to `<https://…|text>`, and a `#` heading to a bold line, since mrkdwn has no headings — unless the heading already carries an asterisk of its own, which is left as it is: Slack has one bold delimiter and no way to nest it, so a second pair would print rather than render. Code spans and fences are left exactly as written, an unclosed fence included, so a `**` inside a snippet stays part of the snippet — a run of N backticks opens code and only a run of exactly N closes it, which is what lets ``a span with a ` in it`` and a ````-fence holding a ```-fence work. One or two unmatched backticks are literal text, as they are in Markdown. Anything whose spelling already matches — lists, block quotes, inline code — is untouched. A marker still being streamed stays literal until its closing half arrives.
-- **Mention-only in channels, free-form in DMs.** Inbound mentions of other users are humanized to `@Display Name` for the model; redeliveries are deduped so a slow turn never runs twice.
+- **Mention to start, then it stays in the thread.** A mention opens a conversation; every reply in that thread reaches the agent without tagging it again, and free-form DMs are unchanged. Who an untagged reply is for is decided by [Who a message is for](#who-a-message-is-for). Inbound mentions of other users are humanized to `@Display Name` for the model; redeliveries are deduped so a slow turn never runs twice.
 - **Approval buttons** for the gateway's `remote` permission mode: a gated tool call parks the turn and asks in its thread with **Allow once** / **Always allow** / **Deny**. See [Approving tool calls](#approving-tool-calls) — clicks are authorized by *who clicked*, never by who can see the message, and **Always allow** is offered only where the daemon would actually remember it.
 - **Tokens are gateway infrastructure secrets**, stored in the `channels` namespace of `~/.stratus/credentials.json` — never in an agent's credential allowlist:
 
@@ -18,6 +18,67 @@ Slack adapter for Stratus agents. **One Slack app per agent** — Slack has no w
   }
 }
 ```
+
+## Who a message is for
+
+A mention is how a conversation starts. After that, the thread is the
+address — replying in it reaches the agent the way replying to a colleague
+reaches them, with no `@` and no ceremony. Four rules decide the rest, and
+they are the whole model:
+
+1. **A mention is always for whoever is named.** In a thread or out of one,
+   naming an agent hands it the question.
+2. **Inside a thread it is already in, an agent listens without being
+   named.** "Already in" means a session exists under that thread's key —
+   which happens only because somebody mentioned it there — so an agent
+   follows conversations it was brought into and nothing else. That record
+   is durable, so a daemon restart mid-thread forgets nothing.
+3. **The room is not a conversation.** A channel message outside any thread
+   is never a follow-up, however much of the channel the app can see. An
+   agent that has not been spoken to does not join in.
+4. **In a thread with several agents, an untagged reply goes to whoever
+   spoke last.** The same rule people use: you are answering the voice that
+   just answered you. Naming another agent moves the conversation to them —
+   so a handover is one `@`, and it takes effect the moment it is sent, not
+   whenever the turn it starts gets around to answering: an addendum typed
+   straight after it reaches the agent you just named, and the agent that
+   *had* the thread stands down at the same instant rather than whenever its
+   own app next catches up.
+
+Everyone in the thread is talking to the same agent — a reply from a second
+person is a follow-up like any other, and channel messages reach the model
+prefixed with the speaker's display name so it knows who said what. A reply
+carrying a file, or one the author also broadcast to the channel, is a
+follow-up too; what Slack marks as bookkeeping — an edit, a deletion, a
+join — is not, and nothing answers it. **Attachment contents are not
+readable** — the app does not ask for `files:read` — so a message with files
+reaches the agent naming them and saying they cannot be opened, which is
+what lets it answer honestly instead of as though it had read the log. A
+file dropped in with nothing said is not a question, and gets no reply. What is
+*not* shared is history: sessions are per agent, so an agent tagged into a
+thread halfway through starts from what it is told then, not from what the
+other agent was told. Bring it up to speed in the message that tags it.
+
+Three edges worth knowing. An agent whose app was installed before the
+history scopes below is told about mentions only, and behaves exactly as it
+always did — the workspace's grant is the switch, per app. Where a thread's
+several agents cannot be ordered — a host whose session routing carries no
+timestamps — an untagged reply is left alone rather than answered twice;
+mention the one you want.
+
+A named agent whose app is down answers nothing, and nothing answers in its
+place: being tagged is a decision about who is being asked, and an agent
+that has been handed the question elsewhere does not take it back because
+the other one is offline. That silence is the same signal a mention has
+always given when an app is down.
+
+And the rules above are mechanical, which shows in a thread where people are
+mostly talking to *each other*: an agent invited into one answers every
+untagged reply in it, including the ones meant for somebody else. Give the
+side conversation its own thread. Teaching an agent to read the room
+instead — to follow a thread whether or not it is being spoken to, and
+answer only when it has something to add — is
+[roadmap step 31](../../docs/roadmap/31-reading-the-room.md).
 
 ## Installing
 
@@ -43,6 +104,7 @@ editing `credentials.json` by hand.
 The manual equivalent, if you prefer:
 
 1. https://api.slack.com/apps → **Create New App → From a manifest** → paste `manifest/stratus-agent.manifest.json` with `NAME` replaced by the agent's name.
+   The manifest asks for the `channels:history` / `groups:history` / `mpim:history` scopes and the matching `message.*` events, which is what lets an agent [stay in a thread](#who-a-message-is-for) instead of needing a mention every time. An app created before those shipped needs them added under **OAuth & Permissions** and **Event Subscriptions** and reinstalled once; leave them off and it answers mentions and DMs, exactly as it did before.
 2. **Basic Information → App-Level Tokens** → generate a token with `connections:write` (that's the `appToken`, `xapp-…`).
 3. **Install App** to the workspace → copy the **Bot User OAuth Token** (that's the `botToken`, `xoxb-…`).
 4. Upload the agent's avatar under **Display Information**.

@@ -148,6 +148,33 @@ test('a session\'s routing carries its latest reply, for a channel finishing a t
   }
 });
 
+test('a session\'s routing reports when its agent last spoke, not when the row last changed', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+  try {
+    const session = await gateway.dispatch({ sessionId: 'thread-s', userMessage: 'say hello' });
+    const spoke = [...session.messages].reverse().find((message) => message.role === 'assistant')?.createdAt;
+    assert.ok(spoke, 'the turn produced a reply');
+    assert.equal((await gateway.sessionRouting('thread-s'))?.lastSpokeAt, spoke);
+
+    // A save that is not the agent speaking — a tool result, an approval
+    // checkpoint, a recovery resuming — moves the row's own timestamp and
+    // must not move this. A channel ordering two agents by who spoke last
+    // would otherwise hand the thread to whichever is mid-turn.
+    const stored = await gateway.store.get('thread-s');
+    assert.ok(stored);
+    stored.messages.push({ id: 'thread-s:user:2', role: 'user', content: 'and again', createdAt: new Date().toISOString() });
+    await gateway.store.save(stored);
+    const after = await gateway.sessionRouting('thread-s');
+    assert.equal(after?.lastSpokeAt, spoke);
+    assert.notEqual((await gateway.store.get('thread-s'))?.updatedAt, spoke);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('sqlite sessions round-trip metadata (anthropic raw-turn cache included)', async () => {
   const home = await newHome();
   const store = new SqliteSessionStore(path.join(home, 'sessions.db'));

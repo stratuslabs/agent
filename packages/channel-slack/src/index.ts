@@ -17,6 +17,35 @@ const SLACK_MAX_MESSAGE_CHARS = 4000;
 const DEFAULT_EDIT_INTERVAL_MS = 1000;
 const DEDUPE_CAPACITY = 2000;
 /**
+ * How many threads' addressees are remembered in receipt order. Past this
+ * the least recently addressed is dropped, which costs its next follow-up
+ * one session lookup — the durable answer, which is what a restart falls
+ * back to anyway.
+ */
+const THREAD_ADDRESSEE_CAPACITY = 2000;
+/**
+ * How many cold verdicts are remembered. Far smaller than the addressee
+ * map: one is wanted only while the agents sharing a thread resolve the
+ * same message, and the addressee record answers for every message after.
+ */
+const COLD_VERDICT_CAPACITY = 256;
+/**
+ * How many changes of hands one thread remembers.
+ *
+ * A message older than all of them asks the sessions instead, which answer
+ * for the thread as it stands rather than as it stood — so a reply that old
+ * can be resolved to the agent holding the thread now. That is the cost of
+ * bounding this, and something has to bound it: the alternative is a list
+ * that grows with a conversation for the life of the daemon.
+ *
+ * Eight is chosen to sit far past the case it covers. This only has to
+ * span the lag between two sockets, which is messages inside one delivery
+ * window; crossing it needs a single thread to change hands eight times —
+ * eight mentions, alternating between agents — while one socket stays
+ * behind for all of them.
+ */
+const THREAD_HANDOVER_DEPTH = 8;
+/**
  * How many files an unrendered turn may queue for its outcome. Nothing
  * drains that queue until the outcome arrives, so a session whose outcome
  * this process never sees would otherwise grow it for the life of the
@@ -96,6 +125,13 @@ export interface SlackInboundEvent {
   channel_type?: string;
   bot_id?: string;
   subtype?: string;
+  /**
+   * Attachments on a `file_share` message. Slack puts the file metadata in
+   * the event and the bytes behind an authenticated URL that needs
+   * `files:read`, which this app does not ask for — so a turn learns that a
+   * file arrived and what it is called, never what is in it.
+   */
+  files?: Array<{ name?: string; title?: string }>;
 }
 
 export interface SlackSocketLike {
@@ -973,6 +1009,52 @@ const APPROVAL_INPUT_LIMIT = 1400;
 const APPROVAL_SUMMARY_LIMIT = 160;
 
 /**
+ * Subtypes that are still a person saying something, rather than Slack
+ * narrating the channel. Everything else a `subtype` marks — an edit, a
+ * deletion, a join, a pinned file — is bookkeeping, and an agent following
+ * a thread must not answer bookkeeping.
+ *
+ * These three are here because each is an ordinary thing a person does:
+ * `file_share` is a message that happens to carry an attachment (asking a
+ * question with the log attached is the normal way to ask it),
+ * `thread_broadcast` is a thread reply the author also sent to the channel,
+ * and `me_message` is what `/me` produces — typed by a person, in their own
+ * words, and marked only by how it is rendered.
+ */
+const HUMAN_MESSAGE_SUBTYPES = new Set(['file_share', 'me_message', 'thread_broadcast']);
+
+const isPersonSpeaking = (event: SlackInboundEvent): boolean =>
+  event.subtype === undefined || HUMAN_MESSAGE_SUBTYPES.has(event.subtype);
+
+/** At most this many attachment names are listed; the rest are counted. */
+const MAX_LISTED_ATTACHMENTS = 5;
+
+/**
+ * What a message's attachments are called, for a turn that cannot open
+ * them. Without this the agent is handed "here's the log" and no log, and
+ * answers as though it had read something — the note is what lets it say
+ * the true thing instead.
+ */
+const attachmentNote = (files: SlackInboundEvent['files']): string => {
+  if (!files || files.length === 0) {
+    return '';
+  }
+  const names = files.slice(0, MAX_LISTED_ATTACHMENTS).map((file) => file.name ?? file.title ?? 'an unnamed file');
+  const rest = files.length - names.length;
+  const listed = rest > 0 ? `${names.join(', ')}, and ${rest} more` : names.join(', ');
+  return `\n[Attached: ${listed}. Attachment contents cannot be read here — say so rather than guessing at them.]`;
+};
+
+/**
+ * Whether `text` addresses a bot user by name. Slack writes a mention as
+ * `<@U123>` markup whoever typed it, so this is the same question for an
+ * `app_mention` event and for a plain channel message the app now also
+ * sees.
+ */
+const mentions = (text: string, botUserId: string): boolean =>
+  botUserId.length > 0 && text.includes(`<@${botUserId}>`);
+
+/**
  * Slack's three markup characters. Tool input is written by a model, so it
  * reaches this message as untrusted text: unescaped, `<@U123>` becomes a
  * real mention and `<!channel>` a real broadcast, letting an agent ping a
@@ -1099,6 +1181,24 @@ interface PendingApprovalPost {
   approvers: Set<string>;
 }
 
+/**
+ * A message `admit` has decided is this agent's, and everything it worked
+ * out on the way — so the async half neither re-derives nor re-reads any of
+ * it. `settled: false` is the one open question left: whether the sessions
+ * say this untagged reply is ours.
+ */
+interface Admission {
+  event: SlackInboundEvent;
+  isDm: boolean;
+  team: string;
+  userId: string;
+  sessionId: string;
+  thread?: string;
+  /** Absent for a DM, which has one agent by construction. */
+  threadKey?: string;
+  settled: boolean;
+}
+
 interface AgentConnection {
   config: SlackAgentConfig;
   web: SlackWebLike;
@@ -1117,6 +1217,14 @@ interface AgentConnection {
  * (DMs: the DM channel id alone), so threads are resumable conversations
  * and two agents sharing a thread keep fully separate sessions. Replies
  * stream via placeholder-then-edit, throttled for chat.update limits.
+ *
+ * A mention starts a thread conversation; inside one, the agent keeps
+ * listening without being tagged again — see `couldBeFollowUp` and
+ * `answersFollowUp` for exactly whose reply an untagged message is. That
+ * needs the app to be subscribed to `message.channels` / `message.groups`
+ * / `message.mpim` (the shipped manifest is); an app installed before
+ * those were in it receives only `app_mention` and behaves as it always
+ * did, which makes the workspace's own grant the switch.
  */
 export const createSlackChannelAdapter = (options: SlackAdapterOptions): ChannelAdapter => {
   const log = options.log ?? (() => {});
@@ -1151,6 +1259,75 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   // Socket Mode redelivers on missed acks; a slow turn must not run twice.
   const seenEvents = new Set<string>();
   const seenOrder: string[] = [];
+  /**
+   * Who each thread was last handed to, in SLACK RECEIPT ORDER — written
+   * the moment a message is accepted for an agent, before any of the work
+   * that message causes.
+   *
+   * The durable answer (`answersFollowUp`) is the agents' own sessions,
+   * and it lags: a session row is written when its turn starts, which is a
+   * display-name lookup and a placeholder post after the message that
+   * asked for it. Inside that window the persisted order still names the
+   * agent that spoke *before* the handover, so a mention of Bea followed
+   * straight away by an untagged addendum would send the addendum to Ava —
+   * and a follow-up typed on the heels of the mention that opened the
+   * thread would find no session at all and be dropped for good.
+   *
+   * Keyed by thread rather than by (agent, thread): one agent has it at a
+   * time, so there is nothing to reconcile. The value is that thread's
+   * HANDOVERS in order, not just its latest one, because the question an
+   * untagged message asks is not "who holds this thread now" but "who held
+   * it when I was sent". Those differ whenever a socket runs behind
+   * another: Bea's connection can reject a pre-handover reply, then take
+   * the mention that moves the thread to her, and Ava's connection reach
+   * that same earlier reply afterwards — which the latest holder alone
+   * would reject for a second time, dropping a message that was plainly
+   * Ava's when it was written.
+   *
+   * Keeping the handovers also makes out-of-order writes ordinary rather
+   * than dangerous. A connection several messages behind, or a redelivered
+   * envelope carrying an old mention, inserts into the past where it
+   * belongs instead of overwriting the present.
+   *
+   * Bounded and lossy on purpose — evicting an entry costs one lookup,
+   * since the sessions still hold the answer for every thread this map has
+   * forgotten, and for every thread a restart forgot.
+   *
+   * One thing they cannot reconstruct: a handover made in the seconds
+   * before the daemon went down. The mention that moved the thread is
+   * recorded only here, and the newly named agent has not replied yet, so
+   * after a restart the sessions still name the previous speaker and the
+   * next untagged reply goes to them. Surviving that needs durable
+   * adapter-owned state, which the channel contract deliberately does not
+   * have — an adapter reads routing and translates events, and inventing a
+   * private store here is the wrong place to answer it. The next mention
+   * corrects it.
+   */
+  const threadAddressee = new Map<string, Array<{ agentId: string; ts: string }>>();
+  /**
+   * One cold verdict per message — see `followUpWinner`. Bounded, because
+   * an entry outlives its own resolution on purpose; an entry that has not
+   * yet resolved is never the one evicted, since the agent still waiting on
+   * it would otherwise start a second one.
+   */
+  const coldVerdicts = new Map<string, { verdict: Promise<string | undefined>; settled: boolean }>();
+  /**
+   * `agentId` → bot user id, for every app whose token this adapter has
+   * authenticated — whether or not its socket then came up, and kept for as
+   * long as the adapter runs.
+   *
+   * Separate from `connections` because recognizing that somebody was named
+   * and being able to answer are different questions. An agent whose app is
+   * down cannot answer anything; a message that names it is still not the
+   * other agent's to take, and treating it as untagged would have the wrong
+   * agent answer a question a person deliberately handed elsewhere. Silence
+   * is the correct outcome there, and it is also the visible one — the same
+   * thing a mention has always done when an app is down.
+   *
+   * Insertion order is `options.agents` order, which is what makes
+   * `agentNamedIn` deterministic across every connection.
+   */
+  const botIdentities = new Map<string, { botUserId: string; teamId: string }>();
   // Rendered approval requests, keyed by the gateway's request id — the
   // same id the buttons carry back.
   const approvalPosts = new Map<string, PendingApprovalPost>();
@@ -1802,51 +1979,458 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
   };
 
-  const handleInbound = async (connection: AgentConnection, args: SlackSocketEventArgs): Promise<void> => {
-    // Ack immediately: Slack redelivers unacked envelopes, and a turn can
-    // outlive the ack window many times over.
-    await args.ack();
+  /** One thread, whichever agent is talking in it. */
+  const threadKeyFor = (parts: { team: string; conversation: string; thread: string }): string =>
+    `${parts.team}:${parts.conversation}:${parts.thread}`;
 
-    const gateway = gatewayRef;
-    const event = args.event;
-    if (!gateway || !event || !event.user || event.bot_id || event.subtype) {
+  /**
+   * Records that `agentId` holds the thread from the message at `ts`
+   * onwards, wherever in the thread's history that message falls.
+   *
+   * Only actual handovers are kept: a write naming the agent that already
+   * held the thread at that point adds nothing, so the list stays as short
+   * as the conversation's changes of hands rather than growing per message.
+   * The oldest handovers are dropped past `THREAD_HANDOVER_DEPTH`, and the
+   * least recently written thread past `THREAD_ADDRESSEE_CAPACITY`; both
+   * losses cost a lookup, never an answer, since the sessions still hold
+   * the durable version.
+   *
+   * Slack timestamps compare as strings: `seconds.microseconds`, both
+   * parts fixed width, so lexicographic order is chronological order.
+   */
+  const rememberAddressee = (key: string, agentId: string, ts: string): void => {
+    const handovers = threadAddressee.get(key) ?? [];
+    let at = handovers.length;
+    while (at > 0 && (handovers[at - 1] as { ts: string }).ts > ts) {
+      at -= 1;
+    }
+    const before = handovers[at - 1];
+    if (before && before.agentId === agentId) {
+      // Already this agent's from earlier in the thread; the same message
+      // reaching a second connection lands here too.
       return;
     }
-    const isDm = event.channel_type === 'im';
-    if (event.type !== 'app_mention' && !(event.type === 'message' && isDm)) {
-      // Mention-only outside DMs.
-      return;
+    handovers.splice(at, 0, { agentId, ts });
+    // Re-inserted rather than mutated in place: a Map iterates in insertion
+    // order, which is what makes the first key the one to evict.
+    threadAddressee.delete(key);
+    threadAddressee.set(key, handovers.slice(-THREAD_HANDOVER_DEPTH));
+    if (threadAddressee.size > THREAD_ADDRESSEE_CAPACITY) {
+      const oldest = threadAddressee.keys().next();
+      if (!oldest.done) {
+        threadAddressee.delete(oldest.value);
+      }
+    }
+  };
+
+  /**
+   * Who held the thread when the message at `ts` was sent — the last
+   * handover at or before it. Undefined when this process has no handover
+   * that old, which sends the question to the sessions.
+   */
+  const holderAt = (key: string, ts: string): string | undefined => {
+    const handovers = threadAddressee.get(key);
+    if (!handovers) {
+      return undefined;
+    }
+    for (let index = handovers.length - 1; index >= 0; index -= 1) {
+      const handover = handovers[index];
+      if (handover && handover.ts <= ts) {
+        return handover.agentId;
+      }
+    }
+    return undefined;
+  };
+  /**
+   * Which of this process's agents a message names, or undefined if it
+   * names none of them.
+   *
+   * When it names several, the first that is actually serving — and any
+   * of them otherwise. That determinism is the point: every connection sees every message and runs
+   * this over the same text and the same array, so all of them agree on who
+   * a message handed the thread to — including the connections that will go
+   * on to ignore it. Which is what makes the handover record converge
+   * without the sockets having to agree on anything, since each agent is
+   * its own Socket Mode connection and one can run minutes behind another.
+   *
+   * Scoped to the message's own workspace, because a bot user id is only
+   * unique within one — the same reason the display-name cache is keyed by
+   * team. Two agents in two workspaces can hold the same id, and resolving
+   * a mention to the wrong one would hand the thread to an agent that
+   * cannot see it, leaving the agent that was actually named refusing every
+   * reply after.
+   *
+   * Only agents this adapter has authenticated can be recognized at all.
+   * One served by another daemon is invisible here, and both would answer;
+   * so is one whose `auth.test` itself failed, since its bot id was never
+   * learned.
+   */
+  const agentNamedIn = (text: string, team: string): string | undefined => {
+    let offline: string | undefined;
+    for (const [agentId, identity] of botIdentities) {
+      if (identity.teamId !== team || !mentions(text, identity.botUserId)) {
+        continue;
+      }
+      if (connections.some((live) => live.config.agentId === agentId)) {
+        return agentId;
+      }
+      // Named, recognized, and not serving. Remembered only as the answer
+      // of last resort: a message that names an agent whose app is down and
+      // nobody else still gets silence, which is the deliberate behavior —
+      // but a message that also names one that IS serving must leave the
+      // thread with the agent that can actually answer it, or the reply it
+      // just posted would be the last anyone gets.
+      offline ??= agentId;
+    }
+    return offline;
+  };
+
+  /**
+   * Who an untagged reply belongs to, asked of the SESSIONS — the durable
+   * answer, for a thread this process has no record of: one it has not seen
+   * a message in since it started, or one evicted from `threadAddressee`.
+   * Everything else is settled synchronously in `admit`, before this is
+   * ever reached.
+   *
+   * Being in the thread is the first half: a session under a thread's key
+   * exists only because someone mentioned that agent here, so an agent
+   * follows up only in conversations it was invited into, and stops when
+   * the thread is gone. `sessionRouting` is the durable record of that — a
+   * restart forgets nothing.
+   *
+   * Whose turn it is, is the second. In a thread with several agents an
+   * unaddressed reply belongs to **whoever spoke last**, the way it does
+   * between people: answer the voice that just answered you, and tag
+   * someone by name to change that. `lastSpokeAt` orders them — when each
+   * agent last *replied*, not when its session last changed, because a turn
+   * saves on tool results and approval checkpoints without having said
+   * anything, and a recovery resuming after a restart lands in exactly this
+   * window.
+   *
+   * Nobody is the answer only when the agents cannot be *ordered* — nothing
+   * in the thread has spoken (a host whose routing carries no `lastSpokeAt`
+   * at all reads this way, and so does a thread where every agent is still
+   * on its first turn), or the newest two tie — because guessing there
+   * would put two answers under one message. An agent that simply has not
+   * spoken is a different thing and is skipped rather than fatal: it cannot
+   * have spoken last, and letting it silence the agent that did would leave
+   * a reply nobody answers. The agent alone in its thread, which is nearly
+   * every thread, is answered without the question arising.
+   */
+  const resolveFollowUpWinner = async (
+    parts: { team: string; conversation: string; thread: string },
+  ): Promise<string | undefined> => {
+    const gateway = gatewayRef;
+    if (!gateway?.sessionRouting || !parts.thread) {
+      return undefined;
+    }
+    const engaged: Array<{ agentId: string; lastSpokeAt?: string }> = [];
+    // Live connections in this message's OWN workspace. Live, because an
+    // agent whose app failed to connect cannot answer anything, and leaving
+    // a thread silent because its last speaker is offline is the bug this
+    // whole change exists to remove. In-workspace, because a session key
+    // carries a team: an agent whose app has moved workspaces still has its
+    // old sessions there, and letting those contend for a thread it can no
+    // longer receive a message in would leave nobody to answer.
+    for (const candidate of connections) {
+      if (candidate.teamId !== parts.team) {
+        continue;
+      }
+      const routing = await gateway.sessionRouting(channelSessionKey({
+        channel: 'slack',
+        agentId: candidate.config.agentId,
+        team: parts.team,
+        conversation: parts.conversation,
+        thread: parts.thread,
+      }));
+      if (!routing) {
+        continue;
+      }
+      engaged.push({
+        agentId: candidate.config.agentId,
+        ...(routing.lastSpokeAt !== undefined ? { lastSpokeAt: routing.lastSpokeAt } : {}),
+      });
+    }
+    const first = engaged[0];
+    if (!first) {
+      return undefined;
+    }
+    if (engaged.length === 1) {
+      return first.agentId;
+    }
+    let latest: { agentId: string; lastSpokeAt: string } | undefined;
+    let tied = false;
+    for (const entry of engaged) {
+      if (entry.lastSpokeAt === undefined) {
+        // In the thread, but has never said anything in it — mentioned and
+        // still on its first turn, or a turn that produced no text. It
+        // cannot be the one who spoke last, and it must not stop the agent
+        // that did from answering.
+        continue;
+      }
+      if (!latest || entry.lastSpokeAt > latest.lastSpokeAt) {
+        latest = { agentId: entry.agentId, lastSpokeAt: entry.lastSpokeAt };
+        tied = false;
+      } else if (entry.lastSpokeAt === latest.lastSpokeAt) {
+        tied = true;
+      }
+    }
+    return tied ? undefined : latest?.agentId;
+  };
+
+  /**
+   * `resolveFollowUpWinner`, resolved ONCE PER MESSAGE and shared by every
+   * agent asking about that message.
+   *
+   * The sharing is the point. Each agent's own copy of the question is
+   * several independent session reads, and turns finishing in between can
+   * make two agents' reads disagree: both concluding they are the most
+   * recent speaker, so one message is answered twice, or both concluding
+   * they are not, so it is answered by nobody. One resolution cannot
+   * disagree with itself, which is a stronger guarantee than arbitrating
+   * between two that already have.
+   *
+   * Keyed on the message, so a later reply in the same thread asks again.
+   * Bounded, and deliberately not deleted when it settles: an entry has to
+   * outlive its own resolution, because an agent it beats may only reach
+   * this after the winner has finished, and recomputing for that agent is
+   * precisely the disagreement the memo exists to prevent.
+   */
+  const followUpWinner = (
+    parts: { team: string; conversation: string; thread: string },
+    ts: string,
+  ): Promise<string | undefined> => {
+    const key = `${threadKeyFor(parts)}:${ts}`;
+    const existing = coldVerdicts.get(key);
+    if (existing) {
+      return existing.verdict;
+    }
+    const entry = { verdict: resolveFollowUpWinner(parts), settled: false };
+    coldVerdicts.set(key, entry);
+    void entry.verdict.then(
+      () => {
+        entry.settled = true;
+      },
+      () => {
+        entry.settled = true;
+      },
+    );
+    if (coldVerdicts.size > COLD_VERDICT_CAPACITY) {
+      // The oldest SETTLED entry, never simply the oldest. Evicting one
+      // still resolving is the one eviction that costs an answer rather
+      // than a lookup: the agent it has not reached yet would start its own
+      // resolution, which is the disagreement this memo exists to prevent.
+      // With none settled there is nothing safe to drop, and the map runs
+      // over its cap by however many resolutions are genuinely in flight.
+      for (const [candidate, held] of coldVerdicts) {
+        if (held.settled) {
+          coldVerdicts.delete(candidate);
+          break;
+        }
+      }
+    }
+    return entry.verdict;
+  };
+
+  /**
+   * Everything about who a message is for that can be decided WITHOUT
+   * AWAITING, run straight off the socket's own event emission — so for the
+   * whole of it, this process is exactly as far through the conversation as
+   * Slack is.
+   *
+   * That is the point of it being one synchronous block. The Socket Mode
+   * client emits envelopes in order, but `ack()` resolves from a WebSocket
+   * send callback, so two handlers that ack before deciding anything can
+   * come back in either order: a follow-up could then overtake the mention
+   * that opened its thread, find neither a record nor a session, and be
+   * dropped for good. Nothing here awaits, so nothing can be overtaken —
+   * the dedupe and the handover record included, which are the two pieces a
+   * later message reads.
+   *
+   * `undefined` means the message is not this agent's. `settled: false`
+   * means only the sessions can still decide it, which is the one case that
+   * has to wait — and it is the cold case, where by definition no message
+   * of this thread has been seen in this process.
+   */
+  const admit = (connection: AgentConnection, args: SlackSocketEventArgs): Admission | undefined => {
+    const event = args.event;
+    if (!gatewayRef || !event || !event.user || event.bot_id || !isPersonSpeaking(event)) {
+      return undefined;
+    }
+    if (event.type !== 'app_mention' && event.type !== 'message') {
+      return undefined;
     }
     if (event.user === connection.botUserId) {
-      return;
+      return undefined;
     }
 
-    const eventKey = `${connection.config.agentId}:${args.body?.event_id ?? args.envelope_id ?? `${event.channel}:${event.ts}`}`;
-    if (alreadySeen(eventKey)) {
-      return;
-    }
-
+    const isDm = event.channel_type === 'im';
     const team = args.body?.team_id ?? connection.teamId;
-    const userId = event.user;
     // A top-level mention has no thread_ts; its own ts roots the reply
     // thread that becomes the conversation. DMs are one conversation per
     // peer, unkeyed by thread.
     const thread = isDm ? undefined : event.thread_ts ?? event.ts;
-    const sessionId = channelSessionKey({
-      channel: 'slack',
-      agentId: connection.config.agentId,
+    // Threads only: a DM has one agent by construction.
+    const threadKey = thread !== undefined && !isDm
+      ? threadKeyFor({ team, conversation: event.channel, thread })
+      : undefined;
+
+    const text = event.text ?? '';
+    const addressed = isDm || mentions(text, connection.botUserId);
+
+    // Who this message hands the thread to — worked out by EVERY connection
+    // that sees it, not only by the one being named, and recorded before any
+    // of the rejections below. Each agent is its own Socket Mode connection,
+    // so the message naming Bea reaches Ava's socket and Bea's socket
+    // independently and in no fixed order; if only Bea recorded the
+    // handover, Ava could take the next untagged reply while Bea's socket
+    // was still behind, and answer a question that had just been handed
+    // away. The message Ava must record is exactly the one Ava ignores.
+    const named = agentNamedIn(text, team);
+    if (threadKey && named) {
+      rememberAddressee(threadKey, named, event.ts);
+    }
+
+    if (!addressed) {
+      if (event.thread_ts === undefined) {
+        // The room is not a conversation: a message that starts a thread,
+        // or stands alone, is a follow-up to nothing.
+        return undefined;
+      }
+      if (named) {
+        // Somebody else was asked. Tagging an agent hands it the question,
+        // and the agent that had it is no longer being asked — two answers
+        // to one message is what a thread with a roster in it must never
+        // produce.
+        return undefined;
+      }
+    }
+
+    // One Slack MESSAGE, not one delivery. An app subscribed to both
+    // `app_mention` and `message.channels` is told about a mention twice —
+    // two envelopes carrying two event ids — so keying this on the event
+    // id would run the turn twice the moment thread follow-through was
+    // switched on. `(channel, ts)` names the message itself, and a
+    // redelivery (what the event id was here for) repeats both.
+    //
+    // After the handover record and not before it: a redelivery re-records
+    // the same agent, which costs nothing, while deduping first would drop
+    // the record whenever the other copy of a doubly-delivered mention is
+    // the one a connection sees second.
+    const eventKey = `${connection.config.agentId}:${event.channel}:${event.ts}`;
+    if (alreadySeen(eventKey)) {
+      return undefined;
+    }
+
+    const admission: Admission = {
+      event,
+      isDm,
       team,
-      conversation: event.channel,
+      userId: event.user,
+      sessionId: channelSessionKey({
+        channel: 'slack',
+        agentId: connection.config.agentId,
+        team,
+        conversation: event.channel,
+        ...(thread ? { thread } : {}),
+      }),
       ...(thread ? { thread } : {}),
+      ...(threadKey ? { threadKey } : {}),
+      settled: true,
+    };
+
+    if (addressed) {
+      // A message that named this agent and others is recorded above under
+      // whichever of them comes first in connection order — every agent
+      // named answers it, and the thread it leaves behind has one holder
+      // that all the sockets agree on, which is the only self-consistent
+      // reading of a message that asked several.
+      return admission;
+    }
+
+    // An untagged reply. The record is what this process has actually seen,
+    // in the order it saw it — right even inside the window before a
+    // handover reaches the store.
+    const holder = threadKey === undefined ? undefined : holderAt(threadKey, event.ts);
+    if (holder !== undefined && threadKey !== undefined) {
+      if (holder !== connection.config.agentId) {
+        // Standing down for the holder, whether or not the holder can still
+        // hear it. An app removed from this channel stops receiving the
+        // thread, and its untagged replies then reach nobody until somebody
+        // names an agent — which is the same answer this adapter gives
+        // whenever the agent being addressed cannot answer, and one mention
+        // reopens the conversation. Doing better means per-channel
+        // membership the adapter does not track, and would have to be
+        // tracked in the durable path too, since a removed app is still a
+        // live connection with the newest session there.
+        return undefined;
+      }
+      rememberAddressee(threadKey, connection.config.agentId, event.ts);
+      return admission;
+    }
+    // Nothing seen for this thread since startup: only the sessions can
+    // answer, and that answer has to be awaited.
+    return { ...admission, settled: false };
+  };
+
+  const handleInbound = async (connection: AgentConnection, args: SlackSocketEventArgs): Promise<void> => {
+    // Decided before the ack, never after it — see `admit`. That block is
+    // map and string work measured in microseconds, against an ack window
+    // Slack measures in seconds, and the envelope is acked below whatever
+    // the decision was.
+    const admitted = admit(connection, args);
+    // Acked without awaiting it. The ack still leaves as promptly as it ever
+    // did — Slack redelivers unacked envelopes, and a turn outlives the ack
+    // window many times over — but nothing here needs its send callback, and
+    // awaiting one was the single await between receiving a message and
+    // taking its place in the queue below. Two handlers waiting on their
+    // acks can come back in either order; two handlers that never wait
+    // cannot. A failed ack costs a redelivery, which the dedupe absorbs.
+    void Promise.resolve(args.ack()).catch((error) => {
+      warn(`slack: could not ack an envelope: ${error instanceof Error ? error.message : String(error)}`);
     });
+    if (!admitted) {
+      return;
+    }
+    // Re-read rather than carried through the admission: `stop()` can clear
+    // it while the ack above is in flight, and a dispatch into a gateway
+    // this adapter has let go of is not one to start.
+    const gateway = gatewayRef;
+    if (!gateway) {
+      return;
+    }
+    const { event, isDm, team, userId, thread, sessionId, threadKey } = admitted;
 
     // Everything up to (and including) the dispatch call is serialized per
     // session in Slack receipt order: the user lookups and placeholder
     // post below await network I/O, and without this chain a later message
     // could reach gateway.dispatch first — processing the conversation in
-    // reverse order in durable history.
+    // reverse order in durable history. The chain is claimed here,
+    // synchronously, so a message's place in it is fixed by when Slack
+    // delivered it and not by how long anything it does takes.
     const previousIntake = intakeChains.get(sessionId) ?? Promise.resolve();
     const intake = previousIntake.then(async () => {
+      // The durable half of addressing runs INSIDE the chain, for the same
+      // reason: it awaits, and a message that had to ask the sessions must
+      // not lose its place to one that did not. A message that turns out
+      // not to be this agent's leaves an empty link behind, which is all it
+      // should cost.
+      if (!admitted.settled) {
+        // One verdict for this message, shared with whichever other agents
+        // are asking about it — see `followUpWinner`.
+        const winner = await followUpWinner(
+          { team, conversation: event.channel, thread: event.thread_ts ?? '' },
+          event.ts,
+        );
+        if (winner !== connection.config.agentId) {
+          return undefined;
+        }
+        // Answered from the store rather than from memory: hold it, so the
+        // rest of the thread is ordered by receipt like any other.
+        if (threadKey) {
+          rememberAddressee(threadKey, connection.config.agentId, event.ts);
+        }
+      }
       const cleaned = await humanizeMentions(connection, event.text ?? '');
       if (cleaned.length === 0) {
         return undefined;
@@ -1854,7 +2438,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       const author = await displayNameFor(connection, userId);
       // In shared channels the model should know who is speaking; a DM is
       // unambiguous.
-      const userMessage = isDm ? cleaned : `${author}: ${cleaned}`;
+      const spoken = isDm ? cleaned : `${author}: ${cleaned}`;
+      const userMessage = `${spoken}${attachmentNote(event.files)}`;
 
       const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn);
       try {
@@ -2036,6 +2621,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       });
 
       const known = new Set(gateway.agents().map((agent) => agent.id));
+      // Two passes, because who a message names has to be answerable from
+      // the first event onwards. Identities are learned for every app
+      // FIRST; only then does any socket start delivering. One pass would
+      // leave the agents at the front of the roster taking messages while
+      // the ones behind them were still authenticating, and a mention of an
+      // agent not yet known reads as an untagged reply — which the agent
+      // holding that thread would then answer.
+      const authenticated: AgentConnection[] = [];
       for (const config of options.agents) {
         if (!known.has(config.agentId)) {
           warn(`slack: no roster agent with id ${config.agentId}; skipping its Slack app`);
@@ -2044,14 +2637,27 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         try {
           const web = createWeb(config.botToken);
           const auth = await web.auth.test();
-          const socket = createSocket(config.appToken);
-          const connection: AgentConnection = {
+          const botUserId = auth.user_id ?? '';
+          const teamId = auth.team_id ?? '';
+          // Recorded before the socket is even built: an app that never
+          // comes up must still be recognizable when somebody names it.
+          botIdentities.set(config.agentId, { botUserId, teamId });
+          authenticated.push({
             config,
             web,
-            socket,
-            botUserId: auth.user_id ?? '',
-            teamId: auth.team_id ?? '',
-          };
+            socket: createSocket(config.appToken),
+            botUserId,
+            teamId,
+          });
+        } catch (error) {
+          // One broken app must not take the rest of the fleet down.
+          warn(`slack: could not connect ${config.agentId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
+      for (const connection of authenticated) {
+        const { config, socket } = connection;
+        try {
           const onEvent = (args: SlackSocketEventArgs): void => {
             const handled = handleInbound(connection, args).catch((error) => {
               warn(`slack event handling failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -2070,7 +2676,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           connections.push(connection);
           log(`slack: ${config.agentId} connected (bot ${connection.botUserId} in team ${connection.teamId})`);
         } catch (error) {
-          // One broken app must not take the rest of the fleet down.
+          // Authenticated but not serving: it answers nothing, and stays
+          // recognizable so nobody answers in its place.
           warn(`slack: could not connect ${config.agentId}: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
@@ -2103,6 +2710,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       gatewayRef = undefined;
       connections.length = 0;
       approvalPosts.clear();
+      threadAddressee.clear();
+      coldVerdicts.clear();
+      botIdentities.clear();
       rendering.clear();
       resolvedWhileRendering.clear();
     },
