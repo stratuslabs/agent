@@ -2264,6 +2264,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const holder = threadKey === undefined ? undefined : threadAddressee.get(threadKey);
     if (holder !== undefined && threadKey !== undefined) {
       if (holder.agentId !== connection.config.agentId) {
+        // Standing down for the holder, whether or not the holder can still
+        // hear it. An app removed from this channel stops receiving the
+        // thread, and its untagged replies then reach nobody until somebody
+        // names an agent — which is the same answer this adapter gives
+        // whenever the agent being addressed cannot answer, and one mention
+        // reopens the conversation. Doing better means per-channel
+        // membership the adapter does not track, and would have to be
+        // tracked in the durable path too, since a removed app is still a
+        // live connection with the newest session there.
         return undefined;
       }
       rememberAddressee(threadKey, connection.config.agentId, event.ts);
