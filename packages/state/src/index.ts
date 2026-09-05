@@ -1100,7 +1100,12 @@ export const readStateStamp = async (env: StateEnvironment): Promise<StateStamp>
   try {
     raw = await readFile(stateFilePath(env), 'utf8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+    // Missing, or something other than a file where the stamp belongs (a
+    // directory, a path through one): unversioned, like a corrupt stamp
+    // below. The write that follows fails on the same obstacle, and that
+    // failure is what refuses a state-writing command — see the CLI.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'EISDIR' || code === 'ENOTDIR') {
       return { schemaVersion: 0, applied: [] };
     }
     throw error;

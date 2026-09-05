@@ -37,7 +37,6 @@ import {
 export {
   canonicalRoots,
   expandHome,
-  nameIdentifiesHandle,
   openContained,
   PathOutsideRootError,
   resolveWithinRoots,
@@ -49,6 +48,7 @@ export {
   createProcessLocalLedger,
   LEDGER_FILENAME,
   ledgerGuard,
+  nameIdentifiesHandle,
   type FileIdentity,
   type LedgerGuard,
   type TaintedWriteLedger,

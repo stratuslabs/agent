@@ -1,6 +1,7 @@
 import { constants } from 'node:fs';
-import { appendFile, chmod, mkdir, open, readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 
 import { isTrustLevel, leastTrusted, type TrustLevel } from '@stratusagent/core';
@@ -240,31 +241,39 @@ export const createFileLedger = (workspaceRoot: string): TaintedWriteLedger => {
     snapshot: (agentId) => read(agentId),
     recordWrite(agentId, absolutePath, trust) {
       const work = chain.then(async () => {
-        const filePath = ledgerPath(agentId);
-        const before = await read(agentId);
-        const paths = nextPaths(before, absolutePath, trust);
-        // A clean write records nothing, and a path already at this label
-        // or lower needs no second line — so a host whose workspace root is
-        // unwritable fails only the writes that needed the ledger.
-        if (paths === before) {
+        if (!tainted(trust)) {
+          // A clean write records nothing — see `TaintedWriteLedger`.
           return;
         }
+        const filePath = ledgerPath(agentId);
         await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-        // Tightened before the append, like the memory file: `appendFile`'s
-        // mode applies only when it creates the file.
+        // Read and appended through ONE descriptor. A ledger reached through
+        // a link (a relocated workspace, a relocated file — both supported)
+        // is resolved once, at this open; a second open for the append
+        // would resolve the name afresh, and a link repointed in between
+        // would put the record in some other file while the bytes it
+        // describes land where the resolver already decided. O_APPEND keeps
+        // the write itself atomic against a peer's.
+        const handle = await open(filePath, constants.O_RDWR | constants.O_CREAT | constants.O_APPEND, 0o600);
         try {
-          await chmod(filePath, 0o600);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-            throw error;
+          // Tightened before the append, like the memory file: the mode on
+          // open applies only when it creates the file.
+          await handle.chmod(0o600);
+          const before = parseLedger((await handle.readFile()).toString('utf8'), filePath);
+          const paths = nextPaths(before, absolutePath, trust);
+          // A path already at this label or lower needs no second line.
+          if (paths === before) {
+            return;
           }
+          const record: LedgerRecord = {
+            path: absolutePath,
+            trust: paths[absolutePath]!,
+            at: new Date().toISOString(),
+          };
+          await handle.appendFile(`${JSON.stringify(record)}\n`);
+        } finally {
+          await handle.close();
         }
-        const record: LedgerRecord = {
-          path: absolutePath,
-          trust: paths[absolutePath]!,
-          at: new Date().toISOString(),
-        };
-        await appendFile(filePath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
       });
       chain = work.then(() => undefined, () => undefined);
       return work;
@@ -391,4 +400,28 @@ export const ledgerGuard = async (workspaceRoot: string | undefined): Promise<Le
       return false;
     }
   };
+};
+
+/**
+ * Whether `absolutePath`, spelled exactly so and through no link, names the
+ * file `handle` holds open — right now. Both halves matter: the canonical
+ * spelling must be the name itself, or a directory on the way is a link and
+ * the file lives somewhere else; and the inode at that name must be the
+ * handle's, or the name has since been given to a decoy while the handle
+ * still refers to wherever the link sent the create. A pathname comparison
+ * alone passes the second case.
+ */
+export const nameIdentifiesHandle = async (
+  absolutePath: string,
+  handle: FileHandle,
+): Promise<boolean> => {
+  try {
+    if ((await realpath(absolutePath)) !== absolutePath) {
+      return false;
+    }
+    const [atName, held] = await Promise.all([lstat(absolutePath), handle.stat()]);
+    return atName.dev === held.dev && atName.ino === held.ino;
+  } catch {
+    return false;
+  }
 };

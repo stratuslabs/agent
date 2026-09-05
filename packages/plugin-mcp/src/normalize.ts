@@ -3,7 +3,7 @@ import { mkdir, open, realpath } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { JsonObject, JsonValue } from '@stratusagent/core';
-import type { TaintedWriteLedger } from '@stratusagent/plugins';
+import { nameIdentifiesHandle, type TaintedWriteLedger } from '@stratusagent/plugins';
 
 /**
  * Turning what an MCP server sends back into what a Stratus tool returns:
@@ -178,12 +178,13 @@ export const normalizeCallResult = async (
       // O_NOFOLLOW guards the final component only: a directory on the way
       // swapped for a link between the `realpath` above and this open would
       // have the create land wherever the link points, under a path the
-      // record above never named. Resolved again now that the file exists;
-      // any other spelling is refused before a byte is written, and the
-      // empty file is left rather than unlinked through a name that just
-      // proved it can move.
-      const landed = await realpath(file);
-      if (landed !== file) {
+      // record above never named. Checked now that the file exists, and
+      // bound to the descriptor rather than the name — a decoy put back at
+      // the expected spelling would satisfy a pathname comparison while the
+      // handle still points where the link sent the create. Refused before
+      // a byte is written; the empty file is left rather than unlinked
+      // through a name that just proved it can move.
+      if (!(await nameIdentifiesHandle(file, handle))) {
         throw new Error(`${file} moved between its provenance record and its write; the ${options.tool} result's binary block was not saved. Retry the call.`);
       }
       await handle.writeFile(Buffer.from(data, 'base64'));

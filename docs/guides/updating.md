@@ -49,7 +49,10 @@ a **newer** build than itself, anything that *writes* under `~/.stratus` —
 the fix, because a downgraded build writing into a newer format is the one
 way to corrupt it. Read-only commands (`logs`, `agents`, `doctor`,
 `service status`/`stop`) warn and continue: reading is how you diagnose
-your way out.
+your way out. The same split applies when a migration itself fails — most
+often a `~/.stratus/state.json` that cannot be written: a command that
+writes state refuses rather than persist data the stamp was meant to
+protect, and a read-only one warns and continues.
 
 ## `stratus update` does the sequence in the order that cannot lose data
 

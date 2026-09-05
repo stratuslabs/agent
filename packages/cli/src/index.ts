@@ -8191,6 +8191,16 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     // to be able to report what is pending rather than having just done it.
     if (command.command !== 'update') {
       const stamp = await readStateStamp(resolvedEnv);
+      const writesState = command.command === 'serve'
+        || command.command === 'setup'
+        || command.command === 'chat'
+        || command.command === 'run'
+        || command.command === 'skill-add'
+        || command.command === 'dashboard'
+        || (command.command === 'credential' && command.action !== 'list')
+        || (command.command === 'schedules' && command.action === 'cancel')
+        || (command.command === 'memory' && command.action === 'reassert')
+        || (command.command === 'service' && (command.action === 'install' || command.action === 'start'));
       if (stamp.schemaVersion > STATE_SCHEMA_VERSION) {
         // Anything that writes under ~/.stratus refuses, not only the
         // daemon: a downgraded build's setup, chat, or run can discard
@@ -8200,16 +8210,6 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
         // diagnoses their way OUT of this state; so do `service stop`,
         // `status`, and `uninstall`, for the same reason. (`agent new`
         // only prints an identity — it writes nothing.)
-        const writesState = command.command === 'serve'
-          || command.command === 'setup'
-          || command.command === 'chat'
-          || command.command === 'run'
-          || command.command === 'skill-add'
-          || command.command === 'dashboard'
-          || (command.command === 'credential' && command.action !== 'list')
-          || (command.command === 'schedules' && command.action === 'cancel')
-          || (command.command === 'memory' && command.action === 'reassert')
-          || (command.command === 'service' && (command.action === 'install' || command.action === 'start'));
         if (writesState) {
           writeLine(streams.stderr, newerStateMessage(stamp.schemaVersion));
           writeLine(streams.stderr, `Refusing \`stratus ${command.command}\` — it writes state the newer format owns. Read-only commands (logs, agents, doctor, service status/stop) still work.`);
@@ -8224,10 +8224,21 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
             }
           }
         } catch (error) {
-          // A failed migration must not brick every command, but running
-          // on unmigrated state is worth a line: silence here is how the
-          // migrated and unmigrated populations diverge.
-          writeLine(streams.stderr, `Warning: state migration failed (${error instanceof Error ? error.message : String(error)}). Continuing on unmigrated state — \`stratus update\` retries it.`);
+          const reason = error instanceof Error ? error.message : String(error);
+          // A command that writes state must not run on a home whose stamp
+          // could not be written: the labels it would persist are what the
+          // stamp protects, and a stamp still reading the old schema lets a
+          // downgraded build in afterwards to read an `external` fact as
+          // ordinary memory — the exact hole the stamp closes. A read-only
+          // command warns and continues, because reading is how someone
+          // diagnoses their way out; silence here is how the migrated and
+          // unmigrated populations diverge.
+          if (writesState) {
+            writeLine(streams.stderr, `State migration failed (${reason}).`);
+            writeLine(streams.stderr, `Refusing \`stratus ${command.command}\` — it writes state the migration stamps. Fix ~/.stratus (is state.json writable?) or run \`stratus update\`; read-only commands (logs, agents, doctor, memory list, service status/stop) still work.`);
+            return 1;
+          }
+          writeLine(streams.stderr, `Warning: state migration failed (${reason}). Continuing on unmigrated state — \`stratus update\` retries it.`);
         }
       }
     }

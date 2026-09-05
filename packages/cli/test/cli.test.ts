@@ -8692,6 +8692,27 @@ test('stratus memory list shows each entry’s label, and reassert moves the unl
   assert.match(nothing.output.stdout, /nothing to re-assert/);
 });
 
+test('a state migration that cannot stamp the home refuses commands that write state, and only those', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-stamp-'));
+  // A stamp that cannot be written: `state.json` is a directory, so the
+  // rename that lands the stamp fails while every other file stays writable.
+  await mkdir(path.join(home, '.stratus', 'state.json'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), `${JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Likes jazz.', createdAt: '2026-01-01T00:00:00.000Z' })}\n`);
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+
+  const refused = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'reassert', 'ava', '--trust', 'user', '--all-unknown'], streams: refused.streams, env }), 1);
+  assert.match(refused.output.stderr, /State migration failed/);
+  assert.match(refused.output.stderr, /Refusing `stratus memory`/);
+  // Nothing was re-asserted: the record is exactly the one line it was.
+  assert.equal((await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8')).trim().split('\n').length, 1);
+
+  const listed = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: listed.streams, env }), 0);
+  assert.match(listed.output.stderr, /Warning: state migration failed/);
+  assert.match(listed.output.stdout, /ava:memory:1/);
+});
+
 test('stratus session rollover without a running daemon says so', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-rollover-'));
   const failed = createStreams();
