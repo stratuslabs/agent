@@ -15,7 +15,7 @@ import {
   type TrustLevel,
 } from '@stratusagent/core';
 
-import { createFsPlugin, LEDGER_FILENAME, openContained } from '../src/index.ts';
+import { createFsPlugin, LEDGER_FILENAME, ledgerGuard, openContained } from '../src/index.ts';
 
 const registryFor = async (config: JsonObject): Promise<ToolRegistry> => {
   const tools = new ToolRegistry();
@@ -482,6 +482,25 @@ test('an existing target swapped for a hard link of the ledger is refused before
   );
   // Refused with the record still in it: the truncation never ran.
   assert.match(await readFile(ledgerPath, 'utf8'), /x\.md/);
+});
+
+test('the ledger guard judges the inode a caller holds, not whatever the name points at now', async () => {
+  const { root, workspaceRoot } = await workspace();
+  const ledgerPath = path.join(workspaceRoot, 'ava', LEDGER_FILENAME);
+  await mkdir(path.dirname(ledgerPath), { recursive: true });
+  await writeFile(ledgerPath, `${JSON.stringify({ path: path.join(root, 'x.md'), trust: 'external', at: 'now' })}\n`);
+  // A hard link of the ledger inside a root, read by a caller who captured
+  // its inode — then swapped for an ordinary file before the check.
+  const alias = path.join(root, 'alias.jsonl');
+  await link(ledgerPath, alias);
+  const info = await stat(alias);
+  const held = { dev: info.dev, ino: info.ino };
+  await rm(alias);
+  await writeFile(alias, 'ordinary');
+  const guard = await ledgerGuard(workspaceRoot);
+  assert.equal(await guard(alias, held), true);
+  // Without the inode the guard can only ask the name, which now lies.
+  assert.equal(await guard(alias), false);
 });
 
 test('two writes racing to create one file both land: the loser looks again and writes what is there', async () => {

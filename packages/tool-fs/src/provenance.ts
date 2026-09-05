@@ -265,7 +265,24 @@ export const isLedgerPath = (workspaceRoots: readonly string[], absolutePath: st
  * link repointed under a running daemon is judged where it points now, and
  * one `readdir` plus two `realpath`s per agent is nothing next to the write.
  */
-export const ledgerGuard = async (workspaceRoot: string | undefined): Promise<(absolutePath: string) => Promise<boolean>> => {
+export interface FileIdentity {
+  dev: number;
+  ino: number;
+}
+
+/**
+ * Whether a path is an agent's ledger. `identity` is the inode the caller
+ * already holds for it — captured by the root resolver and verified by the
+ * open, so it is the file whose bytes were read or are about to be
+ * written. Given, it is what is judged; without it the path is stat'd,
+ * which names whatever is there *now*, and a peer can swap the name
+ * between a read and this check.
+ */
+export type LedgerGuard = (absolutePath: string, identity?: FileIdentity) => Promise<boolean>;
+
+const identityKey = (identity: FileIdentity): string => `${identity.dev}:${identity.ino}`;
+
+export const ledgerGuard = async (workspaceRoot: string | undefined): Promise<LedgerGuard> => {
   if (workspaceRoot === undefined) {
     return async () => false;
   }
@@ -281,8 +298,8 @@ export const ledgerGuard = async (workspaceRoot: string | undefined): Promise<(a
   const ledgers = new Set<string>();
   // And the files themselves, by identity: a hard link to a ledger from
   // inside a root has a path no spelling reaches and `realpath` leaves
-  // alone, and is the same bytes. `bigint` so an inode number survives
-  // the comparison intact.
+  // alone, and is the same bytes. Plain numbers, like the resolver's
+  // `identity`, so the two sides of a comparison round the same way.
   const identities = new Set<string>();
   let entries: Dirent[] = [];
   try {
@@ -307,22 +324,23 @@ export const ledgerGuard = async (workspaceRoot: string | undefined): Promise<(a
     }
     try {
       ledgers.add(await realpath(lexical));
-      const identity = await stat(lexical, { bigint: true });
-      identities.add(`${identity.dev}:${identity.ino}`);
+      identities.add(identityKey(await stat(lexical)));
     } catch {
       // No ledger there yet, or a dangling link: nothing to protect.
     }
   }
-  return async (absolutePath) => {
+  return async (absolutePath, identity) => {
     if (isLedgerPath(roots, absolutePath) || ledgers.has(absolutePath)) {
       return true;
     }
     if (identities.size === 0) {
       return false;
     }
+    if (identity !== undefined) {
+      return identities.has(identityKey(identity));
+    }
     try {
-      const identity = await stat(absolutePath, { bigint: true });
-      return identities.has(`${identity.dev}:${identity.ino}`);
+      return identities.has(identityKey(await stat(absolutePath)));
     } catch {
       // Nothing there: a write about to create a file is not the ledger.
       return false;
