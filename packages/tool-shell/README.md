@@ -29,6 +29,15 @@ npm install @stratusagent/tool-shell
 | --- | --- | --- |
 | `shell.run` | `gated`, narrowed per command | `interactive` shows the command and asks; `remote` asks in Slack; `headless` runs commands inside an approved scope and refuses everything else. |
 
+Its output is labelled `unknown` for provenance, because nobody can say:
+`git status` is the agent's own work and `curl https://…` is a stranger's
+page, and both come back through the same stdout. A session that has run a
+command writes `unknown` from then on — over-marking, which is the safe
+direction — rather than `agent`, which would launder every fetch made
+through a shell past the label `web.fetch` carries. Recognising fetching
+programs by name would be the list the contract rejects. See
+[Memory](../../docs/concepts/memory.md#where-a-fact-came-from).
+
 `gated` rather than `dangerous` on purpose. The danger of a shell is in its
 argument, not in its identity: marking the tool `dangerous` would mean no
 command could ever run unattended — `git status` included — and marking it

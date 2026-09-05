@@ -64,7 +64,7 @@ this*, set where tools run and carried from there into the entry:
 | --- | --- |
 | `user` | An authorized principal said it: you at a local terminal, or a Slack sender you named under `principals`. Hand-added lines you re-assert land here too. |
 | `agent` | The agent's own work, in a conversation where everything in context was yours or its own. What an ordinary conversation writes. |
-| `unknown` | No recorded origin: an entry written before labels existed, a hand-added line, or a fact written in a conversation with someone not configured as a principal. Never read as `agent` — absence of provenance is not evidence of trust. |
+| `unknown` | No recorded origin: an entry written before labels existed, a hand-added line, a fact written in a conversation with someone not configured as a principal, or one written after a `shell.run` — whose stdout could be `git status` or `curl`, and nothing can say which. Never read as `agent` — absence of provenance is not evidence of trust. |
 | `external` | Written after the session read content from outside — a web page, a search result, a fetched document, an MCP server's reply. It may repeat what a stranger wrote. |
 
 The label is **per session, not per fact**. Once a session has read a page,

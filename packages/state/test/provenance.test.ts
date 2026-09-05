@@ -301,3 +301,44 @@ test('a codex agent gets the same marking too', async () => {
   assert.equal(outcome.memory[0]?.trust, 'external');
   assert.equal(outcome.memory[0]?.origin?.taintedBy, 'page.read');
 });
+
+test('an index left by the previous schema is rebuilt whole on first use, not written into', async () => {
+  const dir = await tempDir();
+  const filePath = path.join(dir, 'memory.jsonl');
+  await writeFile(filePath, legacyLine('ava:memory:one', 'ava', 'the staging cluster is named tortoise', '2026-01-01T00:00:00.000Z'));
+  // The v1 index an upgraded install carries: five columns, a v1 stamp,
+  // and the record already applied.
+  const { DatabaseSync } = await import('node:sqlite');
+  const old = new DatabaseSync(`${filePath}.index`);
+  old.exec(`
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE forgotten (id TEXT PRIMARY KEY);
+    CREATE VIRTUAL TABLE memory_fts USING fts5(tokens, id UNINDEXED, agent_id UNINDEXED, content UNINDEXED, created_at UNINDEXED, tokenize = 'unicode61 remove_diacritics 0');
+  `);
+  old.prepare('INSERT INTO memory_fts (tokens, id, agent_id, content, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run('the staging cluster is named tortoise', 'ava:memory:one', 'ava', 'the staging cluster is named tortoise', '2026-01-01T00:00:00.000Z');
+  old.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run('schema_version', '1');
+  old.close();
+
+  const store = createFileMemoryStore(filePath);
+  const hits = (await store.search('ava', 'tortoise')).entries;
+  assert.equal(hits.length, 1);
+  assert.equal(memoryEntryTrust(hits[0]!), 'unknown');
+  // And the rebuilt index takes labelled writes, which is what the old
+  // shape could not.
+  await store.append('ava', 'the prod cluster is named hare', undefined, { trust: 'agent' });
+  assert.equal((await store.search('ava', 'hare')).entries[0]?.trust, 'agent');
+
+  // The same over an index with the old shape and no stamp at all — one
+  // created by a v1 store that never searched.
+  const unstamped = path.join(dir, 'unstamped.jsonl');
+  await writeFile(unstamped, legacyLine('bea:memory:one', 'bea', 'a fact', '2026-01-01T00:00:00.000Z'));
+  const bare = new DatabaseSync(`${unstamped}.index`);
+  bare.exec(`
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE forgotten (id TEXT PRIMARY KEY);
+    CREATE VIRTUAL TABLE memory_fts USING fts5(tokens, id UNINDEXED, agent_id UNINDEXED, content UNINDEXED, created_at UNINDEXED, tokenize = 'unicode61 remove_diacritics 0');
+  `);
+  bare.close();
+  assert.equal((await createFileMemoryStore(unstamped).search('bea', 'fact')).entries.length, 1);
+});

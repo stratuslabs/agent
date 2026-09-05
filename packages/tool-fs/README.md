@@ -75,7 +75,9 @@ next week gets a file with no provenance, arriving as its own notes. So
 `fs.write` from a session whose trust label is `external` or `unknown`
 records the path in a per-agent ledger,
 `<workspaceRoot>/<agent>/fs-provenance.json` (owner-only, replaced
-atomically), and a later `fs.read` or `fs.search` that puts that file's
+atomically) — before the bytes land, so a crash or a ledger that cannot be
+written leaves a labelled path with no file rather than a file with no
+label — and a later `fs.read` or `fs.search` that puts that file's
 contents in front of the model labels the call at the recorded level — so
 the reading session, and every fact it remembers afterwards, carries it. A
 truncating write from a clean session clears the record; an append keeps it.

@@ -431,6 +431,19 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       const opened = new DatabaseSync(indexPath);
       opened.exec('PRAGMA busy_timeout = 5000;');
       opened.exec(INDEX_SCHEMA);
+      // `CREATE ... IF NOT EXISTS` leaves an older install's table standing
+      // with its older columns, and the stale-stamp path below only empties
+      // rows — so the first insert after an upgrade would fail on a column
+      // the table does not have. Judged by the table's actual shape rather
+      // than by the stamp, because an index created and never caught up
+      // has the old shape and no stamp at all. Dropping everything makes
+      // the next catch-up a full rebuild from the record, which is the
+      // only cost a derived file can have.
+      const columns = opened.prepare('PRAGMA table_info(memory_fts)').all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'trust')) {
+        opened.exec('DROP TABLE memory_fts; DROP TABLE forgotten; DROP TABLE reasserted; DROP TABLE meta;');
+        opened.exec(INDEX_SCHEMA);
+      }
       return opened;
     };
     try {

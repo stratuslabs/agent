@@ -127,7 +127,12 @@ export const createFileLedger = (workspaceRoot: string): TaintedWriteLedger => {
     try {
       return parseLedger(await readFile(filePath, 'utf8'), filePath);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      // No ledger yet, or a workspace root that is not a directory: either
+      // way nothing has been recorded. A tainted write still fails when it
+      // tries to record, which is the failure direction that leaves no
+      // unlabelled file behind.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
         return {};
       }
       throw error;
@@ -143,7 +148,15 @@ export const createFileLedger = (workspaceRoot: string): TaintedWriteLedger => {
     recordWrite(agentId, absolutePath, trust, options) {
       const work = chain.then(async () => {
         const filePath = ledgerPath(agentId);
-        const paths = nextPaths(await read(agentId), absolutePath, trust, options.append);
+        const before = await read(agentId);
+        const paths = nextPaths(before, absolutePath, trust, options.append);
+        // A clean write that had nothing to clear changes nothing, and a
+        // ledger rewritten for no reason would make every ordinary write a
+        // file replacement — and a failure, on a host whose workspace root
+        // is unwritable, of a write that never needed the ledger at all.
+        if (paths === before) {
+          return;
+        }
         await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
         const temporary = `${filePath}.${process.pid}.tmp`;
         const body: LedgerFile = { version: LEDGER_VERSION, paths };

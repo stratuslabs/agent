@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -162,4 +162,26 @@ test('without a workspace root the ledger is process-local, and still closes the
   const other = marking();
   await run(await registryFor({ roots: [root] }), 'fs.read', { path: 'a.md' }, sessionAt('ava', 'user'), other.context);
   assert.deepEqual(other.marks, []);
+});
+
+test('a tainted write is recorded before its bytes land, so a ledger that cannot be written leaves no unlabelled file', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-provenance-'));
+  const root = path.join(home, 'notes');
+  await mkdir(root, { recursive: true });
+  // A workspace root that is a file: the ledger's directory cannot be
+  // created, so recording fails.
+  const workspaceRoot = path.join(home, 'not-a-directory');
+  await writeFile(workspaceRoot, 'in the way');
+  const tools = await registryFor({ roots: [root], workspaceRoot });
+
+  await assert.rejects(
+    () => run(tools, 'fs.write', { path: 'fetched.md', content: 'the page said so' }, sessionAt('ava', 'external')),
+  );
+  // The bytes never landed: a fresh session cannot find an unlabelled copy.
+  await assert.rejects(() => stat(path.join(root, 'fetched.md')), /ENOENT/);
+
+  // A clean session's write still lands — its bookkeeping is a clearing,
+  // which runs after the write and has nothing to clear here.
+  await run(tools, 'fs.write', { path: 'own.md', content: 'mine' }, sessionAt('ava', 'agent'));
+  assert.equal((await readFile(path.join(root, 'own.md'), 'utf8')), 'mine');
 });

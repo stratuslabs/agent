@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  isTaintedTrust,
   leastTrusted,
   sessionTrustOf,
   type JsonObject,
@@ -744,6 +745,21 @@ const createWriteTool = (config: JsonObject, ledger: TaintedWriteLedger, workspa
     const flags = input.append === true
       ? constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND
       : constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC;
+
+    // A write from a session at `external` or `unknown` records the path at
+    // that label BEFORE the bytes land: a daemon that dies between the two,
+    // or a ledger that cannot be written, must leave a labelled path with
+    // no file behind rather than a durable file with no label — the second
+    // is exactly the laundering this ledger exists to close, and the first
+    // over-marks, which is the safe direction. A clean session's write is
+    // the other way round: it clears a record only once the write has
+    // succeeded, since a failed write leaves the tainted bytes in place.
+    const trust = sessionTrustOf(session);
+    const append = input.append === true;
+    if (isTaintedTrust(trust)) {
+      await ledger.recordWrite(session.agent.id, resolved.path, trust, { append });
+    }
+
     // O_NOFOLLOW is applied by openContained: a symlink sitting at the
     // destination must fail rather than write through to its target, which
     // is the write half of the escape a read-only check would miss.
@@ -754,12 +770,9 @@ const createWriteTool = (config: JsonObject, ledger: TaintedWriteLedger, workspa
       await handle.close();
     }
 
-    // After the bytes landed, before the result: a write from a session at
-    // `external` or `unknown` records the path at that label, so the read
-    // that comes back for it next week arrives labelled instead of as the
-    // agent's own notes. A truncating write from a clean session clears
-    // the record — the file is now that session's.
-    await ledger.recordWrite(session.agent.id, resolved.path, sessionTrustOf(session), { append: input.append === true });
+    if (!isTaintedTrust(trust)) {
+      await ledger.recordWrite(session.agent.id, resolved.path, trust, { append });
+    }
 
     return {
       path: relativeTo(resolved.root, resolved.path),
