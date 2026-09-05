@@ -75,6 +75,15 @@ afterwards — carries the label
 override lowers that; it is a statement about who wrote the bytes, not
 about how risky the call was.
 
+What a server *advertises* — its tool names, descriptions, and input
+schemas — is not labelled. It reaches the model as part of the tool
+definitions on every turn, and the operator put it there: mounting a server
+in a trusted config vouches for its tool surface the way installing a plugin
+vouches for the descriptions that plugin ships, and labelling text inside the
+prompt is what the provenance step rules out. Only what a call *returns* is
+content the operator did not choose. A server whose descriptions you would
+not want in front of your agent is a server not to mount.
+
 The override is the operator's, explicit and per tool, through the host's
 `toolRisks` key — sibling to `enabled`, applied by the host rather than by
 this package's code:

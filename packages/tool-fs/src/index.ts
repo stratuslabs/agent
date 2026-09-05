@@ -204,10 +204,15 @@ const createReadTool = (config: JsonObject, ledger: TaintedWriteLedger, serializ
     // lock, so a write landing between them cannot pair old bytes with a
     // new record. Marked after the read succeeded, since a refused read
     // put nothing in front of the model.
-    const { result, recorded } = await serialized(resolved.path, async () => ({
-      result: await readContained(resolved, maxBytes),
-      recorded: await ledger.lookup(session.agent.id, resolved.path),
-    }));
+    const { result, recorded } = await serialized(resolved.path, async () => {
+      const snapshot = await ledger.snapshot(session.agent.id);
+      return {
+        result: await readContained(resolved, maxBytes),
+        // The result names the file's path, directories included — see
+        // `withAncestors`.
+        recorded: await recordedTrustAmong(ledger, session.agent.id, [resolved.path], resolved.root, snapshot),
+      };
+    });
     if (recorded !== undefined) {
       context?.markTrust?.(recorded);
     }
@@ -243,10 +248,25 @@ const entryKind = (entry: { isDirectory(): boolean; isFile(): boolean; isSymboli
  * writing session chose, and a tainted session may have chosen it from a
  * page, so even a result that shows no contents carries the label.
  */
+/**
+ * `absolutePath` and every directory between it and `root`, exclusive of the
+ * root: a result that shows `dir/file` shows the directory's name too, and
+ * the directory may be what a tainted session created.
+ */
+const withAncestors = (absolutePath: string, root: string): string[] => {
+  const paths = [absolutePath];
+  for (let parent = path.dirname(absolutePath); parent !== root && parent !== path.dirname(parent) && parent.startsWith(root); parent = path.dirname(parent)) {
+    paths.push(parent);
+  }
+  return paths;
+};
+
 const recordedTrustAmong = async (
   ledger: TaintedWriteLedger,
   agentId: string,
   absolutePaths: Iterable<string>,
+  /** The root the result's paths are shown relative to; ancestors below it are named by the result. */
+  root: string,
   /**
    * The ledger as it stood before the files were read. A listing or a
    * search cannot hold every path it touches under a lock, so it reads
@@ -263,9 +283,11 @@ const recordedTrustAmong = async (
   const after = await ledger.snapshot(agentId);
   const labels: TrustLevel[] = [];
   for (const absolutePath of absolutePaths) {
-    for (const label of [before[absolutePath], after[absolutePath]]) {
-      if (label !== undefined) {
-        labels.push(label);
+    for (const named of withAncestors(absolutePath, root)) {
+      for (const label of [before[named], after[named]]) {
+        if (label !== undefined) {
+          labels.push(label);
+        }
       }
     }
   }
@@ -315,7 +337,15 @@ const createListTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool =>
 
     // The names are what a tainted session chose to call its files, and the
     // listing puts them in front of the model.
-    const recorded = await recordedTrustAmong(ledger, session.agent.id, listed.map((entry) => path.join(resolved.path, entry.name)), ledgerBefore);
+    // The entries' names, and the listed directory's own — the result names
+    // it in `path`.
+    const recorded = await recordedTrustAmong(
+      ledger,
+      session.agent.id,
+      [resolved.path, ...listed.map((entry) => path.join(resolved.path, entry.name))],
+      resolved.root,
+      ledgerBefore,
+    );
     if (recorded !== undefined) {
       context?.markTrust?.(recorded);
     }
@@ -644,7 +674,7 @@ const createSearchTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool 
       }
     };
     const report = async (): Promise<JsonObject> => {
-      const recorded = await recordedTrustAmong(ledger, session.agent.id, namedFiles, ledgerBefore);
+      const recorded = await recordedTrustAmong(ledger, session.agent.id, namedFiles, resolved.root, ledgerBefore);
       if (recorded !== undefined) {
         context?.markTrust?.(recorded);
       }

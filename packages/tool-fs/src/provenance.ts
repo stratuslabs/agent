@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { isTrustLevel, leastTrusted, type TrustLevel } from '@stratusagent/core';
@@ -47,13 +47,20 @@ export interface TaintedWriteLedger {
 }
 
 /** The ledger's filename inside an agent's workspace. Exported so `fs.write` can refuse to write it. */
-export const LEDGER_FILENAME = 'fs-provenance.json';
+export const LEDGER_FILENAME = 'fs-provenance.jsonl';
 
-const LEDGER_VERSION = 1;
-
-interface LedgerFile {
-  version: number;
-  paths: Record<string, TrustLevel>;
+/**
+ * One line of the ledger: a path took a label, or lost it (`trust: null`).
+ * The file is append-only and replayed in order, so the last record for a
+ * path stands — the same concurrency model as the memory JSONL, and for the
+ * same reason: the daemon and a one-shot `stratus run` can both write an
+ * agent's files, and a read-modify-replace from two processes drops one
+ * side's record. Two appends drop nothing.
+ */
+interface LedgerRecord {
+  path: string;
+  trust: TrustLevel | null;
+  at: string;
 }
 
 const tainted = (trust: TrustLevel): boolean => trust === 'external' || trust === 'unknown';
@@ -100,33 +107,36 @@ export const createProcessLocalLedger = (): TaintedWriteLedger => {
 };
 
 const parseLedger = (raw: string, filePath: string): Record<string, TrustLevel> => {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error(`The filesystem provenance ledger is not valid JSON: ${filePath}. Delete it to start over; the cost is that files written by earlier tainted sessions read as the agent's own.`);
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return {};
-  }
-  const file = parsed as Partial<LedgerFile>;
-  if (typeof file.paths !== 'object' || file.paths === null || Array.isArray(file.paths)) {
-    return {};
-  }
   const paths: Record<string, TrustLevel> = {};
-  for (const [recordedPath, trust] of Object.entries(file.paths)) {
-    if (isTrustLevel(trust) && tainted(trust)) {
-      paths[recordedPath] = trust;
+  for (const line of raw.split('\n')) {
+    if (line.trim().length === 0) {
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      throw new Error(`The filesystem provenance ledger has an invalid line: ${filePath}. Delete it to start over; the cost is that files written by earlier tainted sessions read as the agent's own.`);
+    }
+    if (typeof parsed !== 'object' || parsed === null || typeof (parsed as LedgerRecord).path !== 'string') {
+      continue;
+    }
+    const record = parsed as Partial<LedgerRecord>;
+    if (isTrustLevel(record.trust) && tainted(record.trust)) {
+      paths[record.path!] = record.trust;
+    } else {
+      // A clearing, or a label nobody recognises: either way, no record.
+      delete paths[record.path!];
     }
   }
   return paths;
 };
 
 /**
- * The durable ledger, one JSON file per agent at
- * `<workspaceRoot>/<agentId>/fs-provenance.json`, owner-only, replaced
- * atomically: a reader sees the old ledger or the new one, never a
- * truncated file.
+ * The durable ledger, one append-only JSONL file per agent at
+ * `<workspaceRoot>/<agentId>/fs-provenance.jsonl`, owner-only. Each record
+ * is one `O_APPEND` write, so processes that share an agent — the daemon and
+ * a `stratus run` — interleave records rather than overwrite each other.
  */
 export const createFileLedger = (workspaceRoot: string): TaintedWriteLedger => {
   const ledgerPath = (agentId: string): string => path.join(workspaceRoot, agentId, LEDGER_FILENAME);
@@ -168,11 +178,21 @@ export const createFileLedger = (workspaceRoot: string): TaintedWriteLedger => {
           return;
         }
         await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-        const temporary = `${filePath}.${process.pid}.tmp`;
-        const body: LedgerFile = { version: LEDGER_VERSION, paths };
-        await writeFile(temporary, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
-        await chmod(temporary, 0o600);
-        await rename(temporary, filePath);
+        // Tightened before the append, like the memory file: `appendFile`'s
+        // mode applies only when it creates the file.
+        try {
+          await chmod(filePath, 0o600);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            throw error;
+          }
+        }
+        const record: LedgerRecord = {
+          path: absolutePath,
+          trust: paths[absolutePath] ?? null,
+          at: new Date().toISOString(),
+        };
+        await appendFile(filePath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
       });
       chain = work.then(() => undefined, () => undefined);
       return work;

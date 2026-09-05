@@ -73,13 +73,15 @@ The filesystem is a laundering channel by construction: an agent that reads
 a hostile page, writes what it said into its workspace, and reads it back
 next week gets a file with no provenance, arriving as its own notes. So
 `fs.write` from a session whose trust label is `external` or `unknown`
-records the path in a per-agent ledger,
-`<workspaceRoot>/<agent>/fs-provenance.json` (owner-only, replaced
-atomically) — before the bytes land, so a crash or a ledger that cannot be
-written leaves a labelled path with no file rather than a file with no
-label — and a later `fs.read`, `fs.search`, or `fs.list` that puts that file's
-contents — or its name, which the tainted session chose — in front of the
-model labels the call at the recorded level — so
+records the path — and any directory it creates — in a per-agent ledger,
+`<workspaceRoot>/<agent>/fs-provenance.jsonl` (owner-only, append-only, one
+record per line like the memory file, so the daemon and a `stratus run`
+writing at once lose nothing) — before the bytes land, so a crash or a ledger
+that cannot be written leaves a labelled path with no file rather than a file
+with no label — and a later `fs.read`, `fs.search`, or `fs.list` that puts
+that file's contents — or its name, or the name of a directory on its path,
+which the tainted session chose — in front of the model labels the call at
+the recorded level — so
 the reading session, and every fact it remembers afterwards, carries it. A
 truncating write from a clean session clears the record; an append keeps it.
 The ledger is the daemon's record, and `fs.write` refuses to edit it even
