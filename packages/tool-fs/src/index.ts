@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { mkdir, open, readdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { StringDecoder } from 'node:string_decoder';
 import os from 'node:os';
 import path from 'node:path';
@@ -154,7 +154,34 @@ const readContained = async (
   }
 };
 
-const createReadTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool => ({
+/**
+ * Run `work` after every earlier piece of work queued under `key` has
+ * settled — one chain per key, dropped when it drains. `fs.write` queues
+ * each write under its absolute path, so the ledger transition and the
+ * bytes it describes land as one step, and `fs.read` queues its read and
+ * its ledger lookup under the same key: two sessions of the same agent on
+ * one file interleaved could otherwise pair tainted bytes with a record a
+ * clean write had just cleared, in either tool.
+ */
+type KeyedSerializer = <T>(key: string, work: () => Promise<T>) => Promise<T>;
+
+const createKeyedSerializer = (): KeyedSerializer => {
+  const chains = new Map<string, Promise<void>>();
+  return <T>(key: string, work: () => Promise<T>): Promise<T> => {
+    const previous = chains.get(key) ?? Promise.resolve();
+    const run = previous.then(work, work);
+    const settled = run.then(() => undefined, () => undefined);
+    chains.set(key, settled);
+    void settled.then(() => {
+      if (chains.get(key) === settled) {
+        chains.delete(key);
+      }
+    });
+    return run;
+  };
+};
+
+const createReadTool = (config: JsonObject, ledger: TaintedWriteLedger, serialized: KeyedSerializer): Tool => ({
   name: 'fs.read',
   description: 'Read a UTF-8 text file inside one of this agent’s roots.',
   risk: 'safe',
@@ -171,12 +198,16 @@ const createReadTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool =>
     const requested = requireString(input, 'path');
     const resolved = await resolveWithinRoots(settings.roots, requested, { home: settings.home });
     const maxBytes = narrowed(input.maxBytes, settings.maxBytes);
-    const result = await readContained(resolved, maxBytes);
     // Per call, not per tool: most files an agent reads are its operator's,
     // and only the ones a tainted session wrote carry a label — see the
-    // ledger. Marked after the read succeeded, since a refused read put
-    // nothing in front of the model.
-    const recorded = await ledger.lookup(session.agent.id, resolved.path);
+    // ledger. Bytes and label are read as one step under the path's own
+    // lock, so a write landing between them cannot pair old bytes with a
+    // new record. Marked after the read succeeded, since a refused read
+    // put nothing in front of the model.
+    const { result, recorded } = await serialized(resolved.path, async () => ({
+      result: await readContained(resolved, maxBytes),
+      recorded: await ledger.lookup(session.agent.id, resolved.path),
+    }));
     if (recorded !== undefined) {
       context?.markTrust?.(recorded);
     }
@@ -216,13 +247,26 @@ const recordedTrustAmong = async (
   ledger: TaintedWriteLedger,
   agentId: string,
   absolutePaths: Iterable<string>,
+  /**
+   * The ledger as it stood before the files were read. A listing or a
+   * search cannot hold every path it touches under a lock, so it reads
+   * the ledger on both sides of the walk and honours whichever is lower:
+   * a record cleared by a clean write mid-walk still counts, and one added
+   * by a tainted write mid-walk — recorded before its bytes land — is in
+   * the second read. What this cannot see is a tainted write landing and a
+   * clean write clearing it both inside one walk, which is two writes
+   * racing one search; full provenance on a shared filesystem is the
+   * different project the README names.
+   */
+  before: Record<string, TrustLevel>,
 ): Promise<TrustLevel | undefined> => {
-  const recorded = await ledger.snapshot(agentId);
+  const after = await ledger.snapshot(agentId);
   const labels: TrustLevel[] = [];
   for (const absolutePath of absolutePaths) {
-    const label = recorded[absolutePath];
-    if (label !== undefined) {
-      labels.push(label);
+    for (const label of [before[absolutePath], after[absolutePath]]) {
+      if (label !== undefined) {
+        labels.push(label);
+      }
     }
   }
   return labels.length > 0 ? leastTrusted(...labels) : undefined;
@@ -246,6 +290,7 @@ const createListTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool =>
       throw new Error(`${requested} is not a directory; use fs.read.`);
     }
 
+    const ledgerBefore = await ledger.snapshot(session.agent.id);
     const entries = await readdir(resolved.path, { withFileTypes: true });
     const listed = entries.slice(0, settings.maxEntries);
     const detailed = await Promise.all(listed.map(async (entry) => {
@@ -270,7 +315,7 @@ const createListTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool =>
 
     // The names are what a tainted session chose to call its files, and the
     // listing puts them in front of the model.
-    const recorded = await recordedTrustAmong(ledger, session.agent.id, listed.map((entry) => path.join(resolved.path, entry.name)));
+    const recorded = await recordedTrustAmong(ledger, session.agent.id, listed.map((entry) => path.join(resolved.path, entry.name)), ledgerBefore);
     if (recorded !== undefined) {
       context?.markTrust?.(recorded);
     }
@@ -579,6 +624,7 @@ const createSearchTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool 
     // the call the way `fs.read` of it would. A file that produced no match
     // and was not skipped puts nothing in front of the model.
     const namedFiles = new Set<string>();
+    const ledgerBefore = await ledger.snapshot(session.agent.id);
     // What the walk looked past, said outright. A file over the size
     // limit used to vanish from the result: a search of a directory holding
     // one 6.7 MB log came back with no matches and no hint that the log
@@ -598,7 +644,7 @@ const createSearchTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool 
       }
     };
     const report = async (): Promise<JsonObject> => {
-      const recorded = await recordedTrustAmong(ledger, session.agent.id, namedFiles);
+      const recorded = await recordedTrustAmong(ledger, session.agent.id, namedFiles, ledgerBefore);
       if (recorded !== undefined) {
         context?.markTrust?.(recorded);
       }
@@ -722,33 +768,12 @@ const createSearchTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool 
   },
 });
 
-/**
- * Run `work` after every earlier piece of work queued under `key` has
- * settled — one chain per key, dropped when it drains. `fs.write` queues
- * each write under its absolute path, so the ledger transition and the
- * bytes it describes land as one step: two sessions of the same agent
- * writing one file interleaved could otherwise leave the tainted bytes in
- * place under a record the clean write had just cleared.
- */
-const createKeyedSerializer = () => {
-  const chains = new Map<string, Promise<void>>();
-  return <T>(key: string, work: () => Promise<T>): Promise<T> => {
-    const previous = chains.get(key) ?? Promise.resolve();
-    const run = previous.then(work, work);
-    const settled = run.then(() => undefined, () => undefined);
-    chains.set(key, settled);
-    void settled.then(() => {
-      if (chains.get(key) === settled) {
-        chains.delete(key);
-      }
-    });
-    return run;
-  };
-};
-
-const createWriteTool = (config: JsonObject, ledger: TaintedWriteLedger, workspaceRoot: string | undefined): Tool => {
-  const serialized = createKeyedSerializer();
-  return {
+const createWriteTool = (
+  config: JsonObject,
+  ledger: TaintedWriteLedger,
+  workspaceRoots: () => Promise<readonly string[]>,
+  serialized: KeyedSerializer,
+): Tool => ({
   name: 'fs.write',
   description: 'Write a UTF-8 text file inside one of this agent’s roots.',
   // Gated, not safe: it acts on the world outside Stratus and outlives the
@@ -776,7 +801,7 @@ const createWriteTool = (config: JsonObject, ledger: TaintedWriteLedger, workspa
     // tainted. An agent whose roots cover its own workspace could otherwise
     // rewrite that record through this very tool — the attack writing its
     // own permission slip — so the one file the tool never writes is it.
-    if (isLedgerPath(workspaceRoot, resolved.path)) {
+    if (isLedgerPath(await workspaceRoots(), resolved.path)) {
       throw new Error(`${resolved.path} is the filesystem provenance ledger, which fs.write does not edit.`);
     }
 
@@ -838,8 +863,7 @@ const createWriteTool = (config: JsonObject, ledger: TaintedWriteLedger, workspa
       appended: input.append === true,
     };
   },
-  };
-};
+});
 
 /**
  * The filesystem toolset.
@@ -860,13 +884,34 @@ export const createFsPlugin = (config: JsonObject = {}): Plugin => {
     ? config.workspaceRoot
     : undefined;
   const ledger = workspaceRoot !== undefined ? createFileLedger(workspaceRoot) : createProcessLocalLedger();
+  // The root resolver hands back canonical paths, so the ledger is
+  // protected under its canonical spelling as well as the configured one —
+  // a workspace an operator moved behind a symlink would otherwise compare
+  // as outside it. Resolved on first use, not at setup: the directory may
+  // not exist yet, and a missing one has only its configured spelling.
+  let spellings: Promise<readonly string[]> | undefined;
+  const workspaceRoots = (): Promise<readonly string[]> => {
+    spellings ??= workspaceRoot === undefined
+      ? Promise.resolve([])
+      : realpath(workspaceRoot).then(
+          (canonical) => (canonical === workspaceRoot ? [workspaceRoot] : [workspaceRoot, canonical]),
+          () => {
+            // Not there yet: remember nothing, so it is looked up again
+            // once the ledger's first write has created it.
+            spellings = undefined;
+            return [workspaceRoot];
+          },
+        );
+    return spellings;
+  };
+  const serialized = createKeyedSerializer();
   return {
     name: '@stratusagent/tool-fs',
     setup(context) {
-      context.tools.register(createReadTool(config, ledger));
+      context.tools.register(createReadTool(config, ledger, serialized));
       context.tools.register(createListTool(config, ledger));
       context.tools.register(createSearchTool(config, ledger));
-      context.tools.register(createWriteTool(config, ledger, workspaceRoot));
+      context.tools.register(createWriteTool(config, ledger, workspaceRoots, serialized));
     },
   };
 };

@@ -186,15 +186,18 @@ export const createFileLedger = (workspaceRoot: string): TaintedWriteLedger => {
  * one path `fs.write` refuses. Exactly that depth, not any descendant with
  * the name: a project an agent keeps under its workspace may legitimately
  * have a file called `fs-provenance.json` of its own.
+ *
+ * `workspaceRoots` are every spelling of the workspace root worth checking
+ * — the configured path and its canonical form — because the path being
+ * judged arrives canonical from the root resolver, and a workspace an
+ * operator moved behind a symlink would otherwise compare as outside.
  */
-export const isLedgerPath = (workspaceRoot: string | undefined, absolutePath: string): boolean => {
-  if (workspaceRoot === undefined) {
-    return false;
-  }
-  const relative = path.relative(workspaceRoot, absolutePath);
-  if (relative.length === 0 || relative.startsWith('..') || path.isAbsolute(relative)) {
-    return false;
-  }
-  const segments = relative.split(path.sep);
-  return segments.length === 2 && segments[1] === LEDGER_FILENAME;
-};
+export const isLedgerPath = (workspaceRoots: readonly string[], absolutePath: string): boolean =>
+  workspaceRoots.some((workspaceRoot) => {
+    const relative = path.relative(workspaceRoot, absolutePath);
+    if (relative.length === 0 || relative.startsWith('..') || path.isAbsolute(relative)) {
+      return false;
+    }
+    const segments = relative.split(path.sep);
+    return segments.length === 2 && segments[1] === LEDGER_FILENAME;
+  });

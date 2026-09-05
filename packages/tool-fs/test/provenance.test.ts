@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -212,7 +212,17 @@ test('two sessions writing one path at once leave the ledger agreeing with the b
           run(tools, 'fs.write', { path: target, content: 'mine' }, sessionAt('ava', 'agent', 'clean-session')),
           run(tools, 'fs.write', { path: target, content: 'fetched' }, sessionAt('ava', 'external', 'tainted-session')),
         ];
+    // A read races them too: whatever bytes it sees, its label must be
+    // theirs — a read that captured fetched bytes and then looked up a
+    // record a clean write had just cleared would be the laundering.
+    const racing = marking();
+    const raced = run(tools, 'fs.read', { path: target }, sessionAt('ava', 'user'), racing.context)
+      .then((result) => String((result as JsonObject).content), () => undefined);
     await Promise.all(writes);
+    const seen = await raced;
+    if (seen !== undefined) {
+      assert.deepEqual(racing.marks, seen === 'fetched' ? ['external'] : [], `round ${round}: a racing read saw "${seen}" with marks ${JSON.stringify(racing.marks)}`);
+    }
     const bytes = await readFile(path.join(root, target), 'utf8');
     const read = marking();
     await run(tools, 'fs.read', { path: target }, sessionAt('ava', 'user'), read.context);
@@ -221,6 +231,27 @@ test('two sessions writing one path at once leave the ledger agreeing with the b
     // under no label.
     assert.deepEqual(read.marks, bytes === 'fetched' ? ['external'] : [], `round ${round}: bytes "${bytes}" with marks ${JSON.stringify(read.marks)}`);
   }
+});
+
+test('the ledger is protected under the workspace root’s canonical path as well as the configured one', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-provenance-'));
+  const realWorkspaces = path.join(home, 'volume', 'workspaces');
+  await mkdir(realWorkspaces, { recursive: true });
+  // The operator moved the workspaces onto another volume and left a link.
+  const linked = path.join(home, 'workspaces');
+  await symlink(realWorkspaces, linked);
+  // Configured through the link; the agent's root covers the real directory,
+  // which is the spelling every resolved path arrives in.
+  const tools = await registryFor({ roots: [realWorkspaces], workspaceRoot: linked });
+
+  await run(tools, 'fs.write', { path: 'ava/notes.md', content: 'fetched' }, sessionAt('ava', 'external'));
+  await assert.rejects(
+    () => run(tools, 'fs.write', { path: `ava/${LEDGER_FILENAME}`, content: '{"version":1,"paths":{}}' }, sessionAt('ava', 'agent')),
+    /provenance ledger/,
+  );
+  const read = marking();
+  await run(tools, 'fs.read', { path: 'ava/notes.md' }, sessionAt('ava', 'user'), read.context);
+  assert.deepEqual(read.marks, ['external']);
 });
 
 test('a file’s name is the tainted session’s text too: a listing or a skipped-file report that names it is marked', async () => {
