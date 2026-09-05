@@ -1968,6 +1968,33 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   /**
+   * Claims one untagged message for this agent, and says whether the claim
+   * was won.
+   *
+   * Only the cold path needs it. There, two agents both ask the sessions
+   * whether the thread is theirs, and each asks with several independent
+   * reads — so a save landing between one agent's reads and the other's can
+   * let both come back "yes", and both would answer the same message. The
+   * claim is the tie-break the lookups cannot be: the first to record this
+   * message wins it, and the second stands down.
+   *
+   * Losing means *another agent already holds this exact message*, never
+   * merely that the thread has moved on. A holder set by a LATER message —
+   * a mention that arrived while this reply was being resolved — leaves the
+   * claim won and the record untouched: that reply was legitimately this
+   * agent's when it was sent, and dropping it because the conversation has
+   * since moved would lose a message somebody is waiting on.
+   */
+  const claimFollowUp = (key: string, agentId: string, ts: string): boolean => {
+    const held = threadAddressee.get(key);
+    if (held && held.ts === ts && held.agentId !== agentId) {
+      return false;
+    }
+    rememberAddressee(key, agentId, ts);
+    return true;
+  };
+
+  /**
    * Which of this process's agents a message names, or undefined if it
    * names none of them.
    *
@@ -2016,13 +2043,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * Whose turn it is, is the second. In a thread with several agents an
    * unaddressed reply belongs to **whoever spoke last**, the way it does
    * between people: answer the voice that just answered you, and tag
-   * someone by name to change that. `updatedAt` orders the agents' sessions
-   * for exactly that question — a turn is the agent speaking.
+   * someone by name to change that. `lastSpokeAt` orders the agents'
+   * sessions for exactly that question — and it is when each agent last
+   * *replied*, not when its session last changed, because a turn saves on
+   * tool results and approval checkpoints without having said anything. An
+   * agent part-way through a long tool run is not the last speaker, and a
+   * recovery resuming after a restart lands in exactly this window.
    *
    * Silence is the tie-break, and only a contested thread can reach it: a
-   * host whose routing carries no `updatedAt` cannot order two agents, and
-   * guessing would put two answers under one message. The agent alone in
-   * its thread — which is nearly every thread — never asks the question.
+   * host whose routing carries no `lastSpokeAt` cannot order two agents,
+   * and guessing would put two answers under one message. The agent alone
+   * in its thread — which is nearly every thread — never asks the
+   * question.
    */
   const answersFollowUpFromSessions = async (
     connection: AgentConnection,
@@ -2058,7 +2090,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       if (!theirs) {
         continue;
       }
-      if (mine.updatedAt === undefined || theirs.updatedAt === undefined || theirs.updatedAt >= mine.updatedAt) {
+      if (mine.lastSpokeAt === undefined || theirs.lastSpokeAt === undefined || theirs.lastSpokeAt >= mine.lastSpokeAt) {
         return false;
       }
     }
@@ -2243,10 +2275,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         if (!(await answersFollowUpFromSessions(connection, { team, conversation: event.channel, thread: event.thread_ts ?? '' }))) {
           return undefined;
         }
-        // Answered from the store rather than from memory: hold it, so the
-        // rest of the thread is ordered by receipt like any other.
-        if (threadKey) {
-          rememberAddressee(threadKey, connection.config.agentId, event.ts);
+        // Answered from the store rather than from memory, so hold it —
+        // and stand down if another agent resolved the same message first,
+        // which two independent lookups can otherwise both conclude.
+        if (threadKey && !claimFollowUp(threadKey, connection.config.agentId, event.ts)) {
+          return undefined;
         }
       }
       const cleaned = await humanizeMentions(connection, event.text ?? '');

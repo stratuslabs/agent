@@ -660,10 +660,10 @@ const channelMessage = (input: { text: string; ts: string; thread?: string; user
 
 /** `sessionRouting` over a map of session id → when that agent last spoke there. */
 const routingOver = (spoke: Map<string, string>) => async (sessionId: string) => {
-  const updatedAt = spoke.get(sessionId);
-  return updatedAt === undefined
+  const lastSpokeAt = spoke.get(sessionId);
+  return lastSpokeAt === undefined
     ? undefined
-    : { agentId: sessionId.split(':')[1] ?? '', metadata: {}, updatedAt };
+    : { agentId: sessionId.split(':')[1] ?? '', metadata: {}, lastSpokeAt };
 };
 
 test('an untagged reply in a thread reaches the agent already in it, and nothing else does', async () => {
@@ -1084,6 +1084,56 @@ test('a mention resolves within its own workspace, where a bot id is unique', as
     ['ava', 'Dylan: hello'],
     ['ava', 'Dylan: and the other thing'],
   ]);
+});
+
+test('two agents resolving one untagged reply from the sessions do not both answer it', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+
+  // Both lookups are held open, so both agents reach the cold path before
+  // either has recorded a holder — the window the claim exists for.
+  let releaseLookups = (): void => {};
+  const lookups = new Promise<void>((resolve) => {
+    releaseLookups = () => resolve();
+  });
+  // Each agent's own lookup sees itself as the most recent speaker: what
+  // independent reads landing either side of a concurrent save produce, and
+  // a conclusion neither agent can tell is contested.
+  const reads = new Map<string, number>();
+  gateway.sessionRouting = async (sessionId: string) => {
+    const seen = (reads.get(sessionId) ?? 0) + 1;
+    reads.set(sessionId, seen);
+    await lookups;
+    return {
+      agentId: sessionId.split(':')[1] ?? '',
+      metadata: {},
+      lastSpokeAt: seen === 1 ? '2026-01-01T00:00:04.000Z' : '2026-01-01T00:00:02.000Z',
+    };
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  const followUp = channelMessage({ text: 'well?', ts: '990.1', thread: '990.0' });
+  await socketBea.deliver('message', followUp);
+  await socketAva.deliver('message', followUp);
+  releaseLookups();
+  await adapter.stop();
+
+  // One message, one answer: the second to resolve stands down rather than
+  // posting a duplicate under it.
+  assert.equal(gateway.dispatches.length, 1);
 });
 
 test('a contested thread the gateway cannot order stays silent rather than answering twice', async () => {

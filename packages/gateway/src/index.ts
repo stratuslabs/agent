@@ -402,11 +402,11 @@ export interface SessionRouting {
   /** The metadata the dispatching surface attached to the session. */
   metadata: JsonObject;
   /**
-   * When the session last changed, ISO-8601 — when its agent last took a
-   * turn in that conversation. Optional in the adapter-facing shape, so a
-   * host that cannot answer simply does not; this gateway always can.
+   * When this agent last spoke, ISO-8601 — its newest reply's timestamp,
+   * absent when it has never produced one. Not the session's modification
+   * time, which a mid-turn save moves; see `@stratusagent/channels`.
    */
-  updatedAt?: string;
+  lastSpokeAt?: string;
   /** The latest turn's text (`latestTurnReply`), when it produced any — see `@stratusagent/channels`. */
   reply?: string;
 }
@@ -2802,10 +2802,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // the session's own. The latest turn's text only — a turn that
       // produced none has no reply, and an earlier turn's answer is not it.
       const reply = latestTurnReply(session);
+      // When this agent last spoke, which is a different question from when
+      // its session last changed: a turn saves on tool results, approval
+      // checkpoints, and a recovery resuming, all without having said
+      // anything. A channel ordering two agents by "who spoke last" has to
+      // read the speaking.
+      const lastSpokeAt = session.messages.findLast(
+        (message) => message.role === 'assistant' && message.content.trim().length > 0,
+      )?.createdAt;
       return {
         agentId: session.agent.id,
         metadata: session.metadata ?? {},
-        updatedAt: session.updatedAt,
+        ...(lastSpokeAt !== undefined ? { lastSpokeAt } : {}),
         ...(reply !== undefined ? { reply } : {}),
       };
     },

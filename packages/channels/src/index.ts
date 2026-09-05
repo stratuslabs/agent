@@ -77,16 +77,22 @@ export interface SessionRouting {
   /** The metadata the dispatching channel attached to the session. */
   metadata: JsonObject;
   /**
-   * When the session last changed, ISO-8601 — which is to say when its
-   * agent last took a turn in that conversation. Optional because a host
-   * may not track it; a caller that needs to order two sessions checks for
-   * it rather than assuming, and says what it gives up without it.
+   * When this agent last SPOKE in the conversation, ISO-8601 — the
+   * timestamp of its newest reply, absent when it has never produced one.
    *
-   * Still routing, not transcript: it says *when* an agent last spoke in a
-   * conversation, never what was said. The Slack adapter orders the agents
-   * sharing a thread by it, to decide whose reply an untagged follow-up is.
+   * Deliberately not the session's modification time, which moves on every
+   * save a turn makes: a tool result, an approval checkpoint, a recovery
+   * resuming after a restart. An agent part-way through a long turn would
+   * look like the most recent speaker under that reading while another
+   * agent had actually answered, and the Slack adapter orders the agents
+   * sharing a thread by this to decide whose an untagged follow-up is.
+   *
+   * Still routing, not transcript: it says *when* an agent spoke, never
+   * what was said. Optional because a host may not track it; a caller that
+   * needs to order two sessions checks for it rather than assuming, and
+   * says what it gives up without it.
    */
-  updatedAt?: string;
+  lastSpokeAt?: string;
   /**
    * The text the session's latest turn produced (`latestTurnReply` in
    * `@stratusagent/core`, the same rule an adapter finalizes its own turns
