@@ -123,11 +123,15 @@ const parseLedger = (raw: string, filePath: string): Record<string, TrustLevel> 
     }
     const record = parsed as Partial<LedgerRecord>;
     // Order-independent on purpose: labels only ever go down, so the lowest
-    // record for a path stands whichever process appended first. A label
-    // nobody recognises is no record.
-    if (isTrustLevel(record.trust) && tainted(record.trust)) {
+    // record for a path stands whichever process appended first. A path is
+    // in the ledger because a tainted write put it there, so a record whose
+    // label is missing or one nobody recognises — a hand edit, a label from
+    // a newer build — still marks the path: at `unknown`, never dropped,
+    // which would read the file back as the agent's own.
+    const label: TrustLevel = isTrustLevel(record.trust) ? record.trust : 'unknown';
+    if (tainted(label)) {
       const recorded = paths[record.path!];
-      paths[record.path!] = recorded !== undefined ? leastTrusted(recorded, record.trust) : record.trust;
+      paths[record.path!] = recorded !== undefined ? leastTrusted(recorded, label) : label;
     }
   }
   return paths;

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import { constants } from 'node:fs';
 import assert from 'node:assert/strict';
-import { link, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, open, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -17,7 +17,7 @@ import {
 
 import { ledgerContentTrust, ledgerTrustOfContent } from '@stratusagent/plugins';
 
-import { createFileLedger, createFsPlugin, LEDGER_FILENAME, ledgerGuard, openContained } from '../src/index.ts';
+import { createFileLedger, createFsPlugin, LEDGER_FILENAME, ledgerGuard, nameIdentifiesHandle, openContained } from '../src/index.ts';
 
 const registryFor = async (config: JsonObject): Promise<ToolRegistry> => {
   const tools = new ToolRegistry();
@@ -555,6 +555,51 @@ test('a directory swapped for a link between the containment check and the open 
   // proved it can move.
   for (const name of await readdir(rootB)) {
     assert.equal((await stat(path.join(rootB, name))).size, 0);
+  }
+});
+
+test('a ledger record with a label nobody can read still marks its path, at unknown', async () => {
+  const { root, workspaceRoot } = await workspace();
+  const ledgerPath = path.join(workspaceRoot, 'ava', LEDGER_FILENAME);
+  await mkdir(path.dirname(ledgerPath), { recursive: true });
+  // A hand edit, and a label from a build this one has never heard of.
+  await writeFile(ledgerPath, [
+    JSON.stringify({ path: path.join(root, 'edited.md'), at: 'now' }),
+    JSON.stringify({ path: path.join(root, 'future.md'), trust: 'quarantined', at: 'now' }),
+    JSON.stringify({ path: path.join(root, 'fetched.md'), trust: 'external', at: 'now' }),
+    '',
+  ].join('\n'));
+  const ledger = createFileLedger(workspaceRoot);
+  assert.equal(await ledger.lookup('ava', path.join(root, 'edited.md')), 'unknown');
+  assert.equal(await ledger.lookup('ava', path.join(root, 'future.md')), 'unknown');
+  assert.equal(await ledger.lookup('ava', path.join(root, 'fetched.md')), 'external');
+});
+
+test('the post-open check is bound to the descriptor: a decoy at the expected name is not the file that was opened', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-provenance-'));
+  const rootA = path.join(home, 'a');
+  const rootB = path.join(home, 'b');
+  await mkdir(path.join(rootA, 'new'), { recursive: true });
+  await mkdir(rootB, { recursive: true });
+  // The create went through a link and landed in b; the link was then
+  // put back as a real directory holding a decoy at the expected name, so
+  // the name resolves to itself again.
+  const redirected = await open(path.join(rootB, 'file.md'), 'w');
+  await writeFile(path.join(rootA, 'new', 'file.md'), 'decoy');
+  try {
+    assert.equal(await nameIdentifiesHandle(path.join(rootA, 'new', 'file.md'), redirected), false);
+  } finally {
+    await redirected.close();
+  }
+  // The honest case: the name, spelled canonically, is the open file.
+  const honest = await open(path.join(rootA, 'new', 'file.md'), 'r');
+  try {
+    assert.equal(await nameIdentifiesHandle(path.join(rootA, 'new', 'file.md'), honest), true);
+    // And a name reached through a link is not, even to the right inode.
+    await symlink(path.join(rootA, 'new'), path.join(rootA, 'link'));
+    assert.equal(await nameIdentifiesHandle(path.join(rootA, 'link', 'file.md'), honest), false);
+  } finally {
+    await honest.close();
   }
 });
 

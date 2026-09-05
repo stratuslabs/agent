@@ -37,6 +37,7 @@ import {
 export {
   canonicalRoots,
   expandHome,
+  nameIdentifiesHandle,
   openContained,
   PathOutsideRootError,
   resolveWithinRoots,

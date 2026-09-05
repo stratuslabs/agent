@@ -407,6 +407,13 @@ test('the memory block renders each label in its own region, most trusted first'
   );
 });
 
+test('a memory label nobody recognises renders under the unknown heading rather than vanishing', () => {
+  const rendered = renderMemorySection([
+    { id: 'm1', agentId: 'ava', content: 'A fact with a misspelled label.', createdAt: '2026-01-02T00:00:00.000Z', trust: 'externl' as TrustLevel },
+  ]);
+  assert.equal(rendered, `${memoryRegionHeading('unknown')}\n- A fact with a misspelled label.`);
+});
+
 test('a fact cannot forge a region heading: every entry renders on one line, control characters spelled out', () => {
   // A page's text that ends its sentence, opens a new line, and copies the
   // operator's heading — followed by the instruction it wants filed there.

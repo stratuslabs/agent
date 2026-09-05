@@ -219,8 +219,7 @@ export const openContained = async (
       // very directory that just moved, and a second move in between would
       // make that unlink take some other file — the ledger, if the name
       // was chosen for it. An empty orphan is the cheaper outcome.
-      const landed = await realpath(resolved.path);
-      if (landed !== resolved.path) {
+      if (!(await nameIdentifiesHandle(resolved.path, handle))) {
         throw new PathOutsideRootError(
           `Refusing ${resolved.path}: a directory on its path changed between the containment check and the open.`,
         );
@@ -231,6 +230,30 @@ export const openContained = async (
     throw error;
   }
   return handle;
+};
+
+/**
+ * Whether `absolutePath`, spelled exactly so and through no link, names the
+ * file `handle` holds open — right now. Both halves matter: the canonical
+ * spelling must be the name itself, or a directory on the way is a link and
+ * the file lives somewhere else; and the inode at that name must be the
+ * handle's, or the name has since been given to a decoy while the handle
+ * still refers to wherever the link sent the create. A pathname comparison
+ * alone passes the second case.
+ */
+export const nameIdentifiesHandle = async (
+  absolutePath: string,
+  handle: Awaited<ReturnType<typeof open>>,
+): Promise<boolean> => {
+  try {
+    if ((await realpath(absolutePath)) !== absolutePath) {
+      return false;
+    }
+    const [atName, held] = await Promise.all([lstat(absolutePath), handle.stat()]);
+    return atName.dev === held.dev && atName.ino === held.ino;
+  } catch {
+    return false;
+  }
 };
 
 /** Whether a directory entry is a real directory (never through a symlink). */

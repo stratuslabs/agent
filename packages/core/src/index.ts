@@ -550,7 +550,11 @@ export interface MemoryProvenance {
  * `unknown` when none was recorded. Never `agent` by default — see
  * `MemoryEntry.trust`.
  */
-export const memoryEntryTrust = (entry: Pick<MemoryEntry, 'trust'>): TrustLevel => entry.trust ?? 'unknown';
+export const memoryEntryTrust = (entry: Pick<MemoryEntry, 'trust'>): TrustLevel =>
+  // A label nobody recognises — a JavaScript store's misspelling — is no
+  // label: `unknown`, so the entry renders under the unknown-origin heading
+  // rather than falling out of every region and vanishing from the prompt.
+  isTrustLevel(entry.trust) ? entry.trust : 'unknown';
 
 /**
  * A memory entry as the operator's audit read returns it: tombstoned entries
