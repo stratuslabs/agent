@@ -30,6 +30,12 @@ const THREAD_ADDRESSEE_CAPACITY = 2000;
  */
 const COLD_VERDICT_CAPACITY = 256;
 /**
+ * How many changes of hands one thread remembers. A message older than all
+ * of them asks the sessions instead, so this only has to cover the lag
+ * between two sockets, which is messages rather than conversations.
+ */
+const THREAD_HANDOVER_DEPTH = 8;
+/**
  * How many files an unrendered turn may queue for its outcome. Nothing
  * drains that queue until the outcome arrives, so a session whose outcome
  * this process never sees would otherwise grow it for the life of the
@@ -1257,13 +1263,21 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * and a follow-up typed on the heels of the mention that opened the
    * thread would find no session at all and be dropped for good.
    *
-   * Keyed by thread rather than by (agent, thread): the value is which
-   * single agent has it, so there is nothing to reconcile. It carries the
-   * `ts` of the message that set it, because the writes are not ordered —
-   * each agent is its own socket, one can be several messages behind
-   * another, and a redelivery can bring an old mention back long after a
-   * newer handover. An older write is therefore ignored rather than
-   * applied: the holder only ever moves forward through the conversation.
+   * Keyed by thread rather than by (agent, thread): one agent has it at a
+   * time, so there is nothing to reconcile. The value is that thread's
+   * HANDOVERS in order, not just its latest one, because the question an
+   * untagged message asks is not "who holds this thread now" but "who held
+   * it when I was sent". Those differ whenever a socket runs behind
+   * another: Bea's connection can reject a pre-handover reply, then take
+   * the mention that moves the thread to her, and Ava's connection reach
+   * that same earlier reply afterwards — which the latest holder alone
+   * would reject for a second time, dropping a message that was plainly
+   * Ava's when it was written.
+   *
+   * Keeping the handovers also makes out-of-order writes ordinary rather
+   * than dangerous. A connection several messages behind, or a redelivered
+   * envelope carrying an old mention, inserts into the past where it
+   * belongs instead of overwriting the present.
    *
    * Bounded and lossy on purpose — evicting an entry costs one lookup,
    * since the sessions still hold the answer for every thread this map has
@@ -1279,7 +1293,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * private store here is the wrong place to answer it. The next mention
    * corrects it.
    */
-  const threadAddressee = new Map<string, { agentId: string; ts: string }>();
+  const threadAddressee = new Map<string, Array<{ agentId: string; ts: string }>>();
   /**
    * One cold verdict per message — see `followUpWinner`. Bounded, because
    * an entry outlives its own resolution on purpose.
@@ -1958,34 +1972,62 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     `${parts.team}:${parts.conversation}:${parts.thread}`;
 
   /**
-   * Records that `agentId` has the thread as of the message at `ts`,
-   * evicting the least recently addressed once the map is full.
+   * Records that `agentId` holds the thread from the message at `ts`
+   * onwards, wherever in the thread's history that message falls.
    *
-   * A write older than or equal to the one held is dropped, which is what
-   * keeps the holder moving forward only. Both cases happen: a connection
-   * running behind another reaches a mention the others handled several
-   * messages ago, and a redelivered envelope brings one back later still.
-   * Equal means the same message — two connections, or two deliveries of
-   * one — which agree on the answer anyway.
+   * Only actual handovers are kept: a write naming the agent that already
+   * held the thread at that point adds nothing, so the list stays as short
+   * as the conversation's changes of hands rather than growing per message.
+   * The oldest handovers are dropped past `THREAD_HANDOVER_DEPTH`, and the
+   * least recently written thread past `THREAD_ADDRESSEE_CAPACITY`; both
+   * losses cost a lookup, never an answer, since the sessions still hold
+   * the durable version.
    *
    * Slack timestamps compare as strings: `seconds.microseconds`, both
    * parts fixed width, so lexicographic order is chronological order.
    */
   const rememberAddressee = (key: string, agentId: string, ts: string): void => {
-    const held = threadAddressee.get(key);
-    if (held && held.ts >= ts) {
+    const handovers = threadAddressee.get(key) ?? [];
+    let at = handovers.length;
+    while (at > 0 && (handovers[at - 1] as { ts: string }).ts > ts) {
+      at -= 1;
+    }
+    const before = handovers[at - 1];
+    if (before && before.agentId === agentId) {
+      // Already this agent's from earlier in the thread; the same message
+      // reaching a second connection lands here too.
       return;
     }
-    // Re-inserted rather than overwritten: a Map iterates in insertion
+    handovers.splice(at, 0, { agentId, ts });
+    // Re-inserted rather than mutated in place: a Map iterates in insertion
     // order, which is what makes the first key the one to evict.
     threadAddressee.delete(key);
-    threadAddressee.set(key, { agentId, ts });
+    threadAddressee.set(key, handovers.slice(-THREAD_HANDOVER_DEPTH));
     if (threadAddressee.size > THREAD_ADDRESSEE_CAPACITY) {
       const oldest = threadAddressee.keys().next();
       if (!oldest.done) {
         threadAddressee.delete(oldest.value);
       }
     }
+  };
+
+  /**
+   * Who held the thread when the message at `ts` was sent — the last
+   * handover at or before it. Undefined when this process has no handover
+   * that old, which sends the question to the sessions.
+   */
+  const holderAt = (key: string, ts: string): string | undefined => {
+    const handovers = threadAddressee.get(key);
+    if (!handovers) {
+      return undefined;
+    }
+    for (let index = handovers.length - 1; index >= 0; index -= 1) {
+      const handover = handovers[index];
+      if (handover && handover.ts <= ts) {
+        return handover.agentId;
+      }
+    }
+    return undefined;
   };
   /**
    * Which of this process's agents a message names, or undefined if it
@@ -2281,9 +2323,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // An untagged reply. The record is what this process has actually seen,
     // in the order it saw it — right even inside the window before a
     // handover reaches the store.
-    const holder = threadKey === undefined ? undefined : threadAddressee.get(threadKey);
+    const holder = threadKey === undefined ? undefined : holderAt(threadKey, event.ts);
     if (holder !== undefined && threadKey !== undefined) {
-      if (holder.agentId !== connection.config.agentId) {
+      if (holder !== connection.config.agentId) {
         // Standing down for the holder, whether or not the holder can still
         // hear it. An app removed from this channel stops receiving the
         // thread, and its untagged replies then reach nobody until somebody

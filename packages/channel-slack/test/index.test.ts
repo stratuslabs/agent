@@ -1238,6 +1238,52 @@ test('a message naming an offline agent and a live one leaves the thread with th
   assert.equal(gateway.dispatches[1]?.userMessage, 'Dylan: and the other half?');
 });
 
+test('a reply that reaches a lagging socket after a handover is still answered by whoever it was for', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = async () => undefined;
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // Ava is asked, so the thread is hers.
+  const opening = channelMessage({ text: '<@B-AVA> take this one', ts: '994.1', thread: '994.0' });
+  await socketAva.deliver('message', opening);
+  await socketBea.deliver('message', opening);
+
+  // An untagged reply, plainly Ava's — but Bea's socket sees it first and
+  // rightly ignores it.
+  const forAva = channelMessage({ text: 'and the rest?', ts: '994.2', thread: '994.0' });
+  await socketBea.deliver('message', forAva);
+
+  // Bea's socket then runs ahead and takes a mention that moves the thread.
+  const handover = channelMessage({ text: '<@B-BEA> over to you', ts: '994.3', thread: '994.0' });
+  await socketBea.deliver('message', handover);
+
+  // Only now does Ava's socket catch up on the reply that was hers. The
+  // thread has moved on since, but that message had not.
+  await socketAva.deliver('message', forAva);
+  await socketAva.deliver('message', handover);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: take this one'],
+    ['bea', 'Dylan: over to you'],
+    ['ava', 'Dylan: and the rest?'],
+  ]);
+});
+
 test('a contested thread the gateway cannot order stays silent rather than answering twice', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
