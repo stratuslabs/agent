@@ -1741,6 +1741,7 @@ export const describeSchedule = (record: ScheduleRecord): JsonObject => ({
   agentId: record.agentId,
   cadence: describeCadence(record.cadence),
   prompt: record.prompt,
+  trust: record.trust ?? 'unknown',
   ...(record.destination ? { destination: canonicalDestination(record.destination) } : {}),
   ...(record.nextFireAt ? { nextFireAt: record.nextFireAt } : {}),
   ...(record.lastFiredAt ? { lastFiredAt: record.lastFiredAt } : {}),
@@ -1847,8 +1848,17 @@ export const createScheduleTools = (scheduler: SchedulerHandle): Tool[] => {
       // A read of state this agent itself created.
       risk: 'safe',
       parameters: { type: 'object', properties: {} },
-      async execute(_input: JsonObject, session: Session) {
+      async execute(_input: JsonObject, session: Session, context) {
         const records = await scheduler.list(session.agent.id);
+        // Each prompt was written by the session that set the schedule, at
+        // that session's label — and a schedule from before labels existed
+        // has none. Listing puts those prompts in front of the model, so the
+        // call is marked at the lowest of them, as `memory.recall` marks a
+        // hit: a fresh session must not restate a tainted prompt as its own.
+        const lowest = leastTrusted(...records.map((record) => record.trust ?? 'unknown'));
+        if (records.length > 0 && isTaintedTrust(lowest)) {
+          context?.markTrust?.(lowest);
+        }
         return { schedules: records.map(describeSchedule) };
       },
     },

@@ -195,3 +195,30 @@ test('a tainted write is recorded before its bytes land, so a ledger that cannot
   await run(tools, 'fs.write', { path: 'own.md', content: 'mine' }, sessionAt('ava', 'agent'));
   assert.equal((await readFile(path.join(root, 'own.md'), 'utf8')), 'mine');
 });
+
+test('two sessions writing one path at once leave the ledger agreeing with the bytes, whichever landed last', async () => {
+  const { root, workspaceRoot } = await workspace();
+  const tools = await registryFor({ roots: [root], workspaceRoot });
+  for (let round = 0; round < 10; round += 1) {
+    const target = `race-${round}.md`;
+    // Fired together, in both orders across rounds: a tainted truncating
+    // write and a clean one on the same path.
+    const writes = round % 2 === 0
+      ? [
+          run(tools, 'fs.write', { path: target, content: 'fetched' }, sessionAt('ava', 'external', 'tainted-session')),
+          run(tools, 'fs.write', { path: target, content: 'mine' }, sessionAt('ava', 'agent', 'clean-session')),
+        ]
+      : [
+          run(tools, 'fs.write', { path: target, content: 'mine' }, sessionAt('ava', 'agent', 'clean-session')),
+          run(tools, 'fs.write', { path: target, content: 'fetched' }, sessionAt('ava', 'external', 'tainted-session')),
+        ];
+    await Promise.all(writes);
+    const bytes = await readFile(path.join(root, target), 'utf8');
+    const read = marking();
+    await run(tools, 'fs.read', { path: target }, sessionAt('ava', 'user'), read.context);
+    // Whichever write won, the label says so: tainted bytes are labelled,
+    // clean bytes are not. The failure this guards against is tainted bytes
+    // under no label.
+    assert.deepEqual(read.marks, bytes === 'fetched' ? ['external'] : [], `round ${round}: bytes "${bytes}" with marks ${JSON.stringify(read.marks)}`);
+  }
+});

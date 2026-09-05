@@ -695,7 +695,33 @@ const createSearchTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool 
   },
 });
 
-const createWriteTool = (config: JsonObject, ledger: TaintedWriteLedger, workspaceRoot: string | undefined): Tool => ({
+/**
+ * Run `work` after every earlier piece of work queued under `key` has
+ * settled — one chain per key, dropped when it drains. `fs.write` queues
+ * each write under its absolute path, so the ledger transition and the
+ * bytes it describes land as one step: two sessions of the same agent
+ * writing one file interleaved could otherwise leave the tainted bytes in
+ * place under a record the clean write had just cleared.
+ */
+const createKeyedSerializer = () => {
+  const chains = new Map<string, Promise<void>>();
+  return <T>(key: string, work: () => Promise<T>): Promise<T> => {
+    const previous = chains.get(key) ?? Promise.resolve();
+    const run = previous.then(work, work);
+    const settled = run.then(() => undefined, () => undefined);
+    chains.set(key, settled);
+    void settled.then(() => {
+      if (chains.get(key) === settled) {
+        chains.delete(key);
+      }
+    });
+    return run;
+  };
+};
+
+const createWriteTool = (config: JsonObject, ledger: TaintedWriteLedger, workspaceRoot: string | undefined): Tool => {
+  const serialized = createKeyedSerializer();
+  return {
   name: 'fs.write',
   description: 'Write a UTF-8 text file inside one of this agent’s roots.',
   // Gated, not safe: it acts on the world outside Stratus and outlives the
@@ -746,33 +772,37 @@ const createWriteTool = (config: JsonObject, ledger: TaintedWriteLedger, workspa
       ? constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND
       : constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC;
 
-    // A write from a session at `external` or `unknown` records the path at
-    // that label BEFORE the bytes land: a daemon that dies between the two,
-    // or a ledger that cannot be written, must leave a labelled path with
-    // no file behind rather than a durable file with no label — the second
-    // is exactly the laundering this ledger exists to close, and the first
-    // over-marks, which is the safe direction. A clean session's write is
-    // the other way round: it clears a record only once the write has
-    // succeeded, since a failed write leaves the tainted bytes in place.
     const trust = sessionTrustOf(session);
     const append = input.append === true;
-    if (isTaintedTrust(trust)) {
-      await ledger.recordWrite(session.agent.id, resolved.path, trust, { append });
-    }
+    // One step per path, ledger and bytes together — see the serializer.
+    await serialized(resolved.path, async () => {
+      // A write from a session at `external` or `unknown` records the path
+      // at that label BEFORE the bytes land: a daemon that dies between the
+      // two, or a ledger that cannot be written, must leave a labelled path
+      // with no file behind rather than a durable file with no label — the
+      // second is exactly the laundering this ledger exists to close, and
+      // the first over-marks, which is the safe direction. A clean
+      // session's write is the other way round: it clears a record only
+      // once the write has succeeded, since a failed write leaves the
+      // tainted bytes in place.
+      if (isTaintedTrust(trust)) {
+        await ledger.recordWrite(session.agent.id, resolved.path, trust, { append });
+      }
 
-    // O_NOFOLLOW is applied by openContained: a symlink sitting at the
-    // destination must fail rather than write through to its target, which
-    // is the write half of the escape a read-only check would miss.
-    const handle = await openContained(resolved, flags | (constants.O_NONBLOCK ?? 0), 0o644);
-    try {
-      await handle.writeFile(content, 'utf8');
-    } finally {
-      await handle.close();
-    }
+      // O_NOFOLLOW is applied by openContained: a symlink sitting at the
+      // destination must fail rather than write through to its target,
+      // which is the write half of the escape a read-only check would miss.
+      const handle = await openContained(resolved, flags | (constants.O_NONBLOCK ?? 0), 0o644);
+      try {
+        await handle.writeFile(content, 'utf8');
+      } finally {
+        await handle.close();
+      }
 
-    if (!isTaintedTrust(trust)) {
-      await ledger.recordWrite(session.agent.id, resolved.path, trust, { append });
-    }
+      if (!isTaintedTrust(trust)) {
+        await ledger.recordWrite(session.agent.id, resolved.path, trust, { append });
+      }
+    });
 
     return {
       path: relativeTo(resolved.root, resolved.path),
@@ -781,7 +811,8 @@ const createWriteTool = (config: JsonObject, ledger: TaintedWriteLedger, workspa
       appended: input.append === true,
     };
   },
-});
+  };
+};
 
 /**
  * The filesystem toolset.
