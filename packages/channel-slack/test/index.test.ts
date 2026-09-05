@@ -1006,6 +1006,86 @@ test('a mention of an agent whose app never came up is still not the other agent
   assert.deepEqual(gateway.dispatches, []);
 });
 
+test('a lagging socket reaching an older mention does not drag the thread back to it', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = async () => undefined;
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // Ava's socket runs the conversation forward: she is asked, then Bea is.
+  await socketAva.deliver('message', channelMessage({ text: '<@B-AVA> look at this', ts: '970.1', thread: '970.0' }));
+  await socketAva.deliver('message', channelMessage({ text: '<@B-BEA> your turn', ts: '970.2', thread: '970.0' }));
+
+  // Bea's socket is behind and only now reaches the FIRST of those. It must
+  // not undo a handover that has already happened.
+  await socketBea.deliver('message', channelMessage({ text: '<@B-AVA> look at this', ts: '970.1', thread: '970.0' }));
+
+  // The untagged reply lands on Ava's socket while Bea's is still catching
+  // up — the window where a dragged-back record would have Ava answer a
+  // question that was handed to Bea.
+  const followUp = channelMessage({ text: 'and?', ts: '970.3', thread: '970.0' });
+  await socketAva.deliver('message', followUp);
+
+  // Bea's socket catches up and takes what was always hers.
+  await socketBea.deliver('message', channelMessage({ text: '<@B-BEA> your turn', ts: '970.2', thread: '970.0' }));
+  await socketBea.deliver('message', followUp);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: look at this'],
+    ['bea', 'Dylan: your turn'],
+    ['bea', 'Dylan: and?'],
+  ]);
+});
+
+test('a mention resolves within its own workspace, where a bot id is unique', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  // The same bot user id in two different workspaces — ids are unique
+  // within one, never across.
+  const webAva = createFakeWeb('B-SAME', 'T1');
+  const webBea = createFakeWeb('B-SAME', 'T2');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = async () => undefined;
+
+  const adapter = createSlackChannelAdapter({
+    // Bea first, so an unscoped search would answer with her.
+    agents: [
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // A mention in T1 is Ava's; Bea's identical id in T2 is a different bot.
+  await socketAva.deliver('message', channelMessage({ text: '<@B-SAME> hello', ts: '980.1', thread: '980.0' }));
+  await socketAva.deliver('message', channelMessage({ text: 'and the other thing', ts: '980.2', thread: '980.0' }));
+  await adapter.stop();
+
+  // Ava holds her own thread, so her follow-up reaches her rather than
+  // being refused on behalf of an agent in another workspace.
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: hello'],
+    ['ava', 'Dylan: and the other thing'],
+  ]);
+});
+
 test('a contested thread the gateway cannot order stays silent rather than answering twice', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();

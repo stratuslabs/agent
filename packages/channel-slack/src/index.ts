@@ -1252,12 +1252,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * thread would find no session at all and be dropped for good.
    *
    * Keyed by thread rather than by (agent, thread): the value is which
-   * single agent has it, so there is nothing to reconcile. Bounded and
-   * lossy on purpose — evicting an entry costs one lookup, since the
-   * sessions still hold the answer for every thread this map has
+   * single agent has it, so there is nothing to reconcile. It carries the
+   * `ts` of the message that set it, because the writes are not ordered —
+   * each agent is its own socket, one can be several messages behind
+   * another, and a redelivery can bring an old mention back long after a
+   * newer handover. An older write is therefore ignored rather than
+   * applied: the holder only ever moves forward through the conversation.
+   *
+   * Bounded and lossy on purpose — evicting an entry costs one lookup,
+   * since the sessions still hold the answer for every thread this map has
    * forgotten, and for every thread a restart forgot.
    */
-  const threadAddressee = new Map<string, string>();
+  const threadAddressee = new Map<string, { agentId: string; ts: string }>();
   /**
    * `agentId` → bot user id, for every app whose token this adapter has
    * authenticated — whether or not its socket then came up, and kept for as
@@ -1274,7 +1280,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * Insertion order is `options.agents` order, which is what makes
    * `agentNamedIn` deterministic across every connection.
    */
-  const botIdentities = new Map<string, string>();
+  const botIdentities = new Map<string, { botUserId: string; teamId: string }>();
   // Rendered approval requests, keyed by the gateway's request id — the
   // same id the buttons carry back.
   const approvalPosts = new Map<string, PendingApprovalPost>();
@@ -1931,15 +1937,28 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     `${parts.team}:${parts.conversation}:${parts.thread}`;
 
   /**
-   * Records that `agentId` has the thread, evicting the least recently
-   * addressed once the map is full. Called before the work a message
-   * causes, so the order here is the order Slack delivered.
+   * Records that `agentId` has the thread as of the message at `ts`,
+   * evicting the least recently addressed once the map is full.
+   *
+   * A write older than or equal to the one held is dropped, which is what
+   * keeps the holder moving forward only. Both cases happen: a connection
+   * running behind another reaches a mention the others handled several
+   * messages ago, and a redelivered envelope brings one back later still.
+   * Equal means the same message — two connections, or two deliveries of
+   * one — which agree on the answer anyway.
+   *
+   * Slack timestamps compare as strings: `seconds.microseconds`, both
+   * parts fixed width, so lexicographic order is chronological order.
    */
-  const rememberAddressee = (key: string, agentId: string): void => {
+  const rememberAddressee = (key: string, agentId: string, ts: string): void => {
+    const held = threadAddressee.get(key);
+    if (held && held.ts >= ts) {
+      return;
+    }
     // Re-inserted rather than overwritten: a Map iterates in insertion
     // order, which is what makes the first key the one to evict.
     threadAddressee.delete(key);
-    threadAddressee.set(key, agentId);
+    threadAddressee.set(key, { agentId, ts });
     if (threadAddressee.size > THREAD_ADDRESSEE_CAPACITY) {
       const oldest = threadAddressee.keys().next();
       if (!oldest.done) {
@@ -1960,14 +1979,21 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * without the sockets having to agree on anything, since each agent is
    * its own Socket Mode connection and one can run minutes behind another.
    *
+   * Scoped to the message's own workspace, because a bot user id is only
+   * unique within one — the same reason the display-name cache is keyed by
+   * team. Two agents in two workspaces can hold the same id, and resolving
+   * a mention to the wrong one would hand the thread to an agent that
+   * cannot see it, leaving the agent that was actually named refusing every
+   * reply after.
+   *
    * Only agents this adapter has authenticated can be recognized at all.
    * One served by another daemon is invisible here, and both would answer;
    * so is one whose `auth.test` itself failed, since its bot id was never
    * learned.
    */
-  const agentNamedIn = (text: string): string | undefined => {
-    for (const [agentId, botUserId] of botIdentities) {
-      if (mentions(text, botUserId)) {
+  const agentNamedIn = (text: string, team: string): string | undefined => {
+    for (const [agentId, identity] of botIdentities) {
+      if (identity.teamId === team && mentions(text, identity.botUserId)) {
         return agentId;
       }
     }
@@ -2093,9 +2119,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // handover, Ava could take the next untagged reply while Bea's socket
     // was still behind, and answer a question that had just been handed
     // away. The message Ava must record is exactly the one Ava ignores.
-    const named = agentNamedIn(text);
+    const named = agentNamedIn(text, team);
     if (threadKey && named) {
-      rememberAddressee(threadKey, named);
+      rememberAddressee(threadKey, named, event.ts);
     }
 
     if (!addressed) {
@@ -2160,10 +2186,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // handover reaches the store.
     const holder = threadKey === undefined ? undefined : threadAddressee.get(threadKey);
     if (holder !== undefined && threadKey !== undefined) {
-      if (holder !== connection.config.agentId) {
+      if (holder.agentId !== connection.config.agentId) {
         return undefined;
       }
-      rememberAddressee(threadKey, connection.config.agentId);
+      rememberAddressee(threadKey, connection.config.agentId, event.ts);
       return admission;
     }
     // Nothing seen for this thread since startup: only the sessions can
@@ -2220,7 +2246,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // Answered from the store rather than from memory: hold it, so the
         // rest of the thread is ordered by receipt like any other.
         if (threadKey) {
-          rememberAddressee(threadKey, connection.config.agentId);
+          rememberAddressee(threadKey, connection.config.agentId, event.ts);
         }
       }
       const cleaned = await humanizeMentions(connection, event.text ?? '');
@@ -2430,15 +2456,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           const web = createWeb(config.botToken);
           const auth = await web.auth.test();
           const botUserId = auth.user_id ?? '';
+          const teamId = auth.team_id ?? '';
           // Recorded before the socket is even built: an app that never
           // comes up must still be recognizable when somebody names it.
-          botIdentities.set(config.agentId, botUserId);
+          botIdentities.set(config.agentId, { botUserId, teamId });
           authenticated.push({
             config,
             web,
             socket: createSocket(config.appToken),
             botUserId,
-            teamId: auth.team_id ?? '',
+            teamId,
           });
         } catch (error) {
           // One broken app must not take the rest of the fleet down.
