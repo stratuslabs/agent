@@ -48,7 +48,11 @@ person is a follow-up like any other, and channel messages reach the model
 prefixed with the speaker's display name so it knows who said what. A reply
 carrying a file, or one the author also broadcast to the channel, is a
 follow-up too; what Slack marks as bookkeeping — an edit, a deletion, a
-join — is not, and nothing answers it. What is
+join — is not, and nothing answers it. **Attachment contents are not
+readable** — the app does not ask for `files:read` — so a message with files
+reaches the agent naming them and saying they cannot be opened, which is
+what lets it answer honestly instead of as though it had read the log. A
+file dropped in with nothing said is not a question, and gets no reply. What is
 *not* shared is history: sessions are per agent, so an agent tagged into a
 thread halfway through starts from what it is told then, not from what the
 other agent was told. Bring it up to speed in the message that tags it.

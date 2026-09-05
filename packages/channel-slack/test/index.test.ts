@@ -15,7 +15,12 @@ import {
 } from '../src/index.ts';
 
 interface FakeSocket extends SlackSocketLike {
-  deliver(eventName: string, args: Omit<SlackSocketEventArgs, 'ack'>): Promise<void>;
+  /**
+   * `ack` overrides the acknowledgement this delivery hands the adapter —
+   * the real client resolves one from a WebSocket send callback, so two can
+   * come back in either order.
+   */
+  deliver(eventName: string, args: Omit<SlackSocketEventArgs, 'ack'>, ack?: () => Promise<void>): Promise<void>;
   started: boolean;
   disconnected: boolean;
   acks: number;
@@ -38,10 +43,10 @@ const createFakeSocket = (): FakeSocket => {
     async disconnect() {
       socket.disconnected = true;
     },
-    async deliver(eventName, args) {
+    async deliver(eventName, args, ack) {
       const handlers = listeners.get(eventName) ?? [];
       for (const handler of handlers) {
-        handler({ ...args, ack: async () => { socket.acks += 1; } });
+        handler({ ...args, ack: ack ?? (async () => { socket.acks += 1; }) });
       }
       // Handlers run async work after acking; let it settle.
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -826,6 +831,95 @@ test('a follow-up typed while the opening mention is still starting is answered,
   assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
     'Dylan: take a look',
     'Dylan: and the other one too',
+  ]);
+});
+
+test('a follow-up whose ack comes back first still lands behind the mention that opened the thread', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'in order'));
+  // Nothing durable to fall back on: receipt order is the only thing that
+  // can decide either message.
+  gateway.sessionRouting = async () => undefined;
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  // The mention's ack is still in flight when the follow-up's has already
+  // come back — what the real client's send callbacks allow.
+  let releaseAck = (): void => {};
+  const heldAck = new Promise<void>((resolve) => {
+    releaseAck = () => resolve();
+  });
+  await socket.deliver(
+    'app_mention',
+    {
+      body: { team_id: 'T1', event_id: 'evt-slow-ack' },
+      event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-AVA> start here', ts: '940.0', channel: 'C1' },
+    },
+    async () => heldAck,
+  );
+  await socket.deliver('message', channelMessage({ text: 'and this', ts: '940.1', thread: '940.0' }));
+  releaseAck();
+  await adapter.stop();
+
+  // Both ran, and the conversation is in the order it was said — not the
+  // order two acknowledgements happened to come back in.
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
+    'Dylan: start here',
+    'Dylan: and this',
+  ]);
+});
+
+test('a message with attachments tells the turn what arrived and that it cannot be read', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-files' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: "<@B-AVA> here's the log",
+      ts: '950.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [{ name: 'server.log' }, { title: 'crash dump' }],
+    },
+  });
+  // A file dropped in with nothing said is not a question; nothing answers it.
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-files-bare' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA>',
+      ts: '950.1',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [{ name: 'screenshot.png' }],
+    },
+  });
+  await adapter.stop();
+
+  // The turn is told the names and told it cannot open them, so it can say
+  // the true thing instead of answering as though it had read the log.
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.userMessage), [
+    "Dylan: here's the log\n[Attached: server.log, crash dump. Attachment contents cannot be read here — say so rather than guessing at them.]",
   ]);
 });
 
