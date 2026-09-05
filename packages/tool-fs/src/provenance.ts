@@ -1,4 +1,5 @@
-import { appendFile, chmod, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readdir, readFile, realpath } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
 import path from 'node:path';
 
 import { isTrustLevel, leastTrusted, type TrustLevel } from '@stratusagent/core';
@@ -247,3 +248,50 @@ export const isLedgerPath = (workspaceRoots: readonly string[], absolutePath: st
     const segments = relative.split(path.sep);
     return segments.length === 2 && segments[1] === LEDGER_FILENAME;
   });
+
+/**
+ * The predicate `fs.write` refuses on and `fs.read` labels by, built once
+ * per tool call from what the workspace holds right now. A path is an
+ * agent's ledger two ways: lexically —
+ * `<workspaceRoot>/<agent>/fs-provenance.jsonl` under the configured or the
+ * canonical root — or through a link at the agent directory. An operator
+ * who relocated one agent's workspace with `<workspaceRoot>/ava -> /data/ava`
+ * has the ledger at `/data/ava/fs-provenance.jsonl`, which is how the root
+ * resolver spells every path under it and which no spelling of the root
+ * reaches, so every entry of the workspace is canonicalized and its ledger
+ * path listed. Built per call and never cached: a link repointed under a
+ * running daemon is judged where it points now, and one `readdir` plus a
+ * `realpath` per agent is nothing next to the write.
+ */
+export const ledgerGuard = async (workspaceRoot: string | undefined): Promise<(absolutePath: string) => boolean> => {
+  if (workspaceRoot === undefined) {
+    return () => false;
+  }
+  const roots = [workspaceRoot];
+  try {
+    const canonical = await realpath(workspaceRoot);
+    if (canonical !== workspaceRoot) {
+      roots.push(canonical);
+    }
+  } catch {
+    // Not there yet: only the configured spelling, and no agents to list.
+  }
+  const ledgers = new Set<string>();
+  let entries: Dirent[] = [];
+  try {
+    entries = await readdir(workspaceRoot, { withFileTypes: true });
+  } catch {
+    entries = [];
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) {
+      continue;
+    }
+    try {
+      ledgers.add(path.join(await realpath(path.join(workspaceRoot, entry.name)), LEDGER_FILENAME));
+    } catch {
+      // A dangling link holds no ledger.
+    }
+  }
+  return (absolutePath) => isLedgerPath(roots, absolutePath) || ledgers.has(absolutePath);
+};

@@ -363,6 +363,32 @@ test('the ledger is protected under the workspace root’s canonical path as wel
   assert.deepEqual(moved.marks, ['external']);
 });
 
+test('an agent directory relocated behind a link is still the ledger’s home, refused and labelled', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-provenance-'));
+  const workspaceRoot = path.join(home, 'workspaces');
+  const dataAva = path.join(home, 'data', 'ava');
+  await mkdir(workspaceRoot, { recursive: true });
+  await mkdir(dataAva, { recursive: true });
+  // The operator moved one agent's workspace and left a link at the agent
+  // directory, below the root — so every spelling of the root misses it,
+  // and the ledger the plugin writes through the link lands under /data.
+  await symlink(dataAva, path.join(workspaceRoot, 'ava'));
+  const tools = await registryFor({ roots: [dataAva], workspaceRoot });
+
+  await run(tools, 'fs.write', { path: 'notes.md', content: 'fetched' }, sessionAt('ava', 'external'));
+  assert.ok((await stat(path.join(dataAva, LEDGER_FILENAME))).isFile());
+  await assert.rejects(
+    () => run(tools, 'fs.write', { path: LEDGER_FILENAME, content: '' }, sessionAt('ava', 'agent')),
+    /provenance ledger/,
+  );
+  const read = marking();
+  await run(tools, 'fs.read', { path: LEDGER_FILENAME }, sessionAt('ava', 'user'), read.context);
+  assert.deepEqual(read.marks, ['external']);
+  const notes = marking();
+  await run(tools, 'fs.read', { path: 'notes.md' }, sessionAt('ava', 'user'), notes.context);
+  assert.deepEqual(notes.marks, ['external']);
+});
+
 test('a file’s name is the tainted session’s text too: a listing or a skipped-file report that names it is marked', async () => {
   const { root, workspaceRoot } = await workspace();
   const tools = await registryFor({ roots: [root], workspaceRoot });

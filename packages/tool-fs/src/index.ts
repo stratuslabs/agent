@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { mkdir, open, readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, stat } from 'node:fs/promises';
 import { StringDecoder } from 'node:string_decoder';
 import os from 'node:os';
 import path from 'node:path';
@@ -26,8 +26,8 @@ import {
 import {
   createFileLedger,
   createProcessLocalLedger,
-  isLedgerPath,
   ledgerContentTrust,
+  ledgerGuard,
   type TaintedWriteLedger,
 } from './provenance.ts';
 
@@ -185,7 +185,7 @@ const createKeyedSerializer = (): KeyedSerializer => {
 const createReadTool = (
   config: JsonObject,
   ledger: TaintedWriteLedger,
-  workspaceRoots: () => Promise<readonly string[]>,
+  isLedger: () => Promise<(absolutePath: string) => boolean>,
   serialized: KeyedSerializer,
 ): Tool => ({
   name: 'fs.read',
@@ -218,7 +218,7 @@ const createReadTool = (
         // `withAncestors`.
         recorded: lowest(
           await recordedTrustAmong(ledger, session.agent.id, [resolved.path], resolved.root, snapshot),
-          await ledgerContentTrustAmong(workspaceRoots, [resolved.path]),
+          await ledgerContentTrustAmong(isLedger, [resolved.path]),
         ),
       };
     });
@@ -309,13 +309,13 @@ const recordedTrustAmong = async (
  * was anyone's choice.
  */
 const ledgerContentTrustAmong = async (
-  workspaceRoots: () => Promise<readonly string[]>,
+  isLedger: () => Promise<(absolutePath: string) => boolean>,
   absolutePaths: Iterable<string>,
 ): Promise<TrustLevel | undefined> => {
-  const roots = await workspaceRoots();
+  const guard = await isLedger();
   const labels: TrustLevel[] = [];
   for (const absolutePath of absolutePaths) {
-    if (isLedgerPath(roots, absolutePath)) {
+    if (guard(absolutePath)) {
       const label = await ledgerContentTrust(absolutePath);
       if (label !== undefined) {
         labels.push(label);
@@ -661,7 +661,7 @@ const walkFiles = async function* (directory: string, depth = 0): AsyncGenerator
 const createSearchTool = (
   config: JsonObject,
   ledger: TaintedWriteLedger,
-  workspaceRoots: () => Promise<readonly string[]>,
+  isLedger: () => Promise<(absolutePath: string) => boolean>,
 ): Tool => ({
   name: 'fs.search',
   description: 'Search file contents for literal text under one of this agent’s roots.',
@@ -716,7 +716,7 @@ const createSearchTool = (
     const report = async (): Promise<JsonObject> => {
       const recorded = lowest(
         await recordedTrustAmong(ledger, session.agent.id, namedFiles, resolved.root, ledgerBefore),
-        await ledgerContentTrustAmong(workspaceRoots, namedFiles),
+        await ledgerContentTrustAmong(isLedger, namedFiles),
       );
       if (recorded !== undefined) {
         context?.markTrust?.(recorded);
@@ -844,7 +844,7 @@ const createSearchTool = (
 const createWriteTool = (
   config: JsonObject,
   ledger: TaintedWriteLedger,
-  workspaceRoots: () => Promise<readonly string[]>,
+  isLedger: () => Promise<(absolutePath: string) => boolean>,
   serialized: KeyedSerializer,
 ): Tool => ({
   name: 'fs.write',
@@ -874,7 +874,7 @@ const createWriteTool = (
     // tainted. An agent whose roots cover its own workspace could otherwise
     // rewrite that record through this very tool — the attack writing its
     // own permission slip — so the one file the tool never writes is it.
-    if (isLedgerPath(await workspaceRoots(), resolved.path)) {
+    if ((await isLedger())(resolved.path)) {
       throw new Error(`${resolved.path} is the filesystem provenance ledger, which fs.write does not edit.`);
     }
 
@@ -972,33 +972,18 @@ export const createFsPlugin = (config: JsonObject = {}): Plugin => {
     ? config.workspaceRoot
     : undefined;
   const ledger = workspaceRoot !== undefined ? createFileLedger(workspaceRoot) : createProcessLocalLedger();
-  // The root resolver hands back canonical paths, so the ledger is
-  // protected under its canonical spelling as well as the configured one —
-  // a workspace an operator moved behind a symlink would otherwise compare
-  // as outside it. Resolved on every check, never cached: a link repointed
-  // under a running daemon would otherwise leave the ledger at its new
-  // target compared against the old one, and unprotected, for as long as
-  // the process lived. One `realpath` per write is nothing next to the
-  // write. A root that does not exist yet has only its configured spelling.
-  const workspaceRoots = async (): Promise<readonly string[]> => {
-    if (workspaceRoot === undefined) {
-      return [];
-    }
-    try {
-      const canonical = await realpath(workspaceRoot);
-      return canonical === workspaceRoot ? [workspaceRoot] : [workspaceRoot, canonical];
-    } catch {
-      return [workspaceRoot];
-    }
-  };
+  // Which paths are a ledger is decided per call, from the workspace as it
+  // stands — see `ledgerGuard` for the two spellings a ledger can have and
+  // why neither is cached.
+  const isLedger = (): Promise<(absolutePath: string) => boolean> => ledgerGuard(workspaceRoot);
   const serialized = createKeyedSerializer();
   return {
     name: '@stratusagent/tool-fs',
     setup(context) {
-      context.tools.register(createReadTool(config, ledger, workspaceRoots, serialized));
+      context.tools.register(createReadTool(config, ledger, isLedger, serialized));
       context.tools.register(createListTool(config, ledger));
-      context.tools.register(createSearchTool(config, ledger, workspaceRoots));
-      context.tools.register(createWriteTool(config, ledger, workspaceRoots, serialized));
+      context.tools.register(createSearchTool(config, ledger, isLedger));
+      context.tools.register(createWriteTool(config, ledger, isLedger, serialized));
     },
   };
 };
