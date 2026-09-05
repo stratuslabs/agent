@@ -185,7 +185,7 @@ const createKeyedSerializer = (): KeyedSerializer => {
 const createReadTool = (
   config: JsonObject,
   ledger: TaintedWriteLedger,
-  isLedger: () => Promise<(absolutePath: string) => boolean>,
+  isLedger: () => Promise<(absolutePath: string) => Promise<boolean>>,
   serialized: KeyedSerializer,
 ): Tool => ({
   name: 'fs.read',
@@ -309,13 +309,13 @@ const recordedTrustAmong = async (
  * was anyone's choice.
  */
 const ledgerContentTrustAmong = async (
-  isLedger: () => Promise<(absolutePath: string) => boolean>,
+  isLedger: () => Promise<(absolutePath: string) => Promise<boolean>>,
   absolutePaths: Iterable<string>,
 ): Promise<TrustLevel | undefined> => {
   const guard = await isLedger();
   const labels: TrustLevel[] = [];
   for (const absolutePath of absolutePaths) {
-    if (guard(absolutePath)) {
+    if (await guard(absolutePath)) {
       const label = await ledgerContentTrust(absolutePath);
       if (label !== undefined) {
         labels.push(label);
@@ -661,7 +661,7 @@ const walkFiles = async function* (directory: string, depth = 0): AsyncGenerator
 const createSearchTool = (
   config: JsonObject,
   ledger: TaintedWriteLedger,
-  isLedger: () => Promise<(absolutePath: string) => boolean>,
+  isLedger: () => Promise<(absolutePath: string) => Promise<boolean>>,
 ): Tool => ({
   name: 'fs.search',
   description: 'Search file contents for literal text under one of this agent’s roots.',
@@ -844,7 +844,7 @@ const createSearchTool = (
 const createWriteTool = (
   config: JsonObject,
   ledger: TaintedWriteLedger,
-  isLedger: () => Promise<(absolutePath: string) => boolean>,
+  isLedger: () => Promise<(absolutePath: string) => Promise<boolean>>,
   serialized: KeyedSerializer,
 ): Tool => ({
   name: 'fs.write',
@@ -874,7 +874,7 @@ const createWriteTool = (
     // tainted. An agent whose roots cover its own workspace could otherwise
     // rewrite that record through this very tool — the attack writing its
     // own permission slip — so the one file the tool never writes is it.
-    if ((await isLedger())(resolved.path)) {
+    if (await (await isLedger())(resolved.path)) {
       throw new Error(`${resolved.path} is the filesystem provenance ledger, which fs.write does not edit.`);
     }
 
@@ -975,7 +975,7 @@ export const createFsPlugin = (config: JsonObject = {}): Plugin => {
   // Which paths are a ledger is decided per call, from the workspace as it
   // stands — see `ledgerGuard` for the two spellings a ledger can have and
   // why neither is cached.
-  const isLedger = (): Promise<(absolutePath: string) => boolean> => ledgerGuard(workspaceRoot);
+  const isLedger = (): Promise<(absolutePath: string) => Promise<boolean>> => ledgerGuard(workspaceRoot);
   const serialized = createKeyedSerializer();
   return {
     name: '@stratusagent/tool-fs',

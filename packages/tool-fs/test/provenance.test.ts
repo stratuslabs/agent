@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -416,6 +416,33 @@ test('a ledger file relocated behind a link is still the ledger: its target is r
   const notes = marking();
   await run(tools, 'fs.read', { path: 'notes.md' }, sessionAt('ava', 'user'), notes.context);
   assert.deepEqual(notes.marks, ['external']);
+});
+
+test('a hard link to the ledger from inside a root is the ledger: same bytes, refused and labelled', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-provenance-'));
+  const workspaceRoot = path.join(home, 'workspaces');
+  const data = path.join(home, 'data');
+  await mkdir(workspaceRoot, { recursive: true });
+  await mkdir(data, { recursive: true });
+  const tools = await registryFor({ roots: [data], workspaceRoot });
+  await run(tools, 'fs.write', { path: 'notes.md', content: 'fetched' }, sessionAt('ava', 'external'));
+
+  // No spelling of any path reaches an alias, and `realpath` leaves it as
+  // it is — it is the same inode under a name inside the root.
+  const alias = path.join(data, 'alias.jsonl');
+  await link(path.join(workspaceRoot, 'ava', LEDGER_FILENAME), alias);
+  await assert.rejects(
+    () => run(tools, 'fs.write', { path: 'alias.jsonl', content: '' }, sessionAt('ava', 'agent')),
+    /provenance ledger/,
+  );
+  const read = marking();
+  await run(tools, 'fs.read', { path: 'alias.jsonl' }, sessionAt('ava', 'user'), read.context);
+  assert.deepEqual(read.marks, ['external']);
+  // An ordinary file beside it is untouched by the identity check.
+  await run(tools, 'fs.write', { path: 'own.md', content: 'mine' }, sessionAt('ava', 'agent'));
+  const own = marking();
+  await run(tools, 'fs.read', { path: 'own.md' }, sessionAt('ava', 'user'), own.context);
+  assert.deepEqual(own.marks, []);
 });
 
 test('a file’s name is the tainted session’s text too: a listing or a skipped-file report that names it is marked', async () => {

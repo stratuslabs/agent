@@ -1,4 +1,4 @@
-import { appendFile, chmod, mkdir, readdir, readFile, realpath } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
 
@@ -260,13 +260,14 @@ export const isLedgerPath = (workspaceRoots: readonly string[], absolutePath: st
  * resolver spells every path under it and which no spelling of the root
  * reaches, so every entry of the workspace is canonicalized and its ledger
  * path listed — the ledger file's own canonical path too, for a link at
- * the file rather than the directory. Built per call and never cached: a
+ * the file rather than the directory, and its device and inode, for a hard
+ * link to it from inside a root. Built per call and never cached: a
  * link repointed under a running daemon is judged where it points now, and
  * one `readdir` plus two `realpath`s per agent is nothing next to the write.
  */
-export const ledgerGuard = async (workspaceRoot: string | undefined): Promise<(absolutePath: string) => boolean> => {
+export const ledgerGuard = async (workspaceRoot: string | undefined): Promise<(absolutePath: string) => Promise<boolean>> => {
   if (workspaceRoot === undefined) {
-    return () => false;
+    return async () => false;
   }
   const roots = [workspaceRoot];
   try {
@@ -278,6 +279,11 @@ export const ledgerGuard = async (workspaceRoot: string | undefined): Promise<(a
     // Not there yet: only the configured spelling, and no agents to list.
   }
   const ledgers = new Set<string>();
+  // And the files themselves, by identity: a hard link to a ledger from
+  // inside a root has a path no spelling reaches and `realpath` leaves
+  // alone, and is the same bytes. `bigint` so an inode number survives
+  // the comparison intact.
+  const identities = new Set<string>();
   let entries: Dirent[] = [];
   try {
     entries = await readdir(workspaceRoot, { withFileTypes: true });
@@ -301,9 +307,25 @@ export const ledgerGuard = async (workspaceRoot: string | undefined): Promise<(a
     }
     try {
       ledgers.add(await realpath(lexical));
+      const identity = await stat(lexical, { bigint: true });
+      identities.add(`${identity.dev}:${identity.ino}`);
     } catch {
       // No ledger there yet, or a dangling link: nothing to protect.
     }
   }
-  return (absolutePath) => isLedgerPath(roots, absolutePath) || ledgers.has(absolutePath);
+  return async (absolutePath) => {
+    if (isLedgerPath(roots, absolutePath) || ledgers.has(absolutePath)) {
+      return true;
+    }
+    if (identities.size === 0) {
+      return false;
+    }
+    try {
+      const identity = await stat(absolutePath, { bigint: true });
+      return identities.has(`${identity.dev}:${identity.ino}`);
+    } catch {
+      // Nothing there: a write about to create a file is not the ledger.
+      return false;
+    }
+  };
 };
