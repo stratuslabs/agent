@@ -1193,6 +1193,26 @@ test('a binary block cannot steer the written path: the server-side tool name is
   assert.ok(path.basename(file!).startsWith('escape-'));
 });
 
+test('a link planted at a binary block’s recorded path is never written through', async () => {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-link-'));
+  const block = { content: [{ type: 'image', data: Buffer.from('server bytes').toString('base64'), mimeType: 'image/png' }] };
+  const context = { server: 'linear', tool: 'chart', agentId: 'ava', workspaceRoot, now: () => 7, ledger: createFileLedger(workspaceRoot) };
+  // The file names are `<tool>-<stamp>-<serial>`, and the serial counts up
+  // by one per block, so the next name is known once one has been seen —
+  // which is what a peer watching the ledger's records would see too.
+  const [first] = (await normalizeCallResult(block, context) as JsonObject).files as string[];
+  const serial = Number(/-(\d+)\.png$/.exec(first!)![1]);
+  const next = path.join(path.dirname(first!), `chart-7-${serial + 1}.png`);
+  // A victim the link points at: the agent's own file, and the ledger.
+  const victim = path.join(workspaceRoot, 'victim.md');
+  await writeFile(victim, 'mine');
+  await symlink(victim, next);
+  await assert.rejects(() => normalizeCallResult(block, context), /appeared between its provenance record and its write/);
+  assert.equal(await readFile(victim, 'utf8'), 'mine');
+  // Over-marked, which is the safe direction: the record stands.
+  assert.equal(await context.ledger.lookup('ava', next), 'external');
+});
+
 test('two writes in the same millisecond get distinct files', async () => {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-serial-'));
   const block = { content: [{ type: 'image', data: Buffer.from('x').toString('base64'), mimeType: 'image/png' }] };

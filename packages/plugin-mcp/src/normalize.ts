@@ -1,4 +1,5 @@
-import { mkdir, realpath, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { mkdir, open, realpath } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { JsonObject, JsonValue } from '@stratusagent/core';
@@ -159,7 +160,25 @@ export const normalizeCallResult = async (
     // between the two leaves a labelled path with no file, never a file
     // with no label.
     await options.ledger?.recordWrite(options.agentId, file, 'external');
-    await writeFile(file, Buffer.from(data, 'base64'));
+    // Created exclusively, never through a link: the record above names
+    // the exact path, and a link planted there between the record and the
+    // write would carry a server's bytes to a target the ledger never saw
+    // — the ledger itself included. A name that is already taken, by a
+    // link or anything else, fails the block rather than following it.
+    let handle;
+    try {
+      handle = await open(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error(`${file} appeared between its provenance record and its write; the ${options.tool} result's binary block was not saved. Retry the call.`);
+      }
+      throw error;
+    }
+    try {
+      await handle.writeFile(Buffer.from(data, 'base64'));
+    } finally {
+      await handle.close();
+    }
     files.push(file);
   };
 
