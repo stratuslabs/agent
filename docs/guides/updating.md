@@ -45,7 +45,8 @@ rollback is planned.
 The reverse direction refuses instead of guessing: against state stamped by
 a **newer** build than itself, anything that *writes* under `~/.stratus` —
 `serve`, `setup`, `chat`, `run`, `skill add`, `dashboard`,
-`schedules cancel`, `service install`/`start` — refuses with a line naming
+`schedules cancel`, `memory reassert`, `session rollover`, `credential`
+writes, `service install`/`start` — refuses with a line naming
 the fix, because a downgraded build writing into a newer format is the one
 way to corrupt it. Read-only commands (`logs`, `agents`, `doctor`,
 `service status`/`stop`) warn and continue: reading is how you diagnose

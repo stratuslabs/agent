@@ -8707,6 +8707,12 @@ test('a state migration that cannot stamp the home refuses commands that write s
   // Nothing was re-asserted: the record is exactly the one line it was.
   assert.equal((await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8')).trim().split('\n').length, 1);
 
+  // A rollover rewrites a session in this build's shape — a write — and is
+  // refused here before it ever looks for a daemon.
+  const rollover = createStreams();
+  assert.equal(await runCli({ argv: ['session', 'rollover', 's-1'], streams: rollover.streams, env }), 1);
+  assert.match(rollover.output.stderr, /Refusing `stratus session`/);
+
   const listed = createStreams();
   assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: listed.streams, env }), 0);
   assert.match(listed.output.stderr, /Warning: state migration failed/);

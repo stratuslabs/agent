@@ -342,3 +342,17 @@ test('an index left by the previous schema is rebuilt whole on first use, not wr
   bare.close();
   assert.equal((await createFileMemoryStore(unstamped).search('bea', 'fact')).entries.length, 1);
 });
+
+test('a stored memory label nobody can read is a recorded unknown, not an absent one the bulk sweep would promote', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-state-labels-'));
+  const filePath = path.join(home, 'memory.jsonl');
+  await writeFile(filePath, [
+    JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Written before labels.', createdAt: '2026-01-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'ava:memory:2', agentId: 'ava', content: 'Labelled by hand, badly.', createdAt: '2026-01-02T00:00:00.000Z', trust: 'externl', origin: { sessionId: 's1', taintedBy: 'web.fetch' } }),
+    '',
+  ].join('\n'));
+  const store = createFileMemoryStore(filePath);
+  const entries = (await store.list('ava')).entries;
+  assert.equal(entries.find((entry) => entry.id === 'ava:memory:1')?.trust, undefined);
+  assert.equal(entries.find((entry) => entry.id === 'ava:memory:2')?.trust, 'unknown');
+});

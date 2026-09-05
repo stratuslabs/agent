@@ -8200,6 +8200,7 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
         || (command.command === 'credential' && command.action !== 'list')
         || (command.command === 'schedules' && command.action === 'cancel')
         || (command.command === 'memory' && command.action === 'reassert')
+        || command.command === 'session'
         || (command.command === 'service' && (command.action === 'install' || command.action === 'start'));
       if (stamp.schemaVersion > STATE_SCHEMA_VERSION) {
         // Anything that writes under ~/.stratus refuses, not only the

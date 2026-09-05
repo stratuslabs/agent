@@ -96,13 +96,15 @@ const isEntryRecord = (value: unknown): value is MemoryEntry =>
 
 /**
  * An entry's optional provenance fields, as they are safe to read back: a
- * hand-edited `trust` that is not a level is dropped (the entry then reads
- * `unknown`, not as the misspelling), and `origin` keeps only its two known
- * string fields.
+ * `trust` that is present but not a level — a hand edit, a label from a
+ * newer build — reads as a *recorded* `unknown`, never as the misspelling
+ * and never as absent: absence is the upgrade corpus that `stratus memory
+ * reassert --all-unknown` sweeps, and a label somebody wrote is not that.
+ * `origin` keeps only its two known string fields.
  */
 const provenanceOf = (entry: MemoryEntry): Pick<MemoryEntry, 'trust' | 'origin'> => {
   const raw = entry as MemoryEntry & { trust?: unknown; origin?: unknown };
-  const trust = isTrustLevel(raw.trust) ? raw.trust : undefined;
+  const trust: TrustLevel | undefined = raw.trust === undefined ? undefined : isTrustLevel(raw.trust) ? raw.trust : 'unknown';
   let origin: MemoryOrigin | undefined;
   if (typeof raw.origin === 'object' && raw.origin !== null && !Array.isArray(raw.origin)) {
     const source = raw.origin as Record<string, unknown>;
