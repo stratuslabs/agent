@@ -30,9 +30,19 @@ const THREAD_ADDRESSEE_CAPACITY = 2000;
  */
 const COLD_VERDICT_CAPACITY = 256;
 /**
- * How many changes of hands one thread remembers. A message older than all
- * of them asks the sessions instead, so this only has to cover the lag
- * between two sockets, which is messages rather than conversations.
+ * How many changes of hands one thread remembers.
+ *
+ * A message older than all of them asks the sessions instead, which answer
+ * for the thread as it stands rather than as it stood — so a reply that old
+ * can be resolved to the agent holding the thread now. That is the cost of
+ * bounding this, and something has to bound it: the alternative is a list
+ * that grows with a conversation for the life of the daemon.
+ *
+ * Eight is chosen to sit far past the case it covers. This only has to
+ * span the lag between two sockets, which is messages inside one delivery
+ * window; crossing it needs a single thread to change hands eight times —
+ * eight mentions, alternating between agents — while one socket stays
+ * behind for all of them.
  */
 const THREAD_HANDOVER_DEPTH = 8;
 /**
