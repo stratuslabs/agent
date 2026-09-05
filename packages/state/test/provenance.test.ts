@@ -73,8 +73,10 @@ test('a legacy line has no label and reads unknown; a hand-edited nonsense label
   const [legacy, edited] = (await store.list('ava')).entries;
   assert.equal(legacy?.trust, undefined);
   assert.equal(memoryEntryTrust(legacy!), 'unknown');
-  // Not the misspelling, and not `agent`: a label nobody recognises is no label.
-  assert.equal(edited?.trust, undefined);
+  // Not the misspelling, and not `agent` — and not absent either: a label
+  // somebody wrote is a *recorded* unknown, so the bulk upgrade sweep
+  // (`--all-unknown`, which takes only absent labels) leaves it alone.
+  assert.equal(edited?.trust, 'unknown');
   assert.equal(memoryEntryTrust(edited!), 'unknown');
   assert.equal(memoryEntryTrust((await store.search('ava', 'tortoise')).entries[0]!), 'unknown');
 });
