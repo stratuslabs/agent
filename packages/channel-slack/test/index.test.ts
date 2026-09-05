@@ -1164,6 +1164,44 @@ test('two agents that would each read the other as the last speaker still answer
   assert.equal(race.gateway.dispatches.length, 1);
 });
 
+test('an agent that has never spoken in a thread does not silence the one that has', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  // Both are in the thread. Bea was mentioned and is still on her first
+  // turn — or it produced no text — so her session carries no reply time.
+  gateway.sessionRouting = async (sessionId: string) => {
+    const agentId = sessionId.split(':')[1] ?? '';
+    if (agentId === 'ava') {
+      return { agentId, metadata: {}, lastSpokeAt: '2026-01-01T00:00:01.000Z' };
+    }
+    return { agentId, metadata: {} };
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  const followUp = channelMessage({ text: 'so?', ts: '992.1', thread: '992.0' });
+  await socketAva.deliver('message', followUp);
+  await socketBea.deliver('message', followUp);
+  await adapter.stop();
+
+  // Ava is the only agent who has spoken here, so the reply is hers.
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: so?'],
+  ]);
+});
+
 test('a contested thread the gateway cannot order stays silent rather than answering twice', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();

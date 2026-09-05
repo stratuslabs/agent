@@ -2042,10 +2042,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * anything, and a recovery resuming after a restart lands in exactly this
    * window.
    *
-   * Nobody is the answer when the agents cannot be ordered — a host whose
-   * routing carries no `lastSpokeAt`, or an exact tie — because guessing
-   * would put two answers under one message. The agent alone in its thread,
-   * which is nearly every thread, is answered without the question arising.
+   * Nobody is the answer only when the agents cannot be *ordered* — nothing
+   * in the thread has spoken (a host whose routing carries no `lastSpokeAt`
+   * at all reads this way, and so does a thread where every agent is still
+   * on its first turn), or the newest two tie — because guessing there
+   * would put two answers under one message. An agent that simply has not
+   * spoken is a different thing and is skipped rather than fatal: it cannot
+   * have spoken last, and letting it silence the agent that did would leave
+   * a reply nobody answers. The agent alone in its thread, which is nearly
+   * every thread, is answered without the question arising.
    */
   const resolveFollowUpWinner = async (
     parts: { team: string; conversation: string; thread: string },
@@ -2092,7 +2097,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     let tied = false;
     for (const entry of engaged) {
       if (entry.lastSpokeAt === undefined) {
-        return undefined;
+        // In the thread, but has never said anything in it — mentioned and
+        // still on its first turn, or a turn that produced no text. It
+        // cannot be the one who spoke last, and it must not stop the agent
+        // that did from answering.
+        continue;
       }
       if (!latest || entry.lastSpokeAt > latest.lastSpokeAt) {
         latest = { agentId: entry.agentId, lastSpokeAt: entry.lastSpokeAt };
