@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readdirSync, renameSync, statSync, symlinkSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -1236,6 +1237,32 @@ test('a link planted at a binary block’s recorded path is never written throug
   assert.equal(await readFile(victim, 'utf8'), 'mine');
   // Over-marked, which is the safe direction: the record stands.
   assert.equal(await context.ledger.lookup('ava', next), 'external');
+});
+
+test('an artifact directory swapped for a link between its resolution and the open lands no bytes', async () => {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-dirswap-'));
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-elsewhere-'));
+  const block = { content: [{ type: 'image', data: Buffer.from('server bytes').toString('base64'), mimeType: 'image/png' }] };
+  const directory = path.join(workspaceRoot, 'ava', 'mcp', 'linear');
+  // The clock seam runs after the directory is created and canonicalized
+  // and before the open — exactly where a peer's swap would land.
+  const context = {
+    server: 'linear',
+    tool: 'chart',
+    agentId: 'ava',
+    workspaceRoot,
+    ledger: createFileLedger(workspaceRoot),
+    now: () => {
+      renameSync(directory, `${directory}.moved`);
+      symlinkSync(elsewhere, directory);
+      return 7;
+    },
+  };
+  await assert.rejects(() => normalizeCallResult(block, context), /moved between its provenance record and its write/);
+  // The create went through the link; nothing else did.
+  for (const name of readdirSync(elsewhere)) {
+    assert.equal(statSync(path.join(elsewhere, name)).size, 0);
+  }
 });
 
 test('two writes in the same millisecond get distinct files', async () => {

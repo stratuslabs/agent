@@ -175,6 +175,17 @@ export const normalizeCallResult = async (
       throw error;
     }
     try {
+      // O_NOFOLLOW guards the final component only: a directory on the way
+      // swapped for a link between the `realpath` above and this open would
+      // have the create land wherever the link points, under a path the
+      // record above never named. Resolved again now that the file exists;
+      // any other spelling is refused before a byte is written, and the
+      // empty file is left rather than unlinked through a name that just
+      // proved it can move.
+      const landed = await realpath(file);
+      if (landed !== file) {
+        throw new Error(`${file} moved between its provenance record and its write; the ${options.tool} result's binary block was not saved. Retry the call.`);
+      }
       await handle.writeFile(Buffer.from(data, 'base64'));
     } finally {
       await handle.close();

@@ -209,6 +209,15 @@ export interface SchedulerRuntimeOptions {
   /** The roster check: a schedule for an agent that does not exist is a refusal. */
   hasAgent(agentId: string): boolean;
   limits?: SchedulerLimits;
+  /**
+   * Run before every scan of due schedules. A rejection stops the
+   * scheduler for good, before any slot is claimed: the gateway passes the
+   * state-stamp check here, so a newer build stamping the home under a
+   * live daemon stops its firings as well as its turns — a claimed slot is
+   * a write into state this build no longer understands, and a one-shot
+   * whose firing was refused afterwards would be retired unfired.
+   */
+  ready?(): Promise<void>;
   log(line: string): void;
   warn(line: string): void;
 }
@@ -502,9 +511,18 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     void firing.finally(() => inflight.delete(firing));
   };
 
-  const tick = (): void => {
+  const tick = async (): Promise<void> => {
     if (stopped) {
       return;
+    }
+    if (options.ready) {
+      try {
+        await options.ready();
+      } catch (error) {
+        stopped = true;
+        warn(`scheduler stopped before claiming any firing: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
     }
     try {
       const now = new Date();
@@ -522,7 +540,9 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       // stored schedule is real outstanding work — the daemon owes its
       // next firing — and this timer is the only thing that will ever
       // start it. Shutdown belongs to stop(), which clears it.
-      timer = setTimeout(tick, tickMs);
+      timer = setTimeout(() => {
+        void tick();
+      }, tickMs);
     }
   };
 
@@ -571,7 +591,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
           log(`schedule ${record.id}: one-shot already fired; removing`);
         }
       }
-      tick();
+      await tick();
     },
     stop() {
       stopped = true;

@@ -1006,3 +1006,35 @@ test('cancelling from the operator surface stops the next firing', async () => {
   assert.equal(gateway.schedules().length, 0);
   await gateway.stop();
 });
+
+test('a scheduler whose readiness check fails stops before it claims a slot, so no firing is spent or lost', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const past = new Date(Date.now() - 60_000).toISOString();
+  store.insert(record({ id: 'due', cadence: { kind: 'at', at: past }, nextFireAt: past }));
+  const fired: Fired[] = [];
+  const warnings: string[] = [];
+  const runtime = runtimeWith(store, {
+    dispatch: async (input) => {
+      fired.push(input);
+    },
+    // What the gateway passes: the state stamp says a newer build owns
+    // the home now.
+    ready: async () => {
+      throw new Error('~/.stratus was written by a newer Stratus build (state schema 3; this build understands 2).');
+    },
+    warn: (line) => {
+      warnings.push(line);
+    },
+  });
+  await runtime.start();
+  try {
+    assert.deepEqual(fired, []);
+    // The slot is still there for the build that understands it.
+    assert.deepEqual(store.due(new Date().toISOString()).map((row) => row.id), ['due']);
+    assert.ok(warnings.some((line) => /newer Stratus build/.test(line)), warnings.join('\n'));
+  } finally {
+    runtime.stop();
+    store.close();
+  }
+});

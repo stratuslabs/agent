@@ -550,8 +550,12 @@ test('a directory swapped for a link between the containment check and the open 
     /a directory on its path changed/,
   );
   // O_NOFOLLOW guards only the last component, so the create went through
-  // the link — and was taken back: nothing landed in the other root.
-  assert.deepEqual(await readdir(rootB), []);
+  // the link. What it left there is an empty file and nothing more: no
+  // byte was written, and it is not unlinked through a name that just
+  // proved it can move.
+  for (const name of await readdir(rootB)) {
+    assert.equal((await stat(path.join(rootB, name))).size, 0);
+  }
 });
 
 test('two writes racing to create one file both land: the loser looks again and writes what is there', async () => {

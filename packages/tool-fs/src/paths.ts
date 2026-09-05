@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { lstat, open, realpath, stat, unlink } from 'node:fs/promises';
+import { lstat, open, realpath, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -214,11 +214,13 @@ export const openContained = async (
       // points: another root, or nowhere allowed, and under a path the
       // provenance ledger never recorded. The name is resolved again once
       // the file exists; a spelling other than the one decided about is
-      // refused, and the file this call created is removed — O_EXCL
-      // guarantees it was this call's.
+      // refused before a byte is written. The empty file the create left
+      // behind stays: removing it would mean naming it again through the
+      // very directory that just moved, and a second move in between would
+      // make that unlink take some other file — the ledger, if the name
+      // was chosen for it. An empty orphan is the cheaper outcome.
       const landed = await realpath(resolved.path);
       if (landed !== resolved.path) {
-        await unlink(resolved.path);
         throw new PathOutsideRootError(
           `Refusing ${resolved.path}: a directory on its path changed between the containment check and the open.`,
         );

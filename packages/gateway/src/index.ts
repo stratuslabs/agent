@@ -1017,6 +1017,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     sessionStatus: async (sessionId) => (await store.get(sessionId))?.status,
     hasAgent: (agentId) => registry.get(agentId) !== undefined,
     ...(options.schedules ? { limits: options.schedules } : {}),
+    // The same stamp check every turn runs, before a slot is claimed — see
+    // `SchedulerRuntimeOptions.ready`.
+    ready: () => assertStateCompatible(env),
     log,
     warn,
   });
