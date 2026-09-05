@@ -1991,8 +1991,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * Which of this process's agents a message names, or undefined if it
    * names none of them.
    *
-   * The FIRST in connection order when it names several, and that
-   * determinism is the point: every connection sees every message and runs
+   * When it names several, the first that is actually serving — and any
+   * of them otherwise. That determinism is the point: every connection sees every message and runs
    * this over the same text and the same array, so all of them agree on who
    * a message handed the thread to — including the connections that will go
    * on to ignore it. Which is what makes the handover record converge
@@ -2012,12 +2012,23 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * learned.
    */
   const agentNamedIn = (text: string, team: string): string | undefined => {
+    let offline: string | undefined;
     for (const [agentId, identity] of botIdentities) {
-      if (identity.teamId === team && mentions(text, identity.botUserId)) {
+      if (identity.teamId !== team || !mentions(text, identity.botUserId)) {
+        continue;
+      }
+      if (connections.some((live) => live.config.agentId === agentId)) {
         return agentId;
       }
+      // Named, recognized, and not serving. Remembered only as the answer
+      // of last resort: a message that names an agent whose app is down and
+      // nobody else still gets silence, which is the deliberate behavior —
+      // but a message that also names one that IS serving must leave the
+      // thread with the agent that can actually answer it, or the reply it
+      // just posted would be the last anyone gets.
+      offline ??= agentId;
     }
-    return undefined;
+    return offline;
   };
 
   /**

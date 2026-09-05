@@ -1202,6 +1202,42 @@ test('an agent that has never spoken in a thread does not silence the one that h
   ]);
 });
 
+test('a message naming an offline agent and a live one leaves the thread with the live one', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  socketAva.start = async () => {
+    throw new Error('invalid_auth');
+  };
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = async () => undefined;
+
+  const adapter = createSlackChannelAdapter({
+    // Ava is first in the roster and her app never comes up.
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+    warn: () => {},
+  });
+  await adapter.start(gateway);
+
+  // Both are asked; only Bea can answer, and she does.
+  await socketBea.deliver('message', channelMessage({ text: '<@B-AVA> <@B-BEA> thoughts?', ts: '993.1', thread: '993.0' }));
+  // So the thread is hers — the follow-up must not be stranded on the agent
+  // that was named first and cannot hear it.
+  await socketBea.deliver('message', channelMessage({ text: 'and the other half?', ts: '993.2', thread: '993.0' }));
+  await adapter.stop();
+
+  // Both turns are Bea's, and the second is the untagged one.
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.agentId), ['bea', 'bea']);
+  assert.equal(gateway.dispatches[1]?.userMessage, 'Dylan: and the other half?');
+});
+
 test('a contested thread the gateway cannot order stays silent rather than answering twice', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
