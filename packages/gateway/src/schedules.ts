@@ -511,7 +511,12 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     void firing.finally(() => inflight.delete(firing));
   };
 
-  const tick = async (): Promise<void> => {
+  /**
+   * `propagateReadiness` is the startup tick's: a readiness failure there
+   * has a caller to reach — `start()`, whose rejection is the gateway's
+   * refusal to serve — where the timer-driven ticks have only the log.
+   */
+  const tick = async (propagateReadiness = false): Promise<void> => {
     if (stopped) {
       return;
     }
@@ -520,6 +525,9 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
         await options.ready();
       } catch (error) {
         stopped = true;
+        if (propagateReadiness) {
+          throw error;
+        }
         warn(`scheduler stopped before claiming any firing: ${error instanceof Error ? error.message : String(error)}`);
         return;
       }
@@ -598,7 +606,10 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
           log(`schedule ${record.id}: one-shot already fired; removing`);
         }
       }
-      await tick();
+      // The first tick's readiness check propagates too: the stamp can
+      // advance between the check above and here, and a `start()` that
+      // resolved after noticing would let the gateway's sweeps run.
+      await tick(true);
     },
     stop() {
       stopped = true;

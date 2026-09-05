@@ -1041,3 +1041,33 @@ test('a scheduler whose readiness check fails stops before it claims a slot, so 
     store.close();
   }
 });
+
+test('a readiness check that fails on the first tick, after passing the preflight, still fails start', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const past = new Date(Date.now() - 60_000).toISOString();
+  store.insert(record({ id: 'due', cadence: { kind: 'at', at: past }, nextFireAt: past }));
+  const fired: Fired[] = [];
+  let checks = 0;
+  const runtime = runtimeWith(store, {
+    dispatch: async (input) => {
+      fired.push(input);
+    },
+    // The stamp advances between the start's preflight and its first tick.
+    ready: async () => {
+      checks += 1;
+      if (checks > 1) {
+        throw new Error('~/.stratus was written by a newer Stratus build (state schema 3; this build understands 2).');
+      }
+    },
+  });
+  await assert.rejects(() => runtime.start(), /newer Stratus build/);
+  try {
+    assert.equal(checks, 2);
+    assert.deepEqual(fired, []);
+    assert.deepEqual(store.due(new Date().toISOString()).map((row) => row.id), ['due']);
+  } finally {
+    runtime.stop();
+    store.close();
+  }
+});
