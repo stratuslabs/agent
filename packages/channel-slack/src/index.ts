@@ -24,6 +24,12 @@ const DEDUPE_CAPACITY = 2000;
  */
 const THREAD_ADDRESSEE_CAPACITY = 2000;
 /**
+ * How many cold verdicts are remembered. Far smaller than the addressee
+ * map: one is wanted only while the agents sharing a thread resolve the
+ * same message, and the addressee record answers for every message after.
+ */
+const COLD_VERDICT_CAPACITY = 256;
+/**
  * How many files an unrendered turn may queue for its outcome. Nothing
  * drains that queue until the outcome arrives, so a session whose outcome
  * this process never sees would otherwise grow it for the life of the
@@ -1265,6 +1271,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    */
   const threadAddressee = new Map<string, { agentId: string; ts: string }>();
   /**
+   * One cold verdict per message — see `followUpWinner`. Bounded, because
+   * an entry outlives its own resolution on purpose.
+   */
+  const coldVerdicts = new Map<string, Promise<string | undefined>>();
+  /**
    * `agentId` → bot user id, for every app whose token this adapter has
    * authenticated — whether or not its socket then came up, and kept for as
    * long as the adapter runs.
@@ -1966,34 +1977,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       }
     }
   };
-
-  /**
-   * Claims one untagged message for this agent, and says whether the claim
-   * was won.
-   *
-   * Only the cold path needs it. There, two agents both ask the sessions
-   * whether the thread is theirs, and each asks with several independent
-   * reads — so a save landing between one agent's reads and the other's can
-   * let both come back "yes", and both would answer the same message. The
-   * claim is the tie-break the lookups cannot be: the first to record this
-   * message wins it, and the second stands down.
-   *
-   * Losing means *another agent already holds this exact message*, never
-   * merely that the thread has moved on. A holder set by a LATER message —
-   * a mention that arrived while this reply was being resolved — leaves the
-   * claim won and the record untouched: that reply was legitimately this
-   * agent's when it was sent, and dropping it because the conversation has
-   * since moved would lose a message somebody is waiting on.
-   */
-  const claimFollowUp = (key: string, agentId: string, ts: string): boolean => {
-    const held = threadAddressee.get(key);
-    if (held && held.ts === ts && held.agentId !== agentId) {
-      return false;
-    }
-    rememberAddressee(key, agentId, ts);
-    return true;
-  };
-
   /**
    * Which of this process's agents a message names, or undefined if it
    * names none of them.
@@ -2028,73 +2011,125 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   /**
-   * Whether an untagged reply in a thread is this agent's to answer, asked
-   * of the SESSIONS — the durable answer, for a thread this process has no
-   * record of: one it has not seen a message in since it started, or one
-   * evicted from `threadAddressee`. Everything else is settled
-   * synchronously in `admit`, before this is ever reached.
+   * Who an untagged reply belongs to, asked of the SESSIONS — the durable
+   * answer, for a thread this process has no record of: one it has not seen
+   * a message in since it started, or one evicted from `threadAddressee`.
+   * Everything else is settled synchronously in `admit`, before this is
+   * ever reached.
    *
-   * Being in the thread is the first half: a session under this thread's
-   * key exists only because someone mentioned this agent here, so an agent
+   * Being in the thread is the first half: a session under a thread's key
+   * exists only because someone mentioned that agent here, so an agent
    * follows up only in conversations it was invited into, and stops when
-   * the thread is gone. `sessionRouting` is the durable record of that —
-   * a restart forgets nothing.
+   * the thread is gone. `sessionRouting` is the durable record of that — a
+   * restart forgets nothing.
    *
    * Whose turn it is, is the second. In a thread with several agents an
    * unaddressed reply belongs to **whoever spoke last**, the way it does
    * between people: answer the voice that just answered you, and tag
-   * someone by name to change that. `lastSpokeAt` orders the agents'
-   * sessions for exactly that question — and it is when each agent last
-   * *replied*, not when its session last changed, because a turn saves on
-   * tool results and approval checkpoints without having said anything. An
-   * agent part-way through a long tool run is not the last speaker, and a
-   * recovery resuming after a restart lands in exactly this window.
+   * someone by name to change that. `lastSpokeAt` orders them — when each
+   * agent last *replied*, not when its session last changed, because a turn
+   * saves on tool results and approval checkpoints without having said
+   * anything, and a recovery resuming after a restart lands in exactly this
+   * window.
    *
-   * Silence is the tie-break, and only a contested thread can reach it: a
-   * host whose routing carries no `lastSpokeAt` cannot order two agents,
-   * and guessing would put two answers under one message. The agent alone
-   * in its thread — which is nearly every thread — never asks the
-   * question.
+   * Nobody is the answer when the agents cannot be ordered — a host whose
+   * routing carries no `lastSpokeAt`, or an exact tie — because guessing
+   * would put two answers under one message. The agent alone in its thread,
+   * which is nearly every thread, is answered without the question arising.
    */
-  const answersFollowUpFromSessions = async (
-    connection: AgentConnection,
+  const resolveFollowUpWinner = async (
     parts: { team: string; conversation: string; thread: string },
-  ): Promise<boolean> => {
-    if (!parts.thread) {
-      return false;
-    }
+  ): Promise<string | undefined> => {
     const gateway = gatewayRef;
-    if (!gateway?.sessionRouting) {
-      return false;
+    if (!gateway?.sessionRouting || !parts.thread) {
+      return undefined;
     }
-    const keyFor = (agentId: string): string => channelSessionKey({
-      channel: 'slack',
-      agentId,
-      team: parts.team,
-      conversation: parts.conversation,
-      thread: parts.thread,
-    });
-    const mine = await gateway.sessionRouting(keyFor(connection.config.agentId));
-    if (!mine) {
-      return false;
-    }
-    // Live connections, not every configured agent: an agent whose app
-    // failed to connect cannot answer anything, and leaving the thread
-    // silent because the last speaker is offline is the bug this whole
-    // change exists to remove.
-    for (const other of connections) {
-      if (other === connection) {
+    const engaged: Array<{ agentId: string; lastSpokeAt?: string }> = [];
+    // Live connections in this message's OWN workspace. Live, because an
+    // agent whose app failed to connect cannot answer anything, and leaving
+    // a thread silent because its last speaker is offline is the bug this
+    // whole change exists to remove. In-workspace, because a session key
+    // carries a team: an agent whose app has moved workspaces still has its
+    // old sessions there, and letting those contend for a thread it can no
+    // longer receive a message in would leave nobody to answer.
+    for (const candidate of connections) {
+      if (candidate.teamId !== parts.team) {
         continue;
       }
-      const theirs = await gateway.sessionRouting(keyFor(other.config.agentId));
-      if (!theirs) {
+      const routing = await gateway.sessionRouting(channelSessionKey({
+        channel: 'slack',
+        agentId: candidate.config.agentId,
+        team: parts.team,
+        conversation: parts.conversation,
+        thread: parts.thread,
+      }));
+      if (!routing) {
         continue;
       }
-      if (mine.lastSpokeAt === undefined || theirs.lastSpokeAt === undefined || theirs.lastSpokeAt >= mine.lastSpokeAt) {
-        return false;
+      engaged.push({
+        agentId: candidate.config.agentId,
+        ...(routing.lastSpokeAt !== undefined ? { lastSpokeAt: routing.lastSpokeAt } : {}),
+      });
+    }
+    const first = engaged[0];
+    if (!first) {
+      return undefined;
+    }
+    if (engaged.length === 1) {
+      return first.agentId;
+    }
+    let latest: { agentId: string; lastSpokeAt: string } | undefined;
+    let tied = false;
+    for (const entry of engaged) {
+      if (entry.lastSpokeAt === undefined) {
+        return undefined;
+      }
+      if (!latest || entry.lastSpokeAt > latest.lastSpokeAt) {
+        latest = { agentId: entry.agentId, lastSpokeAt: entry.lastSpokeAt };
+        tied = false;
+      } else if (entry.lastSpokeAt === latest.lastSpokeAt) {
+        tied = true;
       }
     }
-    return true;
+    return tied ? undefined : latest?.agentId;
+  };
+
+  /**
+   * `resolveFollowUpWinner`, resolved ONCE PER MESSAGE and shared by every
+   * agent asking about that message.
+   *
+   * The sharing is the point. Each agent's own copy of the question is
+   * several independent session reads, and turns finishing in between can
+   * make two agents' reads disagree: both concluding they are the most
+   * recent speaker, so one message is answered twice, or both concluding
+   * they are not, so it is answered by nobody. One resolution cannot
+   * disagree with itself, which is a stronger guarantee than arbitrating
+   * between two that already have.
+   *
+   * Keyed on the message, so a later reply in the same thread asks again.
+   * Bounded, and deliberately not deleted when it settles: an entry has to
+   * outlive its own resolution, because an agent it beats may only reach
+   * this after the winner has finished, and recomputing for that agent is
+   * precisely the disagreement the memo exists to prevent.
+   */
+  const followUpWinner = (
+    parts: { team: string; conversation: string; thread: string },
+    ts: string,
+  ): Promise<string | undefined> => {
+    const key = `${threadKeyFor(parts)}:${ts}`;
+    const existing = coldVerdicts.get(key);
+    if (existing) {
+      return existing;
+    }
+    const resolving = resolveFollowUpWinner(parts);
+    coldVerdicts.set(key, resolving);
+    if (coldVerdicts.size > COLD_VERDICT_CAPACITY) {
+      const oldest = coldVerdicts.keys().next();
+      if (!oldest.done) {
+        coldVerdicts.delete(oldest.value);
+      }
+    }
+    return resolving;
   };
 
   /**
@@ -2272,14 +2307,19 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // not to be this agent's leaves an empty link behind, which is all it
       // should cost.
       if (!admitted.settled) {
-        if (!(await answersFollowUpFromSessions(connection, { team, conversation: event.channel, thread: event.thread_ts ?? '' }))) {
+        // One verdict for this message, shared with whichever other agents
+        // are asking about it — see `followUpWinner`.
+        const winner = await followUpWinner(
+          { team, conversation: event.channel, thread: event.thread_ts ?? '' },
+          event.ts,
+        );
+        if (winner !== connection.config.agentId) {
           return undefined;
         }
-        // Answered from the store rather than from memory, so hold it —
-        // and stand down if another agent resolved the same message first,
-        // which two independent lookups can otherwise both conclude.
-        if (threadKey && !claimFollowUp(threadKey, connection.config.agentId, event.ts)) {
-          return undefined;
+        // Answered from the store rather than from memory: hold it, so the
+        // rest of the thread is ordered by receipt like any other.
+        if (threadKey) {
+          rememberAddressee(threadKey, connection.config.agentId, event.ts);
         }
       }
       const cleaned = await humanizeMentions(connection, event.text ?? '');
@@ -2562,6 +2602,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       connections.length = 0;
       approvalPosts.clear();
       threadAddressee.clear();
+      coldVerdicts.clear();
       botIdentities.clear();
       rendering.clear();
       resolvedWhileRendering.clear();

@@ -1086,34 +1086,30 @@ test('a mention resolves within its own workspace, where a bot id is unique', as
   ]);
 });
 
-test('two agents resolving one untagged reply from the sessions do not both answer it', async () => {
+/**
+ * Two agents in one cold thread, with session reads that return a different
+ * answer each time — what a stream of concurrent saves looks like to
+ * lookups running side by side. `reads` is consumed in call order.
+ */
+const coldRaceAdapter = (reads: string[]) => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
   const webAva = createFakeWeb('B-AVA', 'T1');
   const webBea = createFakeWeb('B-BEA', 'T1');
   const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
-
-  // Both lookups are held open, so both agents reach the cold path before
-  // either has recorded a holder — the window the claim exists for.
   let releaseLookups = (): void => {};
   const lookups = new Promise<void>((resolve) => {
     releaseLookups = () => resolve();
   });
-  // Each agent's own lookup sees itself as the most recent speaker: what
-  // independent reads landing either side of a concurrent save produce, and
-  // a conclusion neither agent can tell is contested.
-  const reads = new Map<string, number>();
+  let call = 0;
   gateway.sessionRouting = async (sessionId: string) => {
-    const seen = (reads.get(sessionId) ?? 0) + 1;
-    reads.set(sessionId, seen);
+    const lastSpokeAt = reads[call] ?? reads.at(-1) ?? '';
+    call += 1;
+    // Held so both agents reach the cold path before either has recorded a
+    // holder — the window a shared verdict exists for.
     await lookups;
-    return {
-      agentId: sessionId.split(':')[1] ?? '',
-      metadata: {},
-      lastSpokeAt: seen === 1 ? '2026-01-01T00:00:04.000Z' : '2026-01-01T00:00:02.000Z',
-    };
+    return { agentId: sessionId.split(':')[1] ?? '', metadata: {}, lastSpokeAt };
   };
-
   const adapter = createSlackChannelAdapter({
     agents: [
       { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
@@ -1123,17 +1119,49 @@ test('two agents resolving one untagged reply from the sessions do not both answ
     createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
     createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
   });
-  await adapter.start(gateway);
+  return { adapter, gateway, socketAva, socketBea, release: () => releaseLookups() };
+};
+
+test('two agents that would each read themselves as the last speaker still answer once', async () => {
+  // Resolved side by side, each agent's reads name ITSELF the last speaker:
+  // Ava reads ava newer than bea, Bea reads bea newer than ava. Two
+  // resolutions would both say yes, and one message would get two answers.
+  const race = coldRaceAdapter([
+    '2026-01-01T00:00:05.000Z', // Ava's read of ava
+    '2026-01-01T00:00:01.000Z', // Bea's read of ava
+    '2026-01-01T00:00:02.000Z', // Ava's read of bea
+    '2026-01-01T00:00:04.000Z', // Bea's read of bea
+  ]);
+  await race.adapter.start(race.gateway);
 
   const followUp = channelMessage({ text: 'well?', ts: '990.1', thread: '990.0' });
-  await socketBea.deliver('message', followUp);
-  await socketAva.deliver('message', followUp);
-  releaseLookups();
-  await adapter.stop();
+  await race.socketAva.deliver('message', followUp);
+  await race.socketBea.deliver('message', followUp);
+  race.release();
+  await race.adapter.stop();
 
-  // One message, one answer: the second to resolve stands down rather than
-  // posting a duplicate under it.
-  assert.equal(gateway.dispatches.length, 1);
+  assert.equal(race.gateway.dispatches.length, 1);
+});
+
+test('two agents that would each read the other as the last speaker still answer once', async () => {
+  // The mirror image: each agent's reads name the OTHER the last speaker,
+  // so two resolutions would both stand down and nobody would answer —
+  // which is the silence this branch exists to remove.
+  const race = coldRaceAdapter([
+    '2026-01-01T00:00:01.000Z', // Ava's read of ava
+    '2026-01-01T00:00:05.000Z', // Bea's read of ava
+    '2026-01-01T00:00:04.000Z', // Ava's read of bea
+    '2026-01-01T00:00:02.000Z', // Bea's read of bea
+  ]);
+  await race.adapter.start(race.gateway);
+
+  const followUp = channelMessage({ text: 'anyone?', ts: '991.1', thread: '991.0' });
+  await race.socketAva.deliver('message', followUp);
+  await race.socketBea.deliver('message', followUp);
+  race.release();
+  await race.adapter.stop();
+
+  assert.equal(race.gateway.dispatches.length, 1);
 });
 
 test('a contested thread the gateway cannot order stays silent rather than answering twice', async () => {
