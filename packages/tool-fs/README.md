@@ -97,7 +97,13 @@ tainted sessions chose.
 What this does not cover, said plainly: a copy under another name, a file a
 different process or a different agent wrote, content pasted through a path
 the ledger never saw. It closes the sequence one agent can perform by
-itself. The ledger lives in `@stratusagent/plugins` (re-exported here), so a
+itself. In particular it is not a boundary against another process running
+as the same user — one that can repoint a link inside the owner-only
+workspace while a write is in flight can as easily edit the ledger, or
+delete it — so the checks around a write (exclusive create, the inode
+bound to the name, one descriptor for the ledger) close the windows the
+agent's own concurrent calls and an operator's relocated directories open,
+not a hostile process with the daemon's own permissions. The ledger lives in `@stratusagent/plugins` (re-exported here), so a
 plugin that puts a server's bytes on disk without `fs.write` — `plugin-mcp`
 writing a bridged tool's image — records into the same file. Loaded without a `workspaceRoot` — a host wiring the plugin by hand
 rather than through the loader — the ledger is process-local, and the
