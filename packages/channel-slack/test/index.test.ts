@@ -971,6 +971,41 @@ test('the agent losing a thread records the handover too, so a lagging socket ca
   ]);
 });
 
+test('a mention of an agent whose app never came up is still not the other agent\'s to answer', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  socketBea.start = async () => {
+    throw new Error('invalid_auth');
+  };
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const warnings: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:960.0', '2026-01-01T00:00:00.000Z']]));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+    warn: (line) => warnings.push(line),
+  });
+  await adapter.start(gateway);
+  assert.equal(socketAva.started, true);
+  assert.equal(warnings.some((line) => line.includes('bea')), true);
+
+  // Ava holds the thread, and Bea's app is not serving — but Bea was named,
+  // and a question handed to Bea does not fall back to Ava.
+  await socketAva.deliver('message', channelMessage({ text: '<@B-BEA> can you take this?', ts: '960.1', thread: '960.0' }));
+  await socketAva.deliver('message', channelMessage({ text: 'still there?', ts: '960.2', thread: '960.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches, []);
+});
+
 test('a contested thread the gateway cannot order stays silent rather than answering twice', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();

@@ -1258,6 +1258,23 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * forgotten, and for every thread a restart forgot.
    */
   const threadAddressee = new Map<string, string>();
+  /**
+   * `agentId` → bot user id, for every app whose token this adapter has
+   * authenticated — whether or not its socket then came up, and kept for as
+   * long as the adapter runs.
+   *
+   * Separate from `connections` because recognizing that somebody was named
+   * and being able to answer are different questions. An agent whose app is
+   * down cannot answer anything; a message that names it is still not the
+   * other agent's to take, and treating it as untagged would have the wrong
+   * agent answer a question a person deliberately handed elsewhere. Silence
+   * is the correct outcome there, and it is also the visible one — the same
+   * thing a mention has always done when an app is down.
+   *
+   * Insertion order is `options.agents` order, which is what makes
+   * `agentNamedIn` deterministic across every connection.
+   */
+  const botIdentities = new Map<string, string>();
   // Rendered approval requests, keyed by the gateway's request id — the
   // same id the buttons carry back.
   const approvalPosts = new Map<string, PendingApprovalPost>();
@@ -1943,11 +1960,19 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * without the sockets having to agree on anything, since each agent is
    * its own Socket Mode connection and one can run minutes behind another.
    *
-   * Only agents this adapter carries can be recognized at all. One served
-   * by another daemon is invisible here, and both would answer.
+   * Only agents this adapter has authenticated can be recognized at all.
+   * One served by another daemon is invisible here, and both would answer;
+   * so is one whose `auth.test` itself failed, since its bot id was never
+   * learned.
    */
-  const agentNamedIn = (text: string): AgentConnection | undefined =>
-    connections.find((candidate) => mentions(text, candidate.botUserId));
+  const agentNamedIn = (text: string): string | undefined => {
+    for (const [agentId, botUserId] of botIdentities) {
+      if (mentions(text, botUserId)) {
+        return agentId;
+      }
+    }
+    return undefined;
+  };
 
   /**
    * Whether an untagged reply in a thread is this agent's to answer, asked
@@ -2070,7 +2095,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // away. The message Ava must record is exactly the one Ava ignores.
     const named = agentNamedIn(text);
     if (threadKey && named) {
-      rememberAddressee(threadKey, named.config.agentId);
+      rememberAddressee(threadKey, named);
     }
 
     if (!addressed) {
@@ -2388,6 +2413,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       });
 
       const known = new Set(gateway.agents().map((agent) => agent.id));
+      // Two passes, because who a message names has to be answerable from
+      // the first event onwards. Identities are learned for every app
+      // FIRST; only then does any socket start delivering. One pass would
+      // leave the agents at the front of the roster taking messages while
+      // the ones behind them were still authenticating, and a mention of an
+      // agent not yet known reads as an untagged reply — which the agent
+      // holding that thread would then answer.
+      const authenticated: AgentConnection[] = [];
       for (const config of options.agents) {
         if (!known.has(config.agentId)) {
           warn(`slack: no roster agent with id ${config.agentId}; skipping its Slack app`);
@@ -2396,14 +2429,26 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         try {
           const web = createWeb(config.botToken);
           const auth = await web.auth.test();
-          const socket = createSocket(config.appToken);
-          const connection: AgentConnection = {
+          const botUserId = auth.user_id ?? '';
+          // Recorded before the socket is even built: an app that never
+          // comes up must still be recognizable when somebody names it.
+          botIdentities.set(config.agentId, botUserId);
+          authenticated.push({
             config,
             web,
-            socket,
-            botUserId: auth.user_id ?? '',
+            socket: createSocket(config.appToken),
+            botUserId,
             teamId: auth.team_id ?? '',
-          };
+          });
+        } catch (error) {
+          // One broken app must not take the rest of the fleet down.
+          warn(`slack: could not connect ${config.agentId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
+      for (const connection of authenticated) {
+        const { config, socket } = connection;
+        try {
           const onEvent = (args: SlackSocketEventArgs): void => {
             const handled = handleInbound(connection, args).catch((error) => {
               warn(`slack event handling failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -2422,7 +2467,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           connections.push(connection);
           log(`slack: ${config.agentId} connected (bot ${connection.botUserId} in team ${connection.teamId})`);
         } catch (error) {
-          // One broken app must not take the rest of the fleet down.
+          // Authenticated but not serving: it answers nothing, and stays
+          // recognizable so nobody answers in its place.
           warn(`slack: could not connect ${config.agentId}: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
@@ -2456,6 +2502,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       connections.length = 0;
       approvalPosts.clear();
       threadAddressee.clear();
+      botIdentities.clear();
       rendering.clear();
       resolvedWhileRendering.clear();
     },

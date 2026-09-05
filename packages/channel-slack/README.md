@@ -66,6 +66,12 @@ several agents cannot be ordered — a host whose session routing carries no
 timestamps — an untagged reply is left alone rather than answered twice;
 mention the one you want.
 
+A named agent whose app is down answers nothing, and nothing answers in its
+place: being tagged is a decision about who is being asked, and an agent
+that has been handed the question elsewhere does not take it back because
+the other one is offline. That silence is the same signal a mention has
+always given when an app is down.
+
 And the rules above are mechanical, which shows in a thread where people are
 mostly talking to *each other*: an agent invited into one answers every
 untagged reply in it, including the ones meant for somebody else. Give the
