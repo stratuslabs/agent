@@ -81,6 +81,9 @@ next week carries the label with it.
 **Rendering keeps the regions apart.** Facts reach the prompt grouped by
 label, each region introduced by a line saying what it is, so a stranger's
 sentence never renders under the heading for the agent's own conclusions.
+Every entry renders on one line, control characters spelled out (`\n`,
+`\u001b`), so a fact holding a newline and a copy of a heading cannot open
+a forged trusted region inside the one it was filed under.
 `memory.recall` returns each hit's label, and `memory.remember` reports the
 label it wrote.
 

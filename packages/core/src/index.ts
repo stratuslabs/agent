@@ -2002,6 +2002,25 @@ export const memoryRegionHeading = (trust: TrustLevel): string => {
  * message started producing it. An entry with no label renders in the
  * `unknown` region — never as the agent's own conclusion.
  */
+/**
+ * `text` on one line, every control character spelled out the way JSON
+ * does (`\n`, `\u001b`), C1 controls and the Unicode line separators
+ * included. The memory block and `stratus memory list` both frame an entry
+ * by its line — `- ` under a region heading, an indent under an id — and a
+ * fact holding a newline could otherwise start a line of its own that reads
+ * as a heading, the trusted region's heading among them. Escaped rather
+ * than dropped, so what is shown is still what is stored.
+ */
+export const escapeControlCharacters = (text: string): string =>
+  text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (character) => {
+    switch (character) {
+      case '\n': return '\\n';
+      case '\r': return '\\r';
+      case '\t': return '\\t';
+      default: return `\\u${character.codePointAt(0)!.toString(16).padStart(4, '0')}`;
+    }
+  });
+
 export const renderMemorySection = (memory: readonly MemoryEntry[] | undefined): string | undefined => {
   if (!memory || memory.length === 0) {
     return undefined;
@@ -2012,7 +2031,11 @@ export const renderMemorySection = (memory: readonly MemoryEntry[] | undefined):
     if (entries.length === 0) {
       continue;
     }
-    const facts = entries.map((entry) => `- ${entry.content}`).join('\n');
+    // One line per fact, so the region a fact sits under is the region it
+    // was filed under: a page's text that ends in a newline and a copy of
+    // the operator's heading would otherwise open a forged trusted region
+    // inside the external one.
+    const facts = entries.map((entry) => `- ${escapeControlCharacters(entry.content)}`).join('\n');
     regions.push(`${memoryRegionHeading(trust)}\n${facts}`);
   }
   return regions.join('\n\n');
@@ -2195,10 +2218,20 @@ export const sessionTaintedBy = (session: Pick<Session, 'metadata'>): string | u
   return typeof recorded === 'string' ? recorded : undefined;
 };
 
-/** The trust a turn's sender earns, from the turn's metadata. See `SENDER_TRUST_METADATA_KEY`. */
+/**
+ * The trust a turn's sender earns, from the turn's metadata. See
+ * `SENDER_TRUST_METADATA_KEY`. No key at all is the operator's own call —
+ * the CLI, a control API client holding the token. A key holding anything
+ * but a label is a channel that meant to say something and misspelled it,
+ * and a misspelled authorization is not one: it reads `unknown`, the label
+ * for provenance nobody can vouch for, never `user`.
+ */
 export const senderTrustOf = (metadata: JsonObject | undefined): TrustLevel => {
-  const recorded = metadata?.[SENDER_TRUST_METADATA_KEY];
-  return isTrustLevel(recorded) ? recorded : 'user';
+  if (metadata === undefined || !(SENDER_TRUST_METADATA_KEY in metadata)) {
+    return 'user';
+  }
+  const recorded = metadata[SENDER_TRUST_METADATA_KEY];
+  return isTrustLevel(recorded) ? recorded : 'unknown';
 };
 
 /**
