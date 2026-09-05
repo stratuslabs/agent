@@ -60,9 +60,19 @@ tools: [fs.read, fs.search, web.fetch]
 
 `fs.*` grants a whole toolset, so an agent given "the filesystem" does not
 need editing every time the pack gains a tool. The prefix keeps its dot:
-`fs.*` never matches `fsx.read`. Listing nothing grants every registered
+`fs.*` never matches `fsx.read`. Omitting the key grants every registered
 tool, which is fine for a private agent and is not what you want once a
 shell is installed.
+
+**Omitting `tools:` and writing `tools: []` are opposites.** No key grants
+everything; an empty list grants nothing. A bare `tools:` with nothing
+indented under it is the empty list — the shape you get by writing the key
+and not filling it, or by deleting the last entry — so that one is warned
+about too:
+
+```
+agent blair has an empty tools: list, which grants nothing — remove the key to allow every registered tool, or list the ones it should have
+```
 
 **An entry naming a tool nothing provides is inert, and says so.** A `fs.*`
 whose plugin is not installed, or a name with a typo in it, grants nothing —

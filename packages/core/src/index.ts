@@ -429,6 +429,12 @@ export interface ToolAllowlistFinding {
 /**
  * Undefined when there is nothing to say: an agent with no `tools:` key is
  * allowed every registered tool and cannot name one that does not exist.
+ *
+ * An *empty* list is not that agent. Omitting the key grants everything
+ * while `tools: []` grants nothing, and the parser keeps them apart — a
+ * bare `tools:` with nothing under it lands here too, which is the shape
+ * someone gets by writing the key and not filling it, or by deleting the
+ * last entry. There are no entries to name, so the finding carries none.
  */
 export const unmatchedToolAllowlist = (
   agent: Pick<AgentDefinition, 'tools'>,
@@ -436,8 +442,11 @@ export const unmatchedToolAllowlist = (
   mayRegister: readonly string[] = [],
 ): ToolAllowlistFinding | undefined => {
   const allowlist = agent.tools;
-  if (!allowlist || allowlist.length === 0) {
+  if (!allowlist) {
     return undefined;
+  }
+  if (allowlist.length === 0) {
+    return { unmatched: [], inert: [], none: true };
   }
   // Each entry judged on its own, because the question is which entry is
   // dead rather than whether the list as a whole selects anything: an
@@ -501,6 +510,17 @@ export const describeToolAllowlistFinding = (
   finding: ToolAllowlistFinding,
 ): string[] => {
   const lines: string[] = [];
+  // An allowlist that grants nothing with no entry to blame can only be the
+  // empty one, so the shape identifies itself and needs no field of its own.
+  // Its fix is its own: there is no name to correct and no plugin to
+  // install, and the two spellings of "everything" and "nothing" are one
+  // line apart in the file.
+  if (finding.none && finding.unmatched.length === 0 && finding.inert.length === 0) {
+    return [
+      `agent ${agentId} has an empty tools: list, which grants nothing`
+        + ' — remove the key to allow every registered tool, or list the ones it should have',
+    ];
+  }
   if (finding.unmatched.length > 0) {
     lines.push(
       `agent ${agentId} lists tools nothing registered provides: ${finding.unmatched.join(', ')}`
