@@ -2054,8 +2054,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // understand, and a daemon that kept writing into them would be the
     // downgrade the stamp exists to refuse — from the inside. Inside the
     // session chain, so a turn already accepted is counted by the drain
-    // before this waits on anything. One small file read per turn.
-    await assertStateCompatible(env);
+    // before anything else runs. One small file read per turn.
+    assertStateCompatible(env);
     // A dispatch whose signal fired while it queued behind another turn
     // must not touch durable state: without this check, the runner would
     // load the session, append the cancelled user message, and save it as
@@ -2588,11 +2588,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // check and this start, and the sweeps below save sessions in this
     // build's shape. Checked before the channels bind rather than after —
     // the control API announces its address the moment it is up, and every
-    // await between that announcement and `serving = true` is a window in
-    // which a restart asked for at once is refused as "still starting".
+    // I/O await between that announcement and `serving = true` is a window
+    // in which a restart asked for at once is refused as "still starting".
     // The scheduler's own readiness check, which runs after the channels,
-    // covers a stamp that advances while a slow channel is coming up.
-    await assertStateCompatible(env);
+    // covers a stamp that advances while a slow channel is coming up, and
+    // it is synchronous for the same reason: the check is a file read, and
+    // an async one in that stretch failed CI's restart tests twice.
+    assertStateCompatible(env);
     await loadRoster();
     const named = registry.list().map((agent) => agent.name).join(', ');
     log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
@@ -2906,7 +2908,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         // The same stamp check a turn runs: a rollover rewrites a session
         // in this build's shape, and a newer build may have stamped the
         // home with fields this one would drop on the way through.
-        await assertStateCompatible(env);
+        assertStateCompatible(env);
         const existing = await store.get(sessionId);
         if (!existing) {
           throw new Error(`No session with id ${sessionId}. GET /sessions lists what exists.`);

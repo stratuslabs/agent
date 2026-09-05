@@ -65,7 +65,11 @@ test('a stamp from a newer build is refused, not guessed at', async () => {
   await mkdir(path.dirname(stateFilePath(env)), { recursive: true });
   await writeFile(stateFilePath(env), JSON.stringify({ schemaVersion: STATE_SCHEMA_VERSION + 1, applied: [] }));
 
-  await assert.rejects(() => assertStateCompatible(env), /newer Stratus build/);
+  // Thrown, not rejected: the gateway runs this check between the control
+  // API announcing its address and the daemon marking itself serving, and a
+  // check that yielded for I/O there was the window in which CI's restart
+  // tests were refused as "still starting".
+  assert.throws(() => assertStateCompatible(env), /newer Stratus build/);
   await assert.rejects(() => runStateMigrations(env), /newer Stratus build/);
 });
 

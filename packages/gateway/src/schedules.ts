@@ -216,8 +216,13 @@ export interface SchedulerRuntimeOptions {
    * live daemon stops its firings as well as its turns — a claimed slot is
    * a write into state this build no longer understands, and a one-shot
    * whose firing was refused afterwards would be retired unfired.
+   *
+   * May be synchronous, and the gateway's is: `start()` runs between the
+   * control API announcing its address and the daemon marking itself
+   * serving, and I/O there is a window in which a restart is refused as
+   * "still starting".
    */
-  ready?(): Promise<void>;
+  ready?(): void | Promise<void>;
   log(line: string): void;
   warn(line: string): void;
 }

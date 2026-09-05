@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { appendFile, chmod, cp, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -1089,27 +1090,20 @@ export const STATE_MIGRATIONS: readonly StateMigration[] = [
   PROVENANCE_LABELS_MIGRATION,
 ];
 
+const unversionedStamp = (): StateStamp => ({ schemaVersion: 0, applied: [] });
+
 /**
- * The stamp as it stands. A missing file — every install that predates
- * versioning, and every fresh one — reads as schema 0 with nothing applied:
- * all migrations pending, each of which must therefore be a no-op on a home
- * directory it has nothing to do in.
+ * Missing, or something other than a file where the stamp belongs (a
+ * directory, a path through one): unversioned, like a corrupt stamp. The
+ * write that follows fails on the same obstacle, and that failure is what
+ * refuses a state-writing command — see the CLI.
  */
-export const readStateStamp = async (env: StateEnvironment): Promise<StateStamp> => {
-  let raw: string;
-  try {
-    raw = await readFile(stateFilePath(env), 'utf8');
-  } catch (error) {
-    // Missing, or something other than a file where the stamp belongs (a
-    // directory, a path through one): unversioned, like a corrupt stamp
-    // below. The write that follows fails on the same obstacle, and that
-    // failure is what refuses a state-writing command — see the CLI.
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'EISDIR' || code === 'ENOTDIR') {
-      return { schemaVersion: 0, applied: [] };
-    }
-    throw error;
-  }
+const isAbsentStamp = (error: unknown): boolean => {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === 'ENOENT' || code === 'EISDIR' || code === 'ENOTDIR';
+};
+
+const parseStateStamp = (raw: string): StateStamp => {
   try {
     const parsed = JSON.parse(raw) as Partial<StateStamp> | null;
     if (typeof parsed === 'object' && parsed !== null && typeof parsed.schemaVersion === 'number') {
@@ -1125,7 +1119,48 @@ export const readStateStamp = async (env: StateEnvironment): Promise<StateStamp>
   // migration is idempotent, so re-running them costs nothing, while
   // refusing to run would brick every command over a file this build can
   // simply rewrite.
-  return { schemaVersion: 0, applied: [] };
+  return unversionedStamp();
+};
+
+/**
+ * The stamp as it stands. A missing file — every install that predates
+ * versioning, and every fresh one — reads as schema 0 with nothing applied:
+ * all migrations pending, each of which must therefore be a no-op on a home
+ * directory it has nothing to do in.
+ */
+export const readStateStamp = async (env: StateEnvironment): Promise<StateStamp> => {
+  let raw: string;
+  try {
+    raw = await readFile(stateFilePath(env), 'utf8');
+  } catch (error) {
+    if (isAbsentStamp(error)) {
+      return unversionedStamp();
+    }
+    throw error;
+  }
+  return parseStateStamp(raw);
+};
+
+/**
+ * The same stamp, read without yielding to the event loop. The gateway
+ * checks it inside its start-up, between the control API announcing its
+ * address and the daemon marking itself serving, and any I/O in that
+ * stretch is a window in which a restart asked for the moment the address
+ * appears is refused as "still starting" — CI's restart tests hit it twice.
+ * One small file, read synchronously the way the SQLite stores already
+ * read, keeps that stretch to microtasks.
+ */
+const readStateStampSync = (env: StateEnvironment): StateStamp => {
+  let raw: string;
+  try {
+    raw = readFileSync(stateFilePath(env), 'utf8');
+  } catch (error) {
+    if (isAbsentStamp(error)) {
+      return unversionedStamp();
+    }
+    throw error;
+  }
+  return parseStateStamp(raw);
 };
 
 const writeStateStamp = async (env: StateEnvironment, stamp: StateStamp): Promise<void> => {
@@ -1146,9 +1181,12 @@ export const newerStateMessage = (found: number): string =>
   + 'Running an older build against it risks corrupting state the newer format relies on.\n'
   + 'Upgrade this install (`npm install -g @stratusagent/cli`), or point STRATUS home at a different directory.';
 
-/** Throws when the stamp was written by a newer schema than this build knows. */
-export const assertStateCompatible = async (env: StateEnvironment): Promise<void> => {
-  const stamp = await readStateStamp(env);
+/**
+ * Throws when the stamp was written by a newer schema than this build knows.
+ * Synchronous on purpose — see `readStateStampSync`.
+ */
+export const assertStateCompatible = (env: StateEnvironment): void => {
+  const stamp = readStateStampSync(env);
   if (stamp.schemaVersion > STATE_SCHEMA_VERSION) {
     throw new Error(newerStateMessage(stamp.schemaVersion));
   }
