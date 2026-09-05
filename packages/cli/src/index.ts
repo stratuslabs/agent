@@ -905,7 +905,9 @@ Commands:
                    from outside). --trust <level> filters; --format json
   memory reassert  Re-label entries as an operator: stratus memory reassert
                    <agent> --trust user <id>..., or --all-unknown for every
-                   entry with no recorded origin (the upgrade case). Appends
+                   entry with no recorded origin (the upgrade case; an
+                   entry recorded unknown — a stranger's message, a shell
+                   command — is left for you to name by id). Appends
                    a record to ~/.stratus/memory.jsonl; a running daemon
                    sees it on its next turn. The only way a label ever
                    rises — no tool can do this
@@ -6489,8 +6491,19 @@ export const runMemory = async (
   streams: CliStreams,
   env: CliEnvironment = {},
 ): Promise<number> => {
-  await migrateLegacyMemory(env);
+  // Only the writer folds a legacy per-directory store in: `list` is the
+  // read-only command a downgraded build is allowed to run against newer
+  // state, and a migration is a write.
+  if (command.action === 'reassert') {
+    await migrateLegacyMemory(env);
+  }
   const store = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
+  // Two ways an entry reads `unknown`, and only one is the upgrade case:
+  // no label at all (written before labels existed, or added by hand), or a
+  // recorded `unknown` — a session that heard from a sender nobody vouched
+  // for, or ran a shell command. The bulk re-assertion is for the first;
+  // the second may hold a stranger's text and is named by id, once read.
+  const unlabelled = (entry: MemoryEntry): boolean => entry.trust === undefined;
   const describeEntry = (entry: MemoryEntry): Record<string, unknown> => ({
     id: entry.id,
     trust: memoryEntryTrust(entry),
@@ -6517,17 +6530,29 @@ export const runMemory = async (
     }
     for (const entry of live) {
       const taintedBy = entry.origin?.taintedBy ? `  (tainted by ${entry.origin.taintedBy})` : '';
-      writeLine(streams.stdout, `${entry.id}  [${memoryEntryTrust(entry)}]${taintedBy}`);
+      const unrecorded = unlabelled(entry) ? '  (no recorded origin)' : '';
+      writeLine(streams.stdout, `${entry.id}  [${memoryEntryTrust(entry)}]${taintedBy}${unrecorded}`);
       writeLine(streams.stdout, `  ${entry.content}`);
     }
-    const unknownCount = live.filter((entry) => memoryEntryTrust(entry) === 'unknown').length;
-    if (unknownCount > 0 && command.trust === undefined) {
-      writeLine(streams.stdout, '');
-      writeLine(
-        streams.stdout,
-        `${unknownCount} entr${unknownCount === 1 ? 'y has' : 'ies have'} no recorded origin, so any session that reads one writes unknown. `
-        + `Review them, then: stratus memory reassert ${command.agentId} --trust user --all-unknown (or name ids).`,
-      );
+    if (command.trust === undefined) {
+      const unlabelledCount = live.filter(unlabelled).length;
+      const recordedUnknown = live.filter((entry) => !unlabelled(entry) && memoryEntryTrust(entry) === 'unknown').length;
+      if (unlabelledCount > 0) {
+        writeLine(streams.stdout, '');
+        writeLine(
+          streams.stdout,
+          `${unlabelledCount} entr${unlabelledCount === 1 ? 'y has' : 'ies have'} no recorded origin, so any session that reads one writes unknown. `
+          + `Review them, then: stratus memory reassert ${command.agentId} --trust user --all-unknown (or name ids).`,
+        );
+      }
+      if (recordedUnknown > 0) {
+        writeLine(streams.stdout, '');
+        writeLine(
+          streams.stdout,
+          `${recordedUnknown} entr${recordedUnknown === 1 ? 'y was' : 'ies were'} recorded unknown — written after a message from someone not configured as a principal, or after a shell command — `
+          + 'and may repeat what a stranger said. --all-unknown leaves these alone; re-assert one by id once you have read it.',
+        );
+      }
     }
     return 0;
   }
@@ -6539,10 +6564,10 @@ export const runMemory = async (
   const trust = command.trust ?? 'user';
   const live = (await store.list(command.agentId)).entries;
   const targets = command.allUnknown
-    ? [...new Set([...live.filter((entry) => memoryEntryTrust(entry) === 'unknown').map((entry) => entry.id), ...command.ids])]
+    ? [...new Set([...live.filter(unlabelled).map((entry) => entry.id), ...command.ids])]
     : command.ids;
   if (targets.length === 0) {
-    writeLine(streams.stdout, `${command.agentId} has no live entries reading unknown; nothing to re-assert.`);
+    writeLine(streams.stdout, `${command.agentId} has no live entries with no recorded origin; nothing to re-assert. An entry recorded unknown is named by id.`);
     return 0;
   }
   const missing: string[] = [];

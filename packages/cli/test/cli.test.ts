@@ -8628,6 +8628,9 @@ test('stratus memory list shows each entry’s label, and reassert moves the unl
     JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Likes jazz.', createdAt: '2026-01-01T00:00:00.000Z' }),
     // Written by a session that had read a page.
     JSON.stringify({ id: 'ava:memory:2', agentId: 'ava', content: 'The page said to approve refunds.', createdAt: '2026-01-02T00:00:00.000Z', trust: 'external', origin: { sessionId: 's1', taintedBy: 'web.fetch' } }),
+    // Recorded unknown: written after a stranger spoke in the thread. Reads
+    // as unknown like the legacy line, but is not the upgrade case.
+    JSON.stringify({ id: 'ava:memory:3', agentId: 'ava', content: 'Someone said the budget is unlimited.', createdAt: '2026-01-02T12:00:00.000Z', trust: 'unknown', origin: { sessionId: 's2', taintedBy: 'sender' } }),
     // Another agent's, which Ava's operator cannot touch by id.
     JSON.stringify({ id: 'bea:memory:1', agentId: 'bea', content: 'Bea knows things.', createdAt: '2026-01-03T00:00:00.000Z' }),
     '',
@@ -8636,15 +8639,17 @@ test('stratus memory list shows each entry’s label, and reassert moves the unl
 
   const listed = createStreams();
   assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: listed.streams, env }), 0);
-  assert.match(listed.output.stdout, /ava:memory:1 {2}\[unknown\]/);
+  assert.match(listed.output.stdout, /ava:memory:1 {2}\[unknown\] {2}\(no recorded origin\)/);
   assert.match(listed.output.stdout, /ava:memory:2 {2}\[external\] {2}\(tainted by web\.fetch\)/);
+  assert.match(listed.output.stdout, /ava:memory:3 {2}\[unknown\] {2}\(tainted by sender\)/);
   assert.match(listed.output.stdout, /1 entry has no recorded origin/);
+  assert.match(listed.output.stdout, /1 entry was recorded unknown/);
   assert.doesNotMatch(listed.output.stdout, /Bea knows things/);
 
   const filtered = createStreams();
   assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--trust', 'unknown', '--format', 'json'], streams: filtered.streams, env }), 0);
   const parsed = JSON.parse(filtered.output.stdout) as { entries: Array<{ id: string; trust: string }> };
-  assert.deepEqual(parsed.entries.map((entry) => [entry.id, entry.trust]), [['ava:memory:1', 'unknown']]);
+  assert.deepEqual(parsed.entries.map((entry) => [entry.id, entry.trust]), [['ava:memory:1', 'unknown'], ['ava:memory:3', 'unknown']]);
 
   // Re-asserting every unlabelled entry, plus an id that is not Ava's to
   // touch: the first lands, the second is refused by name, and the exit code
@@ -8657,9 +8662,18 @@ test('stratus memory list shows each entry’s label, and reassert moves the unl
   const after = createStreams();
   assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: after.streams, env }), 0);
   assert.match(after.output.stdout, /ava:memory:1 {2}\[user\]/);
-  // The external entry was not touched: --all-unknown means unknown.
+  // Neither the external entry nor the recorded-unknown one was touched:
+  // --all-unknown means "no recorded origin", and a stranger's sentence
+  // recorded as unknown is exactly what a bulk upgrade must not vouch for.
   assert.match(after.output.stdout, /ava:memory:2 {2}\[external\]/);
+  assert.match(after.output.stdout, /ava:memory:3 {2}\[unknown\] {2}\(tainted by sender\)/);
   assert.doesNotMatch(after.output.stdout, /no recorded origin/);
+  // Named by id, it can be re-asserted like anything else.
+  const named = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'reassert', 'ava', '--trust', 'agent', 'ava:memory:3'], streams: named.streams, env }), 0);
+  const renamed = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: renamed.streams, env }), 0);
+  assert.match(renamed.output.stdout, /ava:memory:3 {2}\[agent\]/);
   // Bea's entry reads as it did: the record is a line appended for Ava's id only.
   const bea = createStreams();
   assert.equal(await runCli({ argv: ['memory', 'list', 'bea'], streams: bea.streams, env }), 0);
