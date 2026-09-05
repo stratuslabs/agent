@@ -148,6 +148,16 @@ test('fs.write refuses to edit the ledger itself, even inside a root that covers
   const read = marking();
   await run(tools, 'fs.read', { path: 'ava/notes.md' }, sessionAt('ava', 'user'), read.context);
   assert.deepEqual(read.marks, ['external']);
+
+  // Another agent's ledger is refused too — and only the ledger: a project
+  // file that happens to share the name, one level deeper, is an ordinary
+  // write.
+  await assert.rejects(
+    () => run(tools, 'fs.write', { path: `bea/${LEDGER_FILENAME}`, content: '{}' }, sessionAt('ava', 'agent')),
+    /provenance ledger/,
+  );
+  await run(tools, 'fs.write', { path: `ava/project/${LEDGER_FILENAME}`, content: '{"theirs":true}' }, sessionAt('ava', 'agent'));
+  assert.equal(await readFile(path.join(workspaceRoot, 'ava', 'project', LEDGER_FILENAME), 'utf8'), '{"theirs":true}');
 });
 
 test('without a workspace root the ledger is process-local, and still closes the loop inside the process', async () => {

@@ -842,7 +842,7 @@ export interface Gateway {
    * memory it injects was re-asserted. A session boundary is the only move
    * that neither strands the conversation nor quietly raises trust over a
    * transcript nobody re-read: the old session stays exactly what it was,
-   * under `<id>:rolledover:<time>`, and the fresh one starts at the top of
+   * under `<id>:rolledover:<time>-<suffix>`, and the fresh one starts at the top of
    * the lattice with only the routing metadata the channel needs to keep
    * finding it. The fresh session is still `unknown` on its first turn if
    * the memory it injects is — correctly, and that is the case that
@@ -2893,7 +2893,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           throw new Error(`Session ${sessionId} is an archived transcript; roll over the live session ${String(existing.metadata[ROLLED_OVER_TO_METADATA_KEY])} instead.`);
         }
         const now = new Date().toISOString();
-        const archivedAs = `${sessionId}${ROLLED_OVER_SESSION_ID_MARKER}${now.replace(/[:.]/g, '-')}`;
+        // The time for a reader, a random suffix for uniqueness: two rollovers
+        // of one session are serialized on its chain, but inside one
+        // millisecond they would mint the same id, and `save` replaces — the
+        // second would write the emptied row over the first archive and lose
+        // the transcript the rollover exists to keep.
+        const archivedAs = `${sessionId}${ROLLED_OVER_SESSION_ID_MARKER}${now.replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;
         // The archive is the old row whole — messages, usage, provider
         // replay state, its label — under a new id. `save` keeps the
         // timestamps it is given, so the archive's `createdAt` is the

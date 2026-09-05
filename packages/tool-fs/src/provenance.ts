@@ -170,11 +170,21 @@ export const createFileLedger = (workspaceRoot: string): TaintedWriteLedger => {
   };
 };
 
-/** Whether `absolutePath` is a ledger file under `workspaceRoot` — the one path `fs.write` refuses. */
+/**
+ * Whether `absolutePath` is an agent's ledger — exactly
+ * `<workspaceRoot>/<agentId>/fs-provenance.json`, any agent's — which is the
+ * one path `fs.write` refuses. Exactly that depth, not any descendant with
+ * the name: a project an agent keeps under its workspace may legitimately
+ * have a file called `fs-provenance.json` of its own.
+ */
 export const isLedgerPath = (workspaceRoot: string | undefined, absolutePath: string): boolean => {
-  if (workspaceRoot === undefined || path.basename(absolutePath) !== LEDGER_FILENAME) {
+  if (workspaceRoot === undefined) {
     return false;
   }
   const relative = path.relative(workspaceRoot, absolutePath);
-  return relative.length > 0 && !relative.startsWith('..') && !path.isAbsolute(relative);
+  if (relative.length === 0 || relative.startsWith('..') || path.isAbsolute(relative)) {
+    return false;
+  }
+  const segments = relative.split(path.sep);
+  return segments.length === 2 && segments[1] === LEDGER_FILENAME;
 };

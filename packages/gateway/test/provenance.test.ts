@@ -198,6 +198,14 @@ test('a rollover archives the transcript and starts the same id over — the rem
     assert.deepEqual(continued.messages.filter((m) => m.role === 'user').map((m) => m.content), ['say hello']);
     assert.equal(sessionWriteTrust(continued), 'agent');
 
+    // A second rollover, straight after the first, archives the new
+    // transcript under its own id — the first archive is untouched, whatever
+    // the clock did in between.
+    const second = await gateway.rolloverSession('dm-1');
+    assert.notEqual(second.archivedAs, archivedAs);
+    assert.equal((await gateway.store.get(archivedAs))?.messages.length, 4);
+    assert.equal((await gateway.store.get(second.archivedAs))?.messages.filter((m) => m.role === 'user').length, 1);
+
     // The archive is a record, not a conversation.
     await assert.rejects(() => gateway.dispatch({ sessionId: archivedAs, userMessage: 'psst' }), /rolled over/);
     await assert.rejects(() => gateway.rolloverSession(archivedAs), /archived transcript/);
