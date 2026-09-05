@@ -259,10 +259,10 @@ importers:
       '@stratusagent/core':
         specifier: workspace:*
         version: link:../core
-    devDependencies:
       '@stratusagent/plugins':
         specifier: workspace:*
         version: link:../plugins
+    devDependencies:
       '@types/node':
         specifier: ^24.6.0
         version: 24.12.2

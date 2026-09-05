@@ -96,7 +96,9 @@ tainted sessions chose.
 What this does not cover, said plainly: a copy under another name, a file a
 different process or a different agent wrote, content pasted through a path
 the ledger never saw. It closes the sequence one agent can perform by
-itself. Loaded without a `workspaceRoot` — a host wiring the plugin by hand
+itself. The ledger lives in `@stratusagent/plugins` (re-exported here), so a
+plugin that puts a server's bytes on disk without `fs.write` — `plugin-mcp`
+writing a bridged tool's image — records into the same file. Loaded without a `workspaceRoot` — a host wiring the plugin by hand
 rather than through the loader — the ledger is process-local, and the
 read-back-next-week case survives only as long as the process does. The
 labels themselves are documented in

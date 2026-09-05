@@ -2,6 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { JsonObject, JsonValue } from '@stratusagent/core';
+import type { TaintedWriteLedger } from '@stratusagent/plugins';
 
 /**
  * Turning what an MCP server sends back into what a Stratus tool returns:
@@ -77,6 +78,15 @@ export interface NormalizeOptions {
    */
   workspaceRoot?: string;
   agentId: string;
+  /**
+   * The filesystem provenance ledger for `workspaceRoot`. A binary block
+   * is a server's bytes written to disk without going through `fs.write`,
+   * so the write records itself here at `external` before the bytes land —
+   * a later `fs.read` of the file then carries the label the tool result
+   * did. Without a ledger the file is written unrecorded, which is what
+   * the loader-less host case gets.
+   */
+  ledger?: TaintedWriteLedger;
   /** Clock seam for deterministic file names in tests. */
   now?: () => number;
 }
@@ -140,6 +150,10 @@ export const normalizeCallResult = async (
       directory,
       `${sanitizeToolSegment(options.tool) ?? 'tool'}-${stamp}-${fileSerial}.${extensionFor(typeof mimeType === 'string' ? mimeType : undefined)}`,
     );
+    // Recorded before the bytes land, like a tainted `fs.write`: a crash
+    // between the two leaves a labelled path with no file, never a file
+    // with no label.
+    await options.ledger?.recordWrite(options.agentId, file, 'external');
     await writeFile(file, Buffer.from(data, 'base64'));
     files.push(file);
   };

@@ -25,6 +25,7 @@ import {
   type Session,
   type Tool,
 } from '@stratusagent/core';
+import { createFileLedger } from '@stratusagent/plugins';
 import { ManifestBoundToolRegistry, parsePluginManifest } from '@stratusagent/plugins';
 
 import {
@@ -283,6 +284,11 @@ test('structured content passes through, and an image lands in the per-agent wor
     assert.ok(files[0]!.endsWith('.png'));
     assert.deepEqual(await readFile(files[0]!), png);
     assert.deepEqual(await readdir(path.join(workspaceRoot, 'ava', 'mcp', 'linear')), [path.basename(files[0]!)]);
+    // A server's bytes on disk, written without `fs.write`: recorded in the
+    // same ledger `tool-fs` reads, so a later `fs.read` of the file carries
+    // the label this result did rather than arriving as the agent's own.
+    const ledger = createFileLedger(workspaceRoot);
+    assert.equal(await ledger.lookup('ava', files[0]!), 'external');
   } finally {
     await plugin.dispose?.();
   }

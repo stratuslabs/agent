@@ -15,7 +15,16 @@ import {
   type Tool,
   type TrustLevel,
 } from '@stratusagent/core';
-import { resolvePluginAgentConfig } from '@stratusagent/plugins';
+import {
+  createFileLedger,
+  createProcessLocalLedger,
+  ledgerContentTrust,
+  ledgerGuard,
+  resolvePluginAgentConfig,
+  type FileIdentity,
+  type LedgerGuard,
+  type TaintedWriteLedger,
+} from '@stratusagent/plugins';
 
 import {
   isRealDirectory,
@@ -23,15 +32,6 @@ import {
   resolveWithinRoots,
   type ResolvedPath,
 } from './paths.ts';
-import {
-  createFileLedger,
-  createProcessLocalLedger,
-  ledgerContentTrust,
-  ledgerGuard,
-  type FileIdentity,
-  type LedgerGuard,
-  type TaintedWriteLedger,
-} from './provenance.ts';
 
 export {
   canonicalRoots,
@@ -40,6 +40,8 @@ export {
   PathOutsideRootError,
   resolveWithinRoots,
 } from './paths.ts';
+// The ledger moved to the plugin host the moment it got a second writer
+// (`plugin-mcp`); re-exported from its old home so no importer breaks.
 export {
   createFileLedger,
   createProcessLocalLedger,
@@ -48,7 +50,7 @@ export {
   type FileIdentity,
   type LedgerGuard,
   type TaintedWriteLedger,
-} from './provenance.ts';
+} from '@stratusagent/plugins';
 
 /** Defaults chosen so a tool result is something a model can actually read. */
 const O_NOFOLLOW_FLAG = constants.O_NOFOLLOW ?? 0;
@@ -323,7 +325,7 @@ const ledgerContentTrustAmong = async (
   const labels: TrustLevel[] = [];
   for (const [absolutePath, identity] of named) {
     if (await guard(absolutePath, identity)) {
-      const label = await ledgerContentTrust(absolutePath);
+      const label = await ledgerContentTrust(absolutePath, identity);
       if (label !== undefined) {
         labels.push(label);
       }

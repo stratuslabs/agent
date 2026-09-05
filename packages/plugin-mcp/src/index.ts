@@ -17,6 +17,7 @@ import {
   type Tool,
   type ToolRegistry,
 } from '@stratusagent/core';
+import { createFileLedger } from '@stratusagent/plugins';
 
 import {
   bridgedToolName,
@@ -713,6 +714,9 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
   const delayFor = options.reconnectDelayMs
     ?? ((attempt: number) => Math.min(RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, RECONNECT_MAX_DELAY_MS));
   const workspaceRoot = typeof config.workspaceRoot === 'string' ? config.workspaceRoot : undefined;
+  // The same ledger `tool-fs` reads, so a server's image or audio block
+  // written here reads back labelled there.
+  const ledger = workspaceRoot !== undefined ? createFileLedger(workspaceRoot) : undefined;
 
   if (!isObject(config.servers)) {
     throw new McpConfigError(
@@ -794,6 +798,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
         tool: info.mcpName,
         agentId: session.agent.id,
         ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+        ...(ledger !== undefined ? { ledger } : {}),
       });
     },
   });

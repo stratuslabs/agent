@@ -1,4 +1,5 @@
-import { appendFile, chmod, mkdir, readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { appendFile, chmod, mkdir, open, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
 
@@ -25,6 +26,10 @@ import { isTrustLevel, leastTrusted, type TrustLevel } from '@stratusagent/core'
  * One file per agent, under the agent's own workspace — next to the roots
  * `tool-fs` already resolves per call, and keyed the same way, because two
  * agents with different roots is the whole point of the per-agent block.
+ * It lives in the plugin host rather than in `tool-fs` because `tool-fs`
+ * is not the only plugin that puts a server's bytes on disk: `plugin-mcp`
+ * writes a bridged tool's image and audio blocks into the same workspace,
+ * and a file that bypassed `fs.write` would otherwise read back unlabelled.
  * Without a workspace root (a host that loaded the plugin outside the
  * loader) the ledger is process-local and says so in its name: the
  * read-back-next-week case then survives only as long as the daemon does.
@@ -137,14 +142,38 @@ const parseLedger = (raw: string, filePath: string): Record<string, TrustLevel> 
  * empty one; `unknown` for a file that holds lines nothing here can read
  * — nobody vouches for those.
  */
-export const ledgerContentTrust = async (ledgerFilePath: string): Promise<TrustLevel | undefined> => {
+export const ledgerContentTrust = async (
+  ledgerFilePath: string,
+  /**
+   * The inode the caller read the ledger at. Given, the bytes judged are
+   * read from that inode or not at all: a name swapped for an empty file
+   * after the caller's read would otherwise be read here as "no label",
+   * while the result still shows the ledger's contents. A swap reads
+   * `unknown` — nobody can vouch for bytes they can no longer see.
+   */
+  identity?: FileIdentity,
+): Promise<TrustLevel | undefined> => {
   let raw: string;
   try {
-    raw = await readFile(ledgerFilePath, 'utf8');
+    if (identity !== undefined) {
+      const handle = await open(ledgerFilePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      try {
+        const info = await handle.stat();
+        if (info.dev !== identity.dev || info.ino !== identity.ino) {
+          return 'unknown';
+        }
+        raw = (await handle.readFile()).toString('utf8');
+      } finally {
+        await handle.close();
+      }
+    } else {
+      raw = await readFile(ledgerFilePath, 'utf8');
+    }
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') {
-      return undefined;
+    if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR' || code === 'ELOOP') {
+      // With an inode in hand, a name that no longer opens is a swap too.
+      return identity !== undefined ? 'unknown' : undefined;
     }
     throw error;
   }

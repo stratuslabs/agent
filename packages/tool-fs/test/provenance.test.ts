@@ -15,6 +15,8 @@ import {
   type TrustLevel,
 } from '@stratusagent/core';
 
+import { ledgerContentTrust } from '@stratusagent/plugins';
+
 import { createFsPlugin, LEDGER_FILENAME, ledgerGuard, openContained } from '../src/index.ts';
 
 const registryFor = async (config: JsonObject): Promise<ToolRegistry> => {
@@ -496,11 +498,17 @@ test('the ledger guard judges the inode a caller holds, not whatever the name po
   const info = await stat(alias);
   const held = { dev: info.dev, ino: info.ino };
   await rm(alias);
-  await writeFile(alias, 'ordinary');
+  await writeFile(alias, '');
   const guard = await ledgerGuard(workspaceRoot);
   assert.equal(await guard(alias, held), true);
   // Without the inode the guard can only ask the name, which now lies.
   assert.equal(await guard(alias), false);
+  // And the label is read from the held inode too: the swapped-in file is
+  // empty, which would read as "no label" while the bytes shown were the
+  // ledger's. A name that no longer opens to that inode reads unknown.
+  assert.equal(await ledgerContentTrust(alias, held), 'unknown');
+  assert.equal(await ledgerContentTrust(alias), undefined);
+  assert.equal(await ledgerContentTrust(ledgerPath, { dev: (await stat(ledgerPath)).dev, ino: (await stat(ledgerPath)).ino }), 'external');
 });
 
 test('two writes racing to create one file both land: the loser looks again and writes what is there', async () => {
