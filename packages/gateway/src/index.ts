@@ -1420,11 +1420,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // than the skills reload below: the registry only gains tools when
     // plugins load, which happens once, before the roster (see `start`).
     // An entry naming a tool nobody registered does nothing, and a whole
-    // allowlist of them leaves an agent able to call none — which is not
-    // a quiet degradation, because a persona that still says "use
-    // memory.remember" then meets a provider handed no tools at all, and
-    // a model told to use a tool it has not got tends to write the call
-    // out as prose, with a plausible result attached.
+    // allowlist of them grants an agent nothing — which is not a quiet
+    // degradation, because a persona that still says "use memory.remember"
+    // then meets a provider that was shown no such tool, and a model told
+    // to use a tool it has not got tends to write the call out as prose,
+    // with a plausible result attached.
     const registeredTools = tools.describe().map((tool) => tool.name);
     for (const agent of registry.list()) {
       for (const { skill, missing } of missingSkillRequirements(agent, skillCatalog)) {
@@ -1433,7 +1433,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       const unmatched = unmatchedToolAllowlist(agent, registeredTools);
       if (unmatched) {
         warn(unmatched.none
-          ? `agent ${agent.id} lists only tools nothing registered provides (${unmatched.unmatched.join(', ')}), so it can call none — check the names, or install the plugin that provides them`
+          ? `agent ${agent.id} lists only tools nothing registered provides (${unmatched.unmatched.join(', ')}), so its allowlist grants nothing — check the names, or install the plugin that provides them`
           : `agent ${agent.id} lists tools nothing registered provides: ${unmatched.unmatched.join(', ')}`);
       }
     }

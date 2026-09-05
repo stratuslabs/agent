@@ -390,11 +390,17 @@ export interface SkillRequirementFinding {
  * `unmatched` are the entries selecting no tool at all — a `fs.*` whose
  * plugin was never installed, a name with a typo in it. `none` says every
  * entry was such an entry, which is the case worth shouting about: the
- * agent reaches its provider with an empty tool list while its persona may
- * still tell it to use tools, and a model told to use a tool it has not
+ * agent's allowlist grants it nothing, so none of the tools its persona
+ * talks about are there to call, and a model told to use a tool it has not
  * been given tends to write the call out as prose instead — with a
  * plausible result attached, which reads to everyone as the thing having
  * happened.
+ *
+ * `none` is a statement about the ALLOWLIST, not about everything the
+ * provider will be shown. `skill.read` rides on the `skills:` gate rather
+ * than this one, so an agent with a skill enabled still has that much; it
+ * is not one of the tools the soul was written around, which is why the
+ * finding is still worth reporting in full.
  *
  * Advisory rather than fatal, like `missingSkillRequirements`: an
  * allowlist naming a tool the operator has not installed yet is a normal

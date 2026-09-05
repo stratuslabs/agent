@@ -857,7 +857,7 @@ test('a soul listing only tools nothing provides is warned about, and still runs
   // whose persona still talks about tools it cannot call is the setup for a
   // model writing the call out as text instead.
   assert.equal(exitCode, 0);
-  assert.match(output.stderr, /agent blair lists only tools nothing registered provides \(fs\.\*, memory\.rememberr\), so it can call none/);
+  assert.match(output.stderr, /agent blair lists only tools nothing registered provides \(fs\.\*, memory\.rememberr\), so its allowlist grants nothing/);
 });
 
 test('runCli denies tool calls when approvals are set to never', async () => {

@@ -2263,7 +2263,7 @@ const createAgentRuntime = async (
     writeLine(
       streams.stderr,
       unmatched.none
-        ? `Warning: agent ${agent.id} lists only tools nothing registered provides (${unmatched.unmatched.join(', ')}), so it can call none — check the names, or install the plugin that provides them`
+        ? `Warning: agent ${agent.id} lists only tools nothing registered provides (${unmatched.unmatched.join(', ')}), so its allowlist grants nothing — check the names, or install the plugin that provides them`
         : `Warning: agent ${agent.id} lists tools nothing registered provides: ${unmatched.unmatched.join(', ')}`,
     );
   }

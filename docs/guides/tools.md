@@ -78,14 +78,17 @@ If *every* entry is like that, the warning says so plainly, because the
 consequence is bigger than a dead line in a file:
 
 ```
-agent blair lists only tools nothing registered provides (fs.*, memory.rememberr), so it can call none — check the names, or install the plugin that provides them
+agent blair lists only tools nothing registered provides (fs.*, memory.rememberr), so its allowlist grants nothing — check the names, or install the plugin that provides them
 ```
 
-That agent reaches its provider with an empty tool list while its persona
-may still talk about the tools it was written for — and a model told to use
-a tool it has not been given tends to write the call out as prose, often
-with a plausible-looking result attached. It reads like the thing happened.
-Nothing ran.
+None of the tools that agent's persona talks about are there to call — and
+a model told to use a tool it has not been given tends to write the call out
+as prose, often with a plausible-looking result attached. It reads like the
+thing happened. Nothing ran.
+
+(An agent with `skills:` still gets `skill.read`, which rides on that gate
+rather than this one. It is not one of the tools the soul was written
+around, so the warning still stands.)
 
 ## What is available
 

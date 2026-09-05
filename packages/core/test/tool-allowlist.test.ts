@@ -272,8 +272,10 @@ test('an allowlist entry naming no registered tool is reported, and a whole allo
     none: false,
   });
 
-  // Every entry dead: the agent reaches its provider with no tools at all,
-  // which is the case a host should say more about.
+  // Every entry dead: the allowlist grants nothing, so none of the tools the
+  // soul was written around are there — the case a host should say more
+  // about. A statement about the allowlist, not about `skill.read`, which
+  // rides on the skills gate instead.
   assert.deepEqual(unmatchedToolAllowlist({ tools: ['fs.*', 'web.search'] }, registered), {
     unmatched: ['fs.*', 'web.search'],
     none: true,
