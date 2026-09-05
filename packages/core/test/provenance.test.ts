@@ -15,6 +15,7 @@ import {
   leastTrusted,
   escapeControlCharacters,
   memoryRegionHeading,
+  lowerSessionTrust,
   senderTrustOf,
   renderMemorySection,
   sessionTrustOf,
@@ -412,6 +413,23 @@ test('a fact cannot forge a region heading: every entry renders on one line, con
   ]);
   assert.ok(!rendered.includes('\u001b'));
   assert.equal(escapeControlCharacters('a\tb\rc\u0085d\u2028e'), 'a\\tb\\rc\\u0085d\\u2028e');
+});
+
+test('a stored session label nobody can read starts the session at unknown, never user', () => {
+  const session: Session = {
+    id: 's-malformed',
+    agent: AGENT,
+    status: 'running',
+    messages: [],
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    metadata: { [SESSION_TRUST_METADATA_KEY]: 'trusted' },
+  };
+  assert.equal(sessionTrustOf(session), 'unknown');
+  // The first clean turn evaluates the session; it must not come out `user`.
+  assert.equal(lowerSessionTrust(session, 'user', 'sender'), false);
+  assert.equal(sessionTrustOf(session), 'unknown');
+  assert.equal(sessionWriteTrust(session), 'unknown');
 });
 
 test('a sender label a channel misspelled reads unknown, and only a missing one reads user', () => {

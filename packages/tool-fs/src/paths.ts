@@ -180,7 +180,14 @@ export const openContained = async (
   flags: number,
   mode?: number,
 ): Promise<Awaited<ReturnType<typeof open>>> => {
-  const handle = await open(resolved.path, flags | O_NOFOLLOW, mode);
+  // A resolution that found nothing there has no inode to verify, so the
+  // open is exclusive instead: the decision was made about an empty name,
+  // and a file that appeared under it since — another process hard-linking
+  // the provenance ledger into place is the case that matters, since
+  // O_NOFOLLOW does not see a hard link — fails with EEXIST rather than
+  // being truncated. The caller decides whether to look again.
+  const exclusive = resolved.exists ? 0 : constants.O_EXCL;
+  const handle = await open(resolved.path, flags | O_NOFOLLOW | exclusive, mode);
   if (resolved.identity) {
     const info = await handle.stat();
     if (info.dev !== resolved.identity.dev || info.ino !== resolved.identity.ino) {

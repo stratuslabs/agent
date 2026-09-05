@@ -874,8 +874,10 @@ const createWriteTool = (
     // tainted. An agent whose roots cover its own workspace could otherwise
     // rewrite that record through this very tool — the attack writing its
     // own permission slip — so the one file the tool never writes is it.
+    const ledgerRefusal = (target: string): Error =>
+      new Error(`${target} is the filesystem provenance ledger, which fs.write does not edit.`);
     if (await (await isLedger())(resolved.path)) {
-      throw new Error(`${resolved.path} is the filesystem provenance ledger, which fs.write does not edit.`);
+      throw ledgerRefusal(resolved.path);
     }
 
     // The directories a write would create, deepest last. A directory's
@@ -936,7 +938,29 @@ const createWriteTool = (
       // O_NOFOLLOW is applied by openContained: a symlink sitting at the
       // destination must fail rather than write through to its target,
       // which is the write half of the escape a read-only check would miss.
-      const handle = await openContained(resolved, flags | (constants.O_NONBLOCK ?? 0), 0o644);
+      // A destination resolved as empty is opened exclusively there too.
+      let handle;
+      try {
+        handle = await openContained(resolved, flags | (constants.O_NONBLOCK ?? 0), 0o644);
+      } catch (error) {
+        if (resolved.exists || (error as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw error;
+        }
+        // Something appeared under a name that was empty when the
+        // containment check ran: a peer writing the same new file, or a
+        // hard link of the ledger put there to be truncated — which
+        // O_NOFOLLOW cannot see and an exclusive create refuses. Decide
+        // again about what is there now, ledger guard included, and open
+        // it with its identity checked, so the honest case still lands.
+        const present = await resolveWithinRoots(settings.roots, requested, { home: settings.home, allowMissing: true });
+        if (!present.exists || present.kind !== 'file') {
+          throw new Error(`${present.path} is not a regular file.`);
+        }
+        if (await (await isLedger())(present.path)) {
+          throw ledgerRefusal(present.path);
+        }
+        handle = await openContained(present, flags | (constants.O_NONBLOCK ?? 0), 0o644);
+      }
       try {
         await handle.writeFile(content, 'utf8');
       } finally {

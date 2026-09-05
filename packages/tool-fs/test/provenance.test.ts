@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { constants } from 'node:fs';
 import assert from 'node:assert/strict';
 import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -14,7 +15,7 @@ import {
   type TrustLevel,
 } from '@stratusagent/core';
 
-import { createFsPlugin, LEDGER_FILENAME } from '../src/index.ts';
+import { createFsPlugin, LEDGER_FILENAME, openContained } from '../src/index.ts';
 
 const registryFor = async (config: JsonObject): Promise<ToolRegistry> => {
   const tools = new ToolRegistry();
@@ -443,6 +444,34 @@ test('a hard link to the ledger from inside a root is the ledger: same bytes, re
   const own = marking();
   await run(tools, 'fs.read', { path: 'own.md' }, sessionAt('ava', 'user'), own.context);
   assert.deepEqual(own.marks, []);
+});
+
+test('a file that appears under a name resolved as empty is never truncated: the open is exclusive', async () => {
+  const { root, workspaceRoot } = await workspace();
+  // The ledger, with a record in it, and a hard link of it placed at the
+  // name a write resolved as empty a moment earlier — what a peer process
+  // could do between the containment check and the open.
+  const ledgerPath = path.join(workspaceRoot, 'ava', LEDGER_FILENAME);
+  await mkdir(path.dirname(ledgerPath), { recursive: true });
+  await writeFile(ledgerPath, `${JSON.stringify({ path: path.join(root, 'x.md'), trust: 'external', at: 'now' })}\n`);
+  const target = path.join(root, 'new.md');
+  await link(ledgerPath, target);
+  await assert.rejects(
+    () => openContained({ path: target, root, exists: false }, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC, 0o644),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === 'EEXIST',
+  );
+  assert.match(await readFile(ledgerPath, 'utf8'), /x\.md/);
+});
+
+test('two writes racing to create one file both land: the loser looks again and writes what is there', async () => {
+  const { root, workspaceRoot } = await workspace();
+  const tools = await registryFor({ roots: [root], workspaceRoot });
+  await Promise.all([
+    run(tools, 'fs.write', { path: 'race/new.md', content: 'first' }, sessionAt('ava', 'agent')),
+    run(tools, 'fs.write', { path: 'race/new.md', content: 'second' }, sessionAt('ava', 'agent')),
+  ]);
+  const content = await readFile(path.join(root, 'race', 'new.md'), 'utf8');
+  assert.ok(content === 'first' || content === 'second', content);
 });
 
 test('a file’s name is the tainted session’s text too: a listing or a skipped-file report that names it is marked', async () => {

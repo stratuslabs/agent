@@ -2265,7 +2265,11 @@ export const sessionWriteTrust = (session: Pick<Session, 'metadata'>): TrustLeve
  */
 export const lowerSessionTrust = (session: Session, trust: TrustLevel, source: string): boolean => {
   const recorded = session.metadata?.[SESSION_TRUST_METADATA_KEY];
-  const current: TrustLevel = isTrustLevel(recorded) ? recorded : 'user';
+  // No key is a session nothing has judged yet, which starts at `user`; a
+  // key holding something that is not a label is a record nobody can read,
+  // and `sessionTrustOf` already reads that as `unknown` — starting it at
+  // `user` here would let the first clean turn overwrite it as trusted.
+  const current: TrustLevel = recorded === undefined ? 'user' : isTrustLevel(recorded) ? recorded : 'unknown';
   const next = leastTrusted(current, trust);
   const lowered = next !== current;
   session.metadata = {
@@ -2486,7 +2490,9 @@ export class AgentRunner {
    * this shipped. Marking it `external` would be the other overcorrection.
    */
   private async labelLegacySession(session: Session): Promise<void> {
-    if (session.metadata?.[SESSION_TRUST_METADATA_KEY] === undefined) {
+    // A label nobody recognises is no label: a hand-edited or corrupted
+    // value is the legacy case too, and reads `unknown` from here on.
+    if (!isTrustLevel(session.metadata?.[SESSION_TRUST_METADATA_KEY])) {
       await this.taint(session, 'unknown', 'legacy');
     }
   }
