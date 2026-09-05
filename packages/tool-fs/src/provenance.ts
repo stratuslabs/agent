@@ -38,56 +38,50 @@ export interface TaintedWriteLedger {
    */
   snapshot(agentId: string): Promise<Record<string, TrustLevel>>;
   /**
-   * Record a write. A truncating write from a clean session (`user` or
-   * `agent`) clears the path: the bytes there are now that session's. An
-   * append keeps whatever label was recorded, since the tainted bytes are
-   * still in the file, lowered further if the appending session is lower.
+   * Record a write at the writing session's label. A record only ever goes
+   * down and never clears — not even when a clean session later rewrites
+   * the file whole — because the path was the tainted session's choice as
+   * much as the bytes were, and because a clearing is the one record that
+   * could race a tainted write from another process into leaving tainted
+   * bytes unlabelled. Over-marking is the safe direction; an operator who
+   * wants a path back removes its lines from the ledger by hand. A clean
+   * session's write records nothing.
    */
-  recordWrite(agentId: string, absolutePath: string, trust: TrustLevel, options: { append: boolean }): Promise<void>;
+  recordWrite(agentId: string, absolutePath: string, trust: TrustLevel): Promise<void>;
 }
 
 /** The ledger's filename inside an agent's workspace. Exported so `fs.write` can refuse to write it. */
 export const LEDGER_FILENAME = 'fs-provenance.jsonl';
 
 /**
- * One line of the ledger: a path took a label, or lost it (`trust: null`).
- * The file is append-only and replayed in order, so the last record for a
- * path stands — the same concurrency model as the memory JSONL, and for the
- * same reason: the daemon and a one-shot `stratus run` can both write an
- * agent's files, and a read-modify-replace from two processes drops one
- * side's record. Two appends drop nothing.
+ * One line of the ledger: a path took a label. The file is append-only and
+ * labels only go down, so replay takes the lowest record for a path in any
+ * order — the same concurrency model as the memory JSONL, and for the same
+ * reason: the daemon and a one-shot `stratus run` can both write an agent's
+ * files, and a read-modify-replace from two processes drops one side's
+ * record. Two appends drop nothing, and with nothing ever clearing there is
+ * no ordering between processes to get wrong either.
  */
 interface LedgerRecord {
   path: string;
-  trust: TrustLevel | null;
+  trust: TrustLevel;
   at: string;
 }
 
 const tainted = (trust: TrustLevel): boolean => trust === 'external' || trust === 'unknown';
 
+/** The ledger after a write at `trust`: the same object when nothing changed. */
 const nextPaths = (
   paths: Record<string, TrustLevel>,
   absolutePath: string,
   trust: TrustLevel,
-  append: boolean,
 ): Record<string, TrustLevel> => {
-  const recorded = paths[absolutePath];
-  if (append) {
-    // The old bytes are still there: the label can only go down.
-    const combined = recorded !== undefined ? leastTrusted(recorded, trust) : trust;
-    if (!tainted(combined)) {
-      return paths;
-    }
-    return { ...paths, [absolutePath]: combined };
-  }
-  if (tainted(trust)) {
-    return { ...paths, [absolutePath]: trust };
-  }
-  if (recorded === undefined) {
+  if (!tainted(trust)) {
     return paths;
   }
-  const { [absolutePath]: _cleared, ...rest } = paths;
-  return rest;
+  const recorded = paths[absolutePath];
+  const combined = recorded !== undefined ? leastTrusted(recorded, trust) : trust;
+  return combined === recorded ? paths : { ...paths, [absolutePath]: combined };
 };
 
 /** In-process only. See `TaintedWriteLedger` for when this is what a host gets. */
@@ -100,8 +94,8 @@ export const createProcessLocalLedger = (): TaintedWriteLedger => {
     async snapshot(agentId) {
       return { ...(byAgent.get(agentId) ?? {}) };
     },
-    async recordWrite(agentId, absolutePath, trust, options) {
-      byAgent.set(agentId, nextPaths(byAgent.get(agentId) ?? {}, absolutePath, trust, options.append));
+    async recordWrite(agentId, absolutePath, trust) {
+      byAgent.set(agentId, nextPaths(byAgent.get(agentId) ?? {}, absolutePath, trust));
     },
   };
 };
@@ -122,11 +116,12 @@ const parseLedger = (raw: string, filePath: string): Record<string, TrustLevel> 
       continue;
     }
     const record = parsed as Partial<LedgerRecord>;
+    // Order-independent on purpose: labels only ever go down, so the lowest
+    // record for a path stands whichever process appended first. A label
+    // nobody recognises is no record.
     if (isTrustLevel(record.trust) && tainted(record.trust)) {
-      paths[record.path!] = record.trust;
-    } else {
-      // A clearing, or a label nobody recognises: either way, no record.
-      delete paths[record.path!];
+      const recorded = paths[record.path!];
+      paths[record.path!] = recorded !== undefined ? leastTrusted(recorded, record.trust) : record.trust;
     }
   }
   return paths;
@@ -165,15 +160,14 @@ export const createFileLedger = (workspaceRoot: string): TaintedWriteLedger => {
   return {
     lookup: (agentId, absolutePath) => read(agentId).then((paths) => paths[absolutePath]),
     snapshot: (agentId) => read(agentId),
-    recordWrite(agentId, absolutePath, trust, options) {
+    recordWrite(agentId, absolutePath, trust) {
       const work = chain.then(async () => {
         const filePath = ledgerPath(agentId);
         const before = await read(agentId);
-        const paths = nextPaths(before, absolutePath, trust, options.append);
-        // A clean write that had nothing to clear changes nothing, and a
-        // ledger rewritten for no reason would make every ordinary write a
-        // file replacement — and a failure, on a host whose workspace root
-        // is unwritable, of a write that never needed the ledger at all.
+        const paths = nextPaths(before, absolutePath, trust);
+        // A clean write records nothing, and a path already at this label
+        // or lower needs no second line — so a host whose workspace root is
+        // unwritable fails only the writes that needed the ledger.
         if (paths === before) {
           return;
         }
@@ -189,7 +183,7 @@ export const createFileLedger = (workspaceRoot: string): TaintedWriteLedger => {
         }
         const record: LedgerRecord = {
           path: absolutePath,
-          trust: paths[absolutePath] ?? null,
+          trust: paths[absolutePath]!,
           at: new Date().toISOString(),
         };
         await appendFile(filePath, `${JSON.stringify(record)}\n`, { mode: 0o600 });

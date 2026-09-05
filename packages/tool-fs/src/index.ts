@@ -270,13 +270,10 @@ const recordedTrustAmong = async (
   /**
    * The ledger as it stood before the files were read. A listing or a
    * search cannot hold every path it touches under a lock, so it reads
-   * the ledger on both sides of the walk and honours whichever is lower:
-   * a record cleared by a clean write mid-walk still counts, and one added
-   * by a tainted write mid-walk — recorded before its bytes land — is in
-   * the second read. What this cannot see is a tainted write landing and a
-   * clean write clearing it both inside one walk, which is two writes
-   * racing one search; full provenance on a shared filesystem is the
-   * different project the README names.
+   * the ledger on both sides of the walk and honours whichever is lower,
+   * so a record added by a tainted write mid-walk — recorded before its
+   * bytes land — is in the second read. Records never clear, so there is
+   * no third case.
    */
   before: Record<string, TrustLevel>,
 ): Promise<TrustLevel | undefined> => {
@@ -863,7 +860,6 @@ const createWriteTool = (
       : constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC;
 
     const trust = sessionTrustOf(session);
-    const append = input.append === true;
     // One step per path, ledger and bytes together — see the serializer.
     await serialized(resolved.path, async () => {
       // A write from a session at `external` or `unknown` records the path
@@ -873,14 +869,14 @@ const createWriteTool = (
       // them rather than a durable file or directory with no label — the
       // second is exactly the laundering this ledger exists to close, and
       // the first over-marks, which is the safe direction. A clean
-      // session's write is the other way round: it clears a record only
-      // once the write has succeeded, since a failed write leaves the
-      // tainted bytes in place.
+      // session's write records nothing, and clears nothing: the ledger
+      // is monotonic per path, so no interleaving with another process
+      // can pair tainted bytes with a cleared record.
       if (isTaintedTrust(trust)) {
         for (const parent of missingParents) {
-          await ledger.recordWrite(session.agent.id, parent, trust, { append: false });
+          await ledger.recordWrite(session.agent.id, parent, trust);
         }
-        await ledger.recordWrite(session.agent.id, resolved.path, trust, { append });
+        await ledger.recordWrite(session.agent.id, resolved.path, trust);
       }
 
       if (!resolved.exists) {
@@ -899,10 +895,6 @@ const createWriteTool = (
         await handle.writeFile(content, 'utf8');
       } finally {
         await handle.close();
-      }
-
-      if (!isTaintedTrust(trust)) {
-        await ledger.recordWrite(session.agent.id, resolved.path, trust, { append });
       }
     });
 

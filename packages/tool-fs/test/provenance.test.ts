@@ -162,31 +162,35 @@ test('an unknown session’s writes are recorded at unknown, and the label is pe
   assert.deepEqual(bea.marks, []);
 });
 
-test('a truncating write from a clean session clears the record; an append keeps it', async () => {
+test('a record never clears: a clean rewrite leaves the label, and a lower write lowers it', async () => {
   const { root, workspaceRoot } = await workspace();
   const tools = await registryFor({ roots: [root], workspaceRoot });
   await run(tools, 'fs.write', { path: 'draft.md', content: 'fetched text' }, sessionAt('ava', 'external'));
 
-  // Appending the agent's own line leaves the fetched bytes in the file.
-  await run(tools, 'fs.write', { path: 'draft.md', content: '\nmy addendum', append: true }, sessionAt('ava', 'agent'));
-  const appended = marking();
-  await run(tools, 'fs.read', { path: 'draft.md' }, sessionAt('ava', 'user'), appended.context);
-  assert.deepEqual(appended.marks, ['external']);
-
-  // Rewriting the file from a clean session makes its bytes that session's.
+  // The agent rewrites the file whole in a clean session. The bytes are its
+  // own now; the path was the tainted session's choice, and a clearing is
+  // the one record another process's tainted write could race — so the
+  // label stands. Over-marking, the safe direction.
   await run(tools, 'fs.write', { path: 'draft.md', content: 'rewritten by hand' }, sessionAt('ava', 'agent'));
   const rewritten = marking();
   await run(tools, 'fs.read', { path: 'draft.md' }, sessionAt('ava', 'user'), rewritten.context);
-  assert.deepEqual(rewritten.marks, []);
+  assert.deepEqual(rewritten.marks, ['external']);
 
-  // An append from a lower session lowers a recorded label; from a higher
-  // one it cannot raise it.
+  // A lower write lowers a recorded label; a higher one cannot raise it,
+  // appending or not.
   await run(tools, 'fs.write', { path: 'log.md', content: 'unlabelled note' }, sessionAt('ava', 'unknown'));
   await run(tools, 'fs.write', { path: 'log.md', content: '\nfrom the page', append: true }, sessionAt('ava', 'external'));
   await run(tools, 'fs.write', { path: 'log.md', content: '\nmine', append: true }, sessionAt('ava', 'agent'));
   const lowered = marking();
   await run(tools, 'fs.read', { path: 'log.md' }, sessionAt('ava', 'user'), lowered.context);
   assert.deepEqual(lowered.marks, ['external']);
+
+  // One line per label change, none for the clean writes.
+  const lines = (await readFile(path.join(workspaceRoot, 'ava', LEDGER_FILENAME), 'utf8')).trim().split('\n');
+  assert.deepEqual(
+    lines.map((line) => { const record = JSON.parse(line) as { path: string; trust: string }; return [path.basename(record.path), record.trust]; }),
+    [['draft.md', 'external'], ['log.md', 'unknown'], ['log.md', 'external']],
+  );
 });
 
 test('fs.write refuses to edit the ledger itself, even inside a root that covers it', async () => {
@@ -245,13 +249,12 @@ test('a tainted write is recorded before its bytes land, so a ledger that cannot
   // The bytes never landed: a fresh session cannot find an unlabelled copy.
   await assert.rejects(() => stat(path.join(root, 'fetched.md')), /ENOENT/);
 
-  // A clean session's write still lands — its bookkeeping is a clearing,
-  // which runs after the write and has nothing to clear here.
+  // A clean session's write still lands — it has nothing to record.
   await run(tools, 'fs.write', { path: 'own.md', content: 'mine' }, sessionAt('ava', 'agent'));
   assert.equal((await readFile(path.join(root, 'own.md'), 'utf8')), 'mine');
 });
 
-test('two sessions writing one path at once leave the ledger agreeing with the bytes, whichever landed last', async () => {
+test('two sessions writing one path at once never leave tainted bytes unlabelled, whichever landed last', async () => {
   const { root, workspaceRoot } = await workspace();
   const tools = await registryFor({ roots: [root], workspaceRoot });
   for (let round = 0; round < 10; round += 1) {
@@ -281,10 +284,11 @@ test('two sessions writing one path at once leave the ledger agreeing with the b
     const bytes = await readFile(path.join(root, target), 'utf8');
     const read = marking();
     await run(tools, 'fs.read', { path: target }, sessionAt('ava', 'user'), read.context);
-    // Whichever write won, the label says so: tainted bytes are labelled,
-    // clean bytes are not. The failure this guards against is tainted bytes
-    // under no label.
-    assert.deepEqual(read.marks, bytes === 'fetched' ? ['external'] : [], `round ${round}: bytes "${bytes}" with marks ${JSON.stringify(read.marks)}`);
+    // Whichever write won, a tainted write happened on this path and the
+    // label says so. The failure this guards against is tainted bytes under
+    // no label; clean bytes under a label is the over-marking the ledger
+    // accepts.
+    assert.deepEqual(read.marks, ['external'], `round ${round}: bytes "${bytes}" with marks ${JSON.stringify(read.marks)}`);
   }
 });
 

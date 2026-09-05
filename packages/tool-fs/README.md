@@ -83,7 +83,11 @@ that file's contents — or its name, or the name of a directory on its path,
 which the tainted session chose — in front of the model labels the call at
 the recorded level — so
 the reading session, and every fact it remembers afterwards, carries it. A
-truncating write from a clean session clears the record; an append keeps it.
+record never clears — the path was the tainted session's choice as much as
+the bytes, and a clearing is the one record a tainted write from another
+process could race into leaving tainted bytes unlabelled — so a clean session
+rewriting the file leaves the label standing. Over-marking is the safe
+direction; to reclaim a path, remove its lines from the ledger by hand.
 The ledger is the daemon's record, and `fs.write` refuses to edit it even
 inside a root that covers it.
 
