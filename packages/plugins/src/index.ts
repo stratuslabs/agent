@@ -54,6 +54,7 @@ export {
   LEDGER_FILENAME,
   ledgerContentTrust,
   ledgerGuard,
+  ledgerTrustOfContent,
   type FileIdentity,
   type LedgerGuard,
   type TaintedWriteLedger,

@@ -984,7 +984,7 @@ const STATE_FILENAME = 'state.json';
  * whose absence a newer build must be able to detect — the daemon refuses
  * to run against a HIGHER version than it understands.
  */
-export const STATE_SCHEMA_VERSION = 1;
+export const STATE_SCHEMA_VERSION = 2;
 
 export const stateFilePath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), STATE_FILENAME);
@@ -1068,8 +1068,25 @@ const OWNER_ONLY_STATE_FILES_MIGRATION: StateMigration = {
 };
 
 /** Ordered. Append only — an id that has shipped is never reordered or reused. */
+/**
+ * Schema 2 changes nothing on disk and exists to be refused: memory
+ * entries, sessions, schedules, and the filesystem provenance ledger now
+ * carry trust labels, and a build that predates them would read an
+ * `external` fact as the agent's own conclusion and keep writing unlabelled
+ * state beside the labelled kind. Stamping the version is what makes a
+ * downgraded daemon stop at the door instead.
+ */
+const PROVENANCE_LABELS_MIGRATION: StateMigration = {
+  id: '0002-provenance-labels',
+  description: 'stamp the state as carrying provenance labels, so an older build refuses it rather than ignoring them',
+  async apply() {
+    return undefined;
+  },
+};
+
 export const STATE_MIGRATIONS: readonly StateMigration[] = [
   OWNER_ONLY_STATE_FILES_MIGRATION,
+  PROVENANCE_LABELS_MIGRATION,
 ];
 
 /**

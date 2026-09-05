@@ -18,6 +18,14 @@ is serving, because this path does not stop the managed service — only
 `stratus update` does. A migration needing exclusive access to shared state
 is not registered until the registry can require that bracket.)
 
+Schema 2 is the first stamp that exists only to be refused: since
+[provenance](../concepts/memory.md#where-a-fact-came-from) landed, memory
+entries, sessions, schedules, and the filesystem provenance ledger carry
+trust labels, and a build from before them would read an `external` fact as
+the agent's own conclusion and keep writing unlabelled state beside the
+labelled kind. Nothing is rewritten on the way up; on the way down, a build
+that understands schema 1 refuses to write.
+
 One thing a rollback does lose, and it is not stamped: an agent's
 `origins` grants. `<id>.whitelist.json` holds both kinds of grant under the
 same version, so a daemon predating [browser actions](./browser.md) reads

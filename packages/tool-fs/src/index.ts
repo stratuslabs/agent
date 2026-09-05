@@ -20,6 +20,7 @@ import {
   createProcessLocalLedger,
   ledgerContentTrust,
   ledgerGuard,
+  ledgerTrustOfContent,
   resolvePluginAgentConfig,
   type FileIdentity,
   type LedgerGuard,
@@ -215,18 +216,26 @@ const createReadTool = (
     // Per call, not per tool: most files an agent reads are its operator's,
     // and only the ones a tainted session wrote carry a label — see the
     // ledger. Bytes and label are read as one step under the path's own
-    // lock, so a write landing between them cannot pair old bytes with a
-    // new record. Marked after the read succeeded, since a refused read
-    // put nothing in front of the model.
+    // lock, so a write from this process landing between them cannot pair
+    // old bytes with a new record; a write from another process is not
+    // under this lock, so the ledger is read on both sides of the bytes
+    // (`recordedTrustAmong` takes the second snapshot) and the lower label
+    // stands — a peer records before its bytes land, so a record missing
+    // from the first read is in the second. Marked after the read
+    // succeeded, since a refused read put nothing in front of the model.
     const { result, recorded } = await serialized(resolved.path, async () => {
       const snapshot = await ledger.snapshot(session.agent.id);
+      const contents = await readContained(resolved, maxBytes);
       return {
-        result: await readContained(resolved, maxBytes),
+        result: contents,
         // The result names the file's path, directories included — see
         // `withAncestors`.
         recorded: lowest(
           await recordedTrustAmong(ledger, session.agent.id, [resolved.path], resolved.root, snapshot),
-          await ledgerContentTrustAmong(isLedger, [[resolved.path, resolved.identity]]),
+          await ledgerContentTrustAmong(isLedger, [[resolved.path, {
+            identity: resolved.identity,
+            ...(contents.binary ? {} : { raw: contents.content, truncated: contents.truncated }),
+          }]]),
         ),
       };
     });
@@ -316,19 +325,44 @@ const recordedTrustAmong = async (
  * listing that names it is not: the filename is fixed, and nothing in it
  * was anyone's choice.
  */
+/** What a result showed of one file: the inode it was read at, and the bytes, when the caller still holds them. */
+interface ShownFile {
+  identity?: FileIdentity | undefined;
+  /** The bytes the model was shown, when the whole file was read as text. */
+  raw?: string | undefined;
+  /** True when `raw` is a prefix of the file, not all of it. */
+  truncated?: boolean | undefined;
+}
+
 const ledgerContentTrustAmong = async (
   isLedger: () => Promise<LedgerGuard>,
-  /** Each path with the inode it was read at, when the caller holds one — see `LedgerGuard`. */
-  named: Iterable<readonly [string, FileIdentity | undefined]>,
+  named: Iterable<readonly [string, ShownFile]>,
 ): Promise<TrustLevel | undefined> => {
   const guard = await isLedger();
   const labels: TrustLevel[] = [];
-  for (const [absolutePath, identity] of named) {
-    if (await guard(absolutePath, identity)) {
-      const label = await ledgerContentTrust(absolutePath, identity);
-      if (label !== undefined) {
-        labels.push(label);
-      }
+  for (const [absolutePath, shown] of named) {
+    if (!(await guard(absolutePath, shown.identity))) {
+      continue;
+    }
+    // Judged on the bytes the model saw whenever the caller still has
+    // them, never on a fresh read: a peer rewriting the ledger in place
+    // after the read leaves the inode alone and the bytes changed. A
+    // prefix of a ledger is at most `unknown` — the records it cut off
+    // may sit lower than any it kept.
+    let label: TrustLevel | undefined;
+    if (shown.raw === undefined) {
+      label = await ledgerContentTrust(absolutePath, shown.identity);
+    } else if (!shown.truncated) {
+      label = ledgerTrustOfContent(shown.raw);
+    } else {
+      label = leastTrusted(
+        'unknown',
+        ledgerTrustOfContent(shown.raw) ?? 'unknown',
+        (await ledgerContentTrust(absolutePath, shown.identity)) ?? 'unknown',
+      );
+    }
+    if (label !== undefined) {
+      labels.push(label);
     }
   }
   return labels.length > 0 ? leastTrusted(...labels) : undefined;
@@ -703,7 +737,7 @@ const createSearchTool = (
     // the call the way `fs.read` of it would. A file that produced no match
     // and was not skipped puts nothing in front of the model.
     // Keyed by path, holding the inode each was read at — see `LedgerGuard`.
-    const namedFiles = new Map<string, FileIdentity | undefined>();
+    const namedFiles = new Map<string, ShownFile>();
     const ledgerBefore = await ledger.snapshot(session.agent.id);
     // What the walk looked past, said outright. A file over the size
     // limit used to vanish from the result: a search of a directory holding
@@ -720,7 +754,7 @@ const createSearchTool = (
       if (skipped.length < MAX_SKIPPED_REPORTED) {
         skipped.push(entry);
         // `entry.path` is relative to the root the search resolved in.
-        namedFiles.set(path.join(resolved.root, entry.path), identity);
+        namedFiles.set(path.join(resolved.root, entry.path), { identity });
       }
     };
     const report = async (): Promise<JsonObject> => {
@@ -750,7 +784,7 @@ const createSearchTool = (
       // us directly can.
       throw new Error(`${resolved.path} is not a regular file.`);
     }
-    const record = (file: string, index: number, line: string, identity: FileIdentity | undefined): boolean => {
+    const record = (file: string, index: number, line: string, shown: ShownFile): boolean => {
       if (matches.length >= limit) {
         truncated = true;
         return false;
@@ -760,7 +794,7 @@ const createSearchTool = (
         line: index + 1,
         text: line.length > 400 ? `${line.slice(0, 400)}…` : line,
       });
-      namedFiles.set(file, identity);
+      namedFiles.set(file, shown);
       return true;
     };
 
@@ -775,6 +809,13 @@ const createSearchTool = (
       const { size, lines } = opened;
       const before = matches.length;
       const truncatedBefore = truncated;
+      // A file named outright is streamed, not held — except the ledger,
+      // whose label is judged on the bytes shown (see
+      // `ledgerContentTrustAmong`), so its lines are kept as they pass.
+      // Known before the stream starts, from the resolution's inode.
+      const isLedgerFile = await (await isLedger())(resolved.path, resolved.identity);
+      const kept: string[] = [];
+      const shown: ShownFile = { identity: resolved.identity };
       // Past the match cap the file is still read to its end, no longer
       // matched: the binary verdict is decided on every chunk, and a NUL
       // after the cap would otherwise go unseen, leaving matches from a
@@ -794,10 +835,17 @@ const createSearchTool = (
           break;
         }
         clipped ||= line.clipped;
-        if (!capped && matchesWithin(pattern, line) && !record(resolved.path, index, line.text, resolved.identity)) {
+        if (isLedgerFile) {
+          kept.push(line.text);
+        }
+        if (!capped && matchesWithin(pattern, line) && !record(resolved.path, index, line.text, shown)) {
           capped = true;
         }
         index += 1;
+      }
+      if (isLedgerFile) {
+        shown.raw = kept.join('\n');
+        shown.truncated = clipped || opened.capped;
       }
       if (clipped) {
         skip({
@@ -848,9 +896,10 @@ const createSearchTool = (
       if (looksBinary(contents)) {
         continue;
       }
-      const lines = contents.toString('utf8').split('\n');
+      const text = contents.toString('utf8');
+      const lines = text.split('\n');
       for (const [index, line] of lines.entries()) {
-        if (pattern.test(line) && !record(file, index, line, identity)) {
+        if (pattern.test(line) && !record(file, index, line, { identity, raw: text })) {
           break;
         }
       }

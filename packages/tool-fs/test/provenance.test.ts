@@ -15,7 +15,7 @@ import {
   type TrustLevel,
 } from '@stratusagent/core';
 
-import { ledgerContentTrust } from '@stratusagent/plugins';
+import { ledgerContentTrust, ledgerTrustOfContent } from '@stratusagent/plugins';
 
 import { createFsPlugin, LEDGER_FILENAME, ledgerGuard, openContained } from '../src/index.ts';
 
@@ -509,6 +509,16 @@ test('the ledger guard judges the inode a caller holds, not whatever the name po
   assert.equal(await ledgerContentTrust(alias, held), 'unknown');
   assert.equal(await ledgerContentTrust(alias), undefined);
   assert.equal(await ledgerContentTrust(ledgerPath, { dev: (await stat(ledgerPath)).dev, ino: (await stat(ledgerPath)).ino }), 'external');
+});
+
+test('a ledger’s label is judged on the bytes the model was shown', async () => {
+  const record = (file: string, trust: string) => JSON.stringify({ path: file, trust, at: 'now' });
+  assert.equal(ledgerTrustOfContent(''), undefined);
+  assert.equal(ledgerTrustOfContent(`${record('/a', 'unknown')}\n${record('/b', 'external')}\n`), 'external');
+  assert.equal(ledgerTrustOfContent(`${record('/a', 'unknown')}\n`), 'unknown');
+  // A cut-off line, or a line nothing here can read: nobody vouches.
+  assert.equal(ledgerTrustOfContent(`${record('/a', 'unknown')}\n{"path":"/b","tru`), 'unknown');
+  assert.equal(ledgerTrustOfContent('not a ledger'), 'unknown');
 });
 
 test('two writes racing to create one file both land: the loser looks again and writes what is there', async () => {

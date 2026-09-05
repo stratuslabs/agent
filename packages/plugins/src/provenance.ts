@@ -177,12 +177,24 @@ export const ledgerContentTrust = async (
     }
     throw error;
   }
+  return ledgerTrustOfContent(raw);
+};
+
+/**
+ * The label a ledger's bytes carry: the lowest recorded label, `unknown`
+ * for lines nothing here can read, nothing for an empty file. Pure over the
+ * bytes, so a caller that already holds what it showed the model — an
+ * `fs.read` result, a search's file contents — judges exactly that, and a
+ * peer rewriting the ledger in place after the read (same inode, new
+ * bytes) cannot make the shown lines read as unlabelled.
+ */
+export const ledgerTrustOfContent = (raw: string): TrustLevel | undefined => {
   if (raw.trim().length === 0) {
     return undefined;
   }
   let labels: TrustLevel[];
   try {
-    labels = Object.values(parseLedger(raw, ledgerFilePath));
+    labels = Object.values(parseLedger(raw, 'the ledger as read'));
   } catch {
     return 'unknown';
   }
