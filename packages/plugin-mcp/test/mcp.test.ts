@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -289,6 +289,38 @@ test('structured content passes through, and an image lands in the per-agent wor
     // the label this result did rather than arriving as the agent's own.
     const ledger = createFileLedger(workspaceRoot);
     assert.equal(await ledger.lookup('ava', files[0]!), 'external');
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('an image written through a linked workspace is recorded under the path a read would ask for', async () => {
+  const png = Buffer.from('89504e470d0a1a0a', 'hex');
+  const handle = fakeServer({
+    current: (server) => {
+      server.registerTool('chart', { description: 'Render a chart.' }, async () => ({
+        content: [{ type: 'image', data: png.toString('base64'), mimeType: 'image/png' }],
+      }));
+    },
+  });
+  // The operator moved the workspaces onto another volume and left a link;
+  // `fs.read` canonicalizes every path before it asks the ledger, so a
+  // record under the link's spelling would never be found.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-ws-'));
+  const real = path.join(home, 'volume', 'workspaces');
+  await mkdir(real, { recursive: true });
+  const linked = path.join(home, 'workspaces');
+  await symlink(real, linked);
+  const target = new ToolRegistry();
+  const plugin = pluginFor(handle, { workspaceRoot: linked });
+  await loadThroughView(plugin, target);
+  try {
+    const output = await target.get('mcp.linear.chart')!.execute({}, sessionFor('ava')) as JsonObject;
+    const [file] = output.files as string[];
+    assert.ok(file);
+    assert.equal(file, await realpath(file));
+    assert.ok(file.startsWith(path.join(await realpath(real), 'ava', 'mcp', 'linear') + path.sep));
+    assert.equal(await createFileLedger(linked).lookup('ava', file), 'external');
   } finally {
     await plugin.dispose?.();
   }

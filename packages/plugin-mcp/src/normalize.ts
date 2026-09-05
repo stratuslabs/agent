@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { JsonObject, JsonValue } from '@stratusagent/core';
@@ -138,8 +138,13 @@ export const normalizeCallResult = async (
       texts.push(`[binary ${typeof mimeType === 'string' ? mimeType : 'content'} dropped: no workspaceRoot is configured for @stratusagent/plugin-mcp]`);
       return;
     }
-    const directory = path.join(options.workspaceRoot, options.agentId, 'mcp', options.server);
-    await mkdir(directory, { recursive: true });
+    // Canonical, because the ledger is keyed the way `fs.read` looks a
+    // path up — through `realpath` — and a workspace root or agent
+    // directory an operator moved behind a link would otherwise leave the
+    // record under a spelling no read ever asks for.
+    const lexical = path.join(options.workspaceRoot, options.agentId, 'mcp', options.server);
+    await mkdir(lexical, { recursive: true });
+    const directory = await realpath(lexical);
     const stamp = (options.now ?? Date.now)();
     fileSerial += 1;
     // The tool name is the server's own string, so it is folded to the
