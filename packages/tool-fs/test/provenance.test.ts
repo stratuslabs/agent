@@ -389,6 +389,35 @@ test('an agent directory relocated behind a link is still the ledger’s home, r
   assert.deepEqual(notes.marks, ['external']);
 });
 
+test('a ledger file relocated behind a link is still the ledger: its target is refused and labelled', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-fs-provenance-'));
+  const workspaceRoot = path.join(home, 'workspaces');
+  const data = path.join(home, 'data');
+  await mkdir(path.join(workspaceRoot, 'ava'), { recursive: true });
+  await mkdir(data, { recursive: true });
+  // This time the link is at the file: the agent directory is real, and the
+  // ledger inside it points at a file under /data, which the tainted
+  // write's first append creates through the link.
+  const target = path.join(data, 'ava-ledger.jsonl');
+  await symlink(target, path.join(workspaceRoot, 'ava', LEDGER_FILENAME));
+  const tools = await registryFor({ roots: [data], workspaceRoot });
+
+  await run(tools, 'fs.write', { path: 'notes.md', content: 'fetched' }, sessionAt('ava', 'external'));
+  assert.ok((await stat(target)).isFile());
+  // Resolved, the target is what the resolver hands back — and what a
+  // truncating write would empty.
+  await assert.rejects(
+    () => run(tools, 'fs.write', { path: 'ava-ledger.jsonl', content: '' }, sessionAt('ava', 'agent')),
+    /provenance ledger/,
+  );
+  const read = marking();
+  await run(tools, 'fs.read', { path: 'ava-ledger.jsonl' }, sessionAt('ava', 'user'), read.context);
+  assert.deepEqual(read.marks, ['external']);
+  const notes = marking();
+  await run(tools, 'fs.read', { path: 'notes.md' }, sessionAt('ava', 'user'), notes.context);
+  assert.deepEqual(notes.marks, ['external']);
+});
+
 test('a file’s name is the tainted session’s text too: a listing or a skipped-file report that names it is marked', async () => {
   const { root, workspaceRoot } = await workspace();
   const tools = await registryFor({ roots: [root], workspaceRoot });

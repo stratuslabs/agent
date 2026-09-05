@@ -259,9 +259,10 @@ export const isLedgerPath = (workspaceRoots: readonly string[], absolutePath: st
  * has the ledger at `/data/ava/fs-provenance.jsonl`, which is how the root
  * resolver spells every path under it and which no spelling of the root
  * reaches, so every entry of the workspace is canonicalized and its ledger
- * path listed. Built per call and never cached: a link repointed under a
- * running daemon is judged where it points now, and one `readdir` plus a
- * `realpath` per agent is nothing next to the write.
+ * path listed — the ledger file's own canonical path too, for a link at
+ * the file rather than the directory. Built per call and never cached: a
+ * link repointed under a running daemon is judged where it points now, and
+ * one `readdir` plus two `realpath`s per agent is nothing next to the write.
  */
 export const ledgerGuard = async (workspaceRoot: string | undefined): Promise<(absolutePath: string) => boolean> => {
   if (workspaceRoot === undefined) {
@@ -287,10 +288,21 @@ export const ledgerGuard = async (workspaceRoot: string | undefined): Promise<(a
     if (!entry.isDirectory() && !entry.isSymbolicLink()) {
       continue;
     }
+    const lexical = path.join(workspaceRoot, entry.name, LEDGER_FILENAME);
+    // Two canonical spellings, because either component can be a link: the
+    // agent directory (`ava -> /data/ava`, judged even before the ledger
+    // exists there) and the ledger file itself (`fs-provenance.jsonl ->
+    // /data/ava-ledger.jsonl`, whose target is what the resolver returns
+    // and what a truncating write would empty).
     try {
-      ledgers.add(path.join(await realpath(path.join(workspaceRoot, entry.name)), LEDGER_FILENAME));
+      ledgers.add(path.join(await realpath(path.dirname(lexical)), LEDGER_FILENAME));
     } catch {
       // A dangling link holds no ledger.
+    }
+    try {
+      ledgers.add(await realpath(lexical));
+    } catch {
+      // No ledger there yet, or a dangling link: nothing to protect.
     }
   }
   return (absolutePath) => isLedgerPath(roots, absolutePath) || ledgers.has(absolutePath);
