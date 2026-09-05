@@ -60,7 +60,8 @@ tools: [fs.read, fs.search]     # or fs.* for the whole toolset
 | `maxBytes` | `64000` | Cap on one `fs.read`, before the `truncated` marker. A call's own `maxBytes` may ask for less, never more. |
 | `maxMatches` | `100` | Cap on `fs.search` matches. A call's own `maxMatches` may ask for fewer, never more. |
 | `maxEntries` | `500` | Cap on `fs.list` entries. |
-| `workspaceRoot` | `~/.stratus/workspaces` | Supplied by the daemon. Where each agent's provenance ledger lives — see below. |
+| `workspaceRoot` | `~/.stratus/workspaces` | Supplied by the daemon when unset. Where an agent's files under the workspace live. |
+| `ledgerRoot` | `~/.stratus/workspaces` | Set by the daemon, and not yours to move: where each agent's provenance ledger lives — see below. Every plugin that writes the ledger is handed the same value, so there is one ledger however the workspaces are arranged. |
 
 Every key can be set per agent in the `agents` sub-block, over the defaults
 above it, and `roots` is why the sub-block exists: a flat list would give

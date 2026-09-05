@@ -131,12 +131,16 @@ The host that implements all of this is `@stratusagent/plugins`.
   turns have drained, and a plugin that throws there is logged rather than
   allowed to hold up the drain.
 
-**One key in the config block is the host's, not the plugin's.** A plugin whose
+**Two keys in the config block are the host's, not the plugin's.** A plugin whose
 manifest schema declares `workspaceRoot` is given the platform's answer
 (`~/.stratus/workspaces`) when the operator did not set one, because the
 `~/.stratus` layout is this repository's to own and a plugin deriving it would
-be a second copy of a path that can drift. A plugin that never declares it is
-never handed it.
+be a second copy of a path that can drift. A plugin that declares `ledgerRoot`
+— one that writes the filesystem provenance ledger, as `tool-fs` and
+`plugin-mcp` do — is handed the host's workspace root there *whatever the
+operator set*, so two writers can never keep two ledgers: `fs.read` consults
+one, and a file recorded in another would read back unlabelled. A plugin that
+never declares either is never handed it.
 
 A package may export additional, more specific factories for direct import
 (`createFsPlugin` for a test or an embedding host that skips the loader

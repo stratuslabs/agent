@@ -91,6 +91,9 @@
         },
         "workspaceRoot": {
           "type": "string"
+        },
+        "ledgerRoot": {
+          "type": "string"
         }
       },
       "additionalProperties": false

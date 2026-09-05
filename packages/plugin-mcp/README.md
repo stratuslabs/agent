@@ -239,8 +239,9 @@ Tool results normalize into plain values:
   a bridged tool reaches Slack like a screenshot does. Each such file is a
   server's bytes on disk, so it is recorded in the agent's filesystem
   provenance ledger at `external` before it is written — the same ledger
-  `@stratusagent/tool-fs` reads — and a later `fs.read` of it carries the
-  label the tool result did.
+  `@stratusagent/tool-fs` reads, at the host's `ledgerRoot`, which the daemon
+  sets for both plugins and lets neither config block move — and a later
+  `fs.read` of it carries the label the tool result did.
 - Resource links pass through under `resources`.
 - A result the server marks `isError` fails the call, like any failing tool.
 

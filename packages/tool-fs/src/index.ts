@@ -1069,11 +1069,18 @@ export const createFsPlugin = (config: JsonObject = {}): Plugin => {
   const workspaceRoot = typeof config.workspaceRoot === 'string' && config.workspaceRoot.length > 0
     ? config.workspaceRoot
     : undefined;
-  const ledger = workspaceRoot !== undefined ? createFileLedger(workspaceRoot) : createProcessLocalLedger();
+  // The ledger's home is the host's `ledgerRoot`, which the loader sets to
+  // its workspace root for every plugin that writes the ledger and never
+  // lets a config block override — see the loader. `workspaceRoot` is the
+  // fallback for a host that wired the plugin by hand.
+  const ledgerRoot = typeof config.ledgerRoot === 'string' && config.ledgerRoot.length > 0
+    ? config.ledgerRoot
+    : workspaceRoot;
+  const ledger = ledgerRoot !== undefined ? createFileLedger(ledgerRoot) : createProcessLocalLedger();
   // Which paths are a ledger is decided per call, from the workspace as it
   // stands — see `ledgerGuard` for the two spellings a ledger can have and
   // why neither is cached.
-  const isLedger = (): Promise<LedgerGuard> => ledgerGuard(workspaceRoot);
+  const isLedger = (): Promise<LedgerGuard> => ledgerGuard(ledgerRoot);
   const serialized = createKeyedSerializer();
   return {
     name: '@stratusagent/tool-fs',

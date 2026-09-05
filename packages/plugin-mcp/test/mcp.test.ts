@@ -326,6 +326,31 @@ test('an image written through a linked workspace is recorded under the path a r
   }
 });
 
+test('an image written under a plugin-specific workspace is recorded in the host’s ledger, not one of its own', async () => {
+  const png = Buffer.from('89504e470d0a1a0a', 'hex');
+  const handle = fakeServer({
+    current: (server) => {
+      server.registerTool('chart', { description: 'Render a chart.' }, async () => ({
+        content: [{ type: 'image', data: png.toString('base64'), mimeType: 'image/png' }],
+      }));
+    },
+  });
+  const artifacts = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-artifacts-'));
+  const ledgerRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-ledger-'));
+  const target = new ToolRegistry();
+  const plugin = pluginFor(handle, { workspaceRoot: artifacts, ledgerRoot });
+  await loadThroughView(plugin, target);
+  try {
+    const output = await target.get('mcp.linear.chart')!.execute({}, sessionFor('ava')) as JsonObject;
+    const [file] = output.files as string[];
+    assert.ok(file!.startsWith(path.join(await realpath(artifacts), 'ava') + path.sep));
+    assert.equal(await createFileLedger(ledgerRoot).lookup('ava', file!), 'external');
+    assert.equal(await createFileLedger(artifacts).lookup('ava', file!), undefined);
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
 test('a server that is unreachable at startup leaves the rest serving, with an install-hint log line', async () => {
   const handle = fakeServer({ current: linearTools });
   const warnings: string[] = [];

@@ -17,7 +17,7 @@ import {
 
 import { ledgerContentTrust, ledgerTrustOfContent } from '@stratusagent/plugins';
 
-import { createFsPlugin, LEDGER_FILENAME, ledgerGuard, openContained } from '../src/index.ts';
+import { createFileLedger, createFsPlugin, LEDGER_FILENAME, ledgerGuard, openContained } from '../src/index.ts';
 
 const registryFor = async (config: JsonObject): Promise<ToolRegistry> => {
   const tools = new ToolRegistry();
@@ -519,6 +519,20 @@ test('a ledger’s label is judged on the bytes the model was shown', async () =
   // A cut-off line, or a line nothing here can read: nobody vouches.
   assert.equal(ledgerTrustOfContent(`${record('/a', 'unknown')}\n{"path":"/b","tru`), 'unknown');
   assert.equal(ledgerTrustOfContent('not a ledger'), 'unknown');
+});
+
+test('the ledger lives at the host’s ledgerRoot, not at whatever workspaceRoot a block was given', async () => {
+  const { root, workspaceRoot } = await workspace();
+  const ledgerRoot = path.join(path.dirname(workspaceRoot), 'ledgers');
+  await mkdir(ledgerRoot, { recursive: true });
+  const tools = await registryFor({ roots: [root], workspaceRoot, ledgerRoot });
+  await run(tools, 'fs.write', { path: 'fetched.md', content: 'fetched' }, sessionAt('ava', 'external'));
+  assert.equal(await createFileLedger(ledgerRoot).lookup('ava', path.join(root, 'fetched.md')), 'external');
+  assert.equal(await createFileLedger(workspaceRoot).lookup('ava', path.join(root, 'fetched.md')), undefined);
+  // And it is the ledger the reads consult.
+  const read = marking();
+  await run(tools, 'fs.read', { path: 'fetched.md' }, sessionAt('ava', 'user'), read.context);
+  assert.deepEqual(read.marks, ['external']);
 });
 
 test('two writes racing to create one file both land: the loser looks again and writes what is there', async () => {

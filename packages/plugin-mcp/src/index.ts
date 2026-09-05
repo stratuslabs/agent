@@ -715,8 +715,11 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
     ?? ((attempt: number) => Math.min(RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, RECONNECT_MAX_DELAY_MS));
   const workspaceRoot = typeof config.workspaceRoot === 'string' ? config.workspaceRoot : undefined;
   // The same ledger `tool-fs` reads, so a server's image or audio block
-  // written here reads back labelled there.
-  const ledger = workspaceRoot !== undefined ? createFileLedger(workspaceRoot) : undefined;
+  // written here reads back labelled there: its home is the host's
+  // `ledgerRoot`, which the loader sets for both and lets neither config
+  // block move, with `workspaceRoot` the fallback for a hand-wired host.
+  const ledgerRoot = typeof config.ledgerRoot === 'string' ? config.ledgerRoot : workspaceRoot;
+  const ledger = ledgerRoot !== undefined ? createFileLedger(ledgerRoot) : undefined;
 
   if (!isObject(config.servers)) {
     throw new McpConfigError(
