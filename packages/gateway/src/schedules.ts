@@ -578,6 +578,13 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       return deleted;
     },
     async start() {
+      // Propagated, not swallowed, at start: the sweep below deletes rows,
+      // and a daemon whose home a newer build has stamped must not start
+      // serving at all — the tick's swallow-and-stop is for a stamp that
+      // advances under a scheduler already running.
+      if (options.ready) {
+        await options.ready();
+      }
       // Spent one-shots first: a row with no next slot is only the
       // approval scope of a firing that may still be parked on a human.
       // Turn over — or turn gone — means the row's work is done.

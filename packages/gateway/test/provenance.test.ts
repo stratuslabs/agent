@@ -289,3 +289,14 @@ test('a serving daemon stops taking work once a newer build has stamped the home
     await gateway.stop();
   }
 });
+
+test('a daemon does not start serving a home a newer build has stamped, even if the CLI check passed a moment earlier', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  // The stamp advanced between the CLI's check and the gateway's start —
+  // a newer build ran a command while this one was coming up.
+  await mkdir(path.dirname(stateFilePath(env)), { recursive: true });
+  await writeFile(stateFilePath(env), JSON.stringify({ schemaVersion: STATE_SCHEMA_VERSION + 1, applied: [] }));
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await assert.rejects(() => gateway.start(), /newer Stratus build/);
+});

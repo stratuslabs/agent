@@ -2635,6 +2635,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // the missed-window log lines land in a gateway whose surfaces are
     // listening. The sweep inside is quick (store reads); the firings it
     // may start are tracked, not awaited.
+    // The stamp, once more, before anything below writes: the CLI checked
+    // it before `serve`, but a newer build can stamp the home while a slow
+    // channel is still coming up, and the sweeps below save sessions in
+    // this build's shape. A throw here becomes the shutdown the required-
+    // channel case above describes.
+    await assertStateCompatible(env);
     await scheduler.start();
 
     // Last, and not awaited: recovery re-asks, so it needs the channels

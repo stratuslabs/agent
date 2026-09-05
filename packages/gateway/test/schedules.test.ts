@@ -1027,12 +1027,15 @@ test('a scheduler whose readiness check fails stops before it claims a slot, so 
       warnings.push(line);
     },
   });
-  await runtime.start();
+  // At start the refusal propagates — a daemon whose home a newer build has
+  // stamped must not begin serving — rather than being logged and swallowed
+  // as it is for a stamp that advances under a scheduler already running.
+  await assert.rejects(() => runtime.start(), /newer Stratus build/);
   try {
     assert.deepEqual(fired, []);
+    assert.deepEqual(warnings, []);
     // The slot is still there for the build that understands it.
     assert.deepEqual(store.due(new Date().toISOString()).map((row) => row.id), ['due']);
-    assert.ok(warnings.some((line) => /newer Stratus build/.test(line)), warnings.join('\n'));
   } finally {
     runtime.stop();
     store.close();
