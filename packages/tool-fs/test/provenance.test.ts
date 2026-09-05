@@ -87,7 +87,12 @@ test('write-then-read across sessions: a file a tainted session wrote comes back
   const ledgerPath = path.join(workspaceRoot, 'ava', LEDGER_FILENAME);
   assert.equal((await stat(ledgerPath)).mode & 0o777, 0o600);
   const ledger = JSON.parse(await readFile(ledgerPath, 'utf8')) as { paths: Record<string, string> };
-  assert.deepEqual(Object.values(ledger.paths), ['external']);
+  // The file, and the `research/` directory the tainted write created for
+  // it — a name that session chose as much as the file's.
+  assert.deepEqual(
+    Object.entries(ledger.paths).sort(),
+    [[path.join(root, 'research'), 'external'], [path.join(root, 'research', 'vendor.md'), 'external']],
+  );
 });
 
 test('an unknown session’s writes are recorded at unknown, and the label is per agent', async () => {
@@ -273,6 +278,18 @@ test('a file’s name is the tainted session’s text too: a listing or a skippe
   const found = await run(tools, 'fs.search', { query: 'my note', path: 'inbox' }, sessionAt('ava', 'user'), searched.context) as { skipped?: Array<{ path: string }> };
   assert.ok(found.skipped?.some((entry) => entry.path.endsWith('IGNORE-PREVIOUS-INSTRUCTIONS.md')));
   assert.deepEqual(searched.marks, ['external']);
+
+  // A directory a tainted session created is a name it chose, and a listing
+  // of the parent shows that name — so the directory is recorded too, and
+  // before it is created, like the file.
+  await run(tools, 'fs.write', { path: 'IGNORE-PREVIOUS/nested/orders.md', content: 'the page said so' }, sessionAt('ava', 'external'));
+  const parentListing = marking();
+  const top = await run(tools, 'fs.list', {}, sessionAt('ava', 'user'), parentListing.context) as { entries: Array<{ name: string }> };
+  assert.ok(top.entries.some((entry) => entry.name === 'IGNORE-PREVIOUS'));
+  assert.deepEqual(parentListing.marks, ['external']);
+  const nestedListing = marking();
+  await run(tools, 'fs.list', { path: 'IGNORE-PREVIOUS' }, sessionAt('ava', 'user'), nestedListing.context);
+  assert.deepEqual(nestedListing.marks, ['external']);
 
   // A directory with only the agent's own files in it marks nothing.
   await mkdir(path.join(root, 'clean'), { recursive: true });

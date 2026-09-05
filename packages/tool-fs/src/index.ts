@@ -805,11 +805,19 @@ const createWriteTool = (
       throw new Error(`${resolved.path} is the filesystem provenance ledger, which fs.write does not edit.`);
     }
 
+    // The directories a write would create, deepest last. A directory's
+    // name is text the writing session chose too, and a listing shows it,
+    // so a tainted session's new directories are recorded like its file.
+    const missingParents: string[] = [];
     if (!resolved.exists) {
-      // The parent is created only after the resolution above put it inside
-      // a root — `root/link/notes/x.md` through a symlinked `link` never
-      // gets this far, so nothing is created outside the boundary either.
-      await mkdir(path.dirname(resolved.path), { recursive: true });
+      for (let parent = path.dirname(resolved.path); parent !== resolved.root && parent !== path.dirname(parent); parent = path.dirname(parent)) {
+        try {
+          await stat(parent);
+          break;
+        } catch {
+          missingParents.unshift(parent);
+        }
+      }
     } else if (resolved.kind !== 'file') {
       // Same reason as the read path: writing into a directory is a mistake
       // worth naming, and writing into a fifo or a device blocks forever.
@@ -829,16 +837,28 @@ const createWriteTool = (
     // One step per path, ledger and bytes together — see the serializer.
     await serialized(resolved.path, async () => {
       // A write from a session at `external` or `unknown` records the path
-      // at that label BEFORE the bytes land: a daemon that dies between the
-      // two, or a ledger that cannot be written, must leave a labelled path
-      // with no file behind rather than a durable file with no label — the
+      // at that label BEFORE anything lands — the directories it creates
+      // included: a daemon that dies between the two, or a ledger that
+      // cannot be written, must leave labelled paths with nothing behind
+      // them rather than a durable file or directory with no label — the
       // second is exactly the laundering this ledger exists to close, and
       // the first over-marks, which is the safe direction. A clean
       // session's write is the other way round: it clears a record only
       // once the write has succeeded, since a failed write leaves the
       // tainted bytes in place.
       if (isTaintedTrust(trust)) {
+        for (const parent of missingParents) {
+          await ledger.recordWrite(session.agent.id, parent, trust, { append: false });
+        }
         await ledger.recordWrite(session.agent.id, resolved.path, trust, { append });
+      }
+
+      if (!resolved.exists) {
+        // The parent is created only after the resolution above put it
+        // inside a root — `root/link/notes/x.md` through a symlinked `link`
+        // never gets this far, so nothing is created outside the boundary
+        // either.
+        await mkdir(path.dirname(resolved.path), { recursive: true });
       }
 
       // O_NOFOLLOW is applied by openContained: a symlink sitting at the
