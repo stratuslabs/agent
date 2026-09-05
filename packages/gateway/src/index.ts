@@ -2583,6 +2583,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * failure here requires — see the call site.
    */
   const startServing = async (): Promise<void> => {
+    // The stamp, once more, before anything here writes: the CLI checked it
+    // before `serve`, but a newer build can stamp the home between that
+    // check and this start, and the sweeps below save sessions in this
+    // build's shape. Checked before the channels bind rather than after —
+    // the control API announces its address the moment it is up, and every
+    // await between that announcement and `serving = true` is a window in
+    // which a restart asked for at once is refused as "still starting".
+    // The scheduler's own readiness check, which runs after the channels,
+    // covers a stamp that advances while a slow channel is coming up.
+    await assertStateCompatible(env);
     await loadRoster();
     const named = registry.list().map((agent) => agent.name).join(', ');
     log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
@@ -2635,12 +2645,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // the missed-window log lines land in a gateway whose surfaces are
     // listening. The sweep inside is quick (store reads); the firings it
     // may start are tracked, not awaited.
-    // The stamp, once more, before anything below writes: the CLI checked
-    // it before `serve`, but a newer build can stamp the home while a slow
-    // channel is still coming up, and the sweeps below save sessions in
-    // this build's shape. A throw here becomes the shutdown the required-
-    // channel case above describes.
-    await assertStateCompatible(env);
     await scheduler.start();
 
     // Last, and not awaited: recovery re-asks, so it needs the channels
