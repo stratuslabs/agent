@@ -5,6 +5,7 @@ import {
   AgentRunner,
   EventBus,
   InMemorySessionStore,
+  describeToolAllowlistFinding,
   matchesToolAllowlist,
   unmatchedToolAllowlist,
   originOf,
@@ -269,6 +270,7 @@ test('an allowlist entry naming no registered tool is reported, and a whole allo
   // One dead entry among live ones is named on its own, and is not fatal.
   assert.deepEqual(unmatchedToolAllowlist({ tools: ['demo.echo', 'fs.*'] }, registered), {
     unmatched: ['fs.*'],
+    inert: [],
     none: false,
   });
 
@@ -278,12 +280,17 @@ test('an allowlist entry naming no registered tool is reported, and a whole allo
   // rides on the skills gate instead.
   assert.deepEqual(unmatchedToolAllowlist({ tools: ['fs.*', 'web.search'] }, registered), {
     unmatched: ['fs.*', 'web.search'],
+    inert: [],
     none: true,
   });
 
   // Nothing registered makes even a wildcard dead — the shape a daemon
   // whose plugins all failed to load would be in.
-  assert.deepEqual(unmatchedToolAllowlist({ tools: ['*'] }, []), { unmatched: ['*'], none: true });
+  assert.deepEqual(unmatchedToolAllowlist({ tools: ['*'] }, []), {
+    unmatched: ['*'],
+    inert: [],
+    none: true,
+  });
 
   // A namespace a loaded plugin may still fill is not a dead entry. An MCP
   // server unreachable at startup registers nothing and reconnects, so its
@@ -310,10 +317,81 @@ test('an allowlist entry naming no registered tool is reported, and a whole allo
   // direction.
   assert.deepEqual(unmatchedToolAllowlist({ tools: ['fs.*'] }, registered, ['mcp.*']), {
     unmatched: ['fs.*'],
+    inert: [],
     none: true,
   });
   assert.deepEqual(unmatchedToolAllowlist({ tools: ['mcp.github.*'] }, registered, ['mcp.linear.*']), {
     unmatched: ['mcp.github.*'],
+    inert: [],
     none: true,
   });
+});
+
+test('the skill reader cannot stand in for a grant the tools allowlist never made', () => {
+  // `skill.read` is registered, so an entry naming it matches — while both
+  // of the runner's gates key on `skills:` and neither consults `tools:`.
+  // An allowlist of it alone therefore grants nothing while looking live,
+  // which is precisely the configuration this check exists to expose.
+  const registered = ['demo.echo', 'skill.read'];
+
+  assert.deepEqual(unmatchedToolAllowlist({ tools: ['skill.read'] }, registered), {
+    unmatched: [],
+    inert: ['skill.read'],
+    none: true,
+  });
+  // The glob spelling reaches it the same way, so it is inert the same way.
+  assert.deepEqual(unmatchedToolAllowlist({ tools: ['skill.*'] }, registered), {
+    unmatched: [],
+    inert: ['skill.*'],
+    none: true,
+  });
+
+  // A real grant beside it is still a real grant: `none` is false, and the
+  // dead entry is the reader's, not `demo.echo`'s.
+  assert.deepEqual(unmatchedToolAllowlist({ tools: ['demo.echo', 'skill.read'] }, registered), {
+    unmatched: [],
+    inert: ['skill.read'],
+    none: false,
+  });
+
+  // A wildcard reaches `demo.echo`, so it grants something and there is
+  // nothing to report — the reader riding along does not make it inert.
+  assert.equal(unmatchedToolAllowlist({ tools: ['*'] }, registered), undefined);
+
+  // But a registry holding only the reader leaves `*` granting nothing.
+  assert.deepEqual(unmatchedToolAllowlist({ tools: ['*'] }, ['skill.read']), {
+    unmatched: [],
+    inert: ['*'],
+    none: true,
+  });
+
+  // With nothing registered at all the reader is not there either, so `*`
+  // is an ordinary dead entry rather than one that reached the reader.
+  assert.deepEqual(unmatchedToolAllowlist({ tools: ['*'] }, []), {
+    unmatched: ['*'],
+    inert: [],
+    none: true,
+  });
+
+  // The two kinds get their own sentence, because the fixes differ: there
+  // is no plugin to install for the reader and no name to correct.
+  assert.deepEqual(
+    describeToolAllowlistFinding('blair', { unmatched: ['fs.*'], inert: ['skill.read'], none: true }),
+    [
+      'agent blair lists tools nothing registered provides: fs.* — check the names,'
+        + ' or install the plugin that provides them',
+      'agent blair lists skill.read under tools:, which grants nothing'
+        + ' — skill.read is granted by the skills: key instead',
+      'agent blair has an allowlist that grants nothing, so none of the tools its persona'
+        + ' talks about are there to call',
+    ],
+  );
+  // A live entry beside a dead one says the one thing that applies.
+  assert.deepEqual(
+    describeToolAllowlistFinding('ava', { unmatched: ['fs.*'], inert: [], none: false }),
+    [
+      'agent ava lists tools nothing registered provides: fs.* — check the names,'
+        + ' or install the plugin that provides them',
+    ],
+  );
 });

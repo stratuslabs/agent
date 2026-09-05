@@ -71,24 +71,33 @@ it cannot, since the allowlist only ever narrows what is registered. Both
 entries in an agent's list that select no registered tool:
 
 ```
-agent ava lists tools nothing registered provides: fs.*
+agent ava lists tools nothing registered provides: fs.* — check the names, or install the plugin that provides them
 ```
 
-If *every* entry is like that, the warning says so plainly, because the
+If *every* entry is like that, a second line says so, because the
 consequence is bigger than a dead line in a file:
 
 ```
-agent blair lists only tools nothing registered provides (fs.*, memory.rememberr), so its allowlist grants nothing — check the names, or install the plugin that provides them
+agent blair has an allowlist that grants nothing, so none of the tools its persona talks about are there to call
 ```
 
-None of the tools that agent's persona talks about are there to call — and
-a model told to use a tool it has not been given tends to write the call out
+A model told to use a tool it has not been given tends to write the call out
 as prose, often with a plausible-looking result attached. It reads like the
 thing happened. Nothing ran.
 
-(An agent with `skills:` still gets `skill.read`, which rides on that gate
-rather than this one. It is not one of the tools the soul was written
-around, so the warning still stands.)
+**`skill.read` is not one of the tools this key grants.** It rides on the
+`skills:` gate — an agent with a skill enabled has the reader whether or not
+`tools:` mentions it, and an agent with no skills does not have it however
+permissive `tools:` is. So listing it here does nothing, and gets its own
+line saying which key does grant it:
+
+```
+agent blair lists skill.read under tools:, which grants nothing — skill.read is granted by the skills: key instead
+```
+
+That is also why `tools: [skill.read]` counts as an allowlist that grants
+nothing: the reader loads a skill's instructions, and the tools those
+instructions call for are still not there.
 
 A namespace a plugin discovers into is never reported this way. An MCP
 server that is unreachable when the daemon starts registers nothing and

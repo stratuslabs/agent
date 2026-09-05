@@ -13,6 +13,7 @@ import {
   ToolRegistry,
   createSkillReadTool,
   missingSkillRequirements,
+  describeToolAllowlistFinding,
   unmatchedToolAllowlist,
   PENDING_APPROVAL_METADATA_KEY,
   latestTurnReply,
@@ -1435,11 +1436,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       for (const { skill, missing } of missingSkillRequirements(agent, skillCatalog)) {
         warn(`agent ${agent.id} enables skill ${skill.id}, which expects tools the agent is not allowed: ${missing.join(', ')}`);
       }
-      const unmatched = unmatchedToolAllowlist(agent, registeredTools, discoveredNamespaces);
-      if (unmatched) {
-        warn(unmatched.none
-          ? `agent ${agent.id} lists only tools nothing registered provides (${unmatched.unmatched.join(', ')}), so its allowlist grants nothing — check the names, or install the plugin that provides them`
-          : `agent ${agent.id} lists tools nothing registered provides: ${unmatched.unmatched.join(', ')}`);
+      const finding = unmatchedToolAllowlist(agent, registeredTools, discoveredNamespaces);
+      for (const line of finding ? describeToolAllowlistFinding(agent.id, finding) : []) {
+        warn(line);
       }
     }
   };

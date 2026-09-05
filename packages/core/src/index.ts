@@ -402,6 +402,11 @@ export interface SkillRequirementFinding {
  * is not one of the tools the soul was written around, which is why the
  * finding is still worth reporting in full.
  *
+ * That exemption is also why the reader gets its own bucket. It is
+ * registered, so an entry naming it *looks* live while granting nothing —
+ * and `tools: [skill.read]` is then an allowlist that grants nothing while
+ * reporting clean, which is the one case this check exists for.
+ *
  * Advisory rather than fatal, like `missingSkillRequirements`: an
  * allowlist naming a tool the operator has not installed yet is a normal
  * intermediate state, and refusing to serve the agent would be a worse
@@ -410,7 +415,14 @@ export interface SkillRequirementFinding {
 export interface ToolAllowlistFinding {
   /** Allowlist entries that select no registered tool. */
   unmatched: string[];
-  /** Every entry is unmatched, so the allowlist selects nothing. */
+  /**
+   * Entries whose only match is `skill.read` — registered, but granted by
+   * the `skills:` key rather than this one, so the entry grants nothing.
+   * Separate from `unmatched` because the fix is different: there is no
+   * plugin to install and no name to correct.
+   */
+  inert: string[];
+  /** Every entry is one or the other, so the allowlist grants nothing. */
   none: boolean;
 }
 
@@ -446,14 +458,68 @@ export const unmatchedToolAllowlist = (
   // reading the allowlists already use rather than a second one.
   const overlaps = (entry: string, namespace: string): boolean =>
     matchesToolAllowlist(entry, [namespace]) || matchesToolAllowlist(namespace, [entry]);
-  const unmatched = allowlist.filter(
-    (entry) => !registered.some((name) => matchesToolAllowlist(name, [entry]))
+  // The reader is registered but this key never grants it: both of the
+  // runner's gates key on the agent having a skill enabled, and neither
+  // consults `tools:`. Matching against it would let it stand in for a
+  // grant it does not make — `tools: [skill.read]` reporting clean while
+  // granting nothing at all.
+  const readerRegistered = registered.includes(SKILL_READ_TOOL_NAME);
+  const grantable = readerRegistered
+    ? registered.filter((name) => name !== SKILL_READ_TOOL_NAME)
+    : registered;
+  const dead = allowlist.filter(
+    (entry) => !grantable.some((name) => matchesToolAllowlist(name, [entry]))
       && !mayRegister.some((namespace) => overlaps(entry, namespace)),
   );
-  if (unmatched.length === 0) {
+  if (dead.length === 0) {
     return undefined;
   }
-  return { unmatched, none: unmatched.length === allowlist.length };
+  // Split by what the operator should do about it. An entry that reached
+  // only the reader is a soul listing a tool this key does not control;
+  // sending them to install a plugin for it would send them after one that
+  // does not exist. The reader has to be registered for an entry to have
+  // reached it — with an empty registry `*` names nothing, reader included.
+  const reachesReader = (entry: string): boolean =>
+    readerRegistered && matchesToolAllowlist(SKILL_READ_TOOL_NAME, [entry]);
+  return {
+    unmatched: dead.filter((entry) => !reachesReader(entry)),
+    inert: dead.filter(reachesReader),
+    none: dead.length === allowlist.length,
+  };
+};
+
+/**
+ * The advisory lines for a finding — one per kind, because the fixes
+ * differ, plus the summary when the allowlist grants nothing at all.
+ *
+ * Shared so the daemon and a local `stratus run` say the same thing about
+ * one configuration rather than each writing its own reading of it; the
+ * hosts differ only in where the lines go and what they prefix.
+ */
+export const describeToolAllowlistFinding = (
+  agentId: string,
+  finding: ToolAllowlistFinding,
+): string[] => {
+  const lines: string[] = [];
+  if (finding.unmatched.length > 0) {
+    lines.push(
+      `agent ${agentId} lists tools nothing registered provides: ${finding.unmatched.join(', ')}`
+        + ' — check the names, or install the plugin that provides them',
+    );
+  }
+  if (finding.inert.length > 0) {
+    lines.push(
+      `agent ${agentId} lists ${finding.inert.join(', ')} under tools:, which grants nothing`
+        + ` — ${SKILL_READ_TOOL_NAME} is granted by the skills: key instead`,
+    );
+  }
+  if (finding.none) {
+    lines.push(
+      `agent ${agentId} has an allowlist that grants nothing, so none of the tools its persona`
+        + ' talks about are there to call',
+    );
+  }
+  return lines;
 };
 
 export const missingSkillRequirements = (

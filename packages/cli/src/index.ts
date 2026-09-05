@@ -14,6 +14,7 @@ import {
   ToolRegistry,
   matchesSkillAllowlist,
   missingSkillRequirements,
+  describeToolAllowlistFinding,
   unmatchedToolAllowlist,
   originOf,
   type AgentDefinition,
@@ -2256,20 +2257,15 @@ const createAgentRuntime = async (
 
   // And the same for the tools themselves, after `initialize()` so the
   // plugins have registered theirs: an allowlist entry naming a tool
-  // nothing provides is silently inert, and a soul made only of those
-  // runs with no tools while its persona still talks about them.
-  const unmatched = unmatchedToolAllowlist(
+  // nothing provides grants nothing and says nothing, and a soul made only
+  // of those runs with no tools while its persona still talks about them.
+  const finding = unmatchedToolAllowlist(
     agent,
     tools.describe().map((tool) => tool.name),
     loadedPlugins.flatMap((plugin) => plugin.manifest.contributes.toolsDiscovered.map((declared) => declared.namespace)),
   );
-  if (unmatched) {
-    writeLine(
-      streams.stderr,
-      unmatched.none
-        ? `Warning: agent ${agent.id} lists only tools nothing registered provides (${unmatched.unmatched.join(', ')}), so its allowlist grants nothing — check the names, or install the plugin that provides them`
-        : `Warning: agent ${agent.id} lists tools nothing registered provides: ${unmatched.unmatched.join(', ')}`,
-    );
+  for (const line of finding ? describeToolAllowlistFinding(agent.id, finding) : []) {
+    writeLine(streams.stderr, `Warning: ${line}`);
   }
 
 
