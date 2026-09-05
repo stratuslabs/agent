@@ -923,6 +923,48 @@ test('a message with attachments tells the turn what arrived and that it cannot 
   ]);
 });
 
+test('the agent losing a thread records the handover too, so a lagging socket cannot answer past it', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  // The sessions say Ava holds the thread, and nothing here updates them.
+  gateway.sessionRouting = routingOver(new Map([['slack:ava:T1:C1:920.0', '2026-01-01T00:00:00.000Z']]));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // Each agent is its own socket, and Bea's is behind: Ava's connection sees
+  // both the message naming Bea and the reply after it before Bea's
+  // connection has seen anything at all.
+  await socketAva.deliver('message', channelMessage({ text: '<@B-BEA> your turn', ts: '920.1', thread: '920.0' }));
+  await socketAva.deliver('message', channelMessage({ text: 'go on then', ts: '920.2', thread: '920.0' }));
+
+  // Ava was holding this thread and answers neither: she saw the handover.
+  // Length, not `deepEqual([])` — that narrows the array to `never[]` for
+  // the assertions further down.
+  assert.equal(gateway.dispatches.length, 0);
+
+  // Bea's socket catches up and takes both, in the order they were said.
+  await socketBea.deliver('message', channelMessage({ text: '<@B-BEA> your turn', ts: '920.1', thread: '920.0' }));
+  await socketBea.deliver('message', channelMessage({ text: 'go on then', ts: '920.2', thread: '920.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['bea', 'Dylan: your turn'],
+    ['bea', 'Dylan: go on then'],
+  ]);
+});
+
 test('a contested thread the gateway cannot order stays silent rather than answering twice', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();

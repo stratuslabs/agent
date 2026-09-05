@@ -41,7 +41,9 @@ they are the whole model:
    just answered you. Naming another agent moves the conversation to them —
    so a handover is one `@`, and it takes effect the moment it is sent, not
    whenever the turn it starts gets around to answering: an addendum typed
-   straight after it reaches the agent you just named.
+   straight after it reaches the agent you just named, and the agent that
+   *had* the thread stands down at the same instant rather than whenever its
+   own app next catches up.
 
 Everyone in the thread is talking to the same agent — a reply from a second
 person is a follow-up like any other, and channel messages reach the model

@@ -1930,29 +1930,22 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   /**
-   * The cheap half of "is this untagged channel message ours?", answered
-   * before the message is even deduped so the ordinary traffic of a
-   * channel the app sits in costs nothing.
+   * Which of this process's agents a message names, or undefined if it
+   * names none of them.
    *
-   * Two rules, both about not barging in:
+   * The FIRST in connection order when it names several, and that
+   * determinism is the point: every connection sees every message and runs
+   * this over the same text and the same array, so all of them agree on who
+   * a message handed the thread to — including the connections that will go
+   * on to ignore it. Which is what makes the handover record converge
+   * without the sockets having to agree on anything, since each agent is
+   * its own Socket Mode connection and one can run minutes behind another.
    *
-   * - **Only inside a thread.** An agent follows a conversation it was
-   *   brought into; it does not answer the room. A message with no
-   *   `thread_ts` starts a thread or stands alone, and is a follow-up to
-   *   nothing.
-   * - **Not when somebody else was named.** Tagging an agent hands it the
-   *   question, and the agent that had it is no longer being asked — two
-   *   answers to one message is exactly what a thread with a roster in it
-   *   must never produce. Only agents this adapter carries can be told
-   *   apart by their bot ids; one served by another daemon is invisible
-   *   here, and both would answer.
+   * Only agents this adapter carries can be recognized at all. One served
+   * by another daemon is invisible here, and both would answer.
    */
-  const couldBeFollowUp = (connection: AgentConnection, event: SlackInboundEvent, text: string): boolean => {
-    if (!event.thread_ts) {
-      return false;
-    }
-    return !connections.some((other) => other !== connection && mentions(text, other.botUserId));
-  };
+  const agentNamedIn = (text: string): AgentConnection | undefined =>
+    connections.find((candidate) => mentions(text, candidate.botUserId));
 
   /**
    * Whether an untagged reply in a thread is this agent's to answer, asked
@@ -2044,7 +2037,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (!gatewayRef || !event || !event.user || event.bot_id || !isPersonSpeaking(event)) {
       return undefined;
     }
-    const isDm = event.channel_type === 'im';
     if (event.type !== 'app_mention' && event.type !== 'message') {
       return undefined;
     }
@@ -2052,10 +2044,46 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return undefined;
     }
 
+    const isDm = event.channel_type === 'im';
+    const team = args.body?.team_id ?? connection.teamId;
+    // A top-level mention has no thread_ts; its own ts roots the reply
+    // thread that becomes the conversation. DMs are one conversation per
+    // peer, unkeyed by thread.
+    const thread = isDm ? undefined : event.thread_ts ?? event.ts;
+    // Threads only: a DM has one agent by construction.
+    const threadKey = thread !== undefined && !isDm
+      ? threadKeyFor({ team, conversation: event.channel, thread })
+      : undefined;
+
     const text = event.text ?? '';
     const addressed = isDm || mentions(text, connection.botUserId);
-    if (!addressed && !couldBeFollowUp(connection, event, text)) {
-      return undefined;
+
+    // Who this message hands the thread to — worked out by EVERY connection
+    // that sees it, not only by the one being named, and recorded before any
+    // of the rejections below. Each agent is its own Socket Mode connection,
+    // so the message naming Bea reaches Ava's socket and Bea's socket
+    // independently and in no fixed order; if only Bea recorded the
+    // handover, Ava could take the next untagged reply while Bea's socket
+    // was still behind, and answer a question that had just been handed
+    // away. The message Ava must record is exactly the one Ava ignores.
+    const named = agentNamedIn(text);
+    if (threadKey && named) {
+      rememberAddressee(threadKey, named.config.agentId);
+    }
+
+    if (!addressed) {
+      if (event.thread_ts === undefined) {
+        // The room is not a conversation: a message that starts a thread,
+        // or stands alone, is a follow-up to nothing.
+        return undefined;
+      }
+      if (named) {
+        // Somebody else was asked. Tagging an agent hands it the question,
+        // and the agent that had it is no longer being asked — two answers
+        // to one message is what a thread with a roster in it must never
+        // produce.
+        return undefined;
+      }
     }
 
     // One Slack MESSAGE, not one delivery. An app subscribed to both
@@ -2064,49 +2092,39 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // id would run the turn twice the moment thread follow-through was
     // switched on. `(channel, ts)` names the message itself, and a
     // redelivery (what the event id was here for) repeats both.
+    //
+    // After the handover record and not before it: a redelivery re-records
+    // the same agent, which costs nothing, while deduping first would drop
+    // the record whenever the other copy of a doubly-delivered mention is
+    // the one a connection sees second.
     const eventKey = `${connection.config.agentId}:${event.channel}:${event.ts}`;
     if (alreadySeen(eventKey)) {
       return undefined;
     }
 
-    const team = args.body?.team_id ?? connection.teamId;
-    const userId = event.user;
-    // A top-level mention has no thread_ts; its own ts roots the reply
-    // thread that becomes the conversation. DMs are one conversation per
-    // peer, unkeyed by thread.
-    const thread = isDm ? undefined : event.thread_ts ?? event.ts;
-    const sessionId = channelSessionKey({
-      channel: 'slack',
-      agentId: connection.config.agentId,
-      team,
-      conversation: event.channel,
-      ...(thread ? { thread } : {}),
-    });
-
-    // Threads only: a DM has one agent by construction, and a mention that
-    // starts a thread is the message the thread will be keyed on.
-    const threadKey = thread && !isDm ? threadKeyFor({ team, conversation: event.channel, thread }) : undefined;
     const admission: Admission = {
       event,
       isDm,
       team,
-      userId,
-      sessionId,
+      userId: event.user,
+      sessionId: channelSessionKey({
+        channel: 'slack',
+        agentId: connection.config.agentId,
+        team,
+        conversation: event.channel,
+        ...(thread ? { thread } : {}),
+      }),
       ...(thread ? { thread } : {}),
       ...(threadKey ? { threadKey } : {}),
       settled: true,
     };
 
     if (addressed) {
-      // Recorded here, and not one await later: an addendum arriving while
-      // this message is still paying for its display-name lookup and its
-      // placeholder post must already see the handover this mention just
-      // made. Two agents named in one message leave whichever is recorded
-      // last holding it — one of the two people asked, which is the only
-      // sensible reading of a message that asked both.
-      if (threadKey) {
-        rememberAddressee(threadKey, connection.config.agentId);
-      }
+      // A message that named this agent and others is recorded above under
+      // whichever of them comes first in connection order — every agent
+      // named answers it, and the thread it leaves behind has one holder
+      // that all the sockets agree on, which is the only self-consistent
+      // reading of a message that asked several.
       return admission;
     }
 
