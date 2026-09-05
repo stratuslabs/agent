@@ -383,6 +383,206 @@ export interface SkillRequirementFinding {
  * test exists to prevent. Advisory by design — a skill is prose and can
  * degrade, so callers warn and continue, never refuse.
  */
+/**
+ * What an agent's `tools:` allowlist asks for that nothing registered
+ * provides.
+ *
+ * `unmatched` are the entries selecting no tool at all — a `fs.*` whose
+ * plugin was never installed, a name with a typo in it. `none` says every
+ * entry was such an entry, which is the case worth shouting about: the
+ * agent's allowlist grants it nothing, so none of the tools its persona
+ * talks about are there to call, and a model told to use a tool it has not
+ * been given tends to write the call out as prose instead — with a
+ * plausible result attached, which reads to everyone as the thing having
+ * happened.
+ *
+ * `none` is a statement about the ALLOWLIST, not about everything the
+ * provider will be shown. `skill.read` rides on the `skills:` gate rather
+ * than this one, so an agent with a skill enabled still has that much; it
+ * is not one of the tools the soul was written around, which is why the
+ * finding is still worth reporting in full.
+ *
+ * That exemption is also why the reader gets its own bucket. It is
+ * registered, so an entry naming it *looks* live while granting nothing —
+ * and `tools: [skill.read]` is then an allowlist that grants nothing while
+ * reporting clean, which is the one case this check exists for.
+ *
+ * Advisory rather than fatal, like `missingSkillRequirements`: an
+ * allowlist naming a tool the operator has not installed yet is a normal
+ * intermediate state, and refusing to serve the agent would be a worse
+ * answer than telling them.
+ */
+export interface ToolAllowlistFinding {
+  /** Allowlist entries that select no registered tool. */
+  unmatched: string[];
+  /**
+   * Entries whose only match is `skill.read` — registered, but granted by
+   * the `skills:` key rather than this one, so the entry grants nothing.
+   * Separate from `unmatched` because the fix is different: there is no
+   * plugin to install and no name to correct.
+   */
+  inert: string[];
+  /**
+   * Entries selecting only tools another host registers — real names that
+   * this process does not have. Left to the caller to word, since only the
+   * caller knows which host it is not.
+   */
+  elsewhere: string[];
+  /** Every entry is one of those, so the allowlist grants nothing here. */
+  none: boolean;
+}
+
+/** What excuses an entry from being read as a name that does not exist. */
+export interface ToolAllowlistOptions {
+  /**
+   * Namespaces a loaded plugin is allowed to fill later — an MCP bridge
+   * still connecting registers nothing yet, so an entry aimed at one names
+   * a tool that has not arrived rather than one that will never exist.
+   */
+  mayRegister?: readonly string[];
+  /**
+   * Tools a different host registers. `stratus run` has no dispatcher,
+   * store, or channels, so the daemon's `schedule.*`, `message.send`, and
+   * `agent.delegate` are absent from it while the soul naming them is
+   * correct — a distinction the caller states, because "elsewhere" has no
+   * meaning the kernel can name.
+   */
+  elsewhere?: readonly string[];
+}
+
+/**
+ * Undefined when there is nothing to say: an agent with no `tools:` key is
+ * allowed every registered tool and cannot name one that does not exist.
+ *
+ * An *empty* list is not that agent. Omitting the key grants everything
+ * while `tools: []` grants nothing, and the parser keeps them apart — a
+ * bare `tools:` with nothing under it lands here too, which is the shape
+ * someone gets by writing the key and not filling it, or by deleting the
+ * last entry. There are no entries to name, so the finding carries none.
+ */
+export const unmatchedToolAllowlist = (
+  agent: Pick<AgentDefinition, 'tools'>,
+  registered: readonly string[],
+  options: ToolAllowlistOptions = {},
+): ToolAllowlistFinding | undefined => {
+  const mayRegister = options.mayRegister ?? [];
+  const elsewhere = options.elsewhere ?? [];
+  const allowlist = agent.tools;
+  if (!allowlist) {
+    return undefined;
+  }
+  if (allowlist.length === 0) {
+    return { unmatched: [], inert: [], elsewhere: [], none: true };
+  }
+  // Each entry judged on its own, because the question is which entry is
+  // dead rather than whether the list as a whole selects anything: an
+  // allowlist of four toolsets with one uninstalled should name that one.
+  //
+  // `mayRegister` is what keeps this from crying wolf at a bridge. A
+  // plugin declaring a discovered namespace registers nothing until it
+  // connects, and an unreachable server at startup is a reconnect rather
+  // than a failure — so an entry aimed at one is a tool that has not
+  // arrived yet, not a typo.
+  //
+  // Overlap either way excuses the entry, because either way the entry
+  // selects tools that namespace will bring: `mcp.linear.*` sits under a
+  // declared `mcp.*`, and a granted `mcp.*` covers everything a narrower
+  // declared `mcp.linear.*` will register — namespaces nest, so both
+  // shapes are real. Entry and namespace are passed where a tool name
+  // goes on purpose: both are the same dotted-prefix glob, so this is the
+  // reading the allowlists already use rather than a second one.
+  const overlaps = (entry: string, namespace: string): boolean =>
+    matchesToolAllowlist(entry, [namespace]) || matchesToolAllowlist(namespace, [entry]);
+  // The reader is registered but this key never grants it: both of the
+  // runner's gates key on the agent having a skill enabled, and neither
+  // consults `tools:`. Matching against it would let it stand in for a
+  // grant it does not make — `tools: [skill.read]` reporting clean while
+  // granting nothing at all.
+  const readerRegistered = registered.includes(SKILL_READ_TOOL_NAME);
+  const grantable = readerRegistered
+    ? registered.filter((name) => name !== SKILL_READ_TOOL_NAME)
+    : registered;
+  const dead = allowlist.filter(
+    (entry) => !grantable.some((name) => matchesToolAllowlist(name, [entry]))
+      && !mayRegister.some((namespace) => overlaps(entry, namespace)),
+  );
+  if (dead.length === 0) {
+    return undefined;
+  }
+  // Split by what the operator should do about it. An entry that reached
+  // only the reader is a soul listing a tool this key does not control;
+  // sending them to install a plugin for it would send them after one that
+  // does not exist. The reader has to be registered for an entry to have
+  // reached it — with an empty registry `*` names nothing, reader included.
+  const reachesReader = (entry: string): boolean =>
+    readerRegistered && matchesToolAllowlist(SKILL_READ_TOOL_NAME, [entry]);
+  // A name another host registers is correct, so it is neither a typo nor
+  // a plugin to install — the soul is right and the process is the wrong
+  // one to have loaded it. Matched as ordinary names, because an entry
+  // reads them exactly as it reads the registry's.
+  const isElsewhere = (entry: string): boolean =>
+    !reachesReader(entry) && elsewhere.some((name) => matchesToolAllowlist(name, [entry]));
+  return {
+    unmatched: dead.filter((entry) => !reachesReader(entry) && !isElsewhere(entry)),
+    inert: dead.filter(reachesReader),
+    elsewhere: dead.filter(isElsewhere),
+    none: dead.length === allowlist.length,
+  };
+};
+
+/**
+ * The advisory lines for a finding — one per kind, because the fixes
+ * differ, plus the summary when the allowlist grants nothing at all.
+ *
+ * Shared so the daemon and a local `stratus run` say the same thing about
+ * one configuration rather than each writing its own reading of it; the
+ * hosts differ only in where the lines go and what they prefix.
+ *
+ * `elsewhere` gets no line here on purpose: naming the host that does have
+ * those tools is the caller's to do, and the kernel cannot. The summary
+ * still counts it, because an entry answered by another process is still
+ * an entry this one grants nothing for.
+ */
+export const describeToolAllowlistFinding = (
+  agentId: string,
+  finding: ToolAllowlistFinding,
+): string[] => {
+  const lines: string[] = [];
+  // An allowlist that grants nothing with no entry to blame can only be the
+  // empty one, so the shape identifies itself and needs no field of its own.
+  // Its fix is its own: there is no name to correct and no plugin to
+  // install, and the two spellings of "everything" and "nothing" are one
+  // line apart in the file.
+  if (finding.none
+    && finding.unmatched.length === 0
+    && finding.inert.length === 0
+    && finding.elsewhere.length === 0) {
+    return [
+      `agent ${agentId} has an empty tools: list, which grants nothing`
+        + ' — remove the key to allow every registered tool, or list the ones it should have',
+    ];
+  }
+  if (finding.unmatched.length > 0) {
+    lines.push(
+      `agent ${agentId} lists tools nothing registered provides: ${finding.unmatched.join(', ')}`
+        + ' — check the names, or install the plugin that provides them',
+    );
+  }
+  if (finding.inert.length > 0) {
+    lines.push(
+      `agent ${agentId} lists ${finding.inert.join(', ')} under tools:, which grants nothing`
+        + ` — ${SKILL_READ_TOOL_NAME} is granted by the skills: key instead`,
+    );
+  }
+  if (finding.none) {
+    lines.push(
+      `agent ${agentId} has an allowlist that grants nothing, so none of the tools its persona`
+        + ' talks about are there to call',
+    );
+  }
+  return lines;
+};
+
 export const missingSkillRequirements = (
   agent: Pick<AgentDefinition, 'skills' | 'tools'>,
   skills: SkillRegistry,

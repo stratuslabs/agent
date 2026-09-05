@@ -830,6 +830,93 @@ test('runCli warns like the daemon when a soul enables a skill without its requi
   assert.match(output.stderr, /agent ava enables skill site-audit, which expects tools the agent is not allowed: browser\.\*/);
 });
 
+test('a soul listing only tools nothing provides is warned about, and still runs', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-notools-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-notools-cwd-'));
+  const soulPath = path.join(home, '.stratus', 'agents', 'blair.md');
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  // `fs.*` comes from a plugin this install does not have, and the name
+  // below is a typo. Between them the allowlist selects nothing.
+  await writeFile(
+    soulPath,
+    '---\nname: Blair\nid: blair\ntools:\n  - fs.*\n  - memory.rememberr\n---\n\nUse memory.remember for durable facts.\n',
+  );
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({ soul: soulPath })}\n`,
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'hello'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  // Both dead entries named, and the fact that nothing is left — an agent
+  // whose persona still talks about tools it cannot call is the setup for a
+  // model writing the call out as text instead.
+  assert.equal(exitCode, 0);
+  assert.match(output.stderr, /Warning: agent blair lists tools nothing registered provides: fs\.\*, memory\.rememberr/);
+  assert.match(output.stderr, /Warning: agent blair has an allowlist that grants nothing/);
+});
+
+test('the CLI never imports the gateway at module scope', async () => {
+  // `bin.ts` imports this module to call `unsupportedNodeMessage`, before
+  // anything else has a chance to fail — the whole point being to explain
+  // the Node floor rather than die with a builtin-module error further in.
+  // `@stratusagent/gateway` pulls in `node:sqlite` at module scope, so one
+  // static value import of it makes that guard fail with exactly the error
+  // it exists to replace, on every command including the ones that never
+  // touch a gateway.
+  //
+  // There is no linter here to hold that, and a value import for a list of
+  // strings is an easy thing to write by accident — this is what caught it.
+  const source = await readFile(
+    path.join(import.meta.dirname, '..', 'src', 'index.ts'),
+    'utf8',
+  );
+  const staticImports = source
+    .split('\n')
+    .filter((line) => /^import\b/.test(line) && line.includes("'@stratusagent/gateway'"));
+
+  assert.ok(staticImports.length > 0, 'the assertion below would pass vacuously');
+  for (const line of staticImports) {
+    assert.match(line, /^import type\b/, `a value import of the gateway reaches node:sqlite: ${line}`);
+  }
+});
+
+test('a daemon soul run locally is told the names are right and the process is not', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-daemon-soul-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-daemon-soul-cwd-'));
+  const soulPath = path.join(home, '.stratus', 'agents', 'ava.md');
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  // Every one of these is a real tool — the gateway registers them, and
+  // this soul works under `stratus serve`. A local run has no dispatcher,
+  // store, or channels, so it has none of them.
+  await writeFile(
+    soulPath,
+    '---\nname: Ava\nid: ava\ntools:\n  - schedule.*\n  - message.send\n---\n\nSchedule a daily digest.\n',
+  );
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({ soul: soulPath })}\n`,
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'hello'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 0);
+  // Named as the daemon's, never as a typo or a plugin to go installing.
+  assert.match(output.stderr, /agent ava lists schedule\.\*, message\.send, which only the daemon provides/);
+  assert.match(output.stderr, /stratus run cannot call them; stratus serve can/);
+  assert.doesNotMatch(output.stderr, /agent ava lists tools nothing registered provides/);
+});
+
 test('runCli denies tool calls when approvals are set to never', async () => {
   const { streams, output } = createStreams();
   const exitCode = await runCli({

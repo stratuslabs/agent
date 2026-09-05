@@ -13,6 +13,8 @@ import {
   ToolRegistry,
   createSkillReadTool,
   missingSkillRequirements,
+  describeToolAllowlistFinding,
+  unmatchedToolAllowlist,
   PENDING_APPROVAL_METADATA_KEY,
   latestTurnReply,
   readPendingApproval,
@@ -1414,9 +1416,31 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // prose and can degrade. The check itself is the kernel's
     // (`missingSkillRequirements`), shared with the CLI's local runs so
     // both hosts warn about the same configuration.
+    //
+    // The tools advisory rides along, and belongs to THIS load rather
+    // than the skills reload below: the registry only gains tools when
+    // plugins load, which happens once, before the roster (see `start`).
+    // An entry naming a tool nobody registered does nothing, and a whole
+    // allowlist of them grants an agent nothing — which is not a quiet
+    // degradation, because a persona that still says "use memory.remember"
+    // then meets a provider that was shown no such tool, and a model told
+    // to use a tool it has not got tends to write the call out as prose,
+    // with a plausible result attached.
+    const registeredTools = tools.describe().map((tool) => tool.name);
+    // Namespaces a loaded plugin is allowed to fill later, so a bridge
+    // whose server is still reconnecting is not reported as a typo.
+    const discoveredNamespaces = loadedPlugins.flatMap(
+      (plugin) => plugin.manifest.contributes.toolsDiscovered.map((declared) => declared.namespace),
+    );
     for (const agent of registry.list()) {
       for (const { skill, missing } of missingSkillRequirements(agent, skillCatalog)) {
         warn(`agent ${agent.id} enables skill ${skill.id}, which expects tools the agent is not allowed: ${missing.join(', ')}`);
+      }
+      const finding = unmatchedToolAllowlist(agent, registeredTools, {
+        mayRegister: discoveredNamespaces,
+      });
+      for (const line of finding ? describeToolAllowlistFinding(agent.id, finding) : []) {
+        warn(line);
       }
     }
   };
