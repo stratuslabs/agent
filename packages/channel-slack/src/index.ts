@@ -1306,9 +1306,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const threadAddressee = new Map<string, Array<{ agentId: string; ts: string }>>();
   /**
    * One cold verdict per message — see `followUpWinner`. Bounded, because
-   * an entry outlives its own resolution on purpose.
+   * an entry outlives its own resolution on purpose; an entry that has not
+   * yet resolved is never the one evicted, since the agent still waiting on
+   * it would otherwise start a second one.
    */
-  const coldVerdicts = new Map<string, Promise<string | undefined>>();
+  const coldVerdicts = new Map<string, { verdict: Promise<string | undefined>; settled: boolean }>();
   /**
    * `agentId` → bot user id, for every app whose token this adapter has
    * authenticated — whether or not its socket then came up, and kept for as
@@ -2201,17 +2203,33 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     const key = `${threadKeyFor(parts)}:${ts}`;
     const existing = coldVerdicts.get(key);
     if (existing) {
-      return existing;
+      return existing.verdict;
     }
-    const resolving = resolveFollowUpWinner(parts);
-    coldVerdicts.set(key, resolving);
+    const entry = { verdict: resolveFollowUpWinner(parts), settled: false };
+    coldVerdicts.set(key, entry);
+    void entry.verdict.then(
+      () => {
+        entry.settled = true;
+      },
+      () => {
+        entry.settled = true;
+      },
+    );
     if (coldVerdicts.size > COLD_VERDICT_CAPACITY) {
-      const oldest = coldVerdicts.keys().next();
-      if (!oldest.done) {
-        coldVerdicts.delete(oldest.value);
+      // The oldest SETTLED entry, never simply the oldest. Evicting one
+      // still resolving is the one eviction that costs an answer rather
+      // than a lookup: the agent it has not reached yet would start its own
+      // resolution, which is the disagreement this memo exists to prevent.
+      // With none settled there is nothing safe to drop, and the map runs
+      // over its cap by however many resolutions are genuinely in flight.
+      for (const [candidate, held] of coldVerdicts) {
+        if (held.settled) {
+          coldVerdicts.delete(candidate);
+          break;
+        }
       }
     }
-    return resolving;
+    return entry.verdict;
   };
 
   /**

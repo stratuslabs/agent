@@ -1284,6 +1284,74 @@ test('a reply that reaches a lagging socket after a handover is still answered b
   ]);
 });
 
+test('a cold verdict still resolving is not evicted by the messages behind it', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  let releaseFirst = (): void => {};
+  const first = new Promise<void>((resolve) => {
+    releaseFirst = () => resolve();
+  });
+  // The contested thread's reads are held; every other thread answers at
+  // once, so its verdicts pile up behind the one still in flight.
+  // Read in call order. The first resolution names Ava; a second,
+  // independent one would name Bea — so two answers means the memo was lost.
+  const reads = [
+    '2026-01-01T00:00:05.000Z', // ava, as the first resolution reads it
+    '2026-01-01T00:00:01.000Z', // bea, likewise
+    '2026-01-01T00:00:01.000Z', // ava, as a second resolution would
+    '2026-01-01T00:00:05.000Z', // bea, likewise
+  ];
+  let call = 0;
+  gateway.sessionRouting = async (sessionId: string) => {
+    const agentId = sessionId.split(':')[1] ?? '';
+    if (sessionId.endsWith(':995.0')) {
+      const lastSpokeAt = reads[call] ?? reads.at(-1) ?? '';
+      call += 1;
+      await first;
+      return { agentId, metadata: {}, lastSpokeAt };
+    }
+    return undefined;
+  };
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // Ava opens the contested resolution and stalls inside it.
+  const contested = channelMessage({ text: 'well?', ts: '995.1', thread: '995.0' });
+  await socketAva.deliver('message', contested);
+
+  // Enough later messages, each its own thread and its own verdict, to run
+  // the bounded cache past its capacity while that one is still pending.
+  const filler: Array<Promise<void>> = [];
+  for (let index = 0; index < 300; index += 1) {
+    filler.push(socketAva.deliver('message', channelMessage({
+      text: 'unrelated',
+      ts: `996.${index}`,
+      thread: `9${index}.0`,
+    })));
+  }
+  await Promise.all(filler);
+
+  // Bea's socket only now reaches the contested message. It must find the
+  // verdict Ava started, not begin a second one.
+  await socketBea.deliver('message', contested);
+  releaseFirst();
+  await adapter.stop();
+
+  assert.equal(gateway.dispatches.length, 1);
+});
+
 test('a contested thread the gateway cannot order stays silent rather than answering twice', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
