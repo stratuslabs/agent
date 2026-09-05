@@ -64,6 +64,29 @@ need editing every time the pack gains a tool. The prefix keeps its dot:
 tool, which is fine for a private agent and is not what you want once a
 shell is installed.
 
+**An entry naming a tool nothing provides is inert, and says so.** A `fs.*`
+whose plugin is not installed, or a name with a typo in it, grants nothing —
+it cannot, since the allowlist only ever narrows what is registered. Both
+`stratus serve` (at roster load) and a local `stratus run` warn about the
+entries in an agent's list that select no registered tool:
+
+```
+agent ava lists tools nothing registered provides: fs.*
+```
+
+If *every* entry is like that, the warning says so plainly, because the
+consequence is bigger than a dead line in a file:
+
+```
+agent blair lists only tools nothing registered provides (fs.*, memory.rememberr), so it can call none — check the names, or install the plugin that provides them
+```
+
+That agent reaches its provider with an empty tool list while its persona
+may still talk about the tools it was written for — and a model told to use
+a tool it has not been given tends to write the call out as prose, often
+with a plausible-looking result attached. It reads like the thing happened.
+Nothing ran.
+
 ## What is available
 
 | Package | Tools | Risk |

@@ -383,6 +383,55 @@ export interface SkillRequirementFinding {
  * test exists to prevent. Advisory by design — a skill is prose and can
  * degrade, so callers warn and continue, never refuse.
  */
+/**
+ * What an agent's `tools:` allowlist asks for that nothing registered
+ * provides.
+ *
+ * `unmatched` are the entries selecting no tool at all — a `fs.*` whose
+ * plugin was never installed, a name with a typo in it. `none` says every
+ * entry was such an entry, which is the case worth shouting about: the
+ * agent reaches its provider with an empty tool list while its persona may
+ * still tell it to use tools, and a model told to use a tool it has not
+ * been given tends to write the call out as prose instead — with a
+ * plausible result attached, which reads to everyone as the thing having
+ * happened.
+ *
+ * Advisory rather than fatal, like `missingSkillRequirements`: an
+ * allowlist naming a tool the operator has not installed yet is a normal
+ * intermediate state, and refusing to serve the agent would be a worse
+ * answer than telling them.
+ */
+export interface ToolAllowlistFinding {
+  /** Allowlist entries that select no registered tool. */
+  unmatched: string[];
+  /** Every entry is unmatched, so the allowlist selects nothing. */
+  none: boolean;
+}
+
+/**
+ * Undefined when there is nothing to say: an agent with no `tools:` key is
+ * allowed every registered tool and cannot name one that does not exist.
+ */
+export const unmatchedToolAllowlist = (
+  agent: Pick<AgentDefinition, 'tools'>,
+  registered: readonly string[],
+): ToolAllowlistFinding | undefined => {
+  const allowlist = agent.tools;
+  if (!allowlist || allowlist.length === 0) {
+    return undefined;
+  }
+  // Each entry judged on its own, because the question is which entry is
+  // dead rather than whether the list as a whole selects anything: an
+  // allowlist of four toolsets with one uninstalled should name that one.
+  const unmatched = allowlist.filter(
+    (entry) => !registered.some((name) => matchesToolAllowlist(name, [entry])),
+  );
+  if (unmatched.length === 0) {
+    return undefined;
+  }
+  return { unmatched, none: unmatched.length === allowlist.length };
+};
+
 export const missingSkillRequirements = (
   agent: Pick<AgentDefinition, 'skills' | 'tools'>,
   skills: SkillRegistry,

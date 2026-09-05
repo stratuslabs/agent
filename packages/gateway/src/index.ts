@@ -13,6 +13,7 @@ import {
   ToolRegistry,
   createSkillReadTool,
   missingSkillRequirements,
+  unmatchedToolAllowlist,
   PENDING_APPROVAL_METADATA_KEY,
   latestTurnReply,
   readPendingApproval,
@@ -1414,9 +1415,26 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // prose and can degrade. The check itself is the kernel's
     // (`missingSkillRequirements`), shared with the CLI's local runs so
     // both hosts warn about the same configuration.
+    //
+    // The tools advisory rides along, and belongs to THIS load rather
+    // than the skills reload below: the registry only gains tools when
+    // plugins load, which happens once, before the roster (see `start`).
+    // An entry naming a tool nobody registered does nothing, and a whole
+    // allowlist of them leaves an agent able to call none — which is not
+    // a quiet degradation, because a persona that still says "use
+    // memory.remember" then meets a provider handed no tools at all, and
+    // a model told to use a tool it has not got tends to write the call
+    // out as prose, with a plausible result attached.
+    const registeredTools = tools.describe().map((tool) => tool.name);
     for (const agent of registry.list()) {
       for (const { skill, missing } of missingSkillRequirements(agent, skillCatalog)) {
         warn(`agent ${agent.id} enables skill ${skill.id}, which expects tools the agent is not allowed: ${missing.join(', ')}`);
+      }
+      const unmatched = unmatchedToolAllowlist(agent, registeredTools);
+      if (unmatched) {
+        warn(unmatched.none
+          ? `agent ${agent.id} lists only tools nothing registered provides (${unmatched.unmatched.join(', ')}), so it can call none — check the names, or install the plugin that provides them`
+          : `agent ${agent.id} lists tools nothing registered provides: ${unmatched.unmatched.join(', ')}`);
       }
     }
   };

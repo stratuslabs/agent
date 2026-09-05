@@ -830,6 +830,36 @@ test('runCli warns like the daemon when a soul enables a skill without its requi
   assert.match(output.stderr, /agent ava enables skill site-audit, which expects tools the agent is not allowed: browser\.\*/);
 });
 
+test('a soul listing only tools nothing provides is warned about, and still runs', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-notools-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-notools-cwd-'));
+  const soulPath = path.join(home, '.stratus', 'agents', 'blair.md');
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  // `fs.*` comes from a plugin this install does not have, and the name
+  // below is a typo. Between them the allowlist selects nothing.
+  await writeFile(
+    soulPath,
+    '---\nname: Blair\nid: blair\ntools:\n  - fs.*\n  - memory.rememberr\n---\n\nUse memory.remember for durable facts.\n',
+  );
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({ soul: soulPath })}\n`,
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'hello'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  // Both dead entries named, and the fact that nothing is left — an agent
+  // whose persona still talks about tools it cannot call is the setup for a
+  // model writing the call out as text instead.
+  assert.equal(exitCode, 0);
+  assert.match(output.stderr, /agent blair lists only tools nothing registered provides \(fs\.\*, memory\.rememberr\), so it can call none/);
+});
+
 test('runCli denies tool calls when approvals are set to never', async () => {
   const { streams, output } = createStreams();
   const exitCode = await runCli({

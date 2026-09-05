@@ -6,6 +6,7 @@ import {
   EventBus,
   InMemorySessionStore,
   matchesToolAllowlist,
+  unmatchedToolAllowlist,
   originOf,
   ToolRegistry,
   type ModelProvider,
@@ -255,4 +256,30 @@ test('the dispatch check uses the origin the policy judged, not one from before 
 
   assert.equal(executed, 1, 'an action the policy allowed was refused at dispatch');
   assert.equal(session.messages.filter((message) => message.role === 'tool')[0]?.toolResult?.ok, true);
+});
+
+test('an allowlist entry naming no registered tool is reported, and a whole allowlist of them says so', () => {
+  const registered = ['demo.echo', 'memory.remember', 'memory.recall'];
+
+  // No `tools:` key means every tool, so nothing can be named that is not
+  // there; a live glob is likewise nothing to report.
+  assert.equal(unmatchedToolAllowlist({}, registered), undefined);
+  assert.equal(unmatchedToolAllowlist({ tools: ['memory.*'] }, registered), undefined);
+
+  // One dead entry among live ones is named on its own, and is not fatal.
+  assert.deepEqual(unmatchedToolAllowlist({ tools: ['demo.echo', 'fs.*'] }, registered), {
+    unmatched: ['fs.*'],
+    none: false,
+  });
+
+  // Every entry dead: the agent reaches its provider with no tools at all,
+  // which is the case a host should say more about.
+  assert.deepEqual(unmatchedToolAllowlist({ tools: ['fs.*', 'web.search'] }, registered), {
+    unmatched: ['fs.*', 'web.search'],
+    none: true,
+  });
+
+  // Nothing registered makes even a wildcard dead — the shape a daemon
+  // whose plugins all failed to load would be in.
+  assert.deepEqual(unmatchedToolAllowlist({ tools: ['*'] }, []), { unmatched: ['*'], none: true });
 });

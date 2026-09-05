@@ -14,6 +14,7 @@ import {
   ToolRegistry,
   matchesSkillAllowlist,
   missingSkillRequirements,
+  unmatchedToolAllowlist,
   originOf,
   type AgentDefinition,
   type AgentMemoryStore,
@@ -2250,6 +2251,20 @@ const createAgentRuntime = async (
     writeLine(
       streams.stderr,
       `Warning: agent ${agent.id} enables skill ${skill.id}, which expects tools the agent is not allowed: ${missing.join(', ')}`,
+    );
+  }
+
+  // And the same for the tools themselves, after `initialize()` so the
+  // plugins have registered theirs: an allowlist entry naming a tool
+  // nothing provides is silently inert, and a soul made only of those
+  // runs with no tools while its persona still talks about them.
+  const unmatched = unmatchedToolAllowlist(agent, tools.describe().map((tool) => tool.name));
+  if (unmatched) {
+    writeLine(
+      streams.stderr,
+      unmatched.none
+        ? `Warning: agent ${agent.id} lists only tools nothing registered provides (${unmatched.unmatched.join(', ')}), so it can call none — check the names, or install the plugin that provides them`
+        : `Warning: agent ${agent.id} lists tools nothing registered provides: ${unmatched.unmatched.join(', ')}`,
     );
   }
 

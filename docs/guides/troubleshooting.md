@@ -68,6 +68,14 @@ subscription sign-in to per-token billing.
   `groups:history` / `mpim:history` and the matching `message.*` events and
   reinstall the app once; [Slack](./slack.md#talking-to-an-agent) has the
   rest of the addressing rules.
+- **An agent replies as though it used a tool, but nothing happened** — check
+  the daemon's startup lines for `lists tools nothing registered provides`.
+  An allowlist entry that matches no registered tool grants nothing, and a
+  soul made only of those reaches its provider with no tools at all while
+  its persona still refers to them; a model in that position tends to write
+  the call out as text, result and all. `stratus logs` settles it either
+  way — a real call is a `tool.called` line, and its absence means no tool
+  ran. See [Tools](./tools.md#installing-a-plugin-grants-no-agent-anything).
 - **A gated tool call was refused overnight** — that is the daemon's
   honest default. [Approvals](./approvals.md) covers asking a human in
   Slack instead.
