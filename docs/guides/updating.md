@@ -30,8 +30,12 @@ stamp is checked by a build that knows to check — so it keeps serving until
 it is restarted; `stratus update` stops it first, and an install that went
 around `stratus update` should restart the service (`stratus service
 restart`). From this build on, the daemon re-reads the stamp on every
-dispatch and refuses work once a newer build has stamped the home, so the
-next bump stops a live daemon on its own.
+dispatch, scheduler tick, and rollover and refuses new work once a newer
+build has stamped the home, so the next bump stops a live daemon on its
+own. A turn already in flight at that moment finishes in this build's
+shape — the same thing `stratus service stop` lets an in-flight turn do —
+which is why `stratus update` stops the service *before* it migrates
+rather than relying on the stamp to do it.
 
 One thing a rollback does lose, and it is not stamped: an agent's
 `origins` grants. `<id>.whitelist.json` holds both kinds of grant under the
