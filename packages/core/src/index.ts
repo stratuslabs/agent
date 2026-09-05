@@ -421,6 +421,7 @@ export interface ToolAllowlistFinding {
 export const unmatchedToolAllowlist = (
   agent: Pick<AgentDefinition, 'tools'>,
   registered: readonly string[],
+  mayRegister: readonly string[] = [],
 ): ToolAllowlistFinding | undefined => {
   const allowlist = agent.tools;
   if (!allowlist || allowlist.length === 0) {
@@ -429,8 +430,18 @@ export const unmatchedToolAllowlist = (
   // Each entry judged on its own, because the question is which entry is
   // dead rather than whether the list as a whole selects anything: an
   // allowlist of four toolsets with one uninstalled should name that one.
+  //
+  // `mayRegister` is what keeps this from crying wolf at a bridge. A
+  // plugin declaring a discovered namespace (`mcp.*`) registers nothing
+  // until it connects, and an unreachable server at startup is a
+  // reconnect rather than a failure — so `mcp.linear.*` is not a typo, it
+  // is a tool that has not arrived yet. The entry is passed where a tool
+  // name goes on purpose: an allowlist entry and a namespace are the same
+  // dotted-prefix glob, so `mcp.linear.*` sits under `mcp.*` by exactly
+  // the reading the allowlists already use.
   const unmatched = allowlist.filter(
-    (entry) => !registered.some((name) => matchesToolAllowlist(name, [entry])),
+    (entry) => !registered.some((name) => matchesToolAllowlist(name, [entry]))
+      && !mayRegister.some((namespace) => matchesToolAllowlist(entry, [namespace])),
   );
   if (unmatched.length === 0) {
     return undefined;

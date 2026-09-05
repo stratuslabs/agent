@@ -1426,11 +1426,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // to use a tool it has not got tends to write the call out as prose,
     // with a plausible result attached.
     const registeredTools = tools.describe().map((tool) => tool.name);
+    // Namespaces a loaded plugin is allowed to fill later, so a bridge
+    // whose server is still reconnecting is not reported as a typo.
+    const discoveredNamespaces = loadedPlugins.flatMap(
+      (plugin) => plugin.manifest.contributes.toolsDiscovered.map((declared) => declared.namespace),
+    );
     for (const agent of registry.list()) {
       for (const { skill, missing } of missingSkillRequirements(agent, skillCatalog)) {
         warn(`agent ${agent.id} enables skill ${skill.id}, which expects tools the agent is not allowed: ${missing.join(', ')}`);
       }
-      const unmatched = unmatchedToolAllowlist(agent, registeredTools);
+      const unmatched = unmatchedToolAllowlist(agent, registeredTools, discoveredNamespaces);
       if (unmatched) {
         warn(unmatched.none
           ? `agent ${agent.id} lists only tools nothing registered provides (${unmatched.unmatched.join(', ')}), so its allowlist grants nothing — check the names, or install the plugin that provides them`

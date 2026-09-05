@@ -284,4 +284,22 @@ test('an allowlist entry naming no registered tool is reported, and a whole allo
   // Nothing registered makes even a wildcard dead — the shape a daemon
   // whose plugins all failed to load would be in.
   assert.deepEqual(unmatchedToolAllowlist({ tools: ['*'] }, []), { unmatched: ['*'], none: true });
+
+  // A namespace a loaded plugin may still fill is not a dead entry. An MCP
+  // server unreachable at startup registers nothing and reconnects, so its
+  // tools are late rather than absent — and an allowlist naming them must
+  // not be reported as a typo.
+  assert.equal(
+    unmatchedToolAllowlist({ tools: ['mcp.linear.*'] }, registered, ['mcp.*']),
+    undefined,
+  );
+  assert.equal(
+    unmatchedToolAllowlist({ tools: ['mcp.linear.create_issue'] }, registered, ['mcp.*']),
+    undefined,
+  );
+  // The excuse reaches only as far as the namespace claims.
+  assert.deepEqual(unmatchedToolAllowlist({ tools: ['fs.*'] }, registered, ['mcp.*']), {
+    unmatched: ['fs.*'],
+    none: true,
+  });
 });

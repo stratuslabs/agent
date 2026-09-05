@@ -90,6 +90,13 @@ thing happened. Nothing ran.
 rather than this one. It is not one of the tools the soul was written
 around, so the warning still stands.)
 
+A namespace a plugin discovers into is never reported this way. An MCP
+server that is unreachable when the daemon starts registers nothing and
+reconnects on its own, so `mcp.linear.*` is a tool that has not arrived
+yet rather than a name that does not exist — the check reads the
+`toolsDiscovered` namespaces a loaded plugin declared, and leaves those
+entries alone.
+
 ## What is available
 
 | Package | Tools | Risk |

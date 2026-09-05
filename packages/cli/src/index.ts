@@ -2258,7 +2258,11 @@ const createAgentRuntime = async (
   // plugins have registered theirs: an allowlist entry naming a tool
   // nothing provides is silently inert, and a soul made only of those
   // runs with no tools while its persona still talks about them.
-  const unmatched = unmatchedToolAllowlist(agent, tools.describe().map((tool) => tool.name));
+  const unmatched = unmatchedToolAllowlist(
+    agent,
+    tools.describe().map((tool) => tool.name),
+    loadedPlugins.flatMap((plugin) => plugin.manifest.contributes.toolsDiscovered.map((declared) => declared.namespace)),
+  );
   if (unmatched) {
     writeLine(
       streams.stderr,
