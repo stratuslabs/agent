@@ -861,6 +861,37 @@ test('a soul listing only tools nothing provides is warned about, and still runs
   assert.match(output.stderr, /Warning: agent blair has an allowlist that grants nothing/);
 });
 
+test('a daemon soul run locally is told the names are right and the process is not', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-daemon-soul-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-daemon-soul-cwd-'));
+  const soulPath = path.join(home, '.stratus', 'agents', 'ava.md');
+  await mkdir(path.dirname(soulPath), { recursive: true });
+  // Every one of these is a real tool — the gateway registers them, and
+  // this soul works under `stratus serve`. A local run has no dispatcher,
+  // store, or channels, so it has none of them.
+  await writeFile(
+    soulPath,
+    '---\nname: Ava\nid: ava\ntools:\n  - schedule.*\n  - message.send\n---\n\nSchedule a daily digest.\n',
+  );
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({ soul: soulPath })}\n`,
+  );
+
+  const { streams, output } = createStreams();
+  const exitCode = await runCli({
+    argv: ['run', '--prompt', 'hello'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 0);
+  // Named as the daemon's, never as a typo or a plugin to go installing.
+  assert.match(output.stderr, /agent ava lists schedule\.\*, message\.send, which only the daemon provides/);
+  assert.match(output.stderr, /stratus run cannot call them; stratus serve can/);
+  assert.doesNotMatch(output.stderr, /agent ava lists tools nothing registered provides/);
+});
+
 test('runCli denies tool calls when approvals are set to never', async () => {
   const { streams, output } = createStreams();
   const exitCode = await runCli({

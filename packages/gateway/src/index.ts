@@ -36,6 +36,12 @@ import {
   createRecallTool,
   createRememberTool,
   createScheduleTools,
+  DELEGATE_TOOL_NAME,
+  MESSAGE_SEND_TOOL_NAME,
+  SCHEDULE_AT_TOOL_NAME,
+  SCHEDULE_CANCEL_TOOL_NAME,
+  SCHEDULE_EVERY_TOOL_NAME,
+  SCHEDULE_LIST_TOOL_NAME,
   DELEGATED_BY_METADATA_KEY,
   DELEGATION_DEPTH_METADATA_KEY,
   delegatingSessionIdOf,
@@ -915,6 +921,26 @@ export const ORPHANED_DELEGATION_ERROR =
  * resolved provider configuration — each agent runs on its own provider,
  * model, and credentials, delegation included.
  */
+/**
+ * The tools only a running gateway registers. They need the dispatcher,
+ * the store, and the channels, and nothing else in the tree has all three
+ * — so a soul naming them is correct while a host without them cannot
+ * call them, which is a different thing from a name that does not exist.
+ *
+ * Exported so `stratus run` can say which it is rather than reporting a
+ * daemon soul's `schedule.*` as a typo. It lives here because this is
+ * where the registrations are: a tool added below and not added here would
+ * go back to being misreported.
+ */
+export const GATEWAY_ONLY_TOOL_NAMES: readonly string[] = [
+  SCHEDULE_EVERY_TOOL_NAME,
+  SCHEDULE_AT_TOOL_NAME,
+  SCHEDULE_LIST_TOOL_NAME,
+  SCHEDULE_CANCEL_TOOL_NAME,
+  MESSAGE_SEND_TOOL_NAME,
+  DELEGATE_TOOL_NAME,
+];
+
 export const createGateway = (options: GatewayOptions = {}): Gateway => {
   const env = options.env ?? {};
   const log = options.log ?? (() => {});
@@ -1436,7 +1462,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       for (const { skill, missing } of missingSkillRequirements(agent, skillCatalog)) {
         warn(`agent ${agent.id} enables skill ${skill.id}, which expects tools the agent is not allowed: ${missing.join(', ')}`);
       }
-      const finding = unmatchedToolAllowlist(agent, registeredTools, discoveredNamespaces);
+      const finding = unmatchedToolAllowlist(agent, registeredTools, {
+        mayRegister: discoveredNamespaces,
+      });
       for (const line of finding ? describeToolAllowlistFinding(agent.id, finding) : []) {
         warn(line);
       }

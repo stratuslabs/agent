@@ -422,8 +422,32 @@ export interface ToolAllowlistFinding {
    * plugin to install and no name to correct.
    */
   inert: string[];
-  /** Every entry is one or the other, so the allowlist grants nothing. */
+  /**
+   * Entries selecting only tools another host registers — real names that
+   * this process does not have. Left to the caller to word, since only the
+   * caller knows which host it is not.
+   */
+  elsewhere: string[];
+  /** Every entry is one of those, so the allowlist grants nothing here. */
   none: boolean;
+}
+
+/** What excuses an entry from being read as a name that does not exist. */
+export interface ToolAllowlistOptions {
+  /**
+   * Namespaces a loaded plugin is allowed to fill later — an MCP bridge
+   * still connecting registers nothing yet, so an entry aimed at one names
+   * a tool that has not arrived rather than one that will never exist.
+   */
+  mayRegister?: readonly string[];
+  /**
+   * Tools a different host registers. `stratus run` has no dispatcher,
+   * store, or channels, so the daemon's `schedule.*`, `message.send`, and
+   * `agent.delegate` are absent from it while the soul naming them is
+   * correct — a distinction the caller states, because "elsewhere" has no
+   * meaning the kernel can name.
+   */
+  elsewhere?: readonly string[];
 }
 
 /**
@@ -439,14 +463,16 @@ export interface ToolAllowlistFinding {
 export const unmatchedToolAllowlist = (
   agent: Pick<AgentDefinition, 'tools'>,
   registered: readonly string[],
-  mayRegister: readonly string[] = [],
+  options: ToolAllowlistOptions = {},
 ): ToolAllowlistFinding | undefined => {
+  const mayRegister = options.mayRegister ?? [];
+  const elsewhere = options.elsewhere ?? [];
   const allowlist = agent.tools;
   if (!allowlist) {
     return undefined;
   }
   if (allowlist.length === 0) {
-    return { unmatched: [], inert: [], none: true };
+    return { unmatched: [], inert: [], elsewhere: [], none: true };
   }
   // Each entry judged on its own, because the question is which entry is
   // dead rather than whether the list as a whole selects anything: an
@@ -490,9 +516,16 @@ export const unmatchedToolAllowlist = (
   // reached it — with an empty registry `*` names nothing, reader included.
   const reachesReader = (entry: string): boolean =>
     readerRegistered && matchesToolAllowlist(SKILL_READ_TOOL_NAME, [entry]);
+  // A name another host registers is correct, so it is neither a typo nor
+  // a plugin to install — the soul is right and the process is the wrong
+  // one to have loaded it. Matched as ordinary names, because an entry
+  // reads them exactly as it reads the registry's.
+  const isElsewhere = (entry: string): boolean =>
+    !reachesReader(entry) && elsewhere.some((name) => matchesToolAllowlist(name, [entry]));
   return {
-    unmatched: dead.filter((entry) => !reachesReader(entry)),
+    unmatched: dead.filter((entry) => !reachesReader(entry) && !isElsewhere(entry)),
     inert: dead.filter(reachesReader),
+    elsewhere: dead.filter(isElsewhere),
     none: dead.length === allowlist.length,
   };
 };
@@ -504,6 +537,11 @@ export const unmatchedToolAllowlist = (
  * Shared so the daemon and a local `stratus run` say the same thing about
  * one configuration rather than each writing its own reading of it; the
  * hosts differ only in where the lines go and what they prefix.
+ *
+ * `elsewhere` gets no line here on purpose: naming the host that does have
+ * those tools is the caller's to do, and the kernel cannot. The summary
+ * still counts it, because an entry answered by another process is still
+ * an entry this one grants nothing for.
  */
 export const describeToolAllowlistFinding = (
   agentId: string,
@@ -515,7 +553,10 @@ export const describeToolAllowlistFinding = (
   // Its fix is its own: there is no name to correct and no plugin to
   // install, and the two spellings of "everything" and "nothing" are one
   // line apart in the file.
-  if (finding.none && finding.unmatched.length === 0 && finding.inert.length === 0) {
+  if (finding.none
+    && finding.unmatched.length === 0
+    && finding.inert.length === 0
+    && finding.elsewhere.length === 0) {
     return [
       `agent ${agentId} has an empty tools: list, which grants nothing`
         + ' — remove the key to allow every registered tool, or list the ones it should have',

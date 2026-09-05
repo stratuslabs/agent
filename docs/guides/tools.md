@@ -109,6 +109,16 @@ That is also why `tools: [skill.read]` counts as an allowlist that grants
 nothing: the reader loads a skill's instructions, and the tools those
 instructions call for are still not there.
 
+**A daemon tool named in a local run is a right name in the wrong
+process.** `schedule.*`, `message.send`, and `agent.delegate` need the
+dispatcher, the store, and the channels, so only `stratus serve` registers
+them. A soul that uses them is correct; `stratus run` just cannot call it,
+and says which it is rather than sending you after a plugin:
+
+```
+agent ava lists schedule.*, message.send, which only the daemon provides — the names are right, but stratus run cannot call them; stratus serve can
+```
+
 A namespace a plugin discovers into is never reported this way. An MCP
 server that is unreachable when the daemon starts registers nothing and
 reconnects on its own, so `mcp.linear.*` is a tool that has not arrived

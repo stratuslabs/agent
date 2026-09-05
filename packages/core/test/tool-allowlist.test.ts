@@ -271,6 +271,7 @@ test('an allowlist entry naming no registered tool is reported, and a whole allo
   assert.deepEqual(unmatchedToolAllowlist({ tools: ['demo.echo', 'fs.*'] }, registered), {
     unmatched: ['fs.*'],
     inert: [],
+    elsewhere: [],
     none: false,
   });
 
@@ -281,6 +282,7 @@ test('an allowlist entry naming no registered tool is reported, and a whole allo
   assert.deepEqual(unmatchedToolAllowlist({ tools: ['fs.*', 'web.search'] }, registered), {
     unmatched: ['fs.*', 'web.search'],
     inert: [],
+    elsewhere: [],
     none: true,
   });
 
@@ -289,6 +291,7 @@ test('an allowlist entry naming no registered tool is reported, and a whole allo
   assert.deepEqual(unmatchedToolAllowlist({ tools: ['*'] }, []), {
     unmatched: ['*'],
     inert: [],
+    elsewhere: [],
     none: true,
   });
 
@@ -297,32 +300,34 @@ test('an allowlist entry naming no registered tool is reported, and a whole allo
   // tools are late rather than absent — and an allowlist naming them must
   // not be reported as a typo.
   assert.equal(
-    unmatchedToolAllowlist({ tools: ['mcp.linear.*'] }, registered, ['mcp.*']),
+    unmatchedToolAllowlist({ tools: ['mcp.linear.*'] }, registered, { mayRegister: ['mcp.*'] }),
     undefined,
   );
   assert.equal(
-    unmatchedToolAllowlist({ tools: ['mcp.linear.create_issue'] }, registered, ['mcp.*']),
+    unmatchedToolAllowlist({ tools: ['mcp.linear.create_issue'] }, registered, { mayRegister: ['mcp.*'] }),
     undefined,
   );
   // Namespaces nest, so the overlap runs the other way too: a bridge
   // declaring `mcp.linear.*` and an agent granted the broader `mcp.*` is
   // still an agent whose entry selects every tool that will arrive.
   assert.equal(
-    unmatchedToolAllowlist({ tools: ['mcp.*'] }, registered, ['mcp.linear.*']),
+    unmatchedToolAllowlist({ tools: ['mcp.*'] }, registered, { mayRegister: ['mcp.linear.*'] }),
     undefined,
   );
-  assert.equal(unmatchedToolAllowlist({ tools: ['*'] }, registered, ['mcp.linear.*']), undefined);
+  assert.equal(unmatchedToolAllowlist({ tools: ['*'] }, registered, { mayRegister: ['mcp.linear.*'] }), undefined);
 
   // The excuse reaches only as far as the namespaces claim, in either
   // direction.
-  assert.deepEqual(unmatchedToolAllowlist({ tools: ['fs.*'] }, registered, ['mcp.*']), {
+  assert.deepEqual(unmatchedToolAllowlist({ tools: ['fs.*'] }, registered, { mayRegister: ['mcp.*'] }), {
     unmatched: ['fs.*'],
     inert: [],
+    elsewhere: [],
     none: true,
   });
-  assert.deepEqual(unmatchedToolAllowlist({ tools: ['mcp.github.*'] }, registered, ['mcp.linear.*']), {
+  assert.deepEqual(unmatchedToolAllowlist({ tools: ['mcp.github.*'] }, registered, { mayRegister: ['mcp.linear.*'] }), {
     unmatched: ['mcp.github.*'],
     inert: [],
+    elsewhere: [],
     none: true,
   });
 });
@@ -337,12 +342,14 @@ test('the skill reader cannot stand in for a grant the tools allowlist never mad
   assert.deepEqual(unmatchedToolAllowlist({ tools: ['skill.read'] }, registered), {
     unmatched: [],
     inert: ['skill.read'],
+    elsewhere: [],
     none: true,
   });
   // The glob spelling reaches it the same way, so it is inert the same way.
   assert.deepEqual(unmatchedToolAllowlist({ tools: ['skill.*'] }, registered), {
     unmatched: [],
     inert: ['skill.*'],
+    elsewhere: [],
     none: true,
   });
 
@@ -351,6 +358,7 @@ test('the skill reader cannot stand in for a grant the tools allowlist never mad
   assert.deepEqual(unmatchedToolAllowlist({ tools: ['demo.echo', 'skill.read'] }, registered), {
     unmatched: [],
     inert: ['skill.read'],
+    elsewhere: [],
     none: false,
   });
 
@@ -362,6 +370,7 @@ test('the skill reader cannot stand in for a grant the tools allowlist never mad
   assert.deepEqual(unmatchedToolAllowlist({ tools: ['*'] }, ['skill.read']), {
     unmatched: [],
     inert: ['*'],
+    elsewhere: [],
     none: true,
   });
 
@@ -370,13 +379,14 @@ test('the skill reader cannot stand in for a grant the tools allowlist never mad
   assert.deepEqual(unmatchedToolAllowlist({ tools: ['*'] }, []), {
     unmatched: ['*'],
     inert: [],
+    elsewhere: [],
     none: true,
   });
 
   // The two kinds get their own sentence, because the fixes differ: there
   // is no plugin to install for the reader and no name to correct.
   assert.deepEqual(
-    describeToolAllowlistFinding('blair', { unmatched: ['fs.*'], inert: ['skill.read'], none: true }),
+    describeToolAllowlistFinding('blair', { unmatched: ['fs.*'], inert: ['skill.read'], elsewhere: [], none: true }),
     [
       'agent blair lists tools nothing registered provides: fs.* — check the names,'
         + ' or install the plugin that provides them',
@@ -388,7 +398,7 @@ test('the skill reader cannot stand in for a grant the tools allowlist never mad
   );
   // A live entry beside a dead one says the one thing that applies.
   assert.deepEqual(
-    describeToolAllowlistFinding('ava', { unmatched: ['fs.*'], inert: [], none: false }),
+    describeToolAllowlistFinding('ava', { unmatched: ['fs.*'], inert: [], elsewhere: [], none: false }),
     [
       'agent ava lists tools nothing registered provides: fs.* — check the names,'
         + ' or install the plugin that provides them',
@@ -408,16 +418,66 @@ test('an empty tools list is an allowlist granting nothing, not an absent one', 
   assert.deepEqual(unmatchedToolAllowlist({ tools: [] }, registered), {
     unmatched: [],
     inert: [],
+    elsewhere: [],
     none: true,
   });
 
   // No entry to blame, so the advisory names the two spellings instead of
   // listing names it does not have.
   assert.deepEqual(
-    describeToolAllowlistFinding('blair', { unmatched: [], inert: [], none: true }),
+    describeToolAllowlistFinding('blair', { unmatched: [], inert: [], elsewhere: [], none: true }),
     [
       'agent blair has an empty tools: list, which grants nothing — remove the key to allow'
         + ' every registered tool, or list the ones it should have',
+    ],
+  );
+});
+
+test('a tool another host registers is a real name in the wrong process', () => {
+  // `stratus run` has no dispatcher, store, or channels, so it registers
+  // none of the daemon's tools. A soul written for `stratus serve` is not
+  // wrong for naming them — reporting `schedule.*` as a typo, or telling
+  // someone to install the plugin that provides it, sends them after a
+  // defect that is not there.
+  const registered = ['demo.echo', 'memory.remember'];
+  const daemon = ['schedule.every', 'schedule.at', 'message.send', 'agent.delegate'];
+
+  assert.deepEqual(unmatchedToolAllowlist({ tools: ['schedule.*'] }, registered, { elsewhere: daemon }), {
+    unmatched: [],
+    inert: [],
+    elsewhere: ['schedule.*'],
+    none: true,
+  });
+  // An exact name lands the same way, and a live entry beside it keeps
+  // `none` false.
+  assert.deepEqual(
+    unmatchedToolAllowlist({ tools: ['demo.echo', 'message.send'] }, registered, { elsewhere: daemon }),
+    { unmatched: [], inert: [], elsewhere: ['message.send'], none: false },
+  );
+  // The two kinds are told apart, so one line does not absorb the other.
+  assert.deepEqual(
+    unmatchedToolAllowlist({ tools: ['agent.delegate', 'fs.*'] }, registered, { elsewhere: daemon }),
+    { unmatched: ['fs.*'], inert: [], elsewhere: ['agent.delegate'], none: true },
+  );
+  // Without the set it is an ordinary unknown name, which is what the
+  // daemon's own check should see — it registers them itself.
+  assert.deepEqual(unmatchedToolAllowlist({ tools: ['schedule.*'] }, registered), {
+    unmatched: ['schedule.*'],
+    inert: [],
+    elsewhere: [],
+    none: true,
+  });
+
+  // The kernel says nothing about it: which host is missing is the
+  // caller's to name. The summary still counts it, because this process
+  // grants nothing for that entry either way.
+  assert.deepEqual(
+    describeToolAllowlistFinding('ava', {
+      unmatched: [], inert: [], elsewhere: ['schedule.*'], none: true,
+    }),
+    [
+      'agent ava has an allowlist that grants nothing, so none of the tools its persona'
+        + ' talks about are there to call',
     ],
   );
 });

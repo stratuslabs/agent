@@ -36,6 +36,7 @@ import {
 // Type-only: the gateway itself is imported lazily (it pulls in node:sqlite
 // and the whole runner stack), and a serve-only policy seam must not make
 // `stratus run` pay for it.
+import { GATEWAY_ONLY_TOOL_NAMES } from '@stratusagent/gateway';
 import type { ApprovalTransport, GatewayChannelAdapter, HomeClaim, RestartOutcome } from '@stratusagent/gateway';
 import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
 import {
@@ -2262,10 +2263,27 @@ const createAgentRuntime = async (
   const finding = unmatchedToolAllowlist(
     agent,
     tools.describe().map((tool) => tool.name),
-    loadedPlugins.flatMap((plugin) => plugin.manifest.contributes.toolsDiscovered.map((declared) => declared.namespace)),
+    {
+      mayRegister: loadedPlugins.flatMap(
+        (plugin) => plugin.manifest.contributes.toolsDiscovered.map((declared) => declared.namespace),
+      ),
+      // A local run has no dispatcher, store, or channels, so it registers
+      // none of the daemon's tools. A soul written for `stratus serve` is
+      // not wrong for naming them here — it is in the wrong process.
+      elsewhere: GATEWAY_ONLY_TOOL_NAMES,
+    },
   );
   for (const line of finding ? describeToolAllowlistFinding(agent.id, finding) : []) {
     writeLine(streams.stderr, `Warning: ${line}`);
+  }
+  // The kernel leaves this one to the host, because only the host knows
+  // which process it is not.
+  if (finding && finding.elsewhere.length > 0) {
+    writeLine(
+      streams.stderr,
+      `Warning: agent ${agent.id} lists ${finding.elsewhere.join(', ')}, which only the daemon provides`
+        + ' — the names are right, but stratus run cannot call them; stratus serve can',
+    );
   }
 
 
