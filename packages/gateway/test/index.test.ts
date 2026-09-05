@@ -169,7 +169,12 @@ test('a session\'s routing reports when its agent last spoke, not when the row l
     await gateway.store.save(stored);
     const after = await gateway.sessionRouting('thread-s');
     assert.equal(after?.lastSpokeAt, spoke);
-    assert.notEqual((await gateway.store.get('thread-s'))?.updatedAt, spoke);
+    // That the row did change is proved by what is in it, not by its
+    // timestamp differing from the reply's: both are `Date.now()` at
+    // millisecond resolution, and a dispatch that finishes inside one tick
+    // makes them equal — a race the assertion loses on a loaded runner
+    // rather than a regression it catches.
+    assert.equal((await gateway.store.get('thread-s'))?.messages.length, stored.messages.length);
   } finally {
     await gateway.stop();
   }
