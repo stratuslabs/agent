@@ -280,6 +280,11 @@ test('a serving daemon stops taking work once a newer build has stamped the home
       () => gateway.dispatch({ sessionId: 'long-lived', userMessage: 'and again' }),
       /newer Stratus build/,
     );
+    // A rollover rewrites the session in this build's shape — refused on
+    // the same grounds, with the row left as it was.
+    const before = await gateway.store.get('long-lived');
+    await assert.rejects(() => gateway.rolloverSession('long-lived'), /newer Stratus build/);
+    assert.deepEqual(await gateway.store.get('long-lived'), before);
   } finally {
     await gateway.stop();
   }

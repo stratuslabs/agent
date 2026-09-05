@@ -2893,6 +2893,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // On the session's own chain, so no turn can start between the read
       // and the two writes and save the old transcript over the fresh row.
       return onSessionChain(sessionId, async () => {
+        // The same stamp check a turn runs: a rollover rewrites a session
+        // in this build's shape, and a newer build may have stamped the
+        // home with fields this one would drop on the way through.
+        await assertStateCompatible(env);
         const existing = await store.get(sessionId);
         if (!existing) {
           throw new Error(`No session with id ${sessionId}. GET /sessions lists what exists.`);
