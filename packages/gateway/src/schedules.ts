@@ -606,10 +606,17 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
           continue;
         }
         const status = record.lastSessionId ? await sessionStatus(record.lastSessionId) : undefined;
-        if (status !== 'pending_approval') {
-          store.delete(record.id);
-          log(`schedule ${record.id}: one-shot already fired; removing`);
+        if (status === 'pending_approval') {
+          continue;
         }
+        // Once more after the status lookup awaited: the stamp can advance
+        // while it does, and this delete is a write into the schedules
+        // table — a newer build's row, gone before anything noticed.
+        if (options.ready) {
+          await options.ready();
+        }
+        store.delete(record.id);
+        log(`schedule ${record.id}: one-shot already fired; removing`);
       }
       // The first tick's readiness check propagates too: the stamp can
       // advance between the check above and here, and a `start()` that

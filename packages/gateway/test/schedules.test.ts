@@ -1071,3 +1071,32 @@ test('a readiness check that fails on the first tick, after passing the prefligh
     store.close();
   }
 });
+
+test('a stamp that advances during the spent one-shot lookup keeps the row and fails start', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const spent = record({ id: 'done', cadence: { kind: 'at', at: '2026-01-01T00:00:00Z' }, lastSessionId: 'schedule:done:x' });
+  delete spent.nextFireAt;
+  store.insert(spent);
+  let stamped = false;
+  const runtime = runtimeWith(store, {
+    // The status lookup is the await in the sweep; a newer build stamps
+    // the home while it is outstanding.
+    sessionStatus: async () => {
+      stamped = true;
+      return 'completed';
+    },
+    ready: async () => {
+      if (stamped) {
+        throw new Error('~/.stratus was written by a newer Stratus build (state schema 3; this build understands 2).');
+      }
+    },
+  });
+  await assert.rejects(() => runtime.start(), /newer Stratus build/);
+  try {
+    assert.ok(store.get('done'), "the newer build's row is not this build's to retire");
+  } finally {
+    runtime.stop();
+    store.close();
+  }
+});
