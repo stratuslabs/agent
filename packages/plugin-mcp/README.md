@@ -67,6 +67,14 @@ manifest declares the namespace (`toolsDiscovered: [{ "namespace": "mcp.*",
 "risk": "gated" }]`) and the plugin host enforces it at registration, on
 first connect and identically on reconnect.
 
+Provenance is a different question with one answer: whatever a bridged tool
+returns is the server's text, so every bridged result is labelled
+`external`, and the session that read it — and every fact it remembers
+afterwards — carries the label
+([Memory](../../docs/concepts/memory.md#where-a-fact-came-from)). No
+override lowers that; it is a statement about who wrote the bytes, not
+about how risky the call was.
+
 The override is the operator's, explicit and per tool, through the host's
 `toolRisks` key — sibling to `enabled`, applied by the host rather than by
 this package's code:

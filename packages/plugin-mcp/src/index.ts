@@ -742,6 +742,12 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
     // namespace's declared risk (and any operator override), applied by
     // the manifest-bound view — the server's opinion of itself never
     // enters, and neither does this package's.
+    //
+    // Provenance is a different question with one answer: whatever comes
+    // back is the server's text, written by a party the operator did not
+    // author — so every bridged result is `external`, and no per-call
+    // judgement of the response shape could make it otherwise.
+    outputTrust: 'external',
     async execute(input: JsonObject, session: Session, context?: ExecutionContext): Promise<JsonValue> {
       const client = state.connected ? state.client : undefined;
       if (!client) {

@@ -42,6 +42,7 @@ test('direct executor runs tools and returns normalized success results', async 
     toolName: 'echo',
     ok: true,
     output: { echoed: 'STRATUS' },
+    trust: 'agent',
   });
 });
 
@@ -75,6 +76,7 @@ test('direct executor can customize failure mapping', async () => {
     ok: false,
     output: null,
     error: 'wrapped:boom',
+    trust: 'agent',
   });
 });
 
@@ -107,5 +109,6 @@ test('executor helpers produce core-compatible executor results', async () => {
     toolName: 'noop',
     ok: true,
     output: { mode: 'remote' },
+    trust: 'agent',
   });
 });

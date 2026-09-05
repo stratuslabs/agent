@@ -148,6 +148,12 @@ export const createWebSearchTool = (options: WebSearchToolOptions): Tool => {
     // register `gated` however its manifest reads, so this word is the
     // contract's statement rather than a promise about any given install.
     risk: 'safe',
+    // Titles and snippets are written by whoever owns the page and chosen
+    // by a ranker. The envelope below has said so since step 13; this is
+    // the same fact stated where the kernel reads it, so the session that
+    // read a result carries the label forward and the envelope's note is
+    // for the model rather than the only record.
+    outputTrust: 'external',
     parameters: {
       type: 'object',
       properties: {

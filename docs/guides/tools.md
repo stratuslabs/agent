@@ -108,6 +108,15 @@ risk levels. Four things are worth knowing here:
   first-party is the *shape* — one tool name, one meaning per option, one
   result envelope — so swapping vendors changes no soul and no skill. See
   [Searching the web](#searching-the-web) below.
+- **What a tool reads from outside is labelled, and the label travels.**
+  `web.fetch`, `web.search`, the four `browser.*` tools, and every bridged
+  MCP tool declare their output `external`; `fs.read` labels a file the
+  agent wrote while its session was tainted, from a per-agent ledger under
+  `~/.stratus/workspaces/<agent>/`. The session that read any of it only
+  ever gets less trusted, and every fact it remembers carries the label.
+  A third-party plugin whose output comes from outside declares
+  `outputTrust: 'external'` on the tool, or marks a single call through
+  the execution context — see [`plugins.md`](../architecture/plugins.md).
 - **`plugin-mcp` mounts somebody else's code.** Each configured MCP server's
   tools register as `mcp.<server>.<tool>`, so `tools: [mcp.linear.*]` grants
   one server, and every bridged tool is `gated` regardless of how the server
@@ -170,7 +179,11 @@ a tool name is unique per install, and that is a load-time error naming both.
 
 Search results are **third-party text** — titles and snippets written by
 whoever owns the page and selected by a ranker — and the envelope says so.
-That marking is not a defence against prompt injection; it is a label.
+The tool also declares its output `external`, the same label `web.fetch`,
+the browser, and every MCP-bridged tool carry, so the session that read a
+result stays labelled and every fact it remembers afterwards says where it
+came from ([Memory](../concepts/memory.md#where-a-fact-came-from)). That
+marking is not a defence against prompt injection; it is a label.
 
 ## What runs without asking
 

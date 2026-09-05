@@ -1,13 +1,22 @@
 import {
   AgentRegistry,
+  isTaintedTrust,
+  leastTrusted,
+  memoryEntryTrust,
+  SENDER_TRUST_METADATA_KEY,
+  sessionTaintedBy,
+  sessionTrustOf,
+  sessionWriteTrust,
   type AgentDefinition,
   type AgentMemoryStore,
   type AgentRunner,
   type AvatarTheme,
   type JsonObject,
+  type MemoryOrigin,
   type Session,
   type Skill,
   type Tool,
+  type TrustLevel,
 } from '@stratusagent/core';
 
 // First names only — agents should feel like a teammate you call by name.
@@ -984,8 +993,17 @@ export const createRememberTool = (store: AgentMemoryStore): Tool => ({
     if (!fact) {
       throw new Error('memory.remember requires a non-empty "fact" string.');
     }
-    const entry = await store.append(session.agent.id, fact, { sessionId: session.id });
-    return { remembered: true, id: entry.id };
+    // Per session, not per fact: the runner knows this session has seen
+    // untrusted content and cannot know which words of the fact came from
+    // it, so the write carries the least trusted label the session holds.
+    // Coarse and over-marking — the safe direction.
+    const taintedBy = sessionTaintedBy(session);
+    const origin: MemoryOrigin = { sessionId: session.id, ...(taintedBy !== undefined ? { taintedBy } : {}) };
+    const entry = await store.append(session.agent.id, fact, { sessionId: session.id }, {
+      trust: sessionWriteTrust(session),
+      origin,
+    });
+    return { remembered: true, id: entry.id, trust: memoryEntryTrust(entry) };
   },
 });
 
@@ -1011,14 +1029,27 @@ export const createRecallTool = (store: AgentMemoryStore): Tool => ({
     },
     required: ['query'],
   },
-  async execute(input: JsonObject, session: Session) {
+  async execute(input: JsonObject, session: Session, context) {
     if (typeof input.query !== 'string') {
       throw new Error('memory.recall requires a "query" string.');
     }
     const limit = typeof input.limit === 'number' ? input.limit : undefined;
     const result = await store.search(session.agent.id, input.query, limit);
+    // What enters the context taints the session, recalled as much as
+    // injected: an `external` entry surfacing here is a stranger's text
+    // in the prompt, and marking the call is what stops the store from
+    // laundering its own contents through a fresh session.
+    const lowest = leastTrusted(...result.entries.map(memoryEntryTrust));
+    if (isTaintedTrust(lowest)) {
+      context?.markTrust?.(lowest);
+    }
     return {
-      results: result.entries.map((entry) => ({ id: entry.id, content: entry.content, createdAt: entry.createdAt })),
+      results: result.entries.map((entry) => ({
+        id: entry.id,
+        content: entry.content,
+        createdAt: entry.createdAt,
+        trust: memoryEntryTrust(entry),
+      })),
       truncated: result.truncated,
     };
   },
@@ -1270,11 +1301,24 @@ export const createDelegateTool = ({
         [ROOT_SESSION_ID_METADATA_KEY]: typeof session.metadata?.[ROOT_SESSION_ID_METADATA_KEY] === 'string'
           ? session.metadata[ROOT_SESSION_ID_METADATA_KEY]
           : session.id,
+        // Outbound: the prompt is the parent's text, and the parent is its
+        // "sender" — a tainted parent must not hand attacker text to a
+        // teammate whose session has seen nothing. At most `agent`: the
+        // prompt is something an agent wrote, whoever it was talking to.
+        [SENDER_TRUST_METADATA_KEY]: sessionWriteTrust(session),
       },
       // A cancelled parent turn cancels the delegated run with it —
       // otherwise the parent cannot settle until the target gives up.
       ...(context?.signal ? { signal: context.signal } : {}),
     });
+
+    // Inbound: the reply carries the target session's label, whatever it
+    // is — not only `external`. A target whose own injected memory was
+    // `unknown` replies from content the parent never saw and cannot
+    // assess; the parent takes the lower of its own label and this one,
+    // by the same ordering as everything else.
+    const targetTrust = sessionTrustOf(result);
+    context?.markTrust?.(targetTrust);
 
     const reply = [...result.messages]
       .reverse()
@@ -1284,6 +1328,7 @@ export const createDelegateTool = ({
       agent: target.name,
       reply: reply?.content ?? '(no reply)',
       sessionId: result.id,
+      trust: targetTrust,
     };
   },
   };
@@ -1403,6 +1448,14 @@ export interface ScheduleRecord {
   createdAt: string;
   /** The session whose turn created it, for the audit trail. */
   createdBy?: string;
+  /**
+   * The trust label of the session that set the schedule. The prompt is
+   * that session's text, so each firing's "sender" is the agent's past
+   * self at that label — a tainted session must not launder attacker text
+   * into a fresh, trusted firing. Absent on a schedule set before
+   * provenance was tracked, and a firing reads that as `unknown`.
+   */
+  trust?: TrustLevel;
   /**
    * The next slot, ISO-8601. Consumed — advanced — BEFORE the dispatch, so
    * a daemon that dies mid-firing can never run the same window twice.
@@ -1636,6 +1689,8 @@ export interface ScheduleCreateInput {
   destination?: ScheduleDestination;
   /** The session whose turn asked, for the audit trail. */
   createdBy?: string;
+  /** That session's trust label at the time — see `ScheduleRecord.trust`. */
+  trust?: TrustLevel;
 }
 
 /**
@@ -1724,6 +1779,7 @@ export const createScheduleTools = (scheduler: SchedulerHandle): Tool[] => {
       prompt,
       ...(destination ? { destination } : {}),
       createdBy: session.id,
+      trust: sessionWriteTrust(session),
     });
     return { created: true, schedule: describeSchedule(record) };
   };

@@ -2094,3 +2094,57 @@ test('the API is a required channel, and a port it cannot bind is named with wha
     await new Promise<void>((resolve) => holder.close(() => resolve()));
   }
 });
+
+test('a session rolls over through the API, and the archive and the busy session refuse it', async () => {
+  const harness = await startApi();
+  try {
+    await harness.gateway.store.create({
+      id: 's-roll',
+      agent: { id: 'stratus', name: 'Stratus' },
+      status: 'completed',
+      messages: [{ id: 'm-1', role: 'user', content: 'from before', createdAt: '2026-08-19T00:00:00.000Z' }],
+      metadata: { channel: 'web' },
+    });
+
+    const rolled = await harness.call('/api/v1/sessions/s-roll/rollover', { method: 'POST' });
+    assert.equal(rolled.status, 200);
+    const outcome = await json<{ sessionId: string; archivedAs: string }>(rolled);
+    assert.equal(outcome.sessionId, 's-roll');
+    assert.match(outcome.archivedAs, /^s-roll:rolledover:/);
+
+    const fresh = await json<{ session: { messages: unknown[]; metadata?: Record<string, unknown> } }>(await harness.call('/api/v1/sessions/s-roll'));
+    assert.deepEqual(fresh.session.messages, []);
+    assert.equal(fresh.session.metadata?.rolledOverFrom, outcome.archivedAs);
+    assert.equal(fresh.session.metadata?.sessionTrust, 'user');
+    const archived = await json<{ session: { messages: unknown[] } }>(await harness.call(`/api/v1/sessions/${encodeURIComponent(outcome.archivedAs)}`));
+    assert.equal(archived.session.messages.length, 1);
+
+    // The archive is a record; the live row is what a caller rolls over.
+    const again = await harness.call(`/api/v1/sessions/${encodeURIComponent(outcome.archivedAs)}/rollover`, { method: 'POST' });
+    assert.equal(again.status, 409);
+    assert.equal((await json<{ error: { code: string } }>(again)).error.code, 'session_archived');
+
+    await harness.gateway.store.create({
+      id: 's-busy',
+      agent: { id: 'stratus', name: 'Stratus' },
+      status: 'running',
+      messages: [],
+    });
+    const busy = await harness.call('/api/v1/sessions/s-busy/rollover', { method: 'POST' });
+    assert.equal(busy.status, 409);
+    assert.equal((await json<{ error: { code: string } }>(busy)).error.code, 'session_busy');
+
+    assert.equal((await harness.call('/api/v1/sessions/nope/rollover', { method: 'POST' })).status, 404);
+
+    // And the label is the daemon's: a caller cannot seed it on a new session.
+    const seeded = await harness.call('/api/v1/sessions/s-seeded/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hi', agentId: 'stratus', metadata: { sessionTrust: 'user' } }),
+    });
+    assert.equal(seeded.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(seeded)).error.code, 'metadata_reserved');
+  } finally {
+    await harness.stop();
+  }
+});

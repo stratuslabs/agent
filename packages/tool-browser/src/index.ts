@@ -279,6 +279,11 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
     name: 'browser.goto',
     description: 'Open a URL in this conversation’s browser page.',
     risk: 'gated',
+    // Every one of these four returns a page-supplied `title`, and `read`
+    // returns the page's text: the most attacker-controlled surface in the
+    // repository, reached by a page the agent was merely pointed at. All
+    // four declare it, not only the one that obviously reads.
+    outputTrust: 'external',
     parameters: {
       type: 'object',
       properties: { url: { type: 'string' } },
@@ -307,6 +312,7 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
     name: 'browser.read',
     description: 'Read the current page as text, optionally navigating first.',
     risk: 'gated',
+    outputTrust: 'external',
     parameters: {
       type: 'object',
       properties: { url: { type: 'string' }, maxBytes: { type: 'number' } },
@@ -338,6 +344,7 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
     name: 'browser.screenshot',
     description: 'Save a screenshot of the current page and return its path.',
     risk: 'gated',
+    outputTrust: 'external',
     parameters: {
       type: 'object',
       properties: { url: { type: 'string' }, fullPage: { type: 'boolean' } },
@@ -378,6 +385,7 @@ const createTools = (config: JsonObject, runtime: BrowserRuntime): Tool[] => {
     // runs unattended inside command scopes, because a command string
     // describes its own effect and a CSS selector does not.
     risk: 'gated',
+    outputTrust: 'external',
     parameters: {
       type: 'object',
       properties: {

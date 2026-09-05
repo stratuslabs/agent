@@ -88,6 +88,9 @@
         },
         "maxEntries": {
           "type": "integer"
+        },
+        "workspaceRoot": {
+          "type": "string"
         }
       },
       "additionalProperties": false

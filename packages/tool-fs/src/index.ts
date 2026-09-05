@@ -4,7 +4,16 @@ import { StringDecoder } from 'node:string_decoder';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { JsonObject, JsonValue, Plugin, Session, Tool } from '@stratusagent/core';
+import {
+  leastTrusted,
+  sessionTrustOf,
+  type JsonObject,
+  type JsonValue,
+  type Plugin,
+  type Session,
+  type Tool,
+  type TrustLevel,
+} from '@stratusagent/core';
 import { resolvePluginAgentConfig } from '@stratusagent/plugins';
 
 import {
@@ -13,6 +22,12 @@ import {
   resolveWithinRoots,
   type ResolvedPath,
 } from './paths.ts';
+import {
+  createFileLedger,
+  createProcessLocalLedger,
+  isLedgerPath,
+  type TaintedWriteLedger,
+} from './provenance.ts';
 
 export {
   canonicalRoots,
@@ -21,6 +36,12 @@ export {
   PathOutsideRootError,
   resolveWithinRoots,
 } from './paths.ts';
+export {
+  createFileLedger,
+  createProcessLocalLedger,
+  LEDGER_FILENAME,
+  type TaintedWriteLedger,
+} from './provenance.ts';
 
 /** Defaults chosen so a tool result is something a model can actually read. */
 const DEFAULT_MAX_BYTES = 64_000;
@@ -132,7 +153,7 @@ const readContained = async (
   }
 };
 
-const createReadTool = (config: JsonObject): Tool => ({
+const createReadTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool => ({
   name: 'fs.read',
   description: 'Read a UTF-8 text file inside one of this agent’s roots.',
   risk: 'safe',
@@ -144,12 +165,20 @@ const createReadTool = (config: JsonObject): Tool => ({
     },
     required: ['path'],
   },
-  async execute(input, session) {
+  async execute(input, session, context) {
     const settings = settingsFor(config, session);
     const requested = requireString(input, 'path');
     const resolved = await resolveWithinRoots(settings.roots, requested, { home: settings.home });
     const maxBytes = narrowed(input.maxBytes, settings.maxBytes);
     const result = await readContained(resolved, maxBytes);
+    // Per call, not per tool: most files an agent reads are its operator's,
+    // and only the ones a tainted session wrote carry a label — see the
+    // ledger. Marked after the read succeeded, since a refused read put
+    // nothing in front of the model.
+    const recorded = await ledger.lookup(session.agent.id, resolved.path);
+    if (recorded !== undefined) {
+      context?.markTrust?.(recorded);
+    }
     return {
       path: relativeTo(resolved.root, resolved.path),
       absolutePath: resolved.path,
@@ -487,7 +516,7 @@ const walkFiles = async function* (directory: string, depth = 0): AsyncGenerator
   }
 };
 
-const createSearchTool = (config: JsonObject): Tool => ({
+const createSearchTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool => ({
   name: 'fs.search',
   description: 'Search file contents for literal text under one of this agent’s roots.',
   risk: 'safe',
@@ -502,7 +531,7 @@ const createSearchTool = (config: JsonObject): Tool => ({
     },
     required: ['query'],
   },
-  async execute(input, session) {
+  async execute(input, session, context) {
     const settings = settingsFor(config, session);
     const query = requireString(input, 'query');
     const requested = typeof input.path === 'string' && input.path.length > 0 ? input.path : '.';
@@ -514,6 +543,11 @@ const createSearchTool = (config: JsonObject): Tool => ({
     });
 
     const matches: SearchMatch[] = [];
+    // A match is a line of the file's content in the result, so a matched
+    // file the ledger knows taints the call the way `fs.read` of it would.
+    // Files that only got skipped or produced no match put nothing in
+    // front of the model and are not consulted.
+    const matchedFiles = new Set<string>();
     // What the walk looked past, said outright. A file over the size
     // limit used to vanish from the result: a search of a directory holding
     // one 6.7 MB log came back with no matches and no hint that the log
@@ -530,12 +564,24 @@ const createSearchTool = (config: JsonObject): Tool => ({
         skipped.push(entry);
       }
     };
-    const report = (): JsonObject => ({
-      query,
-      matches,
-      truncated,
-      ...(skippedTotal > 0 ? { skipped, skippedTotal } : {}),
-    });
+    const report = async (): Promise<JsonObject> => {
+      const labels: TrustLevel[] = [];
+      for (const file of matchedFiles) {
+        const recorded = await ledger.lookup(session.agent.id, file);
+        if (recorded !== undefined) {
+          labels.push(recorded);
+        }
+      }
+      if (labels.length > 0) {
+        context?.markTrust?.(leastTrusted(...labels));
+      }
+      return {
+        query,
+        matches,
+        truncated,
+        ...(skippedTotal > 0 ? { skipped, skippedTotal } : {}),
+      };
+    };
     let truncated = false;
     // A file is searched as itself. Falling back to its parent would answer
     // a question nobody asked — `{ path: 'notes/today.md' }` coming back
@@ -558,6 +604,7 @@ const createSearchTool = (config: JsonObject): Tool => ({
         line: index + 1,
         text: line.length > 400 ? `${line.slice(0, 400)}…` : line,
       });
+      matchedFiles.add(file);
       return true;
     };
 
@@ -583,6 +630,7 @@ const createSearchTool = (config: JsonObject): Tool => ({
           // NUL is not a search result of a text file, because this is
           // not one.
           matches.splice(before);
+          matchedFiles.delete(resolved.path);
           truncated = truncatedBefore;
           clipped = false;
           skip({ path: relativeTo(resolved.root, resolved.path), bytes: size, reason: 'binary' });
@@ -646,7 +694,7 @@ const createSearchTool = (config: JsonObject): Tool => ({
   },
 });
 
-const createWriteTool = (config: JsonObject): Tool => ({
+const createWriteTool = (config: JsonObject, ledger: TaintedWriteLedger, workspaceRoot: string | undefined): Tool => ({
   name: 'fs.write',
   description: 'Write a UTF-8 text file inside one of this agent’s roots.',
   // Gated, not safe: it acts on the world outside Stratus and outlives the
@@ -669,6 +717,14 @@ const createWriteTool = (config: JsonObject): Tool => ({
       home: settings.home,
       allowMissing: true,
     });
+
+    // The ledger is the daemon's record of what this agent wrote while
+    // tainted. An agent whose roots cover its own workspace could otherwise
+    // rewrite that record through this very tool — the attack writing its
+    // own permission slip — so the one file the tool never writes is it.
+    if (isLedgerPath(workspaceRoot, resolved.path)) {
+      throw new Error(`${resolved.path} is the filesystem provenance ledger, which fs.write does not edit.`);
+    }
 
     if (!resolved.exists) {
       // The parent is created only after the resolution above put it inside
@@ -698,6 +754,13 @@ const createWriteTool = (config: JsonObject): Tool => ({
       await handle.close();
     }
 
+    // After the bytes landed, before the result: a write from a session at
+    // `external` or `unknown` records the path at that label, so the read
+    // that comes back for it next week arrives labelled instead of as the
+    // agent's own notes. A truncating write from a clean session clears
+    // the record — the file is now that session's.
+    await ledger.recordWrite(session.agent.id, resolved.path, sessionTrustOf(session), { append: input.append === true });
+
     return {
       path: relativeTo(resolved.root, resolved.path),
       absolutePath: resolved.path,
@@ -717,15 +780,25 @@ const createWriteTool = (config: JsonObject): Tool => ({
  * true, so they are an access boundary and not a preference — resolved from
  * `session.agent.id` on every call.
  */
-export const createFsPlugin = (config: JsonObject = {}): Plugin => ({
-  name: '@stratusagent/tool-fs',
-  setup(context) {
-    context.tools.register(createReadTool(config));
-    context.tools.register(createListTool(config));
-    context.tools.register(createSearchTool(config));
-    context.tools.register(createWriteTool(config));
-  },
-});
+export const createFsPlugin = (config: JsonObject = {}): Plugin => {
+  // `workspaceRoot` is supplied by the loader (the host knows the platform's
+  // answer); it is where the tainted-write ledger lives, per agent. Loaded
+  // without one — a host wiring the plugin by hand — the ledger is
+  // process-local, which the README says outright.
+  const workspaceRoot = typeof config.workspaceRoot === 'string' && config.workspaceRoot.length > 0
+    ? config.workspaceRoot
+    : undefined;
+  const ledger = workspaceRoot !== undefined ? createFileLedger(workspaceRoot) : createProcessLocalLedger();
+  return {
+    name: '@stratusagent/tool-fs',
+    setup(context) {
+      context.tools.register(createReadTool(config, ledger));
+      context.tools.register(createListTool(config));
+      context.tools.register(createSearchTool(config, ledger));
+      context.tools.register(createWriteTool(config, ledger, workspaceRoot));
+    },
+  };
+};
 
 /** The loader's ABI. See `docs/architecture/plugins.md`. */
 export const createPlugin = createFsPlugin;

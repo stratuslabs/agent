@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import type { JsonObject, Session } from '@stratusagent/core';
+import { SENDER_TRUST_METADATA_KEY, type JsonObject, type Session } from '@stratusagent/core';
 import {
   canonicalDestination,
   nextFireAfter,
@@ -333,6 +333,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
         ...(input.destination ? { destination: input.destination } : {}),
         createdAt: now.toISOString(),
         ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+        ...(input.trust ? { trust: input.trust } : {}),
         nextFireAt: next.toISOString(),
       };
       store.insert(record);
@@ -470,6 +471,10 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       metadata: {
         [SCHEDULED_TURN_METADATA_KEY]: true,
         [SCHEDULE_ID_METADATA_KEY]: record.id,
+        // The firing's "sender" is the session that wrote the prompt, at
+        // the label it had then; a schedule set before labels existed is
+        // `unknown`, like every other record from before.
+        [SENDER_TRUST_METADATA_KEY]: record.trust ?? 'unknown',
       },
     }).then(
       () => {

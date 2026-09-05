@@ -12,9 +12,12 @@ import {
   EventBus,
   SkillRegistry,
   ToolRegistry,
+  isTrustLevel,
   matchesSkillAllowlist,
+  memoryEntryTrust,
   missingSkillRequirements,
   originOf,
+  TRUST_LEVELS,
   type AgentDefinition,
   type AgentMemoryStore,
   type ApprovalContext,
@@ -26,6 +29,7 @@ import {
   type ModelProvider,
   type Session,
   type StratusEvent,
+  type TrustLevel,
 } from '@stratusagent/core';
 import {
   createLocalCommandExecutor,
@@ -115,6 +119,7 @@ import {
   logsDirPath,
   readWorkingDirectory,
   resolveAgentApprovals,
+  resolveAgentPrincipals,
   resolveEnvApiKey,
   DEFAULT_CONFIG_FILENAME,
   loadConfigFile,
@@ -143,6 +148,7 @@ import {
   type AppliedStateMigration,
   type ApprovalsConfig,
   type CatalogModel,
+  type PrincipalsConfig,
   type ChannelCredentials,
   type CredentialProviderName,
   type CredentialsFile,
@@ -564,6 +570,27 @@ export interface ParsedSchedulesCommand {
   format: 'text' | 'json';
 }
 
+export interface ParsedMemoryCommand {
+  command: 'memory';
+  action: 'list' | 'reassert';
+  agentId: string;
+  /** list: show only entries at this label. reassert: the label to record. */
+  trust?: TrustLevel;
+  /** reassert: the entries to re-label, by id. */
+  ids: string[];
+  /** reassert: every live entry currently reading `unknown` — the upgrade case. */
+  allUnknown: boolean;
+  format: 'text' | 'json';
+}
+
+export interface ParsedSessionCommand {
+  command: 'session';
+  action: 'rollover';
+  sessionId: string;
+  gateway?: string;
+  token?: string;
+}
+
 export interface ParsedDoctorCommand {
   command: 'doctor';
   format: 'text' | 'json';
@@ -634,6 +661,8 @@ export type ParsedCommand =
   | ParsedCredentialCommand
   | ParsedRestartCommand
   | ParsedSchedulesCommand
+  | ParsedMemoryCommand
+  | ParsedSessionCommand
   | ParsedDoctorCommand
   | ParsedLogsCommand
   | ParsedUpdateCommand
@@ -778,6 +807,9 @@ Usage:
   stratus restart
   stratus schedules
   stratus schedules cancel <id>
+  stratus memory list ava
+  stratus memory reassert ava --trust user --all-unknown
+  stratus session rollover slack:ava:T01ABCDEF:D07GHIJKL
   printf %s "$BRAVE_KEY" | stratus credential set search.apiKey
   stratus credentials
   stratus doctor
@@ -866,6 +898,22 @@ Commands:
                    cancel <id>" stops the next firing and revokes the
                    destination that was approved with it
                    (also: stratus schedule list / schedule cancel <id>)
+  memory list      Show an agent's live memory with the trust label each
+                   entry carries — user, agent, unknown (no recorded origin,
+                   or written in a conversation with someone not configured
+                   as a principal), external (recorded after reading content
+                   from outside). --trust <level> filters; --format json
+  memory reassert  Re-label entries as an operator: stratus memory reassert
+                   <agent> --trust user <id>..., or --all-unknown for every
+                   entry with no recorded origin (the upgrade case). Appends
+                   a record to ~/.stratus/memory.jsonl; a running daemon
+                   sees it on its next turn. The only way a label ever
+                   rises — no tool can do this
+  session rollover Start a conversation over under the same session id,
+                   archiving its transcript so far — for a long-lived
+                   session (a Slack DM) that predates provenance tracking
+                   and would otherwise write unknown forever. Asks the
+                   running daemon (--gateway, --token)
   agent new        Create an agent identity (generates a human-ish name + avatar theme)
   agents           List your agents: who they are, where their souls live, what
                    they run on, what they remember (also: stratus agent list).
@@ -911,9 +959,12 @@ Options:
   --port           dashboard: port for a daemon it starts (default: 4123)
   --host           dashboard: host for a daemon it starts (default: 127.0.0.1)
   --no-open        Do not open the browser automatically
-  --gateway        agents / skill reload / restart: a running daemon's control
-                   API (skill reload and restart default to the daemon
+  --gateway        agents / skill reload / restart / session rollover: a running
+                   daemon's control API (all but agents default to the daemon
                    ~/.stratus/gateway.json names)
+  --trust          memory list: show only this label; memory reassert: the
+                   label to record (user, agent, unknown, external)
+  --all-unknown    memory reassert: every live entry with no recorded origin
   --token          Bearer token for --gateway (default: ~/.stratus/gateway-token)
   --no-reload      skill add: install without reloading a running daemon
   --reason         restart: why, for the daemon's log
@@ -1602,6 +1653,125 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     };
   }
 
+  if (command === 'memory') {
+    const [action, ...memoryRest] = rest;
+    if (action === undefined || action === '--help' || action === '-h') {
+      return { command: 'help' };
+    }
+    if (action !== 'list' && action !== 'reassert') {
+      throw new Error(`Unknown memory subcommand: ${action}. Try: stratus memory list <agent>, stratus memory reassert <agent> --trust user <id>...`);
+    }
+    let agentId: string | undefined;
+    let trust: TrustLevel | undefined;
+    let format: 'text' | 'json' = 'text';
+    let allUnknown = false;
+    const ids: string[] = [];
+    for (let index = 0; index < memoryRest.length; index += 1) {
+      const token = memoryRest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--trust') {
+        const value = readOptionValue(memoryRest, index, '--trust');
+        if (!isTrustLevel(value)) {
+          throw new Error(`Unsupported trust level: ${value}. Use one of ${TRUST_LEVELS.join(', ')}.`);
+        }
+        trust = value;
+        index += 1;
+        continue;
+      }
+      if (token === '--format') {
+        const value = readOptionValue(memoryRest, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported format: ${value}`);
+        }
+        format = value;
+        index += 1;
+        continue;
+      }
+      if (token === '--all-unknown' && action === 'reassert') {
+        allUnknown = true;
+        continue;
+      }
+      if (token.startsWith('--')) {
+        throw new Error(`Unknown option: ${token}`);
+      }
+      if (agentId === undefined) {
+        agentId = token;
+        continue;
+      }
+      if (action === 'reassert') {
+        ids.push(token);
+        continue;
+      }
+      throw new Error(`Unexpected argument: ${token}. Try: stratus memory list <agent>`);
+    }
+    if (!agentId) {
+      throw new Error(`memory ${action} needs the agent id: stratus memory ${action} <agent>${action === 'reassert' ? ' --trust user <id>...' : ''}.`);
+    }
+    if (action === 'reassert') {
+      if (trust === undefined) {
+        throw new Error('memory reassert needs --trust <user|agent|external|unknown>: the label you are vouching for.');
+      }
+      if (ids.length === 0 && !allUnknown) {
+        throw new Error('memory reassert needs entry ids, or --all-unknown to re-label every entry that has no recorded origin.');
+      }
+    }
+    return {
+      command: 'memory',
+      action,
+      agentId,
+      ...(trust !== undefined ? { trust } : {}),
+      ids,
+      allUnknown,
+      format,
+    };
+  }
+
+  if (command === 'session') {
+    const [action, ...sessionRest] = rest;
+    if (action === undefined || action === '--help' || action === '-h') {
+      return { command: 'help' };
+    }
+    if (action !== 'rollover') {
+      throw new Error(`Unknown session subcommand: ${action}. Try: stratus session rollover <session-id>`);
+    }
+    const parsed: ParsedSessionCommand = { command: 'session', action: 'rollover', sessionId: '' };
+    for (let index = 0; index < sessionRest.length; index += 1) {
+      const token = sessionRest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--gateway') {
+        parsed.gateway = readOptionValue(sessionRest, index, '--gateway');
+        index += 1;
+        continue;
+      }
+      if (token === '--token') {
+        parsed.token = readOptionValue(sessionRest, index, '--token');
+        index += 1;
+        continue;
+      }
+      if (token.startsWith('--')) {
+        throw new Error(`Unknown option: ${token}`);
+      }
+      if (parsed.sessionId.length > 0) {
+        throw new Error(`Unexpected argument: ${token}. Try: stratus session rollover <session-id>`);
+      }
+      parsed.sessionId = token;
+    }
+    if (parsed.sessionId.length === 0) {
+      throw new Error('session rollover needs the session id: stratus session rollover <session-id>. `stratus logs` shows ids in its last column.');
+    }
+    return parsed;
+  }
+
   if (command === 'restart') {
     const parsed: ParsedRestartCommand = { command: 'restart' };
     for (let index = 0; index < rest.length; index += 1) {
@@ -1878,6 +2048,8 @@ export const formatEvent = (event: StratusEvent): string | null => {
       return `• session.completed ${event.sessionId}`;
     case 'session.failed':
       return `• session.failed ${event.error}`;
+    case 'session.tainted':
+      return `• session.tainted ${event.trust} (${event.source})`;
     default:
       return null;
   }
@@ -1929,6 +2101,11 @@ export const eventDetail = (event: StratusEvent): Record<string, unknown> | unde
       };
     case 'session.failed':
       return { error: event.error };
+    case 'session.tainted':
+      // The label and what lowered it — a tool's name, or `memory`,
+      // `sender`, `legacy`. Never the content that did: same rule as every
+      // other event here.
+      return { trust: event.trust, source: event.source };
     default:
       return undefined;
   }
@@ -5317,6 +5494,45 @@ const loadServeApprovals = async (
  * `agentIds` is therefore the agents that can actually be *asked*, not
  * every agent with tokens on disk.
  */
+/**
+ * The `principals` block, read under the same trust rule as `approvals` and
+ * for a sharper reason: it names the people whose messages an agent takes
+ * as its operator's, which is the trust root everything downstream lowers
+ * from. A cloned repo appointing itself the principal would arrive as
+ * `user` in every Slack thread the daemon serves.
+ */
+const loadServePrincipals = async (
+  env: CliEnvironment,
+  configPath: string | undefined,
+  warn: (line: string) => void,
+): Promise<PrincipalsConfig> => {
+  const block = await readTrustedConfigBlock('principals', env, configPath);
+  if (block.status === 'untrusted') {
+    warn(
+      `ignoring the principals config in ${block.path}: a project-local config cannot decide whose messages `
+      + 'this daemon\'s agents treat as their operator\'s. Move it to ~/.stratus/config.json, or pass it with --config.',
+    );
+    return {};
+  }
+  if (block.status === 'unreadable') {
+    warn(`ignoring the principals config (${block.error instanceof Error ? block.error.message : String(block.error)}); every Slack sender is unknown`);
+    return {};
+  }
+  return block.status === 'present' ? block.value : {};
+};
+
+/** One line saying whose messages arrive as the operator's, per Slack agent. */
+const describePrincipals = (principals: PrincipalsConfig, agentIds: string[]): string => {
+  const covered = agentIds.filter((agentId) => (resolveAgentPrincipals(principals, agentId).slackUsers ?? []).length > 0);
+  if (covered.length === 0) {
+    return 'no principals configured, so every Slack sender is unknown and every fact written in Slack carries that label — set principals.slackUsers in ~/.stratus/config.json';
+  }
+  const uncovered = agentIds.filter((agentId) => !covered.includes(agentId));
+  return uncovered.length === 0
+    ? `principals set for ${covered.join(', ')}`
+    : `principals set for ${covered.join(', ')}; none for ${uncovered.join(', ')}, whose Slack senders are all unknown`;
+};
+
 const describeApprovers = (approvals: ApprovalsConfig, agentIds: string[]): string => {
   if (agentIds.length === 0) {
     return 'but no channel is running to ask through, so gated calls will wait out the approval timeout and then be denied';
@@ -6249,6 +6465,136 @@ export const runSkillReload = async (
   const { skills } = await response.json() as { skills?: Array<{ id: string }> };
   const ids = (skills ?? []).map((skill) => skill.id);
   writeLine(streams.stdout, `reloaded skills in the daemon at ${base} — ${ids.length} skill(s) serving${ids.length > 0 ? `: ${ids.join(', ')}` : ''}`);
+  return 0;
+};
+
+/**
+ * `stratus memory list|reassert` — the operator's half of provenance.
+ *
+ * `list` shows what an agent's store holds with the label each entry
+ * carries, because an operator cannot re-assert what they cannot see.
+ * `reassert` is the one way a label ever rises: it appends a re-assertion
+ * record to the JSONL (never rewrites a line), so a running daemon — which
+ * re-reads the file on every read — sees it at once. Operator only, on
+ * purpose: no tool exposes this, because an agent re-labelling its own
+ * memory as trusted is the attack writing its own permission slip.
+ *
+ * `--all-unknown` exists for the upgrade: every entry written before labels
+ * existed reads `unknown`, and the injected slice of such a store makes
+ * every session `unknown` on its first turn. Re-asserting the entries the
+ * agent actually surfaces, once, is the bounded work that drains it.
+ */
+export const runMemory = async (
+  command: ParsedMemoryCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  await migrateLegacyMemory(env);
+  const store = withLegacyDefaultMemories(createFileMemoryStore(memoryFilePath(env)));
+  const describeEntry = (entry: MemoryEntry): Record<string, unknown> => ({
+    id: entry.id,
+    trust: memoryEntryTrust(entry),
+    content: entry.content,
+    createdAt: entry.createdAt,
+    ...(entry.origin ? { origin: entry.origin } : {}),
+  });
+
+  if (command.action === 'list') {
+    const live = (await store.list(command.agentId)).entries
+      .filter((entry) => command.trust === undefined || memoryEntryTrust(entry) === command.trust);
+    if (command.format === 'json') {
+      writeLine(streams.stdout, JSON.stringify({ agentId: command.agentId, entries: live.map(describeEntry) }, null, 2));
+      return 0;
+    }
+    if (live.length === 0) {
+      writeLine(
+        streams.stdout,
+        command.trust === undefined
+          ? `${command.agentId} has no live memory entries in ${memoryFilePath(env)}.`
+          : `${command.agentId} has no live memory entries at ${command.trust}.`,
+      );
+      return 0;
+    }
+    for (const entry of live) {
+      const taintedBy = entry.origin?.taintedBy ? `  (tainted by ${entry.origin.taintedBy})` : '';
+      writeLine(streams.stdout, `${entry.id}  [${memoryEntryTrust(entry)}]${taintedBy}`);
+      writeLine(streams.stdout, `  ${entry.content}`);
+    }
+    const unknownCount = live.filter((entry) => memoryEntryTrust(entry) === 'unknown').length;
+    if (unknownCount > 0 && command.trust === undefined) {
+      writeLine(streams.stdout, '');
+      writeLine(
+        streams.stdout,
+        `${unknownCount} entr${unknownCount === 1 ? 'y has' : 'ies have'} no recorded origin, so any session that reads one writes unknown. `
+        + `Review them, then: stratus memory reassert ${command.agentId} --trust user --all-unknown (or name ids).`,
+      );
+    }
+    return 0;
+  }
+
+  if (!store.reassertTrust) {
+    writeLine(streams.stderr, 'Error: this memory store cannot re-assert trust.');
+    return 1;
+  }
+  const trust = command.trust ?? 'user';
+  const live = (await store.list(command.agentId)).entries;
+  const targets = command.allUnknown
+    ? [...new Set([...live.filter((entry) => memoryEntryTrust(entry) === 'unknown').map((entry) => entry.id), ...command.ids])]
+    : command.ids;
+  if (targets.length === 0) {
+    writeLine(streams.stdout, `${command.agentId} has no live entries reading unknown; nothing to re-assert.`);
+    return 0;
+  }
+  const missing: string[] = [];
+  let changed = 0;
+  for (const id of targets) {
+    if (await store.reassertTrust(command.agentId, id, trust)) {
+      changed += 1;
+    } else {
+      missing.push(id);
+    }
+  }
+  if (command.format === 'json') {
+    writeLine(streams.stdout, JSON.stringify({ agentId: command.agentId, trust, reasserted: changed, missing }, null, 2));
+  } else {
+    writeLine(streams.stdout, `Re-asserted ${changed} entr${changed === 1 ? 'y' : 'ies'} of ${command.agentId} as ${trust}. A running daemon reads the change on its next turn.`);
+  }
+  for (const id of missing) {
+    writeLine(streams.stderr, `No live memory entry with id ${id} belongs to ${command.agentId}; nothing was re-asserted for it.`);
+  }
+  return missing.length === 0 ? 0 : 1;
+};
+
+/**
+ * `stratus session rollover <id>` — start a conversation over under the
+ * same id, archiving its transcript so far. The daemon does the work, on
+ * the session's own chain, so a turn cannot interleave; this only asks.
+ */
+export const runSessionRollover = async (
+  command: ParsedSessionCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const base = await runningGatewayBase(env, command);
+  if (!base) {
+    writeLine(streams.stderr, `Error: ${noRunningDaemonMessage(env)}`);
+    return 1;
+  }
+  const response = await callRunningGateway(env, command, base, `/api/v1/sessions/${encodeURIComponent(command.sessionId)}/rollover`);
+  if (!response.ok) {
+    writeLine(streams.stderr, `Error: ${await gatewayErrorMessage(response)}`);
+    return 1;
+  }
+  const outcome = await response.json() as { sessionId?: string; archivedAs?: string };
+  writeLine(
+    streams.stdout,
+    `Rolled over ${outcome.sessionId ?? command.sessionId}: the next message starts a fresh conversation, `
+    + `and the transcript so far is archived as ${outcome.archivedAs ?? '(unknown)'}.`,
+  );
+  writeLine(
+    streams.stdout,
+    'A fresh session still reads the memory it injects — if that slice holds entries with no recorded origin, `stratus memory list <agent>` shows them and `stratus memory reassert` re-labels them.',
+  );
   return 0;
 };
 
@@ -7287,6 +7633,7 @@ const serveHeldHome = async (
   // approve this" differently from "is anyone being asked at all".
   const approvalsConfig = await loadServeApprovals(env, command.configPath, warn);
   const approvalMode = command.approvals ?? approvalsConfig.mode ?? 'headless';
+  const principalsConfig = await loadServePrincipals(env, command.configPath, warn);
 
   // Read here rather than inside the gateway for the same reason as the two
   // blocks above: the trust boundary is a property of *which file* said it,
@@ -7376,12 +7723,14 @@ const serveHeldHome = async (
       channels.push(adapter({
         agents: slackAgents.map(([agentId, tokens]) => {
           const route = resolveAgentApprovals(approvalsConfig, agentId);
+          const principals = resolveAgentPrincipals(principalsConfig, agentId);
           return {
             agentId,
             appToken: tokens.appToken,
             botToken: tokens.botToken,
             ...(route.slackApprovers ? { approvers: route.slackApprovers } : {}),
             ...(route.slackChannel ? { approvalChannel: route.slackChannel } : {}),
+            ...(principals.slackUsers ? { principals: principals.slackUsers } : {}),
           };
         }),
         log,
@@ -7492,6 +7841,12 @@ const serveHeldHome = async (
     // request, and the turn discovers that by hanging.
     const askable = slackAdapterUp ? slackAgents.map(([agentId]) => agentId) : [];
     log(`approvals: remote — gated calls are parked and asked in Slack (${describeApprovers(approvalsConfig, askable)})`);
+  }
+  if (slackAdapterUp) {
+    // Said at startup, because the failure it names is silent otherwise: a
+    // daemon with no principals serves every Slack message as `unknown`,
+    // and the operator finds out when their agent's memory reads that way.
+    log(`provenance: ${describePrincipals(principalsConfig, slackAgents.map(([agentId]) => agentId))}`);
   }
 
   /**
@@ -7827,6 +8182,7 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
           || command.command === 'dashboard'
           || (command.command === 'credential' && command.action !== 'list')
           || (command.command === 'schedules' && command.action === 'cancel')
+          || (command.command === 'memory' && command.action === 'reassert')
           || (command.command === 'service' && (command.action === 'install' || command.action === 'start'));
         if (writesState) {
           writeLine(streams.stderr, newerStateMessage(stamp.schemaVersion));
@@ -7889,6 +8245,14 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'schedules') {
       return await runSchedules(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'memory') {
+      return await runMemory(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'session') {
+      return await runSessionRollover(command, streams, resolvedEnv);
     }
 
     if (command.command === 'doctor') {

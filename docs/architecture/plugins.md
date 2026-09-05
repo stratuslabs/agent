@@ -74,6 +74,23 @@ express. A host that omits it leaves a plugin needing a key with no way to
 get one, and such a plugin must fail the call naming what is missing rather
 than falling back to the environment. `AgentRunner.initialize` still calls
 `plugins.loadAll({ bus, tools })` with nothing else.
+
+A tool also says **where its output comes from**, and that is part of the
+contract rather than a courtesy: a result written by a party the operator
+has not authorized — a web page, a search snippet, an MCP server's response,
+a fetched document — is `external`, and the kernel carries that label from
+the result into the session that read it, across restarts and delegations,
+and into every fact the session remembers ([30](../roadmap/30-provenance.md)).
+Two channels, mirroring `risk` and `commandFor`: `outputTrust: 'external'`
+on the `Tool` declares it for every call (`web.fetch`, `browser.read`), and
+`context.markTrust(level)` on the `ExecutionContext` a tool's `execute`
+receives marks one call, for a tool whose output is only sometimes from
+outside (`fs.read` of a file the agent downloaded, `memory.recall` of an
+`external` entry). The executor promotes whichever fired into
+`ToolResult.trust`; a tool that uses neither is labelled `agent`, its own
+work. The rule is a rule, not a list the kernel keeps — a newly registered
+third-party tool that declares itself a producer is labelled with no change
+to kernel code, which is what makes the ecosystem's tools first-class here.
 **So four of the seven kinds have an interface but no registration path.**
 An implementation of `ChannelAdapter` exists (`@stratusagent/channel-slack`),
 and the way it reaches the runtime is that the CLI constructs it and hands it to
@@ -396,6 +413,13 @@ narrow. They are not a sandbox, and this document does not claim one:
   itself — so a tool can raise itself above its manifest and can never talk
   its way below it.
 
+- **A plugin says where its output comes from, and the label is not a risk
+  word.** `outputTrust` and `markTrust` (above) are the plugin's statement
+  about who wrote the bytes it returns; `risk` is the operator's decision
+  about whether the call may run unattended. They are independent — every
+  MCP-bridged tool is `external` however low an operator sets its risk — and
+  a plugin that returns third-party text without declaring it has misstated
+  provenance the way a manifest omitting a tool misstates its surface.
 - **A plugin's configuration is validated against its own schema before the
   module is imported.** The subset understood is deliberately small — `type`,
   `properties`, `required`, `items`, `enum`, and `additionalProperties: false`

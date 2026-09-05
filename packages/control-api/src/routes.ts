@@ -17,6 +17,7 @@ import {
   RESERVED_SESSION_METADATA_KEYS,
   reservedSessionMetadataKey,
   RestartUnsupportedError,
+  ROLLED_OVER_TO_METADATA_KEY,
   SCHEDULE_SESSION_ID_PREFIX,
   type Gateway,
 } from '@stratusagent/gateway';
@@ -845,6 +846,34 @@ export const routes: Route[] = [
 
       context.response.statusCode = 202;
       return { sessionId, turnId };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: `${API_PREFIX}/sessions/:id/rollover`,
+    async handler(context) {
+      const sessionId = context.params.id ?? '';
+      const existing = await context.gateway.store.get(sessionId);
+      if (!existing) {
+        throw new ApiError(404, 'session_not_found', `No session with id ${sessionId}.`);
+      }
+      // Preflighted so the caller gets a status they can act on; the
+      // gateway refuses the same two cases with a plain error.
+      if (existing.status === 'running' || existing.status === 'pending_approval') {
+        throw new ApiError(
+          409,
+          'session_busy',
+          `Session ${sessionId} has a turn in flight (${existing.status}); roll it over once the turn has finished.`,
+        );
+      }
+      if (typeof existing.metadata?.[ROLLED_OVER_TO_METADATA_KEY] === 'string') {
+        throw new ApiError(
+          409,
+          'session_archived',
+          `Session ${sessionId} is an archived transcript; roll over the live session ${String(existing.metadata[ROLLED_OVER_TO_METADATA_KEY])} instead.`,
+        );
+      }
+      return context.gateway.rolloverSession(sessionId);
     },
   },
 

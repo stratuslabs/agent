@@ -49,13 +49,16 @@ import {
 import {
   createAnthropicProvider,
   DEFAULT_ANTHROPIC_MODEL,
+  RAW_TURNS_METADATA_KEY,
 } from '@stratusagent/provider-anthropic';
 import {
   createClaudeCodeProvider,
+  SDK_SESSION_METADATA_KEY,
   type ClaudeCodeQueryFn,
 } from '@stratusagent/provider-claude-code';
 import {
   createCodexProvider,
+  CODEX_THREAD_METADATA_KEY,
   DEFAULT_CODEX_MODEL,
   type CodexRunTurn,
 } from '@stratusagent/provider-codex';
@@ -128,6 +131,37 @@ export interface ApprovalsConfig extends AgentApprovalConfig {
   timeoutMs?: number;
   /** Per-agent overrides, keyed by agent id. */
   agents?: Record<string, AgentApprovalConfig>;
+}
+
+/**
+ * Who counts as an agent's operator on a channel — the authorized
+ * principals whose messages arrive as `user` rather than `unknown`.
+ *
+ * Needed because a channel's own checks establish nothing about who is
+ * typing: the Slack adapter admits a message that has a user, is not a bot,
+ * has no subtype, and is a DM or a mention — and any member of the
+ * workspace can open a DM or type an `@mention`. Without a name here, a
+ * stranger's instruction-shaped message would arrive as the trust root, one
+ * `memory.remember` away from being the agent's own conclusion. So `user`
+ * is earned by being listed, never inferred from the shape of a channel.
+ *
+ * Read only from a **trusted** config, like `approvals`: who an agent's
+ * operator is cannot be a decision a cloned repository makes.
+ */
+export interface AgentPrincipalsConfig {
+  /**
+   * Slack user ids whose messages are the operator's. Nobody listed means
+   * every sender is `unknown` — an explicit empty array excludes an agent
+   * from a global list, and is kept distinct from the key being absent,
+   * which inherits.
+   */
+  slackUsers?: string[];
+}
+
+/** The `principals` block of ~/.stratus/config.json. */
+export interface PrincipalsConfig extends AgentPrincipalsConfig {
+  /** Per-agent overrides, keyed by agent id. */
+  agents?: Record<string, AgentPrincipalsConfig>;
 }
 
 /**
@@ -217,6 +251,8 @@ export interface StratusConfigFile {
   promptCacheTtl?: '5m' | '1h';
   /** Unattended-approval policy for `stratus serve`. */
   approvals?: ApprovalsConfig;
+  /** Which channel senders are each agent's operator. Trusted configs only. */
+  principals?: PrincipalsConfig;
   /** Control API binding for `stratus serve`. */
   api?: ApiConfig;
   /** Plugins to load, keyed by package name. Trusted configs only. */
@@ -430,7 +466,7 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
       ? [DEFAULT_STRATUS_AGENT.id, ...LEGACY_DEFAULT_AGENT_IDS]
       : [agentId];
   return {
-    append: (agentId, content, metadata) => store.append(agentId, content, metadata),
+    append: (agentId, content, metadata, provenance) => store.append(agentId, content, metadata, provenance),
     async list(agentId, options) {
       const ids = aliasIds(agentId);
       if (ids.length === 1) {
@@ -473,6 +509,20 @@ export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryS
       const batches = await Promise.all(ids.map((id) => store.audit(id)));
       return batches.flat().sort(compareMemoryChronology);
     },
+    // Alias-aware like `forget`, for the same reason: a legacy entry is
+    // exactly the one an operator re-asserts, and it lives under a legacy id.
+    ...(store.reassertTrust
+      ? {
+          async reassertTrust(agentId, entryId, trust) {
+            for (const id of aliasIds(agentId)) {
+              if (await store.reassertTrust!(id, entryId, trust)) {
+                return true;
+              }
+            }
+            return false;
+          },
+        }
+      : {}),
   };
 };
 
@@ -1247,6 +1297,10 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   if (approvals) {
     resolved.approvals = approvals;
   }
+  const principals = parsePrincipalsConfig(config.principals);
+  if (principals) {
+    resolved.principals = principals;
+  }
   const api = parseApiConfig(config.api, configPath);
   if (api) {
     resolved.api = api;
@@ -1454,6 +1508,60 @@ export const resolveAgentApprovals = (
     ...(slackApprovers ? { slackApprovers } : {}),
     ...(slackChannel ? { slackChannel } : {}),
   };
+};
+
+const parsePrincipalsEntry = (raw: unknown): AgentPrincipalsConfig | undefined => {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return undefined;
+  }
+  const source = raw as Record<string, unknown>;
+  const entry: AgentPrincipalsConfig = {};
+  if (Array.isArray(source.slackUsers)) {
+    // An empty array survives, as `slackApprovers: []` does: it is how an
+    // agent is excluded from a global list, and dropping it would fall back
+    // to exactly the list being excluded.
+    entry.slackUsers = source.slackUsers.filter(
+      (candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0,
+    );
+  }
+  return entry;
+};
+
+const parsePrincipalsConfig = (raw: unknown): PrincipalsConfig | undefined => {
+  const shared = parsePrincipalsEntry(raw);
+  if (!shared) {
+    return undefined;
+  }
+  const principals: PrincipalsConfig = { ...shared };
+  const source = raw as Record<string, unknown>;
+  if (typeof source.agents === 'object' && source.agents !== null && !Array.isArray(source.agents)) {
+    const agents: Record<string, AgentPrincipalsConfig> = {};
+    for (const [agentId, entry] of Object.entries(source.agents as Record<string, unknown>)) {
+      const parsed = parsePrincipalsEntry(entry);
+      if (parsed) {
+        agents[agentId] = parsed;
+      }
+    }
+    if (Object.keys(agents).length > 0) {
+      principals.agents = agents;
+    }
+  }
+  return principals;
+};
+
+/**
+ * Who one agent's operators are: its own entry where it has one, the
+ * top-level list otherwise — the same per-key precedence as
+ * `resolveAgentApprovals`, exported for the same reason. Nobody at all is
+ * a real answer, and the default: every sender is then `unknown`.
+ */
+export const resolveAgentPrincipals = (
+  principals: PrincipalsConfig | undefined,
+  agentId: string,
+): AgentPrincipalsConfig => {
+  const agent = principals?.agents?.[agentId];
+  const slackUsers = agent?.slackUsers ?? principals?.slackUsers;
+  return { ...(slackUsers ? { slackUsers } : {}) };
 };
 
 export interface ResolvedConfigLocation {
@@ -2753,6 +2861,23 @@ export const createDemoProvider = (): ModelProvider =>
  * rebuilds — a conversation never silently returns to the primary provider.
  */
 export const FALLBACK_ACTIVE_METADATA_KEY = 'fallbackActive';
+
+/**
+ * The session metadata keys that describe a provider's view of *this
+ * transcript* — the Anthropic raw-turn replay cache, the Claude Code SDK
+ * session id, the Codex thread id, and the sticky fallback switch. They
+ * belong to the messages they were written beside and must not follow a
+ * conversation onto a fresh transcript: a harness handed its old session id
+ * would resume the old thread, and the rollover that was meant to leave a
+ * pre-upgrade prefix behind would carry it forward verbatim. Owned here
+ * because this is the one package that already knows all four providers.
+ */
+export const PROVIDER_STATE_METADATA_KEYS: readonly string[] = [
+  FALLBACK_ACTIVE_METADATA_KEY,
+  RAW_TURNS_METADATA_KEY,
+  SDK_SESSION_METADATA_KEY,
+  CODEX_THREAD_METADATA_KEY,
+];
 
 // Wraps the fallback runtime as a provider: the primary model serves every
 // turn until it throws, then that session switches to the fallback for
