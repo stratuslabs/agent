@@ -769,10 +769,19 @@ export const planRiskCeiling = (plan: TemplatePlan): ToolRisk => {
  * the agent can *do* — a tool, its risk, the package that owns it — is
  * already caught by comparing the resolved grants.
  */
-const reviewedPluginDetail = (plan: TemplatePlan): unknown[] => plan.plugins.map((outcome) => ({
-  package: outcome.package,
-  ...('version' in outcome ? { version: outcome.version } : {}),
-}));
+const reviewedPluginDetail = (plan: TemplatePlan): unknown[] => plan.plugins
+  .map((outcome) => ({
+    package: outcome.package,
+    ...('version' in outcome ? { version: outcome.version } : {}),
+  }))
+  // Sorted, because the order these come out in is the order the *config*
+  // lists them, not the order the template declares them — the planner walks
+  // the load order so it can see which package would win a name. Two
+  // templates naming the same packages in different orders (`research` and
+  // `triage` do) would otherwise compare unequal the moment one of them
+  // commits first, and the second would roll back over a difference that is
+  // only an array index.
+  .sort((left, right) => left.package.localeCompare(right.package));
 
 /** Thrown when a plan cannot commit. Nothing is written when it is raised. */
 export class TemplateApplyError extends Error {

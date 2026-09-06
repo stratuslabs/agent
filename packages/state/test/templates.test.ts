@@ -1387,3 +1387,44 @@ test('one config transaction locks, reads and writes the same resolved file', as
   assert.equal(JSON.parse(await readFile(first, 'utf8')).model, 'claude-opus-5', 'written where the lock was taken');
   assert.equal(JSON.parse(await readFile(second, 'utf8')).model, undefined, 'and not where the link now points');
 });
+
+test('a plan still commits when the config lists its plugins in another order', async () => {
+  const fixture = await newFixture();
+  const other: JsonObject = {
+    name: 'other-tools',
+    version: '2.0.0',
+    stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'other.read', risk: 'safe' }] } },
+  };
+  const packages = { '@stratusagent/tool-fs': firstPartyFs, 'other-tools': other };
+  await writeFixturePackages(fixture.packagesRoot, packages);
+
+  const plan = await planFor(
+    templateWith({
+      tools: ['fs.read', 'other.read'],
+      plugins: [
+        { package: '@stratusagent/tool-fs', reason: 'files' },
+        { package: 'other-tools', reason: 'other things' },
+      ],
+    }),
+    fixture,
+    packages,
+  );
+
+  // Another creation committed first and wrote these in its own order. The
+  // planner walks the config's order so it can see which package would win
+  // a contested name, so the replan's array comes out reversed — the same
+  // packages at the same versions, in a different index. Rolling back over
+  // that would make two concurrent creations refuse each other, which is
+  // what the lock exists to prevent.
+  const configPath = path.join(fixture.home, '.stratus', 'config.json');
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(configPath, JSON.stringify({
+    plugins: { 'other-tools': { enabled: true }, '@stratusagent/tool-fs': { enabled: true } },
+  }));
+
+  const applied = await applyFixture(plan, fixture.home, {}, {
+    packagesRoot: fixture.packagesRoot,
+    packages,
+  });
+  assert.equal(applied.agent.id, plan.agent.id);
+});
