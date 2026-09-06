@@ -64,10 +64,11 @@ const base64DecodedBytes = (data: string): number =>
  * session ever received is stored with its message and replayed on every
  * later turn, so a per-message budget alone is not one: two messages that
  * each fit would together exceed the request limit on the turn after. The
- * budget is spent newest first — the latest message always arrives whole,
- * because a channel already holds one message to this same budget — and
- * once an image does not fit, nothing older does either, so what the model
- * sees is a contiguous recent window rather than a scatter. A provider
+ * budget is spent newest first, within a message as well as across them —
+ * the latest message always arrives whole, because a channel already holds
+ * one message to this same budget — and once an image does not fit,
+ * nothing older does either, so what the model sees is a contiguous recent
+ * window rather than a scatter. A provider
  * that sends image bytes asks this and sends a note in place of the rest;
  * the transcript itself is never trimmed.
  *
@@ -85,7 +86,8 @@ export const imagesWithinReplayBudget = (
     if (images === undefined) {
       continue;
     }
-    for (const image of images) {
+    for (let position = images.length - 1; position >= 0; position -= 1) {
+      const image = images[position]!;
       const bytes = base64DecodedBytes(image.data);
       if (bytes > remaining) {
         return kept;
