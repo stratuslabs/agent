@@ -632,7 +632,16 @@ export const createAnthropicProvider = ({
         if (Buffer.byteLength(JSON.stringify(params)) <= requestBodyMaxBytes) {
           break;
         }
-        holder[index] = { type: 'text', text: droppedImageNote(image) };
+        // Only a swap that shrinks the body: the note can outweigh a tiny
+        // image, and swapping then would move the wrong way and could leave
+        // the last swap landing above the cap. What is still over after
+        // every image that helps has given way is the transcript's own
+        // size, which no image can answer for.
+        const note: ContentBlockParam = { type: 'text', text: droppedImageNote(image) };
+        if (Buffer.byteLength(JSON.stringify(note)) >= Buffer.byteLength(JSON.stringify(holder[index]))) {
+          continue;
+        }
+        holder[index] = note;
       }
       // The turn's abort signal cancels the underlying HTTP request — the
       // kernel contract is that aborting stops the work, not just the wait.

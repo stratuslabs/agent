@@ -1240,3 +1240,31 @@ test('the oldest replayed images give way when the whole request body would not 
   assert.equal(older.omitted, undefined);
   assert.equal(older.data.length, 2400);
 });
+
+test('an image is only swapped for a note when the note is smaller', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_input: any, init?: any) => {
+    bodies.push(JSON.parse(init?.body ?? '{}'));
+    return new Response(JSON.stringify(apiMessage([{ type: 'text', text: 'Tiny.' }])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  // A three-byte image whose block is far smaller than the note that would
+  // stand in for it. First, learn how large the body is with it in.
+  const tiny: ImageAttachment = { mediaType: 'image/png', data: 'AAAA', name: 'a-file-with-a-long-name.png' };
+  const session = createSession({
+    messages: [{ id: 'u1', role: 'user', content: 'tiny', createdAt: new Date().toISOString(), images: [tiny] }],
+  });
+  await createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl }).generate({ session });
+  const withImage = JSON.stringify(bodies[0]).length;
+
+  // A cap one byte under that: the body is over, and swapping the image
+  // for the note would only make it more so — so the image stays.
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, requestBodyMaxBytes: withImage - 1 });
+  await provider.generate({ session });
+  assert.deepEqual(bodies[1]!.messages[0].content, [
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
+    { type: 'text', text: 'tiny' },
+  ]);
+});
