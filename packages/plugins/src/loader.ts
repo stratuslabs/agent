@@ -205,6 +205,23 @@ export interface LoadPluginsResult {
 }
 
 const WORKSPACE_ROOT_KEY = 'workspaceRoot';
+/**
+ * Where the filesystem provenance ledger lives — always the host's
+ * workspace root, whatever a plugin's own `workspaceRoot` says. Two plugins
+ * write into the ledger (`tool-fs`, `plugin-mcp`), and an operator who
+ * points one of them at a different workspace must not thereby give it a
+ * different ledger: `fs.read` consults one, so a file recorded in another
+ * reads back unlabelled. Overwritten rather than defaulted, for that reason.
+ */
+const LEDGER_ROOT_KEY = 'ledgerRoot';
+
+const declares = (manifest: PluginManifest, key: string): boolean => Boolean(
+  manifest.config
+  && typeof manifest.config.properties === 'object'
+  && manifest.config.properties !== null
+  && !Array.isArray(manifest.config.properties)
+  && key in (manifest.config.properties as JsonObject),
+);
 
 const configFor = (
   block: JsonObject,
@@ -215,17 +232,14 @@ const configFor = (
   // stripped here so the plugin's code never sees, and so can never
   // second-guess, the operator's risk word.
   const { enabled: _enabled, toolRisks: _toolRisks, ...rest } = block;
-  const declaresWorkspace = Boolean(
-    manifest.config
-    && typeof manifest.config.properties === 'object'
-    && manifest.config.properties !== null
-    && !Array.isArray(manifest.config.properties)
-    && WORKSPACE_ROOT_KEY in (manifest.config.properties as JsonObject),
-  );
-  if (declaresWorkspace && workspaceRoot !== undefined && rest[WORKSPACE_ROOT_KEY] === undefined) {
-    return { ...rest, [WORKSPACE_ROOT_KEY]: workspaceRoot };
+  let config = rest;
+  if (declares(manifest, WORKSPACE_ROOT_KEY) && workspaceRoot !== undefined && config[WORKSPACE_ROOT_KEY] === undefined) {
+    config = { ...config, [WORKSPACE_ROOT_KEY]: workspaceRoot };
   }
-  return rest;
+  if (declares(manifest, LEDGER_ROOT_KEY) && workspaceRoot !== undefined) {
+    config = { ...config, [LEDGER_ROOT_KEY]: workspaceRoot };
+  }
+  return config;
 };
 
 /** A declared skill, read and validated but not yet in any registry. */

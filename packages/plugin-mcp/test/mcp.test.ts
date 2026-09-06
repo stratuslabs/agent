@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
+import { readdirSync, renameSync, statSync, symlinkSync } from 'node:fs';
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +26,7 @@ import {
   type Session,
   type Tool,
 } from '@stratusagent/core';
+import { createFileLedger } from '@stratusagent/plugins';
 import { ManifestBoundToolRegistry, parsePluginManifest } from '@stratusagent/plugins';
 
 import {
@@ -283,6 +285,68 @@ test('structured content passes through, and an image lands in the per-agent wor
     assert.ok(files[0]!.endsWith('.png'));
     assert.deepEqual(await readFile(files[0]!), png);
     assert.deepEqual(await readdir(path.join(workspaceRoot, 'ava', 'mcp', 'linear')), [path.basename(files[0]!)]);
+    // A server's bytes on disk, written without `fs.write`: recorded in the
+    // same ledger `tool-fs` reads, so a later `fs.read` of the file carries
+    // the label this result did rather than arriving as the agent's own.
+    const ledger = createFileLedger(workspaceRoot);
+    assert.equal(await ledger.lookup('ava', files[0]!), 'external');
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('an image written through a linked workspace is recorded under the path a read would ask for', async () => {
+  const png = Buffer.from('89504e470d0a1a0a', 'hex');
+  const handle = fakeServer({
+    current: (server) => {
+      server.registerTool('chart', { description: 'Render a chart.' }, async () => ({
+        content: [{ type: 'image', data: png.toString('base64'), mimeType: 'image/png' }],
+      }));
+    },
+  });
+  // The operator moved the workspaces onto another volume and left a link;
+  // `fs.read` canonicalizes every path before it asks the ledger, so a
+  // record under the link's spelling would never be found.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-ws-'));
+  const real = path.join(home, 'volume', 'workspaces');
+  await mkdir(real, { recursive: true });
+  const linked = path.join(home, 'workspaces');
+  await symlink(real, linked);
+  const target = new ToolRegistry();
+  const plugin = pluginFor(handle, { workspaceRoot: linked });
+  await loadThroughView(plugin, target);
+  try {
+    const output = await target.get('mcp.linear.chart')!.execute({}, sessionFor('ava')) as JsonObject;
+    const [file] = output.files as string[];
+    assert.ok(file);
+    assert.equal(file, await realpath(file));
+    assert.ok(file.startsWith(path.join(await realpath(real), 'ava', 'mcp', 'linear') + path.sep));
+    assert.equal(await createFileLedger(linked).lookup('ava', file), 'external');
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
+test('an image written under a plugin-specific workspace is recorded in the host’s ledger, not one of its own', async () => {
+  const png = Buffer.from('89504e470d0a1a0a', 'hex');
+  const handle = fakeServer({
+    current: (server) => {
+      server.registerTool('chart', { description: 'Render a chart.' }, async () => ({
+        content: [{ type: 'image', data: png.toString('base64'), mimeType: 'image/png' }],
+      }));
+    },
+  });
+  const artifacts = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-artifacts-'));
+  const ledgerRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-ledger-'));
+  const target = new ToolRegistry();
+  const plugin = pluginFor(handle, { workspaceRoot: artifacts, ledgerRoot });
+  await loadThroughView(plugin, target);
+  try {
+    const output = await target.get('mcp.linear.chart')!.execute({}, sessionFor('ava')) as JsonObject;
+    const [file] = output.files as string[];
+    assert.ok(file!.startsWith(path.join(await realpath(artifacts), 'ava') + path.sep));
+    assert.equal(await createFileLedger(ledgerRoot).lookup('ava', file!), 'external');
+    assert.equal(await createFileLedger(artifacts).lookup('ava', file!), undefined);
   } finally {
     await plugin.dispose?.();
   }
@@ -1153,6 +1217,52 @@ test('a binary block cannot steer the written path: the server-side tool name is
   const directory = path.join(workspaceRoot, 'ava', 'mcp', 'linear');
   assert.ok(file!.startsWith(directory + path.sep), `stayed inside the server directory: ${file}`);
   assert.ok(path.basename(file!).startsWith('escape-'));
+});
+
+test('a link planted at a binary block’s recorded path is never written through', async () => {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-link-'));
+  const block = { content: [{ type: 'image', data: Buffer.from('server bytes').toString('base64'), mimeType: 'image/png' }] };
+  const context = { server: 'linear', tool: 'chart', agentId: 'ava', workspaceRoot, now: () => 7, ledger: createFileLedger(workspaceRoot) };
+  // The file names are `<tool>-<stamp>-<serial>`, and the serial counts up
+  // by one per block, so the next name is known once one has been seen —
+  // which is what a peer watching the ledger's records would see too.
+  const [first] = (await normalizeCallResult(block, context) as JsonObject).files as string[];
+  const serial = Number(/-(\d+)\.png$/.exec(first!)![1]);
+  const next = path.join(path.dirname(first!), `chart-7-${serial + 1}.png`);
+  // A victim the link points at: the agent's own file, and the ledger.
+  const victim = path.join(workspaceRoot, 'victim.md');
+  await writeFile(victim, 'mine');
+  await symlink(victim, next);
+  await assert.rejects(() => normalizeCallResult(block, context), /appeared between its provenance record and its write/);
+  assert.equal(await readFile(victim, 'utf8'), 'mine');
+  // Over-marked, which is the safe direction: the record stands.
+  assert.equal(await context.ledger.lookup('ava', next), 'external');
+});
+
+test('an artifact directory swapped for a link between its resolution and the open lands no bytes', async () => {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-dirswap-'));
+  const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-mcp-elsewhere-'));
+  const block = { content: [{ type: 'image', data: Buffer.from('server bytes').toString('base64'), mimeType: 'image/png' }] };
+  const directory = path.join(workspaceRoot, 'ava', 'mcp', 'linear');
+  // The clock seam runs after the directory is created and canonicalized
+  // and before the open — exactly where a peer's swap would land.
+  const context = {
+    server: 'linear',
+    tool: 'chart',
+    agentId: 'ava',
+    workspaceRoot,
+    ledger: createFileLedger(workspaceRoot),
+    now: () => {
+      renameSync(directory, `${directory}.moved`);
+      symlinkSync(elsewhere, directory);
+      return 7;
+    },
+  };
+  await assert.rejects(() => normalizeCallResult(block, context), /moved between its provenance record and its write/);
+  // The create went through the link; nothing else did.
+  for (const name of readdirSync(elsewhere)) {
+    assert.equal(statSync(path.join(elsewhere, name)).size, 0);
+  }
 });
 
 test('two writes in the same millisecond get distinct files', async () => {

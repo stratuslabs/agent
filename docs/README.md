@@ -31,6 +31,7 @@ tree is where the depth lives.
 | Look up a config key, or understand precedence | [Configuration](./reference/config.md) |
 | Understand souls, ids, and agent identity | [Agents](./concepts/agents.md) |
 | Understand what an agent remembers | [Memory](./concepts/memory.md) |
+| See where an agent's facts came from, and vouch for the ones that are yours | [Memory](./concepts/memory.md#where-a-fact-came-from) |
 | Understand what installing a plugin does (and does not do) | [Plugins](./concepts/plugins.md) |
 | See the security posture in one place | [Security](./concepts/security.md) |
 | Drive a daemon over HTTP/WebSocket | [Control API reference](../packages/control-api/README.md) |

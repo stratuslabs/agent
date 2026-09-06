@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import type { JsonObject, Session } from '@stratusagent/core';
+import { SENDER_TRUST_METADATA_KEY, type JsonObject, type Session } from '@stratusagent/core';
 import {
   canonicalDestination,
   nextFireAfter,
@@ -209,6 +209,20 @@ export interface SchedulerRuntimeOptions {
   /** The roster check: a schedule for an agent that does not exist is a refusal. */
   hasAgent(agentId: string): boolean;
   limits?: SchedulerLimits;
+  /**
+   * Run before every scan of due schedules. A rejection stops the
+   * scheduler for good, before any slot is claimed: the gateway passes the
+   * state-stamp check here, so a newer build stamping the home under a
+   * live daemon stops its firings as well as its turns — a claimed slot is
+   * a write into state this build no longer understands, and a one-shot
+   * whose firing was refused afterwards would be retired unfired.
+   *
+   * May be synchronous, and the gateway's is: `start()` runs between the
+   * control API announcing its address and the daemon marking itself
+   * serving, and I/O there is a window in which a restart is refused as
+   * "still starting".
+   */
+  ready?(): void | Promise<void>;
   log(line: string): void;
   warn(line: string): void;
 }
@@ -333,6 +347,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
         ...(input.destination ? { destination: input.destination } : {}),
         createdAt: now.toISOString(),
         ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+        ...(input.trust ? { trust: input.trust } : {}),
         nextFireAt: next.toISOString(),
       };
       store.insert(record);
@@ -470,6 +485,10 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       metadata: {
         [SCHEDULED_TURN_METADATA_KEY]: true,
         [SCHEDULE_ID_METADATA_KEY]: record.id,
+        // The firing's "sender" is the session that wrote the prompt, at
+        // the label it had then; a schedule set before labels existed is
+        // `unknown`, like every other record from before.
+        [SENDER_TRUST_METADATA_KEY]: record.trust ?? 'unknown',
       },
     }).then(
       () => {
@@ -497,9 +516,26 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
     void firing.finally(() => inflight.delete(firing));
   };
 
-  const tick = (): void => {
+  /**
+   * `propagateReadiness` is the startup tick's: a readiness failure there
+   * has a caller to reach — `start()`, whose rejection is the gateway's
+   * refusal to serve — where the timer-driven ticks have only the log.
+   */
+  const tick = async (propagateReadiness = false): Promise<void> => {
     if (stopped) {
       return;
+    }
+    if (options.ready) {
+      try {
+        await options.ready();
+      } catch (error) {
+        stopped = true;
+        if (propagateReadiness) {
+          throw error;
+        }
+        warn(`scheduler stopped before claiming any firing: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
     }
     try {
       const now = new Date();
@@ -517,7 +553,9 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       // stored schedule is real outstanding work — the daemon owes its
       // next firing — and this timer is the only thing that will ever
       // start it. Shutdown belongs to stop(), which clears it.
-      timer = setTimeout(tick, tickMs);
+      timer = setTimeout(() => {
+        void tick();
+      }, tickMs);
     }
   };
 
@@ -553,6 +591,13 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       return deleted;
     },
     async start() {
+      // Propagated, not swallowed, at start: the sweep below deletes rows,
+      // and a daemon whose home a newer build has stamped must not start
+      // serving at all — the tick's swallow-and-stop is for a stamp that
+      // advances under a scheduler already running.
+      if (options.ready) {
+        await options.ready();
+      }
       // Spent one-shots first: a row with no next slot is only the
       // approval scope of a firing that may still be parked on a human.
       // Turn over — or turn gone — means the row's work is done.
@@ -561,12 +606,22 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
           continue;
         }
         const status = record.lastSessionId ? await sessionStatus(record.lastSessionId) : undefined;
-        if (status !== 'pending_approval') {
-          store.delete(record.id);
-          log(`schedule ${record.id}: one-shot already fired; removing`);
+        if (status === 'pending_approval') {
+          continue;
         }
+        // Once more after the status lookup awaited: the stamp can advance
+        // while it does, and this delete is a write into the schedules
+        // table — a newer build's row, gone before anything noticed.
+        if (options.ready) {
+          await options.ready();
+        }
+        store.delete(record.id);
+        log(`schedule ${record.id}: one-shot already fired; removing`);
       }
-      tick();
+      // The first tick's readiness check propagates too: the stamp can
+      // advance between the check above and here, and a `start()` that
+      // resolved after noticing would let the gateway's sweeps run.
+      await tick(true);
     },
     stop() {
       stopped = true;

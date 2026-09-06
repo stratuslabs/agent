@@ -18,6 +18,25 @@ is serving, because this path does not stop the managed service — only
 `stratus update` does. A migration needing exclusive access to shared state
 is not registered until the registry can require that bracket.)
 
+Schema 2 is the first stamp that exists only to be refused: since
+[provenance](../concepts/memory.md#where-a-fact-came-from) landed, memory
+entries, sessions, schedules, and the filesystem provenance ledger carry
+trust labels, and a build from before them would read an `external` fact as
+the agent's own conclusion and keep writing unlabelled state beside the
+labelled kind. Nothing is rewritten on the way up; on the way down, a build
+that understands schema 1 refuses to write. A daemon from *before* this
+build that is still running when the stamp advances never re-reads it — a
+stamp is checked by a build that knows to check — so it keeps serving until
+it is restarted; `stratus update` stops it first, and an install that went
+around `stratus update` should restart the service (`stratus service
+restart`). From this build on, the daemon re-reads the stamp on every
+dispatch, scheduler tick, and rollover and refuses new work once a newer
+build has stamped the home, so the next bump stops a live daemon on its
+own. A turn already in flight at that moment finishes in this build's
+shape — the same thing `stratus service stop` lets an in-flight turn do —
+which is why `stratus update` stops the service *before* it migrates
+rather than relying on the stamp to do it.
+
 One thing a rollback does lose, and it is not stamped: an agent's
 `origins` grants. `<id>.whitelist.json` holds both kinds of grant under the
 same version, so a daemon predating [browser actions](./browser.md) reads
@@ -30,11 +49,15 @@ rollback is planned.
 The reverse direction refuses instead of guessing: against state stamped by
 a **newer** build than itself, anything that *writes* under `~/.stratus` —
 `serve`, `setup`, `chat`, `run`, `skill add`, `dashboard`,
-`schedules cancel`, `service install`/`start` — refuses with a line naming
+`schedules cancel`, `memory reassert`, `session rollover`, `credential`
+writes, `service install`/`start` — refuses with a line naming
 the fix, because a downgraded build writing into a newer format is the one
 way to corrupt it. Read-only commands (`logs`, `agents`, `doctor`,
 `service status`/`stop`) warn and continue: reading is how you diagnose
-your way out.
+your way out. The same split applies when a migration itself fails — most
+often a `~/.stratus/state.json` that cannot be written: a command that
+writes state refuses rather than persist data the stamp was meant to
+protect, and a read-only one warns and continues.
 
 ## `stratus update` does the sequence in the order that cannot lose data
 

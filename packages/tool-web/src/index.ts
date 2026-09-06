@@ -144,6 +144,10 @@ const createFetchTool = (config: JsonObject): Tool => ({
   // Gated: it reaches a service outside Stratus, on an address an agent
   // chose. The address policy decides *where*; approval decides *whether*.
   risk: 'gated',
+  // Every result is a document somebody else wrote — the body, and the
+  // page-supplied title with it. Declared once rather than marked per call
+  // because there is no call for which it is not true.
+  outputTrust: 'external',
   parameters: {
     type: 'object',
     properties: {

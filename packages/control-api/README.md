@@ -107,7 +107,8 @@ log, and an address bar is one that gets noticed when it changes.
 | POST | `/restart` | Announce a restart: `{ reason?, drainTimeoutMs? }` → `202 { restarting, reason?, drainTimeoutMs, inflight }`. New turns are refused from here, in-flight ones get the window, and the daemon comes back. `501 restart_unsupported` from a host that cannot bring it back; `409 not_restartable` while the daemon is still starting or already stopping |
 | GET | `/sessions?agent=&limit=` | Durable sessions, newest first. `limit` bounds the result — the table grows for the life of an install |
 | GET | `/sessions/:id` | One session, provider replay state stripped — including `usage`, the token records of every provider call it has made |
-| POST | `/sessions/:id/messages` | Dispatch a message; returns `202 { sessionId, turnId }`. A `schedule:`-prefixed id answers `400 session_id_reserved` — those belong to scheduled firings. An optional `metadata` object is attached to a new session as given, except the keys the daemon writes for itself (`pendingApproval`, `fallbackActive`, `delegatedBy`, `rootSessionId`, `delegationDepth`, `scheduled`, `scheduleId`), which answer `400 metadata_reserved`. An existing session whose agent has since left the roster answers `404 agent_not_found` |
+| POST | `/sessions/:id/messages` | Dispatch a message; returns `202 { sessionId, turnId }`. A `schedule:`-prefixed id answers `400 session_id_reserved` — those belong to scheduled firings. An optional `metadata` object is attached to a new session as given, except the keys the daemon writes for itself (`pendingApproval`, `fallbackActive`, `delegatedBy`, `rootSessionId`, `delegationDepth`, `scheduled`, `scheduleId`, `sessionTrust`, `sessionTaintedBy`, `rolledOverFrom`, `rolledOverTo`), which answer `400 metadata_reserved`. `senderTrust` may be set to `unknown` to say the message is from someone the operator has not vouched for; it is read for the turn and never stored. Omitted, the sender is the operator; present with any value but a trust label, the sender reads `unknown` — a misspelled authorization is not one. An existing session whose agent has since left the roster answers `404 agent_not_found` |
+| POST | `/sessions/:id/rollover` | Start the conversation over under the same id: the transcript so far is saved as a new session (`<id>:rolledover:<time>-<suffix>`) and the live row is emptied, keeping only the routing metadata a channel needs → `200 { sessionId, archivedAs }`. The remedy for a session from before trust labels existed, which reads `unknown` for as long as it lasts. `409 session_busy` while a turn is running or parked, `409 session_archived` for an archive, `404` for an unknown id |
 | GET | `/approvals` | Calls parked on a human right now |
 | POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }`, where `answer` is `once`, `always`, or `deny` — see [below](#always-does-not-mean-one-thing) |
 | GET | `/schedules` | Every schedule the fleet has set — cadence, prompt, pre-authorized destination, next firing. The audit list: each row with a destination is a standing permission to speak |
@@ -136,7 +137,10 @@ codex `api_key` is an OpenAI platform key and is checked against the
 platform's models endpoint. Provider names on these routes are `anthropic`,
 `openai`, and `codex`.
 
-`PUT /config` does not write the `plugins` block. `GET` returns it, and a
+`PUT /config` writes the `principals` block along with the other settings —
+who counts as the operator on each channel is a trusted-config setting, and
+the only file this endpoint writes is a trusted one — so the GET-modify-PUT
+round trip keeps it. `PUT /config` does not write the `plugins` block. `GET` returns it, and a
 `PUT` carrying it back is accepted (the round trip has to work) but the value
 is ignored and the file's existing block is preserved rather than deleted by
 the replace. Enabling a plugin runs somebody else's code inside the daemon —
@@ -528,7 +532,9 @@ Frames are envelopes:
 ```
 
 The `event` is the existing `StratusEvent` union, unchanged — no new
-vocabulary. The **turn id lives on the envelope** because `StratusEvent`
+vocabulary. (`session.tainted` joined that union with provenance: it carries
+the session's new trust label and the name of what lowered it, never the
+content.) The **turn id lives on the envelope** because `StratusEvent`
 carries none and should not grow one: a session processes several messages in
 sequence, and without this a client that queued one has no way to tell its own
 deltas from the next caller's. The id is assigned at dispatch and returned by

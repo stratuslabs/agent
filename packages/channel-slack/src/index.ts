@@ -3,7 +3,15 @@ import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
-import { latestTurnReply, type ApprovalAnswer, type JsonObject, type Session, type StratusEvent, type ToolResult } from '@stratusagent/core';
+import {
+  latestTurnReply,
+  SENDER_TRUST_METADATA_KEY,
+  type ApprovalAnswer,
+  type JsonObject,
+  type Session,
+  type StratusEvent,
+  type ToolResult,
+} from '@stratusagent/core';
 import {
   channelSessionKey,
   type ChannelAdapter,
@@ -79,6 +87,17 @@ export interface SlackAgentConfig {
    * the answer already is.
    */
   approvalChannel?: string;
+  /**
+   * Slack user ids whose messages are the operator's: a turn from one of
+   * them arrives as `user`, a turn from anyone else as `unknown`. The
+   * adapter's own admission checks — has a user, is not a bot, is a DM or
+   * a mention — establish nothing about who is typing, since any member of
+   * the workspace can open a DM or type an `@mention`; this list is what
+   * makes `user` mean something. Evaluated on every message, because a
+   * thread keys one session for everyone in it. Empty or absent means
+   * nobody is, and every sender is `unknown`.
+   */
+  principals?: string[];
 }
 
 // The thin surfaces of the Slack SDKs the adapter touches — injectable so
@@ -1396,13 +1415,25 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   };
 
   // Mentions arrive as <@U123> markup; the model should read names.
+  /**
+   * `<@U…>` mentions become `@name` — for principals only. A display name
+   * is text its owner typed into their profile, and a mention of a member
+   * nobody vouched for would otherwise carry that member's words into a
+   * turn labelled by its sender alone: an operator's `user` message with a
+   * stranger's chosen text inside it. A principal's profile is trusted the
+   * way their messages are; everyone else stays a stable id, which names
+   * them without quoting them.
+   */
   const humanizeMentions = async (connection: AgentConnection, text: string): Promise<string> => {
     const withoutBot = text.replaceAll(`<@${connection.botUserId}>`, '').trim();
     const mentionPattern = /<@([A-Z0-9]+)>/g;
     const ids = [...withoutBot.matchAll(mentionPattern)].map((match) => match[1]).filter((id): id is string => Boolean(id));
+    const principals = new Set(connection.config.principals ?? []);
     let result = withoutBot;
     for (const id of new Set(ids)) {
-      result = result.replaceAll(`<@${id}>`, `@${await displayNameFor(connection, id)}`);
+      if (principals.has(id)) {
+        result = result.replaceAll(`<@${id}>`, `@${await displayNameFor(connection, id)}`);
+      }
     }
     return result.trim();
   };
@@ -2468,6 +2499,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           // Carried so a mid-turn approval question is asked in the thread
           // the turn belongs to rather than at the top of a busy channel.
           ...(thread ? { slackThread: thread } : {}),
+          // This turn's sender, judged against the operator's list — per
+          // message, never remembered from the first one in the thread. A
+          // DM proves nothing about who is typing, so a DM from an unlisted
+          // member is `unknown` exactly as a channel mention would be.
+          [SENDER_TRUST_METADATA_KEY]: (connection.config.principals ?? []).includes(userId) ? 'user' : 'unknown',
         },
       });
       return { renderer, turn };

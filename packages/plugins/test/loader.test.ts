@@ -266,6 +266,37 @@ test('a plugin without the createPlugin ABI is refused by name', async () => {
   assert.match(result.failures[0]?.reason ?? '', /does not export createPlugin\(config\)/);
 });
 
+test('a plugin that declares ledgerRoot is handed the host’s workspace root whatever the operator set', async () => {
+  const seen: JsonObject[] = [];
+  const host = await fakeHost({
+    '@stratusagent/plugin-mcp': {
+      manifest: {
+        stratus: {
+          pluginVersion: 1,
+          contributes: { tools: [{ name: 'mcp.x.y', risk: 'gated' }] },
+          config: { type: 'object', properties: { workspaceRoot: { type: 'string' }, ledgerRoot: { type: 'string' } } },
+        },
+      },
+      module: pluginModule('plugin-mcp', (tools, config) => {
+        seen.push(config);
+        tools.register(tool('mcp.x.y', 'gated'));
+      }),
+    },
+  });
+
+  await loadPlugins({
+    // The operator moved this plugin's artifacts and, wrongly, its ledger.
+    config: { '@stratusagent/plugin-mcp': { workspaceRoot: '/data/mcp', ledgerRoot: '/data/mcp' } },
+    host,
+    tools: new ToolRegistry(),
+    bus: new EventBus(),
+    workspaceRoot: '/home/ada/.stratus/workspaces',
+  });
+
+  // The artifacts move; the ledger does not — it is the one `fs.read` asks.
+  assert.deepEqual(seen[0], { workspaceRoot: '/data/mcp', ledgerRoot: '/home/ada/.stratus/workspaces' });
+});
+
 test('a plugin that declares workspaceRoot is given the host’s answer unless the operator set one', async () => {
   const seen: JsonObject[] = [];
   const host = await fakeHost({

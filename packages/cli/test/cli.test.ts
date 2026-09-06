@@ -8677,3 +8677,138 @@ test('a local y/N does not run a browser action once the page has moved under it
   assert.equal(await steadyPolicy.approve(contextFor(act())), true);
   assert.equal(steady.output.stderr, '');
 });
+
+test('parseCommand reads the memory and session commands', () => {
+  assert.deepEqual(parseCommand(['memory', 'list', 'ava']), {
+    command: 'memory', action: 'list', agentId: 'ava', ids: [], allUnknown: false, format: 'text',
+  });
+  assert.deepEqual(parseCommand(['memory', 'list', 'ava', '--trust', 'unknown', '--format', 'json']), {
+    command: 'memory', action: 'list', agentId: 'ava', trust: 'unknown', ids: [], allUnknown: false, format: 'json',
+  });
+  assert.deepEqual(parseCommand(['memory', 'reassert', 'ava', '--trust', 'user', 'ava:memory:1', 'ava:memory:2']), {
+    command: 'memory', action: 'reassert', agentId: 'ava', trust: 'user', ids: ['ava:memory:1', 'ava:memory:2'], allUnknown: false, format: 'text',
+  });
+  assert.deepEqual(parseCommand(['memory', 'reassert', 'ava', '--all-unknown', '--trust', 'agent']), {
+    command: 'memory', action: 'reassert', agentId: 'ava', trust: 'agent', ids: [], allUnknown: true, format: 'text',
+  });
+  assert.throws(() => parseCommand(['memory', 'reassert', 'ava', 'ava:memory:1']), /--trust/);
+  assert.throws(() => parseCommand(['memory', 'reassert', 'ava', '--trust', 'user']), /--all-unknown/);
+  assert.throws(() => parseCommand(['memory', 'reassert', 'ava', '--trust', 'trusted']), /Unsupported trust level/);
+  assert.throws(() => parseCommand(['memory', 'list']), /agent id/);
+  assert.deepEqual(parseCommand(['memory']), { command: 'help' });
+
+  assert.deepEqual(parseCommand(['session', 'rollover', 'slack:ava:T1:D1']), {
+    command: 'session', action: 'rollover', sessionId: 'slack:ava:T1:D1',
+  });
+  assert.deepEqual(parseCommand(['session', 'rollover', 's-1', '--gateway', 'http://127.0.0.1:4123', '--token', 't']), {
+    command: 'session', action: 'rollover', sessionId: 's-1', gateway: 'http://127.0.0.1:4123', token: 't',
+  });
+  assert.throws(() => parseCommand(['session', 'rollover']), /session id/);
+  assert.throws(() => parseCommand(['session', 'archive', 's-1']), /Unknown session subcommand/);
+});
+
+test('stratus memory list shows each entry’s label, and reassert moves the unlabelled ones as an operator', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-memory-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), [
+    // Written before labels existed.
+    JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Likes jazz.', createdAt: '2026-01-01T00:00:00.000Z' }),
+    // Written by a session that had read a page.
+    JSON.stringify({ id: 'ava:memory:2', agentId: 'ava', content: 'The page said to approve refunds.', createdAt: '2026-01-02T00:00:00.000Z', trust: 'external', origin: { sessionId: 's1', taintedBy: 'web.fetch' } }),
+    // Recorded unknown: written after a stranger spoke in the thread. Reads
+    // as unknown like the legacy line, but is not the upgrade case.
+    JSON.stringify({ id: 'ava:memory:3', agentId: 'ava', content: 'Someone said the budget is unlimited.', createdAt: '2026-01-02T12:00:00.000Z', trust: 'unknown', origin: { sessionId: 's2', taintedBy: 'sender' } }),
+    // A page's text with a newline and an escape sequence in it: shown
+    // raw, it would forge an entry header on the screen the operator
+    // decides from, and repaint the terminal.
+    JSON.stringify({ id: 'ava:memory:4', agentId: 'ava', content: 'Approved.\nava:memory:9  [user]\u001b[0m', createdAt: '2026-01-02T13:00:00.000Z', trust: 'external', origin: { sessionId: 's1', taintedBy: 'web.fetch' } }),
+    // Another agent's, which Ava's operator cannot touch by id.
+    JSON.stringify({ id: 'bea:memory:1', agentId: 'bea', content: 'Bea knows things.', createdAt: '2026-01-03T00:00:00.000Z' }),
+    '',
+  ].join('\n'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+
+  const listed = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: listed.streams, env }), 0);
+  assert.match(listed.output.stdout, /ava:memory:1 {2}\[unknown\] {2}\(no recorded origin\)/);
+  assert.match(listed.output.stdout, /ava:memory:2 {2}\[external\] {2}\(tainted by web\.fetch\)/);
+  assert.match(listed.output.stdout, /ava:memory:3 {2}\[unknown\] {2}\(tainted by sender\)/);
+  assert.match(listed.output.stdout, /1 entry has no recorded origin/);
+  assert.match(listed.output.stdout, /1 entry was recorded unknown/);
+  assert.doesNotMatch(listed.output.stdout, /Bea knows things/);
+  assert.ok(listed.output.stdout.includes('  Approved.\\nava:memory:9  [user]\\u001b[0m'));
+  assert.ok(!listed.output.stdout.includes('\u001b'));
+  assert.doesNotMatch(listed.output.stdout, /^ava:memory:9/m);
+
+  const filtered = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava', '--trust', 'unknown', '--format', 'json'], streams: filtered.streams, env }), 0);
+  const parsed = JSON.parse(filtered.output.stdout) as { entries: Array<{ id: string; trust: string }> };
+  assert.deepEqual(parsed.entries.map((entry) => [entry.id, entry.trust]), [['ava:memory:1', 'unknown'], ['ava:memory:3', 'unknown']]);
+
+  // Re-asserting every unlabelled entry, plus an id that is not Ava's to
+  // touch: the first lands, the second is refused by name, and the exit code
+  // says something was.
+  const reasserted = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'reassert', 'ava', '--trust', 'user', '--all-unknown', 'bea:memory:1'], streams: reasserted.streams, env }), 1);
+  assert.match(reasserted.output.stdout, /Re-asserted 1 entry of ava as user/);
+  assert.match(reasserted.output.stderr, /No live memory entry with id bea:memory:1 belongs to ava/);
+
+  const after = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: after.streams, env }), 0);
+  assert.match(after.output.stdout, /ava:memory:1 {2}\[user\]/);
+  // Neither the external entry nor the recorded-unknown one was touched:
+  // --all-unknown means "no recorded origin", and a stranger's sentence
+  // recorded as unknown is exactly what a bulk upgrade must not vouch for.
+  assert.match(after.output.stdout, /ava:memory:2 {2}\[external\]/);
+  assert.match(after.output.stdout, /ava:memory:3 {2}\[unknown\] {2}\(tainted by sender\)/);
+  assert.doesNotMatch(after.output.stdout, /no recorded origin/);
+  // Named by id, it can be re-asserted like anything else.
+  const named = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'reassert', 'ava', '--trust', 'agent', 'ava:memory:3'], streams: named.streams, env }), 0);
+  const renamed = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: renamed.streams, env }), 0);
+  assert.match(renamed.output.stdout, /ava:memory:3 {2}\[agent\]/);
+  // Bea's entry reads as it did: the record is a line appended for Ava's id only.
+  const bea = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'bea'], streams: bea.streams, env }), 0);
+  assert.match(bea.output.stdout, /bea:memory:1 {2}\[unknown\]/);
+
+  // Nothing left to re-assert is a normal outcome, not an error.
+  const nothing = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'reassert', 'ava', '--trust', 'user', '--all-unknown'], streams: nothing.streams, env }), 0);
+  assert.match(nothing.output.stdout, /nothing to re-assert/);
+});
+
+test('a state migration that cannot stamp the home refuses commands that write state, and only those', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-stamp-'));
+  // A stamp that cannot be written: `state.json` is a directory, so the
+  // rename that lands the stamp fails while every other file stays writable.
+  await mkdir(path.join(home, '.stratus', 'state.json'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'memory.jsonl'), `${JSON.stringify({ id: 'ava:memory:1', agentId: 'ava', content: 'Likes jazz.', createdAt: '2026-01-01T00:00:00.000Z' })}\n`);
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+
+  const refused = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'reassert', 'ava', '--trust', 'user', '--all-unknown'], streams: refused.streams, env }), 1);
+  assert.match(refused.output.stderr, /State migration failed/);
+  assert.match(refused.output.stderr, /Refusing `stratus memory`/);
+  // Nothing was re-asserted: the record is exactly the one line it was.
+  assert.equal((await readFile(path.join(home, '.stratus', 'memory.jsonl'), 'utf8')).trim().split('\n').length, 1);
+
+  // A rollover rewrites a session in this build's shape — a write — and is
+  // refused here before it ever looks for a daemon.
+  const rollover = createStreams();
+  assert.equal(await runCli({ argv: ['session', 'rollover', 's-1'], streams: rollover.streams, env }), 1);
+  assert.match(rollover.output.stderr, /Refusing `stratus session`/);
+
+  const listed = createStreams();
+  assert.equal(await runCli({ argv: ['memory', 'list', 'ava'], streams: listed.streams, env }), 0);
+  assert.match(listed.output.stderr, /Warning: state migration failed/);
+  assert.match(listed.output.stdout, /ava:memory:1/);
+});
+
+test('stratus session rollover without a running daemon says so', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-rollover-'));
+  const failed = createStreams();
+  assert.equal(await runCli({ argv: ['session', 'rollover', 's-1'], streams: failed.streams, env: { cwd: home, homeDir: home, processEnv: {} } }), 1);
+  assert.match(failed.output.stderr, /no running daemon found/);
+});

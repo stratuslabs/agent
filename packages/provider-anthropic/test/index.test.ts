@@ -92,6 +92,7 @@ test('generate sends the persona in the system block and memory at the tail', as
       agentId: 'ava',
       content: 'The user prefers short answers.',
       createdAt: new Date().toISOString(),
+      trust: 'agent',
     },
   ];
 

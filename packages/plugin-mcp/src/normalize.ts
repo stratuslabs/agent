@@ -1,7 +1,9 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { mkdir, open, realpath } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { JsonObject, JsonValue } from '@stratusagent/core';
+import { nameIdentifiesHandle, type TaintedWriteLedger } from '@stratusagent/plugins';
 
 /**
  * Turning what an MCP server sends back into what a Stratus tool returns:
@@ -77,6 +79,15 @@ export interface NormalizeOptions {
    */
   workspaceRoot?: string;
   agentId: string;
+  /**
+   * The filesystem provenance ledger for `workspaceRoot`. A binary block
+   * is a server's bytes written to disk without going through `fs.write`,
+   * so the write records itself here at `external` before the bytes land —
+   * a later `fs.read` of the file then carries the label the tool result
+   * did. Without a ledger the file is written unrecorded, which is what
+   * the loader-less host case gets.
+   */
+  ledger?: TaintedWriteLedger;
   /** Clock seam for deterministic file names in tests. */
   now?: () => number;
 }
@@ -128,8 +139,13 @@ export const normalizeCallResult = async (
       texts.push(`[binary ${typeof mimeType === 'string' ? mimeType : 'content'} dropped: no workspaceRoot is configured for @stratusagent/plugin-mcp]`);
       return;
     }
-    const directory = path.join(options.workspaceRoot, options.agentId, 'mcp', options.server);
-    await mkdir(directory, { recursive: true });
+    // Canonical, because the ledger is keyed the way `fs.read` looks a
+    // path up — through `realpath` — and a workspace root or agent
+    // directory an operator moved behind a link would otherwise leave the
+    // record under a spelling no read ever asks for.
+    const lexical = path.join(options.workspaceRoot, options.agentId, 'mcp', options.server);
+    await mkdir(lexical, { recursive: true });
+    const directory = await realpath(lexical);
     const stamp = (options.now ?? Date.now)();
     fileSerial += 1;
     // The tool name is the server's own string, so it is folded to the
@@ -140,7 +156,41 @@ export const normalizeCallResult = async (
       directory,
       `${sanitizeToolSegment(options.tool) ?? 'tool'}-${stamp}-${fileSerial}.${extensionFor(typeof mimeType === 'string' ? mimeType : undefined)}`,
     );
-    await writeFile(file, Buffer.from(data, 'base64'));
+    // Recorded before the bytes land, like a tainted `fs.write`: a crash
+    // between the two leaves a labelled path with no file, never a file
+    // with no label.
+    await options.ledger?.recordWrite(options.agentId, file, 'external');
+    // Created exclusively, never through a link: the record above names
+    // the exact path, and a link planted there between the record and the
+    // write would carry a server's bytes to a target the ledger never saw
+    // — the ledger itself included. A name that is already taken, by a
+    // link or anything else, fails the block rather than following it.
+    let handle;
+    try {
+      handle = await open(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error(`${file} appeared between its provenance record and its write; the ${options.tool} result's binary block was not saved. Retry the call.`);
+      }
+      throw error;
+    }
+    try {
+      // O_NOFOLLOW guards the final component only: a directory on the way
+      // swapped for a link between the `realpath` above and this open would
+      // have the create land wherever the link points, under a path the
+      // record above never named. Checked now that the file exists, and
+      // bound to the descriptor rather than the name — a decoy put back at
+      // the expected spelling would satisfy a pathname comparison while the
+      // handle still points where the link sent the create. Refused before
+      // a byte is written; the empty file is left rather than unlinked
+      // through a name that just proved it can move.
+      if (!(await nameIdentifiesHandle(file, handle))) {
+        throw new Error(`${file} moved between its provenance record and its write; the ${options.tool} result's binary block was not saved. Retry the call.`);
+      }
+      await handle.writeFile(Buffer.from(data, 'base64'));
+    } finally {
+      await handle.close();
+    }
     files.push(file);
   };
 

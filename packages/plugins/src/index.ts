@@ -46,3 +46,17 @@ export {
   type PluginLoadFailure,
   type PluginSkillRecord,
 } from './loader.ts';
+
+export {
+  createFileLedger,
+  createProcessLocalLedger,
+  isLedgerPath,
+  LEDGER_FILENAME,
+  ledgerContentTrust,
+  ledgerGuard,
+  ledgerTrustOfContent,
+  nameIdentifiesHandle,
+  type FileIdentity,
+  type LedgerGuard,
+  type TaintedWriteLedger,
+} from './provenance.ts';

@@ -3,6 +3,8 @@ import { lstat, open, realpath, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { nameIdentifiesHandle } from '@stratusagent/plugins';
+
 /** A path that is not inside anything this agent was given. */
 export class PathOutsideRootError extends Error {
   constructor(message: string) {
@@ -180,18 +182,58 @@ export const openContained = async (
   flags: number,
   mode?: number,
 ): Promise<Awaited<ReturnType<typeof open>>> => {
-  const handle = await open(resolved.path, flags | O_NOFOLLOW, mode);
-  if (resolved.identity) {
-    const info = await handle.stat();
-    if (info.dev !== resolved.identity.dev || info.ino !== resolved.identity.ino) {
-      await handle.close();
-      throw new PathOutsideRootError(
-        `Refusing ${resolved.path}: it changed between the containment check and the open.`,
-      );
+  // A resolution that found nothing there has no inode to verify, so the
+  // open is exclusive instead: the decision was made about an empty name,
+  // and a file that appeared under it since — another process hard-linking
+  // the provenance ledger into place is the case that matters, since
+  // O_NOFOLLOW does not see a hard link — fails with EEXIST rather than
+  // being truncated. The caller decides whether to look again.
+  const exclusive = resolved.exists ? 0 : constants.O_EXCL;
+  // Truncation is deferred until the descriptor has been verified: O_TRUNC
+  // empties the file at open, before any inode comparison can run, so a
+  // name swapped for a hard link of the provenance ledger between the check
+  // and the open would be emptied first and refused second. Opened intact,
+  // checked, then truncated through the descriptor already held.
+  const truncate = (flags & constants.O_TRUNC) !== 0;
+  const handle = await open(resolved.path, (flags & ~constants.O_TRUNC) | O_NOFOLLOW | exclusive, mode);
+  try {
+    if (resolved.identity) {
+      const info = await handle.stat();
+      if (info.dev !== resolved.identity.dev || info.ino !== resolved.identity.ino) {
+        throw new PathOutsideRootError(
+          `Refusing ${resolved.path}: it changed between the containment check and the open.`,
+        );
+      }
     }
+    if (truncate) {
+      await handle.truncate(0);
+    }
+    if (!resolved.exists) {
+      // O_NOFOLLOW guards the final component only. A directory between
+      // the root and the name — one the resolution found missing and the
+      // caller then created — can be swapped for a link before the open,
+      // and the exclusive create then lands the file wherever the link
+      // points: another root, or nowhere allowed, and under a path the
+      // provenance ledger never recorded. The name is resolved again once
+      // the file exists; a spelling other than the one decided about is
+      // refused before a byte is written. The empty file the create left
+      // behind stays: removing it would mean naming it again through the
+      // very directory that just moved, and a second move in between would
+      // make that unlink take some other file — the ledger, if the name
+      // was chosen for it. An empty orphan is the cheaper outcome.
+      if (!(await nameIdentifiesHandle(resolved.path, handle))) {
+        throw new PathOutsideRootError(
+          `Refusing ${resolved.path}: a directory on its path changed between the containment check and the open.`,
+        );
+      }
+    }
+  } catch (error) {
+    await handle.close();
+    throw error;
   }
   return handle;
 };
+
 
 /** Whether a directory entry is a real directory (never through a symlink). */
 export const isRealDirectory = async (target: string): Promise<boolean> => {

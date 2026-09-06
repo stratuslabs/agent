@@ -43,6 +43,7 @@ use right now and which file or env var decided each setting.
 | `promptCache` | Cache the stable head of each Anthropic request. Default `true` — see below |
 | `promptCacheTtl` | How long a cache entry lives: `5m` (default) or `1h` |
 | `approvals` | Unattended-approval policy for `stratus serve` — trusted configs only, see below |
+| `principals` | Which channel senders are each agent's operator: `slackUsers` (Slack user ids), with a per-agent `agents` sub-block — trusted configs only, see below |
 | `api` | Control API binding for `stratus serve` — trusted configs only, see below |
 | `plugins` | Plugins to load, keyed by package name — trusted configs only, see below |
 
@@ -107,12 +108,14 @@ set.
 | --- | --- | --- |
 | `plugins` | Which code runs in the daemon's process, with what settings | [Tools](../guides/tools.md) |
 | `approvals` | Who may authorize an agent's tool calls, and how | [Approvals](../guides/approvals.md) |
+| `principals` | Whose messages an agent takes as its operator's; everyone else's arrive as `unknown` | [Slack](../../packages/channel-slack/README.md#who-counts-as-the-operator), [Memory](../concepts/memory.md#where-a-fact-came-from) |
 | `api` | Which interface and port a daemon binds | [Remote access](../guides/remote-access.md) |
 | `apiKeyEnv` | Which environment variable this process reads a secret out of | [Security](../concepts/security.md) |
 
-Each block's keys and shape are documented in its own guide. `approvals`
-and each plugin's entry also take a per-agent `agents` sub-block, where an
-agent's entry overrides the defaults above it key by key; the `api` block
+Each block's keys and shape are documented in its own guide. `approvals`,
+`principals`, and each plugin's entry also take a per-agent `agents`
+sub-block, where an agent's entry overrides the defaults above it key by key
+(an explicit `"slackUsers": []` excludes an agent from a shared list); the `api` block
 has no per-agent form — its keys are exactly `enabled`, `host`, and
 `port`.
 

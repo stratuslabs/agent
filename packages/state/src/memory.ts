@@ -8,13 +8,17 @@ import {
   boundMemoryRead,
   clampMemoryRecallLimit,
   compareMemoryChronology,
+  isTrustLevel,
   tokenizeMemoryText,
   type AgentMemoryStore,
   type JsonObject,
   type MemoryAuditEntry,
   type MemoryEntry,
   type MemoryListOptions,
+  type MemoryOrigin,
+  type MemoryProvenance,
   type MemoryReadResult,
+  type TrustLevel,
 } from '@stratusagent/core';
 
 // Agents keep the same memory across runs: every remembered fact lands in
@@ -46,9 +50,26 @@ interface MemoryTombstone {
   createdAt: string;
 }
 
+/**
+ * An operator's re-assertion of an entry's trust — the third record type in
+ * the lane, and the only way a label ever rises. A record rather than a
+ * field write for the same reason a tombstone is: the file is append-only,
+ * and rewriting a line would race every other writer. The latest
+ * re-assertion in file order is the one that stands.
+ */
+interface MemoryReassertion {
+  reasserts: string;
+  agentId: string;
+  trust: TrustLevel;
+  createdAt: string;
+}
+
+type MemoryRecord = MemoryEntry | MemoryTombstone | MemoryReassertion;
+
 interface MemoryFileRecords {
   entries: MemoryEntry[];
   tombstones: MemoryTombstone[];
+  reassertions: MemoryReassertion[];
 }
 
 const isTombstoneRecord = (value: unknown): value is MemoryTombstone =>
@@ -56,6 +77,16 @@ const isTombstoneRecord = (value: unknown): value is MemoryTombstone =>
   && typeof (value as MemoryTombstone).agentId === 'string'
   && typeof (value as MemoryTombstone).createdAt === 'string';
 
+const isReassertionRecord = (value: unknown): value is MemoryReassertion =>
+  typeof value === 'object' && value !== null && typeof (value as MemoryReassertion).reasserts === 'string'
+  && typeof (value as MemoryReassertion).agentId === 'string'
+  && isTrustLevel((value as MemoryReassertion).trust)
+  && typeof (value as MemoryReassertion).createdAt === 'string';
+
+// Exactly the four fields, still: a hand-added line carrying only these
+// loads, is recallable, and reaches the prompt. `trust` and `origin` are
+// additive — a line without them reads as `unknown`, which is what a line
+// nobody labelled is.
 const isEntryRecord = (value: unknown): value is MemoryEntry =>
   typeof value === 'object' && value !== null
   && typeof (value as MemoryEntry).id === 'string'
@@ -63,9 +94,34 @@ const isEntryRecord = (value: unknown): value is MemoryEntry =>
   && typeof (value as MemoryEntry).content === 'string'
   && typeof (value as MemoryEntry).createdAt === 'string';
 
+/**
+ * An entry's optional provenance fields, as they are safe to read back: a
+ * `trust` that is present but not a level — a hand edit, a label from a
+ * newer build — reads as a *recorded* `unknown`, never as the misspelling
+ * and never as absent: absence is the upgrade corpus that `stratus memory
+ * reassert --all-unknown` sweeps, and a label somebody wrote is not that.
+ * `origin` keeps only its two known string fields.
+ */
+const provenanceOf = (entry: MemoryEntry): Pick<MemoryEntry, 'trust' | 'origin'> => {
+  const raw = entry as MemoryEntry & { trust?: unknown; origin?: unknown };
+  const trust: TrustLevel | undefined = raw.trust === undefined ? undefined : isTrustLevel(raw.trust) ? raw.trust : 'unknown';
+  let origin: MemoryOrigin | undefined;
+  if (typeof raw.origin === 'object' && raw.origin !== null && !Array.isArray(raw.origin)) {
+    const source = raw.origin as Record<string, unknown>;
+    origin = {
+      ...(typeof source.sessionId === 'string' ? { sessionId: source.sessionId } : {}),
+      ...(typeof source.taintedBy === 'string' ? { taintedBy: source.taintedBy } : {}),
+    };
+  }
+  return {
+    ...(trust !== undefined ? { trust } : {}),
+    ...(origin !== undefined ? { origin } : {}),
+  };
+};
+
 /** Every record in the file, in file order — the shape the index applies. */
-const parseOrderedRecords = (raw: string, filePath: string): (MemoryEntry | MemoryTombstone)[] => {
-  const ordered: (MemoryEntry | MemoryTombstone)[] = [];
+const parseOrderedRecords = (raw: string, filePath: string): MemoryRecord[] => {
+  const ordered: MemoryRecord[] = [];
   for (const line of raw.split('\n')) {
     if (line.trim().length === 0) {
       continue;
@@ -80,7 +136,7 @@ const parseOrderedRecords = (raw: string, filePath: string): (MemoryEntry | Memo
     // well-formed record would otherwise surface later as a TypeError in a
     // read or an undefined bound into the index — errors that never name
     // the file the way this one does.
-    if (!isTombstoneRecord(parsed) && !isEntryRecord(parsed)) {
+    if (!isTombstoneRecord(parsed) && !isReassertionRecord(parsed) && !isEntryRecord(parsed)) {
       throw new Error(`Memory file has an invalid line: ${filePath}`);
     }
     ordered.push(parsed);
@@ -91,14 +147,46 @@ const parseOrderedRecords = (raw: string, filePath: string): (MemoryEntry | Memo
 const parseMemoryRecords = (raw: string, filePath: string): MemoryFileRecords => {
   const entries: MemoryEntry[] = [];
   const tombstones: MemoryTombstone[] = [];
+  const reassertions: MemoryReassertion[] = [];
   for (const record of parseOrderedRecords(raw, filePath)) {
     if (isTombstoneRecord(record)) {
       tombstones.push(record);
+    } else if (isReassertionRecord(record)) {
+      reassertions.push(record);
     } else {
       entries.push(record);
     }
   }
-  return { entries, tombstones };
+  return { entries, tombstones, reassertions };
+};
+
+/**
+ * The trust each re-asserted entry now carries: the last record in file
+ * order wins, which is the one total order no later writer can insert
+ * itself into. Scoped to the entry's own agent — a re-assertion naming
+ * another agent's entry is inert, so the per-agent boundary the store rests
+ * on is not breached by a record in a shared file.
+ */
+const reassertedTrustFor = (records: MemoryFileRecords, agentId: string): Map<string, TrustLevel> => {
+  const reasserted = new Map<string, TrustLevel>();
+  for (const record of records.reassertions) {
+    if (record.agentId === agentId) {
+      reasserted.set(record.reasserts, record.trust);
+    }
+  }
+  return reasserted;
+};
+
+/** An entry as read back: provenance fields validated, any re-assertion applied. */
+const presentEntry = (entry: MemoryEntry, reasserted: Map<string, TrustLevel>): MemoryEntry => {
+  const { trust: _trust, origin: _origin, ...rest } = entry;
+  const provenance = provenanceOf(entry);
+  const reassertedTrust = reasserted.get(entry.id);
+  return {
+    ...rest,
+    ...provenance,
+    ...(reassertedTrust !== undefined ? { trust: reassertedTrust } : {}),
+  };
 };
 
 /**
@@ -109,19 +197,25 @@ const parseMemoryRecords = (raw: string, filePath: string): MemoryFileRecords =>
  */
 const liveEntriesFor = (records: MemoryFileRecords, agentId: string): MemoryEntry[] => {
   const forgotten = new Set(records.tombstones.map((tombstone) => tombstone.forgets));
+  const reasserted = reassertedTrustFor(records, agentId);
   const seen = new Set<string>();
-  return records.entries.filter((entry) => {
+  const live: MemoryEntry[] = [];
+  for (const entry of records.entries) {
     if (entry.agentId !== agentId || seen.has(entry.id) || forgotten.has(entry.id)) {
-      return false;
+      continue;
     }
     seen.add(entry.id);
-    return true;
-  });
+    live.push(presentEntry(entry, reasserted));
+  }
+  return live;
 };
 
 // ---- the derived FTS5 index ------------------------------------------------
 
-const INDEX_SCHEMA_VERSION = '1';
+// Bumped when the row shape changes: an index stamped with an older version
+// is rebuilt from the record, which is the only cost a derived file has.
+// '2' added `trust` and `origin` columns and the `reasserted` table.
+const INDEX_SCHEMA_VERSION = '2';
 
 // Loaded on first `search`, never at module load: see the note at the top.
 type SqliteModule = typeof import('node:sqlite');
@@ -139,15 +233,21 @@ type SqliteDatabase = InstanceType<SqliteModule['DatabaseSync']>;
 // Only `tokens` is searchable; it holds the content re-tokenized by the
 // shared tokenizer, so FTS5 sees exactly the token stream the in-memory
 // store matches on rather than applying its own boundaries to raw text.
+// `trust` and `origin` ride along unindexed so a search hit carries its
+// label without a second read of the JSONL; `reasserted` mirrors
+// `forgotten` for the record type that changes a label after the fact.
 const INDEX_SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS forgotten (id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS reasserted (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, trust TEXT NOT NULL);
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
   tokens,
   id UNINDEXED,
   agent_id UNINDEXED,
   content UNINDEXED,
   created_at UNINDEXED,
+  trust UNINDEXED,
+  origin UNINDEXED,
   tokenize = 'unicode61 remove_diacritics 0'
 );
 `;
@@ -192,21 +292,29 @@ const writeWatermark = (db: SqliteDatabase, watermark: IndexWatermark): void => 
 };
 
 const clearIndex = (db: SqliteDatabase): void => {
-  db.exec('DELETE FROM memory_fts; DELETE FROM forgotten; DELETE FROM meta;');
+  db.exec('DELETE FROM memory_fts; DELETE FROM forgotten; DELETE FROM reasserted; DELETE FROM meta;');
 };
 
 /**
  * Apply one contiguous run of records. Sequential application with the
- * `forgotten` table makes the result order-independent: an entry whose
- * tombstone already passed is skipped, an entry already indexed (a rare
- * double-import the read path also dedupes) is skipped, and a tombstone
- * retires its entry whether or not it is indexed yet.
+ * `forgotten` and `reasserted` tables makes the result order-independent:
+ * an entry whose tombstone already passed is skipped, an entry already
+ * indexed (a rare double-import the read path also dedupes) is skipped, a
+ * tombstone retires its entry whether or not it is indexed yet, and a
+ * re-assertion re-labels its entry whether it arrives before or after it.
  */
-const applyRecords = (db: SqliteDatabase, ordered: (MemoryEntry | MemoryTombstone)[]): void => {
+const applyRecords = (db: SqliteDatabase, ordered: MemoryRecord[]): void => {
   const hasEntry = db.prepare('SELECT 1 FROM memory_fts WHERE id = ?');
   const isForgotten = db.prepare('SELECT 1 FROM forgotten WHERE id = ?');
-  const insertEntry = db.prepare('INSERT INTO memory_fts (tokens, id, agent_id, content, created_at) VALUES (?, ?, ?, ?, ?)');
+  const reassertedFor = db.prepare('SELECT trust FROM reasserted WHERE id = ? AND agent_id = ?');
+  const insertEntry = db.prepare(
+    'INSERT INTO memory_fts (tokens, id, agent_id, content, created_at, trust, origin) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  );
   const insertForgotten = db.prepare('INSERT OR IGNORE INTO forgotten (id) VALUES (?)');
+  const upsertReasserted = db.prepare(
+    'INSERT INTO reasserted (id, agent_id, trust) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET agent_id = excluded.agent_id, trust = excluded.trust',
+  );
+  const relabelEntry = db.prepare('UPDATE memory_fts SET trust = ? WHERE id = ? AND agent_id = ?');
   const deleteEntry = db.prepare('DELETE FROM memory_fts WHERE id = ?');
   for (const record of ordered) {
     if (isTombstoneRecord(record)) {
@@ -214,10 +322,26 @@ const applyRecords = (db: SqliteDatabase, ordered: (MemoryEntry | MemoryTombston
       deleteEntry.run(record.forgets);
       continue;
     }
+    if (isReassertionRecord(record)) {
+      upsertReasserted.run(record.reasserts, record.agentId, record.trust);
+      relabelEntry.run(record.trust, record.reasserts, record.agentId);
+      continue;
+    }
     if (hasEntry.get(record.id) !== undefined || isForgotten.get(record.id) !== undefined) {
       continue;
     }
-    insertEntry.run(tokenizeMemoryText(record.content).join(' '), record.id, record.agentId, record.content, record.createdAt);
+    const provenance = provenanceOf(record);
+    const reasserted = reassertedFor.get(record.id, record.agentId) as { trust: string } | undefined;
+    const trust = reasserted?.trust ?? provenance.trust ?? null;
+    insertEntry.run(
+      tokenizeMemoryText(record.content).join(' '),
+      record.id,
+      record.agentId,
+      record.content,
+      record.createdAt,
+      trust,
+      provenance.origin ? JSON.stringify(provenance.origin) : null,
+    );
   }
 };
 
@@ -242,7 +366,7 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       raw = await readFile(filePath, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return { entries: [], tombstones: [] };
+        return { entries: [], tombstones: [], reassertions: [] };
       }
       throw error;
     }
@@ -282,7 +406,7 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
     }
   };
 
-  const appendRecord = async (record: MemoryEntry | MemoryTombstone): Promise<void> => {
+  const appendRecord = async (record: MemoryRecord): Promise<void> => {
     await mkdir(path.dirname(filePath), { recursive: true });
     try {
       await chmod(filePath, 0o600);
@@ -309,6 +433,40 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       const opened = new DatabaseSync(indexPath);
       opened.exec('PRAGMA busy_timeout = 5000;');
       opened.exec(INDEX_SCHEMA);
+      // `CREATE ... IF NOT EXISTS` leaves an older install's table standing
+      // with its older columns, and the stale-stamp path below only empties
+      // rows — so the first insert after an upgrade would fail on a column
+      // the table does not have. Judged by the table's actual shape rather
+      // than by the stamp, because an index created and never caught up
+      // has the old shape and no stamp at all. Dropping everything makes
+      // the next catch-up a full rebuild from the record, which is the
+      // only cost a derived file can have.
+      const hasCurrentShape = (): boolean => (opened.prepare('PRAGMA table_info(memory_fts)').all() as Array<{ name: string }>)
+        .some((column) => column.name === 'trust');
+      if (!hasCurrentShape()) {
+        // Under the same write lock catch-up takes, and re-checked once it
+        // is held: the daemon and a `stratus run` opening an upgraded
+        // index at the same moment both see the old shape, and without the
+        // lock the second's drops would empty the tables the first had
+        // just rebuilt. With it, the second waits, looks again, and finds
+        // nothing to do.
+        opened.exec('BEGIN IMMEDIATE;');
+        try {
+          if (!hasCurrentShape()) {
+            opened.exec('DROP TABLE memory_fts; DROP TABLE forgotten; DROP TABLE reasserted; DROP TABLE meta;');
+            opened.exec(INDEX_SCHEMA);
+          }
+          opened.exec('COMMIT;');
+        } catch (error) {
+          try {
+            opened.exec('ROLLBACK;');
+          } catch {
+            // The transaction may never have started; the original error
+            // is the one worth reporting.
+          }
+          throw error;
+        }
+      }
       return opened;
     };
     try {
@@ -333,7 +491,7 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
     action: 'none' | 'apply';
     /** Drop every row first (schema change, edit, shrink, replaced file). */
     clear: boolean;
-    records: (MemoryEntry | MemoryTombstone)[];
+    records: MemoryRecord[];
     watermark: IndexWatermark;
   }
 
@@ -460,8 +618,20 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
     }
   };
 
+  const parseOrigin = (raw: string | null): MemoryOrigin | undefined => {
+    if (raw === null) {
+      return undefined;
+    }
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return provenanceOf({ id: '', agentId: '', content: '', createdAt: '', origin: parsed } as MemoryEntry).origin;
+    } catch {
+      return undefined;
+    }
+  };
+
   return {
-    async append(agentId: string, content: string, metadata?: JsonObject) {
+    async append(agentId: string, content: string, metadata?: JsonObject, provenance?: MemoryProvenance) {
       assertMemoryContentWithinCap(content);
       const entry: MemoryEntry = {
         id: `${agentId}:memory:${randomUUID()}`,
@@ -469,6 +639,8 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
         content,
         createdAt: new Date().toISOString(),
         ...(metadata ? { metadata } : {}),
+        ...(provenance ? { trust: provenance.trust } : {}),
+        ...(provenance?.origin ? { origin: provenance.origin } : {}),
       };
       await appendRecord(entry);
       return entry;
@@ -500,14 +672,26 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
       const clamped = clampMemoryRecallLimit(limit);
       const match = tokens.map((token) => `"${token}"`).join(' ');
       const rows = database.prepare(
-        'SELECT id, agent_id, content, created_at FROM memory_fts WHERE memory_fts MATCH ? AND agent_id = ? ORDER BY created_at DESC, id ASC LIMIT ?',
-      ).all(match, agentId, clamped + 1) as { id: string; agent_id: string; content: string; created_at: string }[];
-      const candidates: MemoryEntry[] = rows.map((row) => ({
-        id: row.id,
-        agentId: row.agent_id,
-        content: row.content,
-        createdAt: row.created_at,
-      }));
+        'SELECT id, agent_id, content, created_at, trust, origin FROM memory_fts WHERE memory_fts MATCH ? AND agent_id = ? ORDER BY created_at DESC, id ASC LIMIT ?',
+      ).all(match, agentId, clamped + 1) as {
+        id: string;
+        agent_id: string;
+        content: string;
+        created_at: string;
+        trust: string | null;
+        origin: string | null;
+      }[];
+      const candidates: MemoryEntry[] = rows.map((row) => {
+        const origin = parseOrigin(row.origin);
+        return {
+          id: row.id,
+          agentId: row.agent_id,
+          content: row.content,
+          createdAt: row.created_at,
+          ...(isTrustLevel(row.trust) ? { trust: row.trust } : {}),
+          ...(origin !== undefined ? { origin } : {}),
+        };
+      });
       return boundMemoryRead(candidates, clamped);
     },
 
@@ -529,6 +713,7 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
           forgottenAt.set(tombstone.forgets, tombstone.createdAt);
         }
       }
+      const reasserted = reassertedTrustFor(records, agentId);
       const seen = new Set<string>();
       const audit: MemoryAuditEntry[] = [];
       for (const entry of records.entries) {
@@ -537,9 +722,22 @@ export const createFileMemoryStore = (filePath: string): AgentMemoryStore => {
         }
         seen.add(entry.id);
         const droppedAt = forgottenAt.get(entry.id);
-        audit.push({ ...entry, ...(droppedAt !== undefined ? { forgottenAt: droppedAt } : {}) });
+        audit.push({ ...presentEntry(entry, reasserted), ...(droppedAt !== undefined ? { forgottenAt: droppedAt } : {}) });
       }
       return audit.sort(compareMemoryChronology);
+    },
+
+    async reassertTrust(agentId: string, entryId: string, trust: TrustLevel) {
+      // Resolved from the caller's own live set first, like `forget`: the
+      // record lane is shared, and a writer that skipped this would let one
+      // agent's operator surface re-label another agent's memory by id.
+      const live = liveEntriesFor(await readRecords(), agentId);
+      const entry = live.find((candidate) => candidate.id === entryId);
+      if (!entry) {
+        return false;
+      }
+      await appendRecord({ reasserts: entry.id, agentId: entry.agentId, trust, createdAt: new Date().toISOString() });
+      return true;
     },
   };
 };

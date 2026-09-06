@@ -60,11 +60,56 @@ tools: [fs.read, fs.search]     # or fs.* for the whole toolset
 | `maxBytes` | `64000` | Cap on one `fs.read`, before the `truncated` marker. A call's own `maxBytes` may ask for less, never more. |
 | `maxMatches` | `100` | Cap on `fs.search` matches. A call's own `maxMatches` may ask for fewer, never more. |
 | `maxEntries` | `500` | Cap on `fs.list` entries. |
+| `workspaceRoot` | `~/.stratus/workspaces` | Supplied by the daemon when unset. Where an agent's files under the workspace live. |
+| `ledgerRoot` | `~/.stratus/workspaces` | Set by the daemon, and not yours to move: where each agent's provenance ledger lives — see below. Every plugin that writes the ledger is handed the same value, so there is one ledger however the workspaces are arranged. |
 
 Every key can be set per agent in the `agents` sub-block, over the defaults
 above it, and `roots` is why the sub-block exists: a flat list would give
 every agent enabling `fs.*` the same roots, which is one agent reading
 another's files.
+
+## What a read carries with it
+
+The filesystem is a laundering channel by construction: an agent that reads
+a hostile page, writes what it said into its workspace, and reads it back
+next week gets a file with no provenance, arriving as its own notes. So
+`fs.write` from a session whose trust label is `external` or `unknown`
+records the path — and any directory it creates — in a per-agent ledger,
+`<workspaceRoot>/<agent>/fs-provenance.jsonl` (owner-only, append-only, one
+record per line like the memory file, so the daemon and a `stratus run`
+writing at once lose nothing) — before the bytes land, so a crash or a ledger
+that cannot be written leaves a labelled path with no file rather than a file
+with no label — and a later `fs.read`, `fs.search`, or `fs.list` that puts
+that file's contents — or its name, or the name of a directory on its path,
+which the tainted session chose — in front of the model labels the call at
+the recorded level — so
+the reading session, and every fact it remembers afterwards, carries it. A
+record never clears — the path was the tainted session's choice as much as
+the bytes, and a clearing is the one record a tainted write from another
+process could race into leaving tainted bytes unlabelled — so a clean session
+rewriting the file leaves the label standing. Over-marking is the safe
+direction; to reclaim a path, remove its lines from the ledger by hand.
+The ledger is the daemon's record, and `fs.write` refuses to edit it even
+inside a root that covers it; a read or search that shows what it holds is
+labelled at the lowest label in it, because its contents are the paths
+tainted sessions chose.
+
+What this does not cover, said plainly: a copy under another name, a file a
+different process or a different agent wrote, content pasted through a path
+the ledger never saw. It closes the sequence one agent can perform by
+itself. In particular it is not a boundary against another process running
+as the same user — one that can repoint a link inside the owner-only
+workspace while a write is in flight can as easily edit the ledger, or
+delete it — so the checks around a write (exclusive create, the inode
+bound to the name, one descriptor for the ledger) close the windows the
+agent's own concurrent calls and an operator's relocated directories open,
+not a hostile process with the daemon's own permissions. The ledger lives in `@stratusagent/plugins` (re-exported here), so a
+plugin that puts a server's bytes on disk without `fs.write` — `plugin-mcp`
+writing a bridged tool's image — records into the same file. Loaded without a `workspaceRoot` — a host wiring the plugin by hand
+rather than through the loader — the ledger is process-local, and the
+read-back-next-week case survives only as long as the process does. The
+labels themselves are documented in
+[Memory](../../docs/concepts/memory.md#where-a-fact-came-from).
 
 ## `fs.search` takes literal text, not a pattern
 

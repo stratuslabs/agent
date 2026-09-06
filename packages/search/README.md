@@ -266,6 +266,9 @@ Snippets are attacker-controlled text: written by whoever owns the page,
 selected by a third-party ranker, and handed to a model that is about to
 decide what to do next. **This does not solve prompt injection** and does not
 claim to — it marks the boundary, because doing so is nearly free here and a
-retrofit across every tool that returns third-party text is not. Whether the
-marking should become a kernel concept that `web.fetch` and the MCP bridge
-share is [13](../../docs/roadmap/13-search.md)'s open question, still open.
+retrofit across every tool that returns third-party text is not. The marking is
+now also a kernel concept: the tool declares `outputTrust: 'external'`, so
+the session that read a result carries the label forward into everything it
+remembers — the same label `web.fetch`, the browser, and the MCP bridge
+carry. The envelope's note stays, because it is the model, not the kernel,
+that reads it ([Memory](../../docs/concepts/memory.md#where-a-fact-came-from)).

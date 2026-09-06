@@ -49,6 +49,9 @@ stratus skill validate ./my-skill      # check a skill against the spec without 
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
 stratus credentials                    # stored credential names (never values)
 stratus schedules                      # what the fleet has scheduled, and where it reports
+stratus memory list ava                # every live fact, with the trust label it carries
+stratus memory reassert ava --trust user --all-unknown   # vouch for the facts with no recorded origin
+stratus session rollover <session-id>  # archive a conversation's transcript and start the same id over
 stratus dashboard                      # web dashboard, signed in via a one-time link
 ```
 
@@ -72,7 +75,9 @@ Full reference with every subcommand:
 | `--no-log-file` | `serve`: do not write `~/.stratus/logs/stratusd.jsonl` |
 | `--no-api` | `serve`: do not serve the control API |
 | `--api-host`, `--api-port` | `serve`: control API bind (default `127.0.0.1:4123`) |
-| `--gateway <url>`, `--token` | `agents`: read the roster from a running daemon's control API |
+| `--gateway <url>`, `--token` | `agents`, `skill reload`, `restart`, `session rollover`: a running daemon's control API |
+| `--trust <level>` | `memory list`: show only that label; `memory reassert`: the label to record (`user`, `agent`, `unknown`, `external`) |
+| `--all-unknown` | `memory reassert`: every live fact with no recorded origin |
 | `--agent <id>` | `credential set`/`remove`: that agent's own key rather than the fleet's shared one |
 | `--port`, `--host`, `--no-open` | `dashboard`: where a daemon it starts should bind; skip opening the browser |
 | `--no-login` | `service install`: install without the start-at-login trigger |

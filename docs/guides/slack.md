@@ -64,6 +64,14 @@ agent mention-only on purpose.
   `channels.slack.<agentId>` in `~/.stratus/credentials.json` and are never
   resolved through the agent-scoped credential allowlist — an agent must not
   be able to read the tokens of the transport carrying it.
+- **Name who your agent's operator is.** Any member of the workspace can DM
+  an agent or mention it, and the adapter cannot tell them from you. Until
+  you list your Slack user id under `principals` in `~/.stratus/config.json`,
+  every message an agent receives in Slack is treated as coming from someone
+  it cannot vouch for, and every fact it remembers there is labelled that
+  way. How and why is in [Who counts as the
+  operator](../../packages/channel-slack/README.md#who-counts-as-the-operator)
+  and [Memory](../concepts/memory.md#where-a-fact-came-from).
 - **Replies are translated to Slack's markup.** Agents write Markdown; Slack
   renders mrkdwn, where bold is `*one asterisk*` and headings do not exist. The
   adapter converts on the way out, leaving code spans and fences as written —

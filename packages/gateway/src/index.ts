@@ -16,6 +16,8 @@ import {
   describeToolAllowlistFinding,
   unmatchedToolAllowlist,
   PENDING_APPROVAL_METADATA_KEY,
+  SESSION_TAINTED_BY_METADATA_KEY,
+  SESSION_TRUST_METADATA_KEY,
   latestTurnReply,
   readPendingApproval,
   type AgentDefinition,
@@ -92,6 +94,7 @@ import {
   loadSoulFile,
   memoryFilePath,
   migrateLegacyMemory,
+  PROVIDER_STATE_METADATA_KEYS,
   ConfigFileError,
   loadConfigFile,
   readNonEmptyString,
@@ -99,6 +102,7 @@ import {
   resolveConfiguredSoul,
   resolveRuntimeConfig,
   applySoulPins,
+  assertStateCompatible,
   stratusHomePath,
   workspacesDirPath,
   withLegacyDefaultMemories,
@@ -830,6 +834,28 @@ export interface Gateway {
    */
   sessionRouting(sessionId: string): Promise<SessionRouting | undefined>;
   /**
+   * Start a conversation over under the same id, leaving its transcript so
+   * far behind as an archived session.
+   *
+   * The remedy for a session whose trust label cannot honestly be raised. A
+   * session from before provenance was tracked reads `unknown`, the label
+   * never rises, and some sessions never end — a Slack DM is one resumable
+   * session for the life of the install — so without this an operator's
+   * own conversation would write `unknown` forever, however carefully the
+   * memory it injects was re-asserted. A session boundary is the only move
+   * that neither strands the conversation nor quietly raises trust over a
+   * transcript nobody re-read: the old session stays exactly what it was,
+   * under `<id>:rolledover:<time>-<suffix>`, and the fresh one starts at the top of
+   * the lattice with only the routing metadata the channel needs to keep
+   * finding it. The fresh session is still `unknown` on its first turn if
+   * the memory it injects is — correctly, and that is the case that
+   * catches anyone who thinks the rollover alone is the remedy.
+   *
+   * Refuses a session with a turn in flight: the runner holds the live
+   * object and would save the old transcript back over the fresh row.
+   */
+  rolloverSession(sessionId: string): Promise<{ sessionId: string; archivedAs: string }>;
+  /**
    * Settles a parked call. Returns false when the request is not pending —
    * already decided, expired, or belonging to a turn that was cancelled —
    * which is the normal outcome of a button clicked a minute too late, not
@@ -886,6 +912,16 @@ export const ABANDONED_TURN_ERROR =
  * (see `activeFirings`); the durable ones cannot be re-derived in memory,
  * so they are refused at the door instead.
  */
+/**
+ * A rolled-over session: the fresh row records where its predecessor's
+ * transcript went, and the archived row records which live id continues
+ * the conversation. See `Gateway.rolloverSession`.
+ */
+export const ROLLED_OVER_FROM_METADATA_KEY = 'rolledOverFrom';
+export const ROLLED_OVER_TO_METADATA_KEY = 'rolledOverTo';
+/** The segment a rollover mints into the archived transcript's id. */
+export const ROLLED_OVER_SESSION_ID_MARKER = ':rolledover:';
+
 export const RESERVED_SESSION_METADATA_KEYS: readonly string[] = [
   PENDING_APPROVAL_METADATA_KEY,
   FALLBACK_ACTIVE_METADATA_KEY,
@@ -894,6 +930,12 @@ export const RESERVED_SESSION_METADATA_KEYS: readonly string[] = [
   DELEGATION_DEPTH_METADATA_KEY,
   SCHEDULED_TURN_METADATA_KEY,
   SCHEDULE_ID_METADATA_KEY,
+  // The trust label is the runner's to write and only ever goes down; a
+  // caller who could seed it would be seeding it upward.
+  SESSION_TRUST_METADATA_KEY,
+  SESSION_TAINTED_BY_METADATA_KEY,
+  ROLLED_OVER_FROM_METADATA_KEY,
+  ROLLED_OVER_TO_METADATA_KEY,
 ];
 
 /**
@@ -977,6 +1019,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     sessionStatus: async (sessionId) => (await store.get(sessionId))?.status,
     hasAgent: (agentId) => registry.get(agentId) !== undefined,
     ...(options.schedules ? { limits: options.schedules } : {}),
+    // The same stamp check every turn runs, before a slot is claimed — see
+    // `SchedulerRuntimeOptions.ready`.
+    ready: () => assertStateCompatible(env),
     log,
     warn,
   });
@@ -2028,6 +2073,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   const dispatchInternal = async (input: DispatchInput): Promise<Session> => {
+    // Re-read on every turn, not once at start: a newer build that stamps
+    // the home while this daemon is serving has formats this build does not
+    // understand, and a daemon that kept writing into them would be the
+    // downgrade the stamp exists to refuse — from the inside. Inside the
+    // session chain, so a turn already accepted is counted by the drain
+    // before anything else runs. One small file read per turn.
+    assertStateCompatible(env);
     // A dispatch whose signal fired while it queued behind another turn
     // must not touch durable state: without this check, the runner would
     // load the session, append the cancelled user message, and save it as
@@ -2045,6 +2097,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     const agentId = input.agentId ?? existing?.agent.id ?? await defaultAgentId();
     const source = await refreshAgent(agentId);
     const agent = source.definition;
+
+    // An archived transcript is the record of a conversation that has moved
+    // on. Continuing it would revive a session the operator deliberately
+    // left behind, under an id nothing routes to any more.
+    const continuedAs = existing?.metadata?.[ROLLED_OVER_TO_METADATA_KEY];
+    if (typeof continuedAs === 'string') {
+      throw new Error(
+        `Session ${input.sessionId} was rolled over; it is an archived transcript and the conversation continues as ${continuedAs}.`,
+      );
+    }
 
     const config = await runtimeForAgent(source);
     const runner = runnerFor(config);
@@ -2092,7 +2154,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           existing.metadata = withoutDelegation(existing.metadata);
         }
         await store.save(existing);
-        return runner.resume({ sessionId: input.sessionId, userMessage: input.userMessage, signal });
+        // The turn's metadata rides along for the sender's trust: without
+        // it a resumed turn has no way to say who sent it, and a stranger
+        // mentioning the agent in a thread the operator opened would
+        // inherit the operator's label.
+        return runner.resume({
+          sessionId: input.sessionId,
+          userMessage: input.userMessage,
+          ...(input.metadata ? { metadata: input.metadata } : {}),
+          signal,
+        });
       }
 
       return runner.run({
@@ -2536,6 +2607,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * failure here requires — see the call site.
    */
   const startServing = async (): Promise<void> => {
+    // The stamp, once more, before anything here writes: the CLI checked it
+    // before `serve`, but a newer build can stamp the home between that
+    // check and this start, and the sweeps below save sessions in this
+    // build's shape. Checked before the channels bind rather than after —
+    // the control API announces its address the moment it is up, and every
+    // I/O await between that announcement and `serving = true` is a window
+    // in which a restart asked for at once is refused as "still starting".
+    // The scheduler's own readiness check, which runs after the channels,
+    // covers a stamp that advances while a slow channel is coming up, and
+    // it is synchronous for the same reason: the check is a file read, and
+    // an async one in that stretch failed CI's restart tests twice.
+    assertStateCompatible(env);
     await loadRoster();
     const named = registry.list().map((agent) => agent.name).join(', ');
     log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
@@ -2840,6 +2923,70 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(lastSpokeAt !== undefined ? { lastSpokeAt } : {}),
         ...(reply !== undefined ? { reply } : {}),
       };
+    },
+
+    rolloverSession(sessionId: string) {
+      // On the session's own chain, so no turn can start between the read
+      // and the two writes and save the old transcript over the fresh row.
+      return onSessionChain(sessionId, async () => {
+        // The same stamp check a turn runs: a rollover rewrites a session
+        // in this build's shape, and a newer build may have stamped the
+        // home with fields this one would drop on the way through.
+        assertStateCompatible(env);
+        const existing = await store.get(sessionId);
+        if (!existing) {
+          throw new Error(`No session with id ${sessionId}. GET /sessions lists what exists.`);
+        }
+        if (existing.status === 'running' || existing.status === 'pending_approval') {
+          throw new Error(`Session ${sessionId} has a turn in flight (${existing.status}); roll it over once the turn has finished.`);
+        }
+        if (typeof existing.metadata?.[ROLLED_OVER_TO_METADATA_KEY] === 'string') {
+          throw new Error(`Session ${sessionId} is an archived transcript; roll over the live session ${String(existing.metadata[ROLLED_OVER_TO_METADATA_KEY])} instead.`);
+        }
+        const now = new Date().toISOString();
+        // The time for a reader, a random suffix for uniqueness: two rollovers
+        // of one session are serialized on its chain, but inside one
+        // millisecond they would mint the same id, and `save` replaces — the
+        // second would write the emptied row over the first archive and lose
+        // the transcript the rollover exists to keep.
+        const archivedAs = `${sessionId}${ROLLED_OVER_SESSION_ID_MARKER}${now.replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;
+        // The archive is the old row whole — messages, usage, provider
+        // replay state, its label — under a new id. `save` keeps the
+        // timestamps it is given, so the archive's `createdAt` is the
+        // conversation's, not the rollover's.
+        await store.save({
+          ...existing,
+          id: archivedAs,
+          metadata: { ...(existing.metadata ?? {}), [ROLLED_OVER_TO_METADATA_KEY]: sessionId },
+        });
+        // What the fresh row keeps is what a channel needs to keep finding
+        // the conversation — its routing metadata. What it does not keep:
+        // the daemon's own records (a parked call, delegation markers, the
+        // label being left behind) and every provider's view of the old
+        // transcript, which would resume the old thread verbatim.
+        const dropped = new Set<string>([...RESERVED_SESSION_METADATA_KEYS, ...PROVIDER_STATE_METADATA_KEYS]);
+        const carried: JsonObject = {};
+        for (const [key, value] of Object.entries(existing.metadata ?? {})) {
+          if (!dropped.has(key)) {
+            carried[key] = value;
+          }
+        }
+        await store.save({
+          id: sessionId,
+          agent: existing.agent,
+          status: 'idle',
+          messages: [],
+          createdAt: now,
+          updatedAt: now,
+          metadata: {
+            ...carried,
+            [SESSION_TRUST_METADATA_KEY]: 'user',
+            [ROLLED_OVER_FROM_METADATA_KEY]: archivedAs,
+          },
+        });
+        log(`session ${sessionId} rolled over; its transcript so far is archived as ${archivedAs}`);
+        return { sessionId, archivedAs };
+      });
     },
 
     agents() {

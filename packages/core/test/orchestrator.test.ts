@@ -73,7 +73,9 @@ test('agent runner loops provider -> tool -> provider until no tool calls remain
     async execute(call: ToolCall, tool: Tool, session: Session): Promise<ToolResult> {
       traces.push(`executor:${call.toolName}:${session.id}`);
       const output = await tool.execute(call.input, session);
-      return { callId: call.id, toolName: call.toolName, ok: true, output };
+      // Labelled as a real executor labels it; one that returns no label
+      // is read as `unknown` and taints the session — its own test below.
+      return { callId: call.id, toolName: call.toolName, ok: true, output, trust: 'agent' };
     },
   };
 

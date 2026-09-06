@@ -52,6 +52,7 @@ test('local command executor runs a local process and parses its result', async 
       uppercase: 'STRATUS',
       length: 7,
     },
+    trust: 'agent',
   });
 });
 
@@ -75,6 +76,7 @@ test('local command executor falls back to direct tool execution for plain tools
     toolName: 'plain.echo',
     ok: true,
     output: { echoed: 'MINI' },
+    trust: 'agent',
   });
 });
 

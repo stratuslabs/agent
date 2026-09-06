@@ -4,8 +4,28 @@ import { StringDecoder } from 'node:string_decoder';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { JsonObject, JsonValue, Plugin, Session, Tool } from '@stratusagent/core';
-import { resolvePluginAgentConfig } from '@stratusagent/plugins';
+import {
+  isTaintedTrust,
+  leastTrusted,
+  sessionTrustOf,
+  type JsonObject,
+  type JsonValue,
+  type Plugin,
+  type Session,
+  type Tool,
+  type TrustLevel,
+} from '@stratusagent/core';
+import {
+  createFileLedger,
+  createProcessLocalLedger,
+  ledgerContentTrust,
+  ledgerGuard,
+  ledgerTrustOfContent,
+  resolvePluginAgentConfig,
+  type FileIdentity,
+  type LedgerGuard,
+  type TaintedWriteLedger,
+} from '@stratusagent/plugins';
 
 import {
   isRealDirectory,
@@ -21,8 +41,21 @@ export {
   PathOutsideRootError,
   resolveWithinRoots,
 } from './paths.ts';
+// The ledger moved to the plugin host the moment it got a second writer
+// (`plugin-mcp`); re-exported from its old home so no importer breaks.
+export {
+  createFileLedger,
+  createProcessLocalLedger,
+  LEDGER_FILENAME,
+  ledgerGuard,
+  nameIdentifiesHandle,
+  type FileIdentity,
+  type LedgerGuard,
+  type TaintedWriteLedger,
+} from '@stratusagent/plugins';
 
 /** Defaults chosen so a tool result is something a model can actually read. */
+const O_NOFOLLOW_FLAG = constants.O_NOFOLLOW ?? 0;
 const DEFAULT_MAX_BYTES = 64_000;
 const DEFAULT_MAX_MATCHES = 100;
 const DEFAULT_MAX_SEARCH_FILE_BYTES = 1_000_000;
@@ -132,7 +165,39 @@ const readContained = async (
   }
 };
 
-const createReadTool = (config: JsonObject): Tool => ({
+/**
+ * Run `work` after every earlier piece of work queued under `key` has
+ * settled — one chain per key, dropped when it drains. `fs.write` queues
+ * each write under its absolute path, so the ledger transition and the
+ * bytes it describes land as one step, and `fs.read` queues its read and
+ * its ledger lookup under the same key: two sessions of the same agent on
+ * one file interleaved could otherwise pair tainted bytes with a record a
+ * clean write had just cleared, in either tool.
+ */
+type KeyedSerializer = <T>(key: string, work: () => Promise<T>) => Promise<T>;
+
+const createKeyedSerializer = (): KeyedSerializer => {
+  const chains = new Map<string, Promise<void>>();
+  return <T>(key: string, work: () => Promise<T>): Promise<T> => {
+    const previous = chains.get(key) ?? Promise.resolve();
+    const run = previous.then(work, work);
+    const settled = run.then(() => undefined, () => undefined);
+    chains.set(key, settled);
+    void settled.then(() => {
+      if (chains.get(key) === settled) {
+        chains.delete(key);
+      }
+    });
+    return run;
+  };
+};
+
+const createReadTool = (
+  config: JsonObject,
+  ledger: TaintedWriteLedger,
+  isLedger: () => Promise<LedgerGuard>,
+  serialized: KeyedSerializer,
+): Tool => ({
   name: 'fs.read',
   description: 'Read a UTF-8 text file inside one of this agent’s roots.',
   risk: 'safe',
@@ -144,12 +209,40 @@ const createReadTool = (config: JsonObject): Tool => ({
     },
     required: ['path'],
   },
-  async execute(input, session) {
+  async execute(input, session, context) {
     const settings = settingsFor(config, session);
     const requested = requireString(input, 'path');
     const resolved = await resolveWithinRoots(settings.roots, requested, { home: settings.home });
     const maxBytes = narrowed(input.maxBytes, settings.maxBytes);
-    const result = await readContained(resolved, maxBytes);
+    // Per call, not per tool: most files an agent reads are its operator's,
+    // and only the ones a tainted session wrote carry a label — see the
+    // ledger. Bytes and label are read as one step under the path's own
+    // lock, so a write from this process landing between them cannot pair
+    // old bytes with a new record; a write from another process is not
+    // under this lock, so the ledger is read on both sides of the bytes
+    // (`recordedTrustAmong` takes the second snapshot) and the lower label
+    // stands — a peer records before its bytes land, so a record missing
+    // from the first read is in the second. Marked after the read
+    // succeeded, since a refused read put nothing in front of the model.
+    const { result, recorded } = await serialized(resolved.path, async () => {
+      const snapshot = await ledger.snapshot(session.agent.id);
+      const contents = await readContained(resolved, maxBytes);
+      return {
+        result: contents,
+        // The result names the file's path, directories included — see
+        // `withAncestors`.
+        recorded: lowest(
+          await recordedTrustAmong(ledger, session.agent.id, [resolved.path], resolved.root, snapshot),
+          await ledgerContentTrustAmong(isLedger, [[resolved.path, {
+            identity: resolved.identity,
+            ...(contents.binary ? {} : { raw: contents.content, truncated: contents.truncated }),
+          }]]),
+        ),
+      };
+    });
+    if (recorded !== undefined) {
+      context?.markTrust?.(recorded);
+    }
     return {
       path: relativeTo(resolved.root, resolved.path),
       absolutePath: resolved.path,
@@ -175,7 +268,113 @@ const entryKind = (entry: { isDirectory(): boolean; isFile(): boolean; isSymboli
   return 'other';
 };
 
-const createListTool = (config: JsonObject): Tool => ({
+/**
+ * The lowest recorded label among `absolutePaths`, or undefined when the
+ * ledger knows none of them. A result that names files — a listing, a
+ * search's matches and skips — is marked with it: a filename is text the
+ * writing session chose, and a tainted session may have chosen it from a
+ * page, so even a result that shows no contents carries the label.
+ */
+/**
+ * `absolutePath` and every directory between it and `root`, exclusive of the
+ * root: a result that shows `dir/file` shows the directory's name too, and
+ * the directory may be what a tainted session created.
+ */
+const withAncestors = (absolutePath: string, root: string): string[] => {
+  const paths = [absolutePath];
+  for (let parent = path.dirname(absolutePath); parent !== root && parent !== path.dirname(parent) && parent.startsWith(root); parent = path.dirname(parent)) {
+    paths.push(parent);
+  }
+  return paths;
+};
+
+const recordedTrustAmong = async (
+  ledger: TaintedWriteLedger,
+  agentId: string,
+  absolutePaths: Iterable<string>,
+  /** The root the result's paths are shown relative to; ancestors below it are named by the result. */
+  root: string,
+  /**
+   * The ledger as it stood before the files were read. A listing or a
+   * search cannot hold every path it touches under a lock, so it reads
+   * the ledger on both sides of the walk and honours whichever is lower,
+   * so a record added by a tainted write mid-walk — recorded before its
+   * bytes land — is in the second read. Records never clear, so there is
+   * no third case.
+   */
+  before: Record<string, TrustLevel>,
+): Promise<TrustLevel | undefined> => {
+  const after = await ledger.snapshot(agentId);
+  const labels: TrustLevel[] = [];
+  for (const absolutePath of absolutePaths) {
+    for (const named of withAncestors(absolutePath, root)) {
+      for (const label of [before[named], after[named]]) {
+        if (label !== undefined) {
+          labels.push(label);
+        }
+      }
+    }
+  }
+  return labels.length > 0 ? leastTrusted(...labels) : undefined;
+};
+
+/**
+ * The ledger is the one file under a root whose contents are tainted
+ * sessions' text by construction — the paths they chose, one per record —
+ * and whose own path has no record. A result that shows what is in it
+ * (a read, a search that matched a line) is labelled by what it holds. A
+ * listing that names it is not: the filename is fixed, and nothing in it
+ * was anyone's choice.
+ */
+/** What a result showed of one file: the inode it was read at, and the bytes, when the caller still holds them. */
+interface ShownFile {
+  identity?: FileIdentity | undefined;
+  /** The bytes the model was shown, when the whole file was read as text. */
+  raw?: string | undefined;
+  /** True when `raw` is a prefix of the file, not all of it. */
+  truncated?: boolean | undefined;
+}
+
+const ledgerContentTrustAmong = async (
+  isLedger: () => Promise<LedgerGuard>,
+  named: Iterable<readonly [string, ShownFile]>,
+): Promise<TrustLevel | undefined> => {
+  const guard = await isLedger();
+  const labels: TrustLevel[] = [];
+  for (const [absolutePath, shown] of named) {
+    if (!(await guard(absolutePath, shown.identity))) {
+      continue;
+    }
+    // Judged on the bytes the model saw whenever the caller still has
+    // them, never on a fresh read: a peer rewriting the ledger in place
+    // after the read leaves the inode alone and the bytes changed. A
+    // prefix of a ledger is at most `unknown` — the records it cut off
+    // may sit lower than any it kept.
+    let label: TrustLevel | undefined;
+    if (shown.raw === undefined) {
+      label = await ledgerContentTrust(absolutePath, shown.identity);
+    } else if (!shown.truncated) {
+      label = ledgerTrustOfContent(shown.raw);
+    } else {
+      label = leastTrusted(
+        'unknown',
+        ledgerTrustOfContent(shown.raw) ?? 'unknown',
+        (await ledgerContentTrust(absolutePath, shown.identity)) ?? 'unknown',
+      );
+    }
+    if (label !== undefined) {
+      labels.push(label);
+    }
+  }
+  return labels.length > 0 ? leastTrusted(...labels) : undefined;
+};
+
+const lowest = (...labels: Array<TrustLevel | undefined>): TrustLevel | undefined => {
+  const defined = labels.filter((label): label is TrustLevel => label !== undefined);
+  return defined.length > 0 ? leastTrusted(...defined) : undefined;
+};
+
+const createListTool = (config: JsonObject, ledger: TaintedWriteLedger): Tool => ({
   name: 'fs.list',
   description: 'List a directory inside one of this agent’s roots.',
   risk: 'safe',
@@ -185,7 +384,7 @@ const createListTool = (config: JsonObject): Tool => ({
       path: { type: 'string', description: 'Defaults to the agent’s first root.' },
     },
   },
-  async execute(input, session) {
+  async execute(input, session, context) {
     const settings = settingsFor(config, session);
     const requested = typeof input.path === 'string' && input.path.length > 0 ? input.path : '.';
     const resolved = await resolveWithinRoots(settings.roots, requested, { home: settings.home });
@@ -193,6 +392,7 @@ const createListTool = (config: JsonObject): Tool => ({
       throw new Error(`${requested} is not a directory; use fs.read.`);
     }
 
+    const ledgerBefore = await ledger.snapshot(session.agent.id);
     const entries = await readdir(resolved.path, { withFileTypes: true });
     const listed = entries.slice(0, settings.maxEntries);
     const detailed = await Promise.all(listed.map(async (entry) => {
@@ -214,6 +414,21 @@ const createListTool = (config: JsonObject): Tool => ({
         ...(size === undefined ? {} : { size }),
       };
     }));
+
+    // The names are what a tainted session chose to call its files, and the
+    // listing puts them in front of the model.
+    // The entries' names, and the listed directory's own — the result names
+    // it in `path`.
+    const recorded = await recordedTrustAmong(
+      ledger,
+      session.agent.id,
+      [resolved.path, ...listed.map((entry) => path.join(resolved.path, entry.name))],
+      resolved.root,
+      ledgerBefore,
+    );
+    if (recorded !== undefined) {
+      context?.markTrust?.(recorded);
+    }
 
     return {
       path: relativeTo(resolved.root, resolved.path),
@@ -487,7 +702,11 @@ const walkFiles = async function* (directory: string, depth = 0): AsyncGenerator
   }
 };
 
-const createSearchTool = (config: JsonObject): Tool => ({
+const createSearchTool = (
+  config: JsonObject,
+  ledger: TaintedWriteLedger,
+  isLedger: () => Promise<LedgerGuard>,
+): Tool => ({
   name: 'fs.search',
   description: 'Search file contents for literal text under one of this agent’s roots.',
   risk: 'safe',
@@ -502,7 +721,7 @@ const createSearchTool = (config: JsonObject): Tool => ({
     },
     required: ['query'],
   },
-  async execute(input, session) {
+  async execute(input, session, context) {
     const settings = settingsFor(config, session);
     const query = requireString(input, 'query');
     const requested = typeof input.path === 'string' && input.path.length > 0 ? input.path : '.';
@@ -514,6 +733,13 @@ const createSearchTool = (config: JsonObject): Tool => ({
     });
 
     const matches: SearchMatch[] = [];
+    // A match is a line of the file's content in the result, and a skipped
+    // file is named in it, so either kind of file the ledger knows taints
+    // the call the way `fs.read` of it would. A file that produced no match
+    // and was not skipped puts nothing in front of the model.
+    // Keyed by path, holding the inode each was read at — see `LedgerGuard`.
+    const namedFiles = new Map<string, ShownFile>();
+    const ledgerBefore = await ledger.snapshot(session.agent.id);
     // What the walk looked past, said outright. A file over the size
     // limit used to vanish from the result: a search of a directory holding
     // one 6.7 MB log came back with no matches and no hint that the log
@@ -524,18 +750,29 @@ const createSearchTool = (config: JsonObject): Tool => ({
     // put one record per file into a result the search limit was meant
     // to keep small. Past the cap, they are a count.
     let skippedTotal = 0;
-    const skip = (entry: { path: string; bytes: number; reason: string }): void => {
+    const skip = (entry: { path: string; bytes: number; reason: string }, identity?: FileIdentity): void => {
       skippedTotal += 1;
       if (skipped.length < MAX_SKIPPED_REPORTED) {
         skipped.push(entry);
+        // `entry.path` is relative to the root the search resolved in.
+        namedFiles.set(path.join(resolved.root, entry.path), { identity });
       }
     };
-    const report = (): JsonObject => ({
-      query,
-      matches,
-      truncated,
-      ...(skippedTotal > 0 ? { skipped, skippedTotal } : {}),
-    });
+    const report = async (): Promise<JsonObject> => {
+      const recorded = lowest(
+        await recordedTrustAmong(ledger, session.agent.id, namedFiles.keys(), resolved.root, ledgerBefore),
+        await ledgerContentTrustAmong(isLedger, namedFiles),
+      );
+      if (recorded !== undefined) {
+        context?.markTrust?.(recorded);
+      }
+      return {
+        query,
+        matches,
+        truncated,
+        ...(skippedTotal > 0 ? { skipped, skippedTotal } : {}),
+      };
+    };
     let truncated = false;
     // A file is searched as itself. Falling back to its parent would answer
     // a question nobody asked — `{ path: 'notes/today.md' }` coming back
@@ -548,7 +785,7 @@ const createSearchTool = (config: JsonObject): Tool => ({
       // us directly can.
       throw new Error(`${resolved.path} is not a regular file.`);
     }
-    const record = (file: string, index: number, line: string): boolean => {
+    const record = (file: string, index: number, line: string, shown: ShownFile): boolean => {
       if (matches.length >= limit) {
         truncated = true;
         return false;
@@ -558,6 +795,7 @@ const createSearchTool = (config: JsonObject): Tool => ({
         line: index + 1,
         text: line.length > 400 ? `${line.slice(0, 400)}…` : line,
       });
+      namedFiles.set(file, shown);
       return true;
     };
 
@@ -572,6 +810,13 @@ const createSearchTool = (config: JsonObject): Tool => ({
       const { size, lines } = opened;
       const before = matches.length;
       const truncatedBefore = truncated;
+      // A file named outright is streamed, not held — except the ledger,
+      // whose label is judged on the bytes shown (see
+      // `ledgerContentTrustAmong`), so its lines are kept as they pass.
+      // Known before the stream starts, from the resolution's inode.
+      const isLedgerFile = await (await isLedger())(resolved.path, resolved.identity);
+      const kept: string[] = [];
+      const shown: ShownFile = { identity: resolved.identity };
       // Past the match cap the file is still read to its end, no longer
       // matched: the binary verdict is decided on every chunk, and a NUL
       // after the cap would otherwise go unseen, leaving matches from a
@@ -583,30 +828,39 @@ const createSearchTool = (config: JsonObject): Tool => ({
           // NUL is not a search result of a text file, because this is
           // not one.
           matches.splice(before);
+          // The skip that follows names it again, as a binary file.
+          namedFiles.delete(resolved.path);
           truncated = truncatedBefore;
           clipped = false;
-          skip({ path: relativeTo(resolved.root, resolved.path), bytes: size, reason: 'binary' });
+          skip({ path: relativeTo(resolved.root, resolved.path), bytes: size, reason: 'binary' }, resolved.identity);
           break;
         }
         clipped ||= line.clipped;
-        if (!capped && matchesWithin(pattern, line) && !record(resolved.path, index, line.text)) {
+        if (isLedgerFile) {
+          kept.push(line.text);
+        }
+        if (!capped && matchesWithin(pattern, line) && !record(resolved.path, index, line.text, shown)) {
           capped = true;
         }
         index += 1;
+      }
+      if (isLedgerFile) {
+        shown.raw = kept.join('\n');
+        shown.truncated = clipped || opened.capped;
       }
       if (clipped) {
         skip({
           path: relativeTo(resolved.root, resolved.path),
           bytes: size,
           reason: `a line longer than ${MAX_LINE_CHARS / 1_000_000} million characters was searched in its first ${MAX_LINE_CHARS / 1_000_000} million only`,
-        });
+        }, resolved.identity);
       }
       if (opened.capped) {
         skip({
           path: relativeTo(resolved.root, resolved.path),
           bytes: size,
           reason: `reports no size, and was searched in its first ${MAX_UNSIZED_FILE_BYTES / 1_000_000} MB only`,
-        });
+        }, resolved.identity);
       }
       return report();
     }
@@ -616,27 +870,37 @@ const createSearchTool = (config: JsonObject): Tool => ({
         truncated = true;
         break;
       }
+      // Size, identity, and bytes from one descriptor, so the inode the
+      // ledger guard judges is the inode whose lines the result shows.
       let contents: Buffer;
+      let identity: FileIdentity;
       try {
-        const info = await stat(file);
-        if (info.size > DEFAULT_MAX_SEARCH_FILE_BYTES) {
-          skip({
-            path: relativeTo(resolved.root, file),
-            bytes: info.size,
-            reason: `over the ${DEFAULT_MAX_SEARCH_FILE_BYTES / 1_000_000} MB walk limit — search it by name to read it whole`,
-          });
-          continue;
+        const handle = await open(file, constants.O_RDONLY | O_NOFOLLOW_FLAG | (constants.O_NONBLOCK ?? 0));
+        try {
+          const info = await handle.stat();
+          identity = { dev: info.dev, ino: info.ino };
+          if (info.size > DEFAULT_MAX_SEARCH_FILE_BYTES) {
+            skip({
+              path: relativeTo(resolved.root, file),
+              bytes: info.size,
+              reason: `over the ${DEFAULT_MAX_SEARCH_FILE_BYTES / 1_000_000} MB walk limit — search it by name to read it whole`,
+            }, identity);
+            continue;
+          }
+          contents = await handle.readFile();
+        } finally {
+          await handle.close();
         }
-        contents = await readFile(file);
       } catch {
         continue;
       }
       if (looksBinary(contents)) {
         continue;
       }
-      const lines = contents.toString('utf8').split('\n');
+      const text = contents.toString('utf8');
+      const lines = text.split('\n');
       for (const [index, line] of lines.entries()) {
-        if (pattern.test(line) && !record(file, index, line)) {
+        if (pattern.test(line) && !record(file, index, line, { identity, raw: text })) {
           break;
         }
       }
@@ -646,7 +910,12 @@ const createSearchTool = (config: JsonObject): Tool => ({
   },
 });
 
-const createWriteTool = (config: JsonObject): Tool => ({
+const createWriteTool = (
+  config: JsonObject,
+  ledger: TaintedWriteLedger,
+  isLedger: () => Promise<LedgerGuard>,
+  serialized: KeyedSerializer,
+): Tool => ({
   name: 'fs.write',
   description: 'Write a UTF-8 text file inside one of this agent’s roots.',
   // Gated, not safe: it acts on the world outside Stratus and outlives the
@@ -670,11 +939,29 @@ const createWriteTool = (config: JsonObject): Tool => ({
       allowMissing: true,
     });
 
+    // The ledger is the daemon's record of what this agent wrote while
+    // tainted. An agent whose roots cover its own workspace could otherwise
+    // rewrite that record through this very tool — the attack writing its
+    // own permission slip — so the one file the tool never writes is it.
+    const ledgerRefusal = (target: string): Error =>
+      new Error(`${target} is the filesystem provenance ledger, which fs.write does not edit.`);
+    if (await (await isLedger())(resolved.path, resolved.identity)) {
+      throw ledgerRefusal(resolved.path);
+    }
+
+    // The directories a write would create, deepest last. A directory's
+    // name is text the writing session chose too, and a listing shows it,
+    // so a tainted session's new directories are recorded like its file.
+    const missingParents: string[] = [];
     if (!resolved.exists) {
-      // The parent is created only after the resolution above put it inside
-      // a root — `root/link/notes/x.md` through a symlinked `link` never
-      // gets this far, so nothing is created outside the boundary either.
-      await mkdir(path.dirname(resolved.path), { recursive: true });
+      for (let parent = path.dirname(resolved.path); parent !== resolved.root && parent !== path.dirname(parent); parent = path.dirname(parent)) {
+        try {
+          await stat(parent);
+          break;
+        } catch {
+          missingParents.unshift(parent);
+        }
+      }
     } else if (resolved.kind !== 'file') {
       // Same reason as the read path: writing into a directory is a mistake
       // worth naming, and writing into a fifo or a device blocks forever.
@@ -688,15 +975,73 @@ const createWriteTool = (config: JsonObject): Tool => ({
     const flags = input.append === true
       ? constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND
       : constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC;
-    // O_NOFOLLOW is applied by openContained: a symlink sitting at the
-    // destination must fail rather than write through to its target, which
-    // is the write half of the escape a read-only check would miss.
-    const handle = await openContained(resolved, flags | (constants.O_NONBLOCK ?? 0), 0o644);
-    try {
-      await handle.writeFile(content, 'utf8');
-    } finally {
-      await handle.close();
-    }
+
+    const trust = sessionTrustOf(session);
+    // One step per path, ledger and bytes together — see the serializer.
+    await serialized(resolved.path, async () => {
+      // A write from a session at `external` or `unknown` records the path
+      // at that label BEFORE anything lands — the directories it creates
+      // included: a daemon that dies between the two, or a ledger that
+      // cannot be written, must leave labelled paths with nothing behind
+      // them rather than a durable file or directory with no label — the
+      // second is exactly the laundering this ledger exists to close, and
+      // the first over-marks, which is the safe direction. A clean
+      // session's write records nothing, and clears nothing: the ledger
+      // is monotonic per path, so no interleaving with another process
+      // can pair tainted bytes with a cleared record.
+      if (isTaintedTrust(trust)) {
+        for (const parent of missingParents) {
+          await ledger.recordWrite(session.agent.id, parent, trust);
+        }
+        await ledger.recordWrite(session.agent.id, resolved.path, trust);
+      }
+
+      if (!resolved.exists) {
+        // The parent is created only after the resolution above put it
+        // inside a root — `root/link/notes/x.md` through a symlinked `link`
+        // never gets this far, so nothing is created outside the boundary
+        // either.
+        await mkdir(path.dirname(resolved.path), { recursive: true });
+      }
+
+      // O_NOFOLLOW is applied by openContained: a symlink sitting at the
+      // destination must fail rather than write through to its target,
+      // which is the write half of the escape a read-only check would miss.
+      // A destination resolved as empty is opened exclusively there too.
+      let handle;
+      try {
+        handle = await openContained(resolved, flags | (constants.O_NONBLOCK ?? 0), 0o644);
+      } catch (error) {
+        if (resolved.exists || (error as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw error;
+        }
+        // Something appeared under a name that was empty when the
+        // containment check ran: a peer writing the same new file, or a
+        // hard link of the ledger put there to be truncated — which
+        // O_NOFOLLOW cannot see and an exclusive create refuses. Decide
+        // again about what is there now, ledger guard included, and open
+        // it with its identity checked, so the honest case still lands.
+        const present = await resolveWithinRoots(settings.roots, requested, { home: settings.home, allowMissing: true });
+        if (!present.exists || present.kind !== 'file') {
+          throw new Error(`${present.path} is not a regular file.`);
+        }
+        // The path the ledger recorded a moment ago is the only one this
+        // write may land on: a symlink planted under the empty name would
+        // resolve somewhere else, and tainted bytes would land unrecorded.
+        if (present.path !== resolved.path) {
+          throw new Error(`${resolved.path} changed between the containment check and the open; try again.`);
+        }
+        if (await (await isLedger())(present.path, present.identity)) {
+          throw ledgerRefusal(present.path);
+        }
+        handle = await openContained(present, flags | (constants.O_NONBLOCK ?? 0), 0o644);
+      }
+      try {
+        await handle.writeFile(content, 'utf8');
+      } finally {
+        await handle.close();
+      }
+    });
 
     return {
       path: relativeTo(resolved.root, resolved.path),
@@ -717,15 +1062,37 @@ const createWriteTool = (config: JsonObject): Tool => ({
  * true, so they are an access boundary and not a preference — resolved from
  * `session.agent.id` on every call.
  */
-export const createFsPlugin = (config: JsonObject = {}): Plugin => ({
-  name: '@stratusagent/tool-fs',
-  setup(context) {
-    context.tools.register(createReadTool(config));
-    context.tools.register(createListTool(config));
-    context.tools.register(createSearchTool(config));
-    context.tools.register(createWriteTool(config));
-  },
-});
+export const createFsPlugin = (config: JsonObject = {}): Plugin => {
+  // `workspaceRoot` is supplied by the loader (the host knows the platform's
+  // answer); it is where the tainted-write ledger lives, per agent. Loaded
+  // without one — a host wiring the plugin by hand — the ledger is
+  // process-local, which the README says outright.
+  const workspaceRoot = typeof config.workspaceRoot === 'string' && config.workspaceRoot.length > 0
+    ? config.workspaceRoot
+    : undefined;
+  // The ledger's home is the host's `ledgerRoot`, which the loader sets to
+  // its workspace root for every plugin that writes the ledger and never
+  // lets a config block override — see the loader. `workspaceRoot` is the
+  // fallback for a host that wired the plugin by hand.
+  const ledgerRoot = typeof config.ledgerRoot === 'string' && config.ledgerRoot.length > 0
+    ? config.ledgerRoot
+    : workspaceRoot;
+  const ledger = ledgerRoot !== undefined ? createFileLedger(ledgerRoot) : createProcessLocalLedger();
+  // Which paths are a ledger is decided per call, from the workspace as it
+  // stands — see `ledgerGuard` for the two spellings a ledger can have and
+  // why neither is cached.
+  const isLedger = (): Promise<LedgerGuard> => ledgerGuard(ledgerRoot);
+  const serialized = createKeyedSerializer();
+  return {
+    name: '@stratusagent/tool-fs',
+    setup(context) {
+      context.tools.register(createReadTool(config, ledger, isLedger, serialized));
+      context.tools.register(createListTool(config, ledger));
+      context.tools.register(createSearchTool(config, ledger, isLedger));
+      context.tools.register(createWriteTool(config, ledger, isLedger, serialized));
+    },
+  };
+};
 
 /** The loader's ABI. See `docs/architecture/plugins.md`. */
 export const createPlugin = createFsPlugin;

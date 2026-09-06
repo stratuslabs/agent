@@ -194,6 +194,49 @@ needs `settings.interactivity.is_enabled` set to `true` once, under **App
 Manifest**. No request URL is needed — the clicks arrive over the same Socket
 Mode connection.
 
+## Who counts as the operator
+
+Everything above decides *which agent* a message is for. None of it decides
+*who is speaking*: the adapter admits a message that has a user, is not a
+bot, carries no bookkeeping subtype, and is a DM or a mention — and any
+member of the workspace can open a DM or type an `@mention`. A DM proves
+nothing about who is typing.
+
+So a message is the operator's only when the operator has said so:
+
+```jsonc
+{
+  "principals": {
+    "slackUsers": ["U01DYLAN"],
+    "agents": {
+      "ava": { "slackUsers": ["U01DYLAN", "U01OPS"] },
+      "bea": { "slackUsers": [] }
+    }
+  }
+}
+```
+
+A turn from a listed id reaches the agent as its operator's (`user`). A turn
+from anyone else — in a DM as much as in a channel — reaches it as
+`unknown`, and the session it lands in stays `unknown` from then on: that
+text is in the transcript. Every fact the agent remembers afterwards
+carries the label, and the prompt renders it under a heading that says so.
+With no list at all, every Slack sender is `unknown`, and `stratus serve`
+says so at startup. An agent's own entry replaces the shared list;
+`"slackUsers": []` excludes an agent from it.
+
+The sender is judged on **every message**, not once per thread. A thread
+keys one session for everyone in it, so an authorized member can open one
+and a stranger can mention the agent inside it afterwards — the stranger's
+turn lowers the session, and the authorized member's next turn does not
+raise it back.
+
+Like `approvals`, this block is read only from a config you chose —
+`--config`, `STRATUS_CONFIG`, or the global `~/.stratus/config.json`. A
+project-local `stratus.config.json` cannot appoint itself the principal.
+The labels themselves are documented in
+[Memory](../../docs/concepts/memory.md#where-a-fact-came-from).
+
 ## Speaking first: the outbound seam
 
 The adapter also implements the channel contract's `resolveOutbound` — how a
