@@ -646,7 +646,7 @@ export type ParsedCommand =
 
 type CliConfigFile = StratusConfigFile;
 
-export const CLI_VERSION = '0.11.0';
+export const CLI_VERSION = '0.11.1';
 
 const DASHBOARD_TITLE = 'Stratus Agent Dashboard';
 
