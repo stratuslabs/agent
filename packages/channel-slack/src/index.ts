@@ -1220,6 +1220,11 @@ const readImageAttachments = async (
   // before a download and the real length after it, because the message
   // as a whole has a budget the per-image cap alone cannot keep.
   let total = 0;
+  // Once an image that fits on its own does not fit what is left of the
+  // message's budget, nothing listed before it is taken either: the window
+  // is contiguous, as the replay window is, and a smaller older image must
+  // not slip in past a larger newer one that was left out.
+  let windowClosed = false;
   // Why an image is being left out, or nothing when it fits. One place for
   // both limits so the warning and the fallback cannot disagree.
   const overLimit = (label: string, bytes: number): string | undefined => {
@@ -1227,6 +1232,7 @@ const readImageAttachments = async (
       return `slack: ${label} is ${bytes} bytes, over the ${IMAGE_ATTACHMENT_MAX_BYTES}-byte limit an image can be sent to the model at; the turn is told it cannot be read.`;
     }
     if (total + bytes > IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES) {
+      windowClosed = true;
       return `slack: ${label} would take this message's images past the ${IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES} bytes one request can carry; the turn is told it cannot be read. Send it in a message of its own.`;
     }
     return undefined;
@@ -1235,6 +1241,11 @@ const readImageAttachments = async (
     const file = files[position]!;
     const url = file.url_private_download ?? file.url_private;
     if (!isImageAttachmentMediaType(file.mimetype) || url === undefined) {
+      dropped.add(position);
+      continue;
+    }
+    if (windowClosed) {
+      warn(`slack: ${fileLabel(file)} was not taken: an image listed after it already filled what this message's images can carry; the turn is told it cannot be read.`);
       dropped.add(position);
       continue;
     }

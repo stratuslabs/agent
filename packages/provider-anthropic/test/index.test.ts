@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { MemoryEntry, ProviderCallUsage, ProviderRequest, Session } from '@stratusagent/core';
+import type { ImageAttachment, MemoryEntry, ProviderCallUsage, ProviderRequest, Session } from '@stratusagent/core';
 import {
   createAnthropicProvider,
   DEFAULT_ANTHROPIC_MODEL,
@@ -1164,4 +1164,46 @@ test('an image the API cannot process is dropped from the session and the turn r
   ]);
   // Emptied on the session's own object, so the next turn never sends it.
   assert.deepEqual(session.messages[0]!.images, [{ mediaType: 'image/png', data: '', omitted: true, name: 'bad.png' }, good]);
+});
+
+test('the oldest replayed images give way when the whole request body would not fit', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_input: any, init?: any) => {
+    bodies.push(JSON.parse(init?.body ?? '{}'));
+    return new Response(JSON.stringify(apiMessage([{ type: 'text', text: 'Fits now.' }])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  // Two images of 1800 bytes each are 2400 bytes of base64 apiece: together
+  // they overflow a 4000-byte body with the text around them, one does not.
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, requestBodyMaxBytes: 4000 });
+  const older: ImageAttachment = { mediaType: 'image/png', data: 'A'.repeat(2400), name: 'older.png' };
+  const newer: ImageAttachment = { mediaType: 'image/png', data: 'B'.repeat(2400), name: 'newer.png' };
+  const stamp = new Date().toISOString();
+  const session = createSession({
+    messages: [
+      { id: 'u1', role: 'user', content: 'first', createdAt: stamp, images: [older] },
+      { id: 'a1', role: 'assistant', content: 'ok', createdAt: stamp },
+      { id: 'u2', role: 'user', content: 'second', createdAt: stamp, images: [newer] },
+    ],
+  });
+
+  await provider.generate({ session });
+
+  assert.equal(bodies.length, 1);
+  assert.ok(JSON.stringify(bodies[0]).length <= 4000, 'the request body must fit the cap');
+  const users = bodies[0]!.messages.filter((message: { role: string }) => message.role === 'user');
+  assert.deepEqual(users[0].content, [
+    { type: 'text', text: '[An image attached here (older.png) is no longer sent: this conversation\'s images have passed what one request can carry, and only the most recent are kept.]' },
+    { type: 'text', text: 'first' },
+  ]);
+  assert.deepEqual(users[1].content, [
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'B'.repeat(2400) } },
+    { type: 'text', text: 'second' },
+  ]);
+  // Only the request gave way; the session still holds both, within its
+  // own window, and the next turn measures for itself.
+  assert.equal(older.omitted, undefined);
+  assert.equal(older.data.length, 2400);
 });

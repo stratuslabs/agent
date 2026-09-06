@@ -28,6 +28,18 @@ const DEFAULT_MAX_TOKENS = 4096;
 // Session metadata key holding raw assistant turns, keyed by tool_use id.
 export const RAW_TURNS_METADATA_KEY = 'anthropicRawTurns';
 
+/**
+ * The Messages API refuses a request body over 32 MiB. The image budget in
+ * core is a share of that, not the whole of it: the transcript, tool
+ * results, and tool schemas travel in the same body, and a session that
+ * has accumulated a few MiB of those alongside a full image window would
+ * be refused — without naming an image, so nothing would give way and the
+ * same request would fail on every later turn. Stopping short of the
+ * limit leaves room for what the measurement below cannot see: headers
+ * and the SDK's own framing.
+ */
+export const DEFAULT_REQUEST_BODY_MAX_BYTES = 30 * 1024 * 1024;
+
 export interface AnthropicProviderConfig {
   /** Anthropic API key (pay per use). One of apiKey / authToken is required. */
   apiKey?: string;
@@ -56,6 +68,13 @@ export interface AnthropicProviderConfig {
    * limit. Lower one for a proxy with a smaller limit.
    */
   imageReplayBudget?: ImageReplayBudget;
+  /**
+   * The most bytes one request body may serialize to before the oldest
+   * replayed images give way to the rest of it. Defaults to
+   * `DEFAULT_REQUEST_BODY_MAX_BYTES`. Lower it for a proxy with a smaller
+   * limit.
+   */
+  requestBodyMaxBytes?: number;
   /**
    * Mark the stable head of each request cacheable — the tool definitions and
    * the persona/skills system block, which are byte-identical across every
@@ -320,7 +339,12 @@ const createAnthropicMessages = (
   mapping: ToolNameMapping,
   rawTurns: RawTurns,
   imageReplayBudget: ImageReplayBudget | undefined,
-): { messages: MessageParam[]; imageOf: WeakMap<ContentBlockParam, ImageAttachment> } => {
+): {
+  messages: MessageParam[];
+  imageOf: WeakMap<ContentBlockParam, ImageAttachment>;
+  /** Every image block sent, oldest first, with where it sits so it can give way. */
+  imageBlocks: Array<{ holder: ContentBlockParam[]; index: number; image: ImageAttachment }>;
+} => {
   const replayed = imagesWithinReplayBudget(request.session.messages, imageReplayBudget);
   // Which session image each image block came from, so a rejection that
   // names a block can be answered on the session.
@@ -416,7 +440,18 @@ const createAnthropicMessages = (
     push('user', userBlocks(message.content, message.images, replayed, imageOf));
   }
 
-  return { messages: groups.map((group) => ({ role: group.role, content: group.blocks })), imageOf };
+  const imageBlocks: Array<{ holder: ContentBlockParam[]; index: number; image: ImageAttachment }> = [];
+  for (const group of groups) {
+    group.blocks.forEach((block, index) => {
+      const image = imageOf.get(block);
+      if (image !== undefined) {
+        imageBlocks.push({ holder: group.blocks, index, image });
+      }
+    });
+  }
+  // The content arrays are the groups' own, so a block swapped in a holder
+  // is swapped in the request.
+  return { messages: groups.map((group) => ({ role: group.role, content: group.blocks })), imageOf, imageBlocks };
 };
 
 const extractParts = (
@@ -520,6 +555,7 @@ export const createAnthropicProvider = ({
   promptCache = true,
   promptCacheTtl = '5m',
   imageReplayBudget,
+  requestBodyMaxBytes = DEFAULT_REQUEST_BODY_MAX_BYTES,
   fetch: fetchImpl,
 }: AnthropicProviderConfig): ModelProvider => {
   if (!apiKey && !authToken) {
@@ -548,7 +584,7 @@ export const createAnthropicProvider = ({
       const descriptors = sortedToolDescriptors(request.tools);
       const mapping = createToolNameMapping(descriptors);
       const tools = createAnthropicTools(descriptors, mapping);
-      const { messages, imageOf } = createAnthropicMessages(request, mapping, rawTurns, imageReplayBudget);
+      const { messages, imageOf, imageBlocks } = createAnthropicMessages(request, mapping, rawTurns, imageReplayBudget);
       // A system message has to follow a user turn. The kernel loop only
       // calls a provider with a user message or tool results last, so this
       // holds — but it is the API's rule, not ours, and a caller building
@@ -581,6 +617,17 @@ export const createAnthropicProvider = ({
       // byte-identical. Everything else about the request is the same either
       // way, so the fallback below only has to rebuild this.
       let params = buildParams(memoryAtTailSupported && tailTakesSystem);
+      // The image window is a share of the request, not the request: what
+      // is left of the body has to fit alongside it. Measured on the
+      // serialized params, oldest image giving way first, until it does.
+      // The session is left alone — these images are still within what a
+      // session keeps, and the next turn measures again for itself.
+      for (const { holder, index, image } of imageBlocks) {
+        if (Buffer.byteLength(JSON.stringify(params)) <= requestBodyMaxBytes) {
+          break;
+        }
+        holder[index] = { type: 'text', text: droppedImageNote(image) };
+      }
       // The turn's abort signal cancels the underlying HTTP request — the
       // kernel contract is that aborting stops the work, not just the wait.
       const requestOptions = request.signal ? { signal: request.signal } : undefined;

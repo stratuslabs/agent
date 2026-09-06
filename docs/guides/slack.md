@@ -81,9 +81,11 @@ same note; without it the endpoint rejects the request, and keeps rejecting
 every later turn of that session, because the image is stored with the
 message. The image is stored with the message in the session, so a later
 turn in the same thread still has it — up to 20 MB and 20 images across the
-thread, newest first. Past either, the oldest images are let go of: the
-model is told one was there, and what it was called, and the session keeps
-that note in place of the pixels. The same happens to an image the model
+thread, newest first, and fewer when the rest of the conversation — tool
+results, a long transcript — needs the room in the same request. Past
+either, the oldest images are let go of: the model is told one was there,
+and what it was called, and the session keeps that note in place of the
+pixels. The same happens to an image the model
 API refuses outright: it is dropped from the session and the turn retried
 without it, so one bad file cannot fail a thread from then on.
 

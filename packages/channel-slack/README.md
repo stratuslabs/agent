@@ -62,7 +62,9 @@ model API's limits) is not kept, and one message's images stop at 20 MB
 together — a request has a size limit too, and images past it are named as
 unreadable; send them in a message of their own. The same 20 MB — and 20
 images — is what a whole thread's images may take on one request, spent
-newest first: once a thread's images pass either limit the oldest are let
+newest first — and the request as a whole has a limit too, so when the
+rest of the conversation needs the room the oldest images give way to it.
+Once a thread's images pass a limit the oldest are let
 go of — the model is told an image was there and what it was called, and
 the session keeps that record rather than the pixels, so a busy thread's
 row stays bounded. A message's downloads share one 30-second deadline,

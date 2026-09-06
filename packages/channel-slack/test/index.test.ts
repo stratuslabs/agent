@@ -4160,3 +4160,55 @@ test('an image the model API would refuse for its size in pixels is never stored
   assert.equal(warnings.filter((line) => /wide\.png/.test(line) && /9000×100/.test(line)).length, 1);
   assert.equal(warnings.filter((line) => /fake\.jpg/.test(line) && /not a complete image\/jpeg/.test(line)).length, 1);
 });
+
+test('an image left out for the message\'s budget closes the window to everything listed before it', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+  const fetched: string[] = [];
+  const mib = 1024 * 1024;
+  // Listed oldest first: a small one, a middling one, then four large ones.
+  // The four newest take 18 MiB; the middling one would pass 20 and is left
+  // out; the small one would fit what is left, and is left out anyway.
+  const sizes = [1 * mib, 4 * mib, 4.5 * mib, 4.5 * mib, 4.5 * mib, 4.5 * mib];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url) => {
+      fetched.push(url);
+      const n = Number(/F(\d)/.exec(url)![1]);
+      return { status: 200, contentType: 'image/png', body: pngOfLength(sizes[n - 1]!) };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-window' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> six of them',
+      ts: '969.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: sizes.map((size, index) => ({
+        id: `F${index + 1}`, name: `shot${index + 1}.png`, mimetype: 'image/png', size, url_private_download: `https://files.slack.com/F${index + 1}/download`,
+      })),
+    },
+  });
+  await adapter.stop();
+
+  assert.deepEqual(fetched, [6, 5, 4, 3].map((n) => `https://files.slack.com/F${n}/download`));
+  assert.deepEqual(gateway.dispatches[0]?.images?.map((image) => image.name), ['shot3.png', 'shot4.png', 'shot5.png', 'shot6.png']);
+  assert.equal(
+    gateway.dispatches[0]?.userMessage,
+    'Dylan: six of them\n[Attached: shot1.png, shot2.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+  );
+  assert.equal(warnings.filter((line) => /shot2\.png/.test(line) && /message of its own/.test(line)).length, 1);
+  assert.equal(warnings.filter((line) => /shot1\.png/.test(line) && /listed after it/.test(line)).length, 1);
+});
