@@ -60,6 +60,13 @@ operators with different homes pointing `--config` at one shared file take
 the same lock, and so do one addressing a symlinked config through the link
 and another addressing its target.
 
+Because that lock sits beside the config rather than inside `~/.stratus`,
+it can land in a directory other people may write. A lock path that is a
+symbolic link, or a damaged lock file belonging to another user, is refused
+rather than emptied — the recovery that clears a corrupt lock would
+otherwise be a way to destroy whatever the link pointed at. Remove the file
+and run the command again.
+
 **Each writer replaces only the keys it is about.** `stratus setup` rewrites
 the provider, model, base URL, key env var, system prompt, default soul, and
 the fallback settings; everything else in the file — `plugins`, `api`,

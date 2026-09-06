@@ -33,8 +33,11 @@ import {
   TemplateApplyError,
   agentTemplateIds,
   applyAgentTemplate,
+  claimFileLock,
   claimSoulFile,
   configLockPath,
+  FileLockUnsafeError,
+  withFileLock,
   decidePluginConfig,
   findAgentTemplate,
   planAgentTemplate,
@@ -1302,4 +1305,26 @@ test('a required plugin upgraded between review and commit stops the write', asy
     (error: unknown) => error instanceof TemplateApplyError && /no longer the ones printed/.test(error.message),
   );
   assert.deepEqual(await readdir(path.join(fixture.home, '.stratus', 'agents')), []);
+});
+
+test('a lock path that is a symlink is refused, never followed and truncated', async () => {
+  const home = await newHome();
+  const victim = path.join(home, 'credentials.json');
+  await writeFile(victim, `${JSON.stringify({ anthropic: { type: 'api_key' } })}\n`);
+  const lockPath = path.join(home, 'config.json.lock');
+  // A config lock lives beside the config, which can be a directory
+  // somebody else may write. Planting a link there aimed the recovery
+  // path — which truncates anything that is not a database — at a file of
+  // the attacker's choosing that the operator can write.
+  await symlink(victim, lockPath);
+
+  assert.throws(() => claimFileLock(lockPath), (error: unknown) => (
+    error instanceof FileLockUnsafeError && /symbolic link/.test(error.message)
+  ));
+  assert.notEqual((await stat(victim)).size, 0, 'the link target is untouched');
+  await assert.rejects(
+    withFileLock(lockPath, async () => undefined),
+    FileLockUnsafeError,
+    'and the waiting form refuses it too, rather than retrying forever',
+  );
 });

@@ -9224,3 +9224,23 @@ test('a scripted agent new that only prints is not refused on newer state', asyn
   assert.match(output.stderr, /Warning: .*newer/);
   await assert.rejects(readdir(path.join(home, '.stratus', 'agents')), { code: 'ENOENT' });
 });
+
+test('a plugin-free template is created despite a broken project config', async () => {
+  const home = await templateHome();
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-template-broken-'));
+  await writeFile(path.join(project, 'stratus.config.json'), '{ not json\n');
+
+  // What a plugin-free bundle cannot compute from that file is a diff
+  // against plugin entries it does not have. Refusing a soul over somebody
+  // else's broken checkout config is the same over-blocking as the trust
+  // rule was.
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'assistant', '--yes'],
+    streams,
+    env: { homeDir: home, cwd: project, processEnv: {} },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), ['mira.md']);
+});

@@ -7222,7 +7222,13 @@ const runAgentNewFromTemplate = async (
       // type, and the commit half creates the file. Anything else is a
       // config that exists and cannot be read, where computing the diff is
       // impossible and guessing at it is how the summary becomes a lie.
-      if (!(error instanceof ConfigFileError && error.code === 'ENOENT')) {
+      // Only a bundle that would write plugin entries needs this file
+      // readable: what it cannot compute is the diff against them. A
+      // template with no plugins reads nothing from it and writes nothing
+      // to it, so a broken config somebody left in a checkout is no reason
+      // to refuse a soul — untemplated `agent new` treats it as a hint and
+      // carries on for the same reason.
+      if (!(error instanceof ConfigFileError && error.code === 'ENOENT') && template.plugins.length > 0) {
         blockers.push({
           kind: 'unreadable-config',
           message: `${location.path} could not be read (${error instanceof Error ? error.message : String(error)}), `

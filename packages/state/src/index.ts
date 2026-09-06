@@ -4011,6 +4011,7 @@ export {
   withFileLock,
   FileLockBusyError,
   FileLockTimeoutError,
+  FileLockUnsafeError,
   type FileClaim,
   type WithFileLockOptions,
 } from './lock.ts';

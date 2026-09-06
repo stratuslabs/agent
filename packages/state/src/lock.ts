@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, truncateSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, truncateSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -12,6 +12,18 @@ import { DatabaseSync } from 'node:sqlite';
  * loses a plugin entry they never touched. One implementation, two
  * policies — refuse when somebody else holds it, or wait for them.
  */
+
+/** Thrown when a lock path is a symlink, or is a file another user owns. */
+export class FileLockUnsafeError extends Error {
+  constructor(lockPath: string) {
+    super(
+      `${lockPath} is not a lock this process will use: it is a symbolic link, or it belongs to another user. `
+      + 'A lock file is disposable — remove it and run this again. It is not emptied here, because a file standing '
+      + 'in for one points at, or belongs to, something this would otherwise destroy.',
+    );
+    this.name = 'FileLockUnsafeError';
+  }
+}
 
 /** Thrown by `claimFileLock` when another holder has the file. */
 export class FileLockBusyError extends Error {
@@ -82,6 +94,45 @@ const claimAt = (lockPath: string): DatabaseSync => {
 };
 
 /**
+ * Refuse a lock path this process should not open, and — before emptying
+ * one — should not write through.
+ *
+ * The recovery below truncates a file that is not a database, which is safe
+ * for a lock nobody else can create and dangerous for one in a directory
+ * somebody else can write — and config locks now live beside the config,
+ * which may be exactly such a directory. A planted
+ * `config.json.lock -> ~/.stratus/credentials.json` would be opened, read
+ * as `SQLITE_NOTADB`, and then zeroed.
+ *
+ * `lstat` rather than an atomic no-follow open, because `DatabaseSync`
+ * opens by path and takes no descriptor. That closes the planted-link case,
+ * which is the reachable one, and not a race against a link swapped in
+ * during the window — checked once on the way in and again immediately
+ * before the truncate, which is the operation worth guarding.
+ */
+const refuseUnsafeLock = (lockPath: string, forTruncate: boolean): void => {
+  let entry;
+  try {
+    entry = lstatSync(lockPath);
+  } catch {
+    // Not there: the claim creates it, and a file this process creates is
+    // neither a link nor somebody else's.
+    return;
+  }
+  if (entry.isSymbolicLink()) {
+    throw new FileLockUnsafeError(lockPath);
+  }
+  // And nothing this process does not own gets emptied. A planted regular
+  // file is the same attack without the link: leave a damaged one owned by
+  // somebody else where it is and say so, rather than zeroing a file on the
+  // strength of it having failed a header read. Recovery is the rare path,
+  // and refusing it costs an operator one `rm`.
+  if (forTruncate && process.getuid !== undefined && entry.uid !== process.getuid()) {
+    throw new FileLockUnsafeError(lockPath);
+  }
+};
+
+/**
  * Take a lock file exclusively, for as long as the claim is held, or throw
  * `FileLockBusyError` at once.
  *
@@ -104,6 +155,7 @@ const claimAt = (lockPath: string): DatabaseSync => {
  */
 export const claimFileLock = (lockPath: string): FileClaim => {
   mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
+  refuseUnsafeLock(lockPath, false);
   let held: DatabaseSync | undefined;
   // At most twice: the file as found, then the file emptied in place.
   for (const emptied of [false, true]) {
@@ -117,6 +169,10 @@ export const claimFileLock = (lockPath: string): FileClaim => {
       if (emptied || !isNotADatabase(error)) {
         throw error;
       }
+      // Checked again immediately before the truncate, not only on the way
+      // in: this is the operation with teeth, and the window between the
+      // two is where a link would have to be planted to matter.
+      refuseUnsafeLock(lockPath, true);
       try {
         truncateSync(lockPath, 0);
       } catch (truncateError) {
