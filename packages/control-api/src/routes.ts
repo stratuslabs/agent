@@ -31,7 +31,6 @@ import {
   globalConfigPath,
   listAgentSummaries,
   loadChannelCredentials,
-  configLockPath,
   loadConfigFile,
   loadCredentials,
   loadSoulFile,
@@ -40,7 +39,7 @@ import {
   resolveRuntimeConfig,
   saveChannelCredentials,
   saveConfigFile,
-  withFileLock,
+  updateConfigFile,
   saveCredentials,
   validateConfigFile,
   servedRuntimes,
@@ -1255,30 +1254,32 @@ export const routes: Route[] = [
       // entry, and this save then puts the pre-template copy back — leaving
       // a soul whose allowlist names tools nothing enables, reported as
       // created. Every read-modify-write of this file takes the same lock.
-      const validated = await withFileLock(configLockPath(context.env), async () => {
-        // PUT replaces, so anything this endpoint does not write has to be
-        // carried across explicitly or it is deleted by omission — and
-        // deleting somebody's plugin list because they saved a model change
-        // would silently take capability away from every agent.
-        try {
-          const current = await loadConfigFile(configPath);
+      // `updateConfigFile` holds the config lock across the read and the
+      // write, which is what stops a concurrent `stratus agent new
+      // --template` from having its plugin entry undone by a save built on
+      // a read from before it.
+      let validated: StratusConfigFile;
+      try {
+        validated = await updateConfigFile(configPath, context.env, (current) => {
+          // PUT replaces, so anything this endpoint does not write has to be
+          // carried across explicitly or it is deleted by omission — and
+          // deleting somebody's plugin list because they saved a model change
+          // would silently take capability away from every agent.
           if (current.plugins) {
             next.plugins = current.plugins;
           }
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-            throw new ApiError(500, 'config_unreadable', error instanceof Error ? error.message : String(error));
+          try {
+            return validateConfigFile(next, configPath);
+          } catch (error) {
+            throw new ApiError(400, 'invalid_config_value', error instanceof Error ? error.message : String(error));
           }
+        });
+      } catch (error) {
+        if (error instanceof ApiError) {
+          throw error;
         }
-        let checked: StratusConfigFile;
-        try {
-          checked = validateConfigFile(next, configPath);
-        } catch (error) {
-          throw new ApiError(400, 'invalid_config_value', error instanceof Error ? error.message : String(error));
-        }
-        await saveConfigFile(configPath, checked);
-        return checked;
-      });
+        throw new ApiError(500, 'config_unreadable', error instanceof Error ? error.message : String(error));
+      }
       // Settings feed provider resolution, which the gateway re-reads per
       // dispatch — but the default *soul* is roster identity, so a changed
       // one only reaches dispatches after a reload.

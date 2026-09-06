@@ -47,6 +47,27 @@ use right now and which file or env var decided each setting.
 | `api` | Control API binding for `stratus serve` — trusted configs only, see below |
 | `plugins` | Plugins to load, keyed by package name — trusted configs only, see below |
 
+### Who writes this file
+
+`stratus setup`, `stratus agent new` (setting a default agent), `stratus
+agent new --template` (plugin entries), and `PUT /api/v1/config` all write
+it. Each reads and writes under `~/.stratus/config.lock`, so two of them
+running at once cannot undo each other — a save built on a read from before
+another writer committed would put the earlier document back.
+
+**Each writer replaces only the keys it is about.** `stratus setup` rewrites
+the provider, model, base URL, key env var, system prompt, default soul, and
+the fallback settings; everything else in the file — `plugins`, `api`,
+`approvals`, `principals`, the prompt-cache keys — is carried across
+untouched. Before this it wrote a document built from its own menu answers
+alone, so saving a model change deleted the whole `plugins` block and every
+agent silently lost its tools.
+
+The file is written to a temporary beside it and renamed into place, so a
+failure partway through leaves the previous version whole rather than half a
+document. The rename resets the file's permissions to the default this
+writer has always created it with.
+
 Credentials stored by setup live in `~/.stratus/credentials.json`
 (owner-read-only) and are **endpoint-bound**: a credential saved for one
 endpoint is never sent to an endpoint a project-local config selects. See

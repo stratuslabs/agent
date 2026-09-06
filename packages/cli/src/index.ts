@@ -138,6 +138,7 @@ import {
   resolveEnvApiKey,
   DEFAULT_CONFIG_FILENAME,
   loadConfigFile,
+  updateConfigFile,
   resolveConfigLocation,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
   saveChannelCredentials,
@@ -2963,6 +2964,29 @@ interface SetupPrompter {
   close(): void;
 }
 
+/**
+ * The config keys `stratus setup` decides, and therefore the only ones its
+ * save may replace or remove.
+ *
+ * Everything outside this list is the operator's, written by a different
+ * command or by hand, and is carried across untouched — `plugins` most of
+ * all, since deleting it takes every agent's tools away without saying so.
+ * Listed as what setup owns rather than as what to preserve, so a config
+ * key added later survives by default instead of being silently dropped
+ * until somebody notices.
+ */
+const SETUP_OWNED_CONFIG_KEYS = [
+  'provider',
+  'model',
+  'baseUrl',
+  'apiKeyEnv',
+  'systemPrompt',
+  'soul',
+  'fallbackModel',
+  'fallbackProvider',
+  'fallbackBaseUrl',
+] as const satisfies readonly (keyof StratusConfigFile)[];
+
 const createSetupPrompter = (
   streams: CliStreams,
   env: CliEnvironment,
@@ -4752,7 +4776,26 @@ export const runSetup = async (
       }
     }
 
-    await saveConfigFile(configPath, config);
+    // Read and written under the config lock, and merged onto whatever the
+    // file says *now* rather than onto the copy read when the menu opened —
+    // a human sits between those two moments, and another writer can commit
+    // inside it.
+    //
+    // Only the keys setup asks about are replaced. Everything else survives
+    // verbatim: `plugins` above all, but `api`, `approvals`, `principals`
+    // and the prompt-cache settings too. Setup used to write a document
+    // built from its own state alone, so saving a model change deleted the
+    // operator's whole plugin list — every agent silently losing its tools
+    // because somebody re-ran setup. `PUT /api/v1/config` had already been
+    // taught to carry these across for exactly this reason; this is the
+    // same rule at the other writer.
+    await updateConfigFile(configPath, env, (current) => {
+      const preserved = { ...current };
+      for (const key of SETUP_OWNED_CONFIG_KEYS) {
+        delete preserved[key];
+      }
+      return { ...preserved, ...config } as CliConfigFile;
+    });
 
     writeLine(streams.stdout);
     writeLine(streams.stdout, `Wrote ${configPath}`);
@@ -7169,11 +7212,18 @@ const runAgentNewFromTemplate = async (
     try {
       config = await loadConfigFile(location.path);
     } catch (error) {
-      blockers.push({
-        kind: 'unreadable-config',
-        message: `${location.path} could not be read (${error instanceof Error ? error.message : String(error)}), `
-          + 'so what this bundle would change cannot be computed. Fix it, then run this again.',
-      });
+      // A config that is not there yet is an empty merge base, not a
+      // failure: `--config new.json` is a thing an operator is allowed to
+      // type, and the commit half creates the file. Anything else is a
+      // config that exists and cannot be read, where computing the diff is
+      // impossible and guessing at it is how the summary becomes a lie.
+      if (!(error instanceof ConfigFileError && error.code === 'ENOENT')) {
+        blockers.push({
+          kind: 'unreadable-config',
+          message: `${location.path} could not be read (${error instanceof Error ? error.message : String(error)}), `
+            + 'so what this bundle would change cannot be computed. Fix it, then run this again.',
+        });
+      }
     }
   }
 
@@ -7359,32 +7409,28 @@ export const runAgentNew = async (
       if (makeDefault.kind === 'index' && makeDefault.index === 0) {
         // The default agent is a machine-wide setting, so it lands in the
         // global config even when a project config is active here.
-        let globalConfig: CliConfigFile | undefined;
         try {
-          globalConfig = await loadConfigFile(globalConfigPath(env));
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-            globalConfig = {};
-          } else {
-            // A malformed config is recoverable by hand — never overwrite it.
-            writeLine(streams.stdout, `Could not read ${globalConfigPath(env)} (${error instanceof Error ? error.message : String(error)}), so it was left untouched. Fix it, then make ${agent.name} the default from stratus setup.`);
-          }
-        }
-        if (globalConfig !== undefined) {
-          // Re-validated rather than cast: `readNonEmptyString` widens to
-          // `string`, and the shared parser is what says which strings are
-          // provider names. Every source feeding soulProvider is already one,
-          // so this narrows without being able to throw.
-          const config: CliConfigFile = {
+          // Read and written under the config lock, like every other
+          // read-modify-write of this file: a concurrent `agent new
+          // --template` commits a plugin entry the soul it just wrote
+          // depends on, and a save built on a read from before it would put
+          // the pre-template document back.
+          await updateConfigFile(globalConfigPath(env), env, (globalConfig) => ({
             ...globalConfig,
+            // Re-validated rather than cast: `readNonEmptyString` widens to
+            // `string`, and the shared parser is what says which strings are
+            // provider names. Every source feeding soulProvider is already one,
+            // so this narrows without being able to throw.
             provider: globalConfig.provider ?? parseProviderName(soulProvider, 'provider'),
             soul: soulPath,
-          };
-          await saveConfigFile(globalConfigPath(env), config);
+          }));
           madeDefault = true;
           if (configLocation && configLocation.path !== globalConfigPath(env)) {
             writeLine(streams.stdout, `Note: ${configLocation.path} takes precedence over the global config for runs started in this directory.`);
           }
+        } catch (error) {
+          // A malformed config is recoverable by hand — never overwrite it.
+          writeLine(streams.stdout, `Could not read ${globalConfigPath(env)} (${error instanceof Error ? error.message : String(error)}), so it was left untouched. Fix it, then make ${agent.name} the default from stratus setup.`);
         }
       }
 

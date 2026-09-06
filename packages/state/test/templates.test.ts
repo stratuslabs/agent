@@ -41,6 +41,7 @@ import {
   createFileMemoryStore,
   planRiskCeiling,
   saveConfigFile,
+  updateConfigFile,
   type AgentTemplate,
   type TemplatePlan,
 } from '../src/index.ts';
@@ -897,4 +898,105 @@ test('a config write replaces the file rather than truncating it in place', asyn
     [],
     'no temporary left behind',
   );
+});
+
+test('a collision between two plugins the template does not need is not this command\'s business', async () => {
+  const fixture = await newFixture();
+  const first: JsonObject = {
+    name: 'first-thing',
+    version: '1.0.0',
+    stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'foo.read', risk: 'gated' }] } },
+  };
+  const second: JsonObject = {
+    name: 'second-thing',
+    version: '1.0.0',
+    stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'foo.read', risk: 'gated' }] } },
+  };
+  const packages = { 'first-thing': first, 'second-thing': second };
+  await writeFixturePackages(fixture.packagesRoot, packages);
+
+  // The daemon already refuses one of these, and has since before this
+  // command existed. A plugin-free template touches no config and grants
+  // only kernel tools, so refusing to create it over somebody else's
+  // pre-existing problem would be failing for something it neither causes
+  // nor can fix.
+  const plan = await planFor(
+    templateWith({ tools: ['memory.remember'] }),
+    fixture,
+    packages,
+    { plugins: { 'first-thing': { enabled: true }, 'second-thing': { enabled: true } } },
+  );
+
+  assert.deepEqual(plan.blockers, []);
+  const applied = await applyFixture(plan, fixture.home);
+  assert.deepEqual(applied.configured, []);
+});
+
+test('two bridges declaring the same namespace do not read as a collision', async () => {
+  const fixture = await newFixture();
+  const bridge = (name: string): JsonObject => ({
+    name,
+    version: '1.0.0',
+    stratus: {
+      pluginVersion: 1,
+      contributes: { toolsDiscovered: [{ namespace: 'mcp.*', risk: 'gated' }] },
+    },
+  });
+  const packages = { 'bridge-one': bridge('bridge-one'), 'bridge-two': bridge('bridge-two') };
+  await writeFixturePackages(fixture.packagesRoot, packages);
+
+  // A `toolsDiscovered` namespace is a ceiling on what a bridge may
+  // register later, not a reservation. The loader stages and checks the
+  // concrete names each plugin registers, so these two collide only if they
+  // discover the same tool — which nothing here can know, and which
+  // treating the namespace string as a registered name would report as a
+  // certainty before either has connected.
+  const plan = await planFor(
+    templateWith({
+      tools: ['mcp.linear.create_issue'],
+      plugins: [{ package: 'bridge-two', reason: 'a second server' }],
+    }),
+    fixture,
+    packages,
+    { plugins: { 'bridge-one': { enabled: true } } },
+  );
+
+  assert.deepEqual(plan.blockers, []);
+  assert.equal(plan.plugins[0]?.status, 'add');
+});
+
+test('a config file that does not exist yet is an empty merge base, not a failure', async () => {
+  const home = await newHome();
+  const configPath = path.join(home, 'chosen.json');
+  const written = await updateConfigFile(configPath, { homeDir: home }, (current) => {
+    assert.deepEqual(current, {}, 'nothing there yet');
+    return { ...current, provider: 'anthropic' };
+  });
+  assert.equal(written.provider, 'anthropic');
+  assert.equal(JSON.parse(await readFile(configPath, 'utf8')).provider, 'anthropic');
+});
+
+test('a config that exists and will not parse is never overwritten', async () => {
+  const home = await newHome();
+  const configPath = path.join(home, 'broken.json');
+  await writeFile(configPath, '{ not json\n');
+  await assert.rejects(updateConfigFile(configPath, { homeDir: home }, (current) => current));
+  assert.equal(await readFile(configPath, 'utf8'), '{ not json\n', 'left exactly as found');
+});
+
+test('concurrent config updates serialize, so neither loses the other', async () => {
+  const home = await newHome();
+  const configPath = path.join(home, '.stratus', 'config.json');
+  const env = { homeDir: home };
+
+  // Both read an empty config if they run unserialized, and the second
+  // write puts back a document without the first's key.
+  await Promise.all([
+    updateConfigFile(configPath, env, (current) => ({ ...current, provider: 'anthropic' })),
+    updateConfigFile(configPath, env, (current) => ({ ...current, model: 'claude-opus-5' })),
+  ]);
+
+  const written = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+  assert.equal(written.provider, 'anthropic');
+  assert.equal(written.model, 'claude-opus-5');
 });

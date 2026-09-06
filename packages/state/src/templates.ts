@@ -661,18 +661,29 @@ export const planAgentTemplate = async (
       continue;
     }
 
-    const contributed = [...tools, ...manifestNamespaces(installed.manifest)];
-    const collisions = contributed.filter((tool) => owners.has(tool.name));
+    // Concrete names only. A `toolsDiscovered` namespace is a ceiling on
+    // what a bridge may register later, not a reservation: the loader
+    // stages and checks the names a plugin actually registers, so two
+    // bridges both declaring `mcp.*` collide only if they discover the same
+    // tool, which nothing here can know. Treating the namespace string as a
+    // registered name would block every plan on a fleet with two bridges.
+    const collisions = tools.filter((tool) => owners.has(tool.name));
     if (collisions.length > 0) {
-      const message = collisions
-        .map((tool) => `  ${tool.name} is already contributed by ${owners.get(tool.name)}`)
-        .join('\n');
-      blockers.push({
-        kind: 'tool-collision',
-        message: `${packageName} cannot load beside what ${options.configPath} already enables:\n${message}\n`
-          + 'A tool name is unique per install, so the daemon refuses the later plugin whole. Disable one of them, then run this again.',
-      });
+      // Only when it changes what *this* bundle would grant. Two plugins
+      // the operator already enables colliding with each other is a real
+      // problem and an entirely pre-existing one — the daemon already
+      // refuses the later of them — and refusing to create a plugin-free
+      // agent over it would be this command failing for something it
+      // neither causes nor can fix.
       if (requirement !== undefined) {
+        const message = collisions
+          .map((tool) => `  ${tool.name} is already contributed by ${owners.get(tool.name)}`)
+          .join('\n');
+        blockers.push({
+          kind: 'tool-collision',
+          message: `${packageName} cannot load beside what ${options.configPath} already enables:\n${message}\n`
+            + 'A tool name is unique per install, so the daemon refuses the later plugin whole. Disable one of them, then run this again.',
+        });
         outcomes.push({
           status: 'unreadable',
           package: packageName,
@@ -680,9 +691,10 @@ export const planAgentTemplate = async (
           error: `tool name collision: ${collisions.map((tool) => tool.name).join(', ')}`,
         });
       }
+      // Refused either way, so it owns nothing and grants nothing.
       continue;
     }
-    for (const tool of contributed) {
+    for (const tool of tools) {
       owners.set(tool.name, packageName);
     }
 
@@ -692,7 +704,7 @@ export const planAgentTemplate = async (
     if (requirement === undefined || outcome === undefined) {
       continue;
     }
-    available.push(...contributed);
+    available.push(...tools, ...manifestNamespaces(installed.manifest));
     outcomes.push(installed.version !== undefined
       ? { ...outcome, version: installed.version }
       : outcome);

@@ -3942,10 +3942,49 @@ export {
   type FileClaim,
   type WithFileLockOptions,
 } from './lock.ts';
+import { withFileLock } from './lock.ts';
 
 /** `~/.stratus/config.lock` — taken by every writer of the config file. */
 export const configLockPath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), 'config.lock');
+
+/**
+ * Read-modify-write the config, holding the lock across both halves.
+ *
+ * The only correct way to change one setting: the read is what the write is
+ * built on, and there are several writers — `stratus setup`, `agent new`,
+ * `agent new --template`, and `PUT /api/v1/config`. Any of them reading
+ * before another commits and saving after will put the earlier document
+ * back, silently undoing a change nobody asked to undo. That is not
+ * hypothetical for plugin entries: a template commits a soul whose
+ * allowlist depends on one.
+ *
+ * A config file that is not there yet is an empty document, not a failure —
+ * every caller here can create one, and `--config new.json` is a thing an
+ * operator is allowed to type. Anything else about the read propagates: a
+ * malformed config is recoverable by hand and must never be overwritten.
+ *
+ * `applyAgentTemplate` is the one caller that does not use this and cannot:
+ * it has to hold the same lock across the soul claim as well, so it
+ * composes `withFileLock` itself. The lock is not reentrant.
+ */
+export const updateConfigFile = async (
+  configPath: string,
+  env: StateEnvironment,
+  mutate: (current: StratusConfigFile) => StratusConfigFile | Promise<StratusConfigFile>,
+): Promise<StratusConfigFile> => withFileLock(configLockPath(env), async () => {
+  let current: StratusConfigFile = {};
+  try {
+    current = await loadConfigFile(configPath);
+  } catch (error) {
+    if (!(error instanceof ConfigFileError && error.code === 'ENOENT')) {
+      throw error;
+    }
+  }
+  const next = await mutate(current);
+  await saveConfigFile(configPath, next);
+  return next;
+});
 
 export {
   AGENT_TEMPLATE_VERSION,

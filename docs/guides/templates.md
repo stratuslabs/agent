@@ -183,6 +183,9 @@ Each of these changes nothing at all — no soul file, no config entry:
   soul would end up calling a different implementation than the one you
   reviewed, or none. The plan reads every enabled plugin's manifest, not
   just the ones the template names, so it can say this before you commit.
+  Two plugins of your own colliding with each other does **not** stop the
+  command: the daemon already refuses one of them, and that is neither
+  something this creates nor something it can fix.
 - A workspace directory that cannot be created. The per-agent roots point at
   it, and a root that will never exist is a soul whose first `fs.list`
   fails.

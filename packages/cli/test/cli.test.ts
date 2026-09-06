@@ -9089,3 +9089,65 @@ test('a home stamped by a newer build refuses template creation, and still print
   }), 0);
   assert.match(printed.output.stdout, /^---\nname: Ava/);
 });
+
+test('setup keeps the config keys it never asked about', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A plugins block is what `stratus agent new --template` writes, and the
+  // soul it commits alongside depends on it. Setup used to save a document
+  // built from its own menu state alone, so choosing a provider deleted
+  // every agent's tools without saying so.
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({
+      provider: 'anthropic',
+      model: 'claude-opus-5',
+      plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+      approvals: { mode: 'headless' },
+      api: { port: 4200 },
+    })}\n`,
+  );
+
+  const { streams } = createStreams();
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['1\n', '4\n', '6\n', '7\n']),
+    },
+  });
+  assert.equal(exitCode, 0);
+
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8')) as
+    Record<string, unknown>;
+  assert.deepEqual(config.plugins, { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } });
+  assert.deepEqual(config.approvals, { mode: 'headless' });
+  assert.deepEqual(config.api, { port: 4200 });
+  // And the keys it does own are still replaced — including the model,
+  // which demo has none of.
+  assert.equal(config.provider, 'demo');
+  assert.equal(config.model, undefined);
+});
+
+test('a template can be created into a --config file that does not exist yet', async () => {
+  const home = await templateHome();
+  const chosen = path.join(home, 'chosen.json');
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'research', '--config', chosen, '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  const config = JSON.parse(await readFile(chosen, 'utf8')) as { plugins: Record<string, unknown> };
+  assert.deepEqual(
+    Object.keys(config.plugins).sort(),
+    ['@stratusagent/tool-fs', '@stratusagent/tool-web'],
+  );
+});
