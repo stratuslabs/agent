@@ -193,6 +193,15 @@ test of whether this design is the right one.
   get to extend its own ("I'll keep an eye on this")? Both is the honest
   start; self-extension is a nice affordance and a good way to never drift out
   of anything.
+- **An overheard message sent in a failed harness turn's batch goes again
+  on the retry.** `latestUserMessagePrompt` selects by the `overheard`
+  mark — the harness has never seen those, by construction — but a turn
+  the harness accepted and then failed appends no reply and records
+  nothing about what its prompt carried, so the overheard messages it
+  carried are still marked unheard next time. The same class of
+  double-send as before overhearing existed, narrowed to the overheard
+  messages. Closing it means the provider marking what it sent, on the
+  session, which is its own change.
 - **Does every overheard message cost a session write?** A busy thread would
   make that a write per message. Batching, or a tail the session keeps
   in-process until the next turn, is an optimization with a crash-consistency
