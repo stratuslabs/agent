@@ -6,8 +6,10 @@ import path from 'node:path';
 import {
   latestTurnReply,
   SENDER_TRUST_METADATA_KEY,
+  imageDimensions,
   isImageAttachmentMediaType,
   IMAGE_ATTACHMENT_MAX_BYTES,
+  IMAGE_ATTACHMENT_MAX_DIMENSION,
   IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
   type ApprovalAnswer,
   type ImageAttachment,
@@ -1264,6 +1266,20 @@ const readImageAttachments = async (
     const stillTooBig = overLimit(fileLabel(file), download.body.length);
     if (stillTooBig !== undefined) {
       warn(stillTooBig);
+      unread.push(file);
+      continue;
+    }
+    // Read from the bytes, not from Slack's metadata: an image the model
+    // API refuses fails the turn it arrives on and, once stored, every turn
+    // after — so what is stored has to be what the API takes.
+    const dimensions = imageDimensions(download.body, file.mimetype);
+    if (dimensions === undefined) {
+      warn(`slack: ${fileLabel(file)} does not carry the ${file.mimetype} header Slack said it would; the turn is told it cannot be read.`);
+      unread.push(file);
+      continue;
+    }
+    if (dimensions.width > IMAGE_ATTACHMENT_MAX_DIMENSION || dimensions.height > IMAGE_ATTACHMENT_MAX_DIMENSION) {
+      warn(`slack: ${fileLabel(file)} is ${dimensions.width}×${dimensions.height}, over the ${IMAGE_ATTACHMENT_MAX_DIMENSION}-pixel side the model can take; the turn is told it cannot be read.`);
       unread.push(file);
       continue;
     }

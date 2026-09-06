@@ -41,10 +41,102 @@ export const IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 
 /**
  * The most images one request may carry, whatever they weigh. The Messages
- * API accepts 100 per request; a thread of small screenshots reaches that
- * long before it reaches the byte budget.
+ * API accepts 100 per request, but past 20 it also shrinks what each may
+ * measure to 2000 pixels a side — and an image was accepted at up to
+ * `IMAGE_ATTACHMENT_MAX_DIMENSION` when it arrived. Twenty is the count at
+ * which every image already stored is still one the API takes.
  */
-export const IMAGE_ATTACHMENTS_MAX_REPLAY_COUNT = 100;
+export const IMAGE_ATTACHMENTS_MAX_REPLAY_COUNT = 20;
+
+/**
+ * The most an image may measure on either side, in pixels. The Messages
+ * API refuses anything larger, and a large flat PNG compresses far below
+ * the byte cap — so bytes alone would let an image in that fails the turn
+ * it arrives on and, once stored, every turn after.
+ */
+export const IMAGE_ATTACHMENT_MAX_DIMENSION = 8000;
+
+export interface ImageDimensions {
+  width: number;
+  height: number;
+}
+
+/**
+ * An image's pixel size, read from its header without decoding it, or
+ * nothing when the bytes do not carry the header their media type
+ * promises — which a caller should treat as "not an image it can send".
+ * One reader for the four accepted formats, so a channel deciding whether
+ * to keep a download asks this rather than trusting the uploader's
+ * metadata.
+ */
+export const imageDimensions = (bytes: Uint8Array, mediaType: ImageAttachmentMediaType): ImageDimensions | undefined => {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const ascii = (at: number, length: number): string => String.fromCharCode(...bytes.subarray(at, at + length));
+  switch (mediaType) {
+    case 'image/png': {
+      if (bytes.length < 24 || ascii(1, 3) !== 'PNG' || ascii(12, 4) !== 'IHDR') {
+        return undefined;
+      }
+      return { width: view.getUint32(16), height: view.getUint32(20) };
+    }
+    case 'image/gif': {
+      if (bytes.length < 10 || ascii(0, 4) !== 'GIF8') {
+        return undefined;
+      }
+      return { width: view.getUint16(6, true), height: view.getUint16(8, true) };
+    }
+    case 'image/webp': {
+      if (bytes.length < 30 || ascii(0, 4) !== 'RIFF' || ascii(8, 4) !== 'WEBP') {
+        return undefined;
+      }
+      // Three container layouts, each keeping its size somewhere different.
+      const chunk = ascii(12, 4);
+      if (chunk === 'VP8 ') {
+        return { width: view.getUint16(26, true) & 0x3fff, height: view.getUint16(28, true) & 0x3fff };
+      }
+      if (chunk === 'VP8L') {
+        const [b0, b1, b2, b3] = [bytes[21]!, bytes[22]!, bytes[23]!, bytes[24]!];
+        return {
+          width: 1 + (((b1 & 0x3f) << 8) | b0),
+          height: 1 + (((b3 & 0x0f) << 10) | (b2 << 2) | ((b1 & 0xc0) >> 6)),
+        };
+      }
+      if (chunk === 'VP8X') {
+        return {
+          width: 1 + (bytes[24]! | (bytes[25]! << 8) | (bytes[26]! << 16)),
+          height: 1 + (bytes[27]! | (bytes[28]! << 8) | (bytes[29]! << 16)),
+        };
+      }
+      return undefined;
+    }
+    case 'image/jpeg': {
+      if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
+        return undefined;
+      }
+      // Walk the segments to the first start-of-frame, which carries the size.
+      let at = 2;
+      while (at + 9 <= bytes.length) {
+        if (bytes[at] !== 0xff) {
+          return undefined;
+        }
+        const marker = bytes[at + 1]!;
+        if (marker === 0xff) {
+          at += 1;
+          continue;
+        }
+        const startOfFrame = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+        if (startOfFrame) {
+          return { height: view.getUint16(at + 5), width: view.getUint16(at + 7) };
+        }
+        const standalone = marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8);
+        at += standalone ? 2 : 2 + view.getUint16(at + 2);
+      }
+      return undefined;
+    }
+    default:
+      return undefined;
+  }
+};
 
 /** What `imagesWithinReplayBudget` holds a request to; each defaults to the constant above it. */
 export interface ImageReplayBudget {
@@ -66,6 +158,13 @@ export interface ImageAttachment {
    * as text and can only say that an image was there.
    */
   name?: string;
+  /**
+   * Set once the bytes have been let go of: the image fell outside the
+   * replay window when a later turn was stored (see
+   * `omitImagesOutsideReplayBudget`), and `data` is empty. The record that
+   * an image was here, and what it was called, outlives the pixels.
+   */
+  omitted?: true;
 }
 
 /** Decoded size of a base64 string, without decoding it. */
@@ -103,6 +202,12 @@ export const imagesWithinReplayBudget = (
     }
     for (let position = images.length - 1; position >= 0; position -= 1) {
       const image = images[position]!;
+      // Nothing left to send, and nothing to charge: an omitted image is
+      // always older than every kept one, so skipping it keeps the window
+      // contiguous.
+      if (image.omitted === true) {
+        continue;
+      }
       const bytes = base64DecodedBytes(image.data);
       if (bytes > remaining || kept.size >= count) {
         return kept;
@@ -112,6 +217,40 @@ export const imagesWithinReplayBudget = (
     }
   }
   return kept;
+};
+
+/**
+ * Lets go of the bytes of every image outside the replay window, in
+ * place, keeping its name and the fact that it was there. The runner calls
+ * this as it stores a turn: the replay budget bounds what a provider
+ * sends, but a session is one JSON row that every turn re-reads and
+ * re-writes whole, and without this every image a thread ever received
+ * would stay in it — so anyone who can post to a channel could grow a row
+ * by the whole budget per message, forever. What the model can be shown is
+ * exactly what is kept, so nothing the trim removes could have been sent.
+ * Returns how many images it emptied.
+ */
+export const omitImagesOutsideReplayBudget = (messages: Message[], budget: ImageReplayBudget = {}): number => {
+  const kept = imagesWithinReplayBudget(messages, budget);
+  let omitted = 0;
+  for (const message of messages) {
+    if (message.images === undefined) {
+      continue;
+    }
+    message.images = message.images.map((image) => {
+      if (image.omitted === true || kept.has(image)) {
+        return image;
+      }
+      omitted += 1;
+      return {
+        mediaType: image.mediaType,
+        data: '',
+        omitted: true,
+        ...(image.name !== undefined ? { name: image.name } : {}),
+      };
+    });
+  }
+  return omitted;
 };
 
 /**
@@ -2711,6 +2850,14 @@ export interface AgentRunnerOptions {
   skills?: SkillRegistry;
   /** Agent-scoped long-term memory, injected into every provider request. */
   memory?: AgentMemoryStore;
+  /**
+   * How much of a session's images stay stored — bytes and a count, see
+   * `omitImagesOutsideReplayBudget`. Defaults to core's constants for the
+   * model API's limits; a host that omits it gets those, which is right
+   * for every real provider and only wrong for a test that cannot afford
+   * 20 MiB fixtures.
+   */
+  imageReplayBudget?: ImageReplayBudget;
   /** Maximum provider turns per run before the session fails. */
   maxTurns?: number;
   /**
@@ -2737,11 +2884,13 @@ export class AgentRunner {
   readonly maxTurns: number;
   readonly streaming: boolean;
   private readonly options: AgentRunnerOptions;
+  private readonly imageReplayBudget: ImageReplayBudget | undefined;
 
   constructor(options: AgentRunnerOptions) {
     this.options = options;
     this.bus = options.bus ?? new EventBus();
     this.store = options.store ?? new InMemorySessionStore();
+    this.imageReplayBudget = options.imageReplayBudget;
     this.tools = options.tools ?? new ToolRegistry();
     this.executor = options.executor ?? new DefaultExecutor();
     this.approvals = options.approvals ?? new AllowAllApprovalPolicy();
@@ -2876,6 +3025,9 @@ export class AgentRunner {
       createdAt: new Date().toISOString(),
       ...userImages(input.images),
     });
+    // Before the save below: the row that carries this turn is the row
+    // that stops carrying the pixels nothing can send any more.
+    omitImagesOutsideReplayBudget(session.messages, this.imageReplayBudget);
 
     // The sender is evaluated on EVERY turn, from this turn's metadata: a
     // thread keys one session for everyone in it, and an unauthorized

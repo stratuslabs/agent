@@ -1828,3 +1828,28 @@ test('images sent with a user message are stored on it, and only on it', async (
   const stored = await store.get('session-images');
   assert.deepEqual(stored?.messages[0]?.images, [shot]);
 });
+
+test('a stored session keeps only the images inside its replay window', async () => {
+  const store = new InMemorySessionStore();
+  const provider: ModelProvider = {
+    name: 'looking-provider',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'ok' }] };
+    },
+  };
+  // Each image is 6 decoded bytes; the window holds two.
+  const runner = new AgentRunner({ provider, store, imageReplayBudget: { bytes: 12 } });
+  const image = (data: string, name: string) => ({ mediaType: 'image/png' as const, data, name });
+
+  await runner.run({ sessionId: 'session-window', agent: { id: 'a', name: 'A' }, userMessage: 'one', images: [image('AAAAAAAA', 'one.png')] });
+  await runner.resume({ sessionId: 'session-window', userMessage: 'two', images: [image('BBBBBBBB', 'two.png')] });
+  const third = await runner.resume({ sessionId: 'session-window', userMessage: 'three', images: [image('CCCCCCCC', 'three.png')] });
+
+  const asked = third.messages.filter((message) => message.role === 'user');
+  // The oldest image's bytes are gone from the row, its name is not.
+  assert.deepEqual(asked[0]?.images, [{ mediaType: 'image/png', data: '', omitted: true, name: 'one.png' }]);
+  assert.deepEqual(asked[1]?.images, [image('BBBBBBBB', 'two.png')]);
+  assert.deepEqual(asked[2]?.images, [image('CCCCCCCC', 'three.png')]);
+  const stored = await store.get('session-window');
+  assert.equal(stored?.messages[0]?.images?.[0]?.omitted, true);
+});

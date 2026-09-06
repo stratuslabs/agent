@@ -1,7 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { IMAGE_ATTACHMENTS_MAX_REPLAY_COUNT, IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES, imagesWithinReplayBudget, type ImageAttachment, type Message } from '../src/index.ts';
+import {
+  IMAGE_ATTACHMENT_MAX_DIMENSION,
+  IMAGE_ATTACHMENTS_MAX_REPLAY_COUNT,
+  IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
+  imageDimensions,
+  imagesWithinReplayBudget,
+  omitImagesOutsideReplayBudget,
+  type ImageAttachment,
+  type Message,
+} from '../src/index.ts';
 
 // base64 of N bytes is 4 * ceil(N / 3) characters; these are 6 and 9 bytes.
 // Each fixture is given a distinct payload so an assertion on which ones
@@ -88,9 +97,90 @@ test('the replay budget also counts images, newest first, whatever they weigh', 
   assert.equal(three.has(messages[2]!.images![1]!), true);
   assert.equal(three.has(messages[1]!.images![1]!), true);
   assert.equal(three.has(messages[1]!.images![0]!), false);
-  // The default is the Messages API's limit.
-  assert.equal(IMAGE_ATTACHMENTS_MAX_REPLAY_COUNT, 100);
-  const many = Array.from({ length: 101 }, (_, n) => user(`m${n}`, [sixBytes()]));
-  assert.equal(imagesWithinReplayBudget(many).size, 100);
+  // The default is the count past which the Messages API shrinks what each
+  // image may measure below what was accepted on arrival.
+  assert.equal(IMAGE_ATTACHMENTS_MAX_REPLAY_COUNT, 20);
+  const many = Array.from({ length: 21 }, (_, n) => user(`m${n}`, [sixBytes()]));
+  assert.equal(imagesWithinReplayBudget(many).size, 20);
   assert.equal(imagesWithinReplayBudget(many).has(many[0]!.images![0]!), false);
+});
+
+test('storing a turn lets go of the bytes outside the replay window and keeps the record', () => {
+  const oldest = { ...sixBytes(), name: 'first.png' };
+  const middle = sixBytes();
+  const newest = sixBytes();
+  const messages = [user('u1', [oldest]), user('u2', [middle]), user('u3', [newest])];
+
+  assert.equal(omitImagesOutsideReplayBudget(messages, { bytes: 12 }), 1);
+  assert.deepEqual(messages[0]!.images, [{ mediaType: 'image/png', data: '', omitted: true, name: 'first.png' }]);
+  assert.deepEqual(messages[1]!.images, [middle]);
+  assert.deepEqual(messages[2]!.images, [newest]);
+
+  // Idempotent, and an omitted image costs the next window nothing: the
+  // same budget now keeps the same two.
+  assert.equal(omitImagesOutsideReplayBudget(messages, { bytes: 12 }), 0);
+  const kept = imagesWithinReplayBudget(messages, { bytes: 12 });
+  assert.equal(kept.size, 2);
+  assert.equal(kept.has(messages[0]!.images![0]!), false);
+
+  // A message without images is left exactly as it was.
+  const bare = user('u4');
+  omitImagesOutsideReplayBudget([bare], { bytes: 12 });
+  assert.equal('images' in bare, false);
+});
+
+const pngHeader = (width: number, height: number): Uint8Array => {
+  const bytes = Buffer.alloc(24);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  bytes.writeUInt32BE(13, 8);
+  bytes.write('IHDR', 12, 'ascii');
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  return bytes;
+};
+
+test('image dimensions are read from the header of each accepted format', () => {
+  assert.deepEqual(imageDimensions(pngHeader(640, 480), 'image/png'), { width: 640, height: 480 });
+  assert.deepEqual(imageDimensions(pngHeader(9000, 1), 'image/png'), { width: 9000, height: 1 });
+
+  const gif = Buffer.alloc(10);
+  gif.write('GIF89a', 0, 'ascii');
+  gif.writeUInt16LE(320, 6);
+  gif.writeUInt16LE(200, 8);
+  assert.deepEqual(imageDimensions(gif, 'image/gif'), { width: 320, height: 200 });
+
+  // JPEG: SOI, an APP0 segment to step over, then SOF0 with the size.
+  const jpeg = Buffer.from([
+    0xff, 0xd8,
+    0xff, 0xe0, 0x00, 0x04, 0x4a, 0x46,
+    0xff, 0xc0, 0x00, 0x0b, 0x08, 0x01, 0xf4, 0x03, 0x20, 0x01, 0x01, 0x11, 0x00,
+  ]);
+  assert.deepEqual(imageDimensions(jpeg, 'image/jpeg'), { width: 800, height: 500 });
+
+  const webp = (chunk: string, payload: number[]): Uint8Array => {
+    const bytes = Buffer.alloc(30);
+    bytes.write('RIFF', 0, 'ascii');
+    bytes.write('WEBP', 8, 'ascii');
+    bytes.write(chunk, 12, 'ascii');
+    bytes.set(payload, 20);
+    return bytes;
+  };
+  // VP8X: flags + reserved, then width-1 and height-1 as 24-bit LE.
+  assert.deepEqual(imageDimensions(webp('VP8X', [0, 0, 0, 0, 0x1f, 0x03, 0x00, 0xff, 0x01, 0x00]), 'image/webp'), { width: 800, height: 512 });
+  // VP8L: signature, then 14 bits of width-1 and 14 of height-1.
+  assert.deepEqual(imageDimensions(webp('VP8L', [0x2f, 0x1f, 0xc3, 0x7f, 0x00]), 'image/webp'), { width: 800, height: 512 });
+  // VP8: frame tag, start code, then 14-bit width and height.
+  const vp8 = Buffer.alloc(10);
+  vp8.set([0, 0, 0, 0x9d, 0x01, 0x2a], 0);
+  vp8.writeUInt16LE(800, 6);
+  vp8.writeUInt16LE(512, 8);
+  assert.deepEqual(imageDimensions(webp('VP8 ', [...vp8]), 'image/webp'), { width: 800, height: 512 });
+
+  // Bytes that are not what their type says have no size, and neither does
+  // a header cut short.
+  assert.equal(imageDimensions(pngHeader(1, 1), 'image/jpeg'), undefined);
+  assert.equal(imageDimensions(pngHeader(1, 1).subarray(0, 20), 'image/png'), undefined);
+  assert.equal(imageDimensions(Buffer.from('GIF8'), 'image/gif'), undefined);
+  assert.equal(imageDimensions(webp('ALPH', []), 'image/webp'), undefined);
+  assert.equal(IMAGE_ATTACHMENT_MAX_DIMENSION, 8000);
 });

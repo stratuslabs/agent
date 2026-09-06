@@ -3688,9 +3688,21 @@ test('an agent with no principals configured takes every sender as unknown, its 
   assert.deepEqual(senders, ['unknown']);
 });
 
-// A real PNG header, so what the test sends is bytes and not a string that
-// happens to be called one.
-const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]);
+// A real PNG header with its size chunk, so what the test sends is bytes the
+// adapter can read a size out of and not a string that happens to be
+// called an image.
+const pngHeader = (width: number, height: number): Buffer => {
+  const bytes = Buffer.alloc(24);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  bytes.writeUInt32BE(13, 8);
+  bytes.write('IHDR', 12, 'ascii');
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  return bytes;
+};
+const PNG_BYTES = pngHeader(1, 1);
+/** A PNG of `length` bytes that still opens with a readable header. */
+const pngOfLength = (length: number): Buffer => Buffer.concat([PNG_BYTES, Buffer.alloc(length - PNG_BYTES.length, 1)]);
 
 test('an attached image is downloaded and travels with the dispatch; other files stay a note', async () => {
   const socket = createFakeSocket();
@@ -3749,7 +3761,7 @@ test('an image dropped in with nothing said is still a question', async () => {
     editIntervalMs: 0,
     createSocketClient: () => socket,
     createWebClient: () => web,
-    fetchFile: async () => ({ status: 200, contentType: 'image/jpeg', body: PNG_BYTES }),
+    fetchFile: async () => ({ status: 200, contentType: 'image/png', body: PNG_BYTES }),
   });
   await adapter.start(gateway);
 
@@ -3762,7 +3774,7 @@ test('an image dropped in with nothing said is still a question', async () => {
       ts: '961.0',
       channel: 'C1',
       subtype: 'file_share',
-      files: [{ id: 'F3', title: 'shot', mimetype: 'image/jpeg', url_private: 'https://files.slack.com/F3' }],
+      files: [{ id: 'F3', title: 'shot', mimetype: 'image/png', url_private: 'https://files.slack.com/F3' }],
     },
   });
   await adapter.stop();
@@ -3771,7 +3783,7 @@ test('an image dropped in with nothing said is still a question', async () => {
   // The speaker is still named, so a bare image in a channel is not anonymous.
   assert.equal(gateway.dispatches[0]!.userMessage, 'Dylan:');
   assert.deepEqual(gateway.dispatches[0]!.images, [
-    { mediaType: 'image/jpeg', data: PNG_BYTES.toString('base64'), name: 'shot' },
+    { mediaType: 'image/png', data: PNG_BYTES.toString('base64'), name: 'shot' },
   ]);
 });
 
@@ -3923,7 +3935,7 @@ test('images that fit one by one are still held to the message\'s total budget',
     createWebClient: () => web,
     fetchFile: async (url) => {
       fetched.push(url);
-      return { status: 200, contentType: 'image/png', body: Buffer.alloc(nearCap, 1) };
+      return { status: 200, contentType: 'image/png', body: pngOfLength(nearCap) };
     },
   });
   await adapter.start(gateway);
@@ -4037,4 +4049,51 @@ test('an image whose download is cut off at the cap falls back to the note', asy
     undefined,
   ]]);
   assert.equal(warnings.filter((line) => /unsized\.png/.test(line) && /abandoned/.test(line)).length, 1);
+});
+
+test('an image the model API would refuse for its size in pixels is never stored', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url) => ({
+      status: 200,
+      contentType: 'image/png',
+      // A flat 9000-pixel-wide PNG is tiny on disk and refused by the API;
+      // the "jpeg" is a PNG under another name.
+      body: url.includes('F10') ? pngHeader(9000, 100) : PNG_BYTES,
+    }),
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-dims' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> the big one and a fake',
+      ts: '967.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [
+        { id: 'F10', name: 'wide.png', mimetype: 'image/png', size: 24, url_private_download: 'https://files.slack.com/F10/download' },
+        { id: 'F11', name: 'fake.jpg', mimetype: 'image/jpeg', size: 24, url_private_download: 'https://files.slack.com/F11/download' },
+      ],
+    },
+  });
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images]), [[
+    'Dylan: the big one and a fake\n[Attached: wide.png, fake.jpg. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    undefined,
+  ]]);
+  assert.equal(warnings.filter((line) => /wide\.png/.test(line) && /9000×100/.test(line)).length, 1);
+  assert.equal(warnings.filter((line) => /fake\.jpg/.test(line) && /header/.test(line)).length, 1);
 });

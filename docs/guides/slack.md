@@ -66,8 +66,8 @@ into the thread on its own, and the agent is shown it. That takes the
 app installed before it needs the scope added under **OAuth & Permissions**
 and a reinstall, and until then `stratus serve` warns, naming the scope,
 whenever an image arrives. Anything that is not an image the model can
-take — a log, a PDF, an image over 5 MB, or one that would take a single
-message's images past 20 MB together — reaches the agent by name, told
+take — a log, a PDF, an image over 5 MB or 8000 pixels a side, or one that
+would take a single message's images past 20 MB together — reaches the agent by name, told
 that it cannot be opened, so it answers honestly rather than as if it had
 read the file.
 
@@ -80,9 +80,10 @@ OpenAI-compatible model that takes only text — most local runtimes — needs
 same note; without it the endpoint rejects the request, and keeps rejecting
 every later turn of that session, because the image is stored with the
 message. The image is stored with the message in the session, so a later
-turn in the same thread still has it — up to 20 MB and 100 images per
-request, newest first; past either, the oldest ones reach the model as a
-note saying they are no longer sent.
+turn in the same thread still has it — up to 20 MB and 20 images across the
+thread, newest first. Past either, the oldest images are let go of: the
+model is told one was there, and what it was called, and the session keeps
+that note in place of the pixels.
 
 ## Worth knowing
 
