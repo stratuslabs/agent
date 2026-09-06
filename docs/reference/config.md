@@ -54,9 +54,11 @@ agent new --template` (plugin entries), and `PUT /api/v1/config` all write
 it. Each reads and writes under a lock beside the file itself
 (`config.json.lock`), so two of them running at once cannot undo each other
 — a save built on a read from before another writer committed would put the
-earlier document back. The lock is keyed to the destination rather than to
-`~/.stratus`, so two operators with different homes pointing `--config` at
-one shared file still take the same lock.
+earlier document back. The lock is keyed to the destination the write
+actually resolves to, not to `~/.stratus` and not to the spelling used: two
+operators with different homes pointing `--config` at one shared file take
+the same lock, and so do one addressing a symlinked config through the link
+and another addressing its target.
 
 **Each writer replaces only the keys it is about.** `stratus setup` rewrites
 the provider, model, base URL, key env var, system prompt, default soul, and

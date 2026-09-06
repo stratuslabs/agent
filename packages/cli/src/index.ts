@@ -7328,7 +7328,7 @@ const runAgentNewFromTemplate = async (
       },
       writeConfig: (merged) => saveConfigFile(configPath, merged as StratusConfigFile),
       removeSoul: (soulPath) => rm(soulPath, { force: true }),
-      lockPath: configLockPath(configPath),
+      lockPath: await configLockPath(configPath),
       ...(env.templateFailBeforeConfigWrite ? { beforeConfigWrite: env.templateFailBeforeConfigWrite } : {}),
     });
   } catch (error) {

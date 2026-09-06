@@ -394,7 +394,7 @@ const applyFixture = async (
       await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
     },
     removeSoul: (soulPath) => rm(soulPath, { force: true }),
-    lockPath: configLockPath(configPath),
+    lockPath: await configLockPath(configPath),
     ...overrides,
   });
 };
@@ -1202,7 +1202,7 @@ test('every writer of one config file takes one lock, whatever home named it', a
   // Two operators with different homes, one explicit `--config` between
   // them. A lock derived from the home would hand them a lock each, which
   // is no lock at all for the file they are both replacing.
-  assert.equal(configLockPath(configPath), `${configPath}.lock`);
+  assert.equal(await configLockPath(configPath), `${configPath}.lock`);
 
   await Promise.all([
     updateConfigFile(configPath, { homeDir: await newHome() }, (current) => ({ ...current, provider: 'anthropic' })),
@@ -1232,4 +1232,28 @@ test('a symlink chain too deep to follow refuses rather than replacing a link', 
 
   await assert.rejects(saveConfigFile(previous, { provider: 'demo' }), /symlinks deep, or a loop/);
   assert.equal(JSON.parse(await readFile(real, 'utf8')).provider, 'anthropic', 'untouched');
+});
+
+test('a config addressed through a symlink takes the same lock as its target', async () => {
+  const home = await newHome();
+  const real = path.join(home, 'dotfiles', 'config.json');
+  const link = path.join(home, '.stratus', 'config.json');
+  await mkdir(path.dirname(real), { recursive: true });
+  await mkdir(path.dirname(link), { recursive: true });
+  await writeFile(real, '{}\n');
+  await symlink(real, link);
+
+  // The write resolves the chain before renaming, so these two spellings
+  // replace the same file. A lock keyed to the spelling would let them past
+  // each other, and the later save would discard the earlier one's change.
+  assert.equal(await configLockPath(link), await configLockPath(real));
+
+  await Promise.all([
+    updateConfigFile(link, { homeDir: home }, (current) => ({ ...current, provider: 'anthropic' })),
+    updateConfigFile(real, { homeDir: home }, (current) => ({ ...current, model: 'claude-opus-5' })),
+  ]);
+
+  const written = JSON.parse(await readFile(real, 'utf8')) as Record<string, unknown>;
+  assert.equal(written.provider, 'anthropic');
+  assert.equal(written.model, 'claude-opus-5');
 });

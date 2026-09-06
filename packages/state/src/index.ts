@@ -4017,19 +4017,27 @@ export {
 import { withFileLock } from './lock.ts';
 
 /**
- * The lock every writer of one config file takes: `<that file>.lock`.
+ * The lock every writer of one config file takes: `<that file>.lock`,
+ * resolved through symlinks exactly as the write itself resolves.
  *
  * Keyed to the destination rather than to the home, because the home is not
- * what two writers of the same file have in common. Two invocations with
+ * what two writers of the same file have in common: two invocations with
  * different `STRATUS_HOME` can name one explicit `--config`, and a
- * home-derived lock would hand them a lock each — which is no lock at all
- * for the file they are both replacing.
+ * home-derived lock would hand them a lock each — no lock at all for the
+ * file they are both replacing.
+ *
+ * Keyed to the *resolved* destination for the same reason one step further
+ * in. `saveConfigFile` follows the link chain before renaming, so a writer
+ * addressing a config through a symlink and one addressing its target are
+ * replacing the same file; locking on the spelling rather than the file
+ * would let them past each other.
  *
  * Beside the file it guards, which asks for nothing the write does not
  * already need: replacing a config by rename requires write on its
  * directory, so a lock file there is never the thing that fails.
  */
-export const configLockPath = (configPath: string): string => `${configPath}.lock`;
+export const configLockPath = async (configPath: string): Promise<string> =>
+  `${await linkTarget(configPath)}.lock`;
 
 /**
  * Read-modify-write the config, holding the lock across both halves.
@@ -4055,7 +4063,7 @@ export const updateConfigFile = async (
   configPath: string,
   env: StateEnvironment,
   mutate: (current: StratusConfigFile) => StratusConfigFile | Promise<StratusConfigFile>,
-): Promise<StratusConfigFile> => withFileLock(configLockPath(configPath), async () => {
+): Promise<StratusConfigFile> => withFileLock(await configLockPath(configPath), async () => {
   let current: StratusConfigFile = {};
   try {
     current = await loadConfigFile(configPath);
