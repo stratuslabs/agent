@@ -74,11 +74,15 @@ read the file.
 Which runtimes can actually look: agents on the **Anthropic API** or an
 **OpenAI-compatible** provider receive the image itself. The **Claude Code**
 and **Codex** harnesses take a text prompt, so an agent on either is told an
-image was attached, and what it was called, and that it cannot see it. The
-image is stored with the message in the session, so a later turn in the same
-thread still has it — up to 20 MB of images per request, newest first;
-past that, the oldest ones reach the model as a note saying they are no
-longer sent.
+image was attached, and what it was called, and that it cannot see it. An
+OpenAI-compatible model that takes only text — most local runtimes — needs
+`"vision": false` in [config](../reference/config.md), which gives it that
+same note; without it the endpoint rejects the request, and keeps rejecting
+every later turn of that session, because the image is stored with the
+message. The image is stored with the message in the session, so a later
+turn in the same thread still has it — up to 20 MB and 100 images per
+request, newest first; past either, the oldest ones reach the model as a
+note saying they are no longer sent.
 
 ## Worth knowing
 

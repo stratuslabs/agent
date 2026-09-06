@@ -1086,7 +1086,7 @@ test('images past the replay budget are replaced by a note, newest kept', async 
     apiMessage([{ type: 'text', text: 'Still looking.' }]),
   ]);
   // Each image is 6 decoded bytes; the budget holds two of the three.
-  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, imageReplayBudgetBytes: 12 });
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, imageReplayBudget: { bytes: 12 } });
   const stamp = new Date().toISOString();
   const session = createSession({
     messages: [

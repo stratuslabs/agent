@@ -12,6 +12,7 @@ import {
   imagesWithinReplayBudget,
   renderSystemPromptParts,
   type ImageAttachment,
+  type ImageReplayBudget,
   type JsonObject,
   type ModelProvider,
   type ProviderCallUsage,
@@ -48,12 +49,12 @@ export interface AnthropicProviderConfig {
    */
   thinking?: 'default' | 'disabled';
   /**
-   * How many decoded image bytes one request may replay from the
-   * transcript, newest first; older images past it are sent as a note.
-   * Defaults to `IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES` from core, sized to the
-   * Messages API's request limit. Lower it for a proxy with a smaller one.
+   * How much of the transcript's images one request may replay, newest
+   * first — decoded bytes and a count; older images past either are sent
+   * as a note. Each defaults to core's constant for the Messages API's
+   * limit. Lower one for a proxy with a smaller limit.
    */
-  imageReplayBudgetBytes?: number;
+  imageReplayBudget?: ImageReplayBudget;
   /**
    * Mark the stable head of each request cacheable — the tool definitions and
    * the persona/skills system block, which are byte-identical across every
@@ -295,9 +296,9 @@ const createAnthropicMessages = (
   request: ProviderRequest,
   mapping: ToolNameMapping,
   rawTurns: RawTurns,
-  imageReplayBudgetBytes: number | undefined,
+  imageReplayBudget: ImageReplayBudget | undefined,
 ): MessageParam[] => {
-  const replayed = imagesWithinReplayBudget(request.session.messages, imageReplayBudgetBytes);
+  const replayed = imagesWithinReplayBudget(request.session.messages, imageReplayBudget);
   // Build (role, blocks) groups first, merging consecutive same-role turns:
   // the runner records text and each tool call as separate messages, but on
   // the wire they belong to one assistant turn followed by one user turn of
@@ -492,7 +493,7 @@ export const createAnthropicProvider = ({
   thinking = 'default',
   promptCache = true,
   promptCacheTtl = '5m',
-  imageReplayBudgetBytes,
+  imageReplayBudget,
   fetch: fetchImpl,
 }: AnthropicProviderConfig): ModelProvider => {
   if (!apiKey && !authToken) {
@@ -521,7 +522,7 @@ export const createAnthropicProvider = ({
       const descriptors = sortedToolDescriptors(request.tools);
       const mapping = createToolNameMapping(descriptors);
       const tools = createAnthropicTools(descriptors, mapping);
-      const messages = createAnthropicMessages(request, mapping, rawTurns, imageReplayBudgetBytes);
+      const messages = createAnthropicMessages(request, mapping, rawTurns, imageReplayBudget);
       // A system message has to follow a user turn. The kernel loop only
       // calls a provider with a user message or tool results last, so this
       // holds — but it is the API's rule, not ours, and a caller building

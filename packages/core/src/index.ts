@@ -40,6 +40,19 @@ export const IMAGE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
 export const IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 
 /**
+ * The most images one request may carry, whatever they weigh. The Messages
+ * API accepts 100 per request; a thread of small screenshots reaches that
+ * long before it reaches the byte budget.
+ */
+export const IMAGE_ATTACHMENTS_MAX_REPLAY_COUNT = 100;
+
+/** What `imagesWithinReplayBudget` holds a request to; each defaults to the constant above it. */
+export interface ImageReplayBudget {
+  bytes?: number;
+  count?: number;
+}
+
+/**
  * An image a person sent with a user message, as the model receives it.
  * Bytes are base64 so the attachment survives in the session's JSON body
  * and replays on every later turn the way the text does.
@@ -64,11 +77,12 @@ const base64DecodedBytes = (data: string): number =>
  * session ever received is stored with its message and replayed on every
  * later turn, so a per-message budget alone is not one: two messages that
  * each fit would together exceed the request limit on the turn after. The
- * budget is spent newest first, within a message as well as across them —
- * the latest message always arrives whole, because a channel already holds
- * one message to this same budget — and once an image does not fit,
- * nothing older does either, so what the model sees is a contiguous recent
- * window rather than a scatter. A provider
+ * budget — bytes and a count, both API limits — is spent newest first,
+ * within a message as well as across them: the latest message always
+ * arrives whole, because a channel already holds one message to this same
+ * budget, and once an image does not fit, nothing older does either, so
+ * what the model sees is a contiguous recent window rather than a
+ * scatter. A provider
  * that sends image bytes asks this and sends a note in place of the rest;
  * the transcript itself is never trimmed.
  *
@@ -77,10 +91,11 @@ const base64DecodedBytes = (data: string): number =>
  */
 export const imagesWithinReplayBudget = (
   messages: readonly Message[],
-  budgetBytes: number = IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
+  budget: ImageReplayBudget = {},
 ): ReadonlySet<ImageAttachment> => {
   const kept = new Set<ImageAttachment>();
-  let remaining = budgetBytes;
+  let remaining = budget.bytes ?? IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES;
+  const count = budget.count ?? IMAGE_ATTACHMENTS_MAX_REPLAY_COUNT;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const images = messages[index]?.images;
     if (images === undefined) {
@@ -89,7 +104,7 @@ export const imagesWithinReplayBudget = (
     for (let position = images.length - 1; position >= 0; position -= 1) {
       const image = images[position]!;
       const bytes = base64DecodedBytes(image.data);
-      if (bytes > remaining) {
+      if (bytes > remaining || kept.size >= count) {
         return kept;
       }
       remaining -= bytes;

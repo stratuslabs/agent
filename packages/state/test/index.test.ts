@@ -1204,3 +1204,29 @@ test('a credential rotation is atomic, so a concurrent resolve never sees half a
   const leftovers = (await readdir(path.join(home, '.stratus'))).filter((name) => name.endsWith('.tmp'));
   assert.deepEqual(leftovers, []);
 });
+
+test('vision: false reaches the openai runtime, and only it', async () => {
+  const { resolveRuntimeConfig, validateConfigFile } = await import('../src/index.ts');
+  // `false` is the point of the key, so it must survive a truthiness check.
+  assert.equal(validateConfigFile({ vision: false }, 'test config').vision, false);
+  assert.equal(validateConfigFile({ vision: 'no' }, 'test config').vision, undefined);
+
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-vision-'));
+  const configPath = path.join(home, 'stratus.config.json');
+  await writeFile(configPath, JSON.stringify({ provider: 'openai', model: 'local-text-model', vision: false }));
+  const config = await resolveRuntimeConfig({ configPath }, {
+    homeDir: home,
+    cwd: home,
+    processEnv: { OPENAI_API_KEY: 'test-key' },
+  });
+  assert.equal(config.provider, 'openai');
+  assert.equal((config as { vision?: boolean }).vision, false);
+
+  await writeFile(configPath, JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5', vision: false }));
+  const anthropic = await resolveRuntimeConfig({ configPath }, {
+    homeDir: home,
+    cwd: home,
+    processEnv: { ANTHROPIC_API_KEY: 'test-key' },
+  });
+  assert.equal('vision' in anthropic, false);
+});

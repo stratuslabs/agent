@@ -8,6 +8,7 @@ import { EventBus, type ApprovalAnswer, type ImageAttachment, type Session, type
 import type { GatewayLike } from '@stratusagent/channels';
 import {
   createSlackChannelAdapter,
+  createSlackFileFetcher,
   type SlackBlock,
   type SlackSocketEventArgs,
   type SlackSocketLike,
@@ -3951,4 +3952,89 @@ test('images that fit one by one are still held to the message\'s total budget',
     'Dylan: all of them\n[Attached: shot5.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
   );
   assert.equal(warnings.filter((line) => /shot5\.png/.test(line) && /message of its own/.test(line)).length, 1);
+});
+
+test('the default fetcher stops reading a body the moment it passes what the caller will take', async () => {
+  let pulls = 0;
+  let cancelled = false;
+  // A body that never ends: each pull is another 1 KiB, forever.
+  const endless = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulls += 1;
+      controller.enqueue(new Uint8Array(1024));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const fetchImpl = (async () => new Response(endless, { status: 200, headers: { 'content-type': 'image/png' } })) as unknown as typeof fetch;
+
+  const download = await createSlackFileFetcher(fetchImpl)('https://files.slack.com/F9/download', 'xoxb-1', AbortSignal.timeout(5000), 4096);
+
+  assert.equal(download.truncated, true);
+  assert.equal(download.body.length, 0);
+  assert.equal(cancelled, true);
+  // Four chunks fit and the fifth did not; the stream reads one chunk
+  // ahead on its own, so the exact count is its business, not ours — what
+  // matters is that an endless body was let go of almost at once.
+  assert.ok(pulls >= 5 && pulls <= 8, `expected the read to stop after a handful of pulls, saw ${pulls}`);
+
+  // A body that fits comes back whole, and a declared length that does not
+  // is refused before a byte is read.
+  const small = await createSlackFileFetcher((async () => new Response(new Uint8Array([1, 2, 3]), { status: 200 })) as unknown as typeof fetch)('u', 't', AbortSignal.timeout(5000), 4096);
+  assert.deepEqual([...small.body], [1, 2, 3]);
+  assert.equal(small.truncated, undefined);
+  let readDeclared = 0;
+  const declared = new ReadableStream<Uint8Array>({ pull(controller) { readDeclared += 1; controller.enqueue(new Uint8Array(8)); } });
+  const refused = await createSlackFileFetcher((async () => new Response(declared, { status: 200, headers: { 'content-length': '5000' } })) as unknown as typeof fetch)('u', 't', AbortSignal.timeout(5000), 4096);
+  assert.equal(refused.truncated, true);
+  assert.equal(refused.body.length, 0);
+  // The stream primes one chunk for itself when it is built; the fetcher
+  // asked it for nothing.
+  assert.ok(readDeclared <= 1, `expected no reads beyond the stream's own priming, saw ${readDeclared}`);
+});
+
+test('an image whose download is cut off at the cap falls back to the note', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+  const caps: number[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    // Slack said nothing about the size, and the response was bigger than
+    // the fetcher was allowed to take.
+    fetchFile: async (_url, _token, _signal, maxBytes) => {
+      caps.push(maxBytes);
+      return { status: 200, contentType: 'image/png', body: Buffer.alloc(0), truncated: true };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-cut' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> unsized',
+      ts: '966.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [{ id: 'F8', name: 'unsized.png', mimetype: 'image/png', url_private_download: 'https://files.slack.com/F8/download' }],
+    },
+  });
+  await adapter.stop();
+
+  // The first image of a message may weigh the per-image cap.
+  assert.deepEqual(caps, [5 * 1024 * 1024]);
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images]), [[
+    'Dylan: unsized\n[Attached: unsized.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    undefined,
+  ]]);
+  assert.equal(warnings.filter((line) => /unsized\.png/.test(line) && /abandoned/.test(line)).length, 1);
 });

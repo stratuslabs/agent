@@ -190,6 +190,12 @@ export interface SlackFileDownload {
   status: number;
   contentType?: string;
   body: Buffer;
+  /**
+   * Set when the body was cut off at `maxBytes`: what is in `body` is not
+   * the file, only proof that the file was bigger than the caller would
+   * take.
+   */
+  truncated?: boolean;
 }
 
 /**
@@ -197,9 +203,11 @@ export interface SlackFileDownload {
  * download's deadline, and a fetcher MUST stop on it — headers and body
  * both: the download runs inside the session's intake chain, so one that
  * stalls holds every later message in the thread, and `stop()` waits on
- * the handler too.
+ * the handler too. `maxBytes` is the most body a fetcher may buffer; one
+ * that reads past it MUST stop there and report `truncated`, because
+ * Slack's reported size is advisory and a response is not.
  */
-export type SlackFileFetcher = (url: string, botToken: string, signal: AbortSignal) => Promise<SlackFileDownload>;
+export type SlackFileFetcher = (url: string, botToken: string, signal: AbortSignal, maxBytes: number) => Promise<SlackFileDownload>;
 
 export interface SlackSocketLike {
   on(eventName: string, listener: (args: SlackSocketEventArgs) => void): void;
@@ -276,15 +284,54 @@ const defaultWebClient = (botToken: string): SlackWebLike => {
   return new WebClient(botToken) as unknown as SlackWebLike;
 };
 
-const defaultFetchFile: SlackFileFetcher = async (url, botToken, signal) => {
-  const response = await fetch(url, { headers: { authorization: `Bearer ${botToken}` }, signal });
+/**
+ * The default fetcher over a `fetch`. Exported as a factory so the bounded
+ * read can be tested against a fake `fetch` with a body that never ends;
+ * the adapter uses it over the global one.
+ *
+ * The body is read a chunk at a time and abandoned the moment it passes
+ * `maxBytes`: `arrayBuffer()` would buffer the whole response first, and
+ * the size the adapter checked before asking came from Slack's metadata,
+ * which an oversized response is under no obligation to match. A
+ * `content-length` that already says too much is refused before a byte is
+ * read.
+ */
+export const createSlackFileFetcher = (fetchImpl: typeof fetch): SlackFileFetcher => async (url, botToken, signal, maxBytes) => {
+  const response = await fetchImpl(url, { headers: { authorization: `Bearer ${botToken}` }, signal });
   const contentType = response.headers.get('content-type');
-  return {
-    status: response.status,
-    ...(contentType !== null ? { contentType } : {}),
-    body: Buffer.from(await response.arrayBuffer()),
-  };
+  const typed = contentType !== null ? { contentType } : {};
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel();
+    return { status: response.status, ...typed, body: Buffer.alloc(0), truncated: true };
+  }
+  if (response.body === null) {
+    return { status: response.status, ...typed, body: Buffer.alloc(0) };
+  }
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let received = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      received += value.byteLength;
+      if (received > maxBytes) {
+        await reader.cancel();
+        return { status: response.status, ...typed, body: Buffer.alloc(0), truncated: true };
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return { status: response.status, ...typed, body: Buffer.concat(chunks) };
 };
+
+const defaultFetchFile: SlackFileFetcher = (url, botToken, signal, maxBytes) =>
+  createSlackFileFetcher(fetch)(url, botToken, signal, maxBytes);
 
 /**
  * A hold on a queued renderer's placeholder, taken the moment an earlier
@@ -1184,9 +1231,13 @@ const readImageAttachments = async (
       unread.push(file);
       continue;
     }
+    // What this image may weigh: the per-image cap, or what is left of the
+    // message's budget if that is less. Handed to the fetcher so an
+    // oversized response is abandoned mid-body rather than buffered whole.
+    const maxBytes = Math.min(IMAGE_ATTACHMENT_MAX_BYTES, IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES - total);
     let download: SlackFileDownload;
     try {
-      download = await fetchFile(url, botToken, AbortSignal.timeout(timeoutMs));
+      download = await fetchFile(url, botToken, AbortSignal.timeout(timeoutMs), maxBytes);
     } catch (error) {
       const reason = error instanceof Error && error.name === 'TimeoutError'
         ? `it took longer than ${timeoutMs}ms`
@@ -1202,6 +1253,11 @@ const readImageAttachments = async (
     const contentType = download.contentType?.split(';')[0]?.trim().toLowerCase() ?? '';
     if (download.status !== 200 || contentType.startsWith('text/')) {
       warn(`slack: ${fileLabel(file)} came back as ${contentType || 'no content type'} (HTTP ${download.status}) rather than an image. This is what a bot token without the files:read scope gets — add the scope under OAuth & Permissions and reinstall the app.`);
+      unread.push(file);
+      continue;
+    }
+    if (download.truncated === true) {
+      warn(`slack: ${fileLabel(file)} is larger than the ${maxBytes} bytes this message could still take for an image; the download was abandoned and the turn is told it cannot be read.`);
       unread.push(file);
       continue;
     }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES, imagesWithinReplayBudget, type ImageAttachment, type Message } from '../src/index.ts';
+import { IMAGE_ATTACHMENTS_MAX_REPLAY_COUNT, IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES, imagesWithinReplayBudget, type ImageAttachment, type Message } from '../src/index.ts';
 
 // base64 of N bytes is 4 * ceil(N / 3) characters; these are 6 and 9 bytes.
 // Each fixture is given a distinct payload so an assertion on which ones
@@ -32,23 +32,23 @@ test('the replay budget is spent newest first and cuts off contiguously', () => 
   ];
 
   // 12 bytes: the newest message's two images exactly, nothing older.
-  const twelve = imagesWithinReplayBudget(messages, 12);
+  const twelve = imagesWithinReplayBudget(messages, { bytes: 12 });
   assert.deepEqual([...twelve], [newestB, newestA]);
   assert.notDeepEqual(newestA, newestB);
 
   // 6 bytes: only the later of the newest message's two images — the
   // budget is newest-first inside a message too, not first-listed.
-  const six = imagesWithinReplayBudget(messages, 6);
+  const six = imagesWithinReplayBudget(messages, { bytes: 6 });
   assert.deepEqual([...six], [newestB]);
 
   // 21 bytes: the middle one fits too, and the oldest would as well on its
   // own — but the cut-off is contiguous, so it is out (21 - 12 - 9 = 0).
-  const twentyOne = imagesWithinReplayBudget(messages, 21);
+  const twentyOne = imagesWithinReplayBudget(messages, { bytes: 21 });
   assert.equal(twentyOne.has(middle), true);
   assert.equal(twentyOne.has(oldest), false);
 
   // 27 bytes: everything.
-  assert.equal(imagesWithinReplayBudget(messages, 27).size, 4);
+  assert.equal(imagesWithinReplayBudget(messages, { bytes: 27 }).size, 4);
 
   // Membership is by identity, and the default budget is the shared cap.
   const copy = { ...oldest };
@@ -63,8 +63,8 @@ test('a partial fit inside a message keeps its later images, never its earlier o
   // keeps only the 6.
   const bigThenSmall = [nineBytes(), sixBytes()];
   const smallThenBig = [sixBytes(), nineBytes()];
-  assert.deepEqual([...imagesWithinReplayBudget([user('u1', bigThenSmall)], 7)], [bigThenSmall[1]]);
-  assert.equal(imagesWithinReplayBudget([user('u1', smallThenBig)], 7).size, 0);
+  assert.deepEqual([...imagesWithinReplayBudget([user('u1', bigThenSmall)], { bytes: 7 })], [bigThenSmall[1]]);
+  assert.equal(imagesWithinReplayBudget([user('u1', smallThenBig)], { bytes: 7 }).size, 0);
 });
 
 test('base64 padding is not counted as image bytes', () => {
@@ -73,7 +73,24 @@ test('base64 padding is not counted as image bytes', () => {
   const two: ImageAttachment = { mediaType: 'image/png', data: 'AAA=' };
   const one: ImageAttachment = { mediaType: 'image/png', data: 'AA==' };
   const messages = [user('u1', [three]), user('u2', [two]), user('u3', [one])];
-  assert.equal(imagesWithinReplayBudget(messages, 3).size, 2);
-  assert.equal(imagesWithinReplayBudget(messages, 6).size, 3);
-  assert.equal(imagesWithinReplayBudget(messages, 5).size, 2);
+  assert.equal(imagesWithinReplayBudget(messages, { bytes: 3 }).size, 2);
+  assert.equal(imagesWithinReplayBudget(messages, { bytes: 6 }).size, 3);
+  assert.equal(imagesWithinReplayBudget(messages, { bytes: 5 }).size, 2);
+});
+
+test('the replay budget also counts images, newest first, whatever they weigh', () => {
+  const messages = [1, 2, 3].map((n) => user(`u${n}`, [sixBytes(), sixBytes()]));
+  // Bytes would allow all six; a count of three keeps the newest message
+  // whole and one of the middle one's — its later one.
+  const three = imagesWithinReplayBudget(messages, { bytes: 1000, count: 3 });
+  assert.equal(three.size, 3);
+  assert.equal(three.has(messages[2]!.images![0]!), true);
+  assert.equal(three.has(messages[2]!.images![1]!), true);
+  assert.equal(three.has(messages[1]!.images![1]!), true);
+  assert.equal(three.has(messages[1]!.images![0]!), false);
+  // The default is the Messages API's limit.
+  assert.equal(IMAGE_ATTACHMENTS_MAX_REPLAY_COUNT, 100);
+  const many = Array.from({ length: 101 }, (_, n) => user(`m${n}`, [sixBytes()]));
+  assert.equal(imagesWithinReplayBudget(many).size, 100);
+  assert.equal(imagesWithinReplayBudget(many).has(many[0]!.images![0]!), false);
 });

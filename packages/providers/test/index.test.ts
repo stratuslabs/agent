@@ -850,7 +850,7 @@ test('createOpenAICompatibleProvider replaces images past the replay budget with
     });
   }) as typeof fetch;
   // Each image is 6 decoded bytes; the budget holds one.
-  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: fetchImpl, imageReplayBudgetBytes: 6 });
+  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: fetchImpl, imageReplayBudget: { bytes: 6 } });
   const request = requestWithImage();
   request.session.messages[0]!.images = [{ mediaType: 'image/png', data: 'AAAAAAAA', name: 'old.png' }];
   request.session.messages.push({
@@ -880,4 +880,25 @@ test('createOpenAICompatibleProvider replaces images past the replay budget with
       ],
     },
   ]);
+});
+
+test('createOpenAICompatibleProvider names images for a model without vision instead of sending them', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: fetchImpl, vision: false });
+
+  await provider.generate(requestWithImage());
+
+  // A plain string, so an endpoint that takes only strings takes this one,
+  // with the same note a text-only harness gets.
+  assert.equal(
+    bodies[0]!.messages.at(-1).content,
+    'what is this?\n[Attached: shot.png. This runtime cannot see images — say so rather than guessing at them.]',
+  );
 });

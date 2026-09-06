@@ -5,6 +5,7 @@ import {
   uncachedInputTokens,
   type ExecutionContext,
   type ImageAttachment,
+  type ImageReplayBudget,
   type JsonObject,
   type ModelProvider,
   type ProviderCallUsage,
@@ -83,12 +84,21 @@ export interface OpenAICompatibleProviderConfig {
    */
   requestTimeoutMs?: number;
   /**
-   * How many decoded image bytes one request may replay from the
-   * transcript, newest first; older images past it are sent as a note.
-   * Defaults to `IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES` from core. Lower it for
-   * an endpoint with a smaller request limit.
+   * Whether the model takes images. Default true. A text-only model — the
+   * usual case for a local runtime — rejects a request with an `image_url`
+   * part in it, and because the image is stored with the message before the
+   * provider is called, every later turn of that session would replay the
+   * same part and fail the same way. Off, an image reaches the model as a
+   * note naming it instead, the same one a text-only harness gets.
    */
-  imageReplayBudgetBytes?: number;
+  vision?: boolean;
+  /**
+   * How much of the transcript's images one request may replay, newest
+   * first — decoded bytes and a count; older images past either are sent
+   * as a note. Each defaults to core's constant. Lower one for an endpoint
+   * with a smaller limit.
+   */
+  imageReplayBudget?: ImageReplayBudget;
 }
 
 interface OpenAICompatibleToolCall {
@@ -361,7 +371,8 @@ export const createOpenAICompatibleProvider = ({
   headers = {},
   fetch: fetchImpl = globalThis.fetch,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
-  imageReplayBudgetBytes,
+  vision = true,
+  imageReplayBudget,
 }: OpenAICompatibleProviderConfig): ModelProvider => {
   if (typeof fetchImpl !== 'function') {
     throw new Error('Global fetch is unavailable for the OpenAI-compatible provider.');
@@ -395,7 +406,7 @@ export const createOpenAICompatibleProvider = ({
           },
           body: JSON.stringify({
             model,
-            messages: createOpenAICompatibleMessages(request, systemPrompt, toolNames, imageReplayBudgetBytes),
+            messages: createOpenAICompatibleMessages(request, systemPrompt, toolNames, vision, imageReplayBudget),
             ...(tools.length > 0 ? { tools } : {}),
           }),
           ...(signal ? { signal } : {}),
@@ -590,10 +601,11 @@ const createOpenAICompatibleMessages = (
   request: ProviderRequest,
   systemPrompt: string | undefined,
   toolNames: OpenAICompatibleToolNameMapping,
-  imageReplayBudgetBytes: number | undefined,
+  vision: boolean,
+  imageReplayBudget: ImageReplayBudget | undefined,
 ): OpenAICompatibleMessage[] => {
   const messages: OpenAICompatibleMessage[] = [];
-  const replayed = imagesWithinReplayBudget(request.session.messages, imageReplayBudgetBytes);
+  const replayed = imagesWithinReplayBudget(request.session.messages, imageReplayBudget);
 
   // One shared reading of what an agent is told about itself — persona,
   // memory, skills — rendered by the kernel (see core's system prompt
@@ -646,7 +658,9 @@ const createOpenAICompatibleMessages = (
 
     messages.push({
       role: message.role,
-      content: message.role === 'user' ? userContentParts(message, replayed) : message.content,
+      content: message.role === 'user'
+        ? (vision ? userContentParts(message, replayed) : userMessageText(message))
+        : message.content,
       ...(message.name ? { name: message.name } : {}),
     });
   }
