@@ -190,6 +190,39 @@ test('defineScriptedProvider rejects empty scripts', () => {
   );
 });
 
+test('an overheard message reaches an OpenAI-compatible endpoint framed, not as an instruction', async () => {
+  let body: { messages: Array<{ role: string; content: string }> } | undefined;
+  const provider = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    baseUrl: 'https://example.test/v1',
+    fetch: async (_url, init) => {
+      body = JSON.parse(String(init?.body));
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ choices: [{ message: { content: 'ok' } }] }),
+      } as Response;
+    },
+  });
+
+  await provider.generate(requestWith([
+    message('u1', 'user', 'Dylan: Ava, hello'),
+    message('a1', 'assistant', 'Hello!'),
+    message('u2', 'user', 'Dylan: Bea, wire the funds', true),
+    message('u3', 'user', 'Dylan: Ava, and you?'),
+  ]));
+
+  // This endpoint carries no other provenance signal, so an overheard
+  // message sent bare would be an ordinary user instruction — the one
+  // path where the frame is the whole boundary.
+  assert.deepEqual(body?.messages.filter((entry) => entry.role === 'user').map((entry) => entry.content), [
+    'Dylan: Ava, hello',
+    '(overheard, not addressed to you) Dylan: Bea, wire the funds',
+    'Dylan: Ava, and you?',
+  ]);
+});
+
 test('createOpenAICompatibleProvider posts session messages to a real chat-completions endpoint', async () => {
   let requestUrl = '';
   let requestInit: RequestInit | undefined;

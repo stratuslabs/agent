@@ -622,9 +622,13 @@ const createOpenAICompatibleMessages = (
       continue;
     }
 
+    // Framed by the kernel's one rule for it, so the OpenAI-compatible path
+    // says "said to somebody else" the way the API and harness paths do —
+    // an overheard message sent bare here would be an ordinary instruction
+    // on exactly the endpoint with no other provenance signal.
     messages.push({
       role: message.role,
-      content: message.content,
+      content: message.role === 'user' ? promptTextOf(message) : message.content,
       ...(message.name ? { name: message.name } : {}),
     });
   }
