@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, chown, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -1165,5 +1165,33 @@ test('replacing a config keeps the permissions it had', async () => {
   await saveConfigFile(configPath, { provider: 'demo' });
 
   assert.equal((await stat(configPath)).mode & 0o777, 0o640);
+  assert.equal(JSON.parse(await readFile(configPath, 'utf8')).provider, 'demo');
+});
+
+test('replacing a config keeps the ownership it had', async (t) => {
+  // A config chgrp'd to a shared group so a daemon running as another user
+  // can read it. Renaming a temporary over it hands the file the writer's
+  // own primary group, and the daemon loses access — the same failure as
+  // the mode, arriving through the other half of the inode's metadata.
+  //
+  // Needs an alternate gid this process may set, which not every machine
+  // gives a test. Skipped rather than weakened where there is none: an
+  // assertion that cannot fail reads as coverage and is not.
+  const alternateGid = process.getgroups?.().find((gid) => gid !== process.getgid?.())
+    ?? (process.getuid?.() === 0 ? 1 : undefined);
+  if (alternateGid === undefined) {
+    t.skip('no alternate gid this process may set');
+    return;
+  }
+
+  const home = await newHome();
+  const configPath = path.join(home, '.stratus', 'config.json');
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(configPath, `${JSON.stringify({ provider: 'anthropic' })}\n`);
+  await chown(configPath, process.getuid?.() ?? 0, alternateGid);
+
+  await saveConfigFile(configPath, { provider: 'demo' });
+
+  assert.equal((await stat(configPath)).gid, alternateGid);
   assert.equal(JSON.parse(await readFile(configPath, 'utf8')).provider, 'demo');
 });

@@ -69,8 +69,11 @@ document. Replacing a file rather than writing through it means two things
 are carried across deliberately: a symlinked `config.json` — one managed
 from a dotfiles repository — is followed and written where it actually
 lives, including when the link is in place before its target exists; and the
-file keeps the permissions it had, so a `0640` config a daemon running as
-another user can read stays readable.
+file keeps the permissions **and ownership** it had, so a `0640` config, or
+one chgrp'd to a shared group, stays readable by a daemon running as another
+user. Ownership is best effort — a process cannot give a file away to
+another uid — but where it cannot be reproduced the writer could not have
+set it, or modified the file, in the first place.
 
 Credentials stored by setup live in `~/.stratus/credentials.json`
 (owner-read-only) and are **endpoint-bound**: a credential saved for one

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { appendFile, chmod, cp, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, chown, cp, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -3913,12 +3913,16 @@ export const listAgentSummaries = async (
  *   through `realpath`, which needs the final target to exist: a link put
  *   in place before the file it names is exactly the case a dotfiles setup
  *   produces.
- * - **The mode.** A `0640` config read by a daemon running as another user
- *   becomes `0600` if the temporary is renamed over it under umask 077, and
- *   the daemon can no longer load it. That is the shared-machine setup the
- *   paragraph below exists to protect, so the destination's mode is copied
- *   onto the temporary before it replaces it. Only a file being *created*
- *   takes the umask's answer.
+ * - **The mode, and the ownership.** A `0640` config read by a daemon
+ *   running as another user becomes `0600` if the temporary is renamed over
+ *   it under umask 077, and a config chgrp'd to a shared group loses that
+ *   group to the writer's own — either way the daemon can no longer read
+ *   it. That is the shared-machine setup the paragraph below exists to
+ *   protect, so both are copied onto the temporary before it replaces the
+ *   destination. Ownership is best effort by necessity: a process cannot
+ *   give a file away to another uid, and where the copy fails the writer
+ *   could not have set that ownership — or modified the file — in the first
+ *   place. Only a file being *created* takes the umask's answer.
  *
  * Deliberately NOT 0600: `config.json` holds no secrets (those live in
  * `credentials.json`, which has its own posture), and tightening it here
@@ -3962,11 +3966,24 @@ export const saveConfigFile = async (
   const staged = `${target}.${process.pid}.tmp`;
   try {
     await writeFile(staged, `${JSON.stringify(config, null, 2)}\n`);
-    // The mode the file already has, so a replacement is not also a
-    // permission change. Absent (a first write) it keeps the umask's.
+    // The mode and ownership the file already has, so a replacement is not
+    // also a permission change. Absent (a first write) it keeps whatever
+    // the umask and the process's own identity give it.
     const existing = await stat(target).catch(() => undefined);
     if (existing) {
       await chmod(staged, existing.mode & 0o7777);
+      // Best effort, and it has to be: a process cannot give a file away to
+      // another uid, so this can only succeed where the writer already had
+      // the standing to produce that ownership. That is exactly the case
+      // worth covering — an operator who chgrp'd their config so a daemon
+      // running as another user could read it, whose own primary group
+      // would otherwise become the file's on every save. Where it fails,
+      // the writer could not have modified the file at all: a rename needs
+      // write on the directory, and the ownership it could not reproduce is
+      // ownership it could not have set.
+      await chown(staged, existing.uid, existing.gid).catch(() => {
+        // Left as the umask made it. See the note above.
+      });
     }
     await rename(staged, target);
   } catch (error) {
