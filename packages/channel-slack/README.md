@@ -74,9 +74,7 @@ retried without it, so one bad file cannot fail every later turn of a
 thread.
 An OpenAI-compatible model that takes only text needs `"vision": false` in
 config, which turns every image into that note; see the
-[Slack guide](../../docs/guides/slack.md#sending-an-image). A download that stalls is
-abandoned after 30 seconds the same way, so a slow link cannot hold the
-thread. Whether the model actually *sees* the image depends on the
+[Slack guide](../../docs/guides/slack.md#sending-an-image). Whether the model actually *sees* the image depends on the
 agent's runtime: the Anthropic API and OpenAI-compatible providers send it
 as image content; the Claude Code and Codex harnesses take a text prompt,
 so there the agent is told the image's name and that it cannot see it.
