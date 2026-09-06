@@ -303,6 +303,13 @@ export interface FallbackRuntime {
    */
   promptCache?: boolean;
   promptCacheTtl?: '5m' | '1h';
+  /**
+   * The daemon's `vision` setting, carried to an OpenAI-compatible fallback
+   * for the same reason as the caching settings above: a session that has
+   * gone fallback-sticky replays its images to the fallback, and a
+   * text-only one would reject every turn from then on.
+   */
+  vision?: boolean;
 }
 
 export type RuntimeConfig =
@@ -2837,6 +2844,9 @@ export const resolveRuntimeConfig = async (
           // providers, which do not build their own requests.
           ...(fileConfig.promptCache !== undefined ? { promptCache: fileConfig.promptCache } : {}),
           ...(fileConfig.promptCacheTtl ? { promptCacheTtl: fileConfig.promptCacheTtl } : {}),
+          // The one daemon-wide `vision` setting reaches an OpenAI-compatible
+          // fallback too; the other providers never ask.
+          ...(fallbackProvider === 'openai' && fileConfig.vision !== undefined ? { vision: fileConfig.vision } : {}),
           ...(fallbackProvider === 'openai'
             ? {
                 baseUrl: fallbackBoundUrl

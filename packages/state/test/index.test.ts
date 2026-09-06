@@ -1222,11 +1222,40 @@ test('vision: false reaches the openai runtime, and only it', async () => {
   assert.equal(config.provider, 'openai');
   assert.equal((config as { vision?: boolean }).vision, false);
 
-  await writeFile(configPath, JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5', vision: false }));
+  // An Anthropic primary never asks, but its OpenAI-compatible fallback
+  // does: a session that has gone fallback-sticky replays its images there.
+  await writeFile(configPath, JSON.stringify({
+    provider: 'anthropic',
+    model: 'claude-opus-5',
+    fallbackProvider: 'openai',
+    fallbackModel: 'local-text-model',
+    vision: false,
+  }));
   const anthropic = await resolveRuntimeConfig({ configPath }, {
     homeDir: home,
     cwd: home,
-    processEnv: { ANTHROPIC_API_KEY: 'test-key' },
+    processEnv: { ANTHROPIC_API_KEY: 'test-key', OPENAI_API_KEY: 'test-key' },
   });
+  assert.equal(anthropic.provider, 'anthropic');
   assert.equal('vision' in anthropic, false);
+  assert.equal(anthropic.fallback?.provider, 'openai');
+  assert.equal(anthropic.fallback?.vision, false);
+
+  // And an Anthropic fallback never carries it.
+  await writeFile(configPath, JSON.stringify({
+    provider: 'openai',
+    model: 'local-text-model',
+    fallbackProvider: 'anthropic',
+    fallbackModel: 'claude-opus-5',
+    vision: false,
+  }));
+  const openaiPrimary = await resolveRuntimeConfig({ configPath }, {
+    homeDir: home,
+    cwd: home,
+    processEnv: { ANTHROPIC_API_KEY: 'test-key', OPENAI_API_KEY: 'test-key' },
+  });
+  assert.equal(openaiPrimary.provider, 'openai');
+  assert.equal(openaiPrimary.vision, false);
+  assert.equal(openaiPrimary.fallback?.provider, 'anthropic');
+  assert.equal('vision' in (openaiPrimary.fallback ?? {}), false);
 });
