@@ -850,6 +850,23 @@ export const applyAgentTemplate = async (
     );
   }
 
+  // A bundle with no plugin entries has no config transaction to run, so it
+  // takes no config lock — which is what keeps creating a plugin-free agent
+  // from leaving a lock file beside somebody's config, and from failing
+  // outright where that directory is read-only. The soul claim is atomic on
+  // its own (`wx`); the lock was only ever there so the per-agent config key
+  // and the claimed id could not disagree, and there is no key to write.
+  if (plan.template.plugins.length === 0) {
+    const claimed = await options.claimSoul(options.renderSoul);
+    return {
+      agent: claimed.agent,
+      soulPath: claimed.soulPath,
+      configPath: plan.configPath,
+      configured: [],
+      ...(claimed.agent.id !== plan.agent.id ? { reassignedFrom: plan.agent.id } : {}),
+    };
+  }
+
   return withFileLock(options.lockPath, async () => {
     // Inside the lock: the claim and the config write have to be one
     // operation, or two creations of the same-named agent can settle on the

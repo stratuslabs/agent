@@ -174,7 +174,9 @@ Each of these changes nothing at all — no soul file, no config entry:
   template that needs plugins**. Plugin entries are read only from a config
   you chose, so there is nowhere to write them; pass `--config`, or move
   those settings to `~/.stratus/config.json`. A template with no plugins —
-  `assistant` — writes only a soul and is unaffected.
+  `assistant` — writes only a soul and is unaffected: it runs no config
+  transaction at all, so it takes no lock and leaves nothing beside your
+  config.
 - A plugin block this host would refuse to load — a `toolRisks` value that is
   not a risk word, or a setting its manifest's schema rejects. The daemon
   refuses such a plugin whole, so the tools in the review would not exist

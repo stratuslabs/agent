@@ -1257,3 +1257,19 @@ test('a config addressed through a symlink takes the same lock as its target', a
   assert.equal(written.provider, 'anthropic');
   assert.equal(written.model, 'claude-opus-5');
 });
+
+test('a bundle with no plugin entries never touches the config lock', async () => {
+  const fixture = await newFixture();
+  const plan = await planFor(templateWith({ tools: ['memory.remember'] }), fixture, {});
+  const lockPath = path.join(fixture.home, 'somewhere', 'config.json.lock');
+
+  // Nothing to merge means no config transaction and so no lock — which is
+  // what keeps a plugin-free creation from leaving a lock file beside
+  // somebody's config, and from failing where that directory is read-only.
+  // The soul claim is atomic on its own; the lock was only ever there so
+  // the per-agent config key and the claimed id could not disagree.
+  await applyFixture(plan, fixture.home, { lockPath });
+
+  await assert.rejects(stat(path.dirname(lockPath)), { code: 'ENOENT' }, 'no lock, and no directory made for one');
+  assert.deepEqual(await readdir(path.join(fixture.home, '.stratus', 'agents')), [`${plan.agent.id}.md`]);
+});

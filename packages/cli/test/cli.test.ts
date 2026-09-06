@@ -9171,4 +9171,14 @@ test('a plugin-free template is created even with a project config active', asyn
   assert.equal(code, 0, output.stderr);
   assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), ['mira.md']);
   await assert.rejects(readFile(path.join(home, '.stratus', 'config.json')), { code: 'ENOENT' });
+  // And nothing of ours is left in the checkout. A bundle with no plugin
+  // entries runs no config transaction, so it takes no lock — a lock file
+  // dropped into somebody's repository would be litter, and would fail
+  // outright where the checkout is read-only. `applyAgentTemplate` is what
+  // guarantees that; this is the end-to-end confirmation of it.
+  assert.deepEqual(
+    (await readdir(project)).filter((name) => name !== 'stratus.config.json'),
+    [],
+  );
 });
+
