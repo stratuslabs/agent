@@ -349,7 +349,15 @@ const manifestNamespaces = (manifest: PluginManifest): TemplateResolvedTool[] =>
 const resolveGrant = (entry: string, available: TemplateResolvedTool[]): TemplateToolGrant => {
   const wildcard = isGlob(entry);
   const resolves = available.filter((tool) => (
-    wildcard ? matchesToolAllowlist(tool.name, [entry]) : tool.name === entry
+    wildcard
+      ? matchesToolAllowlist(tool.name, [entry])
+      // A bridge that declared a namespace rather than naming what is inside
+      // it answers a literal entry that falls under the namespace. Nothing is
+      // registered until it connects, so comparing names outright would call
+      // a grant the host will honour unresolved — and, since an unresolved
+      // grant is now a blocker, would refuse every template naming a tool
+      // behind an MCP bridge.
+      : isGlob(tool.name) ? matchesToolAllowlist(entry, [tool.name]) : tool.name === entry
   ));
   return {
     entry,
@@ -710,13 +718,33 @@ export const planAgentTemplate = async (
       : outcome);
   }
 
+  const grants = template.tools.map((entry) => resolveGrant(entry, available));
+  // A tool the template promises that nothing here provides is a
+  // prerequisite failure, not a footnote. The review prints the line, but
+  // an operator who says yes to a bundle described as reading files should
+  // not get an agent that cannot — and the usual cause is an installed
+  // package older than the template expects, which reads as "installed"
+  // to the check above and is invisible until a tool call fails.
+  const unresolved = grants.filter((grant) => grant.unresolved);
+  if (unresolved.length > 0 && blockers.length === 0) {
+    const required = template.plugins.map((requirement) => requirement.package);
+    blockers.push({
+      kind: 'missing-plugin',
+      message: `${template.id} grants ${unresolved.map((grant) => grant.entry).join(', ')}, which nothing installed `
+        + 'here provides. Nothing was created.'
+        + (required.length > 0
+          ? `\nA package older than this template expects reads as installed. Update them, then run this again:\n  npm install -g ${required.join(' ')}`
+          : ''),
+    });
+  }
+
   const agentCredentials = options.credentials.agents[agent.id] ?? {};
   return {
     template,
     agent,
     soulPath: options.soulPath,
     configPath: options.configPath,
-    tools: template.tools.map((entry) => resolveGrant(entry, available)),
+    tools: grants,
     skills: template.skills.map((entry) => ({
       entry,
       installed: options.installedSkills.some((id) => matchesSkillAllowlist(id, [entry])),

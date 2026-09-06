@@ -282,6 +282,34 @@ test('a template naming an uninstalled plugin blocks with the install command', 
   assert.equal(plan.blockers[0]?.kind, 'missing-plugin');
 });
 
+test('a package too old to carry a tool the template names blocks, and creates nothing', async () => {
+  const fixture = await newFixture();
+  // Installed, enabled, and valid — but from before `fs.search` existed. The
+  // prerequisite check above sees a package that is present and says nothing,
+  // so without a blocker here the agent is created carrying an allowlist
+  // entry no registered tool answers, and the gap surfaces as a tool call
+  // that fails in front of whoever is talking to it.
+  const packages = { '@stratusagent/tool-fs': firstPartyFs };
+  await writeFixturePackages(fixture.packagesRoot, packages);
+
+  const plan = await planFor(
+    templateWith({
+      tools: ['fs.read', 'fs.search'],
+      plugins: [{ package: '@stratusagent/tool-fs', reason: 'files' }],
+    }),
+    fixture,
+    packages,
+    { plugins: { '@stratusagent/tool-fs': { enabled: true } } },
+  );
+
+  assert.equal(plan.plugins[0]?.status, 'reuse', 'the package itself is present and agrees');
+  assert.equal(plan.blockers.length, 1);
+  assert.equal(plan.blockers[0]?.kind, 'missing-plugin');
+  assert.match(plan.blockers[0]?.message ?? '', /fs\.search/);
+  assert.doesNotMatch(plan.blockers[0]?.message ?? '', /fs\.read/, 'only the entry that resolves to nothing');
+  assert.match(plan.blockers[0]?.message ?? '', /npm install -g @stratusagent\/tool-fs/);
+});
+
 test('settings the template contradicts are a conflict naming both values', async () => {
   const fixture = await newFixture();
   const packages = { '@stratusagent/tool-fs': firstPartyFs };

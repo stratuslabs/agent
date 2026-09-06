@@ -100,6 +100,10 @@ A template that names a plugin you have not installed **creates nothing**
 and prints the install command. Install it, then run the same command
 again.
 
+So does a template that grants a tool nothing installed provides — an
+older plugin reads as installed, and creating the agent anyway would
+give it an allowlist entry no registered tool answers.
+
 ## Templates never carry a credential
 
 A template is a file that gets copied around and read out of a repository,
@@ -169,6 +173,10 @@ stratus agent new --template research --name Vera --yes
 Each of these changes nothing at all — no soul file, no config entry:
 
 - A plugin the template needs that is not installed.
+- A tool the template grants that nothing installed provides. The usual
+  cause is a plugin older than the template — present, enabled, and
+  valid, but from before the tool existed. Update the packages it names
+  and run the command again.
 - A plugin setting the template contradicts.
 - A project-local `stratus.config.json` as the active config, **for a
   template that needs plugins**. Plugin entries are read only from a config
