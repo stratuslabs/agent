@@ -43,6 +43,8 @@ stratus logs -f                        # what the daemon has been doing
 stratus doctor                         # what a run would use right now, and why
 stratus update                         # stop → upgrade → migrate → repair unit → restart
 stratus agent new                      # create an agent (guided on a terminal)
+stratus agent templates                # the first-party bundles, and what each needs installed
+stratus agent new --template triage    # a working teammate: soul, allowlist, and plugin config, reviewed once
 stratus agents                         # who's on the team: souls, models, memory
 stratus skill add owner/repo           # install skills from GitHub (validated against the Agent Skills spec) — a running daemon picks them up, no restart
 stratus skill validate ./my-skill      # check a skill against the spec without installing it
@@ -69,7 +71,8 @@ Full reference with every subcommand:
 | `--config <file>` | Load settings from a specific config file |
 | `--approvals` | `run`/`chat`: `always`, `ask`, or `never`. `serve`: `headless` (refuse gated calls) or `remote` (ask in Slack) |
 | `--max-turns` | Max provider turns per run (default 8) |
-| `--format` | `text` or `json` |
+| `--format` | `text` or `json`; `agent new` also accepts `soul` |
+| `--template <id>`, `--yes` | `agent new`: create from a first-party bundle, after a review of what it grants on this machine; `--yes` skips the question |
 | `--idle-timeout` | `serve`: seconds of provider silence before the watchdog aborts a turn (default 120) |
 | `--no-events` | Hide the event log |
 | `--no-log-file` | `serve`: do not write `~/.stratus/logs/stratusd.jsonl` |
@@ -116,6 +119,7 @@ The reasoning:
 
 | I want to… | Read |
 | --- | --- |
+| Create an agent that already does something | [Agent templates](https://github.com/stratuslabs/agent/blob/main/docs/guides/templates.md) |
 | Put my agents in Slack | [Slack](https://github.com/stratuslabs/agent/blob/main/docs/guides/slack.md) |
 | Give agents files, a shell, the web, a browser | [Tools](https://github.com/stratuslabs/agent/blob/main/docs/guides/tools.md) |
 | Decide what runs unattended, approve the rest from Slack | [Approvals](https://github.com/stratuslabs/agent/blob/main/docs/guides/approvals.md) |

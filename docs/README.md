@@ -11,6 +11,7 @@ tree is where the depth lives.
 | --- | --- |
 | Install Stratus | [Installation](./start/installation.md) |
 | Run the setup menu, sign in, create my first agent | [Setup](./start/setup.md) |
+| Create an agent that already does something | [Agent templates](./guides/templates.md) |
 | Run something *right now*, account or not | [Quickstart](./start/quickstart.md) |
 | Talk to my agents in Slack | [Slack](./guides/slack.md) |
 | Give agents files, a shell, the web, a browser | [Tools](./guides/tools.md) |

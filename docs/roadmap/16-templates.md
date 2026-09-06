@@ -149,7 +149,44 @@ least of what the product does.
   and makes it go stale; not pinning makes "what the operator reviewed" a
   moving target. Leaning unpinned with the installed version shown in the
   summary, on the grounds that the summary is the thing being reviewed.
+  **Settled: unpinned**, with the installed version printed on the plugin
+  line.
 - **Is there a `--template` for `stratus setup`?** The setup menu already
   offers packages the operator's answers imply, and templates are a better
   version of that conversation. Probably yes, and probably after this step
-  proves the format.
+  proves the format. **Still open** — deferred out of the first version.
+
+## What the first version settled
+
+- **Globs.** The scope left this to be decided "before the first template
+  ships one". Decided: **literal tool names**, the option the spec called
+  safer. A glob keeps admitting tools a later, unreviewed plugin update
+  registers, so what the operator approved would keep widening after they
+  approved it. The planner still *handles* a wildcard — a hand-written soul
+  may carry one and [17](./17-fleet-console.md) will render souls it did not
+  create — and discloses it as a wildcard rather than as the narrower list it
+  resolves to today. A test refuses any shipped template that writes one.
+- **Where the summary lives.** In `@stratusagent/state`
+  (`planAgentTemplate`), as the scope required, rather than beside the CLI:
+  the acceptance criterion that the CLI's summary and the API's are identical
+  is only satisfiable if they are the same call, and `control-api` cannot
+  reach into the CLI. `state` ships in lockstep with the CLI from this
+  repository, so the constraint the design sketch was protecting — a template
+  can never be newer than the code that understands it — still holds.
+- **Per-agent settings over fleet-wide ones.** A template that needs `fs`
+  roots writes them under `agents.<id>`, never into the shared `roots`.
+  Widening the fleet entry would hand every existing agent a directory nobody
+  reviewed on their behalf, and a brand-new id has no entry to contradict, so
+  the per-agent block can never be the half that conflicts.
+- **A contested id.** Two `--template triage` runs both want `kit`. The second
+  takes a suffixed id, and — new in this step, in `claimSoulFile` — a palette
+  seeded on that id rather than on the name it shares, so the roster does not
+  draw them identically. Only a collided id is themed this way; every agent
+  whose id nothing contested keeps the palette its name has always given it.
+
+## Deferred
+
+- The dashboard's rendering of the plan, which is [17](./17-fleet-console.md).
+  The computation is shared already; what is missing is the route and the
+  screen.
+- `stratus setup --template`, per the open question above.

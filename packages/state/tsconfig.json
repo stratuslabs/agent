@@ -13,7 +13,8 @@
     { "path": "../provider-anthropic" },
     { "path": "../provider-claude-code" },
     { "path": "../provider-codex" },
-    { "path": "../executor-local" }
+    { "path": "../executor-local" },
+    { "path": "../plugins" }
   ],
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "test"]

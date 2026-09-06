@@ -48,7 +48,9 @@ import {
   tailLog,
   npmNeedsShell,
 } from '../src/index.ts';
-import type { Session, Tool } from '@stratusagent/core';
+import { EventBus, ToolRegistry, type JsonObject, type Session, type Tool } from '@stratusagent/core';
+import { loadPlugins } from '@stratusagent/plugins';
+import { loadSoulFile } from '@stratusagent/state';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 // Isolated HOME so tests never read or write the real ~/.stratus.
@@ -8811,4 +8813,248 @@ test('stratus session rollover without a running daemon says so', async () => {
   const failed = createStreams();
   assert.equal(await runCli({ argv: ['session', 'rollover', 's-1'], streams: failed.streams, env: { cwd: home, homeDir: home, processEnv: {} } }), 1);
   assert.match(failed.output.stderr, /no running daemon found/);
+});
+
+// ---- stratus agent new --template (step 16) ---------------------------------
+
+const templateHome = async (): Promise<string> => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-template-cli-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  return home;
+};
+
+/** Piped stdin, which is how the prompter and the confirmation both read. */
+const answering = (...lines: string[]): NodeJS.ReadableStream =>
+  Readable.from(lines.map((line) => `${line}\n`));
+
+test('a template creates an agent that actually calls a real tool', async () => {
+  const home = await templateHome();
+  const { streams, output } = createStreams();
+
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'research', '--name', 'Vera', '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+  assert.equal(code, 0, output.stderr);
+
+  // Verified by running the tool, not by reading the files the command
+  // wrote: the soul's allowlist, the per-agent roots it configured, and the
+  // plugin behind them all have to line up for this to answer.
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8')) as {
+    plugins: Record<string, JsonObject>;
+  };
+  const workspace = path.join(home, '.stratus', 'workspaces', 'vera');
+  await writeFile(path.join(workspace, 'findings.md'), 'the kettle is in the cupboard\n');
+
+  const tools = new ToolRegistry();
+  const result = await loadPlugins({
+    config: config.plugins,
+    host: { resolve: (specifier) => import.meta.resolve(specifier), import: (specifier) => import(specifier) },
+    tools,
+    bus: new EventBus(),
+    workspaceRoot: path.join(home, '.stratus', 'workspaces'),
+  });
+  assert.deepEqual(result.failures, []);
+
+  const soul = await loadSoulFile(path.join(home, '.stratus', 'agents', 'vera.md'));
+  const session: Session = {
+    id: 'session-vera',
+    agent: soul.agent,
+    status: 'running',
+    messages: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  const read = await (tools.get('fs.read') as Tool).execute({ path: 'findings.md' }, session) as JsonObject;
+  assert.match(String(read.content), /kettle/);
+
+  for (const plugin of result.loaded) {
+    await plugin.instance.dispose?.();
+  }
+});
+
+test('--yes puts exactly the bytes on stdout that the reviewed path does', async () => {
+  const scripted = await templateHome();
+  const reviewed = await templateHome();
+
+  const yes = createStreams();
+  await runCli({
+    argv: ['agent', 'new', '--template', 'triage', '--name', 'Kit', '--yes'],
+    streams: yes.streams,
+    env: { homeDir: scripted, cwd: scripted, processEnv: {} },
+  });
+
+  const asked = createStreams();
+  await runCli({
+    argv: ['agent', 'new', '--template', 'triage', '--name', 'Kit'],
+    streams: asked.streams,
+    env: { homeDir: reviewed, cwd: reviewed, processEnv: {}, setupInput: answering('y') },
+  });
+
+  // The question itself goes to stderr, so the two paths differ in whether
+  // a human was asked and in nothing else. Homes differ, so the paths do.
+  assert.equal(
+    yes.output.stdout.split(scripted).join('<HOME>'),
+    asked.output.stdout.split(reviewed).join('<HOME>'),
+  );
+  assert.match(asked.output.stderr, /Create Kit with exactly this\?/);
+  assert.equal(yes.output.stderr, '');
+});
+
+test('declining the review creates nothing', async () => {
+  const home = await templateHome();
+  const { streams, output } = createStreams();
+
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'triage'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, setupInput: answering('n') },
+  });
+
+  assert.equal(code, 1);
+  assert.match(output.stderr, /Nothing was created/);
+  await assert.rejects(readdir(path.join(home, '.stratus', 'agents')), { code: 'ENOENT' });
+  await assert.rejects(readFile(path.join(home, '.stratus', 'config.json')), { code: 'ENOENT' });
+});
+
+test('the review lists every tool with its resolved risk before asking', async () => {
+  const home = await templateHome();
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['agent', 'new', '--template', 'operator', '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.match(output.stdout, /shell\.run\s+gated\s+@stratusagent\/tool-shell/);
+  assert.match(output.stdout, /fs\.read\s+safe\s+@stratusagent\/tool-fs/);
+  assert.match(output.stdout, /memory\.remember\s+safe\s+the kernel/);
+  assert.match(output.stdout, /gated: asks a human every time/);
+});
+
+test('an unknown template id lists what exists and creates nothing', async () => {
+  const home = await templateHome();
+  const { streams, output } = createStreams();
+
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'nowhere', '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 1);
+  assert.match(output.stderr, /No template named nowhere/);
+  assert.match(output.stderr, /research, triage, operator, assistant/);
+  await assert.rejects(readdir(path.join(home, '.stratus', 'agents')), { code: 'ENOENT' });
+});
+
+test('a plugin setting the template contradicts stops the whole thing and names both', async () => {
+  const home = await templateHome();
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    `${JSON.stringify({ plugins: { '@stratusagent/tool-web': { enabled: false } } })}\n`,
+  );
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'research', '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 1);
+  assert.match(output.stdout, /CONFLICT/);
+  assert.match(output.stderr, /yours is false, the template asks for true/);
+  await assert.rejects(readdir(path.join(home, '.stratus', 'agents')), { code: 'ENOENT' });
+  // Not changed, not even to the value the template wanted.
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8')) as JsonObject;
+  assert.deepEqual(config, { plugins: { '@stratusagent/tool-web': { enabled: false } } });
+});
+
+test('a plugin already configured the way the template needs it is reused, not rewritten', async () => {
+  const home = await templateHome();
+  const configPath = path.join(home, '.stratus', 'config.json');
+  await writeFile(
+    configPath,
+    `${JSON.stringify({ plugins: { '@stratusagent/tool-web': { enabled: true, maxBytes: 1234 } } })}\n`,
+  );
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'research', '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.match(output.stdout, /@stratusagent\/tool-web.*kept exactly as it is/);
+  const config = JSON.parse(await readFile(configPath, 'utf8')) as {
+    plugins: { '@stratusagent/tool-web': JsonObject };
+  };
+  assert.deepEqual(config.plugins['@stratusagent/tool-web'], { enabled: true, maxBytes: 1234 });
+});
+
+test('a failure between the soul write and the config write leaves neither', async () => {
+  const home = await templateHome();
+  const { streams, output } = createStreams();
+
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'research', '--yes'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      templateFailBeforeConfigWrite: async () => {
+        throw new Error('the disk went away');
+      },
+    },
+  });
+
+  assert.equal(code, 1);
+  assert.match(output.stderr, /the disk went away/);
+  assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), []);
+  await assert.rejects(readFile(path.join(home, '.stratus', 'config.json')), { code: 'ENOENT' });
+});
+
+test('a project-local config cannot be the file a template enables plugins in', async () => {
+  const home = await templateHome();
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-template-project-'));
+  await writeFile(path.join(project, 'stratus.config.json'), '{}\n');
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'research', '--yes'],
+    streams,
+    env: { homeDir: home, cwd: project, processEnv: {} },
+  });
+
+  assert.equal(code, 1);
+  assert.match(output.stderr, /project-local config, which cannot enable plugins/);
+  await assert.rejects(readdir(path.join(home, '.stratus', 'agents')), { code: 'ENOENT' });
+});
+
+test('a template refuses --instructions and --format rather than half-obeying them', () => {
+  assert.throws(
+    () => parseCommand(['agent', 'new', '--template', 'triage', '--format', 'soul']),
+    /only prints one/,
+  );
+  assert.throws(
+    () => parseCommand(['agent', 'new', '--template', 'triage', '--instructions', 'be terse']),
+    /carries its own persona/,
+  );
+});
+
+test('stratus agent templates lists what each one needs', async () => {
+  const { streams, output } = createStreams();
+  assert.equal(await runCli({ argv: ['agent', 'templates'], streams, env: {} }), 0);
+  assert.match(output.stdout, /triage\s+On-call triage/);
+  assert.match(output.stdout, /needs @stratusagent\/tool-fs, @stratusagent\/tool-web/);
+
+  const json = createStreams();
+  await runCli({ argv: ['agent', 'templates', '--format', 'json'], streams: json.streams, env: {} });
+  const parsed = JSON.parse(json.output.stdout) as { id: string; tools: string[] }[];
+  assert.ok(parsed.some((entry) => entry.id === 'assistant'));
 });

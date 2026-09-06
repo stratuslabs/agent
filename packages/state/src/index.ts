@@ -28,6 +28,7 @@ import {
 } from '@stratusagent/core';
 import {
   agentIdWithSuffix,
+  generateAvatarTheme,
   createLazySkill,
   isLoadableSkillId,
   SKILL_ID_RULE,
@@ -3681,10 +3682,19 @@ export const claimSoulFile = async (
         }
       }
     }
+    const id = agentIdWithSuffix(baseId, randomUUID().slice(0, 4));
     agent = defineAgent({
-      id: agentIdWithSuffix(baseId, randomUUID().slice(0, 4)),
+      id,
       ...(input.name ? { name: input.name } : { name: agent.name }),
       instructions: input.instructions,
+      // Themed on the id rather than the name, and only here. This agent
+      // exists because another one already answers to that name, and a
+      // roster where the second Kit is drawn identically to the first is
+      // exactly what the palette is there to prevent — two agents from one
+      // template, whose default name they both take, is the ordinary case.
+      // Every agent whose id nothing contested keeps the palette its name
+      // has always given it.
+      avatar: generateAvatarTheme(id),
     });
   }
 };
@@ -3896,3 +3906,52 @@ export const saveConfigFile = async (
   await mkdir(path.dirname(configPath), { recursive: true });
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 };
+
+// ---------------------------------------------------------------------------
+// Cross-process file locks, and agent templates
+// ---------------------------------------------------------------------------
+
+export {
+  claimFileLock,
+  withFileLock,
+  FileLockBusyError,
+  FileLockTimeoutError,
+  type FileClaim,
+  type WithFileLockOptions,
+} from './lock.ts';
+
+/** `~/.stratus/config.lock` — taken by every writer of the config file. */
+export const configLockPath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), 'config.lock');
+
+export {
+  AGENT_TEMPLATE_VERSION,
+  KERNEL_TOOL_RISKS,
+  TemplateApplyError,
+  applyAgentTemplate,
+  decidePluginConfig,
+  planAgentTemplate,
+  planRiskCeiling,
+  type AgentTemplate,
+  type AppliedTemplate,
+  type ApplyAgentTemplateOptions,
+  type PlanAgentTemplateOptions,
+  type TemplateBlocker,
+  type TemplateCredentialNeed,
+  type TemplateMergeOutcome,
+  type TemplatePlan,
+  type TemplatePluginOutcome,
+  type TemplatePluginRequirement,
+  type TemplateRenderContext,
+  type TemplateResolvedTool,
+  type TemplateScheduleProposal,
+  type TemplateSettingConflict,
+  type TemplateSkillNeed,
+  type TemplateToolGrant,
+} from './templates.ts';
+
+export {
+  AGENT_TEMPLATES,
+  agentTemplateIds,
+  findAgentTemplate,
+} from './template-catalog.ts';

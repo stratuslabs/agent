@@ -30,6 +30,9 @@ stratus update                         # the whole upgrade dance, in the safe or
 stratus update --check                 # report what an update would do, do nothing
 stratus agent new                      # create an agent (guided on a terminal)
 stratus agent new --name Ava --instructions "You research things." --format soul > ava.md
+stratus agent templates                # the first-party bundles, and what each needs installed
+stratus agent new --template triage    # a working teammate: soul, allowlist, and plugin config, reviewed once
+stratus agent new --template research --name Vera --yes
 stratus agents                         # who's on the team (also: stratus agent list)
 stratus skill add owner/repo           # install skills from GitHub or a local path
 stratus skill add owner/repo --skill hn-search --agent ava
@@ -60,7 +63,7 @@ stratus dashboard                      # local browser dashboard
 | `logs` | [Logs](../guides/logs.md) |
 | `doctor` | [Troubleshooting](../guides/troubleshooting.md) |
 | `update` | [Updating](../guides/updating.md) |
-| `agent new`, `agents` | [Agents](../concepts/agents.md) |
+| `agent new`, `agent templates`, `agents` | [Agents](../concepts/agents.md), [Templates](../guides/templates.md) |
 | `skill add`, `skill validate`, `skills`, `skill reload` | [Skills](../guides/skills.md), [Skill format](./skill-format.md) |
 | `credential set`, `credentials`, `credential remove` | [Tools](../guides/tools.md#searching-the-web), [Security](../concepts/security.md) |
 | `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
@@ -79,12 +82,14 @@ stratus dashboard                      # local browser dashboard
 | `--provider` | `anthropic`, `openai`, `codex`, or `demo` (offline, no account) |
 | `--model` | Model for real providers (anthropic default: `claude-opus-5`, codex default: `gpt-5.5`) |
 | `--base-url` | Override the provider API base URL |
-| `--config <file>` | Load settings from a specific config file |
+| `--config <file>` | Load settings from a specific config file. `agent new --template` also **writes** its plugin entries there — plugin config is read only from a config you chose |
 | `--approvals` | `run`/`chat`: tool approval mode — `always`, `ask`, or `never`. `serve`: how the daemon reaches a human — `headless` (refuse gated calls) or `remote` (ask in Slack); overrides the config's `approvals.mode` |
 | `--max-turns` | Max provider turns per run (default 8) |
 | `--format` | `text` or `json`; `agent new` also accepts `soul` — a ready-to-edit soul file |
 | `--name` | `agent new`: the agent's name (omit to have one generated) |
-| `--instructions` | `agent new`: the agent's persona/instructions |
+| `--instructions` | `agent new`: the agent's persona/instructions. Refused with `--template`, which carries its own |
+| `--template <id>` | `agent new`: create from a first-party bundle. Prints what it would grant on **this** machine and asks before writing anything; `stratus agent templates` lists the ids |
+| `--yes`, `-y` | `agent new --template`: skip the confirmation. For scripting — the reviewed path is the documented one, and stdout is byte-identical either way |
 | `--idle-timeout` | `stratus serve`: seconds of provider silence before the watchdog aborts a turn (default 120) |
 | `--no-events` | Hide the event log |
 | `--no-log-file` | `stratus serve`: do not write `~/.stratus/logs/stratusd.jsonl` |

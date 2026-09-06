@@ -98,6 +98,44 @@ const packageJsonFor = async (
   throw new PluginManifestError(`Could not find a package.json for ${specifier}.`);
 };
 
+/** An installed package's manifest, read without importing its code. */
+export interface InstalledPluginManifest {
+  manifest: PluginManifest;
+  /** The package root — what a manifest's relative skill paths resolve against. */
+  directory: string;
+  /** The `version` the installed package.json names, when it names one. */
+  version?: string;
+}
+
+/**
+ * Read the manifest of a package that is installed, without importing it.
+ *
+ * The one place package.json becomes a `PluginManifest`, because there are
+ * two callers with the same requirement and no licence to disagree: the
+ * loader, deciding what a plugin may register, and the template planner,
+ * telling an operator what a bundle would grant *before* anything runs. A
+ * second reading would be a second answer to what a package contributes.
+ *
+ * Resolution failure propagates rather than becoming `undefined` — a
+ * package that is installed but missing one of its own dependencies throws
+ * from `resolve` too, and reading that as "not installed" would silently
+ * drop something the operator's config says should be running. Callers who
+ * mean "is it installed" ask `host.resolve` themselves; see
+ * `loadOptionalModule`.
+ */
+export const readPluginManifest = async (
+  specifier: string,
+  host: OptionalModuleHost,
+): Promise<InstalledPluginManifest> => {
+  const resolved = host.resolve(specifier);
+  const { packageJson, directory } = await packageJsonFor(resolved, specifier);
+  const manifest = parsePluginManifest(packageJson, specifier);
+  const version = typeof (packageJson as { version?: unknown }).version === 'string'
+    ? (packageJson as { version: string }).version
+    : undefined;
+  return { manifest, directory, ...(version !== undefined ? { version } : {}) };
+};
+
 /**
  * Whether a package's code is trusted — which is to say whether its
  * manifest may declare a tool `safe`.
@@ -343,9 +381,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
     // held for the life of a daemon that goes on running without it.
     let instance: Plugin | undefined;
     try {
-      const resolved = options.host.resolve(specifier);
-      const { packageJson, directory } = await packageJsonFor(resolved, specifier);
-      const manifest = parsePluginManifest(packageJson, specifier);
+      const { manifest, directory } = await readPluginManifest(specifier, options.host);
       const isTrusted = trusted(manifest.packageName);
       // Validated *after* the host's defaults are folded in, because that
       // is the configuration the plugin will actually be handed: a manifest
