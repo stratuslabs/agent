@@ -60,9 +60,71 @@ tools: [fs.read, fs.search, web.fetch]
 
 `fs.*` grants a whole toolset, so an agent given "the filesystem" does not
 need editing every time the pack gains a tool. The prefix keeps its dot:
-`fs.*` never matches `fsx.read`. Listing nothing grants every registered
+`fs.*` never matches `fsx.read`. Omitting the key grants every registered
 tool, which is fine for a private agent and is not what you want once a
 shell is installed.
+
+**Omitting `tools:` and writing `tools: []` are opposites.** No key grants
+everything; an empty list grants nothing. A bare `tools:` with nothing
+indented under it is the empty list — the shape you get by writing the key
+and not filling it, or by deleting the last entry — so that one is warned
+about too:
+
+```
+agent blair has an empty tools: list, which grants nothing — remove the key to allow every registered tool, or list the ones it should have
+```
+
+**An entry naming a tool nothing provides is inert, and says so.** A `fs.*`
+whose plugin is not installed, or a name with a typo in it, grants nothing —
+it cannot, since the allowlist only ever narrows what is registered. Both
+`stratus serve` (at roster load) and a local `stratus run` warn about the
+entries in an agent's list that select no registered tool:
+
+```
+agent ava lists tools nothing registered provides: fs.* — check the names, or install the plugin that provides them
+```
+
+If *every* entry is like that, a second line says so, because the
+consequence is bigger than a dead line in a file:
+
+```
+agent blair has an allowlist that grants nothing, so none of the tools its persona talks about are there to call
+```
+
+A model told to use a tool it has not been given tends to write the call out
+as prose, often with a plausible-looking result attached. It reads like the
+thing happened. Nothing ran.
+
+**`skill.read` is not one of the tools this key grants.** It rides on the
+`skills:` gate — an agent with a skill enabled has the reader whether or not
+`tools:` mentions it, and an agent with no skills does not have it however
+permissive `tools:` is. So listing it here does nothing, and gets its own
+line saying which key does grant it:
+
+```
+agent blair lists skill.read under tools:, which grants nothing — skill.read is granted by the skills: key instead
+```
+
+That is also why `tools: [skill.read]` counts as an allowlist that grants
+nothing: the reader loads a skill's instructions, and the tools those
+instructions call for are still not there.
+
+**A daemon tool named in a local run is a right name in the wrong
+process.** `schedule.*`, `message.send`, and `agent.delegate` need the
+dispatcher, the store, and the channels, so only `stratus serve` registers
+them. A soul that uses them is correct; `stratus run` just cannot call it,
+and says which it is rather than sending you after a plugin:
+
+```
+agent ava lists schedule.*, message.send, which only the daemon provides — the names are right, but stratus run cannot call them; stratus serve can
+```
+
+A namespace a plugin discovers into is never reported this way. An MCP
+server that is unreachable when the daemon starts registers nothing and
+reconnects on its own, so `mcp.linear.*` is a tool that has not arrived
+yet rather than a name that does not exist — the check reads the
+`toolsDiscovered` namespaces a loaded plugin declared, and leaves those
+entries alone.
 
 ## What is available
 

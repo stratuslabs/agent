@@ -20,6 +20,13 @@ import {
   type ApprovalTransport,
   type GatewayChannelAdapter,
 } from '../src/index.ts';
+import {
+  GATEWAY_ONLY_TOOL_NAMES,
+  FORGET_TOOL_NAME,
+  RECALL_TOOL_NAME,
+  MEMORY_TOOL_NAME,
+} from '@stratusagent/agents';
+import { SKILL_READ_TOOL_NAME } from '@stratusagent/core';
 
 const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-gw-'));
 
@@ -169,7 +176,12 @@ test('a session\'s routing reports when its agent last spoke, not when the row l
     await gateway.store.save(stored);
     const after = await gateway.sessionRouting('thread-s');
     assert.equal(after?.lastSpokeAt, spoke);
-    assert.notEqual((await gateway.store.get('thread-s'))?.updatedAt, spoke);
+    // That the row did change is proved by what is in it, not by its
+    // timestamp differing from the reply's: both are `Date.now()` at
+    // millisecond resolution, and a dispatch that finishes inside one tick
+    // makes them equal — a race the assertion loses on a loaded runner
+    // rather than a regression it catches.
+    assert.equal((await gateway.store.get('thread-s'))?.messages.length, stored.messages.length);
   } finally {
     await gateway.stop();
   }
@@ -4038,6 +4050,45 @@ test('a recovered firing retires only its own one-shot row, and does so even whe
     assert.deepEqual(gateway.schedules().map((record) => record.id), ['once-parked']);
     const stored = await gateway.store.get(failingFiring);
     assert.equal(stored?.status, 'failed');
+  } finally {
+    await gateway.stop();
+  }
+});
+
+test('GATEWAY_ONLY_TOOL_NAMES is exactly what a gateway adds over a plain host', async () => {
+  // `stratus run` reads this list to tell a daemon soul's `schedule.*`
+  // apart from a name that does not exist, and the list lives in
+  // `@stratusagent/agents` rather than here — the CLI reaches the gateway
+  // only through `await import`, since `bin.ts` loads the CLI to print the
+  // Node floor message and this module pulls in `node:sqlite` at import.
+  //
+  // So proximity cannot hold the two together, and this does. Splitting
+  // the registry exactly means drift fails in both directions: a new
+  // gateway tool left off the list turns up in `shared`, and a name
+  // removed or renamed turns up missing from the registry.
+  const home = await newHome();
+  const gateway = createGateway({
+    env: { homeDir: home, cwd: home, processEnv: {} },
+    idleTimeoutMs: 0,
+  });
+  await gateway.start();
+  try {
+    const registered = gateway.tools().map((tool) => tool.name);
+    const shared = registered.filter((name) => !GATEWAY_ONLY_TOOL_NAMES.includes(name));
+
+    // Everything the list claims really is registered here.
+    for (const name of GATEWAY_ONLY_TOOL_NAMES) {
+      assert.ok(registered.includes(name), `${name} is listed as gateway-only but not registered`);
+    }
+    // And everything else is a tool a plain host registers too, so nothing
+    // gateway-only is missing from the list.
+    assert.deepEqual(shared.sort(), [
+      'demo.echo',
+      FORGET_TOOL_NAME,
+      RECALL_TOOL_NAME,
+      MEMORY_TOOL_NAME,
+      SKILL_READ_TOOL_NAME,
+    ].sort());
   } finally {
     await gateway.stop();
   }

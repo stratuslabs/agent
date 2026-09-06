@@ -17,6 +17,8 @@ import {
   escapeControlCharacters,
   memoryEntryTrust,
   missingSkillRequirements,
+  describeToolAllowlistFinding,
+  unmatchedToolAllowlist,
   originOf,
   TRUST_LEVELS,
   type AgentDefinition,
@@ -83,6 +85,7 @@ import {
   isValidAgentId,
   parseSoul,
   type ParsedSoul,
+  GATEWAY_ONLY_TOOL_NAMES,
 } from '@stratusagent/agents';
 import {
   agentsDirPath,
@@ -673,7 +676,7 @@ export type ParsedCommand =
 
 type CliConfigFile = StratusConfigFile;
 
-export const CLI_VERSION = '0.11.0';
+export const CLI_VERSION = '0.11.1';
 
 const DASHBOARD_TITLE = 'Stratus Agent Dashboard';
 
@@ -2430,6 +2433,36 @@ const createAgentRuntime = async (
     writeLine(
       streams.stderr,
       `Warning: agent ${agent.id} enables skill ${skill.id}, which expects tools the agent is not allowed: ${missing.join(', ')}`,
+    );
+  }
+
+  // And the same for the tools themselves, after `initialize()` so the
+  // plugins have registered theirs: an allowlist entry naming a tool
+  // nothing provides grants nothing and says nothing, and a soul made only
+  // of those runs with no tools while its persona still talks about them.
+  const finding = unmatchedToolAllowlist(
+    agent,
+    tools.describe().map((tool) => tool.name),
+    {
+      mayRegister: loadedPlugins.flatMap(
+        (plugin) => plugin.manifest.contributes.toolsDiscovered.map((declared) => declared.namespace),
+      ),
+      // A local run has no dispatcher, store, or channels, so it registers
+      // none of the daemon's tools. A soul written for `stratus serve` is
+      // not wrong for naming them here — it is in the wrong process.
+      elsewhere: GATEWAY_ONLY_TOOL_NAMES,
+    },
+  );
+  for (const line of finding ? describeToolAllowlistFinding(agent.id, finding) : []) {
+    writeLine(streams.stderr, `Warning: ${line}`);
+  }
+  // The kernel leaves this one to the host, because only the host knows
+  // which process it is not.
+  if (finding && finding.elsewhere.length > 0) {
+    writeLine(
+      streams.stderr,
+      `Warning: agent ${agent.id} lists ${finding.elsewhere.join(', ')}, which only the daemon provides`
+        + ' — the names are right, but stratus run cannot call them; stratus serve can',
     );
   }
 
