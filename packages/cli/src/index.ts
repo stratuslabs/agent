@@ -7197,7 +7197,33 @@ const runAgentNewFromTemplate = async (
   // and does not get to decide which code runs in a daemon. So the target
   // is the config the operator chose — and when that is an auto-discovered
   // one, this refuses rather than writing somewhere it would be ignored.
-  const location = await resolveConfigLocation(command.configPath ? { configPath: command.configPath } : {}, env);
+  // One question, asked at each of the four places this flow would
+  // otherwise touch the config: does this bundle have anything to write
+  // there? `applyAgentTemplate` asks the same one to decide whether to run
+  // a transaction at all, and the answers have to agree — a plan that
+  // refused over a file the commit never opens is the over-blocking every
+  // one of these exemptions exists to undo.
+  const needsConfig = template.plugins.length > 0;
+
+  // Discovery reads each candidate to find the active one, so a config
+  // that exists and cannot be opened — a self-referential symlink someone
+  // left in a checkout — throws here, ahead of every exemption below. A
+  // bundle with no plugin entries neither reads that file nor writes it,
+  // which is the same reason the trust rule and the parse failure already
+  // let `assistant` through; this is only the third place the exemption
+  // has to be spelled, because it is the one that runs first.
+  let location;
+  try {
+    location = await resolveConfigLocation(command.configPath ? { configPath: command.configPath } : {}, env);
+  } catch (error) {
+    if (needsConfig) {
+      throw error;
+    }
+    writeLine(
+      streams.stderr,
+      `Warning: ${error instanceof Error ? error.message : String(error)}. ${template.id} writes no plugin config, so it was not needed.`,
+    );
+  }
   const blockers: TemplateBlocker[] = [];
   let configPath = globalConfigPath(env);
   let config: StratusConfigFile = {};
@@ -7206,7 +7232,7 @@ const runAgentNewFromTemplate = async (
   // about which file may decide what code runs in the daemon — refusing
   // `assistant` because the working directory happens to hold a project
   // config would be applying a plugin rule to a bundle that has none.
-  if (location && !location.trusted && template.plugins.length > 0) {
+  if (location && !location.trusted && needsConfig) {
     blockers.push({
       kind: 'untrusted-config',
       message: `${location.path} is a project-local config, which cannot enable plugins — a file that ships in a cloned `
@@ -7229,7 +7255,7 @@ const runAgentNewFromTemplate = async (
       // to it, so a broken config somebody left in a checkout is no reason
       // to refuse a soul — untemplated `agent new` treats it as a hint and
       // carries on for the same reason.
-      if (!(error instanceof ConfigFileError && error.code === 'ENOENT') && template.plugins.length > 0) {
+      if (!(error instanceof ConfigFileError && error.code === 'ENOENT') && needsConfig) {
         blockers.push({
           kind: 'unreadable-config',
           message: `${location.path} could not be read (${error instanceof Error ? error.message : String(error)}), `
@@ -7306,7 +7332,7 @@ const runAgentNewFromTemplate = async (
   // a path it will not touch would let a symlink loop or an over-long
   // chain refuse a soul — after the operator already confirmed it — over
   // a file the command was never going to open.
-  const configTarget = template.plugins.length > 0 ? await resolveConfigTarget(configPath) : configPath;
+  const configTarget = needsConfig ? await resolveConfigTarget(configPath) : configPath;
 
   let applied;
   try {

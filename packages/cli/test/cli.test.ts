@@ -9245,6 +9245,26 @@ test('a plugin-free template is created despite a broken project config', async 
   assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), ['mira.md']);
 });
 
+test('a plugin-free template is created despite a project config that cannot be opened', async () => {
+  const home = await templateHome();
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-template-loop-'));
+  await symlink(path.join(project, 'stratus.config.json'), path.join(project, 'stratus.config.json'));
+
+  // Config discovery opens each candidate to find the active one, so this
+  // throws before any of the plugin-free exemptions are reached. Nothing
+  // `assistant` does touches that file.
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'assistant', '--yes'],
+    streams,
+    env: { homeDir: home, cwd: project, processEnv: {} },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.match(output.stderr, /writes no plugin config/);
+  assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), ['mira.md']);
+});
+
 test('a plugin-free template is created despite a config path that will not resolve', async () => {
   const home = await templateHome();
   const loop = path.join(home, 'loop.json');
