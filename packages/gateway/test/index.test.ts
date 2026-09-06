@@ -187,6 +187,80 @@ test('a session\'s routing reports when its agent last spoke, not when the row l
   }
 });
 
+test('observe puts a message into a session with no turn, on the session\'s chain, and refuses what dispatch refuses', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+  const events: StratusEvent[] = [];
+  gateway.bus.subscribe((event) => {
+    events.push(event);
+  });
+  try {
+    const first = await gateway.dispatch({ sessionId: 'thread-o', userMessage: 'Dylan: Ava, hello' });
+    const spoke = (await gateway.sessionRouting('thread-o'))?.lastSpokeAt;
+    assert.ok(spoke);
+    const updatedBefore = events.filter((event) => event.type === 'session.updated').length;
+
+    const observed = await gateway.observe({ sessionId: 'thread-o', message: 'Dylan: Bea, what do you think?' });
+    assert.ok(observed, 'the agent is in this conversation');
+
+    // Appended and durable, and no turn ran: same status the last turn
+    // left, its own event and not a `session.updated`, and the agent has
+    // not spoken since — an adapter ordering agents by who spoke last
+    // must not see an overhear as speaking.
+    assert.equal(observed.messages.length, first.messages.length + 1);
+    assert.equal(observed.status, first.status);
+    const stored = await gateway.store.get('thread-o');
+    assert.equal(stored?.messages.at(-1)?.overheard, true);
+    assert.equal(stored?.messages.at(-1)?.content, 'Dylan: Bea, what do you think?');
+    assert.equal(events.filter((event) => event.type === 'session.updated').length, updatedBefore);
+    assert.deepEqual(
+      events.filter((event) => event.type === 'session.observed'),
+      [{ type: 'session.observed', sessionId: 'thread-o', agentId: first.agent.id }],
+    );
+    assert.equal((await gateway.sessionRouting('thread-o'))?.lastSpokeAt, spoke);
+
+    // The next turn carries it, ahead of the message that started the turn.
+    const next = await gateway.dispatch({ sessionId: 'thread-o', userMessage: 'Dylan: Ava, and you?' });
+    const users = next.messages.filter((message) => message.role === 'user').map((message) => [message.content, message.overheard === true]);
+    assert.deepEqual(users, [
+      ['Dylan: Ava, hello', false],
+      ['Dylan: Bea, what do you think?', true],
+      ['Dylan: Ava, and you?', false],
+    ]);
+
+    // An agent hears only conversations it is already in: nothing is
+    // created on its behalf, and "not in that one" is an answer rather
+    // than a refusal — a channel asks this for every thread its app can
+    // see.
+    assert.equal(await gateway.observe({ sessionId: 'never-seen', message: 'anyone?' }), undefined);
+    assert.equal(await gateway.store.get('never-seen'), undefined);
+
+    // Read on the chain, behind a dispatch queued ahead of it: the
+    // invitation that creates the session has landed by the time the
+    // observe looks, so a message said moments after a first mention is
+    // heard rather than dropped. Neither call is awaited before the other
+    // is placed — that is the shape a channel produces.
+    const invitation = gateway.dispatch({ sessionId: 'thread-fresh', userMessage: 'Dylan: Ava, hello' });
+    const heard = gateway.observe({ sessionId: 'thread-fresh', message: 'Dylan: Bea, and you?' });
+    await invitation;
+    assert.equal((await heard)?.messages.at(-1)?.overheard, true);
+    // Sessions never cross agent identities, by the same door dispatch uses.
+    await assert.rejects(
+      () => gateway.observe({ sessionId: 'thread-o', agentId: 'somebody-else', message: 'hm' }),
+      /belongs to agent .* not somebody-else/,
+    );
+    // And the scheduler's namespace is as closed to an overhear as to a turn.
+    await assert.rejects(
+      () => gateway.observe({ sessionId: 'schedule:x:y', message: 'psst' }),
+      /reserved for scheduled firings/,
+    );
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('sqlite sessions round-trip metadata (anthropic raw-turn cache included)', async () => {
   const home = await newHome();
   const store = new SqliteSessionStore(path.join(home, 'sessions.db'));
@@ -351,6 +425,44 @@ test('a rotated credential reaches the provider on the next dispatch', async () 
   await gateway.stop();
 
   assert.deepEqual(authHeaders, ['Bearer sk-before', 'Bearer sk-after']);
+});
+
+test('an agent that cannot currently answer still hears, and has it once it can', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const userContents: string[][] = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+    userContents.push(body.messages.filter((message) => message.role === 'user').map((message) => message.content));
+    return openAiText('ok');
+  }) as typeof fetch;
+  const processEnv: NodeJS.ProcessEnv = { OPENAI_API_KEY: 'sk-test' };
+  const gateway = createGateway({ env: { homeDir: home, cwd: home, processEnv, fetch: fetchImpl }, idleTimeoutMs: 0 });
+  await gateway.start();
+  try {
+    await gateway.dispatch({ sessionId: 'quiet-1', agentId: 'ava', userMessage: 'Dylan: Ava, hello' });
+
+    // The credential goes away — a sign-in that lapsed, a restart without
+    // the env. A turn cannot be run, and says so.
+    delete processEnv.OPENAI_API_KEY;
+    await assert.rejects(() => gateway.dispatch({ sessionId: 'quiet-1', agentId: 'ava', userMessage: 'Dylan: Ava?' }));
+
+    // Hearing runs no turn and needs no provider: the thread carries on
+    // without the agent, and what was said is not lost to the outage.
+    const heard = await gateway.observe({ sessionId: 'quiet-1', agentId: 'ava', message: 'Dylan: Bea, cover for her?' });
+    assert.equal(heard?.messages.at(-1)?.overheard, true);
+
+    // Repaired, the next turn reads what was heard while it was down.
+    processEnv.OPENAI_API_KEY = 'sk-test';
+    await gateway.dispatch({ sessionId: 'quiet-1', agentId: 'ava', userMessage: 'Dylan: Ava, back?' });
+    assert.deepEqual(userContents.at(-1), [
+      'Dylan: Ava, hello',
+      '(overheard, not addressed to you)\n> Dylan: Bea, cover for her?',
+      'Dylan: Ava, back?',
+    ]);
+  } finally {
+    await gateway.stop();
+  }
 });
 
 test('a session never crosses agent identities', async () => {

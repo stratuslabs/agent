@@ -12,6 +12,7 @@ import {
   type ToolCall,
   type ToolDescriptor,
   type ToolResult,
+  promptTextOf,
 } from '@stratusagent/core';
 
 export interface ProviderResponseBuilder {
@@ -621,9 +622,13 @@ const createOpenAICompatibleMessages = (
       continue;
     }
 
+    // Framed by the kernel's one rule for it, so the OpenAI-compatible path
+    // says "said to somebody else" the way the API and harness paths do —
+    // an overheard message sent bare here would be an ordinary instruction
+    // on exactly the endpoint with no other provenance signal.
     messages.push({
       role: message.role,
-      content: message.content,
+      content: message.role === 'user' ? promptTextOf(message) : message.content,
       ...(message.name ? { name: message.name } : {}),
     });
   }
@@ -774,24 +779,48 @@ export const renderTranscriptPrompt = (request: ProviderRequest): string => {
         continue;
       }
     }
-    lines.push(`[${message.role}] ${message.content}`);
+    lines.push(`[${message.role}] ${message.role === 'user' ? promptTextOf(message) : message.content}`);
   }
   lines.push('', 'Continue the conversation by replying to the latest user message.');
   return lines.join('\n');
 };
 
 /**
- * The newest user message, which is all a resumed harness session needs:
- * the harness is holding everything before it. Falls back to the full
- * transcript when there is no user message to isolate, so a caller can
- * never end up sending nothing.
+ * What a resumed harness session has not heard yet: every message
+ * overheard since the agent last spoke, then the newest user message. The
+ * harness holds everything before its own last reply, and until `observe`
+ * that was always exactly one message — but a message overheard between
+ * turns is appended with no turn run on it, so by the next turn there can
+ * be several, and sending only the newest would leave the model answering
+ * with the thread's middle missing on precisely the path that cannot
+ * rebuild its history.
+ *
+ * Selected by the mark, not by position. "Every user message since the
+ * last assistant" reads the same in the common case and differs after a
+ * turn the harness accepted and then failed: no reply was appended, so
+ * that turn's message is still ahead of the last assistant, and scanning
+ * back would send it to a harness that already has it. An overheard
+ * message is one the harness has never seen, by construction; an
+ * addressed one before the newest was some turn's prompt.
+ *
+ * One addressed message with nothing overheard renders bare, as it always
+ * did. Falls back to the full transcript when there is no user message to
+ * isolate, so a caller can never end up sending nothing.
  */
 export const latestUserMessagePrompt = (request: ProviderRequest): string => {
-  for (let index = request.session.messages.length - 1; index >= 0; index -= 1) {
-    const message = request.session.messages[index];
-    if (message?.role === 'user') {
-      return message.content;
-    }
+  const messages = request.session.messages;
+  let start = messages.length;
+  while (start > 0 && messages[start - 1]?.role !== 'assistant') {
+    start -= 1;
   }
-  return renderTranscriptPrompt(request);
+  const since = messages.slice(start).filter((message) => message.role === 'user');
+  const newest = since.at(-1);
+  if (!newest) {
+    return renderTranscriptPrompt(request);
+  }
+  const unheard = since.filter((message) => message.overheard === true || message === newest);
+  if (unheard.length === 1 && newest.overheard !== true) {
+    return newest.content;
+  }
+  return unheard.map(promptTextOf).join('\n');
 };
