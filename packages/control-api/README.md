@@ -534,7 +534,10 @@ Frames are envelopes:
 The `event` is the existing `StratusEvent` union, unchanged — no new
 vocabulary. (`session.tainted` joined that union with provenance: it carries
 the session's new trust label and the name of what lowered it, never the
-content.) The **turn id lives on the envelope** because `StratusEvent`
+content. `session.observed` joined it with overhearing: a message entered
+the session with no turn run on it — its own event rather than a
+`session.updated`, because a client that takes `running` as "a reply is
+coming" would wait on a turn that never speaks. Session and agent ids only.) The **turn id lives on the envelope** because `StratusEvent`
 carries none and should not grow one: a session processes several messages in
 sequence, and without this a client that queued one has no way to tell its own
 deltas from the next caller's. The id is assigned at dispatch and returned by

@@ -234,6 +234,39 @@ test('history replay merges runner messages into API turns and keeps thinking bl
   });
 });
 
+test('a message overheard between turns reaches the API framed, in one user turn with the next', async () => {
+  const { fetchImpl, requests } = createMockFetch([
+    apiMessage([{ type: 'text', text: 'Both of you, then.' }]),
+  ]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const now = new Date().toISOString();
+  const session = createSession({
+    messages: [
+      { id: 's:u:1', role: 'user', content: 'Dylan: Ava, hello', createdAt: now },
+      { id: 's:a:2', role: 'assistant', content: 'Hello!', createdAt: now },
+      // Appended by `observe`, with no turn run on it.
+      { id: 's:u:3', role: 'user', content: 'Dylan: Bea, what do you think?', createdAt: now, overheard: true },
+      { id: 's:u:4', role: 'user', content: 'Dylan: Ava, and you?', createdAt: now },
+    ],
+  });
+
+  await provider.generate({ session });
+
+  // Consecutive user messages merge into one API turn, so the overheard
+  // one and the one that followed it arrive as two blocks of one user
+  // turn — the first framed by the kernel's one rule for it, not the
+  // provider's own.
+  const wire = requests[0]!.body.messages;
+  assert.equal(wire.length, 3);
+  assert.deepEqual(wire[2], {
+    role: 'user',
+    content: [
+      { type: 'text', text: '(overheard, not addressed to you) Dylan: Bea, what do you think?' },
+      { type: 'text', text: 'Dylan: Ava, and you?' },
+    ],
+  });
+});
+
 test('failed tool results replay as is_error tool_result blocks', async () => {
   const { fetchImpl, requests } = createMockFetch([
     apiMessage([{ type: 'text', text: 'That tool failed, sorry.' }]),

@@ -187,6 +187,70 @@ test('a session\'s routing reports when its agent last spoke, not when the row l
   }
 });
 
+test('observe puts a message into a session with no turn, on the session\'s chain, and refuses what dispatch refuses', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+  const events: StratusEvent[] = [];
+  gateway.bus.subscribe((event) => {
+    events.push(event);
+  });
+  try {
+    const first = await gateway.dispatch({ sessionId: 'thread-o', userMessage: 'Dylan: Ava, hello' });
+    const spoke = (await gateway.sessionRouting('thread-o'))?.lastSpokeAt;
+    assert.ok(spoke);
+    const updatedBefore = events.filter((event) => event.type === 'session.updated').length;
+
+    const observed = await gateway.observe({ sessionId: 'thread-o', message: 'Dylan: Bea, what do you think?' });
+
+    // Appended and durable, and no turn ran: same status the last turn
+    // left, its own event and not a `session.updated`, and the agent has
+    // not spoken since — an adapter ordering agents by who spoke last
+    // must not see an overhear as speaking.
+    assert.equal(observed.messages.length, first.messages.length + 1);
+    assert.equal(observed.status, first.status);
+    const stored = await gateway.store.get('thread-o');
+    assert.equal(stored?.messages.at(-1)?.overheard, true);
+    assert.equal(stored?.messages.at(-1)?.content, 'Dylan: Bea, what do you think?');
+    assert.equal(events.filter((event) => event.type === 'session.updated').length, updatedBefore);
+    assert.deepEqual(
+      events.filter((event) => event.type === 'session.observed'),
+      [{ type: 'session.observed', sessionId: 'thread-o', agentId: first.agent.id }],
+    );
+    assert.equal((await gateway.sessionRouting('thread-o'))?.lastSpokeAt, spoke);
+
+    // The next turn carries it, ahead of the message that started the turn.
+    const next = await gateway.dispatch({ sessionId: 'thread-o', userMessage: 'Dylan: Ava, and you?' });
+    const users = next.messages.filter((message) => message.role === 'user').map((message) => [message.content, message.overheard === true]);
+    assert.deepEqual(users, [
+      ['Dylan: Ava, hello', false],
+      ['Dylan: Bea, what do you think?', true],
+      ['Dylan: Ava, and you?', false],
+    ]);
+
+    // An agent hears only conversations it is already in: nothing is
+    // created on its behalf.
+    await assert.rejects(
+      () => gateway.observe({ sessionId: 'never-seen', message: 'anyone?' }),
+      /No session with id never-seen to overhear into/,
+    );
+    assert.equal(await gateway.store.get('never-seen'), undefined);
+    // Sessions never cross agent identities, by the same door dispatch uses.
+    await assert.rejects(
+      () => gateway.observe({ sessionId: 'thread-o', agentId: 'somebody-else', message: 'hm' }),
+      /belongs to agent .* not somebody-else/,
+    );
+    // And the scheduler's namespace is as closed to an overhear as to a turn.
+    await assert.rejects(
+      () => gateway.observe({ sessionId: 'schedule:x:y', message: 'psst' }),
+      /reserved for scheduled firings/,
+    );
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('sqlite sessions round-trip metadata (anthropic raw-turn cache included)', async () => {
   const home = await newHome();
   const store = new SqliteSessionStore(path.join(home, 'sessions.db'));

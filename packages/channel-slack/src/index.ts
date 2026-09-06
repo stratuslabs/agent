@@ -1216,6 +1216,14 @@ interface Admission {
   /** Absent for a DM, which has one agent by construction. */
   threadKey?: string;
   settled: boolean;
+  /**
+   * In the thread, if at all, as a listener: the message is somebody
+   * else's to answer, and this agent hears it into its session rather than
+   * replying. Decided here for the two cases the process can settle
+   * synchronously — a message naming another agent, and one an earlier
+   * handover gave to another agent — and by the sessions for the cold one.
+   */
+  overhear: boolean;
 }
 
 interface AgentConnection {
@@ -2278,10 +2286,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * the dedupe and the handover record included, which are the two pieces a
    * later message reads.
    *
-   * `undefined` means the message is not this agent's. `settled: false`
-   * means only the sessions can still decide it, which is the one case that
-   * has to wait — and it is the cold case, where by definition no message
-   * of this thread has been seen in this process.
+   * `undefined` means the message is nothing to this agent — a DM to
+   * someone else, the room rather than a thread, its own words.
+   * `overhear: true` means it is somebody else's to answer and this
+   * agent's to hear, if it is in the thread at all, which only the sessions
+   * can say. `settled: false` means only the sessions can decide even that
+   * much, which is the one case that has to wait — and it is the cold
+   * case, where by definition no message of this thread has been seen in
+   * this process.
    */
   const admit = (connection: AgentConnection, args: SlackSocketEventArgs): Admission | undefined => {
     const event = args.event;
@@ -2328,13 +2340,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // or stands alone, is a follow-up to nothing.
         return undefined;
       }
-      if (named) {
-        // Somebody else was asked. Tagging an agent hands it the question,
-        // and the agent that had it is no longer being asked — two answers
-        // to one message is what a thread with a roster in it must never
-        // produce.
-        return undefined;
-      }
     }
 
     // One Slack MESSAGE, not one delivery. An app subscribed to both
@@ -2347,7 +2352,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // After the handover record and not before it: a redelivery re-records
     // the same agent, which costs nothing, while deduping first would drop
     // the record whenever the other copy of a doubly-delivered mention is
-    // the one a connection sees second.
+    // the one a connection sees second. And before every stand-down below,
+    // because standing down is no longer nothing: an agent that hears a
+    // message it is not answering must hear it once.
     const eventKey = `${connection.config.agentId}:${event.channel}:${event.ts}`;
     if (alreadySeen(eventKey)) {
       return undefined;
@@ -2368,6 +2375,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       ...(thread ? { thread } : {}),
       ...(threadKey ? { threadKey } : {}),
       settled: true,
+      overhear: false,
     };
 
     if (addressed) {
@@ -2377,6 +2385,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // that all the sockets agree on, which is the only self-consistent
       // reading of a message that asked several.
       return admission;
+    }
+
+    if (named) {
+      // Somebody else was asked. Tagging an agent hands it the question,
+      // and the agent that had it is no longer being asked — two answers
+      // to one message is what a thread with a roster in it must never
+      // produce. But the agent that had it is still in the room, and a
+      // person in that position hears the question asked of their
+      // colleague: it goes into this agent's session, unanswered, so the
+      // next thing it is asked is asked of someone who followed along.
+      return { ...admission, overhear: true };
     }
 
     // An untagged reply. The record is what this process has actually seen,
@@ -2394,7 +2413,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // membership the adapter does not track, and would have to be
         // tracked in the durable path too, since a removed app is still a
         // live connection with the newest session there.
-        return undefined;
+        //
+        // Standing down is not leaving: the reply is the holder's, and this
+        // agent hears it.
+        return { ...admission, overhear: true };
       }
       rememberAddressee(threadKey, connection.config.agentId, event.ts);
       return admission;
@@ -2446,6 +2468,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // not lose its place to one that did not. A message that turns out
       // not to be this agent's leaves an empty link behind, which is all it
       // should cost.
+      let overhear = admitted.overhear;
       if (!admitted.settled) {
         // One verdict for this message, shared with whichever other agents
         // are asking about it — see `followUpWinner`.
@@ -2454,11 +2477,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           event.ts,
         );
         if (winner !== connection.config.agentId) {
-          return undefined;
-        }
-        // Answered from the store rather than from memory: hold it, so the
-        // rest of the thread is ordered by receipt like any other.
-        if (threadKey) {
+          // Not this agent's to answer — and, if it is in the thread,
+          // this agent's to hear, same as the two warm stand-downs.
+          overhear = true;
+        } else if (threadKey) {
+          // Answered from the store rather than from memory: hold it, so
+          // the rest of the thread is ordered by receipt like any other.
           rememberAddressee(threadKey, connection.config.agentId, event.ts);
         }
       }
@@ -2471,6 +2495,44 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // unambiguous.
       const spoken = isDm ? cleaned : `${author}: ${cleaned}`;
       const userMessage = `${spoken}${attachmentNote(event.files)}`;
+      // Who sent this, judged against the operator's list — per message,
+      // never remembered from the first one in the thread. A DM proves
+      // nothing about who is typing, so a DM from an unlisted member is
+      // `unknown` exactly as a channel mention would be. The same label
+      // whether the agent answers or only hears: the text is in its
+      // transcript either way.
+      const senderTrust = (connection.config.principals ?? []).includes(userId) ? 'user' : 'unknown';
+      const metadata = {
+        channel: 'slack',
+        team,
+        slackChannel: event.channel,
+        slackUser: userId,
+        // Carried so a mid-turn approval question is asked in the thread
+        // the turn belongs to rather than at the top of a busy channel.
+        ...(thread ? { slackThread: thread } : {}),
+        [SENDER_TRUST_METADATA_KEY]: senderTrust,
+      };
+
+      if (overhear) {
+        // Heard, not answered: no placeholder, no turn. Only into a
+        // conversation this agent is already in — a session under this
+        // thread's key exists exactly when it was invited here — and only
+        // where the host can take it; one that cannot leaves the agent
+        // hearing what it answers, as every agent did before.
+        if (!gateway.observe || !gateway.sessionRouting) {
+          return undefined;
+        }
+        if (!(await gateway.sessionRouting(sessionId))) {
+          return undefined;
+        }
+        // Placed on the gateway's chain here, in receipt order, and not
+        // awaited here: a dispatch is placed the same way, and awaiting
+        // an overhear queued behind a long turn would hold the next
+        // message's place in this chain hostage to that turn.
+        return {
+          observed: gateway.observe({ sessionId, agentId: connection.config.agentId, message: userMessage, metadata }),
+        };
+      }
 
       const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn);
       try {
@@ -2491,20 +2553,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         agentId: connection.config.agentId,
         userMessage,
         turnId: renderer.turnId,
-        metadata: {
-          channel: 'slack',
-          team,
-          slackChannel: event.channel,
-          slackUser: userId,
-          // Carried so a mid-turn approval question is asked in the thread
-          // the turn belongs to rather than at the top of a busy channel.
-          ...(thread ? { slackThread: thread } : {}),
-          // This turn's sender, judged against the operator's list — per
-          // message, never remembered from the first one in the thread. A
-          // DM proves nothing about who is typing, so a DM from an unlisted
-          // member is `unknown` exactly as a channel mention would be.
-          [SENDER_TRUST_METADATA_KEY]: (connection.config.principals ?? []).includes(userId) ? 'user' : 'unknown',
-        },
+        metadata,
       });
       return { renderer, turn };
     });
@@ -2521,6 +2570,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
     const started = await intake;
     if (!started) {
+      return;
+    }
+    if ('observed' in started) {
+      // Nothing to render; the one outcome worth a line is the host
+      // refusing it — a turn parked across a restart, most likely — since
+      // a message dropped on the floor is the thing this exists to end.
+      try {
+        await started.observed;
+      } catch (error) {
+        warn(`slack: ${connection.config.agentId} could not overhear a message in ${event.channel}: ${error instanceof Error ? error.message : String(error)}`);
+      }
       return;
     }
     const { renderer, turn } = started;

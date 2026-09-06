@@ -2038,6 +2038,8 @@ export const formatEvent = (event: StratusEvent): string | null => {
       return `• session.created ${event.sessionId}`;
     case 'session.updated':
       return `• session.updated ${event.status}`;
+    case 'session.observed':
+      return `• session.observed ${event.sessionId}`;
     case 'provider.response':
       return `• provider.response ${event.parts.length} part(s)`;
     case 'tool.called':

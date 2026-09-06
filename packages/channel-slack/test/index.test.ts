@@ -152,6 +152,8 @@ const sessionWithReply = (id: string, reply: string): Session => {
 
 interface StubGateway extends GatewayLike {
   dispatches: Array<{ sessionId: string; agentId?: string; userMessage: string }>;
+  /** What each agent heard without answering, in the order the gateway was asked. */
+  observes: Array<{ sessionId: string; agentId?: string; message: string }>;
   resolutions: Array<{ requestId: string; answer: ApprovalAnswer; actor?: string; reason?: string }>;
   /** Request ids the gateway still considers pending. */
   pendingApprovals: Set<string>;
@@ -165,6 +167,7 @@ const createStubGateway = (
   const gateway: StubGateway = {
     bus,
     dispatches: [],
+    observes: [],
     resolutions: [],
     pendingApprovals: new Set<string>(),
     agents: () => [
@@ -206,6 +209,15 @@ const createStubGateway = (
       }
     },
     activeTurnId: (sessionId) => activeTurns.get(sessionId),
+    async observe(input) {
+      gateway.observes.push({
+        sessionId: input.sessionId,
+        ...(input.agentId ? { agentId: input.agentId } : {}),
+        message: input.message,
+      });
+      await bus.emit({ type: 'session.observed', sessionId: input.sessionId, agentId: input.agentId ?? 'ava' });
+      return sessionWithReply(input.sessionId, '');
+    },
   };
   return gateway;
 };
@@ -802,6 +814,121 @@ test('in a shared thread an untagged reply goes to whoever spoke last, and a men
     ['bea', 'Dylan: what do you think?'],
     ['bea', 'Dylan: go on'],
   ]);
+});
+
+test('an agent in a shared thread hears what is said to the other one, and posts nothing for it', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  // Both in the thread; Ava spoke last.
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:900.0', '2026-01-01T00:00:01.000Z'],
+    ['slack:bea:T1:C1:900.0', '2026-01-01T00:00:00.000Z'],
+  ]));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // Cold: the sessions say Ava spoke last, so the untagged reply is hers —
+  // and Bea, in the thread but not asked, hears it.
+  const followUp = channelMessage({ text: 'say more', ts: '900.1', thread: '900.0' });
+  await socketAva.deliver('message', followUp);
+  await socketBea.deliver('message', followUp);
+
+  // Naming Bea hands her the question. Ava had it, and now hears it asked
+  // of her colleague instead — once, though Slack tells her app about a
+  // mention of another app through `message.channels` only, and tells
+  // Bea's about it twice.
+  const handover = channelMessage({ text: '<@B-BEA> what do you think?', ts: '900.2', thread: '900.0' });
+  await socketAva.deliver('message', handover);
+  // A redelivery — the same message, again — is heard once, exactly as
+  // it would be answered once.
+  await socketAva.deliver('message', handover);
+  await socketBea.deliver('message', handover);
+  await socketBea.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-handover' },
+    event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-BEA> what do you think?', ts: '900.2', thread_ts: '900.0', channel: 'C1' },
+  });
+
+  // Warm: the handover is in force, so the next untagged reply is Bea's to
+  // answer and Ava's to hear.
+  const afterHandover = channelMessage({ text: 'go on', ts: '900.3', thread: '900.0' });
+  await socketAva.deliver('message', afterHandover);
+  await socketBea.deliver('message', afterHandover);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: say more'],
+    ['bea', 'Dylan: what do you think?'],
+    ['bea', 'Dylan: go on'],
+  ]);
+  // Every message somebody else answered reached the agent that did not,
+  // into its own session for the thread, with the speaker named the way a
+  // turn's message names them.
+  assert.deepEqual(
+    gateway.observes.map((observed) => [observed.agentId, observed.sessionId, observed.message]),
+    [
+      ['bea', 'slack:bea:T1:C1:900.0', 'Dylan: say more'],
+      ['ava', 'slack:ava:T1:C1:900.0', 'Dylan: <@B-BEA> what do you think?'],
+      ['ava', 'slack:ava:T1:C1:900.0', 'Dylan: go on'],
+    ],
+  );
+  // Hearing is silent: a placeholder is a promise of a reply, and there
+  // is none coming. Every post either app made was for a turn it answered.
+  assert.equal(webAva.posts.length, 1);
+  assert.equal(webBea.posts.length, 2);
+});
+
+test('an agent hears only threads it is in, and only where the host can take it', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  // Only Bea has a session under this thread: Ava was never invited.
+  gateway.sessionRouting = routingOver(new Map([['slack:bea:T1:C1:700.0', '2026-01-01T00:00:00.000Z']]));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // A thread Ava's app is told about, like every thread in the channel,
+  // and has no part in: nothing to hear into.
+  const toBea = channelMessage({ text: '<@B-BEA> thoughts?', ts: '700.1', thread: '700.0' });
+  await socketAva.deliver('message', toBea);
+  await socketBea.deliver('message', toBea);
+
+  // A host without `observe` leaves the agent hearing what it answers, as
+  // every agent did before — no error, and the answering is untouched.
+  delete gateway.observe;
+  const again = channelMessage({ text: '<@B-BEA> and?', ts: '700.2', thread: '700.0' });
+  await socketAva.deliver('message', again);
+  await socketBea.deliver('message', again);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['bea', 'Dylan: thoughts?'],
+    ['bea', 'Dylan: and?'],
+  ]);
+  assert.deepEqual(gateway.observes, []);
+  assert.equal(webAva.posts.length, 0);
 });
 
 test('a follow-up typed while the opening mention is still starting is answered, not dropped', async () => {

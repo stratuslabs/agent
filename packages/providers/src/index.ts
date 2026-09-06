@@ -12,6 +12,7 @@ import {
   type ToolCall,
   type ToolDescriptor,
   type ToolResult,
+  promptTextOf,
 } from '@stratusagent/core';
 
 export interface ProviderResponseBuilder {
@@ -774,24 +775,38 @@ export const renderTranscriptPrompt = (request: ProviderRequest): string => {
         continue;
       }
     }
-    lines.push(`[${message.role}] ${message.content}`);
+    lines.push(`[${message.role}] ${message.role === 'user' ? promptTextOf(message) : message.content}`);
   }
   lines.push('', 'Continue the conversation by replying to the latest user message.');
   return lines.join('\n');
 };
 
 /**
- * The newest user message, which is all a resumed harness session needs:
- * the harness is holding everything before it. Falls back to the full
- * transcript when there is no user message to isolate, so a caller can
- * never end up sending nothing.
+ * What a resumed harness session has not heard yet: every user message
+ * since the agent last spoke, in order. The harness holds everything up to
+ * its own last reply, and until `observe` that was always exactly one
+ * message — but a message overheard between turns is appended with no turn
+ * run on it, so by the next turn there can be several, and sending only
+ * the newest would leave the model answering with the thread's middle
+ * missing on precisely the path that cannot rebuild its history.
+ *
+ * One user message that was addressed to the agent renders bare, as it
+ * always did. Falls back to the full transcript when there is no user
+ * message to isolate, so a caller can never end up sending nothing.
  */
 export const latestUserMessagePrompt = (request: ProviderRequest): string => {
-  for (let index = request.session.messages.length - 1; index >= 0; index -= 1) {
-    const message = request.session.messages[index];
-    if (message?.role === 'user') {
-      return message.content;
-    }
+  const messages = request.session.messages;
+  let start = messages.length;
+  while (start > 0 && messages[start - 1]?.role !== 'assistant') {
+    start -= 1;
   }
-  return renderTranscriptPrompt(request);
+  const unheard = messages.slice(start).filter((message) => message.role === 'user');
+  const only = unheard[0];
+  if (unheard.length === 1 && only && only.overheard !== true) {
+    return only.content;
+  }
+  if (unheard.length === 0) {
+    return renderTranscriptPrompt(request);
+  }
+  return unheard.map(promptTextOf).join('\n');
 };

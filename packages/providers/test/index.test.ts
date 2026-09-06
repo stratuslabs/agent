@@ -5,6 +5,8 @@ import type { ProviderCallUsage, ProviderRequest } from '@stratusagent/core';
 import {
   createOpenAICompatibleProvider,
   createProviderRegistry,
+  latestUserMessagePrompt,
+  renderTranscriptPrompt,
   createProviderResponseBuilder,
   defineProvider,
   defineScriptedProvider,
@@ -761,4 +763,85 @@ test('a successful call reports once, through the sink, and repeats it on the re
   // reads one or the other and never both.
   assert.equal(reported.length, 1);
   assert.deepEqual(reported[0], response.usage);
+});
+
+const message = (
+  id: string,
+  role: 'user' | 'assistant',
+  content: string,
+  overheard = false,
+): ProviderRequest['session']['messages'][number] => ({
+  id,
+  role,
+  content,
+  createdAt: new Date().toISOString(),
+  ...(overheard ? { overheard: true } : {}),
+});
+
+const requestWith = (messages: ProviderRequest['session']['messages']): ProviderRequest => ({
+  session: { ...createRequest().session, messages },
+});
+
+test('a resumed harness is sent everything since the agent last spoke, overheard messages framed', () => {
+  // One addressed message renders bare, as it always did: the harness is
+  // holding everything before it, and until `observe` that was every case.
+  assert.equal(
+    latestUserMessagePrompt(requestWith([
+      message('u1', 'user', 'Dylan: hello'),
+      message('a1', 'assistant', 'hi'),
+      message('u2', 'user', 'Dylan: and again'),
+    ])),
+    'Dylan: and again',
+  );
+
+  // Two messages overheard between turns, then the one that addressed the
+  // agent: all three, in order, the overheard ones framed as somebody
+  // else's — on the one path that cannot rebuild its own history, sending
+  // only the newest would answer with the thread's middle missing.
+  assert.equal(
+    latestUserMessagePrompt(requestWith([
+      message('u1', 'user', 'Dylan: Ava, hello'),
+      message('a1', 'assistant', 'hi'),
+      message('u2', 'user', 'Dylan: Bea, what do you think?', true),
+      message('u3', 'user', 'Dylan: go on', true),
+      message('u4', 'user', 'Dylan: Ava, and you?'),
+    ])),
+    [
+      '(overheard, not addressed to you) Dylan: Bea, what do you think?',
+      '(overheard, not addressed to you) Dylan: go on',
+      'Dylan: Ava, and you?',
+    ].join('\n'),
+  );
+
+  // A single overheard message with nothing after it is still framed —
+  // bare would read as if the agent had been asked.
+  assert.equal(
+    latestUserMessagePrompt(requestWith([
+      message('u1', 'user', 'Dylan: hello'),
+      message('a1', 'assistant', 'hi'),
+      message('u2', 'user', 'Dylan: Bea?', true),
+    ])),
+    '(overheard, not addressed to you) Dylan: Bea?',
+  );
+
+  // Nothing since the last reply falls back to the whole transcript, so a
+  // caller can never end up sending nothing.
+  assert.match(
+    latestUserMessagePrompt(requestWith([
+      message('u1', 'user', 'Dylan: hello'),
+      message('a1', 'assistant', 'hi'),
+    ])),
+    /^Conversation so far:/,
+  );
+
+  // The fresh-session rendering frames the same way, from the same rule.
+  assert.match(
+    renderTranscriptPrompt(requestWith([
+      message('u1', 'user', 'Dylan: hello'),
+      message('a1', 'assistant', 'hi'),
+      message('u2', 'user', 'Dylan: Bea?', true),
+      message('u3', 'user', 'Dylan: Ava?'),
+    ])),
+    /\[user\] \(overheard, not addressed to you\) Dylan: Bea\?\n\[user\] Dylan: Ava\?/,
+  );
 });

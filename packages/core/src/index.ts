@@ -18,6 +18,18 @@ export interface Message {
   createdAt: string;
   toolCalls?: ToolCall[];
   toolResult?: ToolResult;
+  /**
+   * A user message the agent was not spoken to by: something said in a
+   * conversation it is in, to somebody else, appended by `observe` with no
+   * turn run on it. Present only when true.
+   *
+   * Durable, because it changes how the message is rendered on every later
+   * turn, not just the next one: every renderer passes user content through
+   * `promptTextOf`, which frames an overheard message as third-party speech
+   * so a stranger's words never read as something the agent was told to do
+   * — the boundary provenance draws, here at the point text enters.
+   */
+  overheard?: boolean;
 }
 
 export interface AgentDescriptor {
@@ -1550,6 +1562,21 @@ export const latestTurnReply = (session: Pick<Session, 'messages'>): string | un
   return undefined;
 };
 
+/**
+ * A user message's text as a prompt should carry it. The one place an
+ * overheard message is framed, so the API provider's content blocks and the
+ * two harness renderers cannot drift on what "not spoken to" looks like.
+ *
+ * The frame names the fact rather than an instruction: the model is told
+ * this was said to someone else, and what to make of that is its own
+ * judgement — the same reason a memory region is labelled by trust and not
+ * annotated with advice.
+ */
+export const promptTextOf = (message: Pick<Message, 'content' | 'overheard'>): string =>
+  message.overheard === true
+    ? `(overheard, not addressed to you) ${message.content}`
+    : message.content;
+
 /** Reads the checkpoint off a session, if it is parked. */
 export const readPendingApproval = (session: Session): PendingApprovalRecord | undefined => {
   const raw = session.metadata?.[PENDING_APPROVAL_METADATA_KEY];
@@ -1602,6 +1629,13 @@ export type ApprovalResolutionReason = 'decided' | 'timeout' | 'cancelled' | 'un
 export type StratusEvent =
   | { type: 'session.created'; sessionId: string; agentId: string }
   | { type: 'session.updated'; sessionId: string; status: SessionStatus }
+  /**
+   * A message entered the session without a turn — `AgentRunner.observe`.
+   * Its own event rather than a `session.updated`, because a renderer that
+   * takes `running` as "a reply is coming" would open a placeholder for a
+   * turn that never speaks. By name only, like everything the log keeps.
+   */
+  | { type: 'session.observed'; sessionId: string; agentId: string }
   | { type: 'provider.delta'; sessionId: string; delta: ProviderDelta }
   | { type: 'provider.response'; sessionId: string; parts: ProviderPart[] }
   | { type: 'tool.called'; sessionId: string; call: ToolCall }
@@ -2524,6 +2558,19 @@ export interface ResumeInput {
   signal?: AbortSignal;
 }
 
+export interface ObserveInput {
+  sessionId: string;
+  /** What was said, as the transcript will carry it — speaker included, the way a channel already writes a user turn. */
+  message: string;
+  /**
+   * This message's metadata, read for the speaker's trust exactly as
+   * `ResumeInput.metadata` is and merged into nothing: an overheard
+   * stranger lowers the session's label the same way one who addressed the
+   * agent would, because their text is in the transcript either way.
+   */
+  metadata?: JsonObject;
+}
+
 /**
  * Thrown when a run is stopped by its abort signal. The session ends up
  * `failed` with this error's message as `lastError`, so an aborted turn is
@@ -2762,6 +2809,55 @@ export class AgentRunner {
     await this.bus.emit({ type: 'session.updated', sessionId: working.id, status: working.status });
 
     return this.executeTurns(working, input.signal);
+  }
+
+  /**
+   * A message reaching the session with no turn run on it: something said
+   * in a conversation the agent is in, to somebody else. Appended and
+   * saved, so the next turn the agent does take has it in hand; no
+   * provider call, no reply, no status change, and its own event rather
+   * than `session.updated`, since nothing is running.
+   *
+   * Refused while a turn is in flight. A parked turn's transcript ends in
+   * a tool call awaiting its result, and a user message spliced in ahead
+   * of that result is a wire-format violation on the API path — the one
+   * shape `reconcileInterruptedToolCalls` exists to repair, and repairing
+   * it here would close a call a human is still deciding on. A host that
+   * serializes writes per session (the gateway's chain) only ever sees
+   * this for a turn parked across a restart, and says so rather than
+   * dropping the message silently.
+   */
+  async observe(input: ObserveInput): Promise<Session> {
+    const session = await this.store.get(input.sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${input.sessionId}`);
+    }
+    if (session.status === 'running' || session.status === 'pending_approval') {
+      throw new Error(
+        `Session ${input.sessionId} has a turn in flight (${session.status}); a message cannot be overheard into it until the turn has finished.`,
+      );
+    }
+
+    session.messages.push({
+      id: `${session.id}:user:${session.messages.length + 1}`,
+      role: 'user',
+      content: input.message,
+      createdAt: new Date().toISOString(),
+      overheard: true,
+    });
+
+    // The speaker is judged like any sender: their words are in the
+    // transcript from here on, whether or not they were talking to the
+    // agent — which is exactly the case the label exists for.
+    await this.labelLegacySession(session);
+    await this.taint(session, senderTrustOf(input.metadata), 'sender');
+
+    await this.store.save(session);
+    const stored = await this.store.get(session.id);
+    const working = stored ?? session;
+
+    await this.bus.emit({ type: 'session.observed', sessionId: working.id, agentId: working.agent.id });
+    return working;
   }
 
   /**

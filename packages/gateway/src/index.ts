@@ -705,11 +705,34 @@ export interface DispatchInput {
   turnId?: string;
 }
 
+export interface ObserveInput {
+  sessionId: string;
+  /** Must match the session's agent when given; a session never crosses identities. */
+  agentId?: string;
+  /** What was said, speaker included — see `ObserveInput.message` in core. */
+  message: string;
+  /** This message's metadata, read for the speaker's trust; never merged. */
+  metadata?: JsonObject;
+}
+
 export interface Gateway {
   start(): Promise<void>;
   stop(): Promise<void>;
   /** The one entrypoint: resolve the agent, load-or-create the session, run a turn. */
   dispatch(input: DispatchInput): Promise<Session>;
+  /**
+   * A message into an existing session with no turn run on it —
+   * `AgentRunner.observe`, on the session's chain so an overheard message
+   * and a turn never interleave writes, and behind the same two refusals
+   * as `dispatch`: the scheduler's reserved id namespace and the daemon's
+   * reserved metadata keys, since text entering a session's context is
+   * text entering its next prompt whichever door it came through.
+   *
+   * Existing only: an agent overhears a conversation it is already in, and
+   * a session that would have to be created is one it was never invited
+   * to. A rolled-over transcript refuses like a dispatch would.
+   */
+  observe(input: ObserveInput): Promise<Session>;
   /** Live events from every runner, one stream for all consumers. */
   readonly bus: EventBus;
   /** The store shared by every runner (durable across restarts). */
@@ -2538,6 +2561,58 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     });
   };
 
+  const observe = async (input: ObserveInput): Promise<Session> => {
+    if (stopping) {
+      throw refusal();
+    }
+    // The same two doors `dispatch` guards, for the same reasons: a message
+    // overheard into a firing's session would sit in the scheduler's
+    // context, and a metadata key only the daemon may write is not one a
+    // channel gets to supply by hearing something.
+    if (isScheduleSessionId(input.sessionId)) {
+      throw new Error(
+        `Session ids beginning with "${SCHEDULE_SESSION_ID_PREFIX}" are reserved for scheduled firings and cannot be observed into externally.`,
+      );
+    }
+    const reserved = reservedSessionMetadataKey(input.metadata);
+    if (reserved !== undefined) {
+      throw new Error(
+        `Session metadata key "${reserved}" is reserved for the daemon's own records and cannot be supplied by an observe. Reserved keys: ${RESERVED_SESSION_METADATA_KEYS.join(', ')}.`,
+      );
+    }
+
+    return onSessionChain(input.sessionId, async () => {
+      assertStateCompatible(env);
+      const existing = await store.get(input.sessionId);
+      if (!existing) {
+        throw new Error(
+          `No session with id ${input.sessionId} to overhear into; an agent hears only conversations it is already in.`,
+        );
+      }
+      if (input.agentId !== undefined && existing.agent.id !== input.agentId) {
+        throw new Error(
+          `Session ${input.sessionId} belongs to agent ${existing.agent.id}, not ${input.agentId} — sessions never cross agent identities.`,
+        );
+      }
+      const continuedAs = existing.metadata?.[ROLLED_OVER_TO_METADATA_KEY];
+      if (typeof continuedAs === 'string') {
+        throw new Error(
+          `Session ${input.sessionId} was rolled over; it is an archived transcript and the conversation continues as ${continuedAs}.`,
+        );
+      }
+      // Resolved the way a turn resolves it, so the runner that hears is
+      // the one that would speak: the label it writes is the runner's, and
+      // there is one implementation of that rule.
+      const source = await refreshAgent(existing.agent.id);
+      const runner = runnerFor(await runtimeForAgent(source));
+      return runner.observe({
+        sessionId: input.sessionId,
+        message: input.message,
+        ...(input.metadata ? { metadata: input.metadata } : {}),
+      });
+    });
+  };
+
   /**
    * Load what the config asked for, and say what did not load.
    *
@@ -2898,6 +2973,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
 
     dispatch,
+    observe,
 
     async sessionRouting(sessionId: string) {
       const session = await store.get(sessionId);

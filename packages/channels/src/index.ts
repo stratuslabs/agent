@@ -141,6 +141,23 @@ export interface GatewayLike {
    */
   sessionRouting?(sessionId: string): Promise<SessionRouting | undefined>;
   /**
+   * A message that reaches a session without running a turn: something
+   * said in a conversation the agent is in, to somebody else. The next
+   * turn the agent takes has it in hand; nothing is posted now.
+   *
+   * Optional, like `sessionRouting`, and an adapter needs both — the
+   * routing to know the agent is in the conversation at all, since a
+   * session an agent was never invited into is nothing to hear into. A
+   * host that omits it gives up overhearing: its agents hear only what
+   * they answer, which is what every agent did before this existed.
+   */
+  observe?(input: {
+    sessionId: string;
+    agentId?: string;
+    message: string;
+    metadata?: JsonObject;
+  }): Promise<Session>;
+  /**
    * Settles a call parked on `tool.approval-requested`. False means the
    * request is no longer pending — decided already, expired, or its turn
    * cancelled — which an adapter reports back to whoever answered rather

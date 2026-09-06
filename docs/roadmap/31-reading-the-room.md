@@ -1,5 +1,30 @@
 # 31 — Reading the room: overhearing, and an agent's own choice to speak
 
+**Status: in progress.** Piece 1 of the [design sketch](#design-sketch) —
+`observe` and the overheard lane — has shipped: `AgentRunner.observe`,
+`Gateway.observe` on the session chain, `session.observed`, the `overheard`
+mark on a message and the one rule (`promptTextOf`) every renderer frames
+it by, and the Slack adapter hearing, into an agent's own session, each
+message in a shared thread that was another agent's to answer. Pieces 2 and
+3 are not started.
+
+Two things the sketch did not say, found on the way:
+
+- **"Append and save" was not enough on the harness path.** A resumed SDK
+  session is sent only the newest user message, since the harness holds
+  everything before it — so a message overheard between turns would never
+  have reached the model on exactly the provider that cannot rebuild its
+  own history. `latestUserMessagePrompt` now sends every user message since
+  the agent last spoke, which degrades to the old single message whenever
+  nothing was overheard.
+- **What the other agent *replied* is not overheard yet — only what people
+  say.** A colleague's reply is a bot message the adapter deliberately
+  ignores, and its final text arrives as a stream of edits rather than one
+  event, so hearing it is a different mechanism: the adapter that rendered
+  the reply knows its final text and can observe it into the thread's other
+  sessions itself, with no Slack event involved. That is the next slice of
+  piece 1, before piece 2.
+
 ## Goal
 
 An agent in a shared thread behaves like a person in one: it follows what is
@@ -49,6 +74,14 @@ description of the streaming and starts being about judgement.
     never speak). The gateway exposes it on the dispatcher so a channel can
     reach it, and it takes the same single-flight session chain as a
     dispatch, so an overheard message and a turn never interleave writes.
+    **Shipped.** One refusal the sketch did not anticipate: a session with
+    a turn parked on a human cannot be observed into, because its
+    transcript ends in a tool call awaiting its result and a user message
+    spliced in ahead of that result is a wire-format violation — the one
+    `reconcileInterruptedToolCalls` repairs, and repairing it there would
+    close a call somebody is still deciding on. Under the gateway's chain
+    that only ever happens for a turn parked across a restart, and the
+    adapter warns rather than dropping the message silently.
   - **Overheard text is somebody else's.** It enters the prompt with no one
     having addressed it, which is exactly the boundary [30](./30-provenance.md)
     draws: it is marked untrusted at the point it enters and rendered as
