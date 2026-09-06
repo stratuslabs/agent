@@ -7432,15 +7432,19 @@ const runAgentNewFromTemplate = async (
   }
   writeLine(streams.stdout);
   // What a bare `stratus run` from here would select *now*, which is not
-  // always the file the entries went into: a project `stratus.config.json`
-  // created while the review was on screen takes precedence over the global
-  // config, cannot enable plugins, and would start this agent with none of
-  // the tools just approved. Asked after the write rather than before it,
-  // because the answer changes no part of what was written — plugin entries
-  // have one legal home and that is where they went — only which command
-  // reproduces it.
+  // always the file this template's plugins are configured in. Keyed to
+  // whether the bundle needs plugins at all, never to whether it wrote
+  // any: a run whose every required block was already there writes
+  // nothing and depends on that file exactly as much.
+  //
+  // A project `stratus.config.json` created while the review was on screen
+  // takes precedence over the global config, cannot enable plugins, and
+  // would start this agent with none of the tools just approved. Asked
+  // after the transaction rather than before it, because the answer
+  // changes no part of what was written — plugin entries have one legal
+  // home and that is where they are — only which command reproduces it.
   let shadowedBy: string | undefined;
-  if (applied.configured.length > 0 && command.configPath === undefined) {
+  if (needsConfig && command.configPath === undefined) {
     const activeNow = await resolveConfigLocation({}, env).catch(() => undefined);
     const activeTarget = activeNow
       ? await resolveConfigTarget(activeNow.path).catch(() => activeNow.path)
@@ -7453,7 +7457,7 @@ const runAgentNewFromTemplate = async (
     writeLine(
       streams.stderr,
       `Note: ${shadowedBy} is what a bare run here selects now, and a project config cannot enable plugins. `
-      + 'The commands below name the file the entries went into.',
+      + 'The commands below name the file this agent\'s plugins are configured in.',
     );
   }
 

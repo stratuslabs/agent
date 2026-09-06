@@ -9373,6 +9373,41 @@ test('a project config appearing mid-flight makes the suggested run name the fil
   );
 });
 
+test('a reused plugin block still gets the shadowed-config warning', async () => {
+  const home = await templateHome();
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-template-reuse-'));
+  const workspace = path.join(home, '.stratus', 'workspaces', 'vera');
+  // Everything `research` needs, already exactly as it wants it — including
+  // the per-agent roots for the id it is about to claim. Nothing is written,
+  // so the outcome is `reuse` across the board.
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({
+    plugins: {
+      '@stratusagent/tool-web': { enabled: true },
+      '@stratusagent/tool-fs': { enabled: true, agents: { vera: { roots: [workspace] } } },
+    },
+  })}\n`);
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'research', '--yes'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: project,
+      processEnv: {},
+      templateBeforeSoulClaim: async () => {
+        await writeFile(path.join(project, 'stratus.config.json'), '{}\n');
+      },
+    },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.doesNotMatch(output.stdout, /^  config /m, 'nothing was written, so nothing is reported as written');
+  // …and the agent depends on that file exactly as much as one that wrote it.
+  assert.match(output.stderr, /is what a bare run here selects now/);
+  assert.match(output.stdout, /stratus run --config /);
+});
+
 test('a template checks the id against the config it locked, not the spelling', async () => {
   const home = await templateHome();
   const first = path.join(home, 'first.json');
