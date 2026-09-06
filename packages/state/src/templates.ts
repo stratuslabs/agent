@@ -15,6 +15,7 @@ import {
   isFirstPartyPackage,
   parseToolRiskOverrides,
   readPluginManifest,
+  stageManifestSkills,
   riskFloorFor,
   validatePluginConfig,
   type OptionalModuleHost,
@@ -431,8 +432,28 @@ export const decidePluginConfig = (
     // ones. Silently replacing a root somebody chose is precisely the
     // failure the conflict rule exists to prevent.
     if (perAgent) {
+      // A container that is present but not an object is a value the
+      // operator wrote, not an absent one. Reading it as `{}` would report
+      // an amend that "adds keys" while replacing whatever was there — the
+      // silent overwrite the conflict rule exists to stop, and the one case
+      // where it would happen without the reviewed summary ever naming the
+      // value being lost.
+      if (existing.agents !== undefined && !isJsonObject(existing.agents)) {
+        conflicts.push({
+          key: 'agents',
+          existing: existing.agents,
+          requested: { [context.agentId]: perAgent } as JsonValue,
+        });
+      }
       const agents = isJsonObject(existing.agents) ? existing.agents : {};
       const mine = agents[context.agentId];
+      if (mine !== undefined && !isJsonObject(mine)) {
+        conflicts.push({
+          key: `agents.${context.agentId}`,
+          existing: mine,
+          requested: perAgent as JsonValue,
+        });
+      }
       const mineNow = isJsonObject(mine) ? mine : {};
       const perAgentAdds: JsonObject = {};
       for (const [key, value] of Object.entries(perAgent)) {
@@ -665,6 +686,31 @@ export const planAgentTemplate = async (
         kind: 'unreadable-plugin',
         message: `${packageName} is installed, but this host would refuse to load it as configured: ${message}\n`
           + `A plugin refused at load registers nothing, so the tools above would not exist. Fix it in ${options.configPath}, then run this again.`,
+      });
+      continue;
+    }
+
+    // Skill files, in the order `loadPlugins` reads them: after the config
+    // and before the module. A manifest naming a file that is missing,
+    // escapes its package, or will not parse refuses the plugin whole, and
+    // that is a property of the installed package rather than of anything
+    // the operator wrote — so the fix this names is the package, not the
+    // config. Called for the refusal alone; what it stages is discarded.
+    try {
+      await stageManifestSkills(installed.manifest, installed.directory);
+    } catch (error) {
+      if (requirement === undefined) {
+        // Somebody else's broken package, refused at load and therefore
+        // owning no name this bundle needs. Same reasoning as above.
+        continue;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      outcomes.push({ status: 'unreadable', package: packageName, reason, error: message });
+      blockers.push({
+        kind: 'unreadable-plugin',
+        message: `${packageName} is installed, but this host would refuse to load it: ${message}\n`
+          + 'A plugin refused at load registers nothing, so the tools above would not exist. '
+          + 'Reinstalling or updating that package is the fix; nothing in your config changes this.',
       });
       continue;
     }

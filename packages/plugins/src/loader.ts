@@ -305,8 +305,13 @@ interface StagedPluginSkill {
  * file that is missing, escapes its package, or will not parse refuses the
  * plugin whole, before its code is imported — a skill is prose, so the
  * host reads it from the declaration alone.
+ *
+ * Exported for the template planner, which calls it for that refusal alone
+ * and discards what it returns: a plan that accepted a package this would
+ * reject would print a tool list that stops existing at the next start.
+ * Nothing here registers or caches, so a second call is only a second read.
  */
-const stageManifestSkills = async (
+export const stageManifestSkills = async (
   manifest: PluginManifest,
   packageDirectory: string,
 ): Promise<StagedPluginSkill[]> => {

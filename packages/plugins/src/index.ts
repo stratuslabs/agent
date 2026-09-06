@@ -40,6 +40,7 @@ export {
   loadOptionalModule,
   loadPlugins,
   readPluginManifest,
+  stageManifestSkills,
   type CreatePlugin,
   type InstalledPluginManifest,
   type LoadedPlugin,

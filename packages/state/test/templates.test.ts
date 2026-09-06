@@ -333,6 +333,89 @@ test('settings the template contradicts are a conflict naming both values', asyn
   assert.match(plan.blockers[0]?.message ?? '', /yours is \["\/b"\], the template asks for \["\/a"\]/);
 });
 
+test('a malformed per-agent container is a conflict, never quietly replaced', () => {
+  const template = templateWith({
+    plugins: [{
+      package: 'p',
+      reason: 'r',
+      agentSettings: (context) => ({ roots: [context.workspacePath] }),
+    }],
+  });
+  const context = { agentId: 'kit', agentName: 'Kit', workspacePath: '/w' };
+
+  // `agents` is a value the operator wrote. Reading a non-object as `{}`
+  // would report an amend that adds a key while deleting the string.
+  const wholeBlock = decidePluginConfig(template, context, {
+    p: { enabled: true, agents: 'not a map' },
+  }).get('p');
+  assert.equal(wholeBlock?.status, 'conflict');
+  assert.deepEqual(wholeBlock?.status === 'conflict' ? wholeBlock.conflicts : [], [
+    { key: 'agents', existing: 'not a map', requested: { kit: { roots: ['/w'] } } },
+  ]);
+
+  // And the same one level down, for this agent's own entry.
+  const mine = decidePluginConfig(template, context, {
+    p: { enabled: true, agents: { kit: ['not a map either'] } },
+  }).get('p');
+  assert.equal(mine?.status, 'conflict');
+  assert.deepEqual(mine?.status === 'conflict' ? mine.conflicts : [], [
+    { key: 'agents.kit', existing: ['not a map either'], requested: { roots: ['/w'] } },
+  ]);
+});
+
+test('a required package whose skill files this host would refuse is a blocker', async () => {
+  const fixture = await newFixture();
+  const withSkill = (skillPath: string): JsonObject => ({
+    name: 'skilled',
+    version: '1.0.0',
+    stratus: {
+      pluginVersion: 1,
+      contributes: {
+        tools: [{ name: 'skilled.do', risk: 'safe' }],
+        skills: [{ id: 'how-to', path: skillPath }],
+      },
+    },
+  });
+
+  // `loadPlugins` reads the files a manifest names before it imports
+  // anything and refuses the plugin whole over a bad one. A plan that did
+  // not would create the agent and report success, and the tools it
+  // promised would be missing at the next start.
+  const packages = { skilled: withSkill('skills/how-to/SKILL.md') };
+  await writeFixturePackages(fixture.packagesRoot, packages);
+  const missing = await planFor(
+    templateWith({
+      tools: ['skilled.do'],
+      plugins: [{ package: 'skilled', reason: 'doing' }],
+    }),
+    fixture,
+    packages,
+  );
+  assert.equal(missing.blockers.length, 1);
+  assert.equal(missing.blockers[0]?.kind, 'unreadable-plugin');
+  assert.match(missing.blockers[0]?.message ?? '', /could not be read/);
+  assert.match(missing.blockers[0]?.message ?? '', /Reinstalling or updating that package/);
+  assert.equal(missing.plugins[0]?.status, 'unreadable');
+
+  // The same manifest with the file actually there plans normally: this
+  // refuses broken packages, not every package that ships a skill.
+  await mkdir(path.join(fixture.packagesRoot, 'skilled', 'skills', 'how-to'), { recursive: true });
+  await writeFile(
+    path.join(fixture.packagesRoot, 'skilled', 'skills', 'how-to', 'SKILL.md'),
+    '---\ndescription: how to do the thing\n---\n\nDo it.\n',
+  );
+  const fine = await planFor(
+    templateWith({
+      tools: ['skilled.do'],
+      plugins: [{ package: 'skilled', reason: 'doing' }],
+    }),
+    fixture,
+    packages,
+  );
+  assert.deepEqual(fine.blockers, []);
+  assert.equal(fine.plugins[0]?.status, 'add');
+});
+
 test('a block already saying what the template needs is reused, not rewritten', async () => {
   const fixture = await newFixture();
   const packages = { '@stratusagent/tool-fs': firstPartyFs };

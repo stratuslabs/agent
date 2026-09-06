@@ -177,7 +177,10 @@ Each of these changes nothing at all — no soul file, no config entry:
   cause is a plugin older than the template — present, enabled, and
   valid, but from before the tool existed. Update the packages it names
   and run the command again.
-- A plugin setting the template contradicts.
+- A plugin setting the template contradicts — including one under
+  `agents.<id>`, and including a `plugins.<pkg>.agents` value that is
+  present but is not an object. Something you wrote is still something
+  you wrote, and the command will not replace it without saying so.
 - A project-local `stratus.config.json` as the active config, **for a
   template that needs plugins**. Plugin entries are read only from a config
   you chose, so there is nowhere to write them; pass `--config`, or move
@@ -190,6 +193,11 @@ Each of these changes nothing at all — no soul file, no config entry:
   refuses such a plugin whole, so the tools in the review would not exist
   after a restart; the command says so instead of creating an agent that
   stops working at the next one.
+- A plugin this host would refuse to load for its own sake — a manifest
+  naming a skill file that is missing, reaches outside its package, or will
+  not parse. Same consequence, different fix: that one is the installed
+  package's problem and nothing in your config changes it, so the command
+  points you at reinstalling or updating the package.
 - A tool name a plugin you already enable contributes. A tool name is unique
   per install, so the daemon refuses whichever plugin loads second — the
   soul would end up calling a different implementation than the one you
