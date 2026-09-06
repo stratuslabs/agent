@@ -50,14 +50,26 @@ person is a follow-up like any other, and channel messages reach the model
 prefixed with the speaker's display name so it knows who said what. A reply
 carrying a file, or one the author also broadcast to the channel, is a
 follow-up too; what Slack marks as bookkeeping — an edit, a deletion, a
-join — is not, and nothing answers it. **Attachment contents are not
-readable** — the app does not ask for `files:read` — so a message with files
-reaches the agent naming them and saying they cannot be opened, which is
-what lets it answer honestly instead of as though it had read the log. A
-file dropped in with nothing said is not a question, and gets no reply. What is
-*not* shared is history: sessions are per agent, so an agent tagged into a
-thread halfway through starts from what it is told then, not from what the
-other agent was told. Bring it up to speed in the message that tags it.
+join — is not, and nothing answers it. **Images are shown to the model.**
+A PNG, JPEG, GIF, or WebP attached to a message is downloaded with the
+bot token and sent with the message — a screenshot alone, with nothing
+typed, is a question in its own right and gets an answer. That needs the
+`files:read` scope, which the shipped manifest asks for; an app installed
+without it should have the scope added under **OAuth & Permissions** and be
+reinstalled once, and until then `stratus serve` warns, naming the scope,
+each time an image arrives. An image over 5 MB (the model API's limit) is
+not fetched. Whether the model actually *sees* the image depends on the
+agent's runtime: the Anthropic API and OpenAI-compatible providers send it
+as image content; the Claude Code and Codex harnesses take a text prompt,
+so there the agent is told the image's name and that it cannot see it.
+**Every other attachment is unreadable** — a log, a PDF, an image that was
+too large — so the message reaches the agent naming those files and saying
+they cannot be opened, which is what lets it answer honestly instead of as
+though it had read the log. Such a file dropped in with nothing said is not
+a question, and gets no reply. What is *not* shared is history: sessions
+are per agent, so an agent tagged into a thread halfway through starts from
+what it is told then, not from what the other agent was told. Bring it up
+to speed in the message that tags it.
 
 Three edges worth knowing. An agent whose app was installed before the
 history scopes below is told about mentions only, and behaves exactly as it
@@ -104,7 +116,7 @@ editing `credentials.json` by hand.
 The manual equivalent, if you prefer:
 
 1. https://api.slack.com/apps → **Create New App → From a manifest** → paste `manifest/stratus-agent.manifest.json` with `NAME` replaced by the agent's name.
-   The manifest asks for the `channels:history` / `groups:history` / `mpim:history` scopes and the matching `message.*` events, which is what lets an agent [stay in a thread](#who-a-message-is-for) instead of needing a mention every time. An app created before those shipped needs them added under **OAuth & Permissions** and **Event Subscriptions** and reinstalled once; leave them off and it answers mentions and DMs, exactly as it did before.
+   The manifest asks for the `channels:history` / `groups:history` / `mpim:history` scopes and the matching `message.*` events, which is what lets an agent [stay in a thread](#who-a-message-is-for) instead of needing a mention every time, and for `files:read`, which is what lets it [see an attached image](#who-a-message-is-for). An app created before those shipped needs them added under **OAuth & Permissions** and **Event Subscriptions** and reinstalled once; leave the history scopes off and it answers mentions and DMs, exactly as it did before; leave `files:read` off and it hears about attachments by name only.
 2. **Basic Information → App-Level Tokens** → generate a token with `connections:write` (that's the `appToken`, `xapp-…`).
 3. **Install App** to the workspace → copy the **Bot User OAuth Token** (that's the `botToken`, `xoxb-…`).
 4. Upload the agent's avatar under **Display Information**.

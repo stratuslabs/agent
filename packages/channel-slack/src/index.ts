@@ -6,7 +6,10 @@ import path from 'node:path';
 import {
   latestTurnReply,
   SENDER_TRUST_METADATA_KEY,
+  isImageAttachmentMediaType,
+  IMAGE_ATTACHMENT_MAX_BYTES,
   type ApprovalAnswer,
+  type ImageAttachment,
   type JsonObject,
   type Session,
   type StratusEvent,
@@ -147,11 +150,41 @@ export interface SlackInboundEvent {
   /**
    * Attachments on a `file_share` message. Slack puts the file metadata in
    * the event and the bytes behind an authenticated URL that needs
-   * `files:read`, which this app does not ask for — so a turn learns that a
-   * file arrived and what it is called, never what is in it.
+   * `files:read`. An image the model can take is downloaded and sent with
+   * the message (see `readImageAttachments`); anything else — a log, a
+   * PDF, an image too large or in a format the API refuses — reaches the
+   * turn by name only, told that it cannot be opened.
    */
-  files?: Array<{ name?: string; title?: string }>;
+  files?: SlackInboundFile[];
 }
+
+/** The slice of Slack's file object the adapter reads. */
+export interface SlackInboundFile {
+  id?: string;
+  name?: string;
+  title?: string;
+  /** Slack's own `image/png`-style type, decided by the uploader's client. */
+  mimetype?: string;
+  /** Bytes, as Slack reports them; checked before anything is downloaded. */
+  size?: number;
+  url_private?: string;
+  url_private_download?: string;
+}
+
+/**
+ * What came back from fetching a file's private URL. Slack answers a
+ * request the app is not allowed to make — a token without `files:read` —
+ * with a **200 and a sign-in page**, never an error status, which is why
+ * the content type travels: it is the only thing that tells an image from
+ * an HTML apology for one.
+ */
+export interface SlackFileDownload {
+  status: number;
+  contentType?: string;
+  body: Buffer;
+}
+
+export type SlackFileFetcher = (url: string, botToken: string) => Promise<SlackFileDownload>;
 
 export interface SlackSocketLike {
   on(eventName: string, listener: (args: SlackSocketEventArgs) => void): void;
@@ -201,6 +234,12 @@ export interface SlackAdapterOptions {
   createSocketClient?: (appToken: string) => SlackSocketLike;
   /** Test injection: build a Web API client for a bot token. */
   createWebClient?: (botToken: string) => SlackWebLike;
+  /**
+   * Test injection: fetch a file's private URL with the bot token. The
+   * Web API client has no call for this — file bytes are served from a
+   * plain authenticated URL — so it is its own seam.
+   */
+  fetchFile?: SlackFileFetcher;
 }
 
 // Lazy (and CJS-interoperable) so tests with injected fakes never load the
@@ -215,6 +254,16 @@ const defaultSocketClient = (appToken: string): SlackSocketLike => {
 const defaultWebClient = (botToken: string): SlackWebLike => {
   const { WebClient } = requireModule('@slack/web-api') as typeof import('@slack/web-api');
   return new WebClient(botToken) as unknown as SlackWebLike;
+};
+
+const defaultFetchFile: SlackFileFetcher = async (url, botToken) => {
+  const response = await fetch(url, { headers: { authorization: `Bearer ${botToken}` } });
+  const contentType = response.headers.get('content-type');
+  return {
+    status: response.status,
+    ...(contentType !== null ? { contentType } : {}),
+    body: Buffer.from(await response.arrayBuffer()),
+  };
 };
 
 /**
@@ -1052,16 +1101,83 @@ const MAX_LISTED_ATTACHMENTS = 5;
  * What a message's attachments are called, for a turn that cannot open
  * them. Without this the agent is handed "here's the log" and no log, and
  * answers as though it had read something — the note is what lets it say
- * the true thing instead.
+ * the true thing instead. Images the model was actually shown are not
+ * listed here: they travel on the dispatch, name included.
  */
-const attachmentNote = (files: SlackInboundEvent['files']): string => {
-  if (!files || files.length === 0) {
+const attachmentNote = (files: readonly SlackInboundFile[]): string => {
+  if (files.length === 0) {
     return '';
   }
   const names = files.slice(0, MAX_LISTED_ATTACHMENTS).map((file) => file.name ?? file.title ?? 'an unnamed file');
   const rest = files.length - names.length;
   const listed = rest > 0 ? `${names.join(', ')}, and ${rest} more` : names.join(', ');
   return `\n[Attached: ${listed}. Attachment contents cannot be read here — say so rather than guessing at them.]`;
+};
+
+/** What Slack calls a file, in a warning about it. */
+const fileLabel = (file: SlackInboundFile): string => file.name ?? file.title ?? file.id ?? 'an unnamed file';
+
+/**
+ * A message's attachments, sorted into the images the model will be shown
+ * and everything else. An image is fetched only when Slack's own metadata
+ * says it is one the API accepts and small enough to send; that keeps a
+ * 40 MB PNG from being downloaded just to be dropped, and a PDF from being
+ * fetched at all. What comes back is checked as well: without `files:read`
+ * Slack serves a sign-in page with a 200, and sending that to the model as
+ * an image would fail the turn with an error naming nothing the person can
+ * fix — the warning here names the scope instead, and the file falls back
+ * to the by-name note like any other attachment the turn cannot open.
+ */
+const readImageAttachments = async (
+  files: readonly SlackInboundFile[],
+  botToken: string,
+  fetchFile: SlackFileFetcher,
+  warn: (line: string) => void,
+): Promise<{ images: ImageAttachment[]; unread: SlackInboundFile[] }> => {
+  const images: ImageAttachment[] = [];
+  const unread: SlackInboundFile[] = [];
+  for (const file of files) {
+    const url = file.url_private_download ?? file.url_private;
+    if (!isImageAttachmentMediaType(file.mimetype) || url === undefined) {
+      unread.push(file);
+      continue;
+    }
+    if (file.size !== undefined && file.size > IMAGE_ATTACHMENT_MAX_BYTES) {
+      warn(`slack: ${fileLabel(file)} is ${file.size} bytes, over the ${IMAGE_ATTACHMENT_MAX_BYTES}-byte limit an image can be sent to the model at; the turn is told it cannot be read.`);
+      unread.push(file);
+      continue;
+    }
+    let download: SlackFileDownload;
+    try {
+      download = await fetchFile(url, botToken);
+    } catch (error) {
+      warn(`slack: could not download ${fileLabel(file)}: ${error instanceof Error ? error.message : String(error)}`);
+      unread.push(file);
+      continue;
+    }
+    // Refused on what Slack sends when it will not serve the file — a
+    // non-200, or a 200 whose body is a page — rather than on the label of
+    // what it does serve: a download URL may be typed as the image or as
+    // a plain octet stream, and either is the bytes Slack said it was.
+    const contentType = download.contentType?.split(';')[0]?.trim().toLowerCase() ?? '';
+    if (download.status !== 200 || contentType.startsWith('text/')) {
+      warn(`slack: ${fileLabel(file)} came back as ${contentType || 'no content type'} (HTTP ${download.status}) rather than an image. This is what a bot token without the files:read scope gets — add the scope under OAuth & Permissions and reinstall the app.`);
+      unread.push(file);
+      continue;
+    }
+    if (download.body.length > IMAGE_ATTACHMENT_MAX_BYTES) {
+      warn(`slack: ${fileLabel(file)} is ${download.body.length} bytes, over the ${IMAGE_ATTACHMENT_MAX_BYTES}-byte limit an image can be sent to the model at; the turn is told it cannot be read.`);
+      unread.push(file);
+      continue;
+    }
+    const name = file.name ?? file.title;
+    images.push({
+      mediaType: file.mimetype,
+      data: download.body.toString('base64'),
+      ...(name !== undefined ? { name } : {}),
+    });
+  }
+  return { images, unread };
 };
 
 /**
@@ -1251,6 +1367,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const editIntervalMs = options.editIntervalMs ?? DEFAULT_EDIT_INTERVAL_MS;
   const createSocket = options.createSocketClient ?? defaultSocketClient;
   const createWeb = options.createWebClient ?? defaultWebClient;
+  const fetchFile = options.fetchFile ?? defaultFetchFile;
 
   const connections: AgentConnection[] = [];
   // Every agent this adapter was asked to carry, connected or not — the
@@ -2463,14 +2580,21 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         }
       }
       const cleaned = await humanizeMentions(connection, event.text ?? '');
-      if (cleaned.length === 0) {
+      // Fetched inside the chain, like the lookups below: it is network
+      // I/O, and a message whose screenshot is slow to arrive must not lose
+      // its place to the one typed after it.
+      const { images, unread } = await readImageAttachments(event.files ?? [], connection.config.botToken, fetchFile, warn);
+      // An image with nothing said is still a question ("what's this?"); a
+      // file the turn could not open with nothing said is not one, and gets
+      // no reply.
+      if (cleaned.length === 0 && images.length === 0) {
         return undefined;
       }
       const author = await displayNameFor(connection, userId);
       // In shared channels the model should know who is speaking; a DM is
-      // unambiguous.
-      const spoken = isDm ? cleaned : `${author}: ${cleaned}`;
-      const userMessage = `${spoken}${attachmentNote(event.files)}`;
+      // unambiguous. A bare image in a channel still says who sent it.
+      const spoken = isDm ? cleaned : (cleaned.length > 0 ? `${author}: ${cleaned}` : `${author}:`);
+      const userMessage = `${spoken}${attachmentNote(unread)}`;
 
       const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn);
       try {
@@ -2490,6 +2614,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         sessionId,
         agentId: connection.config.agentId,
         userMessage,
+        ...(images.length > 0 ? { images } : {}),
         turnId: renderer.turnId,
         metadata: {
           channel: 'slack',

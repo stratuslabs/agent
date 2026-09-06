@@ -9,6 +9,7 @@ import type {
 } from '@anthropic-ai/sdk/resources/messages/messages';
 import {
   renderSystemPromptParts,
+  type ImageAttachment,
   type JsonObject,
   type ModelProvider,
   type ProviderCallUsage,
@@ -240,6 +241,23 @@ const rawTurnsFrom = (session: ProviderRequest['session']): RawTurns => {
   return fresh;
 };
 
+/**
+ * A user turn's blocks: its images first, then the text. The API refuses an
+ * empty text block, and a message that is only an image has no text — so
+ * the text block is added only when there is text, and a message with
+ * neither still sends one so the turn is never an empty content array.
+ */
+const userBlocks = (content: string, images: readonly ImageAttachment[] | undefined): ContentBlockParam[] => {
+  const blocks: ContentBlockParam[] = (images ?? []).map((image) => ({
+    type: 'image',
+    source: { type: 'base64', media_type: image.mediaType, data: image.data },
+  }));
+  if (content.length > 0 || blocks.length === 0) {
+    blocks.push({ type: 'text', text: content });
+  }
+  return blocks;
+};
+
 const reconstructAssistantBlocks = (
   content: string,
   toolCalls: ToolCall[],
@@ -353,7 +371,7 @@ const createAnthropicMessages = (
       continue;
     }
 
-    push('user', [{ type: 'text', text: message.content }]);
+    push('user', userBlocks(message.content, message.images));
   }
 
   return groups.map((group) => ({ role: group.role, content: group.blocks }));

@@ -1035,3 +1035,48 @@ test('a body that ends cleanly before message_stop still reports its input', asy
     { provider: 'anthropic', model: 'claude-served-1', inputTokens: 900, cacheReadTokens: 600, cacheWriteTokens: 0 },
   ]);
 });
+
+test('a user message with images sends them as image blocks ahead of its text', async () => {
+  const { fetchImpl, requests } = createMockFetch([
+    apiMessage([{ type: 'text', text: 'A stack trace.' }]),
+  ]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const session = createSession({
+    messages: [
+      {
+        id: 'session-1:user:1',
+        role: 'user',
+        content: 'what is this?',
+        createdAt: new Date().toISOString(),
+        images: [{ mediaType: 'image/png', data: 'iVBORw0KGgo=', name: 'shot.png' }],
+      },
+      { id: 'session-1:assistant:2', role: 'assistant', content: 'A stack trace.', createdAt: new Date().toISOString() },
+      // An image with nothing typed is a turn with no text block at all —
+      // the API refuses an empty one.
+      {
+        id: 'session-1:user:3',
+        role: 'user',
+        content: '',
+        createdAt: new Date().toISOString(),
+        images: [{ mediaType: 'image/jpeg', data: '/9j/4AAQ' }],
+      },
+    ],
+  });
+
+  await provider.generate({ session });
+
+  assert.deepEqual(requests[0]!.body.messages, [
+    {
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } },
+        { type: 'text', text: 'what is this?' },
+      ],
+    },
+    { role: 'assistant', content: [{ type: 'text', text: 'A stack trace.' }] },
+    {
+      role: 'user',
+      content: [{ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: '/9j/4AAQ' } }],
+    },
+  ]);
+});

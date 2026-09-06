@@ -24,6 +24,7 @@ import {
   type ApprovalAnswer,
   type ApprovalPolicy,
   type ApprovalResolutionReason,
+  type ImageAttachment,
   type JsonObject,
   type Session,
   type SessionStatus,
@@ -691,6 +692,8 @@ export interface DispatchInput {
   /** Roster agent id. Defaults to the gateway's default agent. */
   agentId?: string;
   userMessage: string;
+  /** Images sent with the message — see `Message.images` in `@stratusagent/core`. */
+  images?: ImageAttachment[];
   metadata?: JsonObject;
   signal?: AbortSignal;
   /**
@@ -2161,6 +2164,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         return runner.resume({
           sessionId: input.sessionId,
           userMessage: input.userMessage,
+          ...(input.images !== undefined ? { images: input.images } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
           signal,
         });
@@ -2170,6 +2174,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         sessionId: input.sessionId,
         agent,
         userMessage: input.userMessage,
+        ...(input.images !== undefined ? { images: input.images } : {}),
         metadata,
         signal,
       });

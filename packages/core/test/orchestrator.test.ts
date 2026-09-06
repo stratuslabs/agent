@@ -1794,3 +1794,37 @@ test('resuming a parked session retires its checkpoint along with the interrupte
   assert.deepEqual(executed, [], 'and nothing ran on the completed session');
   assert.equal((await store.get('parked-then-messaged'))?.status, 'completed');
 });
+
+test('images sent with a user message are stored on it, and only on it', async () => {
+  const store = new InMemorySessionStore();
+  const provider: ModelProvider = {
+    name: 'looking-provider',
+    async generate({ session }) {
+      const latest = session.messages.findLast((message) => message.role === 'user');
+      return { parts: [{ type: 'text', text: `saw ${latest?.images?.length ?? 0} images` }] };
+    },
+  };
+  const runner = new AgentRunner({ provider, store });
+  const shot = { mediaType: 'image/png' as const, data: 'iVBORw0KGgo=', name: 'shot.png' };
+
+  const first = await runner.run({
+    sessionId: 'session-images',
+    agent: { id: 'agent-images', name: 'Looker' },
+    userMessage: 'what is this?',
+    images: [shot],
+  });
+  assert.deepEqual(first.messages[0]?.images, [shot]);
+  assert.equal(first.messages.at(-1)?.content, 'saw 1 images');
+
+  // A message without images has no field at all, so a transcript written
+  // before images existed and one written after read the same.
+  const second = await runner.resume({ sessionId: 'session-images', userMessage: 'and now?', images: [] });
+  const asked = second.messages.filter((message) => message.role === 'user');
+  assert.equal(asked.length, 2);
+  assert.equal('images' in asked[1]!, false);
+  assert.equal(second.messages.at(-1)?.content, 'saw 0 images');
+
+  // The stored session carries the image for every later turn to replay.
+  const stored = await store.get('session-images');
+  assert.deepEqual(stored?.messages[0]?.images, [shot]);
+});

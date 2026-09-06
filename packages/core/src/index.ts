@@ -10,6 +10,42 @@ export type JsonObject = { [key: string]: JsonValue };
 export type SessionStatus = 'idle' | 'running' | 'pending_approval' | 'completed' | 'failed';
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
+/**
+ * The image formats a model request may carry. The list is the Messages
+ * API's, and it is exported so a channel deciding which of a message's
+ * attachments to fetch asks this rather than keeping its own copy — a
+ * format the API rejects is one the channel should never have downloaded.
+ */
+export const IMAGE_ATTACHMENT_MEDIA_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'] as const;
+export type ImageAttachmentMediaType = (typeof IMAGE_ATTACHMENT_MEDIA_TYPES)[number];
+
+export const isImageAttachmentMediaType = (value: unknown): value is ImageAttachmentMediaType =>
+  typeof value === 'string' && (IMAGE_ATTACHMENT_MEDIA_TYPES as readonly string[]).includes(value);
+
+/**
+ * The largest image a message may carry, in decoded bytes. The Messages
+ * API refuses anything over 5 MB per image, and a session is one JSON row
+ * that every later turn re-reads — an image is stored with the message it
+ * arrived on, so the cap is also what keeps a transcript readable.
+ */
+export const IMAGE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
+
+/**
+ * An image a person sent with a user message, as the model receives it.
+ * Bytes are base64 so the attachment survives in the session's JSON body
+ * and replays on every later turn the way the text does.
+ */
+export interface ImageAttachment {
+  mediaType: ImageAttachmentMediaType;
+  /** Base64-encoded image bytes. */
+  data: string;
+  /**
+   * What the sender called it, for a runtime that renders the transcript
+   * as text and can only say that an image was there.
+   */
+  name?: string;
+}
+
 export interface Message {
   id: string;
   role: MessageRole;
@@ -18,6 +54,12 @@ export interface Message {
   createdAt: string;
   toolCalls?: ToolCall[];
   toolResult?: ToolResult;
+  /**
+   * Images sent with a user message. Present only on `user` messages that
+   * carried one; a provider that can show the model an image sends these
+   * alongside the text, and one that cannot names them instead.
+   */
+  images?: ImageAttachment[];
 }
 
 export interface AgentDescriptor {
@@ -2499,11 +2541,21 @@ export class AllowAllApprovalPolicy implements ApprovalPolicy {
   }
 }
 
+/**
+ * The `images` field of a user message, or nothing: a message that carried
+ * none has no field, so a transcript written before images existed and one
+ * written after read the same.
+ */
+const userImages = (images: ImageAttachment[] | undefined): Pick<Message, 'images'> =>
+  images !== undefined && images.length > 0 ? { images } : {};
+
 export interface RunInput {
   sessionId: string;
   /** See Session.agent: the allowlist travels with the run. */
   agent: AgentDefinition;
   userMessage: string;
+  /** Images sent with the message; see `Message.images`. */
+  images?: ImageAttachment[];
   metadata?: JsonObject;
   /** Aborting fails the turn cleanly; see RunAbortedError. */
   signal?: AbortSignal;
@@ -2512,6 +2564,8 @@ export interface RunInput {
 export interface ResumeInput {
   sessionId: string;
   userMessage: string;
+  /** Images sent with the message; see `Message.images`. */
+  images?: ImageAttachment[];
   /**
    * This turn's metadata — read for the sender's trust
    * (`SENDER_TRUST_METADATA_KEY`) and not merged into the session's. The
@@ -2653,6 +2707,7 @@ export class AgentRunner {
           role: 'user',
           content: input.userMessage,
           createdAt: new Date().toISOString(),
+          ...userImages(input.images),
         },
       ],
       // Labelled from the first write, whatever the dispatching surface
@@ -2743,6 +2798,7 @@ export class AgentRunner {
       role: 'user',
       content: input.userMessage,
       createdAt: new Date().toISOString(),
+      ...userImages(input.images),
     });
 
     // The sender is evaluated on EVERY turn, from this turn's metadata: a

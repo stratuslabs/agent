@@ -58,6 +58,25 @@ once (the manifest `stratus setup` prints already has them) — until then it
 answers mentions and DMs and nothing else, which is also how you keep an
 agent mention-only on purpose.
 
+## Sending an image
+
+Attach a screenshot — a PNG, JPEG, GIF, or WebP — to a message, or drop one
+into the thread on its own, and the agent is shown it. That takes the
+`files:read` scope, which the manifest `stratus setup` prints includes; an
+app installed before it needs the scope added under **OAuth & Permissions**
+and a reinstall, and until then `stratus serve` warns, naming the scope,
+whenever an image arrives. Anything that is not an image the model can
+take — a log, a PDF, an image over 5 MB — reaches the agent by name, told
+that it cannot be opened, so it answers honestly rather than as if it had
+read the file.
+
+Which runtimes can actually look: agents on the **Anthropic API** or an
+**OpenAI-compatible** provider receive the image itself. The **Claude Code**
+and **Codex** harnesses take a text prompt, so an agent on either is told an
+image was attached, and what it was called, and that it cannot see it. The
+image is stored with the message in the session, so a later turn in the same
+thread still has it.
+
 ## Worth knowing
 
 - **Tokens are gateway infrastructure secrets.** They live under

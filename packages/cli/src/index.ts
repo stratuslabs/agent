@@ -3269,6 +3269,11 @@ const SLACK_BOT_SCOPES = [
   // exists, and whether this app is a member of it.
   'channels:read',
   'chat:write',
+  // What lets an agent be shown a screenshot: file bytes sit behind an
+  // authenticated URL that answers a token without this scope with a
+  // sign-in page. An app installed without it still hears about the
+  // attachment, by name, and is told it cannot open it.
+  'files:read',
   'files:write',
   'groups:history',
   'groups:read',

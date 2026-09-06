@@ -4,7 +4,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { EventBus, type ApprovalAnswer, type Session, type StratusEvent } from '@stratusagent/core';
+import { EventBus, type ApprovalAnswer, type ImageAttachment, type Session, type StratusEvent } from '@stratusagent/core';
 import type { GatewayLike } from '@stratusagent/channels';
 import {
   createSlackChannelAdapter,
@@ -151,7 +151,7 @@ const sessionWithReply = (id: string, reply: string): Session => {
 };
 
 interface StubGateway extends GatewayLike {
-  dispatches: Array<{ sessionId: string; agentId?: string; userMessage: string }>;
+  dispatches: Array<{ sessionId: string; agentId?: string; userMessage: string; images?: ImageAttachment[] }>;
   resolutions: Array<{ requestId: string; answer: ApprovalAnswer; actor?: string; reason?: string }>;
   /** Request ids the gateway still considers pending. */
   pendingApprovals: Set<string>;
@@ -191,6 +191,7 @@ const createStubGateway = (
         sessionId: input.sessionId,
         ...(input.agentId ? { agentId: input.agentId } : {}),
         userMessage: input.userMessage,
+        ...(input.images !== undefined ? { images: input.images } : {}),
       });
       // As the gateway does: the caller's turn id is the session's active
       // turn for as long as the turn runs, and the session reports
@@ -3684,4 +3685,173 @@ test('an agent with no principals configured takes every sender as unknown, its 
   // A DM proves nothing about who is typing: without a name to check
   // against, honest is `unknown`, not `user`.
   assert.deepEqual(senders, ['unknown']);
+});
+
+// A real PNG header, so what the test sends is bytes and not a string that
+// happens to be called one.
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]);
+
+test('an attached image is downloaded and travels with the dispatch; other files stay a note', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'I see it'));
+  const fetched: Array<{ url: string; token: string }> = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url, token) => {
+      fetched.push({ url, token });
+      return { status: 200, contentType: 'image/png', body: PNG_BYTES };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: "<@B-AVA> what's wrong here?",
+      ts: '960.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [
+        { id: 'F1', name: 'error.png', mimetype: 'image/png', size: PNG_BYTES.length, url_private_download: 'https://files.slack.com/F1/download' },
+        { id: 'F2', name: 'server.log', mimetype: 'text/plain', size: 10, url_private_download: 'https://files.slack.com/F2/download' },
+      ],
+    },
+  });
+  await adapter.stop();
+
+  // The download carries the bot token — it is the transport's secret,
+  // used by the transport — and only the image was fetched.
+  assert.deepEqual(fetched, [{ url: 'https://files.slack.com/F1/download', token: 'xoxb-1' }]);
+  assert.deepEqual(gateway.dispatches, [{
+    sessionId: 'slack:ava:T1:C1:960.0',
+    agentId: 'ava',
+    // The image is not in the note: the model is shown it. The log still is.
+    userMessage: "Dylan: what's wrong here?\n[Attached: server.log. Attachment contents cannot be read here — say so rather than guessing at them.]",
+    images: [{ mediaType: 'image/png', data: PNG_BYTES.toString('base64'), name: 'error.png' }],
+  }]);
+});
+
+test('an image dropped in with nothing said is still a question', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'a screenshot'));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async () => ({ status: 200, contentType: 'image/jpeg', body: PNG_BYTES }),
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-bare' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA>',
+      ts: '961.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [{ id: 'F3', title: 'shot', mimetype: 'image/jpeg', url_private: 'https://files.slack.com/F3' }],
+    },
+  });
+  await adapter.stop();
+
+  assert.equal(gateway.dispatches.length, 1);
+  // The speaker is still named, so a bare image in a channel is not anonymous.
+  assert.equal(gateway.dispatches[0]!.userMessage, 'Dylan:');
+  assert.deepEqual(gateway.dispatches[0]!.images, [
+    { mediaType: 'image/jpeg', data: PNG_BYTES.toString('base64'), name: 'shot' },
+  ]);
+});
+
+test('an image the token may not read falls back to the note and names the scope', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    // What Slack actually does without files:read: a 200 and a sign-in page.
+    fetchFile: async () => ({ status: 200, contentType: 'text/html; charset=utf-8', body: Buffer.from('<html>sign in</html>') }),
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-noscope' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> see attached',
+      ts: '962.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [{ id: 'F4', name: 'error.png', mimetype: 'image/png', size: 100, url_private_download: 'https://files.slack.com/F4/download' }],
+    },
+  });
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images]), [[
+    'Dylan: see attached\n[Attached: error.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    undefined,
+  ]]);
+  assert.equal(warnings.filter((line) => /error\.png/.test(line) && /files:read/.test(line)).length, 1);
+});
+
+test('an image over the model limit is never downloaded, while a smaller one beside it still is', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const fetched: string[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url) => {
+      fetched.push(url);
+      return { status: 200, contentType: 'image/png', body: PNG_BYTES };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-huge' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> full-res and a crop',
+      ts: '963.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [
+        { id: 'F5', name: 'poster.png', mimetype: 'image/png', size: 6 * 1024 * 1024, url_private_download: 'https://files.slack.com/F5/download' },
+        { id: 'F6', name: 'crop.png', mimetype: 'image/png', size: PNG_BYTES.length, url_private_download: 'https://files.slack.com/F6/download' },
+      ],
+    },
+  });
+  await adapter.stop();
+
+  // Slack's own size is trusted before any bytes move: the poster was never
+  // requested, and the crop went through as usual.
+  assert.deepEqual(fetched, ['https://files.slack.com/F6/download']);
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images?.map((image) => image.name)]), [[
+    'Dylan: full-res and a crop\n[Attached: poster.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    ['crop.png'],
+  ]]);
 });

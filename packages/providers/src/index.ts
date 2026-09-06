@@ -2,6 +2,7 @@ import {
   renderSystemPromptSections,
   uncachedInputTokens,
   type ExecutionContext,
+  type ImageAttachment,
   type JsonObject,
   type ModelProvider,
   type ProviderCallUsage,
@@ -90,9 +91,19 @@ interface OpenAICompatibleToolCall {
   };
 }
 
+/**
+ * A user turn's content on the chat-completions wire: a string when it is
+ * only text, and the parts form — text plus `image_url` parts carrying
+ * data URLs — when the message has images. The string form is kept for
+ * the common case because some compatible servers accept only that.
+ */
+type OpenAICompatibleUserContent =
+  | string
+  | Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }>;
+
 interface OpenAICompatibleMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string | null;
+  content: OpenAICompatibleUserContent | null;
   name?: string;
   tool_calls?: Array<{
     id: string;
@@ -623,12 +634,25 @@ const createOpenAICompatibleMessages = (
 
     messages.push({
       role: message.role,
-      content: message.content,
+      content: message.role === 'user' ? userContentParts(message) : message.content,
       ...(message.name ? { name: message.name } : {}),
     });
   }
 
   return messages;
+};
+
+const userContentParts = (message: { content: string; images?: ImageAttachment[] }): OpenAICompatibleUserContent => {
+  if (message.images === undefined || message.images.length === 0) {
+    return message.content;
+  }
+  return [
+    ...(message.content.length > 0 ? [{ type: 'text' as const, text: message.content }] : []),
+    ...message.images.map((image) => ({
+      type: 'image_url' as const,
+      image_url: { url: `data:${image.mediaType};base64,${image.data}` },
+    })),
+  ];
 };
 
 const extractOpenAICompatibleText = (payload: OpenAICompatibleResponse): string => {
@@ -747,13 +771,31 @@ export const bridgedToolNames = (descriptors: readonly ToolDescriptor[]): Map<st
  * when a harness session is fresh (or its stored session could not be
  * resumed) and knows nothing yet.
  */
+/**
+ * What a text-only runtime is told about the images on a user message. The
+ * harness providers hand their SDK one prompt string, so the image itself
+ * cannot travel; naming it is what lets the model say it cannot see the
+ * screenshot rather than describe one it was never shown.
+ */
+const describeImageAttachments = (images: readonly ImageAttachment[] | undefined): string => {
+  if (images === undefined || images.length === 0) {
+    return '';
+  }
+  const names = images.map((image) => image.name ?? `a ${image.mediaType} image`);
+  return `\n[Attached: ${names.join(', ')}. This runtime cannot see images — say so rather than guessing at them.]`;
+};
+
+/** A user message's text with its images named after it. */
+const userMessageText = (message: { content: string; images?: ImageAttachment[] }): string =>
+  `${message.content}${describeImageAttachments(message.images)}`;
+
 export const renderTranscriptPrompt = (request: ProviderRequest): string => {
   const conversational = request.session.messages.filter(
     (message) => message.role === 'user' || message.role === 'assistant' || message.role === 'tool',
   );
 
   if (conversational.length === 1 && conversational[0]?.role === 'user') {
-    return conversational[0].content;
+    return userMessageText(conversational[0]);
   }
 
   const lines: string[] = ['Conversation so far:'];
@@ -774,7 +816,7 @@ export const renderTranscriptPrompt = (request: ProviderRequest): string => {
         continue;
       }
     }
-    lines.push(`[${message.role}] ${message.content}`);
+    lines.push(`[${message.role}] ${message.role === 'user' ? userMessageText(message) : message.content}`);
   }
   lines.push('', 'Continue the conversation by replying to the latest user message.');
   return lines.join('\n');
@@ -790,7 +832,7 @@ export const latestUserMessagePrompt = (request: ProviderRequest): string => {
   for (let index = request.session.messages.length - 1; index >= 0; index -= 1) {
     const message = request.session.messages[index];
     if (message?.role === 'user') {
-      return message.content;
+      return userMessageText(message);
     }
   }
   return renderTranscriptPrompt(request);

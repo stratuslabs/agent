@@ -9,8 +9,10 @@ import {
   defineProvider,
   defineScriptedProvider,
   defineStaticProvider,
+  latestUserMessagePrompt,
   normalizeProviderParts,
   normalizeProviderResponse,
+  renderTranscriptPrompt,
   sanitizeOpenAICompatibleToolName,
 } from '../src/index.ts';
 
@@ -761,4 +763,79 @@ test('a successful call reports once, through the sink, and repeats it on the re
   // reads one or the other and never both.
   assert.equal(reported.length, 1);
   assert.deepEqual(reported[0], response.usage);
+});
+
+const requestWithImage = (): ProviderRequest => {
+  const request = createRequest();
+  request.session.messages = [
+    {
+      id: 'session-1:user:1',
+      role: 'user',
+      content: 'what is this?',
+      createdAt: new Date().toISOString(),
+      images: [{ mediaType: 'image/png', data: 'iVBORw0KGgo=', name: 'shot.png' }],
+    },
+  ];
+  return request;
+};
+
+test('a text-only transcript prompt names the images it cannot show', () => {
+  const single = requestWithImage();
+  const note = '\n[Attached: shot.png. This runtime cannot see images — say so rather than guessing at them.]';
+  assert.equal(renderTranscriptPrompt(single), `what is this?${note}`);
+  assert.equal(latestUserMessagePrompt(single), `what is this?${note}`);
+
+  const longer = requestWithImage();
+  longer.session.messages.push(
+    { id: 'session-1:assistant:2', role: 'assistant', content: 'A trace.', createdAt: new Date().toISOString() },
+    {
+      id: 'session-1:user:3',
+      role: 'user',
+      content: '',
+      createdAt: new Date().toISOString(),
+      images: [{ mediaType: 'image/jpeg', data: '/9j/4AAQ' }],
+    },
+  );
+  // An unnamed image is still named by what it is; a message that was only
+  // an image is the note alone.
+  assert.equal(
+    renderTranscriptPrompt(longer),
+    [
+      'Conversation so far:',
+      `[user] what is this?${note}`,
+      '[assistant] A trace.',
+      '[user] \n[Attached: a image/jpeg image. This runtime cannot see images — say so rather than guessing at them.]',
+      '',
+      'Continue the conversation by replying to the latest user message.',
+    ].join('\n'),
+  );
+  // A transcript with no images reads exactly as it did before they existed.
+  assert.equal(renderTranscriptPrompt(createRequest()), 'Say hello');
+});
+
+test('createOpenAICompatibleProvider sends a user message\'s images as data-URL image parts', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'A trace.' } }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: fetchImpl });
+
+  await provider.generate(requestWithImage());
+
+  const sent = bodies[0]!.messages.filter((message: { role: string }) => message.role === 'user');
+  assert.deepEqual(sent, [{
+    role: 'user',
+    content: [
+      { type: 'text', text: 'what is this?' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } },
+    ],
+  }]);
+  // Without images the content stays the plain string every compatible
+  // server accepts.
+  await provider.generate(createRequest());
+  assert.equal(bodies[1]!.messages.at(-1).content, 'Say hello');
 });
