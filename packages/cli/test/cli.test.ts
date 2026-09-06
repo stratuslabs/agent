@@ -9319,6 +9319,40 @@ test('a template refuses to write when a link replaces the config it locked', as
   assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), [], 'and the soul it claimed was rolled back');
 });
 
+test('a project config appearing mid-flight makes the suggested run name the file written', async () => {
+  const home = await templateHome();
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-template-shadow-'));
+
+  // Plugin entries have one legal home and that is where they went — a
+  // project config cannot enable plugins, so nothing about the write
+  // changes. What changes is that a bare `stratus run` from here would now
+  // pick the project config and start this agent with none of the tools
+  // just approved, so the printed command has to name the file instead.
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'research', '--yes'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: project,
+      processEnv: {},
+      templateBeforeSoulClaim: async () => {
+        await writeFile(path.join(project, 'stratus.config.json'), '{}\n');
+      },
+    },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  const written = path.join(home, '.stratus', 'config.json');
+  assert.match(output.stdout, new RegExp(`stratus run --config ${written.replace(/[.*+?^$()|[\]\\]/g, '\\$&')} --soul`));
+  assert.match(output.stderr, /is what a bare run here selects now/);
+  assert.deepEqual(
+    Object.keys((JSON.parse(await readFile(written, 'utf8')) as { plugins?: Record<string, unknown> }).plugins ?? {}).sort(),
+    ['@stratusagent/tool-fs', '@stratusagent/tool-web'],
+    'written where the plan said, not into the project config',
+  );
+});
+
 test('a template checks the id against the config it locked, not the spelling', async () => {
   const home = await templateHome();
   const first = path.join(home, 'first.json');

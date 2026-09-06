@@ -100,6 +100,13 @@ A template that names a plugin you have not installed **creates nothing**
 and prints the install command. Install it, then run the same command
 again.
 
+The plugin entries go into the config you chose, which is the only file
+that may enable a plugin. If a project `stratus.config.json` becomes the
+active config here — it takes precedence, and it cannot enable plugins —
+the commands printed at the end name the file the entries went into, with
+`--config`, rather than leaving you a bare `stratus run` that would start
+the agent without them.
+
 So does a template that grants a tool nothing installed provides — an
 older plugin reads as installed, and creating the agent anyway would
 give it an allowlist entry no registered tool answers.

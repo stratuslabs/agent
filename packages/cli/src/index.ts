@@ -7420,12 +7420,41 @@ const runAgentNewFromTemplate = async (
     writeLine(streams.stdout, `    ${credential.provideCommand}`);
   }
   writeLine(streams.stdout);
+  // What a bare `stratus run` from here would select *now*, which is not
+  // always the file the entries went into: a project `stratus.config.json`
+  // created while the review was on screen takes precedence over the global
+  // config, cannot enable plugins, and would start this agent with none of
+  // the tools just approved. Asked after the write rather than before it,
+  // because the answer changes no part of what was written — plugin entries
+  // have one legal home and that is where they went — only which command
+  // reproduces it.
+  let shadowedBy: string | undefined;
+  if (applied.configured.length > 0 && command.configPath === undefined) {
+    const activeNow = await resolveConfigLocation({}, env).catch(() => undefined);
+    const activeTarget = activeNow
+      ? await resolveConfigTarget(activeNow.path).catch(() => activeNow.path)
+      : undefined;
+    if (activeTarget !== undefined && activeTarget !== configTarget) {
+      shadowedBy = activeNow?.path;
+    }
+  }
+  if (shadowedBy !== undefined) {
+    writeLine(
+      streams.stderr,
+      `Note: ${shadowedBy} is what a bare run here selects now, and a project config cannot enable plugins. `
+      + 'The commands below name the file the entries went into.',
+    );
+  }
+
   writeLine(streams.stdout, 'Try:');
   // Carrying `--config` when one was given: the plugin entries went into
   // that file, and a run without it resolves whatever config is active
   // here instead — starting the agent with none of the tools just
-  // reviewed.
-  const configFlag = command.configPath ? ` --config ${quoteShellArg(command.configPath)}` : '';
+  // reviewed. Same flag, same reason, when nothing was given but the
+  // active config has since become a file this did not write.
+  const configFlag = command.configPath
+    ? ` --config ${quoteShellArg(command.configPath)}`
+    : shadowedBy !== undefined ? ` --config ${quoteShellArg(applied.configPath)}` : '';
   writeLine(streams.stdout, `  stratus run${configFlag} --soul ${quoteShellArg(applied.soulPath)} "introduce yourself"`);
   if (applied.configured.length > 0) {
     writeLine(streams.stdout, '  stratus restart          # a plugin change needs one; see docs/guides/always-on.md');
