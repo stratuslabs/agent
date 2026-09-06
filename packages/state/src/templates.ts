@@ -864,7 +864,15 @@ export const applyAgentTemplate = async (
       // first `fs.list` fails, and a home where `~/.stratus/workspaces` is
       // unwritable must leave no agent behind rather than one that half
       // works.
-      await mkdir(workspacePath, { recursive: true });
+      //
+      // Only for a template that renders per-agent settings, which is what
+      // puts the path into the config in the first place. A bundle with no
+      // plugins at all — `assistant` — has nothing pointing at a workspace,
+      // so failing its creation over an unwritable `~/.stratus/workspaces`
+      // would refuse an agent that would have worked perfectly.
+      if (plan.template.plugins.some((requirement) => requirement.agentSettings !== undefined)) {
+        await mkdir(workspacePath, { recursive: true });
+      }
       const config = await options.readConfig();
       const rawPlugins = config.plugins;
       const plugins: Record<string, JsonObject> = isJsonObject(rawPlugins as JsonValue)

@@ -65,10 +65,12 @@ agent silently lost its tools.
 
 The file is written to a temporary beside it and renamed into place, so a
 failure partway through leaves the previous version whole rather than half a
-document. A symlinked `config.json` — one managed from a dotfiles repository
-— is followed and written where it actually lives, not replaced. The rename
-resets the file's permissions to the default this writer has always created
-it with.
+document. Replacing a file rather than writing through it means two things
+are carried across deliberately: a symlinked `config.json` — one managed
+from a dotfiles repository — is followed and written where it actually
+lives, including when the link is in place before its target exists; and the
+file keeps the permissions it had, so a `0640` config a daemon running as
+another user can read stays readable.
 
 Credentials stored by setup live in `~/.stratus/credentials.json`
 (owner-read-only) and are **endpoint-bound**: a credential saved for one

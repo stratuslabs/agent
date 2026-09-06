@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -878,7 +878,13 @@ test('a workspace that cannot be created leaves no agent and no config entry', a
   const plan = await planFor(
     templateWith({
       tools: ['fs.read'],
-      plugins: [{ package: '@stratusagent/tool-fs', reason: 'files' }],
+      plugins: [{
+        package: '@stratusagent/tool-fs',
+        reason: 'files',
+        // The per-agent roots are what put the workspace path into the
+        // config, and so what makes its creation part of the commit.
+        agentSettings: (context) => ({ roots: [context.workspacePath] }),
+      }],
     }),
     fixture,
     packages,
@@ -1111,4 +1117,53 @@ test('a config written through a symlink stays a symlink, and its target is upda
     (await readdir(path.dirname(real))).filter((name) => name.endsWith('.tmp')),
     [],
   );
+});
+
+test('a template with nothing pointing at a workspace does not need one', async () => {
+  const fixture = await newFixture();
+  const plan = await planFor(templateWith({ tools: ['memory.remember'] }), fixture, {});
+
+  // Unusable, and irrelevant: this bundle configures no per-agent roots, so
+  // nothing it writes names a workspace. Refusing the agent over it would
+  // be failing for a directory the agent never reaches.
+  const workspaces = path.join(fixture.home, '.stratus', 'workspaces');
+  await mkdir(path.dirname(workspaces), { recursive: true });
+  await writeFile(workspaces, 'not a directory\n');
+
+  const applied = await applyFixture(plan, fixture.home);
+  assert.equal(applied.agent.id, plan.agent.id);
+});
+
+test('a config written through a dangling symlink creates its target, not a file over the link', async () => {
+  const home = await newHome();
+  const real = path.join(home, 'dotfiles', 'config.json');
+  const link = path.join(home, '.stratus', 'config.json');
+  await mkdir(path.dirname(real), { recursive: true });
+  await mkdir(path.dirname(link), { recursive: true });
+  // The link in place before the file it names — what a dotfiles checkout
+  // looks like on a machine that has not been set up yet. `realpath` throws
+  // here, which is why the chain is followed by hand.
+  await symlink(real, link);
+
+  await saveConfigFile(link, { provider: 'demo' });
+
+  assert.equal((await lstat(link)).isSymbolicLink(), true);
+  assert.equal(JSON.parse(await readFile(real, 'utf8')).provider, 'demo');
+});
+
+test('replacing a config keeps the permissions it had', async () => {
+  const home = await newHome();
+  const configPath = path.join(home, '.stratus', 'config.json');
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(configPath, `${JSON.stringify({ provider: 'anthropic' })}\n`);
+  // Group-readable, as a shared-machine install has it so a daemon running
+  // as another user can load it. A rename that took the umask's answer
+  // instead would tighten it to 0600 and lock that daemon out — the setup
+  // this function's "deliberately NOT 0600" note exists to protect.
+  await chmod(configPath, 0o640);
+
+  await saveConfigFile(configPath, { provider: 'demo' });
+
+  assert.equal((await stat(configPath)).mode & 0o777, 0o640);
+  assert.equal(JSON.parse(await readFile(configPath, 'utf8')).provider, 'demo');
 });

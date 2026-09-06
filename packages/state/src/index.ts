@@ -3901,37 +3901,73 @@ export const listAgentSummaries = async (
  * read-modify-write of settings somebody else's agents depend on, and one
  * of them (`applyAgentTemplate`) advertises an all-or-nothing commit that a
  * truncating write cannot deliver. The rename is atomic within a
- * filesystem, and the temporary is beside the destination so it is one.
+ * filesystem, and the temporary is beside the resolved target so it is one.
  *
- * The destination is resolved through symlinks first, so a config managed
- * from a dotfiles repository is written where it actually lives.
+ * Replacing a file rather than writing through it means two things it would
+ * otherwise inherit have to be carried across by hand, and both matter:
  *
- * The rename replaces the file, so the saved config carries the temporary's
- * mode rather than whatever the old file had — the same mode a first write
- * would have created it with, which is the one this function has always
- * chosen.
+ * - **The symlink.** A rename replaces a directory entry, so renaming onto
+ *   a symlinked `config.json` — a dotfiles repository, usually — would
+ *   detach the link and leave the file it pointed at holding the previous
+ *   contents forever. `linkTarget` follows the chain by hand rather than
+ *   through `realpath`, which needs the final target to exist: a link put
+ *   in place before the file it names is exactly the case a dotfiles setup
+ *   produces.
+ * - **The mode.** A `0640` config read by a daemon running as another user
+ *   becomes `0600` if the temporary is renamed over it under umask 077, and
+ *   the daemon can no longer load it. That is the shared-machine setup the
+ *   paragraph below exists to protect, so the destination's mode is copied
+ *   onto the temporary before it replaces it. Only a file being *created*
+ *   takes the umask's answer.
  *
  * Deliberately NOT 0600: `config.json` holds no secrets (those live in
  * `credentials.json`, which has its own posture), and tightening it here
  * would be a security theatre that also breaks a shared-machine setup where
  * the daemon runs as another user.
  */
+/**
+ * Where a path actually leads, following symlinks by hand.
+ *
+ * `realpath` cannot be used: it resolves the whole chain and fails if the
+ * final target does not exist, and a link standing in front of a file that
+ * has not been created yet is ordinary — a dotfiles repository puts the
+ * link there first. `readlink` per hop answers for a dangling link too.
+ *
+ * Bounded, so a symlink loop returns rather than spinning. A path that is
+ * not a link (EINVAL) or is not there at all (ENOENT) is its own target.
+ */
+const linkTarget = async (from: string): Promise<string> => {
+  let current = from;
+  for (let depth = 0; depth < 8; depth += 1) {
+    let next: string;
+    try {
+      next = await readlink(current);
+    } catch {
+      return current;
+    }
+    current = path.resolve(path.dirname(current), next);
+  }
+  return current;
+};
+
 export const saveConfigFile = async (
   configPath: string,
   config: StratusConfigFile,
 ): Promise<void> => {
   await mkdir(path.dirname(configPath), { recursive: true });
-  // Through the symlink, not over it. A rename replaces a directory entry,
-  // so renaming onto a symlinked `~/.stratus/config.json` would detach the
-  // link and leave the file it pointed at — a dotfiles repository, usually
-  // — holding the previous contents forever. The direct write this replaced
-  // followed the link, and that behavior has to survive. Resolving also
-  // puts the temporary on the target's own filesystem, which is what makes
-  // the rename atomic in the first place.
-  const target = await realpath(configPath).catch(() => configPath);
+  const target = await linkTarget(configPath);
+  if (target !== configPath) {
+    await mkdir(path.dirname(target), { recursive: true });
+  }
   const staged = `${target}.${process.pid}.tmp`;
   try {
     await writeFile(staged, `${JSON.stringify(config, null, 2)}\n`);
+    // The mode the file already has, so a replacement is not also a
+    // permission change. Absent (a first write) it keeps the umask's.
+    const existing = await stat(target).catch(() => undefined);
+    if (existing) {
+      await chmod(staged, existing.mode & 0o7777);
+    }
     await rename(staged, target);
   } catch (error) {
     await rm(staged, { force: true }).catch(() => {
