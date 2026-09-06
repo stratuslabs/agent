@@ -7245,19 +7245,30 @@ const runAgentNewFromTemplate = async (
     ...(template.credentials.length > 0 ? { credentials: template.credentials } : {}),
   });
 
-  const plan = await planAgentTemplate({
+  // One call, used twice: to print, and again under the lock to commit.
+  // Location blockers are only for the first — they are about which file is
+  // active, which nothing under the lock can change.
+  const namedCredentials = await loadNamedCredentials(env);
+  const installedSkills = await installedSkillIds(env, config.plugins ?? {}, host);
+  const planFor = (
+    identity: AgentDefinition,
+    current: { plugins?: PluginsConfig },
+    locationBlockers: readonly TemplateBlocker[] = [],
+  ) => planAgentTemplate({
     template,
-    agent,
-    soulPath: path.join(agentsDirPath(env), `${agent.id}.md`),
+    agent: identity,
+    soulPath: path.join(agentsDirPath(env), `${identity.id}.md`),
     configPath,
-    config: config as { plugins?: PluginsConfig },
-    workspacePath: agentWorkspacePath(env, agent.id),
+    config: current,
+    workspacePath: agentWorkspacePath(env, identity.id),
     workspaceRoot: workspacesDirPath(env),
     host,
-    credentials: await loadNamedCredentials(env),
-    installedSkills: await installedSkillIds(env, config.plugins ?? {}, host),
-    blockers,
+    credentials: namedCredentials,
+    installedSkills,
+    blockers: locationBlockers,
   });
+
+  const plan = await planFor(agent, config as { plugins?: PluginsConfig }, blockers);
 
   writeTemplatePlan(streams, plan);
   if (plan.blockers.length > 0) {
@@ -7277,6 +7288,7 @@ const runAgentNewFromTemplate = async (
   try {
     applied = await applyAgentTemplate({
       plan,
+      replan: planFor,
       claimSoul: (render) => claimSoulFile(
         env,
         { name, instructions: template.persona },

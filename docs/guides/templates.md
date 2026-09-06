@@ -191,6 +191,12 @@ Each of these changes nothing at all — no soul file, no config entry:
   fails.
 - Declining the review.
 
+The bundle is also re-resolved against the config at the moment it commits,
+not just the moment you read it. If something changed in between — another
+command enabled a plugin that takes one of these tool names, or moved a
+tool's risk — the command writes nothing and tells you to look again. What
+you approved and what would land have to be the same thing.
+
 If the id the template wanted is already taken — two `--template triage`
 runs both want `kit` — the second agent gets a suffixed id and a palette of
 its own, and the command tells you which id it actually took.

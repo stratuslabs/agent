@@ -779,6 +779,19 @@ export interface ApplyAgentTemplateOptions {
   workspacePathFor: (agentId: string) => string;
   /** Re-read the config. Called under the lock, and its result is the merge base. */
   readConfig: () => Promise<Record<string, JsonValue>>;
+  /**
+   * Recompute the whole plan, for the identity actually claimed and against
+   * the config as it stands under the lock.
+   *
+   * Not an optimisation and not a second opinion: it is what makes the
+   * commit describe the same host the review described. Re-running only the
+   * merge decision catches a setting the template contradicts and nothing
+   * else — a writer that added a plugin colliding on `fs.read`, or broke a
+   * required plugin's `toolRisks`, contradicts none of the template's keys
+   * and would sail through, committing a soul whose plugin the daemon then
+   * refuses.
+   */
+  replan: (agent: AgentDefinition, config: { plugins?: Record<string, JsonObject> }) => Promise<TemplatePlan>;
   /** Write the merged config. Called under the lock. */
   writeConfig: (config: Record<string, JsonValue>) => Promise<void>;
   /** Remove a soul this call wrote, when the config half fails. */
@@ -857,17 +870,28 @@ export const applyAgentTemplate = async (
       const plugins: Record<string, JsonObject> = isJsonObject(rawPlugins as JsonValue)
         ? { ...(rawPlugins as Record<string, JsonObject>) }
         : {};
-      const decided = decidePluginConfig(
-        plan.template,
-        { agentId: claimed.agent.id, agentName: claimed.agent.name, workspacePath },
-        plugins,
-      );
-      for (const outcome of decided.values()) {
-        if (outcome.status === 'conflict') {
-          throw new TemplateApplyError(
-            conflictBlocker(outcome, plan.template.id, plan.configPath).message,
-          );
-        }
+
+      // The plan the write is built from, computed here rather than
+      // replayed from the one that was printed.
+      const fresh = await options.replan(claimed.agent, { plugins });
+      if (fresh.blockers.length > 0) {
+        throw new TemplateApplyError(
+          `${plan.template.id} cannot be applied — the configuration changed since this was reviewed:\n`
+          + fresh.blockers.map((blocker) => blocker.message).join('\n'),
+        );
+      }
+      // And what it grants has to still be what was approved. An unrelated
+      // config change is fine; one that moves a tool, its risk, or the
+      // package behind it means the operator said yes to something else.
+      if (JSON.stringify(fresh.tools) !== JSON.stringify(plan.tools)) {
+        throw new TemplateApplyError(
+          `${plan.template.id} was not created: the configuration changed since this was reviewed, and the tools it `
+          + 'would grant are no longer the ones printed. Nothing was written — run the command again to review the '
+          + 'current answer.',
+        );
+      }
+
+      for (const outcome of fresh.plugins) {
         if (outcome.status === 'add') {
           plugins[outcome.package] = outcome.settings;
           configured.push(outcome.package);

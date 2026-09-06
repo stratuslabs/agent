@@ -3903,6 +3903,9 @@ export const listAgentSummaries = async (
  * truncating write cannot deliver. The rename is atomic within a
  * filesystem, and the temporary is beside the destination so it is one.
  *
+ * The destination is resolved through symlinks first, so a config managed
+ * from a dotfiles repository is written where it actually lives.
+ *
  * The rename replaces the file, so the saved config carries the temporary's
  * mode rather than whatever the old file had — the same mode a first write
  * would have created it with, which is the one this function has always
@@ -3918,10 +3921,18 @@ export const saveConfigFile = async (
   config: StratusConfigFile,
 ): Promise<void> => {
   await mkdir(path.dirname(configPath), { recursive: true });
-  const staged = `${configPath}.${process.pid}.tmp`;
+  // Through the symlink, not over it. A rename replaces a directory entry,
+  // so renaming onto a symlinked `~/.stratus/config.json` would detach the
+  // link and leave the file it pointed at — a dotfiles repository, usually
+  // — holding the previous contents forever. The direct write this replaced
+  // followed the link, and that behavior has to survive. Resolving also
+  // puts the temporary on the target's own filesystem, which is what makes
+  // the rename atomic in the first place.
+  const target = await realpath(configPath).catch(() => configPath);
+  const staged = `${target}.${process.pid}.tmp`;
   try {
     await writeFile(staged, `${JSON.stringify(config, null, 2)}\n`);
-    await rename(staged, configPath);
+    await rename(staged, target);
   } catch (error) {
     await rm(staged, { force: true }).catch(() => {
       // The write's failure is the one to report.

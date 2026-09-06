@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -343,14 +343,37 @@ interface ApplyHarness {
   claimed: AgentDefinition;
 }
 
+/**
+ * `applyAgentTemplate` with the seams a host supplies.
+ *
+ * `live` gives it a real `replan` over the fixture's packages — the commit
+ * is built from a plan recomputed under the lock, so a test that changes the
+ * config between planning and applying has to let that recomputation
+ * happen. Without it the fixture just hands back the plan it was given,
+ * which is what every test that changes nothing wants.
+ */
 const applyFixture = async (
   plan: TemplatePlan,
   home: string,
   overrides: Partial<Parameters<typeof applyAgentTemplate>[0]> = {},
+  live?: { packagesRoot: string; packages: Record<string, JsonObject> },
 ) => {
   const configPath = path.join(home, '.stratus', 'config.json');
   return applyAgentTemplate({
     plan,
+    replan: live
+      ? (identity, current) => planAgentTemplate({
+        template: plan.template,
+        agent: identity,
+        soulPath: path.join(home, '.stratus', 'agents', `${identity.id}.md`),
+        configPath,
+        config: current,
+        workspacePath: path.join(home, '.stratus', 'workspaces', identity.id),
+        host: fakeHost(live.packages, live.packagesRoot),
+        credentials: { shared: {}, agents: {} },
+        installedSkills: [],
+      })
+      : async () => plan,
     claimSoul: async (render) => {
       const soulPath = path.join(home, '.stratus', 'agents', `${plan.agent.id}.md`);
       await mkdir(path.dirname(soulPath), { recursive: true });
@@ -517,7 +540,7 @@ test('a per-agent block is merged into the entry a racing creation already wrote
     plugins: { '@stratusagent/tool-fs': { enabled: true, agents: { elsewhere: { roots: ['/theirs'] } } } },
   }));
 
-  await applyFixture(plan, fixture.home);
+  await applyFixture(plan, fixture.home, {}, { packagesRoot: fixture.packagesRoot, packages });
   const config = JSON.parse(await readFile(configPath, 'utf8')) as {
     plugins: { '@stratusagent/tool-fs': { agents: Record<string, JsonObject> } };
   };
@@ -999,4 +1022,93 @@ test('concurrent config updates serialize, so neither loses the other', async ()
   const written = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
   assert.equal(written.provider, 'anthropic');
   assert.equal(written.model, 'claude-opus-5');
+});
+
+test('a config change between review and commit that breaks a required plugin stops the write', async () => {
+  const fixture = await newFixture();
+  const rival: JsonObject = {
+    name: 'rival-fs',
+    version: '1.0.0',
+    stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'fs.read', risk: 'gated' }] } },
+  };
+  const packages = { '@stratusagent/tool-fs': firstPartyFs, 'rival-fs': rival };
+  await writeFixturePackages(fixture.packagesRoot, packages);
+
+  const plan = await planFor(
+    templateWith({
+      tools: ['fs.read'],
+      plugins: [{ package: '@stratusagent/tool-fs', reason: 'files' }],
+    }),
+    fixture,
+    packages,
+  );
+  assert.deepEqual(plan.blockers, []);
+
+  // Written after the review: it contradicts none of the template's keys, so
+  // re-running only the merge decision would sail past it — and the daemon
+  // would then refuse tool-fs whole, leaving a soul whose reviewed tools do
+  // not exist.
+  const configPath = path.join(fixture.home, '.stratus', 'config.json');
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(configPath, JSON.stringify({ plugins: { 'rival-fs': { enabled: true } } }));
+
+  await assert.rejects(
+    applyFixture(plan, fixture.home, {}, { packagesRoot: fixture.packagesRoot, packages }),
+    (error: unknown) => error instanceof TemplateApplyError && /changed since this was reviewed/.test(error.message),
+  );
+  assert.deepEqual(await readdir(path.join(fixture.home, '.stratus', 'agents')), []);
+});
+
+test('a config change that moves what a granted tool resolves to stops the write', async () => {
+  const fixture = await newFixture();
+  const packages = { '@stratusagent/tool-fs': firstPartyFs };
+  await writeFixturePackages(fixture.packagesRoot, packages);
+
+  const plan = await planFor(
+    templateWith({
+      tools: ['fs.read'],
+      plugins: [{ package: '@stratusagent/tool-fs', reason: 'files' }],
+    }),
+    fixture,
+    packages,
+  );
+  assert.equal(plan.tools[0]?.resolves[0]?.risk, 'safe');
+
+  // An operator override raising fs.read, written after the review. Nothing
+  // is blocked by it — the plan is perfectly valid — but it is no longer the
+  // plan anybody said yes to.
+  const configPath = path.join(fixture.home, '.stratus', 'config.json');
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(configPath, JSON.stringify({
+    plugins: { '@stratusagent/tool-fs': { enabled: true, toolRisks: { 'fs.read': 'dangerous' } } },
+  }));
+
+  await assert.rejects(
+    applyFixture(plan, fixture.home, {}, { packagesRoot: fixture.packagesRoot, packages }),
+    (error: unknown) => error instanceof TemplateApplyError
+      && /no longer the ones printed/.test(error.message),
+  );
+  assert.deepEqual(await readdir(path.join(fixture.home, '.stratus', 'agents')), []);
+});
+
+test('a config written through a symlink stays a symlink, and its target is updated', async () => {
+  const home = await newHome();
+  const real = path.join(home, 'dotfiles', 'config.json');
+  const link = path.join(home, '.stratus', 'config.json');
+  await mkdir(path.dirname(real), { recursive: true });
+  await mkdir(path.dirname(link), { recursive: true });
+  await writeFile(real, `${JSON.stringify({ provider: 'anthropic' })}\n`);
+  await symlink(real, link);
+
+  await saveConfigFile(link, { provider: 'demo' });
+
+  // A rename replaces a directory entry, so renaming onto the link would
+  // detach it and leave the dotfiles repository holding the old contents
+  // forever. The direct write this replaced followed the link.
+  assert.equal((await lstat(link)).isSymbolicLink(), true);
+  assert.equal(JSON.parse(await readFile(real, 'utf8')).provider, 'demo');
+  assert.deepEqual(
+    (await readdir(path.dirname(real))).filter((name) => name.endsWith('.tmp')),
+    [],
+  );
 });
