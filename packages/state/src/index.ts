@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { appendFile, chmod, chown, cp, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { constants as fsConstants, readFileSync } from 'node:fs';
+import { appendFile, chmod, cp, mkdir, open, readdir, readFile, readlink, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -3930,7 +3930,13 @@ export const listAgentSummaries = async (
  * the daemon runs as another user.
  */
 /**
- * Where a path actually leads, following symlinks by hand.
+ * Where a config path actually leads, following symlinks by hand.
+ *
+ * Exported because every part of one config transaction has to agree on
+ * *which file* it is operating on: the lock, the read, and the write. A
+ * caller that resolved separately at each step could lock one target and
+ * replace another if the link were retargeted in between, holding a lock
+ * that guards nothing.
  *
  * `realpath` cannot be used: it resolves the whole chain and fails if the
  * final target does not exist, and a link standing in front of a file that
@@ -3945,7 +3951,7 @@ export const listAgentSummaries = async (
  */
 const MAX_CONFIG_LINK_HOPS = 32;
 
-const linkTarget = async (from: string): Promise<string> => {
+export const resolveConfigTarget = async (from: string): Promise<string> => {
   let current = from;
   for (let depth = 0; depth < MAX_CONFIG_LINK_HOPS; depth += 1) {
     let next: string;
@@ -3967,19 +3973,36 @@ export const saveConfigFile = async (
   config: StratusConfigFile,
 ): Promise<void> => {
   await mkdir(path.dirname(configPath), { recursive: true });
-  const target = await linkTarget(configPath);
+  const target = await resolveConfigTarget(configPath);
   if (target !== configPath) {
     await mkdir(path.dirname(target), { recursive: true });
   }
-  const staged = `${target}.${process.pid}.tmp`;
+  // Unguessable, created exclusively, and never through a link. The
+  // temporary lands beside the config — which for a shared config is a
+  // directory somebody else may write — and a predictable name there can be
+  // pre-created as a symlink: the write would truncate whatever it pointed
+  // at, the chmod and chown would follow it, and the rename would put the
+  // link where the config belongs. `O_EXCL` means this process created what
+  // it is writing to; `O_NOFOLLOW` means it is not a link; and the mode and
+  // ownership are set through the descriptor, so they cannot be redirected
+  // either.
+  const staged = `${target}.${randomUUID()}.tmp`;
+  const handle = await open(
+    staged,
+    fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+    // Masked by the umask, so a file this creates carries exactly what a
+    // plain write would have given it.
+    0o666,
+  );
+  let closed = false;
   try {
-    await writeFile(staged, `${JSON.stringify(config, null, 2)}\n`);
+    await handle.writeFile(`${JSON.stringify(config, null, 2)}\n`);
     // The mode and ownership the file already has, so a replacement is not
     // also a permission change. Absent (a first write) it keeps whatever
     // the umask and the process's own identity give it.
     const existing = await stat(target).catch(() => undefined);
     if (existing) {
-      await chmod(staged, existing.mode & 0o7777);
+      await handle.chmod(existing.mode & 0o7777);
       // Best effort, and it has to be: a process cannot give a file away to
       // another uid, so this can only succeed where the writer already had
       // the standing to produce that ownership. That is exactly the case
@@ -3989,12 +4012,19 @@ export const saveConfigFile = async (
       // the writer could not have modified the file at all: a rename needs
       // write on the directory, and the ownership it could not reproduce is
       // ownership it could not have set.
-      await chown(staged, existing.uid, existing.gid).catch(() => {
+      await handle.chown(existing.uid, existing.gid).catch(() => {
         // Left as the umask made it. See the note above.
       });
     }
+    await handle.close();
+    closed = true;
     await rename(staged, target);
   } catch (error) {
+    if (!closed) {
+      await handle.close().catch(() => {
+        // Already failing; the original error is the one to report.
+      });
+    }
     await rm(staged, { force: true }).catch(() => {
       // The write's failure is the one to report.
     });
@@ -4038,7 +4068,7 @@ import { withFileLock } from './lock.ts';
  * directory, so a lock file there is never the thing that fails.
  */
 export const configLockPath = async (configPath: string): Promise<string> =>
-  `${await linkTarget(configPath)}.lock`;
+  `${await resolveConfigTarget(configPath)}.lock`;
 
 /**
  * Read-modify-write the config, holding the lock across both halves.
@@ -4064,19 +4094,26 @@ export const updateConfigFile = async (
   configPath: string,
   env: StateEnvironment,
   mutate: (current: StratusConfigFile) => StratusConfigFile | Promise<StratusConfigFile>,
-): Promise<StratusConfigFile> => withFileLock(await configLockPath(configPath), async () => {
-  let current: StratusConfigFile = {};
-  try {
-    current = await loadConfigFile(configPath);
-  } catch (error) {
-    if (!(error instanceof ConfigFileError && error.code === 'ENOENT')) {
-      throw error;
+): Promise<StratusConfigFile> => {
+  // Resolved once, and then the lock, the read and the write all name the
+  // same file. Resolving at each step would let a link retargeted mid
+  // transaction have this read one target and replace another while holding
+  // a lock on neither.
+  const target = await resolveConfigTarget(configPath);
+  return withFileLock(`${target}.lock`, async () => {
+    let current: StratusConfigFile = {};
+    try {
+      current = await loadConfigFile(target);
+    } catch (error) {
+      if (!(error instanceof ConfigFileError && error.code === 'ENOENT')) {
+        throw error;
+      }
     }
-  }
-  const next = await mutate(current);
-  await saveConfigFile(configPath, next);
-  return next;
-});
+    const next = await mutate(current);
+    await saveConfigFile(target, next);
+    return next;
+  });
+};
 
 export {
   AGENT_TEMPLATE_VERSION,

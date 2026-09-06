@@ -1328,3 +1328,62 @@ test('a lock path that is a symlink is refused, never followed and truncated', a
     'and the waiting form refuses it too, rather than retrying forever',
   );
 });
+
+test('a damaged lock is emptied through one descriptor, so a swapped link cannot be truncated', async () => {
+  const home = await newHome();
+  const lockPath = path.join(home, 'config.json.lock');
+  const victim = path.join(home, 'credentials.json');
+  await writeFile(victim, `${JSON.stringify({ anthropic: { type: 'api_key' } })}\n`);
+  // Damaged, so the recovery path runs. Owned by this process, so the
+  // ownership check passes and the truncate is genuinely reached.
+  await writeFile(lockPath, 'not a database at all\n');
+
+  const claim = claimFileLock(lockPath);
+  claim.release();
+  assert.equal(await readFile(lockPath, 'utf8'), '', 'emptied in place, as before');
+  assert.notEqual((await stat(victim)).size, 0);
+});
+
+test('the staged config write refuses a temporary somebody else planted', async () => {
+  const home = await newHome();
+  const configPath = path.join(home, 'config.json');
+  await writeFile(configPath, `${JSON.stringify({ provider: 'anthropic' })}\n`);
+
+  // The name is unguessable now, so this plants every temporary the old
+  // predictable scheme could have produced and asserts the write does not
+  // take any of them. `O_EXCL` is what makes that true regardless of the
+  // name: this process creates what it writes to, or it fails.
+  const victim = path.join(home, 'credentials.json');
+  await writeFile(victim, `${JSON.stringify({ anthropic: { type: 'api_key' } })}\n`);
+  await symlink(victim, `${configPath}.${process.pid}.tmp`);
+
+  await saveConfigFile(configPath, { provider: 'demo' });
+
+  assert.notEqual((await stat(victim)).size, 0, 'the planted target is untouched');
+  assert.equal(JSON.parse(await readFile(configPath, 'utf8')).provider, 'demo');
+  assert.equal((await lstat(configPath)).isSymbolicLink(), false, 'and the config is still a real file');
+});
+
+test('one config transaction locks, reads and writes the same resolved file', async () => {
+  const home = await newHome();
+  const first = path.join(home, 'first.json');
+  const second = path.join(home, 'second.json');
+  const link = path.join(home, 'config.json');
+  await writeFile(first, `${JSON.stringify({ provider: 'anthropic' })}\n`);
+  await writeFile(second, `${JSON.stringify({ provider: 'openai' })}\n`);
+  await symlink(first, link);
+
+  await updateConfigFile(link, { homeDir: home }, async (current) => {
+    assert.equal(current.provider, 'anthropic', 'read through the link, from the first target');
+    // Retargeted mid-transaction. Resolving again for the write would send
+    // it to a file this holds no lock on, and leave the one it does hold
+    // unchanged — a concurrent writer addressing the second target directly
+    // would then interleave freely.
+    await rm(link);
+    await symlink(second, link);
+    return { ...current, model: 'claude-opus-5' };
+  });
+
+  assert.equal(JSON.parse(await readFile(first, 'utf8')).model, 'claude-opus-5', 'written where the lock was taken');
+  assert.equal(JSON.parse(await readFile(second, 'utf8')).model, undefined, 'and not where the link now points');
+});

@@ -1,4 +1,4 @@
-import { chmodSync, lstatSync, mkdirSync, truncateSync } from 'node:fs';
+import { closeSync, constants as fsConstants, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, chmodSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -94,8 +94,7 @@ const claimAt = (lockPath: string): DatabaseSync => {
 };
 
 /**
- * Refuse a lock path this process should not open, and — before emptying
- * one — should not write through.
+ * Refuse a lock path that is already a symlink, before opening it.
  *
  * The recovery below truncates a file that is not a database, which is safe
  * for a lock nobody else can create and dangerous for one in a directory
@@ -105,12 +104,12 @@ const claimAt = (lockPath: string): DatabaseSync => {
  * as `SQLITE_NOTADB`, and then zeroed.
  *
  * `lstat` rather than an atomic no-follow open, because `DatabaseSync`
- * opens by path and takes no descriptor. That closes the planted-link case,
- * which is the reachable one, and not a race against a link swapped in
- * during the window — checked once on the way in and again immediately
- * before the truncate, which is the operation worth guarding.
+ * opens by path and takes no descriptor: this is an early, clear refusal
+ * for a link that is already there, not a guarantee. The guarantee lives in
+ * `emptyInPlace`, which is where the destructive step is and which checks
+ * and truncates one descriptor rather than one path twice.
  */
-const refuseUnsafeLock = (lockPath: string, forTruncate: boolean): void => {
+const refuseUnsafeLock = (lockPath: string): void => {
   let entry;
   try {
     entry = lstatSync(lockPath);
@@ -122,13 +121,45 @@ const refuseUnsafeLock = (lockPath: string, forTruncate: boolean): void => {
   if (entry.isSymbolicLink()) {
     throw new FileLockUnsafeError(lockPath);
   }
-  // And nothing this process does not own gets emptied. A planted regular
-  // file is the same attack without the link: leave a damaged one owned by
-  // somebody else where it is and say so, rather than zeroing a file on the
-  // strength of it having failed a header read. Recovery is the rare path,
-  // and refusing it costs an operator one `rm`.
-  if (forTruncate && process.getuid !== undefined && entry.uid !== process.getuid()) {
-    throw new FileLockUnsafeError(lockPath);
+};
+
+/**
+ * Empty a damaged lock, checking and truncating **the same inode**.
+ *
+ * A path-based `lstat` then `truncate` is two resolutions with a window
+ * between them, and the window is the whole attack: swap the checked
+ * regular file for a link and the truncate follows it. `O_NOFOLLOW` refuses
+ * a link at open time, and `fstat` and `ftruncate` then act on the
+ * descriptor that open returned — the checks and the destruction cannot be
+ * pointed at different files.
+ *
+ * Nothing this process does not own gets emptied either. A planted regular
+ * file is the same attack without the link: leave a damaged one belonging
+ * to somebody else where it is and say so, rather than zeroing a file on
+ * the strength of it having failed a header read. Recovery is the rare
+ * path, and refusing it costs an operator one `rm`.
+ */
+const emptyInPlace = (lockPath: string): void => {
+  let fd: number;
+  try {
+    fd = openSync(lockPath, fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
+  } catch (error) {
+    // ELOOP is what O_NOFOLLOW reports for a symlink; ENOENT is a file that
+    // went away, which the caller retries. Anything else is the operator's
+    // to see.
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      throw new FileLockUnsafeError(lockPath);
+    }
+    throw error;
+  }
+  try {
+    const entry = fstatSync(fd);
+    if (process.getuid !== undefined && entry.uid !== process.getuid()) {
+      throw new FileLockUnsafeError(lockPath);
+    }
+    ftruncateSync(fd, 0);
+  } finally {
+    closeSync(fd);
   }
 };
 
@@ -155,7 +186,7 @@ const refuseUnsafeLock = (lockPath: string, forTruncate: boolean): void => {
  */
 export const claimFileLock = (lockPath: string): FileClaim => {
   mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
-  refuseUnsafeLock(lockPath, false);
+  refuseUnsafeLock(lockPath);
   let held: DatabaseSync | undefined;
   // At most twice: the file as found, then the file emptied in place.
   for (const emptied of [false, true]) {
@@ -169,12 +200,8 @@ export const claimFileLock = (lockPath: string): FileClaim => {
       if (emptied || !isNotADatabase(error)) {
         throw error;
       }
-      // Checked again immediately before the truncate, not only on the way
-      // in: this is the operation with teeth, and the window between the
-      // two is where a link would have to be planted to matter.
-      refuseUnsafeLock(lockPath, true);
       try {
-        truncateSync(lockPath, 0);
+        emptyInPlace(lockPath);
       } catch (truncateError) {
         // Gone meanwhile: the claim below creates it afresh.
         if ((truncateError as NodeJS.ErrnoException).code !== 'ENOENT') {

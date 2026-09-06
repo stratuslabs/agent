@@ -60,12 +60,20 @@ operators with different homes pointing `--config` at one shared file take
 the same lock, and so do one addressing a symlinked config through the link
 and another addressing its target.
 
-Because that lock sits beside the config rather than inside `~/.stratus`,
-it can land in a directory other people may write. A lock path that is a
-symbolic link, or a damaged lock file belonging to another user, is refused
-rather than emptied — the recovery that clears a corrupt lock would
-otherwise be a way to destroy whatever the link pointed at. Remove the file
-and run the command again.
+Because both the lock and the temporary sit beside the config rather than
+inside `~/.stratus`, they can land in a directory other people may write.
+Three rules follow, and they exist because without them a file planted there
+turns an ordinary save into a way to destroy something else:
+
+- A lock path that is a symbolic link, or a damaged lock file belonging to
+  another user, is refused rather than emptied. Remove the file and run the
+  command again.
+- Clearing a damaged lock opens it without following links and truncates
+  *that descriptor*, so the file checked and the file emptied cannot be
+  different ones.
+- The temporary is created exclusively, under an unguessable name, and
+  without following links, and its mode and ownership are set through the
+  descriptor. Nothing pre-created at that path is ever written through.
 
 **Each writer replaces only the keys it is about.** `stratus setup` rewrites
 the provider, model, base URL, key env var, system prompt, default soul, and
