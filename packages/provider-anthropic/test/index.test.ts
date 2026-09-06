@@ -261,7 +261,7 @@ test('a message overheard between turns reaches the API framed, in one user turn
   assert.deepEqual(wire[2], {
     role: 'user',
     content: [
-      { type: 'text', text: '(overheard, not addressed to you) Dylan: Bea, what do you think?' },
+      { type: 'text', text: '(overheard, not addressed to you)\n> Dylan: Bea, what do you think?' },
       { type: 'text', text: 'Dylan: Ava, and you?' },
     ],
   });

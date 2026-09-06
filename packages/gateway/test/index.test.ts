@@ -457,7 +457,7 @@ test('an agent that cannot currently answer still hears, and has it once it can'
     await gateway.dispatch({ sessionId: 'quiet-1', agentId: 'ava', userMessage: 'Dylan: Ava, back?' });
     assert.deepEqual(userContents.at(-1), [
       'Dylan: Ava, hello',
-      '(overheard, not addressed to you) Dylan: Bea, cover for her?',
+      '(overheard, not addressed to you)\n> Dylan: Bea, cover for her?',
       'Dylan: Ava, back?',
     ]);
   } finally {

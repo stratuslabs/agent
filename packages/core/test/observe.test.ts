@@ -72,7 +72,7 @@ test('observe appends what was said with no turn, and the next turn has it in ha
   assert.equal(last?.role, 'user');
   assert.equal(last?.content, 'Dylan: Bea, what do you think?');
   assert.equal(last?.overheard, true);
-  assert.equal(promptTextOf(last!), '(overheard, not addressed to you) Dylan: Bea, what do you think?');
+  assert.equal(promptTextOf(last!), '(overheard, not addressed to you)\n> Dylan: Bea, what do you think?');
   // An earlier reply is not this turn's: the overheard message closes the
   // window `latestTurnReply` walks back through, the same as any user turn.
   assert.equal(latestTurnReply(stored!), undefined);
@@ -83,7 +83,7 @@ test('observe appends what was said with no turn, and the next turn has it in ha
   assert.equal(provider.calls, 2);
   assert.equal(
     latestTurnReply(resumed),
-    'heard: Dylan: Ava, hello | (overheard, not addressed to you) Dylan: Bea, what do you think? | Dylan: Ava, and you?',
+    'heard: Dylan: Ava, hello | (overheard, not addressed to you)\n> Dylan: Bea, what do you think? | Dylan: Ava, and you?',
   );
 });
 
@@ -134,4 +134,12 @@ test('observe refuses a session it cannot find, and one with a turn in flight', 
     /has a turn in flight \(pending_approval\)/,
   );
   assert.equal((await runner.store.get('s3'))?.messages.length, 2, 'nothing was appended');
+});
+
+test('promptTextOf quotes every line of an overheard message, whichever line break it used', () => {
+  assert.equal(
+    promptTextOf({ content: 'one\ntwo\r\nthree\rfour', overheard: true }),
+    '(overheard, not addressed to you)\n> one\n> two\n> three\n> four',
+  );
+  assert.equal(promptTextOf({ content: 'one\ntwo' }), 'one\ntwo');
 });
