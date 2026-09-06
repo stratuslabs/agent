@@ -96,7 +96,7 @@ import {
   agentTemplateIds,
   agentWorkspacePath,
   applyAgentTemplate,
-  configLockPath,
+  resolveConfigTarget,
   createDemoTool,
   createFileCredentialResolver,
   createFileMemoryStore,
@@ -7295,6 +7295,12 @@ const runAgentNewFromTemplate = async (
     }
   }
 
+  // Resolved once, so the lock, the read and the write all name the same
+  // file — the same rule `updateConfigFile` follows, and it has to be
+  // stated here too because this transaction is composed by hand rather
+  // than run through it.
+  const configTarget = await resolveConfigTarget(configPath);
+
   let applied;
   try {
     applied = await applyAgentTemplate({
@@ -7322,7 +7328,7 @@ const runAgentNewFromTemplate = async (
       workspacePathFor: (agentId) => agentWorkspacePath(env, agentId),
       readConfig: async () => {
         try {
-          return await loadConfigFile(configPath) as Record<string, JsonValue>;
+          return await loadConfigFile(configTarget) as Record<string, JsonValue>;
         } catch (error) {
           // A config file that is not there yet is the ordinary first
           // case, not a failure: the merge base is an empty object.
@@ -7332,9 +7338,9 @@ const runAgentNewFromTemplate = async (
           throw error;
         }
       },
-      writeConfig: (merged) => saveConfigFile(configPath, merged as StratusConfigFile),
+      writeConfig: (merged) => saveConfigFile(configTarget, merged as StratusConfigFile),
       removeSoul: (soulPath) => rm(soulPath, { force: true }),
-      lockPath: await configLockPath(configPath),
+      lockPath: `${configTarget}.lock`,
       ...(env.templateFailBeforeConfigWrite ? { beforeConfigWrite: env.templateFailBeforeConfigWrite } : {}),
     });
   } catch (error) {

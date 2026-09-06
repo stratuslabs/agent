@@ -205,6 +205,12 @@ would land have to be the same thing.
 Another agent being created at the same time is not such a change: your
 entry and theirs both land, which is what the lock is for.
 
+One limit worth knowing: the rollback covers *failures*, not a process
+killed outright. The soul becomes a roster entry the moment it is claimed,
+so a `SIGKILL` or a crash in the moments before the config is written can
+leave an agent whose tools are not configured. Delete its soul file, or run
+the command again.
+
 If the id the template wanted is already taken — two `--template triage`
 runs both want `kit` — the second agent gets a suffixed id and a palette of
 its own, and the command tells you which id it actually took.

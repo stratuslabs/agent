@@ -1,4 +1,4 @@
-import { closeSync, constants as fsConstants, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, chmodSync } from 'node:fs';
+import { closeSync, constants as fsConstants, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -73,19 +73,26 @@ const errcodeOf = (error: unknown): unknown =>
  * tear, and a machine that dies leaves a file the next claimant can take.
  * The in-memory journal mode is only so no `-journal` file appears beside
  * the lock; it has nothing to roll back.
+ *
+ * An `ELOOP` from the open is a link where the lock should be, which is
+ * refused rather than followed — see `refuseUnsafeLock` for why that
+ * matters here and not in `~/.stratus`.
  */
 const claimAt = (lockPath: string): DatabaseSync => {
+  // The file is created here, not by SQLite, so its mode arrives with it.
+  // A path-based `chmod` after the claim would be a third resolution of
+  // this path — and the one running while the claim is already held, so a
+  // link swapped in behind it would have this set an arbitrary
+  // operator-owned file to 0600. `O_NOFOLLOW` refuses a link, `O_CREAT`
+  // without `O_EXCL` leaves an existing lock's mode alone, and the mode
+  // argument applies only to a file this call creates.
+  closeSync(openSync(lockPath, fsConstants.O_CREAT | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW, 0o600));
   const db = new DatabaseSync(lockPath);
   try {
     db.exec('PRAGMA journal_mode = MEMORY');
     // A holder anywhere makes this fail with SQLITE_BUSY at once —
     // node:sqlite waits for nothing by default.
     db.exec('BEGIN EXCLUSIVE');
-    // Created under the umask, like every other file SQLite makes;
-    // tightened to match the rest of ~/.stratus. Inside the try: a
-    // filesystem that refuses the chmod must not leave the lock held by a
-    // connection nobody can close.
-    chmodSync(lockPath, 0o600);
     return db;
   } catch (error) {
     db.close();
@@ -196,6 +203,9 @@ export const claimFileLock = (lockPath: string): FileClaim => {
     } catch (error) {
       if (isBusy(error)) {
         throw new FileLockBusyError(lockPath);
+      }
+      if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+        throw new FileLockUnsafeError(lockPath);
       }
       if (emptied || !isNotADatabase(error)) {
         throw error;

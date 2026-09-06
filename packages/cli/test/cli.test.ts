@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { EventEmitter, once } from 'node:events';
@@ -9243,4 +9243,41 @@ test('a plugin-free template is created despite a broken project config', async 
 
   assert.equal(code, 0, output.stderr);
   assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), ['mira.md']);
+});
+
+test('a template writes the config it locked, even if a symlink is retargeted mid-flight', async () => {
+  const home = await templateHome();
+  const first = path.join(home, 'first.json');
+  const second = path.join(home, 'second.json');
+  const link = path.join(home, 'chosen.json');
+  await writeFile(first, '{}\n');
+  await writeFile(second, '{}\n');
+  await symlink(first, link);
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'research', '--config', link, '--yes'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      // Runs after the soul claim and before the config is read. Resolving
+      // the path again at each step would send the read and the write to
+      // the new target while the lock sits on the old one.
+      templateFailBeforeConfigWrite: async () => {
+        await rm(link);
+        await symlink(second, link);
+      },
+    },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  const written = JSON.parse(await readFile(first, 'utf8')) as { plugins?: Record<string, unknown> };
+  assert.deepEqual(
+    Object.keys(written.plugins ?? {}).sort(),
+    ['@stratusagent/tool-fs', '@stratusagent/tool-web'],
+    'written where the lock was taken',
+  );
+  assert.deepEqual(JSON.parse(await readFile(second, 'utf8')), {}, 'and not where the link now points');
 });

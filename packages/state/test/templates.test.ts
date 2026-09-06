@@ -1428,3 +1428,27 @@ test('a plan still commits when the config lists its plugins in another order', 
   });
   assert.equal(applied.agent.id, plan.agent.id);
 });
+
+test('a lock takes its mode from the open that creates it', async () => {
+  const home = await newHome();
+  const victim = path.join(home, 'notes.md');
+  await writeFile(victim, 'not a secret, but not 0600 either\n');
+  await chmod(victim, 0o644);
+
+  // The mode arrives with the file, from the open that creates it, so
+  // there is no later path-based chmod for a link swapped in behind the
+  // claim to redirect. That race is not what this pins — it is not
+  // reachable from a test — but the mode arriving at creation is, and it is
+  // what removes the chmod the race needed.
+  const lockPath = path.join(home, 'config.json.lock');
+  const claim = claimFileLock(lockPath);
+  claim.release();
+  assert.equal((await stat(lockPath)).mode & 0o777, 0o600, 'a lock this created is owner-only');
+
+  // And a link standing where the lock belongs is refused outright rather
+  // than opened and then permissioned.
+  const linked = path.join(home, 'other.lock');
+  await symlink(victim, linked);
+  assert.throws(() => claimFileLock(linked), FileLockUnsafeError);
+  assert.equal((await stat(victim)).mode & 0o777, 0o644, 'the link target keeps its mode');
+});

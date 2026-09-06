@@ -863,6 +863,16 @@ export interface AppliedTemplate {
  * half-configured state this whole step exists to prevent. So a failure
  * anywhere after the claim removes the soul it wrote.
  *
+ * **That covers errors, not abrupt termination.** The soul is a loadable
+ * roster entry from the moment it is claimed, and a `SIGKILL` or a crash
+ * between the claim and the config write leaves it there with nothing
+ * enabling its tools — the rollback is a `catch`, and a killed process runs
+ * no `catch`. Closing that would mean claiming the id at a path the roster
+ * does not read and linking it into place after the config commits, which
+ * changes a function the untemplated path shares; it is written up rather
+ * than done here. The window is the workspace `mkdir`, one config read, the
+ * replan, and the write.
+ *
  * Everything runs under `lockPath`, and the merge decision is **re-run**
  * there rather than replayed from the plan. The CLI and the dashboard both
  * read-modify-write the same file: the read that decides the merge has to
