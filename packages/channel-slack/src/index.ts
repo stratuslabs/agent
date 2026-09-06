@@ -1208,8 +1208,12 @@ const readImageAttachments = async (
   timeoutMs: number,
   warn: (line: string) => void,
 ): Promise<{ images: ImageAttachment[]; unread: SlackInboundFile[] }> => {
-  const images: ImageAttachment[] = [];
-  const unread: SlackInboundFile[] = [];
+  // Decided from the last file back, the way the replay window is spent:
+  // when a message's images do not all fit, the ones kept are the ones it
+  // listed last, so intake and replay agree about which survive. Delivered
+  // in the message's own order, because that is how the person sees them.
+  const kept = new Map<number, ImageAttachment>();
+  const dropped = new Set<number>();
   // The message's one deadline, shared by every download in it.
   const deadline = AbortSignal.timeout(timeoutMs);
   // Decoded bytes accepted so far. Checked against Slack's reported size
@@ -1227,16 +1231,17 @@ const readImageAttachments = async (
     }
     return undefined;
   };
-  for (const file of files) {
+  for (let position = files.length - 1; position >= 0; position -= 1) {
+    const file = files[position]!;
     const url = file.url_private_download ?? file.url_private;
     if (!isImageAttachmentMediaType(file.mimetype) || url === undefined) {
-      unread.push(file);
+      dropped.add(position);
       continue;
     }
     const tooBig = file.size === undefined ? undefined : overLimit(fileLabel(file), file.size);
     if (tooBig !== undefined) {
       warn(tooBig);
-      unread.push(file);
+      dropped.add(position);
       continue;
     }
     // What this image may weigh: the per-image cap, or what is left of the
@@ -1245,7 +1250,7 @@ const readImageAttachments = async (
     const maxBytes = Math.min(IMAGE_ATTACHMENT_MAX_BYTES, IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES - total);
     if (deadline.aborted) {
       warn(`slack: ${fileLabel(file)} was not downloaded: this message's downloads had already taken longer than ${timeoutMs}ms. The turn is told it cannot be read.`);
-      unread.push(file);
+      dropped.add(position);
       continue;
     }
     let download: SlackFileDownload;
@@ -1256,7 +1261,7 @@ const readImageAttachments = async (
         ? `this message's downloads took longer than ${timeoutMs}ms`
         : (error instanceof Error ? error.message : String(error));
       warn(`slack: could not download ${fileLabel(file)}: ${reason}. The turn is told it cannot be read.`);
-      unread.push(file);
+      dropped.add(position);
       continue;
     }
     // Refused on what Slack sends when it will not serve the file — a
@@ -1266,18 +1271,18 @@ const readImageAttachments = async (
     const contentType = download.contentType?.split(';')[0]?.trim().toLowerCase() ?? '';
     if (download.status !== 200 || contentType.startsWith('text/')) {
       warn(`slack: ${fileLabel(file)} came back as ${contentType || 'no content type'} (HTTP ${download.status}) rather than an image. This is what a bot token without the files:read scope gets — add the scope under OAuth & Permissions and reinstall the app.`);
-      unread.push(file);
+      dropped.add(position);
       continue;
     }
     if (download.truncated === true) {
       warn(`slack: ${fileLabel(file)} is larger than the ${maxBytes} bytes this message could still take for an image; the download was abandoned and the turn is told it cannot be read.`);
-      unread.push(file);
+      dropped.add(position);
       continue;
     }
     const stillTooBig = overLimit(fileLabel(file), download.body.length);
     if (stillTooBig !== undefined) {
       warn(stillTooBig);
-      unread.push(file);
+      dropped.add(position);
       continue;
     }
     // Read from the bytes, not from Slack's metadata: an image the model
@@ -1286,22 +1291,32 @@ const readImageAttachments = async (
     const dimensions = imageDimensions(download.body, file.mimetype);
     if (dimensions === undefined) {
       warn(`slack: ${fileLabel(file)} is not a complete ${file.mimetype} — its header or trailer is missing; the turn is told it cannot be read.`);
-      unread.push(file);
+      dropped.add(position);
       continue;
     }
     if (dimensions.width > IMAGE_ATTACHMENT_MAX_DIMENSION || dimensions.height > IMAGE_ATTACHMENT_MAX_DIMENSION) {
       warn(`slack: ${fileLabel(file)} is ${dimensions.width}×${dimensions.height}, over the ${IMAGE_ATTACHMENT_MAX_DIMENSION}-pixel side the model can take; the turn is told it cannot be read.`);
-      unread.push(file);
+      dropped.add(position);
       continue;
     }
     total += download.body.length;
     const name = file.name ?? file.title;
-    images.push({
+    kept.set(position, {
       mediaType: file.mimetype,
       data: download.body.toString('base64'),
       ...(name !== undefined ? { name } : {}),
     });
   }
+  const images: ImageAttachment[] = [];
+  const unread: SlackInboundFile[] = [];
+  files.forEach((file, position) => {
+    const image = kept.get(position);
+    if (image !== undefined) {
+      images.push(image);
+    } else if (dropped.has(position)) {
+      unread.push(file);
+    }
+  });
   return { images, unread };
 };
 

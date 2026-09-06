@@ -3966,15 +3966,16 @@ test('one message\'s downloads share a single deadline, so ten stalls cost one w
   });
   await adapter.stop();
 
-  // The first download waited out the deadline; the rest were never
-  // started, because the deadline they would have shared had passed.
+  // One download waited out the deadline — the last-listed file, since
+  // files are decided from the end — and the rest were never started,
+  // because the deadline they would have shared had passed.
   assert.equal(signals.length, 1);
   assert.equal(
     gateway.dispatches[0]?.userMessage,
     'Dylan: three slow ones\n[Attached: slow1.png, slow2.png, slow3.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
   );
-  assert.equal(warnings.filter((line) => /slow1\.png/.test(line) && /longer than 20ms/.test(line)).length, 1);
-  assert.equal(warnings.filter((line) => /slow[23]\.png/.test(line) && /already taken longer/.test(line)).length, 2);
+  assert.equal(warnings.filter((line) => /slow3\.png/.test(line) && /longer than 20ms/.test(line)).length, 1);
+  assert.equal(warnings.filter((line) => /slow[12]\.png/.test(line) && /already taken longer/.test(line)).length, 2);
 });
 
 test('images that fit one by one are still held to the message\'s total budget', async () => {
@@ -4016,14 +4017,16 @@ test('images that fit one by one are still held to the message\'s total budget',
   });
   await adapter.stop();
 
-  // The fifth was never even requested: Slack's size said it would not fit.
-  assert.deepEqual(fetched, [1, 2, 3, 4].map((n) => `https://files.slack.com/F${n}/download`));
-  assert.deepEqual(gateway.dispatches[0]?.images?.map((image) => image.name), ['shot1.png', 'shot2.png', 'shot3.png', 'shot4.png']);
+  // Decided from the last file back, as the replay window is spent: the
+  // first was never even requested, because Slack's size said it would not
+  // fit after the four listed after it. Delivered in the message's order.
+  assert.deepEqual(fetched, [5, 4, 3, 2].map((n) => `https://files.slack.com/F${n}/download`));
+  assert.deepEqual(gateway.dispatches[0]?.images?.map((image) => image.name), ['shot2.png', 'shot3.png', 'shot4.png', 'shot5.png']);
   assert.equal(
     gateway.dispatches[0]?.userMessage,
-    'Dylan: all of them\n[Attached: shot5.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    'Dylan: all of them\n[Attached: shot1.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
   );
-  assert.equal(warnings.filter((line) => /shot5\.png/.test(line) && /message of its own/.test(line)).length, 1);
+  assert.equal(warnings.filter((line) => /shot1\.png/.test(line) && /message of its own/.test(line)).length, 1);
 });
 
 test('the default fetcher stops reading a body the moment it passes what the caller will take', async () => {
