@@ -143,6 +143,7 @@ import {
   resolveRuntimeConfig as resolveStateRuntimeConfig,
   saveChannelCredentials,
   saveConfigFile,
+  saveResolvedConfigFile,
   readTrustedConfigBlock,
   saveCredentials,
   saveNamedCredentials,
@@ -7344,7 +7345,9 @@ const runAgentNewFromTemplate = async (
           throw error;
         }
       },
-      writeConfig: (merged) => saveConfigFile(configTarget, merged as StratusConfigFile),
+      // The resolved variant: `configTarget` is what the lock names, and a
+      // second resolution here could land the write on a different file.
+      writeConfig: (merged) => saveResolvedConfigFile(configTarget, merged as StratusConfigFile),
       removeSoul: (soulPath) => rm(soulPath, { force: true }),
       lockPath: `${configTarget}.lock`,
       ...(env.templateFailBeforeConfigWrite ? { beforeConfigWrite: env.templateFailBeforeConfigWrite } : {}),

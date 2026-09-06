@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { constants as fsConstants, readFileSync } from 'node:fs';
-import { appendFile, chmod, cp, mkdir, open, readdir, readFile, readlink, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, cp, lstat, mkdir, open, readdir, readFile, readlink, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -3968,15 +3968,28 @@ export const resolveConfigTarget = async (from: string): Promise<string> => {
   );
 };
 
-export const saveConfigFile = async (
-  configPath: string,
+/**
+ * Replace a config file at a path that is **already resolved**.
+ *
+ * The write half of a config transaction, split from `saveConfigFile`
+ * because resolving again here would undo the point of resolving once. A
+ * caller takes the lock on the target it resolved; if this then followed
+ * the path afresh, somebody who can write that directory could put a link
+ * there in between and have the rename land on whatever the link named —
+ * any file the operator can write — while the lock still guards a file
+ * nothing touched. `updateConfigFile` and the template transaction both
+ * documented that invariant before either of them held it.
+ *
+ * A target that has *become* a symlink is refused rather than replaced. By
+ * contract it was a real file when the caller resolved it, so a link there
+ * now means something changed it under the lock, and the answer to that is
+ * to stop rather than to guess which file was meant.
+ */
+export const saveResolvedConfigFile = async (
+  target: string,
   config: StratusConfigFile,
 ): Promise<void> => {
-  await mkdir(path.dirname(configPath), { recursive: true });
-  const target = await resolveConfigTarget(configPath);
-  if (target !== configPath) {
-    await mkdir(path.dirname(target), { recursive: true });
-  }
+  await mkdir(path.dirname(target), { recursive: true });
   // Unguessable, created exclusively, and never through a link. The
   // temporary lands beside the config — which for a shared config is a
   // directory somebody else may write — and a predictable name there can be
@@ -4000,7 +4013,15 @@ export const saveConfigFile = async (
     // The mode and ownership the file already has, so a replacement is not
     // also a permission change. Absent (a first write) it keeps whatever
     // the umask and the process's own identity give it.
-    const existing = await stat(target).catch(() => undefined);
+    // `lstat`, not `stat`: a link here is the case above, and following it
+    // would copy the victim's mode and ownership onto the config.
+    const existing = await lstat(target).catch(() => undefined);
+    if (existing?.isSymbolicLink()) {
+      throw new Error(
+        `Refusing to replace ${target}: it is a symlink now and was a real file when this write was planned. `
+        + 'Something changed it underneath. Check what put a link there before running this again.',
+      );
+    }
     if (existing) {
       await handle.chmod(existing.mode & 0o7777);
       // Best effort, and it has to be: a process cannot give a file away to
@@ -4030,6 +4051,22 @@ export const saveConfigFile = async (
     });
     throw error;
   }
+};
+
+/**
+ * Resolve a config path to the file it names, then replace that file.
+ *
+ * The entry point for a caller that has not resolved anything itself. One
+ * that has — because it also took the lock on the resolved target — calls
+ * `saveResolvedConfigFile` directly, which is the only way the lock and the
+ * write can be talking about the same file.
+ */
+export const saveConfigFile = async (
+  configPath: string,
+  config: StratusConfigFile,
+): Promise<void> => {
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await saveResolvedConfigFile(await resolveConfigTarget(configPath), config);
 };
 
 // ---------------------------------------------------------------------------
@@ -4110,7 +4147,7 @@ export const updateConfigFile = async (
       }
     }
     const next = await mutate(current);
-    await saveConfigFile(target, next);
+    await saveResolvedConfigFile(target, next);
     return next;
   });
 };

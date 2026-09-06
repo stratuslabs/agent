@@ -62,7 +62,7 @@ and another addressing its target.
 
 Because both the lock and the temporary sit beside the config rather than
 inside `~/.stratus`, they can land in a directory other people may write.
-Three rules follow, and they exist because without them a file planted there
+Four rules follow, and they exist because without them a file planted there
 turns an ordinary save into a way to destroy something else:
 
 - A lock path that is a symbolic link, or a damaged lock file belonging to
@@ -74,6 +74,11 @@ turns an ordinary save into a way to destroy something else:
 - The temporary is created exclusively, under an unguessable name, and
   without following links, and its mode and ownership are set through the
   descriptor. Nothing pre-created at that path is ever written through.
+- The path is resolved **once** per transaction, and the lock, the read, and
+  the write all name that one file. A config replaced by a symbolic link
+  after that — under the lock the write is holding — is refused rather than
+  followed, because the file the command set out to replace is no longer
+  there and the link's target is not a file it was asked to touch.
 
 **Each writer replaces only the keys it is about.** `stratus setup` rewrites
 the provider, model, base URL, key env var, system prompt, default soul, and

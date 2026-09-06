@@ -9267,6 +9267,38 @@ test('a plugin-free template is created despite a config path that will not reso
   assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), ['mira.md']);
 });
 
+test('a template refuses to write when a link replaces the config it locked', async () => {
+  const home = await templateHome();
+  const configPath = path.join(home, 'chosen.json');
+  const victim = path.join(home, 'victim.json');
+  await writeFile(configPath, '{}\n');
+  await writeFile(victim, '{"provider":"demo"}\n');
+
+  // Retargeting a link in front of the config is the case above. This is
+  // the other half: the resolved file itself is replaced by a link, so a
+  // write that resolves its own argument again would rename over whatever
+  // the link names — while the lock still sits on the entry nobody touched.
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'research', '--config', configPath, '--yes'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      templateFailBeforeConfigWrite: async () => {
+        await rm(configPath);
+        await symlink(victim, configPath);
+      },
+    },
+  });
+
+  assert.equal(code, 1);
+  assert.match(output.stderr, /symlink now and was a real file/);
+  assert.equal(await readFile(victim, 'utf8'), '{"provider":"demo"}\n', 'the victim is untouched');
+  assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), [], 'and the soul it claimed was rolled back');
+});
+
 test('a template writes the config it locked, even if a symlink is retargeted mid-flight', async () => {
   const home = await templateHome();
   const first = path.join(home, 'first.json');

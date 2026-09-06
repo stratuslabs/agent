@@ -1044,6 +1044,29 @@ test('a config that exists and will not parse is never overwritten', async () =>
   assert.equal(await readFile(configPath, 'utf8'), '{ not json\n', 'left exactly as found');
 });
 
+test('a config replaced by a symlink mid-transaction is never followed to its target', async () => {
+  const home = await newHome();
+  const configPath = path.join(home, '.stratus', 'config.json');
+  const victim = path.join(home, 'victim.json');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(configPath, '{}\n');
+  await writeFile(victim, 'not the config\n');
+
+  // The transaction resolved `configPath` and took the lock on what it
+  // resolved to. Somebody who can write that directory then puts a link
+  // there. A write that resolves again lands on the link's target — any
+  // file the operator can write — while the lock still guards a file
+  // nothing is touching.
+  await assert.rejects(updateConfigFile(configPath, { homeDir: home }, async (current) => {
+    await rm(configPath);
+    await symlink(victim, configPath);
+    return { ...current, provider: 'anthropic' };
+  }));
+
+  assert.equal(await readFile(victim, 'utf8'), 'not the config\n', 'the victim is untouched');
+  assert.equal((await lstat(configPath)).isSymbolicLink(), true, 'and the planted link was not replaced either');
+});
+
 test('concurrent config updates serialize, so neither loses the other', async () => {
   const home = await newHome();
   const configPath = path.join(home, '.stratus', 'config.json');
