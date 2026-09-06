@@ -394,7 +394,7 @@ const applyFixture = async (
       await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
     },
     removeSoul: (soulPath) => rm(soulPath, { force: true }),
-    lockPath: configLockPath({ homeDir: home }),
+    lockPath: configLockPath(configPath),
     ...overrides,
   });
 };
@@ -1194,4 +1194,42 @@ test('replacing a config keeps the ownership it had', async (t) => {
 
   assert.equal((await stat(configPath)).gid, alternateGid);
   assert.equal(JSON.parse(await readFile(configPath, 'utf8')).provider, 'demo');
+});
+
+test('every writer of one config file takes one lock, whatever home named it', async () => {
+  const shared = await newHome();
+  const configPath = path.join(shared, 'shared-config.json');
+  // Two operators with different homes, one explicit `--config` between
+  // them. A lock derived from the home would hand them a lock each, which
+  // is no lock at all for the file they are both replacing.
+  assert.equal(configLockPath(configPath), `${configPath}.lock`);
+
+  await Promise.all([
+    updateConfigFile(configPath, { homeDir: await newHome() }, (current) => ({ ...current, provider: 'anthropic' })),
+    updateConfigFile(configPath, { homeDir: await newHome() }, (current) => ({ ...current, model: 'claude-opus-5' })),
+  ]);
+
+  const written = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+  assert.equal(written.provider, 'anthropic');
+  assert.equal(written.model, 'claude-opus-5');
+});
+
+test('a symlink chain too deep to follow refuses rather than replacing a link', async () => {
+  const home = await newHome();
+  const real = path.join(home, 'config.json');
+  await writeFile(real, `${JSON.stringify({ provider: 'anthropic' })}\n`);
+
+  // Longer than the bound. Returning the last link reached would hand the
+  // rename an intermediate symlink to replace — the exact failure following
+  // the chain exists to prevent, so the bound has to refuse rather than
+  // silently do the wrong thing.
+  let previous = real;
+  for (let hop = 0; hop < 40; hop += 1) {
+    const link = path.join(home, `link-${hop}.json`);
+    await symlink(previous, link);
+    previous = link;
+  }
+
+  await assert.rejects(saveConfigFile(previous, { provider: 'demo' }), /symlinks deep, or a loop/);
+  assert.equal(JSON.parse(await readFile(real, 'utf8')).provider, 'anthropic', 'untouched');
 });

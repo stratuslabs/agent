@@ -7200,7 +7200,12 @@ const runAgentNewFromTemplate = async (
   const blockers: TemplateBlocker[] = [];
   let configPath = globalConfigPath(env);
   let config: StratusConfigFile = {};
-  if (location && !location.trusted) {
+  // Only when this bundle would actually write plugin config. A template
+  // with no plugins writes a soul and nothing else, and the trust rule is
+  // about which file may decide what code runs in the daemon — refusing
+  // `assistant` because the working directory happens to hold a project
+  // config would be applying a plugin rule to a bundle that has none.
+  if (location && !location.trusted && template.plugins.length > 0) {
     blockers.push({
       kind: 'untrusted-config',
       message: `${location.path} is a project-local config, which cannot enable plugins — a file that ships in a cloned `
@@ -7323,7 +7328,7 @@ const runAgentNewFromTemplate = async (
       },
       writeConfig: (merged) => saveConfigFile(configPath, merged as StratusConfigFile),
       removeSoul: (soulPath) => rm(soulPath, { force: true }),
-      lockPath: configLockPath(env),
+      lockPath: configLockPath(configPath),
       ...(env.templateFailBeforeConfigWrite ? { beforeConfigWrite: env.templateFailBeforeConfigWrite } : {}),
     });
   } catch (error) {

@@ -170,9 +170,11 @@ Each of these changes nothing at all — no soul file, no config entry:
 
 - A plugin the template needs that is not installed.
 - A plugin setting the template contradicts.
-- A project-local `stratus.config.json` as the active config. Plugin entries
-  are read only from a config you chose, so there is nowhere to write them;
-  pass `--config`, or move those settings to `~/.stratus/config.json`.
+- A project-local `stratus.config.json` as the active config, **for a
+  template that needs plugins**. Plugin entries are read only from a config
+  you chose, so there is nowhere to write them; pass `--config`, or move
+  those settings to `~/.stratus/config.json`. A template with no plugins —
+  `assistant` — writes only a soul and is unaffected.
 - A plugin block this host would refuse to load — a `toolRisks` value that is
   not a risk word, or a setting its manifest's schema rejects. The daemon
   refuses such a plugin whole, so the tools in the review would not exist

@@ -3937,12 +3937,17 @@ export const listAgentSummaries = async (
  * has not been created yet is ordinary — a dotfiles repository puts the
  * link there first. `readlink` per hop answers for a dangling link too.
  *
- * Bounded, so a symlink loop returns rather than spinning. A path that is
- * not a link (EINVAL) or is not there at all (ENOENT) is its own target.
+ * Bounded, and a chain that outruns the bound **throws**. Returning the
+ * last link reached would hand the caller an intermediate symlink to
+ * rename over — replacing a link and leaving the real config stale, which
+ * is the failure this function exists to prevent. A path that is not a link
+ * (EINVAL) or is not there at all (ENOENT) is its own target.
  */
+const MAX_CONFIG_LINK_HOPS = 32;
+
 const linkTarget = async (from: string): Promise<string> => {
   let current = from;
-  for (let depth = 0; depth < 8; depth += 1) {
+  for (let depth = 0; depth < MAX_CONFIG_LINK_HOPS; depth += 1) {
     let next: string;
     try {
       next = await readlink(current);
@@ -3951,7 +3956,10 @@ const linkTarget = async (from: string): Promise<string> => {
     }
     current = path.resolve(path.dirname(current), next);
   }
-  return current;
+  throw new Error(
+    `Could not follow ${from} to a real file: more than ${MAX_CONFIG_LINK_HOPS} symlinks deep, or a loop. `
+    + 'Point it at the file itself, or shorten the chain.',
+  );
 };
 
 export const saveConfigFile = async (
@@ -4008,9 +4016,20 @@ export {
 } from './lock.ts';
 import { withFileLock } from './lock.ts';
 
-/** `~/.stratus/config.lock` — taken by every writer of the config file. */
-export const configLockPath = (env: StateEnvironment): string =>
-  path.join(stratusHomePath(env), 'config.lock');
+/**
+ * The lock every writer of one config file takes: `<that file>.lock`.
+ *
+ * Keyed to the destination rather than to the home, because the home is not
+ * what two writers of the same file have in common. Two invocations with
+ * different `STRATUS_HOME` can name one explicit `--config`, and a
+ * home-derived lock would hand them a lock each — which is no lock at all
+ * for the file they are both replacing.
+ *
+ * Beside the file it guards, which asks for nothing the write does not
+ * already need: replacing a config by rename requires write on its
+ * directory, so a lock file there is never the thing that fails.
+ */
+export const configLockPath = (configPath: string): string => `${configPath}.lock`;
 
 /**
  * Read-modify-write the config, holding the lock across both halves.
@@ -4036,7 +4055,7 @@ export const updateConfigFile = async (
   configPath: string,
   env: StateEnvironment,
   mutate: (current: StratusConfigFile) => StratusConfigFile | Promise<StratusConfigFile>,
-): Promise<StratusConfigFile> => withFileLock(configLockPath(env), async () => {
+): Promise<StratusConfigFile> => withFileLock(configLockPath(configPath), async () => {
   let current: StratusConfigFile = {};
   try {
     current = await loadConfigFile(configPath);

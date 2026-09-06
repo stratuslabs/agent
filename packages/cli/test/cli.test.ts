@@ -9151,3 +9151,24 @@ test('a template can be created into a --config file that does not exist yet', a
     ['@stratusagent/tool-fs', '@stratusagent/tool-web'],
   );
 });
+
+test('a plugin-free template is created even with a project config active', async () => {
+  const home = await templateHome();
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-template-project-'));
+  await writeFile(path.join(project, 'stratus.config.json'), '{}\n');
+
+  // The trust rule is about which file may decide what code runs in the
+  // daemon. `assistant` declares no plugins, so it writes a soul and
+  // nothing else — refusing it because the working directory happens to
+  // hold a project config applies a plugin rule to a bundle with none.
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'assistant', '--yes'],
+    streams,
+    env: { homeDir: home, cwd: project, processEnv: {} },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), ['mira.md']);
+  await assert.rejects(readFile(path.join(home, '.stratus', 'config.json')), { code: 'ENOENT' });
+});

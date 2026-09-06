@@ -2170,7 +2170,7 @@ test('a config write waits for the config lock, so it cannot clobber a concurren
   // through changing and then saves the copy from before it — dropping a
   // plugin entry and leaving the committed soul without the tools that were
   // reviewed.
-  const claim = claimFileLock(configLockPath({ homeDir: home }));
+  const claim = claimFileLock(configLockPath(path.join(home, '.stratus', 'config.json')));
   let released = false;
   try {
     const put = harness.call('/api/v1/config', {

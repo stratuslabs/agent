@@ -51,9 +51,12 @@ use right now and which file or env var decided each setting.
 
 `stratus setup`, `stratus agent new` (setting a default agent), `stratus
 agent new --template` (plugin entries), and `PUT /api/v1/config` all write
-it. Each reads and writes under `~/.stratus/config.lock`, so two of them
-running at once cannot undo each other — a save built on a read from before
-another writer committed would put the earlier document back.
+it. Each reads and writes under a lock beside the file itself
+(`config.json.lock`), so two of them running at once cannot undo each other
+— a save built on a read from before another writer committed would put the
+earlier document back. The lock is keyed to the destination rather than to
+`~/.stratus`, so two operators with different homes pointing `--config` at
+one shared file still take the same lock.
 
 **Each writer replaces only the keys it is about.** `stratus setup` rewrites
 the provider, model, base URL, key env var, system prompt, default soul, and
