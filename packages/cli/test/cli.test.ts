@@ -9,6 +9,7 @@ import { Readable } from 'node:stream';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
 import { tokenFingerprint } from '@stratusagent/control-api';
 import { claimHome } from '@stratusagent/gateway';
@@ -875,19 +876,36 @@ test('the CLI never imports the gateway at module scope', async () => {
   // strings is an easy thing to write by accident — this is what caught it.
   const srcDir = path.join(import.meta.dirname, '..', 'src');
   const sources = (await readdir(srcDir, { recursive: true })).filter((entry) => entry.endsWith('.ts'));
-  const staticImports: string[] = [];
+  const gatewayStatements: { entry: string; text: string; typeOnly: boolean }[] = [];
   for (const entry of sources) {
     const source = await readFile(path.join(srcDir, entry), 'utf8');
-    // A whole statement, not a line: a wrapped import ends on a `} from` line
-    // that a per-line check would never see.
-    for (const match of source.matchAll(/^import\b[^;]*?\bfrom\s+'@stratusagent\/gateway'/gm)) {
-      staticImports.push(`${entry}: ${match[0].replaceAll(/\s+/g, ' ')}`);
+    // Parsed, not pattern-matched: a side-effect `import '…'`, a barrel
+    // `export { x } from '…'`, and a wrapped `import {\n…\n} from '…'` all
+    // load the module when this one is evaluated, and a regex over lines
+    // saw none of them — while one over statements matched a dynamic
+    // `import()` inside an exported function, which loads nothing until
+    // it runs.
+    const parsed = ts.createSourceFile(entry, source, ts.ScriptTarget.Latest);
+    for (const statement of parsed.statements) {
+      if (!ts.isImportDeclaration(statement) && !ts.isExportDeclaration(statement)) {
+        continue;
+      }
+      const specifier = statement.moduleSpecifier;
+      if (specifier === undefined || !ts.isStringLiteral(specifier) || specifier.text !== '@stratusagent/gateway') {
+        continue;
+      }
+      // The statement-level `type`, not the inline one: type stripping turns
+      // `import { type X } from` into `import {} from`, which still loads.
+      const typeOnly = ts.isImportDeclaration(statement)
+        ? statement.importClause?.phaseModifier === ts.SyntaxKind.TypeKeyword
+        : statement.isTypeOnly;
+      gatewayStatements.push({ entry, text: statement.getText(parsed).replaceAll(/\s+/g, ' '), typeOnly });
     }
   }
 
-  assert.ok(staticImports.length > 0, 'the assertion below would pass vacuously');
-  for (const statement of staticImports) {
-    assert.match(statement, /^[^:]+: import type\b/, `a value import of the gateway reaches node:sqlite: ${statement}`);
+  assert.ok(gatewayStatements.length > 0, 'the assertion below would pass vacuously');
+  for (const { entry, text, typeOnly } of gatewayStatements) {
+    assert.ok(typeOnly, `a value import of the gateway reaches node:sqlite: ${entry}: ${text}`);
   }
 });
 
