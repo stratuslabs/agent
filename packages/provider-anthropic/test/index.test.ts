@@ -1080,3 +1080,48 @@ test('a user message with images sends them as image blocks ahead of its text', 
     },
   ]);
 });
+
+test('images past the replay budget are replaced by a note, newest kept', async () => {
+  const { fetchImpl, requests } = createMockFetch([
+    apiMessage([{ type: 'text', text: 'Still looking.' }]),
+  ]);
+  // Each image is 6 decoded bytes; the budget holds two of the three.
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, imageReplayBudgetBytes: 12 });
+  const stamp = new Date().toISOString();
+  const session = createSession({
+    messages: [
+      { id: 'u1', role: 'user', content: 'first', createdAt: stamp, images: [{ mediaType: 'image/png', data: 'AAAAAAAA', name: 'one.png' }] },
+      { id: 'a1', role: 'assistant', content: 'ok', createdAt: stamp },
+      { id: 'u2', role: 'user', content: 'second', createdAt: stamp, images: [{ mediaType: 'image/png', data: 'BBBBBBBB' }] },
+      { id: 'a2', role: 'assistant', content: 'ok', createdAt: stamp },
+      { id: 'u3', role: 'user', content: 'third', createdAt: stamp, images: [{ mediaType: 'image/png', data: 'CCCCCCCC', name: 'three.png' }] },
+    ],
+  });
+
+  await provider.generate({ session });
+
+  const sent = requests[0]!.body.messages.filter((message: { role: string }) => message.role === 'user');
+  assert.deepEqual(sent, [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: '[An image attached here (one.png) is no longer sent: this conversation\'s images have passed what one request can carry, and only the most recent are kept.]' },
+        { type: 'text', text: 'first' },
+      ],
+    },
+    {
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'BBBBBBBB' } },
+        { type: 'text', text: 'second' },
+      ],
+    },
+    {
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'CCCCCCCC' } },
+        { type: 'text', text: 'third' },
+      ],
+    },
+  ]);
+});

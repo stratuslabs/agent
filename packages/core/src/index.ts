@@ -55,6 +55,56 @@ export interface ImageAttachment {
   name?: string;
 }
 
+/** Decoded size of a base64 string, without decoding it. */
+const base64DecodedBytes = (data: string): number =>
+  Math.floor((data.length * 3) / 4) - (data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0);
+
+/**
+ * Which of a transcript's images still travel on a request. Every image a
+ * session ever received is stored with its message and replayed on every
+ * later turn, so a per-message budget alone is not one: two messages that
+ * each fit would together exceed the request limit on the turn after. The
+ * budget is spent newest first — the latest message always arrives whole,
+ * because a channel already holds one message to this same budget — and
+ * once an image does not fit, nothing older does either, so what the model
+ * sees is a contiguous recent window rather than a scatter. A provider
+ * that sends image bytes asks this and sends a note in place of the rest;
+ * the transcript itself is never trimmed.
+ *
+ * Membership is by identity: the set holds the very objects on the
+ * messages, so a provider walking them asks `has(image)`.
+ */
+export const imagesWithinReplayBudget = (
+  messages: readonly Message[],
+  budgetBytes: number = IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
+): ReadonlySet<ImageAttachment> => {
+  const kept = new Set<ImageAttachment>();
+  let remaining = budgetBytes;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const images = messages[index]?.images;
+    if (images === undefined) {
+      continue;
+    }
+    for (const image of images) {
+      const bytes = base64DecodedBytes(image.data);
+      if (bytes > remaining) {
+        return kept;
+      }
+      remaining -= bytes;
+      kept.add(image);
+    }
+  }
+  return kept;
+};
+
+/**
+ * What stands in for an image `imagesWithinReplayBudget` left out — one
+ * wording, so every provider tells the model the same thing about the
+ * same gap.
+ */
+export const droppedImageNote = (image: ImageAttachment): string =>
+  `[An image attached here${image.name !== undefined ? ` (${image.name})` : ''} is no longer sent: this conversation's images have passed what one request can carry, and only the most recent are kept.]`;
+
 export interface Message {
   id: string;
   role: MessageRole;

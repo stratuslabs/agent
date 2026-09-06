@@ -76,7 +76,9 @@ Which runtimes can actually look: agents on the **Anthropic API** or an
 and **Codex** harnesses take a text prompt, so an agent on either is told an
 image was attached, and what it was called, and that it cannot see it. The
 image is stored with the message in the session, so a later turn in the same
-thread still has it.
+thread still has it — up to 20 MB of images per request, newest first;
+past that, the oldest ones reach the model as a note saying they are no
+longer sent.
 
 ## Worth knowing
 

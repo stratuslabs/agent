@@ -839,3 +839,45 @@ test('createOpenAICompatibleProvider sends a user message\'s images as data-URL 
   await provider.generate(createRequest());
   assert.equal(bodies[1]!.messages.at(-1).content, 'Say hello');
 });
+
+test('createOpenAICompatibleProvider replaces images past the replay budget with a note', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  // Each image is 6 decoded bytes; the budget holds one.
+  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: fetchImpl, imageReplayBudgetBytes: 6 });
+  const request = requestWithImage();
+  request.session.messages[0]!.images = [{ mediaType: 'image/png', data: 'AAAAAAAA', name: 'old.png' }];
+  request.session.messages.push({
+    id: 'session-1:user:2',
+    role: 'user',
+    content: 'and now',
+    createdAt: new Date().toISOString(),
+    images: [{ mediaType: 'image/png', data: 'BBBBBBBB' }],
+  });
+
+  await provider.generate(request);
+
+  const sent = bodies[0]!.messages.filter((message: { role: string }) => message.role === 'user');
+  assert.deepEqual(sent, [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'what is this?' },
+        { type: 'text', text: '[An image attached here (old.png) is no longer sent: this conversation\'s images have passed what one request can carry, and only the most recent are kept.]' },
+      ],
+    },
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'and now' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,BBBBBBBB' } },
+      ],
+    },
+  ]);
+});

@@ -1,4 +1,6 @@
 import {
+  droppedImageNote,
+  imagesWithinReplayBudget,
   renderSystemPromptSections,
   uncachedInputTokens,
   type ExecutionContext,
@@ -80,6 +82,13 @@ export interface OpenAICompatibleProviderConfig {
    * (and its caller's shutdown) forever. 0 disables. Default 5 minutes.
    */
   requestTimeoutMs?: number;
+  /**
+   * How many decoded image bytes one request may replay from the
+   * transcript, newest first; older images past it are sent as a note.
+   * Defaults to `IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES` from core. Lower it for
+   * an endpoint with a smaller request limit.
+   */
+  imageReplayBudgetBytes?: number;
 }
 
 interface OpenAICompatibleToolCall {
@@ -352,6 +361,7 @@ export const createOpenAICompatibleProvider = ({
   headers = {},
   fetch: fetchImpl = globalThis.fetch,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  imageReplayBudgetBytes,
 }: OpenAICompatibleProviderConfig): ModelProvider => {
   if (typeof fetchImpl !== 'function') {
     throw new Error('Global fetch is unavailable for the OpenAI-compatible provider.');
@@ -385,7 +395,7 @@ export const createOpenAICompatibleProvider = ({
           },
           body: JSON.stringify({
             model,
-            messages: createOpenAICompatibleMessages(request, systemPrompt, toolNames),
+            messages: createOpenAICompatibleMessages(request, systemPrompt, toolNames, imageReplayBudgetBytes),
             ...(tools.length > 0 ? { tools } : {}),
           }),
           ...(signal ? { signal } : {}),
@@ -580,8 +590,10 @@ const createOpenAICompatibleMessages = (
   request: ProviderRequest,
   systemPrompt: string | undefined,
   toolNames: OpenAICompatibleToolNameMapping,
+  imageReplayBudgetBytes: number | undefined,
 ): OpenAICompatibleMessage[] => {
   const messages: OpenAICompatibleMessage[] = [];
+  const replayed = imagesWithinReplayBudget(request.session.messages, imageReplayBudgetBytes);
 
   // One shared reading of what an agent is told about itself — persona,
   // memory, skills — rendered by the kernel (see core's system prompt
@@ -634,7 +646,7 @@ const createOpenAICompatibleMessages = (
 
     messages.push({
       role: message.role,
-      content: message.role === 'user' ? userContentParts(message) : message.content,
+      content: message.role === 'user' ? userContentParts(message, replayed) : message.content,
       ...(message.name ? { name: message.name } : {}),
     });
   }
@@ -642,16 +654,18 @@ const createOpenAICompatibleMessages = (
   return messages;
 };
 
-const userContentParts = (message: { content: string; images?: ImageAttachment[] }): OpenAICompatibleUserContent => {
+const userContentParts = (
+  message: { content: string; images?: ImageAttachment[] },
+  replayed: ReadonlySet<ImageAttachment>,
+): OpenAICompatibleUserContent => {
   if (message.images === undefined || message.images.length === 0) {
     return message.content;
   }
   return [
     ...(message.content.length > 0 ? [{ type: 'text' as const, text: message.content }] : []),
-    ...message.images.map((image) => ({
-      type: 'image_url' as const,
-      image_url: { url: `data:${image.mediaType};base64,${image.data}` },
-    })),
+    ...message.images.map((image) => (replayed.has(image)
+      ? { type: 'image_url' as const, image_url: { url: `data:${image.mediaType};base64,${image.data}` } }
+      : { type: 'text' as const, text: droppedImageNote(image) })),
   ];
 };
 

@@ -8,6 +8,8 @@ import type {
   Tool as AnthropicTool,
 } from '@anthropic-ai/sdk/resources/messages/messages';
 import {
+  droppedImageNote,
+  imagesWithinReplayBudget,
   renderSystemPromptParts,
   type ImageAttachment,
   type JsonObject,
@@ -45,6 +47,13 @@ export interface AnthropicProviderConfig {
    * thinking off (e.g. for older models or latency-sensitive runs).
    */
   thinking?: 'default' | 'disabled';
+  /**
+   * How many decoded image bytes one request may replay from the
+   * transcript, newest first; older images past it are sent as a note.
+   * Defaults to `IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES` from core, sized to the
+   * Messages API's request limit. Lower it for a proxy with a smaller one.
+   */
+  imageReplayBudgetBytes?: number;
   /**
    * Mark the stable head of each request cacheable — the tool definitions and
    * the persona/skills system block, which are byte-identical across every
@@ -242,16 +251,20 @@ const rawTurnsFrom = (session: ProviderRequest['session']): RawTurns => {
 };
 
 /**
- * A user turn's blocks: its images first, then the text. The API refuses an
- * empty text block, and a message that is only an image has no text — so
- * the text block is added only when there is text, and a message with
- * neither still sends one so the turn is never an empty content array.
+ * A user turn's blocks: its images first, then the text. An image outside
+ * the replay budget becomes a note saying so. The API refuses an empty
+ * text block, and a message that is only an image has no text — so the
+ * text block is added only when there is text, and a message with neither
+ * still sends one so the turn is never an empty content array.
  */
-const userBlocks = (content: string, images: readonly ImageAttachment[] | undefined): ContentBlockParam[] => {
-  const blocks: ContentBlockParam[] = (images ?? []).map((image) => ({
-    type: 'image',
-    source: { type: 'base64', media_type: image.mediaType, data: image.data },
-  }));
+const userBlocks = (
+  content: string,
+  images: readonly ImageAttachment[] | undefined,
+  replayed: ReadonlySet<ImageAttachment>,
+): ContentBlockParam[] => {
+  const blocks: ContentBlockParam[] = (images ?? []).map((image) => (replayed.has(image)
+    ? { type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } }
+    : { type: 'text', text: droppedImageNote(image) }));
   if (content.length > 0 || blocks.length === 0) {
     blocks.push({ type: 'text', text: content });
   }
@@ -282,7 +295,9 @@ const createAnthropicMessages = (
   request: ProviderRequest,
   mapping: ToolNameMapping,
   rawTurns: RawTurns,
+  imageReplayBudgetBytes: number | undefined,
 ): MessageParam[] => {
+  const replayed = imagesWithinReplayBudget(request.session.messages, imageReplayBudgetBytes);
   // Build (role, blocks) groups first, merging consecutive same-role turns:
   // the runner records text and each tool call as separate messages, but on
   // the wire they belong to one assistant turn followed by one user turn of
@@ -371,7 +386,7 @@ const createAnthropicMessages = (
       continue;
     }
 
-    push('user', userBlocks(message.content, message.images));
+    push('user', userBlocks(message.content, message.images, replayed));
   }
 
   return groups.map((group) => ({ role: group.role, content: group.blocks }));
@@ -477,6 +492,7 @@ export const createAnthropicProvider = ({
   thinking = 'default',
   promptCache = true,
   promptCacheTtl = '5m',
+  imageReplayBudgetBytes,
   fetch: fetchImpl,
 }: AnthropicProviderConfig): ModelProvider => {
   if (!apiKey && !authToken) {
@@ -505,7 +521,7 @@ export const createAnthropicProvider = ({
       const descriptors = sortedToolDescriptors(request.tools);
       const mapping = createToolNameMapping(descriptors);
       const tools = createAnthropicTools(descriptors, mapping);
-      const messages = createAnthropicMessages(request, mapping, rawTurns);
+      const messages = createAnthropicMessages(request, mapping, rawTurns, imageReplayBudgetBytes);
       // A system message has to follow a user turn. The kernel loop only
       // calls a provider with a user message or tool results last, so this
       // holds — but it is the API's rule, not ours, and a caller building
