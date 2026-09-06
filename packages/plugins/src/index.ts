@@ -35,6 +35,7 @@ export {
 } from './registry.ts';
 
 export {
+  effectivePluginConfig,
   isFirstPartyPackage,
   loadOptionalModule,
   loadPlugins,

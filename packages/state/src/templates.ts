@@ -1,3 +1,5 @@
+import { mkdir } from 'node:fs/promises';
+
 import {
   atLeastAsRisky,
   matchesSkillAllowlist,
@@ -9,10 +11,12 @@ import {
   type ToolRisk,
 } from '@stratusagent/core';
 import {
+  effectivePluginConfig,
   isFirstPartyPackage,
   parseToolRiskOverrides,
   readPluginManifest,
   riskFloorFor,
+  validatePluginConfig,
   type OptionalModuleHost,
   type PluginManifest,
 } from '@stratusagent/plugins';
@@ -238,7 +242,14 @@ export interface TemplateSkillNeed {
  * where committing would make the reviewed summary a lie.
  */
 export interface TemplateBlocker {
-  kind: 'missing-plugin' | 'conflict' | 'unreadable-plugin' | 'untrusted-config' | 'unreadable-config';
+  kind:
+    | 'missing-plugin'
+    | 'conflict'
+    | 'unreadable-plugin'
+    | 'untrusted-config'
+    | 'unreadable-config'
+    /** Two enabled plugins contribute the same tool name; the daemon refuses one. */
+    | 'tool-collision';
   message: string;
 }
 
@@ -477,6 +488,13 @@ export interface PlanAgentTemplateOptions {
   workspacePath: string;
   /** Resolves a package specifier the way the host that will load it does. */
   host: OptionalModuleHost;
+  /**
+   * `~/.stratus/workspaces` — the host default folded into a plugin's block
+   * before it is validated, exactly as the loader folds it. Without it a
+   * manifest requiring `workspaceRoot` would be reported as invalid here and
+   * load perfectly well in the daemon.
+   */
+  workspaceRoot?: string;
   /** Named credentials as stored: which the fleet has, which this agent has. */
   credentials: { shared: Record<string, string>; agents: Record<string, Record<string, string>> };
   /** Skill ids installed on this host — operator directory plus plugin skills. */
@@ -523,9 +541,41 @@ export const planAgentTemplate = async (
   const outcomes: TemplatePluginOutcome[] = [];
   const available: TemplateResolvedTool[] = Object.entries(KERNEL_TOOL_RISKS)
     .map(([name, risk]) => ({ name, risk }));
+  // Who owns each name so far, exactly as `loadPlugins` tracks it, seeded
+  // with the kernel's own — its `commit` refuses a plugin whose name the
+  // kernel already registered too.
+  const owners = new Map<string, string>(
+    Object.keys(KERNEL_TOOL_RISKS).map((name) => [name, 'the kernel']),
+  );
 
-  for (const requirement of template.plugins) {
-    const { package: packageName, reason } = requirement;
+  /**
+   * Every plugin the daemon will load after this write, in the order it
+   * will load them: what the config already lists, then what the template
+   * adds. `loadPlugins` walks `Object.entries` of the merged block, and a
+   * later plugin whose name an earlier one owns is refused whole — so a
+   * plan that only looked at the template's own packages would attribute a
+   * tool to the package it came from in the template rather than to the one
+   * that will actually win, and would miss that the required plugin does
+   * not load at all.
+   */
+  const required = new Map(template.plugins.map((requirement) => [requirement.package, requirement]));
+  const loadOrder: string[] = [
+    // A package the config disables loads nothing, so it owns no names and
+    // is none of this bundle's business — unless the template requires it,
+    // in which case `enabled: false` is a value the template contradicts
+    // and has to be reported as the conflict it is.
+    ...Object.keys(existingPlugins)
+      .filter((name) => existingPlugins[name]?.enabled !== false || required.has(name)),
+    ...template.plugins
+      .map((requirement) => requirement.package)
+      .filter((name) => existingPlugins[name] === undefined),
+  ];
+
+  for (const packageName of loadOrder) {
+    const requirement = required.get(packageName);
+    const reason = requirement?.reason ?? 'already enabled in your config';
+    const outcome = decided.get(packageName);
+
     // Resolution and loading are separate questions, and only the first one
     // means "not installed" — the rule `loadOptionalModule` states, applied
     // here because a plan must tell an operator to run npm install rather
@@ -533,6 +583,12 @@ export const planAgentTemplate = async (
     try {
       options.host.resolve(packageName);
     } catch {
+      if (requirement === undefined) {
+        // Already in the config and not installed. The daemon reports that
+        // itself and it is not this bundle's business — it contributes no
+        // names, so it cannot collide with one either.
+        continue;
+      }
       const installCommand = `npm install -g ${packageName}`;
       outcomes.push({ status: 'missing', package: packageName, reason, installCommand });
       blockers.push({
@@ -547,6 +603,9 @@ export const planAgentTemplate = async (
     try {
       installed = await readPluginManifest(packageName, options.host);
     } catch (error) {
+      if (requirement === undefined) {
+        continue;
+      }
       const message = error instanceof Error ? error.message : String(error);
       outcomes.push({ status: 'unreadable', package: packageName, reason, error: message });
       blockers.push({
@@ -556,21 +615,42 @@ export const planAgentTemplate = async (
       continue;
     }
 
-    const outcome = decided.get(packageName);
-    if (outcome === undefined) {
+    if (outcome?.status === 'conflict') {
+      blockers.push(conflictBlocker(outcome, template.id, options.configPath));
+      // Reported, and then left alone. Nothing is being written, and a
+      // block the operator disabled contributes no names to collide with.
+      outcomes.push(installed.version !== undefined
+        ? { ...outcome, version: installed.version }
+        : outcome);
       continue;
     }
-    if (outcome.status === 'conflict') {
-      blockers.push(conflictBlocker(outcome, template.id, options.configPath));
+    // The block this plugin will be loaded with after the write: what the
+    // config already says, plus whatever this bundle would add to it.
+    const merged: JsonObject = outcome?.status === 'add'
+      ? outcome.settings
+      : outcome?.status === 'amend'
+        ? { ...(existingPlugins[packageName] ?? {}), ...outcome.adds }
+        : existingPlugins[packageName] ?? {};
+    if (merged.enabled === false) {
+      continue;
     }
-    // The block the tools will actually be registered under: what the
-    // config already says where it says anything, since that is the
-    // configuration the daemon will load.
-    const effective = existingPlugins[packageName]
-      ?? (outcome.status === 'add' ? outcome.settings : {});
+
+    // Everything the daemon checks before it registers anything: the
+    // manifest's own schema over the block with the host's defaults folded
+    // in, and the operator's risk words. `loadPlugins` refuses the plugin
+    // whole over either, so a plan that skipped them would print a tool
+    // list that stops existing at the next restart.
+    let tools: TemplateResolvedTool[];
     try {
-      available.push(...manifestTools(installed.manifest, effective));
+      validatePluginConfig(installed.manifest, effectivePluginConfig(merged, installed.manifest, options.workspaceRoot));
+      tools = manifestTools(installed.manifest, merged);
     } catch (error) {
+      if (requirement === undefined) {
+        // Somebody else's broken block. It will not load, so it cannot own
+        // a name this bundle's plugins need — skipping it is what makes the
+        // collision check below describe the daemon rather than the file.
+        continue;
+      }
       const message = error instanceof Error ? error.message : String(error);
       outcomes.push({ status: 'unreadable', package: packageName, reason, error: message });
       blockers.push({
@@ -580,7 +660,39 @@ export const planAgentTemplate = async (
       });
       continue;
     }
-    available.push(...manifestNamespaces(installed.manifest));
+
+    const contributed = [...tools, ...manifestNamespaces(installed.manifest)];
+    const collisions = contributed.filter((tool) => owners.has(tool.name));
+    if (collisions.length > 0) {
+      const message = collisions
+        .map((tool) => `  ${tool.name} is already contributed by ${owners.get(tool.name)}`)
+        .join('\n');
+      blockers.push({
+        kind: 'tool-collision',
+        message: `${packageName} cannot load beside what ${options.configPath} already enables:\n${message}\n`
+          + 'A tool name is unique per install, so the daemon refuses the later plugin whole. Disable one of them, then run this again.',
+      });
+      if (requirement !== undefined) {
+        outcomes.push({
+          status: 'unreadable',
+          package: packageName,
+          reason,
+          error: `tool name collision: ${collisions.map((tool) => tool.name).join(', ')}`,
+        });
+      }
+      continue;
+    }
+    for (const tool of contributed) {
+      owners.set(tool.name, packageName);
+    }
+
+    // A plugin the config already enables contributes its names to the
+    // collision map above, and nothing else: the operator is not being
+    // asked to approve it, and the soul does not allowlist its tools.
+    if (requirement === undefined || outcome === undefined) {
+      continue;
+    }
+    available.push(...contributed);
     outcomes.push(installed.version !== undefined
       ? { ...outcome, version: installed.version }
       : outcome);
@@ -647,7 +759,11 @@ export interface ApplyAgentTemplateOptions {
   claimSoul: (render: (agent: AgentDefinition) => string) => Promise<{ agent: AgentDefinition; soulPath: string }>;
   /** The soul file's contents for whichever identity the claim settled on. */
   renderSoul: (agent: AgentDefinition) => string;
-  /** This agent's workspace directory, for re-rendering per-agent settings. */
+  /**
+   * This agent's workspace directory: re-rendered into the per-agent
+   * settings, and created inside the guarded region so a root the config
+   * names is a directory that exists.
+   */
   workspacePathFor: (agentId: string) => string;
   /** Re-read the config. Called under the lock, and its result is the merge base. */
   readConfig: () => Promise<Record<string, JsonValue>>;
@@ -715,8 +831,15 @@ export const applyAgentTemplate = async (
     // same per-agent block key.
     const claimed = await options.claimSoul(options.renderSoul);
     const configured: string[] = [];
+    const workspacePath = options.workspacePathFor(claimed.agent.id);
     try {
       await options.beforeConfigWrite?.();
+      // Inside the guard, before the config names it: a per-agent `roots`
+      // pointing at a directory that could not be created is a soul whose
+      // first `fs.list` fails, and a home where `~/.stratus/workspaces` is
+      // unwritable must leave no agent behind rather than one that half
+      // works.
+      await mkdir(workspacePath, { recursive: true });
       const config = await options.readConfig();
       const rawPlugins = config.plugins;
       const plugins: Record<string, JsonObject> = isJsonObject(rawPlugins as JsonValue)
@@ -724,11 +847,7 @@ export const applyAgentTemplate = async (
         : {};
       const decided = decidePluginConfig(
         plan.template,
-        {
-          agentId: claimed.agent.id,
-          agentName: claimed.agent.name,
-          workspacePath: options.workspacePathFor(claimed.agent.id),
-        },
+        { agentId: claimed.agent.id, agentName: claimed.agent.name, workspacePath },
         plugins,
       );
       for (const outcome of decided.values()) {

@@ -3894,6 +3894,20 @@ export const listAgentSummaries = async (
 /**
  * Persist settings, creating the directory if it is not there yet.
  *
+ * Written to a temporary beside the destination and renamed over it, never
+ * straight to the file: a plain write truncates first, so a failure partway
+ * through — a full disk, a process killed mid-write — leaves the operator
+ * with a config that is empty or half a document. Every caller here is a
+ * read-modify-write of settings somebody else's agents depend on, and one
+ * of them (`applyAgentTemplate`) advertises an all-or-nothing commit that a
+ * truncating write cannot deliver. The rename is atomic within a
+ * filesystem, and the temporary is beside the destination so it is one.
+ *
+ * The rename replaces the file, so the saved config carries the temporary's
+ * mode rather than whatever the old file had — the same mode a first write
+ * would have created it with, which is the one this function has always
+ * chosen.
+ *
  * Deliberately NOT 0600: `config.json` holds no secrets (those live in
  * `credentials.json`, which has its own posture), and tightening it here
  * would be a security theatre that also breaks a shared-machine setup where
@@ -3904,7 +3918,16 @@ export const saveConfigFile = async (
   config: StratusConfigFile,
 ): Promise<void> => {
   await mkdir(path.dirname(configPath), { recursive: true });
-  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  const staged = `${configPath}.${process.pid}.tmp`;
+  try {
+    await writeFile(staged, `${JSON.stringify(config, null, 2)}\n`);
+    await rename(staged, configPath);
+  } catch (error) {
+    await rm(staged, { force: true }).catch(() => {
+      // The write's failure is the one to report.
+    });
+    throw error;
+  }
 };
 
 // ---------------------------------------------------------------------------

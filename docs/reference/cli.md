@@ -88,7 +88,7 @@ stratus dashboard                      # local browser dashboard
 | `--format` | `text` or `json`; `agent new` also accepts `soul` — a ready-to-edit soul file |
 | `--name` | `agent new`: the agent's name (omit to have one generated) |
 | `--instructions` | `agent new`: the agent's persona/instructions. Refused with `--template`, which carries its own |
-| `--template <id>` | `agent new`: create from a first-party bundle. Prints what it would grant on **this** machine and asks before writing anything; `stratus agent templates` lists the ids |
+| `--template <id>` | `agent new`: create from a first-party bundle. Prints what it would grant on **this** machine — resolved against every plugin your config enables, not just the ones the template names — and asks before writing anything; `stratus agent templates` lists the ids |
 | `--yes`, `-y` | `agent new --template`: skip the confirmation. For scripting — the reviewed path is the documented one, and stdout is byte-identical either way |
 | `--idle-timeout` | `stratus serve`: seconds of provider silence before the watchdog aborts a turn (default 120) |
 | `--no-events` | Hide the event log |

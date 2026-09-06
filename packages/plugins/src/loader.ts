@@ -261,7 +261,18 @@ const declares = (manifest: PluginManifest, key: string): boolean => Boolean(
   && key in (manifest.config.properties as JsonObject),
 );
 
-const configFor = (
+/**
+ * The configuration a plugin will actually be handed: the operator's block
+ * with the host's keys stripped and the host's defaults folded in.
+ *
+ * Exported because validating a block means validating *this*, not the raw
+ * entry — a manifest that requires `workspaceRoot` would be refused for
+ * missing the very setting the host supplies. The loader validates it
+ * before importing a plugin, and the template planner validates it before
+ * telling an operator what a bundle would grant; a second fold would be a
+ * second answer to what the daemon is about to load.
+ */
+export const effectivePluginConfig = (
   block: JsonObject,
   manifest: PluginManifest,
   workspaceRoot: string | undefined,
@@ -387,7 +398,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
       // is the configuration the plugin will actually be handed: a manifest
       // that declares `workspaceRoot` required would otherwise be refused
       // for missing the very setting the host supplies.
-      const config = configFor(block, manifest, options.workspaceRoot);
+      const config = effectivePluginConfig(block, manifest, options.workspaceRoot);
       validatePluginConfig(manifest, config);
       const riskOverrides = parseToolRiskOverrides(manifest, block);
 

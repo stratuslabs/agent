@@ -9058,3 +9058,34 @@ test('stratus agent templates lists what each one needs', async () => {
   const parsed = JSON.parse(json.output.stdout) as { id: string; tools: string[] }[];
   assert.ok(parsed.some((entry) => entry.id === 'assistant'));
 });
+
+test('a home stamped by a newer build refuses template creation, and still prints an identity', async () => {
+  const home = await templateHome();
+  // Written by a build that understands more than this one. Anything that
+  // writes under ~/.stratus has to refuse — creating an agent from a
+  // template writes a soul *and* merges plugin entries into the config.
+  await writeFile(
+    path.join(home, '.stratus', 'state.json'),
+    `${JSON.stringify({ schemaVersion: 999 })}\n`,
+  );
+
+  const refused = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'assistant', '--yes'],
+    streams: refused.streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+  assert.equal(code, 1);
+  assert.match(refused.output.stderr, /Refusing `stratus agent-new`/);
+  await assert.rejects(readdir(path.join(home, '.stratus', 'agents')), { code: 'ENOENT' });
+
+  // The printing formats write nothing, so they stay available — they are
+  // part of how somebody diagnoses their way out of this state.
+  const printed = createStreams();
+  assert.equal(await runCli({
+    argv: ['agent', 'new', '--name', 'Ava', '--format', 'soul'],
+    streams: printed.streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  }), 0);
+  assert.match(printed.output.stdout, /^---\nname: Ava/);
+});

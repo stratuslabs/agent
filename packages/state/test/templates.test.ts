@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -40,6 +40,7 @@ import {
   planAgentTemplate,
   createFileMemoryStore,
   planRiskCeiling,
+  saveConfigFile,
   type AgentTemplate,
   type TemplatePlan,
 } from '../src/index.ts';
@@ -724,4 +725,176 @@ test('a config block this host would refuse to load blocks the plan', async () =
   assert.equal(plan.blockers[0]?.kind, 'unreadable-plugin');
   assert.match(plan.blockers[0]?.message ?? '', /would refuse to load it as configured/);
   await assert.rejects(applyFixture(plan, fixture.home), TemplateApplyError);
+});
+
+// ---- what the daemon would do with the whole config, not just this bundle
+
+test('a tool name another enabled plugin already owns blocks the plan', async () => {
+  const fixture = await newFixture();
+  const rival: JsonObject = {
+    name: 'rival-fs',
+    version: '1.0.0',
+    stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'fs.read', risk: 'gated' }] } },
+  };
+  const packages = { 'rival-fs': rival, '@stratusagent/tool-fs': firstPartyFs };
+  await writeFixturePackages(fixture.packagesRoot, packages);
+
+  const plan = await planFor(
+    templateWith({
+      tools: ['fs.read'],
+      plugins: [{ package: '@stratusagent/tool-fs', reason: 'files' }],
+    }),
+    fixture,
+    packages,
+    // Listed first, so `loadPlugins` gives it the name and refuses tool-fs
+    // whole. A plan that read only the template's own packages would show
+    // `fs.read (safe) @stratusagent/tool-fs` — a different implementation
+    // than the one the soul would actually reach, and one that never loads.
+    { plugins: { 'rival-fs': { enabled: true } } },
+  );
+
+  assert.equal(plan.blockers[0]?.kind, 'tool-collision');
+  assert.match(plan.blockers[0]?.message ?? '', /fs\.read is already contributed by rival-fs/);
+  await assert.rejects(applyFixture(plan, fixture.home), TemplateApplyError);
+});
+
+test('a plugin the config disables owns no names, so it cannot collide', async () => {
+  const fixture = await newFixture();
+  const rival: JsonObject = {
+    name: 'rival-fs',
+    version: '1.0.0',
+    stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'fs.read', risk: 'gated' }] } },
+  };
+  const packages = { 'rival-fs': rival, '@stratusagent/tool-fs': firstPartyFs };
+  await writeFixturePackages(fixture.packagesRoot, packages);
+
+  const plan = await planFor(
+    templateWith({
+      tools: ['fs.read'],
+      plugins: [{ package: '@stratusagent/tool-fs', reason: 'files' }],
+    }),
+    fixture,
+    packages,
+    { plugins: { 'rival-fs': { enabled: false } } },
+  );
+
+  assert.deepEqual(plan.blockers, []);
+  assert.equal(plan.tools[0]?.resolves[0]?.package, '@stratusagent/tool-fs');
+});
+
+test('a plugin block that violates its own manifest schema blocks the plan', async () => {
+  const fixture = await newFixture();
+  const packages = { '@stratusagent/tool-fs': firstPartyFs };
+  await writeFixturePackages(fixture.packagesRoot, packages);
+
+  const plan = await planFor(
+    templateWith({
+      tools: ['fs.read'],
+      plugins: [{ package: '@stratusagent/tool-fs', reason: 'files' }],
+    }),
+    fixture,
+    packages,
+    // `loadConfigFile` accepts the host-level shape; `validatePluginConfig`
+    // is what refuses it, and it runs in the daemon rather than here — so
+    // without this check the agent is created and the plugin is refused at
+    // the next restart.
+    { plugins: { '@stratusagent/tool-fs': { enabled: true, roots: 'not-an-array' } } },
+  );
+
+  assert.equal(plan.plugins[0]?.status, 'unreadable');
+  assert.equal(plan.blockers[0]?.kind, 'unreadable-plugin');
+  assert.match(plan.blockers[0]?.message ?? '', /would refuse to load it as configured/);
+});
+
+test('a manifest requiring a host-supplied setting is not reported as invalid', async () => {
+  const fixture = await newFixture();
+  const needsWorkspace: JsonObject = {
+    name: 'needs-workspace',
+    version: '1.0.0',
+    stratus: {
+      pluginVersion: 1,
+      contributes: { tools: [{ name: 'ws.read', risk: 'gated' }] },
+      config: {
+        type: 'object',
+        properties: { workspaceRoot: { type: 'string' } },
+        required: ['workspaceRoot'],
+      },
+    },
+  };
+  const packages = { 'needs-workspace': needsWorkspace };
+  await writeFixturePackages(fixture.packagesRoot, packages);
+
+  const plan = await planAgentTemplate({
+    template: templateWith({
+      tools: ['ws.read'],
+      plugins: [{ package: 'needs-workspace', reason: 'a workspace' }],
+    }),
+    agent: fixture.agent,
+    soulPath: path.join(fixture.home, 'soul.md'),
+    configPath: path.join(fixture.home, 'config.json'),
+    config: {},
+    workspacePath: path.join(fixture.home, 'ws', fixture.agent.id),
+    // The host's default, folded in before validation exactly as the loader
+    // folds it. Without it this manifest reads as invalid here and loads
+    // perfectly well in the daemon.
+    workspaceRoot: path.join(fixture.home, 'ws'),
+    host: fakeHost(packages, fixture.packagesRoot),
+    credentials: { shared: {}, agents: {} },
+    installedSkills: [],
+  });
+
+  assert.deepEqual(plan.blockers, []);
+  assert.equal(plan.tools[0]?.resolves[0]?.name, 'ws.read');
+});
+
+test('a workspace that cannot be created leaves no agent and no config entry', async () => {
+  const fixture = await newFixture();
+  const packages = { '@stratusagent/tool-fs': firstPartyFs };
+  await writeFixturePackages(fixture.packagesRoot, packages);
+  const plan = await planFor(
+    templateWith({
+      tools: ['fs.read'],
+      plugins: [{ package: '@stratusagent/tool-fs', reason: 'files' }],
+    }),
+    fixture,
+    packages,
+  );
+
+  // `~/.stratus/workspaces` as a file: `mkdir -p` under it fails. A soul
+  // whose configured root could never exist is a half-configured agent, so
+  // it has to fail the way any other commit failure does.
+  const workspaces = path.join(fixture.home, '.stratus', 'workspaces');
+  await mkdir(path.dirname(workspaces), { recursive: true });
+  await writeFile(workspaces, 'not a directory\n');
+
+  await assert.rejects(applyFixture(plan, fixture.home));
+  assert.deepEqual(await readdir(path.join(fixture.home, '.stratus', 'agents')), []);
+  await assert.rejects(stat(path.join(fixture.home, '.stratus', 'config.json')), { code: 'ENOENT' });
+});
+
+test('a config write replaces the file rather than truncating it in place', async () => {
+  const home = await newHome();
+  const configPath = path.join(home, '.stratus', 'config.json');
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(configPath, `${JSON.stringify({ provider: 'anthropic' }, null, 2)}\n`);
+  const before = await stat(configPath);
+
+  await saveConfigFile(configPath, { provider: 'anthropic', model: 'claude-opus-5' });
+
+  // A different inode is the whole property: a write straight to the
+  // destination opens it with O_TRUNC, so a failure partway through — a
+  // full disk, a process killed mid-write — leaves the operator with half a
+  // document, and a concurrent reader can see one. Written beside it and
+  // renamed over, the old file is whole until the instant it is gone.
+  const after = await stat(configPath);
+  assert.notEqual(after.ino, before.ino);
+  assert.equal(
+    JSON.parse(await readFile(configPath, 'utf8')).model,
+    'claude-opus-5',
+  );
+  assert.deepEqual(
+    (await readdir(path.dirname(configPath))).filter((name) => name.endsWith('.tmp')),
+    [],
+    'no temporary left behind',
+  );
 });

@@ -7202,6 +7202,7 @@ const runAgentNewFromTemplate = async (
     configPath,
     config: config as { plugins?: PluginsConfig },
     workspacePath: agentWorkspacePath(env, agent.id),
+    workspaceRoot: workspacesDirPath(env),
     host,
     credentials: await loadNamedCredentials(env),
     installedSkills: await installedSkillIds(env, config.plugins ?? {}, host),
@@ -7269,10 +7270,6 @@ const runAgentNewFromTemplate = async (
       : `Nothing was created: ${error instanceof Error ? error.message : String(error)}`);
     return 1;
   }
-
-  // The agent's own directory, so the roots the per-agent block just named
-  // are a place that exists rather than an error on the first `fs.list`.
-  await mkdir(agentWorkspacePath(env, applied.agent.id), { recursive: true });
 
   writeLine(streams.stdout, `Say hello to ${applied.agent.name}.`);
   if (applied.reassignedFrom) {
@@ -8756,6 +8753,12 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
         || (command.command === 'credential' && command.action !== 'list')
         || (command.command === 'schedules' && command.action === 'cancel')
         || (command.command === 'memory' && command.action === 'reassert')
+        // `agent new` writes: the guided path claims a soul and may set the
+        // default agent, and `--template` also merges plugin entries into
+        // the config. Only the printing formats (`json`, `soul`) write
+        // nothing, and they stay available on a home this build must not
+        // touch.
+        || (command.command === 'agent-new' && (command.template !== undefined || command.format === 'text'))
         || command.command === 'session'
         || (command.command === 'service' && (command.action === 'install' || command.action === 'start'));
       if (stamp.schemaVersion > STATE_SCHEMA_VERSION) {
@@ -8765,8 +8768,8 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
         // hazard the stamp exists to close. Read-only commands warn and
         // continue, because reading logs or the roster is how someone
         // diagnoses their way OUT of this state; so do `service stop`,
-        // `status`, and `uninstall`, for the same reason. (`agent new`
-        // only prints an identity — it writes nothing.)
+        // `status`, and `uninstall`, for the same reason. (`agent new
+        // --format json|soul` only prints an identity, and still runs.)
         if (writesState) {
           writeLine(streams.stderr, newerStateMessage(stamp.schemaVersion));
           writeLine(streams.stderr, `Refusing \`stratus ${command.command}\` — it writes state the newer format owns. Read-only commands (logs, agents, doctor, service status/stop) still work.`);

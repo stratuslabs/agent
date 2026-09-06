@@ -174,9 +174,18 @@ Each of these changes nothing at all — no soul file, no config entry:
   are read only from a config you chose, so there is nowhere to write them;
   pass `--config`, or move those settings to `~/.stratus/config.json`.
 - A plugin block this host would refuse to load — a `toolRisks` value that is
-  not a risk word, say. The daemon refuses such a plugin whole, so the tools
-  in the review would not exist after a restart; the command says so instead
-  of creating an agent that stops working at the next one.
+  not a risk word, or a setting its manifest's schema rejects. The daemon
+  refuses such a plugin whole, so the tools in the review would not exist
+  after a restart; the command says so instead of creating an agent that
+  stops working at the next one.
+- A tool name a plugin you already enable contributes. A tool name is unique
+  per install, so the daemon refuses whichever plugin loads second — the
+  soul would end up calling a different implementation than the one you
+  reviewed, or none. The plan reads every enabled plugin's manifest, not
+  just the ones the template names, so it can say this before you commit.
+- A workspace directory that cannot be created. The per-agent roots point at
+  it, and a root that will never exist is a soul whose first `fs.list`
+  fails.
 - Declining the review.
 
 If the id the template wanted is already taken — two `--template triage`
