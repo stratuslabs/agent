@@ -111,6 +111,7 @@ import {
   globalConfigPath,
   loadChannelCredentials,
   loadCredentials,
+  emptyNamedCredentials,
   loadNamedCredentials,
   discoverSkillsInDirectory,
   installSkillsFromDirectory,
@@ -7293,8 +7294,18 @@ const runAgentNewFromTemplate = async (
   // One call, used twice: to print, and again under the lock to commit.
   // Location blockers are only for the first — they are about which file is
   // active, which nothing under the lock can change.
-  const namedCredentials = await loadNamedCredentials(env);
-  const installedSkills = await installedSkillIds(env, config.plugins ?? {}, host);
+  // Read only what this bundle names. A `credentials.json` somebody broke,
+  // or a skills directory that turns out to be a file, would otherwise
+  // refuse a template that declares neither and reads neither — and since
+  // no shipped template declares a credential today, that is every one of
+  // them. Same rule the config exemptions follow: what a bundle does not
+  // touch is not its problem.
+  const namedCredentials = template.credentials.length > 0
+    ? await loadNamedCredentials(env)
+    : emptyNamedCredentials();
+  const installedSkills = template.skills.length > 0
+    ? await installedSkillIds(env, config.plugins ?? {}, host)
+    : [];
   const planFor = (
     identity: AgentDefinition,
     current: { plugins?: PluginsConfig },

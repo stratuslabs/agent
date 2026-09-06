@@ -805,11 +805,25 @@ const readNameMap = (value: unknown): Record<string, string> => {
   return entries;
 };
 
+/**
+ * No credentials at all, in the shape `loadNamedCredentials` returns —
+ * prototype-less maps included, because a caller indexing one of these by
+ * an arbitrary credential name must not reach `Object.prototype`.
+ *
+ * Exported for a caller that already knows it needs none: reading the file
+ * to find that out would let a `credentials.json` somebody broke refuse
+ * work that never touches it.
+ */
+export const emptyNamedCredentials = (): NamedCredentials => ({
+  shared: emptyNameMap<string>(),
+  agents: emptyNameMap<Record<string, string>>(),
+});
+
 export const loadNamedCredentials = async (env: StateEnvironment): Promise<NamedCredentials> => {
   const raw = await loadRawCredentialsFile(env);
   const named = raw.named;
   if (typeof named !== 'object' || named === null || Array.isArray(named)) {
-    return { shared: emptyNameMap<string>(), agents: emptyNameMap<Record<string, string>>() };
+    return emptyNamedCredentials();
   }
   const block = named as Record<string, unknown>;
   const agents = emptyNameMap<Record<string, string>>();

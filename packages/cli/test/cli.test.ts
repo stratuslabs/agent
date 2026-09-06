@@ -9245,6 +9245,26 @@ test('a plugin-free template is created despite a broken project config', async 
   assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), ['mira.md']);
 });
 
+test('broken credentials and an unusable skills directory do not refuse a template that names neither', async () => {
+  const home = await templateHome();
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), '{ not json\n');
+  // A file where the skills directory goes: `readdir` gives ENOTDIR, which
+  // is not the ENOENT that "you have no skills" degrades to.
+  await writeFile(path.join(home, '.stratus', 'skills'), 'not a directory\n');
+
+  // No shipped template declares a credential, so reading that file to
+  // report on credentials none of them name refused all four of them.
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'assistant', '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), ['mira.md']);
+});
+
 test('a plugin-free template is created despite a project config that cannot be opened', async () => {
   const home = await templateHome();
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-template-loop-'));
