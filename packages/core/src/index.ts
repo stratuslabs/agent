@@ -31,6 +31,15 @@ export const isImageAttachmentMediaType = (value: unknown): value is ImageAttach
 export const IMAGE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
 
 /**
+ * The most image bytes one message may carry in total, decoded. The
+ * Messages API caps a request body at 32 MiB, and base64 costs a third
+ * again — so five images each just under the per-image cap pass one by one
+ * and still fail the turn together. 20 MiB decoded is 26.7 MiB encoded,
+ * leaving room for the text around it.
+ */
+export const IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
+
+/**
  * An image a person sent with a user message, as the model receives it.
  * Bytes are base64 so the attachment survives in the session's JSON body
  * and replays on every later turn the way the text does.

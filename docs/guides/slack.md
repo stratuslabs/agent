@@ -66,7 +66,8 @@ into the thread on its own, and the agent is shown it. That takes the
 app installed before it needs the scope added under **OAuth & Permissions**
 and a reinstall, and until then `stratus serve` warns, naming the scope,
 whenever an image arrives. Anything that is not an image the model can
-take — a log, a PDF, an image over 5 MB — reaches the agent by name, told
+take — a log, a PDF, an image over 5 MB, or one that would take a single
+message's images past 20 MB together — reaches the agent by name, told
 that it cannot be opened, so it answers honestly rather than as if it had
 read the file.
 

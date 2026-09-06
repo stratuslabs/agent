@@ -8,6 +8,7 @@ import {
   SENDER_TRUST_METADATA_KEY,
   isImageAttachmentMediaType,
   IMAGE_ATTACHMENT_MAX_BYTES,
+  IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
   type ApprovalAnswer,
   type ImageAttachment,
   type JsonObject,
@@ -66,6 +67,13 @@ const THREAD_HANDOVER_DEPTH = 8;
 const MAX_UNRENDERED_FILES = 20;
 
 const PLACEHOLDER_TEXT = '…';
+
+/**
+ * A 5 MB image over a slow link is seconds, not minutes. Past this the
+ * download is abandoned and the turn runs with the attachment named as
+ * unreadable, rather than the thread waiting on it.
+ */
+const DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS = 30_000;
 /** What a turn that produced no text puts in its message, wherever it is posted from. */
 const NO_REPLY_TEXT = '(no reply)';
 
@@ -184,7 +192,14 @@ export interface SlackFileDownload {
   body: Buffer;
 }
 
-export type SlackFileFetcher = (url: string, botToken: string) => Promise<SlackFileDownload>;
+/**
+ * Fetches a file's private URL with the bot token. `signal` is the
+ * download's deadline, and a fetcher MUST stop on it — headers and body
+ * both: the download runs inside the session's intake chain, so one that
+ * stalls holds every later message in the thread, and `stop()` waits on
+ * the handler too.
+ */
+export type SlackFileFetcher = (url: string, botToken: string, signal: AbortSignal) => Promise<SlackFileDownload>;
 
 export interface SlackSocketLike {
   on(eventName: string, listener: (args: SlackSocketEventArgs) => void): void;
@@ -240,6 +255,11 @@ export interface SlackAdapterOptions {
    * plain authenticated URL — so it is its own seam.
    */
   fetchFile?: SlackFileFetcher;
+  /**
+   * How long one attachment download may take before the turn goes on
+   * without it. Defaults to `DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS`.
+   */
+  fileDownloadTimeoutMs?: number;
 }
 
 // Lazy (and CJS-interoperable) so tests with injected fakes never load the
@@ -256,8 +276,8 @@ const defaultWebClient = (botToken: string): SlackWebLike => {
   return new WebClient(botToken) as unknown as SlackWebLike;
 };
 
-const defaultFetchFile: SlackFileFetcher = async (url, botToken) => {
-  const response = await fetch(url, { headers: { authorization: `Bearer ${botToken}` } });
+const defaultFetchFile: SlackFileFetcher = async (url, botToken, signal) => {
+  const response = await fetch(url, { headers: { authorization: `Bearer ${botToken}` }, signal });
   const contentType = response.headers.get('content-type');
   return {
     status: response.status,
@@ -1132,26 +1152,46 @@ const readImageAttachments = async (
   files: readonly SlackInboundFile[],
   botToken: string,
   fetchFile: SlackFileFetcher,
+  timeoutMs: number,
   warn: (line: string) => void,
 ): Promise<{ images: ImageAttachment[]; unread: SlackInboundFile[] }> => {
   const images: ImageAttachment[] = [];
   const unread: SlackInboundFile[] = [];
+  // Decoded bytes accepted so far. Checked against Slack's reported size
+  // before a download and the real length after it, because the message
+  // as a whole has a budget the per-image cap alone cannot keep.
+  let total = 0;
+  // Why an image is being left out, or nothing when it fits. One place for
+  // both limits so the warning and the fallback cannot disagree.
+  const overLimit = (label: string, bytes: number): string | undefined => {
+    if (bytes > IMAGE_ATTACHMENT_MAX_BYTES) {
+      return `slack: ${label} is ${bytes} bytes, over the ${IMAGE_ATTACHMENT_MAX_BYTES}-byte limit an image can be sent to the model at; the turn is told it cannot be read.`;
+    }
+    if (total + bytes > IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES) {
+      return `slack: ${label} would take this message's images past the ${IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES} bytes one request can carry; the turn is told it cannot be read. Send it in a message of its own.`;
+    }
+    return undefined;
+  };
   for (const file of files) {
     const url = file.url_private_download ?? file.url_private;
     if (!isImageAttachmentMediaType(file.mimetype) || url === undefined) {
       unread.push(file);
       continue;
     }
-    if (file.size !== undefined && file.size > IMAGE_ATTACHMENT_MAX_BYTES) {
-      warn(`slack: ${fileLabel(file)} is ${file.size} bytes, over the ${IMAGE_ATTACHMENT_MAX_BYTES}-byte limit an image can be sent to the model at; the turn is told it cannot be read.`);
+    const tooBig = file.size === undefined ? undefined : overLimit(fileLabel(file), file.size);
+    if (tooBig !== undefined) {
+      warn(tooBig);
       unread.push(file);
       continue;
     }
     let download: SlackFileDownload;
     try {
-      download = await fetchFile(url, botToken);
+      download = await fetchFile(url, botToken, AbortSignal.timeout(timeoutMs));
     } catch (error) {
-      warn(`slack: could not download ${fileLabel(file)}: ${error instanceof Error ? error.message : String(error)}`);
+      const reason = error instanceof Error && error.name === 'TimeoutError'
+        ? `it took longer than ${timeoutMs}ms`
+        : (error instanceof Error ? error.message : String(error));
+      warn(`slack: could not download ${fileLabel(file)}: ${reason}. The turn is told it cannot be read.`);
       unread.push(file);
       continue;
     }
@@ -1165,11 +1205,13 @@ const readImageAttachments = async (
       unread.push(file);
       continue;
     }
-    if (download.body.length > IMAGE_ATTACHMENT_MAX_BYTES) {
-      warn(`slack: ${fileLabel(file)} is ${download.body.length} bytes, over the ${IMAGE_ATTACHMENT_MAX_BYTES}-byte limit an image can be sent to the model at; the turn is told it cannot be read.`);
+    const stillTooBig = overLimit(fileLabel(file), download.body.length);
+    if (stillTooBig !== undefined) {
+      warn(stillTooBig);
       unread.push(file);
       continue;
     }
+    total += download.body.length;
     const name = file.name ?? file.title;
     images.push({
       mediaType: file.mimetype,
@@ -1368,6 +1410,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const createSocket = options.createSocketClient ?? defaultSocketClient;
   const createWeb = options.createWebClient ?? defaultWebClient;
   const fetchFile = options.fetchFile ?? defaultFetchFile;
+  const fileDownloadTimeoutMs = options.fileDownloadTimeoutMs ?? DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS;
 
   const connections: AgentConnection[] = [];
   // Every agent this adapter was asked to carry, connected or not — the
@@ -2583,7 +2626,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // Fetched inside the chain, like the lookups below: it is network
       // I/O, and a message whose screenshot is slow to arrive must not lose
       // its place to the one typed after it.
-      const { images, unread } = await readImageAttachments(event.files ?? [], connection.config.botToken, fetchFile, warn);
+      const { images, unread } = await readImageAttachments(
+        event.files ?? [],
+        connection.config.botToken,
+        fetchFile,
+        fileDownloadTimeoutMs,
+        warn,
+      );
       // An image with nothing said is still a question ("what's this?"); a
       // file the turn could not open with nothing said is not one, and gets
       // no reply.

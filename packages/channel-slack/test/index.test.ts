@@ -3855,3 +3855,100 @@ test('an image over the model limit is never downloaded, while a smaller one bes
     ['crop.png'],
   ]]);
 });
+
+test('a download that stalls is abandoned at the deadline and the turn goes on without it', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fileDownloadTimeoutMs: 20,
+    // A fetcher that never answers on its own: it ends only when the
+    // adapter's deadline tells it to. Given no deadline at all — the
+    // regression — it answers at once with an image, and the assertions
+    // below fail rather than the test hanging.
+    fetchFile: (_url, _token, signal) => new Promise((resolve, reject) => {
+      if (!(signal instanceof AbortSignal)) {
+        resolve({ status: 200, contentType: 'image/png', body: PNG_BYTES });
+        return;
+      }
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }),
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-stall' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> slow one',
+      ts: '964.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [{ id: 'F7', name: 'slow.png', mimetype: 'image/png', size: 100, url_private_download: 'https://files.slack.com/F7/download' }],
+    },
+  });
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images]), [[
+    'Dylan: slow one\n[Attached: slow.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    undefined,
+  ]]);
+  assert.equal(warnings.filter((line) => /slow\.png/.test(line) && /longer than 20ms/.test(line)).length, 1);
+});
+
+test('images that fit one by one are still held to the message\'s total budget', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+  const fetched: string[] = [];
+  // Each just under the per-image cap; five together are over what one
+  // request can carry, and past the per-message budget after four.
+  const nearCap = 5 * 1024 * 1024 - 1;
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url) => {
+      fetched.push(url);
+      return { status: 200, contentType: 'image/png', body: Buffer.alloc(nearCap, 1) };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-budget' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> all of them',
+      ts: '965.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [1, 2, 3, 4, 5].map((n) => ({
+        id: `F${n}`, name: `shot${n}.png`, mimetype: 'image/png', size: nearCap, url_private_download: `https://files.slack.com/F${n}/download`,
+      })),
+    },
+  });
+  await adapter.stop();
+
+  // The fifth was never even requested: Slack's size said it would not fit.
+  assert.deepEqual(fetched, [1, 2, 3, 4].map((n) => `https://files.slack.com/F${n}/download`));
+  assert.deepEqual(gateway.dispatches[0]?.images?.map((image) => image.name), ['shot1.png', 'shot2.png', 'shot3.png', 'shot4.png']);
+  assert.equal(
+    gateway.dispatches[0]?.userMessage,
+    'Dylan: all of them\n[Attached: shot5.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+  );
+  assert.equal(warnings.filter((line) => /shot5\.png/.test(line) && /message of its own/.test(line)).length, 1);
+});

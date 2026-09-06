@@ -58,7 +58,10 @@ typed, is a question in its own right and gets an answer. That needs the
 without it should have the scope added under **OAuth & Permissions** and be
 reinstalled once, and until then `stratus serve` warns, naming the scope,
 each time an image arrives. An image over 5 MB (the model API's limit) is
-not fetched. Whether the model actually *sees* the image depends on the
+not fetched, and one message's images stop at 20 MB together — a request
+has a size limit too, and images past it are named as unreadable; send
+them in a message of their own. A download that stalls is abandoned after
+30 seconds the same way, so a slow link cannot hold the thread. Whether the model actually *sees* the image depends on the
 agent's runtime: the Anthropic API and OpenAI-compatible providers send it
 as image content; the Claude Code and Codex harnesses take a text prompt,
 so there the agent is told the image's name and that it cannot see it.
