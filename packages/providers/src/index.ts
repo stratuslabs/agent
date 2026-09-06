@@ -397,11 +397,15 @@ export const createOpenAICompatibleProvider = ({
 
       let payload;
       let response: Response;
-      // Sent at most twice: once as built, and once more without its
-      // images if the endpoint refused them.
+      // Sent at most twice: once as built, and once more with no images at
+      // all if the endpoint refused them. The retry is built as though the
+      // model had no vision rather than from what is left: omitting the
+      // refused images frees replay budget, and a rebuild that could see
+      // it would spend it on older images — sending a picture to an
+      // endpoint that just said it takes none.
       let imagesRetried = false;
       for (;;) {
-        const { messages, sent } = createOpenAICompatibleMessages(request, systemPrompt, toolNames, vision, imageReplayBudget);
+        const { messages, sent } = createOpenAICompatibleMessages(request, systemPrompt, toolNames, vision && !imagesRetried, imageReplayBudget);
         try {
           response = await fetchImpl(`${normalizedBaseUrl}/chat/completions`, {
             method: 'POST',

@@ -921,18 +921,28 @@ test('createOpenAICompatibleProvider drops images an endpoint refuses and retrie
       headers: { 'content-type': 'application/json' },
     });
   }) as typeof fetch;
-  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: fetchImpl });
+  // A window of one image: the request carries only the newest, and the
+  // older one is exactly what a rebuilt retry would otherwise reach for.
+  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: fetchImpl, imageReplayBudget: { count: 1 } });
   const request = requestWithImage();
+  const older = { mediaType: 'image/png' as const, data: 'AAAAAAAA', name: 'older.png' };
+  request.session.messages.unshift({ id: 'session-1:user:0', role: 'user', content: 'earlier', createdAt: new Date().toISOString(), images: [older] });
 
   const response = await provider.generate(request);
 
   assert.deepEqual(response.parts, [{ type: 'text', text: 'without it, then' }]);
   assert.equal(bodies.length, 2);
-  assert.deepEqual(bodies[1]!.messages.at(-1).content, [
-    { type: 'text', text: 'what is this?' },
-    { type: 'text', text: '[An image attached here (shot.png) is no longer sent: this conversation\'s images have passed what one request can carry, and only the most recent are kept.]' },
-  ]);
-  assert.deepEqual(request.session.messages[0]!.images, [{ mediaType: 'image/png', data: '', omitted: true, name: 'shot.png' }]);
+  // The retry carries no image anywhere — not the refused one, and not the
+  // older one the refusal made room for.
+  const retryParts = bodies[1]!.messages.flatMap((message: any) => (Array.isArray(message.content) ? message.content : []));
+  assert.equal(retryParts.some((part: any) => part.type === 'image_url'), false);
+  assert.equal(
+    bodies[1]!.messages.at(-1).content,
+    'what is this?\n[Attached: shot.png. This runtime cannot see images — say so rather than guessing at them.]',
+  );
+  // Only the image that was sent and refused is emptied on the session.
+  assert.deepEqual(request.session.messages[1]!.images, [{ mediaType: 'image/png', data: '', omitted: true, name: 'shot.png' }]);
+  assert.deepEqual(request.session.messages[0]!.images, [older]);
 
   // A 400 that blames something else is not retried.
   let calls = 0;
