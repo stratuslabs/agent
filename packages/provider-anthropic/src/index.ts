@@ -21,6 +21,7 @@ import {
   type Session,
   type ToolCall,
   type ToolDescriptor,
+  promptTextOf,
 } from '@stratusagent/core';
 
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5';
@@ -437,7 +438,12 @@ const createAnthropicMessages = (
       continue;
     }
 
-    push('user', userBlocks(message.content, message.images, replayed, imageOf));
+    // Framed by the kernel's one rule for it: an overheard message is
+    // rendered as something said to somebody else, on this path as on the
+    // harness ones. Consecutive user turns merge above, so a message
+    // overheard between turns and the one that followed it reach the API
+    // as one user turn of two blocks. Its images, if any, ride ahead of it.
+    push('user', userBlocks(promptTextOf(message), message.images, replayed, imageOf));
   }
 
   const imageBlocks: Array<{ holder: ContentBlockParam[]; index: number; image: ImageAttachment }> = [];

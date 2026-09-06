@@ -383,9 +383,14 @@ export const renderAgent = (agentId, initialSessionId) => {
 
     // Anything that changes the stored conversation is worth re-reading even
     // when somebody else caused it — it is the same conversation. Only the
-    // in-flight rendering below is ours alone.
+    // in-flight rendering below is ours alone. An overhear is always
+    // somebody else's: it runs no turn, so it carries no turn id and this
+    // event is the only one it emits — and a message in the transcript
+    // that no completion follows is exactly the change this branch exists
+    // to notice. The session list re-reads too, since its order follows
+    // the row's own timestamp, which an overhear moves.
     if (!isOurTurn(envelope)) {
-      if (event.type === 'session.completed' || event.type === 'session.failed') {
+      if (event.type === 'session.completed' || event.type === 'session.failed' || event.type === 'session.observed') {
         void loadTranscript();
         void loadSessions();
       }

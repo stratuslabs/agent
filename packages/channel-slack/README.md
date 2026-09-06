@@ -44,6 +44,16 @@ they are the whole model:
    straight after it reaches the agent you just named, and the agent that
    *had* the thread stands down at the same instant rather than whenever its
    own app next catches up.
+5. **Standing down is not leaving.** An agent in a thread hears what is
+   said to the other agent in it — the question that named its colleague,
+   the untagged replies that were the colleague's to answer — into its own
+   session, with no turn run and nothing posted. The next time it is
+   asked, it answers as someone who followed the conversation rather than
+   one who stepped out of the room. What it hears is marked as said to
+   somebody else, so a stranger's words in a shared thread never read to
+   it as an instruction; and a stranger overheard lowers its session's
+   trust label exactly as one who addressed it would, since their text is
+   in the transcript either way.
 
 Everyone in the thread is talking to the same agent — a reply from a second
 person is a follow-up like any other, and channel messages reach the model
@@ -84,10 +94,15 @@ so there the agent is told the image's name and that it cannot see it.
 too large — so the message reaches the agent naming those files and saying
 they cannot be opened, which is what lets it answer honestly instead of as
 though it had read the log. Such a file dropped in with nothing said is not
-a question, and gets no reply. What is *not* shared is history: sessions
-are per agent, so an agent tagged into a thread halfway through starts from
-what it is told then, not from what the other agent was told. Bring it up
-to speed in the message that tags it.
+a question, and gets no reply. 
+Sessions are still per agent: an agent hears a thread from the mention
+that brought it in, and what was said before that — to the other agent, or
+by it — is not backfilled ([#147](https://github.com/stratuslabs/agent/issues/147)).
+Bring it up to speed in the message that tags it. What the *other agent*
+replied is not overheard yet either — only what people say — so an agent
+that followed a thread knows the questions its colleague was asked and not
+the answers; that is the next step of
+[31](../../docs/roadmap/31-reading-the-room.md).
 
 Three edges worth knowing. An agent whose app was installed before the
 history scopes below is told about mentions only, and behaves exactly as it
@@ -105,10 +120,10 @@ always given when an app is down.
 And the rules above are mechanical, which shows in a thread where people are
 mostly talking to *each other*: an agent invited into one answers every
 untagged reply in it, including the ones meant for somebody else. Give the
-side conversation its own thread. Teaching an agent to read the room
-instead — to follow a thread whether or not it is being spoken to, and
-answer only when it has something to add — is
-[roadmap step 31](../../docs/roadmap/31-reading-the-room.md).
+side conversation its own thread. It can now *hear* a thread it is not
+answering; teaching it to choose — to answer only when it has something to
+add, and to let "thanks, we've got it" be a sentence it read — is the rest
+of [roadmap step 31](../../docs/roadmap/31-reading-the-room.md).
 
 ## Installing
 

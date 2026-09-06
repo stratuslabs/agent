@@ -52,7 +52,7 @@ conversations, and a live activity feed.
 **Agent** — one agent, three tabs. *Chat* streams a conversation as it
 happens: text arrives token by token, tool calls appear as status lines, and
 the transcript is re-read from the daemon when the turn settles so the page
-never quietly disagrees with what is stored. *Activity* is the same event
+never quietly disagrees with what is stored. It is re-read the same way when a message an agent overheard lands in the conversation with no turn at all — `session.observed` is the only sign of it, and the activity feed shows it as *overheard a message*. *Activity* is the same event
 stream filtered to that agent. *Settings* edits the soul — name, persona,
 provider and model pins — through a validated round-trip.
 
