@@ -857,6 +857,30 @@ test('a resumed harness is sent everything since the agent last spoke, overheard
     '(overheard, not addressed to you) Dylan: Bea?',
   );
 
+  // A turn the harness accepted and then failed appends no reply, so its
+  // message still sits ahead of the last assistant. It is not resent: the
+  // harness has it. Only what was overheard — which it has never seen —
+  // and the newest message go.
+  assert.equal(
+    latestUserMessagePrompt(requestWith([
+      message('u1', 'user', 'Dylan: hello'),
+      message('a1', 'assistant', 'hi'),
+      message('u2', 'user', 'Dylan: this turn failed'),
+      message('u3', 'user', 'Dylan: try again'),
+    ])),
+    'Dylan: try again',
+  );
+  assert.equal(
+    latestUserMessagePrompt(requestWith([
+      message('u1', 'user', 'Dylan: hello'),
+      message('a1', 'assistant', 'hi'),
+      message('u2', 'user', 'Dylan: this turn failed'),
+      message('u3', 'user', 'Dylan: Bea?', true),
+      message('u4', 'user', 'Dylan: try again'),
+    ])),
+    '(overheard, not addressed to you) Dylan: Bea?\nDylan: try again',
+  );
+
   // Nothing since the last reply falls back to the whole transcript, so a
   // caller can never end up sending nothing.
   assert.match(

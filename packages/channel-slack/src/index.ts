@@ -2516,13 +2516,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       if (overhear) {
         // Heard, not answered: no placeholder, no turn. Only into a
         // conversation this agent is already in — a session under this
-        // thread's key exists exactly when it was invited here — and only
-        // where the host can take it; one that cannot leaves the agent
-        // hearing what it answers, as every agent did before.
-        if (!gateway.observe || !gateway.sessionRouting) {
-          return undefined;
-        }
-        if (!(await gateway.sessionRouting(sessionId))) {
+        // thread's key exists exactly when it was invited here — and the
+        // gateway is the one to say whether it is, on the session's chain:
+        // a first mention whose dispatch is queued ahead of this message
+        // has created the session by the time the observe runs, where a
+        // membership read from here would find nothing and drop a
+        // message said moments after the invitation. A host that cannot
+        // take it leaves the agent hearing what it answers, as every
+        // agent did before.
+        if (!gateway.observe) {
           return undefined;
         }
         // Placed on the gateway's chain here, in receipt order, and not

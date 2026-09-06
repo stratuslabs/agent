@@ -730,9 +730,15 @@ export interface Gateway {
    *
    * Existing only: an agent overhears a conversation it is already in, and
    * a session that would have to be created is one it was never invited
-   * to. A rolled-over transcript refuses like a dispatch would.
+   * to — so a session that does not exist is nothing to hear into, and
+   * resolves `undefined` rather than refusing. Read on the chain, which is
+   * what makes that answer right: an invitation still in flight — a first
+   * mention whose dispatch is queued ahead of this — has created the
+   * session by the time this runs, where a read outside the chain would
+   * have found nothing and dropped the message for good. A rolled-over
+   * transcript refuses like a dispatch would.
    */
-  observe(input: ObserveInput): Promise<Session>;
+  observe(input: ObserveInput): Promise<Session | undefined>;
   /** Live events from every runner, one stream for all consumers. */
   readonly bus: EventBus;
   /** The store shared by every runner (durable across restarts). */
@@ -2561,7 +2567,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     });
   };
 
-  const observe = async (input: ObserveInput): Promise<Session> => {
+  const observe = async (input: ObserveInput): Promise<Session | undefined> => {
     if (stopping) {
       throw refusal();
     }
@@ -2585,9 +2591,12 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       assertStateCompatible(env);
       const existing = await store.get(input.sessionId);
       if (!existing) {
-        throw new Error(
-          `No session with id ${input.sessionId} to overhear into; an agent hears only conversations it is already in.`,
-        );
+        // Not a refusal: a channel asks this for every message in every
+        // thread its app can see, and "not in that one" is the ordinary
+        // answer. The chain has already run whatever dispatch was queued
+        // ahead, so this is a session the agent was genuinely never
+        // invited to, not one that is still being created.
+        return undefined;
       }
       if (input.agentId !== undefined && existing.agent.id !== input.agentId) {
         throw new Error(

@@ -203,6 +203,7 @@ test('observe puts a message into a session with no turn, on the session\'s chai
     const updatedBefore = events.filter((event) => event.type === 'session.updated').length;
 
     const observed = await gateway.observe({ sessionId: 'thread-o', message: 'Dylan: Bea, what do you think?' });
+    assert.ok(observed, 'the agent is in this conversation');
 
     // Appended and durable, and no turn ran: same status the last turn
     // left, its own event and not a `session.updated`, and the agent has
@@ -230,12 +231,21 @@ test('observe puts a message into a session with no turn, on the session\'s chai
     ]);
 
     // An agent hears only conversations it is already in: nothing is
-    // created on its behalf.
-    await assert.rejects(
-      () => gateway.observe({ sessionId: 'never-seen', message: 'anyone?' }),
-      /No session with id never-seen to overhear into/,
-    );
+    // created on its behalf, and "not in that one" is an answer rather
+    // than a refusal — a channel asks this for every thread its app can
+    // see.
+    assert.equal(await gateway.observe({ sessionId: 'never-seen', message: 'anyone?' }), undefined);
     assert.equal(await gateway.store.get('never-seen'), undefined);
+
+    // Read on the chain, behind a dispatch queued ahead of it: the
+    // invitation that creates the session has landed by the time the
+    // observe looks, so a message said moments after a first mention is
+    // heard rather than dropped. Neither call is awaited before the other
+    // is placed — that is the shape a channel produces.
+    const invitation = gateway.dispatch({ sessionId: 'thread-fresh', userMessage: 'Dylan: Ava, hello' });
+    const heard = gateway.observe({ sessionId: 'thread-fresh', message: 'Dylan: Bea, and you?' });
+    await invitation;
+    assert.equal((await heard)?.messages.at(-1)?.overheard, true);
     // Sessions never cross agent identities, by the same door dispatch uses.
     await assert.rejects(
       () => gateway.observe({ sessionId: 'thread-o', agentId: 'somebody-else', message: 'hm' }),

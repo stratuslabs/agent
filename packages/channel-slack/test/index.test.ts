@@ -210,6 +210,15 @@ const createStubGateway = (
     },
     activeTurnId: (sessionId) => activeTurns.get(sessionId),
     async observe(input) {
+      // As the gateway does, on the session's chain: a session exists if a
+      // dispatch was placed for it ahead of this — the invitation still in
+      // flight — or the durable record knows it. "Not in that one" is an
+      // answer, not a refusal.
+      const invited = gateway.dispatches.some((dispatch) => dispatch.sessionId === input.sessionId)
+        || (await gateway.sessionRouting?.(input.sessionId)) !== undefined;
+      if (!invited) {
+        return undefined;
+      }
       gateway.observes.push({
         sessionId: input.sessionId,
         ...(input.agentId ? { agentId: input.agentId } : {}),
@@ -887,6 +896,57 @@ test('an agent in a shared thread hears what is said to the other one, and posts
   // is none coming. Every post either app made was for a turn it answered.
   assert.equal(webAva.posts.length, 1);
   assert.equal(webBea.posts.length, 2);
+});
+
+test('a message said moments after an agent was invited is heard, not dropped', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  // Every dispatch waits on a gate, so the invitation's session is still
+  // being created when the next message arrives — the durable record
+  // knows nothing of this thread yet.
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const gateway = createStubGateway(async ({ sessionId }) => {
+    await gate;
+    return sessionWithReply(sessionId, 'ok');
+  });
+  gateway.sessionRouting = routingOver(new Map());
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // Ava is mentioned; her first turn is queued and has not written a
+  // session. Before it can, the same person turns to Bea in that thread.
+  const invitation = socketAva.deliver('app_mention', mention('<@B-AVA> hello', { ts: '300.0' }));
+  const toBea = channelMessage({ text: '<@B-BEA> and you?', ts: '300.1', thread: '300.0' });
+  const heardByAva = socketAva.deliver('message', toBea);
+  const answeredByBea = socketBea.deliver('message', toBea);
+  release();
+  await Promise.all([invitation, heardByAva, answeredByBea]);
+  await adapter.stop();
+
+  // A membership check from the adapter would have found no session and
+  // dropped this. The gateway, asked on the session's chain behind the
+  // invitation, finds the session that dispatch created.
+  assert.deepEqual(
+    gateway.observes.map((observed) => [observed.agentId, observed.message]),
+    [['ava', 'Dylan: <@B-BEA> and you?']],
+  );
+  // And Bea, who was named, answers it — hearing and answering are the
+  // two sides of one message.
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.agentId), ['ava', 'bea']);
 });
 
 test('an agent hears only threads it is in, and only where the host can take it', async () => {

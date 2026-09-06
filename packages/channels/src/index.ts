@@ -145,18 +145,23 @@ export interface GatewayLike {
    * said in a conversation the agent is in, to somebody else. The next
    * turn the agent takes has it in hand; nothing is posted now.
    *
-   * Optional, like `sessionRouting`, and an adapter needs both — the
-   * routing to know the agent is in the conversation at all, since a
-   * session an agent was never invited into is nothing to hear into. A
-   * host that omits it gives up overhearing: its agents hear only what
-   * they answer, which is what every agent did before this existed.
+   * Resolves `undefined` when there is no such session: an agent hears
+   * only conversations it is already in, and the host is the one to say
+   * so — on the session's own chain, behind any turn queued ahead, which
+   * is what an adapter cannot do from outside. An adapter that checked
+   * membership itself first would find nothing for an agent whose
+   * invitation is still being written, and drop the message for good.
+   *
+   * Optional, like `sessionRouting`. A host that omits it gives up
+   * overhearing: its agents hear only what they answer, which is what
+   * every agent did before this existed.
    */
   observe?(input: {
     sessionId: string;
     agentId?: string;
     message: string;
     metadata?: JsonObject;
-  }): Promise<Session>;
+  }): Promise<Session | undefined>;
   /**
    * Settles a call parked on `tool.approval-requested`. False means the
    * request is no longer pending — decided already, expired, or its turn

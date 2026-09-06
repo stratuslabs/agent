@@ -786,17 +786,26 @@ export const renderTranscriptPrompt = (request: ProviderRequest): string => {
 };
 
 /**
- * What a resumed harness session has not heard yet: every user message
- * since the agent last spoke, in order. The harness holds everything up to
- * its own last reply, and until `observe` that was always exactly one
- * message — but a message overheard between turns is appended with no turn
- * run on it, so by the next turn there can be several, and sending only
- * the newest would leave the model answering with the thread's middle
- * missing on precisely the path that cannot rebuild its history.
+ * What a resumed harness session has not heard yet: every message
+ * overheard since the agent last spoke, then the newest user message. The
+ * harness holds everything before its own last reply, and until `observe`
+ * that was always exactly one message — but a message overheard between
+ * turns is appended with no turn run on it, so by the next turn there can
+ * be several, and sending only the newest would leave the model answering
+ * with the thread's middle missing on precisely the path that cannot
+ * rebuild its history.
  *
- * One user message that was addressed to the agent renders bare, as it
- * always did. Falls back to the full transcript when there is no user
- * message to isolate, so a caller can never end up sending nothing.
+ * Selected by the mark, not by position. "Every user message since the
+ * last assistant" reads the same in the common case and differs after a
+ * turn the harness accepted and then failed: no reply was appended, so
+ * that turn's message is still ahead of the last assistant, and scanning
+ * back would send it to a harness that already has it. An overheard
+ * message is one the harness has never seen, by construction; an
+ * addressed one before the newest was some turn's prompt.
+ *
+ * One addressed message with nothing overheard renders bare, as it always
+ * did. Falls back to the full transcript when there is no user message to
+ * isolate, so a caller can never end up sending nothing.
  */
 export const latestUserMessagePrompt = (request: ProviderRequest): string => {
   const messages = request.session.messages;
@@ -804,13 +813,14 @@ export const latestUserMessagePrompt = (request: ProviderRequest): string => {
   while (start > 0 && messages[start - 1]?.role !== 'assistant') {
     start -= 1;
   }
-  const unheard = messages.slice(start).filter((message) => message.role === 'user');
-  const only = unheard[0];
-  if (unheard.length === 1 && only && only.overheard !== true) {
-    return only.content;
-  }
-  if (unheard.length === 0) {
+  const since = messages.slice(start).filter((message) => message.role === 'user');
+  const newest = since.at(-1);
+  if (!newest) {
     return renderTranscriptPrompt(request);
+  }
+  const unheard = since.filter((message) => message.overheard === true || message === newest);
+  if (unheard.length === 1 && newest.overheard !== true) {
+    return newest.content;
   }
   return unheard.map(promptTextOf).join('\n');
 };
