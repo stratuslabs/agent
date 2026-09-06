@@ -4212,3 +4212,54 @@ test('an image left out for the message\'s budget closes the window to everythin
   assert.equal(warnings.filter((line) => /shot2\.png/.test(line) && /message of its own/.test(line)).length, 1);
   assert.equal(warnings.filter((line) => /shot1\.png/.test(line) && /listed after it/.test(line)).length, 1);
 });
+
+test('a download cut off at what was left of the budget closes the window too', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+  const fetched: Array<{ url: string; maxBytes: number }> = [];
+  const mib = 1024 * 1024;
+  // Oldest first: a small sized one, an unsized one that turns out to be
+  // 4 MiB, then four large ones. After the four newest take 18 MiB the
+  // unsized one is cut off at the 2 MiB left — and that closes the window
+  // to the small one, which would otherwise have fit.
+  const files = [
+    { id: 'F1', name: 'shot1.png', mimetype: 'image/png', size: 1 * mib, url_private_download: 'https://files.slack.com/F1/download' },
+    { id: 'F2', name: 'shot2.png', mimetype: 'image/png', url_private_download: 'https://files.slack.com/F2/download' },
+    ...[3, 4, 5, 6].map((n) => ({ id: `F${n}`, name: `shot${n}.png`, mimetype: 'image/png', size: 4.5 * mib, url_private_download: `https://files.slack.com/F${n}/download` })),
+  ];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url, _token, _signal, maxBytes) => {
+      fetched.push({ url, maxBytes });
+      if (url.includes('F2')) {
+        return { status: 200, contentType: 'image/png', body: Buffer.alloc(0), truncated: true };
+      }
+      return { status: 200, contentType: 'image/png', body: pngOfLength(4.5 * mib) };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-cut-window' },
+    event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-AVA> six again', ts: '970.0', channel: 'C1', subtype: 'file_share', files },
+  });
+  await adapter.stop();
+
+  assert.deepEqual(fetched.map((call) => call.url), [6, 5, 4, 3, 2].map((n) => `https://files.slack.com/F${n}/download`));
+  // The unsized one was offered only what was left, and that is what cut it off.
+  assert.equal(fetched.at(-1)?.maxBytes, 2 * mib);
+  assert.deepEqual(gateway.dispatches[0]?.images?.map((image) => image.name), ['shot3.png', 'shot4.png', 'shot5.png', 'shot6.png']);
+  assert.equal(
+    gateway.dispatches[0]?.userMessage,
+    'Dylan: six again\n[Attached: shot1.png, shot2.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+  );
+  assert.equal(warnings.filter((line) => /shot2\.png/.test(line) && /abandoned/.test(line)).length, 1);
+  assert.equal(warnings.filter((line) => /shot1\.png/.test(line) && /listed after it/.test(line)).length, 1);
+});

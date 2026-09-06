@@ -1286,6 +1286,12 @@ const readImageAttachments = async (
       continue;
     }
     if (download.truncated === true) {
+      // Cut off at what was left of the message's budget, rather than at
+      // the per-image cap: the same overflow the size check closes the
+      // window on, learned from the bytes instead of the metadata.
+      if (maxBytes < IMAGE_ATTACHMENT_MAX_BYTES) {
+        windowClosed = true;
+      }
       warn(`slack: ${fileLabel(file)} is larger than the ${maxBytes} bytes this message could still take for an image; the download was abandoned and the turn is told it cannot be read.`);
       dropped.add(position);
       continue;
