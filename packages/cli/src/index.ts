@@ -266,6 +266,13 @@ export interface CliEnvironment {
    */
   templateFailBeforeConfigWrite?: () => Promise<void>;
   /**
+   * Runs inside a template's lock, immediately before the soul is claimed
+   * (tests). The claim reads the config to see which ids are already
+   * declared, so this is where a retarget has to land to prove that read
+   * uses the file the transaction locked.
+   */
+  templateBeforeSoulClaim?: () => Promise<void>;
+  /**
    * Starts the fresh daemon an announced restart asks for and resolves
    * with its exit code. Injected so tests never spawn a process; the
    * default runs this CLI's own entrypoint with the serve arguments given.
@@ -7334,18 +7341,32 @@ const runAgentNewFromTemplate = async (
   // a file the command was never going to open.
   const configTarget = needsConfig ? await resolveConfigTarget(configPath) : configPath;
 
+  // What the id check reads. Claiming an id resolves the config for the
+  // default soul it declares, and a resolution of its own could see a
+  // different file than the one this transaction locked — handing the agent
+  // an id that config's configured soul already answers to, and then
+  // writing its per-agent settings under an id that soul shadows.
+  //
+  // Only when a config was actually selected. With none, `configTarget` is
+  // a global path that need not exist, and naming it would turn "there is
+  // no config" into "the configured default soul could not be read".
+  const idCheckConfig = needsConfig && location !== undefined ? configTarget : command.configPath;
+
   let applied;
   try {
     applied = await applyAgentTemplate({
       plan,
       replan: planFor,
-      claimSoul: (render) => claimSoulFile(
-        env,
-        { name, instructions: template.persona },
-        render,
-        (message) => writeLine(streams.stderr, message),
-        command.configPath,
-      ),
+      claimSoul: async (render) => {
+        await env.templateBeforeSoulClaim?.();
+        return claimSoulFile(
+          env,
+          { name, instructions: template.persona },
+          render,
+          (message) => writeLine(streams.stderr, message),
+          idCheckConfig,
+        );
+      },
       // `formatSoul`, exactly as the untemplated path calls it — there is
       // no template-only way into the roster, because a second one would be
       // a second set of validation rules to disagree with the first.

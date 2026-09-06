@@ -9319,6 +9319,44 @@ test('a template refuses to write when a link replaces the config it locked', as
   assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), [], 'and the soul it claimed was rolled back');
 });
 
+test('a template checks the id against the config it locked, not the spelling', async () => {
+  const home = await templateHome();
+  const first = path.join(home, 'first.json');
+  const second = path.join(home, 'second.json');
+  const link = path.join(home, 'chosen.json');
+  const outsider = path.join(home, 'vera.md');
+  await writeFile(outsider, '---\nname: Vera\nid: vera\n---\n\nYou were here first.\n');
+  await writeFile(first, `${JSON.stringify({ soul: outsider })}\n`);
+  await writeFile(second, '{}\n');
+  await symlink(first, link);
+
+  // Claiming an id reads the config for the default soul it declares. That
+  // read used to resolve the path for itself, so a link retargeted between
+  // the resolution and the claim had it looking at a config that declares
+  // nothing — handing this agent `vera`, which the locked config's own
+  // configured soul already answers to and would shadow.
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'research', '--config', link, '--yes'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      templateBeforeSoulClaim: async () => {
+        await rm(link);
+        await symlink(second, link);
+      },
+    },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.match(output.stdout, /not vera/, 'the id the locked config already spoke for was not taken');
+  const written = await readdir(path.join(home, '.stratus', 'agents'));
+  assert.equal(written.length, 1);
+  assert.notEqual(written[0], 'vera.md');
+});
+
 test('a template writes the config it locked, even if a symlink is retargeted mid-flight', async () => {
   const home = await templateHome();
   const first = path.join(home, 'first.json');
