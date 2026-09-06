@@ -575,15 +575,34 @@ test('a template names credentials and never carries one', async () => {
   assert.ok(!JSON.stringify(plan).includes('sk-live'), 'no plan ever carries a value');
 });
 
-test('a template proposes a schedule and creates none', () => {
-  const triage = findAgentTemplate('triage');
-  assert.ok(triage?.schedule, 'triage is the one whose agent is only useful on a cadence');
-  // Nothing in the format can write a schedule: it carries a proposal, and
-  // `schedule.every` is gated so the operator approves it as its own step.
+test('a template that proposes a schedule grants the tool the proposal needs', () => {
+  // The allowlist is checked before the approval policy, so a soul without
+  // `schedule.every` refuses the call outright and the "they will ask you to
+  // approve it" the flow promises can never happen. Granting it is not
+  // creating a schedule — it is gated, so the human still approves the
+  // cadence — and the reporting half needs `message.send` for the same
+  // reason.
   for (const template of AGENT_TEMPLATES) {
-    assert.ok(!template.tools.includes('schedule.every'), template.id);
-    assert.ok(!template.tools.includes('schedule.at'), template.id);
+    if (!template.schedule) {
+      continue;
+    }
+    assert.ok(template.tools.includes('schedule.every'), `${template.id} proposes a schedule it cannot set`);
+    assert.ok(template.tools.includes('message.send'), `${template.id} would fire with nowhere to report`);
   }
+  assert.ok(findAgentTemplate('triage')?.schedule, 'triage is the one whose agent is only useful on a cadence');
+});
+
+test('applying a template writes a soul and a config entry, and nothing else', async () => {
+  const fixture = await newFixture();
+  const schedule = findAgentTemplate('triage')?.schedule;
+  assert.ok(schedule, 'the template that proposes one');
+  // The format has no field a schedule could be written from and the apply
+  // has no scheduler seam to write one through: the proposal reaches the
+  // operator as text, and `schedule.every` is what turns it into a row.
+  const plan = await planFor(templateWith({ schedule }), fixture, {});
+  const applied = await applyFixture(plan, fixture.home);
+  assert.deepEqual(Object.keys(applied).sort(), ['agent', 'configPath', 'configured', 'soulPath']);
+  assert.deepEqual(applied.configured, []);
 });
 
 // ---- the kernel risk table stays true --------------------------------------
@@ -622,4 +641,87 @@ test('KERNEL_TOOL_RISKS says what the kernel tool factories say', () => {
     Object.fromEntries(tools.map((tool) => [tool.name, resolveToolRisk(tool)])),
     { ...KERNEL_TOOL_RISKS },
   );
+});
+
+// ---- what the review promised, held under configuration that already exists
+
+test('a per-agent entry the template contradicts is a conflict, not an overwrite', () => {
+  const template = templateWith({
+    plugins: [{
+      package: 'p',
+      reason: 'r',
+      agentSettings: (context) => ({ roots: [context.workspacePath] }),
+    }],
+  });
+  // Preconfigured before the soul existed, or left behind by one somebody
+  // deleted. Either way the operator chose it, and the command promises a
+  // conflict rather than a silent replacement.
+  const decided = decidePluginConfig(
+    template,
+    { agentId: 'kit', agentName: 'Kit', workspacePath: '/ws/kit' },
+    { p: { enabled: true, agents: { kit: { roots: ['/theirs'] } } } },
+  );
+  const outcome = decided.get('p');
+  assert.equal(outcome?.status, 'conflict');
+  assert.deepEqual(outcome?.status === 'conflict' ? outcome.conflicts : [], [
+    { key: 'agents.kit.roots', existing: ['/theirs'], requested: ['/ws/kit'] },
+  ]);
+});
+
+test('a per-agent entry that already says what the template needs is reused', () => {
+  const decided = decidePluginConfig(
+    templateWith({
+      plugins: [{
+        package: 'p',
+        reason: 'r',
+        agentSettings: (context) => ({ roots: [context.workspacePath] }),
+      }],
+    }),
+    { agentId: 'kit', agentName: 'Kit', workspacePath: '/ws/kit' },
+    { p: { enabled: true, agents: { kit: { roots: ['/ws/kit'], maxBytes: 10 } } } },
+  );
+  assert.equal(decided.get('p')?.status, 'reuse');
+});
+
+test('a per-agent entry another agent owns is merged, never replaced', () => {
+  const decided = decidePluginConfig(
+    templateWith({
+      plugins: [{
+        package: 'p',
+        reason: 'r',
+        agentSettings: (context) => ({ roots: [context.workspacePath] }),
+      }],
+    }),
+    { agentId: 'kit', agentName: 'Kit', workspacePath: '/ws/kit' },
+    { p: { enabled: true, agents: { elsewhere: { roots: ['/theirs'] } } } },
+  );
+  const outcome = decided.get('p');
+  assert.equal(outcome?.status, 'amend');
+  assert.deepEqual(outcome?.status === 'amend' ? outcome.adds : {}, {
+    agents: { elsewhere: { roots: ['/theirs'] }, kit: { roots: ['/ws/kit'] } },
+  });
+});
+
+test('a config block this host would refuse to load blocks the plan', async () => {
+  const fixture = await newFixture();
+  const packages = { '@stratusagent/tool-fs': firstPartyFs };
+  await writeFixturePackages(fixture.packagesRoot, packages);
+
+  const plan = await planFor(
+    templateWith({
+      tools: ['fs.read'],
+      plugins: [{ package: '@stratusagent/tool-fs', reason: 'files' }],
+    }),
+    fixture,
+    packages,
+    // `loadPlugins` refuses the whole plugin over this. A plan that printed
+    // the tool list and created the agent anyway would hand the operator a
+    // soul whose tools stop existing at the next restart.
+    { plugins: { '@stratusagent/tool-fs': { enabled: true, toolRisks: { 'fs.read': 'mostly-safe' } } } },
+  );
+
+  assert.equal(plan.plugins[0]?.status, 'unreadable');
+  assert.equal(plan.blockers[0]?.kind, 'unreadable-plugin');
+  assert.match(plan.blockers[0]?.message ?? '', /would refuse to load it as configured/);
+  await assert.rejects(applyFixture(plan, fixture.home), TemplateApplyError);
 });

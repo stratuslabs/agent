@@ -72,6 +72,9 @@ to touch the file's mtime. `already configured; these keys are added` names
 exactly the keys. And a setting the template contradicts is a **conflict**:
 the command stops, prints both values, and changes nothing, because
 silently keeping either one would make the summary you just read a lie.
+That covers the per-agent block too — if you configured `agents.<id>` before
+the agent existed, or an entry outlived a soul you deleted, the template
+reports the contradiction rather than replacing what you chose.
 
 **Filesystem roots are per agent.** A template that needs `fs.read` writes
 its roots under `agents.<id>` — the agent's own workspace — rather than
@@ -85,7 +88,7 @@ directory nobody reviewed on their behalf. Widen it by hand in
 | Template | What it is | Needs installed |
 | --- | --- | --- |
 | `research` | Reads the web and your notes, and hands back what is actually known. | `@stratusagent/tool-web`, `@stratusagent/tool-fs` |
-| `triage` | Watches logs and status pages, and says what changed and whether it matters. | `@stratusagent/tool-fs`, `@stratusagent/tool-web` |
+| `triage` | Watches logs and status pages, and says what changed and whether it matters. Also allowlists `schedule.every` and `message.send`, both `gated` — see below. | `@stratusagent/tool-fs`, `@stratusagent/tool-web` |
 | `operator` | Runs the commands you have approved, and shows you the output. | `@stratusagent/tool-shell`, `@stratusagent/tool-fs` |
 | `assistant` | Keeps track of your people, projects, and decisions across every conversation. | nothing — memory is kernel capability |
 
@@ -122,7 +125,17 @@ This agent is most useful on a schedule, which this does NOT create.
 A schedule's cadence, prompt, and destination are a decision, which is why
 `schedule.every` is `gated` in the first place. A bundle that quietly
 inserted schedule rows would put unattended recurring work behind something
-nobody read as such. See [Schedules](./schedules.md).
+nobody read as such.
+
+The `triage` soul **does** allowlist `schedule.every` and `message.send`,
+and both show in the review as `gated`. That is not the template creating a
+schedule — it is what makes the proposal reachable at all. An allowlist is
+checked before the approval policy, so a soul without `schedule.every` would
+refuse the call outright and the approval prompt this flow promises could
+never appear. Gated means you are still the one who says yes, once, to a
+specific cadence and destination; a firing's `message.send` then runs
+unattended only to the destination approved with that schedule. See
+[Schedules](./schedules.md).
 
 ## After it lands
 
@@ -160,6 +173,10 @@ Each of these changes nothing at all — no soul file, no config entry:
 - A project-local `stratus.config.json` as the active config. Plugin entries
   are read only from a config you chose, so there is nowhere to write them;
   pass `--config`, or move those settings to `~/.stratus/config.json`.
+- A plugin block this host would refuse to load — a `toolRisks` value that is
+  not a risk word, say. The daemon refuses such a plugin whole, so the tools
+  in the review would not exist after a restart; the command says so instead
+  of creating an agent that stops working at the next one.
 - Declining the review.
 
 If the id the template wanted is already taken — two `--template triage`

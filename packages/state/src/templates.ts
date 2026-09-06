@@ -192,7 +192,11 @@ export type TemplatePluginOutcome =
     status: 'unreadable';
     package: string;
     reason: string;
-    /** Why the installed package's manifest could not be read. */
+    /**
+     * Why this host would refuse the plugin: a manifest that will not
+     * parse, or a config block it rejects. Either way the daemon registers
+     * nothing for it, so the tools the plan lists would not exist.
+     */
     error: string;
   };
 
@@ -300,15 +304,11 @@ const manifestTools = (
   // The operator's word, read through the same parser the registration view
   // uses — a second reading here could disagree with the one that will
   // actually be enforced, which is the only thing the summary promises.
-  let overrides: Map<string, ToolRisk>;
-  try {
-    overrides = parseToolRiskOverrides(manifest, block);
-  } catch {
-    // A block whose overrides will not parse is refused at load; the plan
-    // reports the tools at their declared risk rather than inventing one,
-    // and the config blocker below is what the operator sees.
-    overrides = new Map();
-  }
+  // Throws on a block the daemon would refuse, and the caller turns that
+  // into a blocker: `loadPlugins` treats it as fatal for the whole plugin,
+  // so swallowing it here would print a tool list that stops existing at
+  // the next restart.
+  const overrides = parseToolRiskOverrides(manifest, block);
   return manifest.contributes.tools.map((declaration) => {
     const override = overrides.get(declaration.name);
     const base = override ?? declaration.risk;
@@ -404,13 +404,37 @@ export const decidePluginConfig = (
       decided.set(packageName, { status: 'conflict', package: packageName, reason, conflicts });
       continue;
     }
-    // A brand-new agent id has no entry under `agents`, so per-agent
-    // settings are always an addition and can never contradict anything.
+    // The per-agent block is usually an addition — a brand-new id has no
+    // entry — but "usually" is not "always": an operator can configure
+    // `agents.<id>` before the soul exists, and an entry outlives a soul
+    // somebody deleted. Either way it is settings the template would be
+    // overwriting, so it is compared key by key exactly like the shared
+    // ones. Silently replacing a root somebody chose is precisely the
+    // failure the conflict rule exists to prevent.
     if (perAgent) {
-      const agents = existing.agents;
-      adds.agents = (isJsonObject(agents)
-        ? { ...agents, [context.agentId]: perAgent }
-        : { [context.agentId]: perAgent }) as JsonValue;
+      const agents = isJsonObject(existing.agents) ? existing.agents : {};
+      const mine = agents[context.agentId];
+      const mineNow = isJsonObject(mine) ? mine : {};
+      const perAgentAdds: JsonObject = {};
+      for (const [key, value] of Object.entries(perAgent)) {
+        const present = mineNow[key];
+        if (present === undefined) {
+          perAgentAdds[key] = value as JsonValue;
+        } else if (!deepEqual(present, value as JsonValue)) {
+          conflicts.push({
+            key: `agents.${context.agentId}.${key}`,
+            existing: present,
+            requested: value as JsonValue,
+          });
+        }
+      }
+      if (conflicts.length > 0) {
+        decided.set(packageName, { status: 'conflict', package: packageName, reason, conflicts });
+        continue;
+      }
+      if (Object.keys(perAgentAdds).length > 0) {
+        adds.agents = { ...agents, [context.agentId]: { ...mineNow, ...perAgentAdds } } as JsonValue;
+      }
     }
     decided.set(
       packageName,
@@ -544,7 +568,18 @@ export const planAgentTemplate = async (
     // configuration the daemon will load.
     const effective = existingPlugins[packageName]
       ?? (outcome.status === 'add' ? outcome.settings : {});
-    available.push(...manifestTools(installed.manifest, effective));
+    try {
+      available.push(...manifestTools(installed.manifest, effective));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      outcomes.push({ status: 'unreadable', package: packageName, reason, error: message });
+      blockers.push({
+        kind: 'unreadable-plugin',
+        message: `${packageName} is installed, but this host would refuse to load it as configured: ${message}\n`
+          + `A plugin refused at load registers nothing, so the tools above would not exist. Fix it in ${options.configPath}, then run this again.`,
+      });
+      continue;
+    }
     available.push(...manifestNamespaces(installed.manifest));
     outcomes.push(installed.version !== undefined
       ? { ...outcome, version: installed.version }

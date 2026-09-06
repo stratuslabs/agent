@@ -75,6 +75,14 @@ const triage: AgentTemplate = {
   title: 'On-call triage',
   summary: 'Watches logs and status pages, and says what changed and whether it matters.',
   defaultName: 'Kit',
+  // `schedule.every` and `message.send` are here because the proposal at the
+  // end of this template's flow is only reachable through them, and the
+  // allowlist is checked *before* the approval policy — a soul without
+  // `schedule.every` refuses the call outright, so the "they will ask you to
+  // approve it" the flow promises could never happen. Granting them is not
+  // creating a schedule: both are `gated`, so the operator approves the
+  // cadence when it is proposed, and a firing's `message.send` runs
+  // unattended only to the destination approved with that schedule.
   tools: [
     'fs.read',
     'fs.list',
@@ -82,8 +90,10 @@ const triage: AgentTemplate = {
     'web.fetch',
     'memory.remember',
     'memory.recall',
+    'schedule.every',
     'schedule.list',
     'schedule.cancel',
+    'message.send',
   ],
   skills: [],
   credentials: [],
