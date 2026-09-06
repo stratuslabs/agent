@@ -141,5 +141,12 @@ test('promptTextOf quotes every line of an overheard message, whichever line bre
     promptTextOf({ content: 'one\ntwo\r\nthree\rfour', overheard: true }),
     '(overheard, not addressed to you)\n> one\n> two\n> three\n> four',
   );
+  // Every mandatory break Unicode defines, not only the ASCII two: a
+  // stranger needs exactly one the split does not know to put a bare line
+  // after it.
+  assert.equal(
+    promptTextOf({ content: 'a\u000Bb\u000Cc\u0085d\u2028e\u2029f', overheard: true }),
+    '(overheard, not addressed to you)\n> a\n> b\n> c\n> d\n> e\n> f',
+  );
   assert.equal(promptTextOf({ content: 'one\ntwo' }), 'one\ntwo');
 });
