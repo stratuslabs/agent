@@ -7353,12 +7353,36 @@ const runAgentNewFromTemplate = async (
   }
   writeLine(streams.stdout);
   writeLine(streams.stdout, 'Try:');
-  writeLine(streams.stdout, `  stratus run --soul ${quoteShellArg(applied.soulPath)} "introduce yourself"`);
+  // Carrying `--config` when one was given: the plugin entries went into
+  // that file, and a run without it resolves whatever config is active
+  // here instead — starting the agent with none of the tools just
+  // reviewed.
+  const configFlag = command.configPath ? ` --config ${quoteShellArg(command.configPath)}` : '';
+  writeLine(streams.stdout, `  stratus run${configFlag} --soul ${quoteShellArg(applied.soulPath)} "introduce yourself"`);
   if (applied.configured.length > 0) {
     writeLine(streams.stdout, '  stratus restart          # a plugin change needs one; see docs/guides/always-on.md');
   }
   return 0;
 };
+
+/**
+ * Whether `agent new` will take its guided path — the one that claims a
+ * soul and may set the default agent — as opposed to printing an identity
+ * and writing nothing.
+ *
+ * Exported and consulted in two places on purpose: here, to choose the
+ * path, and by `runCli`'s state-schema guard, to decide whether this
+ * invocation writes. A second reading of "is somebody at a terminal" could
+ * disagree with the first, and the disagreement that matters is a
+ * downgraded build refusing a command that only prints, or running one that
+ * writes.
+ */
+export const agentNewIsGuided = (
+  command: ParsedAgentNewCommand,
+  env: CliEnvironment,
+): boolean => env.setupInput === undefined
+  && process.stdin.isTTY === true
+  && command.format === 'text';
 
 export const runAgentNew = async (
   command: ParsedAgentNewCommand,
@@ -7369,14 +7393,12 @@ export const runAgentNew = async (
     return runAgentNewFromTemplate({ ...command, template: command.template }, streams, env);
   }
 
+  const interactive = agentNewIsGuided(command, env);
+
   // On a real terminal, creating an agent is the same guided experience as
   // setup: a headed screen, a prefilled (editable) name, a personality, and
   // an offer to make them the default. Scripted formats and piped input
   // keep the plain one-shot output.
-  const interactive = env.setupInput === undefined
-    && process.stdin.isTTY === true
-    && command.format === 'text';
-
   if (interactive) {
     const prompter = createSetupPrompter(streams, env, {
       header: stratusHeaderLines,
@@ -8816,12 +8838,14 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
         || (command.command === 'credential' && command.action !== 'list')
         || (command.command === 'schedules' && command.action === 'cancel')
         || (command.command === 'memory' && command.action === 'reassert')
-        // `agent new` writes: the guided path claims a soul and may set the
-        // default agent, and `--template` also merges plugin entries into
-        // the config. Only the printing formats (`json`, `soul`) write
-        // nothing, and they stay available on a home this build must not
-        // touch.
-        || (command.command === 'agent-new' && (command.template !== undefined || command.format === 'text'))
+        // `agent new` writes on two paths: `--template` merges plugin
+        // entries into the config, and the guided path claims a soul and may
+        // set the default agent. Asked of the same predicate that chooses
+        // the path, so a scripted `--format text` — which only prints — is
+        // not refused on a home this build must not touch, and the guided
+        // one is never let through.
+        || (command.command === 'agent-new'
+          && (command.template !== undefined || agentNewIsGuided(command, resolvedEnv)))
         || command.command === 'session'
         || (command.command === 'service' && (command.action === 'install' || command.action === 'start'));
       if (stamp.schemaVersion > STATE_SCHEMA_VERSION) {

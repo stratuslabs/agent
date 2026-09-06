@@ -751,6 +751,29 @@ export const planRiskCeiling = (plan: TemplatePlan): ToolRisk => {
 // Applying
 // ---------------------------------------------------------------------------
 
+/**
+ * The plugin half of what the operator approved, in a form two plans can be
+ * compared by: the package and the version behind it.
+ *
+ * Not the outcome or the settings, and that is a decision rather than an
+ * omission. A second creation running concurrently adds its own entry under
+ * `agents`, which turns this bundle's `add` into an `amend` and its written
+ * settings into none — a difference in the printed lines that changes
+ * nothing about what this agent gets. Binding those would make two
+ * creations racing on one config file refuse each other, which is the
+ * behaviour the lock exists to provide.
+ *
+ * The version is the reviewed detail worth binding: a package upgraded
+ * between the review and the confirmation is different code behind the same
+ * tool names, and the summary named a version. Everything that changes what
+ * the agent can *do* — a tool, its risk, the package that owns it — is
+ * already caught by comparing the resolved grants.
+ */
+const reviewedPluginDetail = (plan: TemplatePlan): unknown[] => plan.plugins.map((outcome) => ({
+  package: outcome.package,
+  ...('version' in outcome ? { version: outcome.version } : {}),
+}));
+
 /** Thrown when a plan cannot commit. Nothing is written when it is raised. */
 export class TemplateApplyError extends Error {
   constructor(message: string) {
@@ -906,13 +929,21 @@ export const applyAgentTemplate = async (
         );
       }
       // And what it grants has to still be what was approved. An unrelated
-      // config change is fine; one that moves a tool, its risk, or the
-      // package behind it means the operator said yes to something else.
+      // config change is fine; one that moves a tool, its risk, the package
+      // behind it, or the plugin settings that were shown means the
+      // operator said yes to something else.
       if (JSON.stringify(fresh.tools) !== JSON.stringify(plan.tools)) {
         throw new TemplateApplyError(
           `${plan.template.id} was not created: the configuration changed since this was reviewed, and the tools it `
           + 'would grant are no longer the ones printed. Nothing was written — run the command again to review the '
           + 'current answer.',
+        );
+      }
+      if (JSON.stringify(reviewedPluginDetail(fresh)) !== JSON.stringify(reviewedPluginDetail(plan))) {
+        throw new TemplateApplyError(
+          `${plan.template.id} was not created: the configuration changed since this was reviewed, and the plugin `
+          + 'packages behind it are no longer the ones printed. Nothing was written — run the command again to '
+          + 'review the current answer.',
         );
       }
 

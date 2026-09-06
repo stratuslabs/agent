@@ -1273,3 +1273,33 @@ test('a bundle with no plugin entries never touches the config lock', async () =
   await assert.rejects(stat(path.dirname(lockPath)), { code: 'ENOENT' }, 'no lock, and no directory made for one');
   assert.deepEqual(await readdir(path.join(fixture.home, '.stratus', 'agents')), [`${plan.agent.id}.md`]);
 });
+
+test('a required plugin upgraded between review and commit stops the write', async () => {
+  const fixture = await newFixture();
+  const packages: Record<string, JsonObject> = { '@stratusagent/tool-fs': firstPartyFs };
+  await writeFixturePackages(fixture.packagesRoot, packages);
+  const plan = await planFor(
+    templateWith({
+      tools: ['fs.read'],
+      plugins: [{ package: '@stratusagent/tool-fs', reason: 'files' }],
+    }),
+    fixture,
+    packages,
+  );
+  assert.equal(plan.plugins[0]?.status === 'add' ? plan.plugins[0].version : undefined, '9.9.9');
+
+  // Upgraded after the review. Same manifest, same tools, same risks — so
+  // the grant comparison passes — but different code behind them, and the
+  // summary named a version.
+  const upgraded = { ...firstPartyFs, version: '10.0.0' };
+  await writeFixturePackages(fixture.packagesRoot, { '@stratusagent/tool-fs': upgraded });
+
+  await assert.rejects(
+    applyFixture(plan, fixture.home, {}, {
+      packagesRoot: fixture.packagesRoot,
+      packages: { '@stratusagent/tool-fs': upgraded },
+    }),
+    (error: unknown) => error instanceof TemplateApplyError && /no longer the ones printed/.test(error.message),
+  );
+  assert.deepEqual(await readdir(path.join(fixture.home, '.stratus', 'agents')), []);
+});

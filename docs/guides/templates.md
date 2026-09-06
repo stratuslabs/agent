@@ -197,9 +197,13 @@ Each of these changes nothing at all — no soul file, no config entry:
 
 The bundle is also re-resolved against the config at the moment it commits,
 not just the moment you read it. If something changed in between — another
-command enabled a plugin that takes one of these tool names, or moved a
-tool's risk — the command writes nothing and tells you to look again. What
-you approved and what would land have to be the same thing.
+command enabled a plugin that takes one of these tool names, moved a tool's
+risk, or upgraded one of the packages named in the summary — the command
+writes nothing and tells you to look again. What you approved and what
+would land have to be the same thing.
+
+Another agent being created at the same time is not such a change: your
+entry and theirs both land, which is what the lock is for.
 
 If the id the template wanted is already taken — two `--template triage`
 runs both want `kit` — the second agent gets a suffixed id and a palette of

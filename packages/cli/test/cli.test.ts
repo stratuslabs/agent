@@ -9182,3 +9182,45 @@ test('a plugin-free template is created even with a project config active', asyn
   );
 });
 
+
+test('the suggested run keeps the config the plugin entries went into', async () => {
+  const home = await templateHome();
+  const chosen = path.join(home, 'chosen.json');
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'research', '--config', chosen, '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  // Without the flag the run resolves whatever config is active here, which
+  // is not the file the plugin entries were just written to — so the first
+  // thing the operator is told to try starts the agent with none of the
+  // tools they just reviewed.
+  assert.match(output.stdout, new RegExp(`stratus run --config \\S*chosen\\.json --soul`));
+});
+
+test('a scripted agent new that only prints is not refused on newer state', async () => {
+  const home = await templateHome();
+  await writeFile(
+    path.join(home, '.stratus', 'state.json'),
+    `${JSON.stringify({ schemaVersion: 999 })}\n`,
+  );
+
+  // Piped, so the guided path cannot run: this prints an identity and
+  // writes nothing, and reading is how somebody diagnoses their way out of
+  // a home a newer build stamped.
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--name', 'Ava'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, setupInput: Readable.from([]) },
+  });
+
+  assert.equal(code, 0);
+  assert.match(output.stdout, /Say hello to Ava/);
+  assert.match(output.stderr, /Warning: .*newer/);
+  await assert.rejects(readdir(path.join(home, '.stratus', 'agents')), { code: 'ENOENT' });
+});
