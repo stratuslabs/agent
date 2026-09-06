@@ -1125,3 +1125,43 @@ test('images past the replay budget are replaced by a note, newest kept', async 
     },
   ]);
 });
+
+test('an image the API cannot process is dropped from the session and the turn retried', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_input: any, init?: any) => {
+    const body = JSON.parse(init?.body ?? '{}');
+    bodies.push(body);
+    const hasImage = body.messages.some((message: any) => Array.isArray(message.content)
+      && message.content.some((block: any) => block.type === 'image' && block.source.data === 'BADBADBA'));
+    if (hasImage) {
+      return new Response(
+        JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'messages.0.content.0.image.source.base64.data: Could not process image' } }),
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    return new Response(JSON.stringify(apiMessage([{ type: 'text', text: 'Only the second one, then.' }])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const bad = { mediaType: 'image/png' as const, data: 'BADBADBA', name: 'bad.png' };
+  const good = { mediaType: 'image/png' as const, data: 'GOODGOOD', name: 'good.png' };
+  const session = createSession({
+    messages: [{ id: 'u1', role: 'user', content: 'both of these', createdAt: new Date().toISOString(), images: [bad, good] }],
+  });
+
+  const response = await provider.generate({ session });
+
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Only the second one, then.' }]);
+  // Two requests: the rejected one, then one with a note where the bad
+  // image was and the good image still in place.
+  assert.equal(bodies.length, 2);
+  assert.deepEqual(bodies[1]!.messages[0].content, [
+    { type: 'text', text: '[An image attached here (bad.png) is no longer sent: this conversation\'s images have passed what one request can carry, and only the most recent are kept.]' },
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'GOODGOOD' } },
+    { type: 'text', text: 'both of these' },
+  ]);
+  // Emptied on the session's own object, so the next turn never sends it.
+  assert.deepEqual(session.messages[0]!.images, [{ mediaType: 'image/png', data: '', omitted: true, name: 'bad.png' }, good]);
+});

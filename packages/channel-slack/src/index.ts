@@ -72,8 +72,11 @@ const PLACEHOLDER_TEXT = '…';
 
 /**
  * A 5 MB image over a slow link is seconds, not minutes. Past this the
- * download is abandoned and the turn runs with the attachment named as
- * unreadable, rather than the thread waiting on it.
+ * downloads are abandoned and the turn runs with the attachments named as
+ * unreadable, rather than the thread waiting on them. One deadline for
+ * the whole message, not one per file: a message may carry ten, and ten
+ * stalls in a row would hold the thread — and `stop()` — ten times as
+ * long.
  */
 const DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS = 30_000;
 /** What a turn that produced no text puts in its message, wherever it is posted from. */
@@ -266,8 +269,9 @@ export interface SlackAdapterOptions {
    */
   fetchFile?: SlackFileFetcher;
   /**
-   * How long one attachment download may take before the turn goes on
-   * without it. Defaults to `DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS`.
+   * How long one message's attachment downloads may take, all of them
+   * together, before the turn goes on without whatever has not arrived.
+   * Defaults to `DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS`.
    */
   fileDownloadTimeoutMs?: number;
 }
@@ -1206,6 +1210,8 @@ const readImageAttachments = async (
 ): Promise<{ images: ImageAttachment[]; unread: SlackInboundFile[] }> => {
   const images: ImageAttachment[] = [];
   const unread: SlackInboundFile[] = [];
+  // The message's one deadline, shared by every download in it.
+  const deadline = AbortSignal.timeout(timeoutMs);
   // Decoded bytes accepted so far. Checked against Slack's reported size
   // before a download and the real length after it, because the message
   // as a whole has a budget the per-image cap alone cannot keep.
@@ -1237,12 +1243,17 @@ const readImageAttachments = async (
     // message's budget if that is less. Handed to the fetcher so an
     // oversized response is abandoned mid-body rather than buffered whole.
     const maxBytes = Math.min(IMAGE_ATTACHMENT_MAX_BYTES, IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES - total);
+    if (deadline.aborted) {
+      warn(`slack: ${fileLabel(file)} was not downloaded: this message's downloads had already taken longer than ${timeoutMs}ms. The turn is told it cannot be read.`);
+      unread.push(file);
+      continue;
+    }
     let download: SlackFileDownload;
     try {
-      download = await fetchFile(url, botToken, AbortSignal.timeout(timeoutMs), maxBytes);
+      download = await fetchFile(url, botToken, deadline, maxBytes);
     } catch (error) {
       const reason = error instanceof Error && error.name === 'TimeoutError'
-        ? `it took longer than ${timeoutMs}ms`
+        ? `this message's downloads took longer than ${timeoutMs}ms`
         : (error instanceof Error ? error.message : String(error));
       warn(`slack: could not download ${fileLabel(file)}: ${reason}. The turn is told it cannot be read.`);
       unread.push(file);
@@ -1274,7 +1285,7 @@ const readImageAttachments = async (
     // after — so what is stored has to be what the API takes.
     const dimensions = imageDimensions(download.body, file.mimetype);
     if (dimensions === undefined) {
-      warn(`slack: ${fileLabel(file)} does not carry the ${file.mimetype} header Slack said it would; the turn is told it cannot be read.`);
+      warn(`slack: ${fileLabel(file)} is not a complete ${file.mimetype} — its header or trailer is missing; the turn is told it cannot be read.`);
       unread.push(file);
       continue;
     }

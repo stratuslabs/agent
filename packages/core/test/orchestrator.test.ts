@@ -1853,3 +1853,30 @@ test('a stored session keeps only the images inside its replay window', async ()
   const stored = await store.get('session-window');
   assert.equal(stored?.messages[0]?.images?.[0]?.omitted, true);
 });
+
+test('the first stored turn is held to the replay window too', async () => {
+  const store = new InMemorySessionStore();
+  const provider: ModelProvider = {
+    name: 'looking-provider',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'ok' }] };
+    },
+  };
+  const runner = new AgentRunner({ provider, store, imageReplayBudget: { count: 1 } });
+  const image = (data: string, name: string) => ({ mediaType: 'image/png' as const, data, name });
+
+  const opened = await runner.run({
+    sessionId: 'session-first-window',
+    agent: { id: 'a', name: 'A' },
+    userMessage: 'both',
+    images: [image('AAAAAAAA', 'first.png'), image('BBBBBBBB', 'second.png')],
+  });
+
+  // Newest first inside the message: the second image is the one kept.
+  assert.deepEqual(opened.messages[0]?.images, [
+    { mediaType: 'image/png', data: '', omitted: true, name: 'first.png' },
+    image('BBBBBBBB', 'second.png'),
+  ]);
+  const stored = await store.get('session-first-window');
+  assert.equal(stored?.messages[0]?.images?.[0]?.omitted, true);
+});

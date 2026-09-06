@@ -129,13 +129,16 @@ test('storing a turn lets go of the bytes outside the replay window and keeps th
   assert.equal('images' in bare, false);
 });
 
+/** The smallest thing that opens and closes like a PNG: signature, IHDR, IEND. */
 const pngHeader = (width: number, height: number): Uint8Array => {
-  const bytes = Buffer.alloc(24);
+  const bytes = Buffer.alloc(36);
   bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
   bytes.writeUInt32BE(13, 8);
   bytes.write('IHDR', 12, 'ascii');
   bytes.writeUInt32BE(width, 16);
   bytes.writeUInt32BE(height, 20);
+  bytes.write('IEND', 28, 'ascii');
+  bytes.set([0xae, 0x42, 0x60, 0x82], 32);
   return bytes;
 };
 
@@ -143,23 +146,26 @@ test('image dimensions are read from the header of each accepted format', () => 
   assert.deepEqual(imageDimensions(pngHeader(640, 480), 'image/png'), { width: 640, height: 480 });
   assert.deepEqual(imageDimensions(pngHeader(9000, 1), 'image/png'), { width: 9000, height: 1 });
 
-  const gif = Buffer.alloc(10);
+  const gif = Buffer.alloc(11);
   gif.write('GIF89a', 0, 'ascii');
   gif.writeUInt16LE(320, 6);
   gif.writeUInt16LE(200, 8);
+  gif[10] = 0x3b;
   assert.deepEqual(imageDimensions(gif, 'image/gif'), { width: 320, height: 200 });
 
-  // JPEG: SOI, an APP0 segment to step over, then SOF0 with the size.
+  // JPEG: SOI, an APP0 segment to step over, SOF0 with the size, then EOI.
   const jpeg = Buffer.from([
     0xff, 0xd8,
     0xff, 0xe0, 0x00, 0x04, 0x4a, 0x46,
     0xff, 0xc0, 0x00, 0x0b, 0x08, 0x01, 0xf4, 0x03, 0x20, 0x01, 0x01, 0x11, 0x00,
+    0xff, 0xd9,
   ]);
   assert.deepEqual(imageDimensions(jpeg, 'image/jpeg'), { width: 800, height: 500 });
 
   const webp = (chunk: string, payload: number[]): Uint8Array => {
     const bytes = Buffer.alloc(30);
     bytes.write('RIFF', 0, 'ascii');
+    bytes.writeUInt32LE(22, 4);
     bytes.write('WEBP', 8, 'ascii');
     bytes.write(chunk, 12, 'ascii');
     bytes.set(payload, 20);
@@ -177,10 +183,15 @@ test('image dimensions are read from the header of each accepted format', () => 
   assert.deepEqual(imageDimensions(webp('VP8 ', [...vp8]), 'image/webp'), { width: 800, height: 512 });
 
   // Bytes that are not what their type says have no size, and neither does
-  // a header cut short.
+  // a header cut short or a body that never reaches its trailer — the shape
+  // of a download that stopped early.
   assert.equal(imageDimensions(pngHeader(1, 1), 'image/jpeg'), undefined);
   assert.equal(imageDimensions(pngHeader(1, 1).subarray(0, 20), 'image/png'), undefined);
+  assert.equal(imageDimensions(Buffer.concat([pngHeader(1, 1), Buffer.alloc(4)]), 'image/png'), undefined);
+  assert.equal(imageDimensions(jpeg.subarray(0, jpeg.length - 2), 'image/jpeg'), undefined);
+  assert.equal(imageDimensions(gif.subarray(0, 10), 'image/gif'), undefined);
   assert.equal(imageDimensions(Buffer.from('GIF8'), 'image/gif'), undefined);
   assert.equal(imageDimensions(webp('ALPH', []), 'image/webp'), undefined);
+  assert.equal(imageDimensions(Buffer.concat([webp('VP8X', [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), Buffer.alloc(1)]), 'image/webp'), undefined);
   assert.equal(IMAGE_ATTACHMENT_MAX_DIMENSION, 8000);
 });

@@ -63,30 +63,37 @@ export interface ImageDimensions {
 
 /**
  * An image's pixel size, read from its header without decoding it, or
- * nothing when the bytes do not carry the header their media type
- * promises — which a caller should treat as "not an image it can send".
- * One reader for the four accepted formats, so a channel deciding whether
- * to keep a download asks this rather than trusting the uploader's
- * metadata.
+ * nothing when the bytes do not carry the header and trailer their media
+ * type promises — which a caller should treat as "not an image it can
+ * send". The trailer is what catches a download cut short: a PNG ends in
+ * IEND, a JPEG in an end-of-image marker, a GIF in a trailer byte, and a
+ * RIFF container declares its own length. It is not a decode — bytes that
+ * open and close correctly can still be refused by a model API, and a
+ * provider handles that when it happens (see `omitImage`) — but it is
+ * everything that can be checked without an image library, which core
+ * does not carry. One reader for the four accepted formats, so a channel
+ * deciding whether to keep a download asks this rather than trusting the
+ * uploader's metadata.
  */
 export const imageDimensions = (bytes: Uint8Array, mediaType: ImageAttachmentMediaType): ImageDimensions | undefined => {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const ascii = (at: number, length: number): string => String.fromCharCode(...bytes.subarray(at, at + length));
+  const last = bytes.length;
   switch (mediaType) {
     case 'image/png': {
-      if (bytes.length < 24 || ascii(1, 3) !== 'PNG' || ascii(12, 4) !== 'IHDR') {
+      if (bytes.length < 36 || ascii(1, 3) !== 'PNG' || ascii(12, 4) !== 'IHDR' || ascii(last - 8, 4) !== 'IEND') {
         return undefined;
       }
       return { width: view.getUint32(16), height: view.getUint32(20) };
     }
     case 'image/gif': {
-      if (bytes.length < 10 || ascii(0, 4) !== 'GIF8') {
+      if (bytes.length < 11 || ascii(0, 4) !== 'GIF8' || bytes[last - 1] !== 0x3b) {
         return undefined;
       }
       return { width: view.getUint16(6, true), height: view.getUint16(8, true) };
     }
     case 'image/webp': {
-      if (bytes.length < 30 || ascii(0, 4) !== 'RIFF' || ascii(8, 4) !== 'WEBP') {
+      if (bytes.length < 30 || ascii(0, 4) !== 'RIFF' || ascii(8, 4) !== 'WEBP' || view.getUint32(4, true) !== last - 8) {
         return undefined;
       }
       // Three container layouts, each keeping its size somewhere different.
@@ -110,7 +117,7 @@ export const imageDimensions = (bytes: Uint8Array, mediaType: ImageAttachmentMed
       return undefined;
     }
     case 'image/jpeg': {
-      if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
+      if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[last - 2] !== 0xff || bytes[last - 1] !== 0xd9) {
         return undefined;
       }
       // Walk the segments to the first start-of-frame, which carries the size.
@@ -234,23 +241,30 @@ export const omitImagesOutsideReplayBudget = (messages: Message[], budget: Image
   const kept = imagesWithinReplayBudget(messages, budget);
   let omitted = 0;
   for (const message of messages) {
-    if (message.images === undefined) {
-      continue;
-    }
-    message.images = message.images.map((image) => {
+    for (const image of message.images ?? []) {
       if (image.omitted === true || kept.has(image)) {
-        return image;
+        continue;
       }
+      omitImage(image);
       omitted += 1;
-      return {
-        mediaType: image.mediaType,
-        data: '',
-        omitted: true,
-        ...(image.name !== undefined ? { name: image.name } : {}),
-      };
-    });
+    }
   }
   return omitted;
+};
+
+/**
+ * Lets go of one image's bytes in place, keeping the record that it was
+ * there. Besides the replay window, this is what a provider does to an
+ * image the model API refused: the header checks a channel runs are not a
+ * decode, so a file that opens and closes correctly can still be rejected
+ * — and because an image is stored before the provider is called, a
+ * rejection left alone would replay on every later turn of the session.
+ * Emptied in place on the session's own object, so the runner's next save
+ * carries it and the turn goes on with a note in the image's place.
+ */
+export const omitImage = (image: ImageAttachment): void => {
+  image.data = '';
+  image.omitted = true;
 };
 
 /**
@@ -2922,19 +2936,21 @@ export class AgentRunner {
     // take the first sender's label for every turn that follows.
     const { [SENDER_TRUST_METADATA_KEY]: _sender, ...persisted } = input.metadata ?? {};
     const senderTrust = senderTrustOf(input.metadata);
+    // The first stored turn is held to the window like every later one:
+    // a one-shot session is a row too.
+    const opening: Message = {
+      id: `${input.sessionId}:user:1`,
+      role: 'user',
+      content: input.userMessage,
+      createdAt: new Date().toISOString(),
+      ...userImages(input.images),
+    };
+    omitImagesOutsideReplayBudget([opening], this.imageReplayBudget);
     const sessionInput: Omit<Session, 'createdAt' | 'updatedAt'> = {
       id: input.sessionId,
       agent: input.agent,
       status: 'running',
-      messages: [
-        {
-          id: `${input.sessionId}:user:1`,
-          role: 'user',
-          content: input.userMessage,
-          createdAt: new Date().toISOString(),
-          ...userImages(input.images),
-        },
-      ],
+      messages: [opening],
       // Labelled from the first write, whatever the dispatching surface
       // put in `metadata` under this key: the label is the runner's to
       // write, and a fresh session starts at the top of the lattice lowered

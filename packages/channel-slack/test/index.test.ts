@@ -3691,6 +3691,7 @@ test('an agent with no principals configured takes every sender as unknown, its 
 // A real PNG header with its size chunk, so what the test sends is bytes the
 // adapter can read a size out of and not a string that happens to be
 // called an image.
+const PNG_IEND = Buffer.from([0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
 const pngHeader = (width: number, height: number): Buffer => {
   const bytes = Buffer.alloc(24);
   bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
@@ -3698,11 +3699,15 @@ const pngHeader = (width: number, height: number): Buffer => {
   bytes.write('IHDR', 12, 'ascii');
   bytes.writeUInt32BE(width, 16);
   bytes.writeUInt32BE(height, 20);
-  return bytes;
+  return Buffer.concat([bytes, PNG_IEND]);
 };
 const PNG_BYTES = pngHeader(1, 1);
-/** A PNG of `length` bytes that still opens with a readable header. */
-const pngOfLength = (length: number): Buffer => Buffer.concat([PNG_BYTES, Buffer.alloc(length - PNG_BYTES.length, 1)]);
+/** A PNG of `length` bytes that still opens and closes like one. */
+const pngOfLength = (length: number): Buffer => Buffer.concat([
+  PNG_BYTES.subarray(0, 24),
+  Buffer.alloc(length - PNG_BYTES.length, 1),
+  PNG_IEND,
+]);
 
 test('an attached image is downloaded and travels with the dispatch; other files stay a note', async () => {
   const socket = createFakeSocket();
@@ -3891,6 +3896,10 @@ test('a download that stalls is abandoned at the deadline and the turn goes on w
         resolve({ status: 200, contentType: 'image/png', body: PNG_BYTES });
         return;
       }
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
       signal.addEventListener('abort', () => reject(signal.reason), { once: true });
     }),
   });
@@ -3915,6 +3924,57 @@ test('a download that stalls is abandoned at the deadline and the turn goes on w
     undefined,
   ]]);
   assert.equal(warnings.filter((line) => /slow\.png/.test(line) && /longer than 20ms/.test(line)).length, 1);
+});
+
+test('one message\'s downloads share a single deadline, so ten stalls cost one wait', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+  const signals: AbortSignal[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fileDownloadTimeoutMs: 20,
+    // Every download stalls until its signal fires.
+    fetchFile: (_url, _token, signal) => new Promise((_resolve, reject) => {
+      signals.push(signal);
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }),
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-batch' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> three slow ones',
+      ts: '968.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [1, 2, 3].map((n) => ({ id: `S${n}`, name: `slow${n}.png`, mimetype: 'image/png', size: 100, url_private_download: `https://files.slack.com/S${n}/download` })),
+    },
+  });
+  await adapter.stop();
+
+  // The first download waited out the deadline; the rest were never
+  // started, because the deadline they would have shared had passed.
+  assert.equal(signals.length, 1);
+  assert.equal(
+    gateway.dispatches[0]?.userMessage,
+    'Dylan: three slow ones\n[Attached: slow1.png, slow2.png, slow3.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+  );
+  assert.equal(warnings.filter((line) => /slow1\.png/.test(line) && /longer than 20ms/.test(line)).length, 1);
+  assert.equal(warnings.filter((line) => /slow[23]\.png/.test(line) && /already taken longer/.test(line)).length, 2);
 });
 
 test('images that fit one by one are still held to the message\'s total budget', async () => {
@@ -4083,8 +4143,8 @@ test('an image the model API would refuse for its size in pixels is never stored
       channel: 'C1',
       subtype: 'file_share',
       files: [
-        { id: 'F10', name: 'wide.png', mimetype: 'image/png', size: 24, url_private_download: 'https://files.slack.com/F10/download' },
-        { id: 'F11', name: 'fake.jpg', mimetype: 'image/jpeg', size: 24, url_private_download: 'https://files.slack.com/F11/download' },
+        { id: 'F10', name: 'wide.png', mimetype: 'image/png', size: 36, url_private_download: 'https://files.slack.com/F10/download' },
+        { id: 'F11', name: 'fake.jpg', mimetype: 'image/jpeg', size: 36, url_private_download: 'https://files.slack.com/F11/download' },
       ],
     },
   });
@@ -4095,5 +4155,5 @@ test('an image the model API would refuse for its size in pixels is never stored
     undefined,
   ]]);
   assert.equal(warnings.filter((line) => /wide\.png/.test(line) && /9000×100/.test(line)).length, 1);
-  assert.equal(warnings.filter((line) => /fake\.jpg/.test(line) && /header/.test(line)).length, 1);
+  assert.equal(warnings.filter((line) => /fake\.jpg/.test(line) && /not a complete image\/jpeg/.test(line)).length, 1);
 });

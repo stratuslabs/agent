@@ -65,7 +65,13 @@ images — is what a whole thread's images may take on one request, spent
 newest first: once a thread's images pass either limit the oldest are let
 go of — the model is told an image was there and what it was called, and
 the session keeps that record rather than the pixels, so a busy thread's
-row stays bounded.
+row stays bounded. A message's downloads share one 30-second deadline,
+after which whatever has not arrived is named as unreadable, so a slow
+link cannot hold the thread. And an image the model API itself refuses —
+the adapter checks that a file opens and closes like the image it claims
+to be, but that is not a decode — is dropped from the session and the turn
+retried without it, so one bad file cannot fail every later turn of a
+thread.
 An OpenAI-compatible model that takes only text needs `"vision": false` in
 config, which turns every image into that note; see the
 [Slack guide](../../docs/guides/slack.md#sending-an-image). A download that stalls is

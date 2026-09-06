@@ -1,6 +1,7 @@
 import {
   droppedImageNote,
   imagesWithinReplayBudget,
+  omitImage,
   renderSystemPromptSections,
   uncachedInputTokens,
   type ExecutionContext,
@@ -396,33 +397,54 @@ export const createOpenAICompatibleProvider = ({
 
       let payload;
       let response: Response;
-      try {
-        response = await fetchImpl(`${normalizedBaseUrl}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            authorization: `Bearer ${apiKey}`,
-            ...headers,
-          },
-          body: JSON.stringify({
-            model,
-            messages: createOpenAICompatibleMessages(request, systemPrompt, toolNames, vision, imageReplayBudget),
-            ...(tools.length > 0 ? { tools } : {}),
-          }),
-          ...(signal ? { signal } : {}),
-        });
-        payload = await parseOpenAICompatibleResponse(response);
-      } catch (error) {
-        // A timed-out request is a provider failure (fallback-eligible),
-        // never mistaken for the caller's own cancellation.
-        if (timeout?.aborted && !request.signal?.aborted) {
-          throw new Error(`Provider request timed out after ${requestTimeoutMs}ms: ${name}`);
+      // Sent at most twice: once as built, and once more without its
+      // images if the endpoint refused them.
+      let imagesRetried = false;
+      for (;;) {
+        const { messages, sent } = createOpenAICompatibleMessages(request, systemPrompt, toolNames, vision, imageReplayBudget);
+        try {
+          response = await fetchImpl(`${normalizedBaseUrl}/chat/completions`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              authorization: `Bearer ${apiKey}`,
+              ...headers,
+            },
+            body: JSON.stringify({
+              model,
+              messages,
+              ...(tools.length > 0 ? { tools } : {}),
+            }),
+            ...(signal ? { signal } : {}),
+          });
+          payload = await parseOpenAICompatibleResponse(response);
+        } catch (error) {
+          // A timed-out request is a provider failure (fallback-eligible),
+          // never mistaken for the caller's own cancellation.
+          if (timeout?.aborted && !request.signal?.aborted) {
+            throw new Error(`Provider request timed out after ${requestTimeoutMs}ms: ${name}`);
+          }
+          throw error;
         }
-        throw error;
-      }
 
-      if (!response.ok) {
-        throw new Error(payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`);
+        if (response.ok) {
+          break;
+        }
+        const message = payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`;
+        // A 400 that blames an image, from a request that carried some. This
+        // wire format has no one error shape across its vendors, so the
+        // whole batch is let go of rather than one block: the images are
+        // emptied on the session itself, since stored as they are they would
+        // fail every later turn the same way, and the turn goes on with a
+        // note in each one's place.
+        if (response.status === 400 && sent.length > 0 && !imagesRetried && /image/i.test(message)) {
+          for (const image of sent) {
+            omitImage(image);
+          }
+          imagesRetried = true;
+          continue;
+        }
+        throw new Error(message);
       }
 
       // Reported through the sink BEFORE the empty-response check below.
@@ -603,9 +625,13 @@ const createOpenAICompatibleMessages = (
   toolNames: OpenAICompatibleToolNameMapping,
   vision: boolean,
   imageReplayBudget: ImageReplayBudget | undefined,
-): OpenAICompatibleMessage[] => {
+): { messages: OpenAICompatibleMessage[]; sent: ImageAttachment[] } => {
   const messages: OpenAICompatibleMessage[] = [];
   const replayed = imagesWithinReplayBudget(request.session.messages, imageReplayBudget);
+  // The images this request actually carries, for a rejection to answer.
+  const sent: ImageAttachment[] = vision
+    ? request.session.messages.flatMap((message) => (message.images ?? []).filter((image) => replayed.has(image)))
+    : [];
 
   // One shared reading of what an agent is told about itself — persona,
   // memory, skills — rendered by the kernel (see core's system prompt
@@ -665,7 +691,7 @@ const createOpenAICompatibleMessages = (
     });
   }
 
-  return messages;
+  return { messages, sent };
 };
 
 const userContentParts = (

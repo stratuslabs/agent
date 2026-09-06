@@ -902,3 +902,49 @@ test('createOpenAICompatibleProvider names images for a model without vision ins
     'what is this?\n[Attached: shot.png. This runtime cannot see images — say so rather than guessing at them.]',
   );
 });
+
+test('createOpenAICompatibleProvider drops images an endpoint refuses and retries once', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    bodies.push(body);
+    const carriesImage = body.messages.some((message: any) => Array.isArray(message.content)
+      && message.content.some((part: any) => part.type === 'image_url'));
+    if (carriesImage) {
+      return new Response(JSON.stringify({ error: { message: 'Invalid image data' } }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'without it, then' } }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: fetchImpl });
+  const request = requestWithImage();
+
+  const response = await provider.generate(request);
+
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'without it, then' }]);
+  assert.equal(bodies.length, 2);
+  assert.deepEqual(bodies[1]!.messages.at(-1).content, [
+    { type: 'text', text: 'what is this?' },
+    { type: 'text', text: '[An image attached here (shot.png) is no longer sent: this conversation\'s images have passed what one request can carry, and only the most recent are kept.]' },
+  ]);
+  assert.deepEqual(request.session.messages[0]!.images, [{ mediaType: 'image/png', data: '', omitted: true, name: 'shot.png' }]);
+
+  // A 400 that blames something else is not retried.
+  let calls = 0;
+  const strict = createOpenAICompatibleProvider({
+    apiKey: 'k',
+    baseUrl: 'https://example.test/v1',
+    model: 'm',
+    fetch: (async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ error: { message: 'model not found' } }), { status: 400, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch,
+  });
+  await assert.rejects(() => strict.generate(requestWithImage()), /model not found/);
+  assert.equal(calls, 1);
+});

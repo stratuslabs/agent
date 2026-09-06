@@ -10,6 +10,7 @@ import type {
 import {
   droppedImageNote,
   imagesWithinReplayBudget,
+  omitImage,
   renderSystemPromptParts,
   type ImageAttachment,
   type ImageReplayBudget,
@@ -215,6 +216,22 @@ const buildPrompt = (
 const rejectsSystemMessages = (error: unknown): boolean =>
   error instanceof Anthropic.BadRequestError && /role .?system.? is not supported/i.test(error.message);
 
+/**
+ * The image block a 400 names, when it names one. The API spells the
+ * offending block's address into the message —
+ * `messages.3.content.0.image.source.base64.data: Could not process image`
+ * — which is the one thing that lets a provider drop exactly that image
+ * and try again, rather than fail a turn that will fail the same way on
+ * every replay after it.
+ */
+const rejectedImageAddress = (error: unknown): { message: number; block: number } | undefined => {
+  if (!(error instanceof Anthropic.BadRequestError)) {
+    return undefined;
+  }
+  const match = /messages\.(\d+)\.content\.(\d+)\.image\b/.exec(error.message);
+  return match ? { message: Number(match[1]), block: Number(match[2]) } : undefined;
+};
+
 type RawTurns = Record<string, ContentBlock[]>;
 
 /**
@@ -262,10 +279,16 @@ const userBlocks = (
   content: string,
   images: readonly ImageAttachment[] | undefined,
   replayed: ReadonlySet<ImageAttachment>,
+  imageOf: WeakMap<ContentBlockParam, ImageAttachment>,
 ): ContentBlockParam[] => {
-  const blocks: ContentBlockParam[] = (images ?? []).map((image) => (replayed.has(image)
-    ? { type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } }
-    : { type: 'text', text: droppedImageNote(image) }));
+  const blocks: ContentBlockParam[] = (images ?? []).map((image) => {
+    if (!replayed.has(image)) {
+      return { type: 'text', text: droppedImageNote(image) };
+    }
+    const block: ContentBlockParam = { type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } };
+    imageOf.set(block, image);
+    return block;
+  });
   if (content.length > 0 || blocks.length === 0) {
     blocks.push({ type: 'text', text: content });
   }
@@ -297,8 +320,11 @@ const createAnthropicMessages = (
   mapping: ToolNameMapping,
   rawTurns: RawTurns,
   imageReplayBudget: ImageReplayBudget | undefined,
-): MessageParam[] => {
+): { messages: MessageParam[]; imageOf: WeakMap<ContentBlockParam, ImageAttachment> } => {
   const replayed = imagesWithinReplayBudget(request.session.messages, imageReplayBudget);
+  // Which session image each image block came from, so a rejection that
+  // names a block can be answered on the session.
+  const imageOf = new WeakMap<ContentBlockParam, ImageAttachment>();
   // Build (role, blocks) groups first, merging consecutive same-role turns:
   // the runner records text and each tool call as separate messages, but on
   // the wire they belong to one assistant turn followed by one user turn of
@@ -387,10 +413,10 @@ const createAnthropicMessages = (
       continue;
     }
 
-    push('user', userBlocks(message.content, message.images, replayed));
+    push('user', userBlocks(message.content, message.images, replayed, imageOf));
   }
 
-  return groups.map((group) => ({ role: group.role, content: group.blocks }));
+  return { messages: groups.map((group) => ({ role: group.role, content: group.blocks })), imageOf };
 };
 
 const extractParts = (
@@ -522,7 +548,7 @@ export const createAnthropicProvider = ({
       const descriptors = sortedToolDescriptors(request.tools);
       const mapping = createToolNameMapping(descriptors);
       const tools = createAnthropicTools(descriptors, mapping);
-      const messages = createAnthropicMessages(request, mapping, rawTurns, imageReplayBudget);
+      const { messages, imageOf } = createAnthropicMessages(request, mapping, rawTurns, imageReplayBudget);
       // A system message has to follow a user turn. The kernel loop only
       // calls a provider with a user message or tool results last, so this
       // holds — but it is the API's rule, not ours, and a caller building
@@ -632,21 +658,41 @@ export const createAnthropicProvider = ({
       };
 
       let response;
-      try {
-        response = await send(params);
-      } catch (error) {
-        // The one recoverable rejection: this model has no mid-conversation
-        // system message, so memory has to go back in the system block. Only
-        // when we actually sent one — any other 400 is the caller's.
-        //
-        // No reset delta first: the API rejects the request before generating,
-        // so nothing has streamed for a consumer to discard.
-        if (params.messages.at(-1)?.role !== 'system' || !rejectsSystemMessages(error)) {
-          throw error;
+      // Each pass through this loop removes one thing the API refused, so
+      // it ends: the system message once, and each image at most once.
+      for (;;) {
+        try {
+          response = await send(params);
+          break;
+        } catch (error) {
+          // No reset delta on either recovery: the API rejects the request
+          // before generating, so nothing has streamed for a consumer to
+          // discard.
+          //
+          // One recoverable rejection: this model has no mid-conversation
+          // system message, so memory has to go back in the system block.
+          // Only when we actually sent one — any other 400 is the caller's.
+          if (params.messages.at(-1)?.role === 'system' && rejectsSystemMessages(error)) {
+            memoryAtTailSupported = false;
+            params = buildParams(false);
+            continue;
+          }
+          // The other: an image the API could not process. The channel
+          // checked its header and trailer, but that is not a decode. The
+          // image is emptied on the session itself — it is stored already,
+          // and left alone it would fail every later turn the same way —
+          // and the turn goes on with a note in its place.
+          const address = rejectedImageAddress(error);
+          const content = address === undefined ? undefined : params.messages[address.message]?.content;
+          const block = Array.isArray(content) ? content[address!.block] : undefined;
+          const image = block === undefined ? undefined : imageOf.get(block as ContentBlockParam);
+          if (image === undefined || block === undefined) {
+            throw error;
+          }
+          omitImage(image);
+          (content as ContentBlockParam[])[address!.block] = { type: 'text', text: droppedImageNote(image) };
+          continue;
         }
-        memoryAtTailSupported = false;
-        params = buildParams(false);
-        response = await send(params);
       }
 
       // Reported through the sink BEFORE anything that can reject the
