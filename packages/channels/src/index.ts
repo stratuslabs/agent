@@ -2,6 +2,7 @@ import type {
   AgentDefinition,
   ApprovalAnswer,
   EventBus,
+  ImageAttachment,
   JsonObject,
   Session,
 } from '@stratusagent/core';
@@ -110,6 +111,8 @@ export interface GatewayLike {
     sessionId: string;
     agentId?: string;
     userMessage: string;
+    /** Images sent with the message — see `Message.images` in `@stratusagent/core`. */
+    images?: ImageAttachment[];
     metadata?: JsonObject;
     signal?: AbortSignal;
     /**

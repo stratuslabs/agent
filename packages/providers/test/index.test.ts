@@ -5,14 +5,14 @@ import type { ProviderCallUsage, ProviderRequest } from '@stratusagent/core';
 import {
   createOpenAICompatibleProvider,
   createProviderRegistry,
-  latestUserMessagePrompt,
-  renderTranscriptPrompt,
   createProviderResponseBuilder,
   defineProvider,
   defineScriptedProvider,
   defineStaticProvider,
+  latestUserMessagePrompt,
   normalizeProviderParts,
   normalizeProviderResponse,
+  renderTranscriptPrompt,
   sanitizeOpenAICompatibleToolName,
 } from '../src/index.ts';
 
@@ -796,6 +796,200 @@ test('a successful call reports once, through the sink, and repeats it on the re
   // reads one or the other and never both.
   assert.equal(reported.length, 1);
   assert.deepEqual(reported[0], response.usage);
+});
+
+const requestWithImage = (): ProviderRequest => {
+  const request = createRequest();
+  request.session.messages = [
+    {
+      id: 'session-1:user:1',
+      role: 'user',
+      content: 'what is this?',
+      createdAt: new Date().toISOString(),
+      images: [{ mediaType: 'image/png', data: 'iVBORw0KGgo=', name: 'shot.png' }],
+    },
+  ];
+  return request;
+};
+
+test('a text-only transcript prompt names the images it cannot show', () => {
+  const single = requestWithImage();
+  const note = '\n[Attached: shot.png. This runtime cannot see images — say so rather than guessing at them.]';
+  assert.equal(renderTranscriptPrompt(single), `what is this?${note}`);
+  assert.equal(latestUserMessagePrompt(single), `what is this?${note}`);
+
+  const longer = requestWithImage();
+  longer.session.messages.push(
+    { id: 'session-1:assistant:2', role: 'assistant', content: 'A trace.', createdAt: new Date().toISOString() },
+    {
+      id: 'session-1:user:3',
+      role: 'user',
+      content: '',
+      createdAt: new Date().toISOString(),
+      images: [{ mediaType: 'image/jpeg', data: '/9j/4AAQ' }],
+    },
+  );
+  // An unnamed image is still named by what it is; a message that was only
+  // an image is the note alone.
+  assert.equal(
+    renderTranscriptPrompt(longer),
+    [
+      'Conversation so far:',
+      `[user] what is this?${note}`,
+      '[assistant] A trace.',
+      '[user] \n[Attached: a image/jpeg image. This runtime cannot see images — say so rather than guessing at them.]',
+      '',
+      'Continue the conversation by replying to the latest user message.',
+    ].join('\n'),
+  );
+  // A transcript with no images reads exactly as it did before they existed.
+  assert.equal(renderTranscriptPrompt(createRequest()), 'Say hello');
+});
+
+test('createOpenAICompatibleProvider sends a user message\'s images as data-URL image parts', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'A trace.' } }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: fetchImpl });
+
+  await provider.generate(requestWithImage());
+
+  const sent = bodies[0]!.messages.filter((message: { role: string }) => message.role === 'user');
+  assert.deepEqual(sent, [{
+    role: 'user',
+    content: [
+      { type: 'text', text: 'what is this?' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } },
+    ],
+  }]);
+  // Without images the content stays the plain string every compatible
+  // server accepts.
+  await provider.generate(createRequest());
+  assert.equal(bodies[1]!.messages.at(-1).content, 'Say hello');
+});
+
+test('createOpenAICompatibleProvider replaces images past the replay budget with a note', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  // Each image is 6 decoded bytes; the budget holds one.
+  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: fetchImpl, imageReplayBudget: { bytes: 6 } });
+  const request = requestWithImage();
+  request.session.messages[0]!.images = [{ mediaType: 'image/png', data: 'AAAAAAAA', name: 'old.png' }];
+  request.session.messages.push({
+    id: 'session-1:user:2',
+    role: 'user',
+    content: 'and now',
+    createdAt: new Date().toISOString(),
+    images: [{ mediaType: 'image/png', data: 'BBBBBBBB' }],
+  });
+
+  await provider.generate(request);
+
+  const sent = bodies[0]!.messages.filter((message: { role: string }) => message.role === 'user');
+  assert.deepEqual(sent, [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'what is this?' },
+        { type: 'text', text: '[An image attached here (old.png) is no longer sent: this conversation\'s images have passed what one request can carry, and only the most recent are kept.]' },
+      ],
+    },
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'and now' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,BBBBBBBB' } },
+      ],
+    },
+  ]);
+});
+
+test('createOpenAICompatibleProvider names images for a model without vision instead of sending them', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: fetchImpl, vision: false });
+
+  await provider.generate(requestWithImage());
+
+  // A plain string, so an endpoint that takes only strings takes this one,
+  // with the same note a text-only harness gets.
+  assert.equal(
+    bodies[0]!.messages.at(-1).content,
+    'what is this?\n[Attached: shot.png. This runtime cannot see images — say so rather than guessing at them.]',
+  );
+});
+
+test('createOpenAICompatibleProvider drops images an endpoint refuses and retries once', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    bodies.push(body);
+    const carriesImage = body.messages.some((message: any) => Array.isArray(message.content)
+      && message.content.some((part: any) => part.type === 'image_url'));
+    if (carriesImage) {
+      return new Response(JSON.stringify({ error: { message: 'Invalid image data' } }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'without it, then' } }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  // A window of one image: the request carries only the newest, and the
+  // older one is exactly what a rebuilt retry would otherwise reach for.
+  const provider = createOpenAICompatibleProvider({ apiKey: 'k', baseUrl: 'https://example.test/v1', model: 'm', fetch: fetchImpl, imageReplayBudget: { count: 1 } });
+  const request = requestWithImage();
+  const older = { mediaType: 'image/png' as const, data: 'AAAAAAAA', name: 'older.png' };
+  request.session.messages.unshift({ id: 'session-1:user:0', role: 'user', content: 'earlier', createdAt: new Date().toISOString(), images: [older] });
+
+  const response = await provider.generate(request);
+
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'without it, then' }]);
+  assert.equal(bodies.length, 2);
+  // The retry carries no image anywhere — not the refused one, and not the
+  // older one the refusal made room for.
+  const retryParts = bodies[1]!.messages.flatMap((message: any) => (Array.isArray(message.content) ? message.content : []));
+  assert.equal(retryParts.some((part: any) => part.type === 'image_url'), false);
+  assert.equal(
+    bodies[1]!.messages.at(-1).content,
+    'what is this?\n[Attached: shot.png. This runtime cannot see images — say so rather than guessing at them.]',
+  );
+  // Only the image that was sent and refused is emptied on the session.
+  assert.deepEqual(request.session.messages[1]!.images, [{ mediaType: 'image/png', data: '', omitted: true, name: 'shot.png' }]);
+  assert.deepEqual(request.session.messages[0]!.images, [older]);
+
+  // A 400 that blames something else is not retried.
+  let calls = 0;
+  const strict = createOpenAICompatibleProvider({
+    apiKey: 'k',
+    baseUrl: 'https://example.test/v1',
+    model: 'm',
+    fetch: (async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ error: { message: 'model not found' } }), { status: 400, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch,
+  });
+  await assert.rejects(() => strict.generate(requestWithImage()), /model not found/);
+  assert.equal(calls, 1);
 });
 
 const message = (

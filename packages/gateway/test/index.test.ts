@@ -4205,3 +4205,19 @@ test('GATEWAY_ONLY_TOOL_NAMES is exactly what a gateway adds over a plain host',
     await gateway.stop();
   }
 });
+
+test('a dispatch carrying images stores them on the turn it opens and on the turn it resumes', async () => {
+  const home = await newHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  const gateway = createGateway({ env, idleTimeoutMs: 0 });
+  await gateway.start();
+
+  const shot = { mediaType: 'image/png' as const, data: 'iVBORw0KGgo=', name: 'shot.png' };
+  const opened = await gateway.dispatch({ sessionId: 'images-1', userMessage: 'what is this?', images: [shot] });
+  const resumed = await gateway.dispatch({ sessionId: 'images-1', userMessage: 'and this?', images: [{ ...shot, name: 'other.png' }] });
+  await gateway.stop();
+
+  assert.deepEqual(opened.messages[0]?.images, [shot]);
+  const asked = resumed.messages.filter((message) => message.role === 'user');
+  assert.deepEqual(asked.map((message) => message.images?.[0]?.name), ['shot.png', 'other.png']);
+});

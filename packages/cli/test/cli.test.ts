@@ -8812,3 +8812,37 @@ test('stratus session rollover without a running daemon says so', async () => {
   assert.equal(await runCli({ argv: ['session', 'rollover', 's-1'], streams: failed.streams, env: { cwd: home, homeDir: home, processEnv: {} } }), 1);
   assert.match(failed.output.stderr, /no running daemon found/);
 });
+
+test('re-running setup carries a configured vision switch through the save', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A text-only local model, told so. Setup has no menu for this key, so
+  // a rewrite that forgot it would hand the model its images back.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'local-text-model',
+    baseUrl: 'https://local.test/v1',
+    vision: false,
+  }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    openai: { type: 'api_key', value: 'sk-openai-key', baseUrl: 'https://local.test/v1' },
+  }));
+  const { streams } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['6\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.vision, false);
+  assert.equal(config.provider, 'openai');
+});
