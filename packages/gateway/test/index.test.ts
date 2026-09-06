@@ -427,6 +427,44 @@ test('a rotated credential reaches the provider on the next dispatch', async () 
   assert.deepEqual(authHeaders, ['Bearer sk-before', 'Bearer sk-after']);
 });
 
+test('an agent that cannot currently answer still hears, and has it once it can', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
+  const userContents: string[][] = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+    userContents.push(body.messages.filter((message) => message.role === 'user').map((message) => message.content));
+    return openAiText('ok');
+  }) as typeof fetch;
+  const processEnv: NodeJS.ProcessEnv = { OPENAI_API_KEY: 'sk-test' };
+  const gateway = createGateway({ env: { homeDir: home, cwd: home, processEnv, fetch: fetchImpl }, idleTimeoutMs: 0 });
+  await gateway.start();
+  try {
+    await gateway.dispatch({ sessionId: 'quiet-1', agentId: 'ava', userMessage: 'Dylan: Ava, hello' });
+
+    // The credential goes away — a sign-in that lapsed, a restart without
+    // the env. A turn cannot be run, and says so.
+    delete processEnv.OPENAI_API_KEY;
+    await assert.rejects(() => gateway.dispatch({ sessionId: 'quiet-1', agentId: 'ava', userMessage: 'Dylan: Ava?' }));
+
+    // Hearing runs no turn and needs no provider: the thread carries on
+    // without the agent, and what was said is not lost to the outage.
+    const heard = await gateway.observe({ sessionId: 'quiet-1', agentId: 'ava', message: 'Dylan: Bea, cover for her?' });
+    assert.equal(heard?.messages.at(-1)?.overheard, true);
+
+    // Repaired, the next turn reads what was heard while it was down.
+    processEnv.OPENAI_API_KEY = 'sk-test';
+    await gateway.dispatch({ sessionId: 'quiet-1', agentId: 'ava', userMessage: 'Dylan: Ava, back?' });
+    assert.deepEqual(userContents.at(-1), [
+      'Dylan: Ava, hello',
+      '(overheard, not addressed to you) Dylan: Bea, cover for her?',
+      'Dylan: Ava, back?',
+    ]);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('a session never crosses agent identities', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');

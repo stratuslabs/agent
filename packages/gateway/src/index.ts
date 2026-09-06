@@ -1758,6 +1758,32 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return runner;
   };
 
+  /**
+   * The runner that hears and never speaks. `observe` runs no turn, so it
+   * needs no provider — and resolving one anyway would refuse an overhear
+   * whenever the agent's runtime cannot currently be built: credentials
+   * missing after a restart, a sign-in that lapsed. That is precisely the
+   * window in which the agent cannot answer and the thread carries on
+   * without it, so it is the window in which hearing matters most, and
+   * what it heard is there once the configuration is repaired.
+   *
+   * A runner rather than a store write, because the label a speaker
+   * lowers the session to is the runner's rule and there is one
+   * implementation of it. Same store and bus as every speaking runner, so
+   * a message it appends is the message the next turn reads, and its
+   * event goes where every other event goes.
+   */
+  const observer = new AgentRunner({
+    provider: {
+      name: 'observer',
+      async generate(): Promise<never> {
+        throw new Error('The observing runner never runs a turn.');
+      },
+    },
+    store,
+    bus,
+  });
+
   // ---- watchdog -----------------------------------------------------------
 
   /**
@@ -2609,12 +2635,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
           `Session ${input.sessionId} was rolled over; it is an archived transcript and the conversation continues as ${continuedAs}.`,
         );
       }
-      // Resolved the way a turn resolves it, so the runner that hears is
-      // the one that would speak: the label it writes is the runner's, and
-      // there is one implementation of that rule.
-      const source = await refreshAgent(existing.agent.id);
-      const runner = runnerFor(await runtimeForAgent(source));
-      return runner.observe({
+      return observer.observe({
         sessionId: input.sessionId,
         message: input.message,
         ...(input.metadata ? { metadata: input.metadata } : {}),
