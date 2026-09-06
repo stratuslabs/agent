@@ -62,12 +62,16 @@ and another addressing its target.
 
 Because both the lock and the temporary sit beside the config rather than
 inside `~/.stratus`, they can land in a directory other people may write.
-Four rules follow, and they exist because without them a file planted there
+Five rules follow. Most exist because without them a file planted there
 turns an ordinary save into a way to destroy something else:
 
 - A lock path that is a symbolic link, or a damaged lock file belonging to
   another user, is refused rather than emptied. Remove the file and run the
   command again.
+- A lock this command creates is `0600` exactly, set through the descriptor
+  it was created on rather than left to the umask — a restrictive one would
+  otherwise produce a lock the process that made it cannot open. A lock that
+  already exists keeps whatever mode its creator gave it.
 - Clearing a damaged lock opens it without following links and truncates
   *that descriptor*, so the file checked and the file emptied cannot be
   different ones.

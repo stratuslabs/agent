@@ -1,4 +1,4 @@
-import { closeSync, constants as fsConstants, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync } from 'node:fs';
+import { closeSync, constants as fsConstants, fchmodSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -79,14 +79,7 @@ const errcodeOf = (error: unknown): unknown =>
  * matters here and not in `~/.stratus`.
  */
 const claimAt = (lockPath: string): DatabaseSync => {
-  // The file is created here, not by SQLite, so its mode arrives with it.
-  // A path-based `chmod` after the claim would be a third resolution of
-  // this path — and the one running while the claim is already held, so a
-  // link swapped in behind it would have this set an arbitrary
-  // operator-owned file to 0600. `O_NOFOLLOW` refuses a link, `O_CREAT`
-  // without `O_EXCL` leaves an existing lock's mode alone, and the mode
-  // argument applies only to a file this call creates.
-  closeSync(openSync(lockPath, fsConstants.O_CREAT | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW, 0o600));
+  openLockFile(lockPath);
   const db = new DatabaseSync(lockPath);
   try {
     db.exec('PRAGMA journal_mode = MEMORY');
@@ -97,6 +90,45 @@ const claimAt = (lockPath: string): DatabaseSync => {
   } catch (error) {
     db.close();
     throw error;
+  }
+};
+
+/**
+ * Make sure the lock file exists, at mode 0600 when this call creates it.
+ *
+ * The file is created here rather than by SQLite so that its mode is this
+ * module's decision. `fchmod` rather than open's mode argument, because
+ * that argument is masked by the umask: under a restrictive one the file
+ * arrives without the owner bits and SQLite cannot open the lock it was
+ * just handed — `SQLITE_CANTOPEN`, and no daemon and no config
+ * transaction. Through the descriptor rather than the path, so nothing
+ * swapped in behind it can be what gets re-permissioned.
+ *
+ * Two opens, and the second is not redundant. `O_EXCL` is what makes the
+ * mode apply to a file this call actually created, and it answers EEXIST
+ * for a symlink as well as for a real file — so the plain no-follow open
+ * runs next, which answers `ELOOP` for the link and leaves an existing
+ * lock's mode exactly as its creator left it.
+ */
+const openLockFile = (lockPath: string): void => {
+  let fd: number;
+  try {
+    fd = openSync(
+      lockPath,
+      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw error;
+    }
+    closeSync(openSync(lockPath, fsConstants.O_CREAT | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW, 0o600));
+    return;
+  }
+  try {
+    fchmodSync(fd, 0o600);
+  } finally {
+    closeSync(fd);
   }
 };
 

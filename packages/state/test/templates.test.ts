@@ -1463,6 +1463,30 @@ test('a lock path that is a symlink is refused, never followed and truncated', a
   );
 });
 
+test('a lock is 0600 whatever the umask says, and an existing one keeps its own mode', async () => {
+  const home = await newHome();
+  const lockPath = path.join(home, 'config.json.lock');
+
+  // The umask masks `open`'s mode argument, so a restrictive one creates
+  // the lock without the owner bits and SQLite cannot open the file it was
+  // just handed — `SQLITE_CANTOPEN`, and no daemon and no config
+  // transaction. Asserted on the mode rather than on SQLite failing,
+  // because CI runs as root and root opens 0000 regardless.
+  const before = process.umask(0o777);
+  try {
+    claimFileLock(lockPath).release();
+  } finally {
+    process.umask(before);
+  }
+  assert.equal((await stat(lockPath)).mode & 0o777, 0o600);
+
+  // An existing lock is somebody's decision — an operator who loosened one
+  // beside a shared config keeps it — so a later claim leaves it alone.
+  await chmod(lockPath, 0o660);
+  claimFileLock(lockPath).release();
+  assert.equal((await stat(lockPath)).mode & 0o777, 0o660, 'left as its creator left it');
+});
+
 test('a damaged lock is emptied through one descriptor, so a swapped link cannot be truncated', async () => {
   const home = await newHome();
   const lockPath = path.join(home, 'config.json.lock');
