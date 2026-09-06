@@ -9245,6 +9245,28 @@ test('a plugin-free template is created despite a broken project config', async 
   assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), ['mira.md']);
 });
 
+test('a plugin-free template is created despite a config path that will not resolve', async () => {
+  const home = await templateHome();
+  const loop = path.join(home, 'loop.json');
+  const back = path.join(home, 'back.json');
+  await symlink(back, loop);
+  await symlink(loop, back);
+
+  // `assistant` runs no config transaction at all — no lock, no read, no
+  // write — so a link chain it will never open is not its problem. The
+  // resolution used to run unconditionally, which turned somebody else's
+  // dotfiles loop into a refusal after the operator had already confirmed.
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['agent', 'new', '--template', 'assistant', '--config', loop, '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), ['mira.md']);
+});
+
 test('a template writes the config it locked, even if a symlink is retargeted mid-flight', async () => {
   const home = await templateHome();
   const first = path.join(home, 'first.json');

@@ -7299,7 +7299,13 @@ const runAgentNewFromTemplate = async (
   // file — the same rule `updateConfigFile` follows, and it has to be
   // stated here too because this transaction is composed by hand rather
   // than run through it.
-  const configTarget = await resolveConfigTarget(configPath);
+  //
+  // Only for a bundle that has a transaction to run. A template with no
+  // plugin entries never locks, reads, or writes the config, so resolving
+  // a path it will not touch would let a symlink loop or an over-long
+  // chain refuse a soul — after the operator already confirmed it — over
+  // a file the command was never going to open.
+  const configTarget = template.plugins.length > 0 ? await resolveConfigTarget(configPath) : configPath;
 
   let applied;
   try {
