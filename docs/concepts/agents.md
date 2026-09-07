@@ -74,6 +74,13 @@ The `tools:` list is the per-identity gate over everything a plugin
 installs — see [Tools](../guides/tools.md) — and `skills:` opts into
 procedures the same way — see [Skills](../guides/skills.md).
 
+One more frontmatter key, and it is the only one that makes an agent act
+without being spoken to: `dreams: ./ava.dreams.md` points at a file of
+overnight work — experiments, builds, reading — that a running daemon
+works through in a window at night. The path is relative to the soul, and
+the file is where the window and the dreams themselves live. See
+[Dreams](../guides/dreams.md).
+
 ## Ids are not labels
 
 Frontmatter may set `id:` explicitly, and it keys the agent's sessions,

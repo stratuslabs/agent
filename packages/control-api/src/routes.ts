@@ -13,6 +13,8 @@ import {
 } from '@stratusagent/agents';
 import type { JsonObject } from '@stratusagent/core';
 import {
+  DREAM_SESSION_ID_PREFIX,
+  isDreamSessionId,
   isScheduleSessionId,
   RESERVED_SESSION_METADATA_KEYS,
   reservedSessionMetadataKey,
@@ -483,6 +485,10 @@ export const routes: Route[] = [
             ...(summary?.soulPath ? { soulPath: summary.soulPath } : {}),
             ...(summary?.provider ? { provider: summary.provider } : {}),
             ...(summary?.model ? { model: summary.model } : {}),
+            // As the soul wrote it. Where it resolves to, and whether that
+            // path is one the daemon will read, is the dream runtime's
+            // answer and not a listing's.
+            ...(summary?.dreams ? { dreams: summary.dreams } : {}),
             ...(summary?.persona ? { persona: summary.persona } : {}),
             ...(agent.avatar ? { avatar: agent.avatar } : summary?.avatar ? { avatar: summary.avatar } : {}),
             // A timestamp and a count, never a verdict. What counts as
@@ -512,6 +518,7 @@ export const routes: Route[] = [
         soulPath,
         ...(soul.provider ? { provider: soul.provider } : {}),
         ...(soul.model ? { model: soul.model } : {}),
+        ...(soul.dreams ? { dreams: soul.dreams } : {}),
       };
     },
   },
@@ -593,6 +600,12 @@ export const routes: Route[] = [
           // An empty string clears a pin; an absent key leaves it alone.
           ...(provider === undefined ? (current.provider ? { provider: current.provider } : {}) : (provider ? { provider } : {})),
           ...(model === undefined ? (current.model ? { model: current.model } : {}) : (model ? { model } : {})),
+          // Carried, never taken as a field: this edit renders the whole
+          // soul back, so anything not carried is deleted — and a rename
+          // from the dashboard that silently stopped an agent dreaming is
+          // the kind of loss nobody connects to the edit that caused it.
+          // Setting it is a raw-markdown edit, or the file itself.
+          ...(current.dreams ? { dreams: current.dreams } : {}),
         };
       }
 
@@ -740,6 +753,14 @@ export const routes: Route[] = [
           'session_id_reserved',
           `Session ids beginning with "${SCHEDULE_SESSION_ID_PREFIX}" belong to scheduled firings and cannot be dispatched externally. `
             + 'Use your own id for a conversation; `GET /schedules` lists the schedules whose firings own those.',
+        );
+      }
+      if (isDreamSessionId(sessionId)) {
+        throw new ApiError(
+          400,
+          'session_id_reserved',
+          `Session ids beginning with "${DREAM_SESSION_ID_PREFIX}" belong to an agent's dreams and cannot be dispatched externally. `
+            + 'Use your own id for a conversation; a dream session is the transcript of one night\'s work.',
         );
       }
 

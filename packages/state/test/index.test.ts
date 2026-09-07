@@ -47,6 +47,25 @@ test('roster loading returns parsed souls and skips unreadable files with a warn
   assert.equal(ava.soul.agent.instructions, 'You are Ava.');
 });
 
+test('a dream file beside its soul is not read as a soul', async () => {
+  // Its own home: the shared one carries the unreadable soul the roster
+  // test above leaves behind, and the point here is that nothing warns.
+  const env = { homeDir: await mkdtemp(path.join(os.tmpdir(), 'stratus-dreams-roster-')) };
+  await mkdir(agentsDirPath(env), { recursive: true });
+  await writeFile(path.join(agentsDirPath(env), 'ava.md'), '---\nname: Ava\nid: ava\ndreams: ./ava.dreams.md\n---\n\nYou are Ava.\n');
+  // The layout the docs recommend. Scanned by extension, this file would
+  // otherwise be parsed as a soul and skipped with a warning on every
+  // start, every listing, and every reload.
+  await writeFile(path.join(agentsDirPath(env), 'ava.dreams.md'), '---\nwindow: 01:00-05:00\n---\n\n## A dream\n');
+
+  const warnings: string[] = [];
+  const roster = await loadRosterSouls(env, (message) => warnings.push(message));
+
+  assert.deepEqual(warnings, []);
+  assert.deepEqual(roster.map((entry) => entry.soul.agent.id), ['ava']);
+  assert.equal(roster[0]?.soul.dreams, './ava.dreams.md');
+});
+
 test('soul identity is seeded by path so ids stay stable across loads', async () => {
   const env = { homeDir: tempHome };
   const soulPath = path.join(agentsDirPath(env), 'anon.md');

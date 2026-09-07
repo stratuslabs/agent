@@ -7212,6 +7212,70 @@ test('stratus schedules lists the daemon database and cancel revokes a row', asy
   await rm(home, { recursive: true, force: true });
 });
 
+// ---- stratus dreams ---------------------------------------------------------
+
+test('parseCommand reads the dreams command', () => {
+  assert.deepEqual(parseCommand(['dreams']), { command: 'dreams', format: 'text' });
+  assert.deepEqual(parseCommand(['dreams', '--agent', 'ava']), { command: 'dreams', format: 'text', agentId: 'ava' });
+  assert.deepEqual(parseCommand(['dreams', '--format', 'json']), { command: 'dreams', format: 'json' });
+  assert.throws(() => parseCommand(['dreams', '--format', 'yaml']), /Unsupported format/);
+  assert.throws(() => parseCommand(['dreams', 'cancel']), /Unexpected argument/);
+});
+
+test('stratus dreams shows the plan from disk and the night from the daemon database', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-dreams-cli-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const agents = path.join(home, '.stratus', 'agents');
+  await mkdir(agents, { recursive: true });
+  await writeFile(path.join(agents, 'ava.md'), '---\nname: Ava\nid: ava\ndreams: ./ava.dreams.md\n---\n\nYou are Ava.\n');
+  await writeFile(
+    path.join(agents, 'ava.dreams.md'),
+    '---\nwindow: 23:00-04:00\nmaxPerNight: 2\n---\n\n## Triage the flaky tests\n\nRead the CI log.\n\n## Read up on WAL\n',
+  );
+  // An agent with no dreams: file with the plan, and absent from the listing.
+  await writeFile(path.join(agents, 'bo.md'), '---\nname: Bo\nid: bo\n---\n\nYou are Bo.\n');
+
+  const empty = createStreams();
+  assert.equal(await runCli({ argv: ['dreams', '--agent', 'bo'], streams: empty.streams, env }), 0);
+  assert.match(empty.output.stdout, /bo does not dream/);
+
+  const { SqliteDreamStore, defaultSessionDbPath } = await import('@stratusagent/gateway');
+  const store = new SqliteDreamStore(defaultSessionDbPath({ homeDir: home }));
+  store.beginNight({
+    agentId: 'ava',
+    night: '2026-09-06',
+    started: 2,
+    finished: 2,
+    titles: ['Triage the flaky tests', 'Read up on WAL'],
+    source: path.join(agents, 'ava.dreams.md'),
+    openedAt: '2026-09-06T23:00:00.000Z',
+    updatedAt: '2026-09-07T01:12:00.000Z',
+  });
+  store.close();
+
+  const listing = createStreams();
+  assert.equal(await runCli({ argv: ['dreams'], streams: listing.streams, env }), 0);
+  assert.match(listing.output.stdout, /ava {2}.*ava\.dreams\.md/);
+  assert.match(listing.output.stdout, /window: 23:00-04:00 local, up to 2 a night/);
+  assert.match(listing.output.stdout, /1\. Triage the flaky tests/);
+  assert.match(listing.output.stdout, /night of 2026-09-06: 2 started, 2 finished/);
+  assert.doesNotMatch(listing.output.stdout, /^bo/m, 'an agent without a dream file is not listed');
+
+  const asJson = createStreams();
+  assert.equal(await runCli({ argv: ['dreams', '--format', 'json'], streams: asJson.streams, env }), 0);
+  const parsed = JSON.parse(asJson.output.stdout) as { dreams: Array<Record<string, unknown>> };
+  assert.equal(parsed.dreams[0]?.window, '23:00-04:00');
+  assert.deepEqual(parsed.dreams[0]?.titles, ['Triage the flaky tests', 'Read up on WAL']);
+
+  // A file that will not parse is reported here, in daylight, rather than
+  // in a log line at 1am.
+  await writeFile(path.join(agents, 'ava.dreams.md'), '---\nwindow: after dark\n---\n\n## Something\n');
+  const broken = createStreams();
+  assert.equal(await runCli({ argv: ['dreams'], streams: broken.streams, env }), 0);
+  assert.match(broken.output.stdout, /cannot dream: .*two 24-hour local times/);
+  await rm(home, { recursive: true, force: true });
+});
+
 /** A daemon's control API as the CLI discovers it: the info file and the token. */
 const publishGateway = async (home: string, url: string): Promise<void> => {
   await mkdir(path.join(home, '.stratus'), { recursive: true });

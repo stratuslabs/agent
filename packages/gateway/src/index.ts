@@ -42,6 +42,8 @@ import {
   DELEGATED_BY_METADATA_KEY,
   DELEGATION_DEPTH_METADATA_KEY,
   delegatingSessionIdOf,
+  DREAM_TITLE_METADATA_KEY,
+  DREAMING_TURN_METADATA_KEY,
   isDelegatedSession,
   outstandingDelegationFor,
   ROOT_SESSION_ID_METADATA_KEY,
@@ -59,6 +61,25 @@ import {
   SCHEDULE_SESSION_ID_PREFIX,
   type SchedulerLimits,
 } from './schedules.ts';
+import {
+  createDreamRuntime,
+  isDreamSessionId,
+  SqliteDreamStore,
+  DREAM_SESSION_ID_PREFIX,
+  type DreamLimits,
+} from './dreams.ts';
+
+export {
+  SqliteDreamStore,
+  createDreamRuntime,
+  isDreamSessionId,
+  DREAM_SESSION_ID_PREFIX,
+  type DreamLimits,
+  type DreamNightRecord,
+  type DreamRuntime,
+  type DreamRuntimeOptions,
+  type DreamStoreLike,
+} from './dreams.ts';
 
 export {
   claimHome,
@@ -89,8 +110,10 @@ import {
   createFileMemoryStore,
   createRuntimeProvider,
   DEFAULT_STRATUS_AGENT,
+  loadDreamFile,
   loadOperatorSkills,
   loadRosterSouls,
+  resolveDreamsPath,
   FALLBACK_ACTIVE_METADATA_KEY,
   loadSoulFile,
   memoryFilePath,
@@ -107,6 +130,7 @@ import {
   stratusHomePath,
   workspacesDirPath,
   withLegacyDefaultMemories,
+  type DreamerEntry,
   type FallbackRuntime,
   type OperatorSkillInfo,
   type RosterEntry,
@@ -649,6 +673,12 @@ export interface GatewayOptions {
    */
   schedules?: SchedulerLimits;
   /**
+   * Dreaming limits — how often the nightly window is checked, and how many
+   * dreams a night starts for a file that names no `maxPerNight:`.
+   * Production defaults; tests lower them.
+   */
+  dreams?: DreamLimits;
+  /**
    * Plugins to load, keyed by package name — the `plugins` block, which the
    * caller has already read from a **trusted** config. The gateway does not
    * go looking for one: a plugin runs in-process with the daemon, and which
@@ -962,6 +992,8 @@ export const RESERVED_SESSION_METADATA_KEYS: readonly string[] = [
   DELEGATION_DEPTH_METADATA_KEY,
   SCHEDULED_TURN_METADATA_KEY,
   SCHEDULE_ID_METADATA_KEY,
+  DREAMING_TURN_METADATA_KEY,
+  DREAM_TITLE_METADATA_KEY,
   // The trust label is the runner's to write and only ever goes down; a
   // caller who could seed it would be seeding it upward.
   SESSION_TRUST_METADATA_KEY,
@@ -1044,7 +1076,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // path — single-flight, watchdog, refusal while stopping — never a
     // second runner. Through the firing-only entry, which is allowed into
     // the reserved `schedule:` namespace the public `dispatch` refuses.
-    dispatch: (input) => dispatchScheduledFiring(input),
+    dispatch: (input) => dispatchIntoReservedSession(input),
     validateDestination: async (agentId, destination) => {
       await outboundFor(agentId, destination);
     },
@@ -1053,6 +1085,67 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     ...(options.schedules ? { limits: options.schedules } : {}),
     // The same stamp check every turn runs, before a slot is claimed — see
     // `SchedulerRuntimeOptions.ready`.
+    ready: () => assertStateCompatible(env),
+    log,
+    warn,
+  });
+
+  // ---- dreams -------------------------------------------------------------
+
+  // Same file again, same reason as the schedule store's own connection:
+  // `stratus dreams` reads this table while the daemon writes it.
+  const dreamStore = new SqliteDreamStore(sessionDbPath);
+
+  /**
+   * The roster's dreamers, as the live `sources` map has them.
+   *
+   * Read per tick rather than captured, so a `dreams:` added to a soul is
+   * dreaming after `POST /roster/reload` rather than after a restart. A
+   * soul whose declared path is refused — inside the agents' own workspace
+   * directory, where an agent could write itself standing overnight orders
+   * — is dropped here with the message `resolveDreamsPath` wrote.
+   *
+   * Said once per message, not once per tick, for the reason the runtime
+   * dedupes its own file complaints: this runs on a timer all night, and a
+   * misconfiguration that repeats a line a minute buries the log it is
+   * reported in. The entry clears when the soul is fixed, so the next
+   * mistake is heard.
+   */
+  const dreamPathRefusals = new Map<string, string>();
+  const dreamers = async (): Promise<DreamerEntry[]> => {
+    const entries: DreamerEntry[] = [];
+    for (const source of sources.values()) {
+      const declared = source.soul?.dreams;
+      if (declared === undefined || !source.soulPath) {
+        dreamPathRefusals.delete(source.definition.id);
+        continue;
+      }
+      try {
+        entries.push({
+          agentId: source.definition.id,
+          dreamsPath: resolveDreamsPath(declared, source.soulPath, env),
+          soulPath: source.soulPath,
+        });
+        dreamPathRefusals.delete(source.definition.id);
+      } catch (error) {
+        const message = `${source.definition.id} cannot dream: ${error instanceof Error ? error.message : String(error)}`;
+        if (dreamPathRefusals.get(source.definition.id) !== message) {
+          dreamPathRefusals.set(source.definition.id, message);
+          warn(message);
+        }
+      }
+    }
+    return entries;
+  };
+
+  const dreams = createDreamRuntime({
+    store: dreamStore,
+    dreamers,
+    loadDreams: (dreamsPath) => loadDreamFile(dreamsPath),
+    // The firing-only entry, for the scheduler's reason: the public door
+    // refuses the reserved namespace a dream's session lives in.
+    dispatch: (input) => dispatchIntoReservedSession(input),
+    ...(options.dreams ? { limits: options.dreams } : {}),
     ready: () => assertStateCompatible(env),
     log,
     warn,
@@ -2538,15 +2631,20 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   /**
-   * A scheduled firing's own dispatch — single-flight and stopping-aware
-   * like the public one, but permitted into the reserved `schedule:`
-   * namespace the public one refuses. Firings are the only writers of that
-   * namespace, which is what keeps the destination carve-out unforgeable:
-   * an external message can never share, resume, or race a firing's
-   * session, so `isPreauthorized` can trust that a `schedule:` session
-   * running is the scheduler's turn and no one else's.
+   * The daemon's own dispatch for work nobody asked for right now — a
+   * scheduled firing, a dream. Single-flight and stopping-aware like the
+   * public one, but permitted into the reserved `schedule:` and `dream:`
+   * namespaces the public one refuses.
+   *
+   * Being the only writer of those namespaces is what keeps the
+   * scheduler's destination carve-out unforgeable: an external message can
+   * never share, resume, or race a firing's session, so `isPreauthorized`
+   * can trust that a `schedule:` session running is the scheduler's turn
+   * and no one else's. A dream mints no grant to borrow, and gets the same
+   * door for the weaker reason that its session is the record of the
+   * night's own work.
    */
-  const dispatchScheduledFiring = (input: DispatchInput): Promise<Session> => {
+  const dispatchIntoReservedSession = (input: DispatchInput): Promise<Session> => {
     if (stopping) {
       throw refusal();
     }
@@ -2567,6 +2665,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (isScheduleSessionId(input.sessionId)) {
       throw new Error(
         `Session ids beginning with "${SCHEDULE_SESSION_ID_PREFIX}" are reserved for scheduled firings and cannot be dispatched externally.`,
+      );
+    }
+    // And the dreaming namespace, which the same door guards for a
+    // narrower reason: a dream mints no grant to borrow, but its session
+    // is what an operator reads in the morning as the night's own work,
+    // and a turn queued into it by anyone else would be read as that too.
+    if (isDreamSessionId(input.sessionId)) {
+      throw new Error(
+        `Session ids beginning with "${DREAM_SESSION_ID_PREFIX}" are reserved for dreams and cannot be dispatched externally.`,
       );
     }
 
@@ -2609,6 +2716,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     if (isScheduleSessionId(input.sessionId)) {
       throw new Error(
         `Session ids beginning with "${SCHEDULE_SESSION_ID_PREFIX}" are reserved for scheduled firings and cannot be observed into externally.`,
+      );
+    }
+    if (isDreamSessionId(input.sessionId)) {
+      throw new Error(
+        `Session ids beginning with "${DREAM_SESSION_ID_PREFIX}" are reserved for dreams and cannot be observed into externally.`,
       );
     }
     const reserved = reservedSessionMetadataKey(input.metadata);
@@ -2783,6 +2895,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // may start are tracked, not awaited.
     await scheduler.start();
 
+    // Dreaming after the scheduler, and for one of its reasons: a daemon
+    // that comes up inside a window starts tonight's dreams here, and a
+    // gated one has to have somewhere to ask. Nothing is caught up — a
+    // window that closed while the daemon was down is a night that did not
+    // happen (see `createDreamRuntime`).
+    await dreams.start();
+
     // Last, and not awaited: recovery re-asks, so it needs the channels
     // above already listening — but a turn parked behind a slow approver
     // must not hold up start(), or a daemon with one outstanding request
@@ -2812,6 +2931,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     }
     storesClosed = true;
     scheduleStore.close();
+    dreamStore.close();
     store.close();
   };
 
@@ -2875,6 +2995,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // already past its `stopping` check loses to `dispatch`'s own
     // refusal — the second gate is why this needs no handshake.
     scheduler.stop();
+    // And no new dreams, for the same reason and with the same second
+    // gate: a tick already past its own check is refused by `dispatch`.
+    dreams.stop();
     // Deny what is parked before draining, or the drain waits out every
     // outstanding approval timeout — a shutdown would hang for as long as
     // the longest request had left. Each denial is a real decision the
@@ -2939,6 +3062,15 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       await schedulerDrain;
     } else if (!(await settlesWithin(schedulerDrain, abortAfterMs))) {
       warn('restart: a scheduled firing did not stop after being aborted; shutting down around it');
+    }
+    // The dream table's last writer, bounded the same way: a dream's
+    // wrapper settles after its dispatch does, recording that the night
+    // got one further.
+    const dreamDrain = dreams.drain();
+    if (drained || abortAfterMs === undefined) {
+      await dreamDrain;
+    } else if (!(await settlesWithin(dreamDrain, abortAfterMs))) {
+      warn('restart: a dream did not stop after being aborted; shutting down around it');
     }
     // After the turns that might still be using them. A plugin holding a
     // browser is the reason this exists, and closing it out from under a

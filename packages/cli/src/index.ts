@@ -74,9 +74,13 @@ import {
   createForgetTool,
   createRecallTool,
   createRememberTool,
+  DEFAULT_MAX_DREAMS_PER_NIGHT,
   defineAgent,
   describeCadence,
   describeSchedule,
+  dreamNightOf,
+  formatDreamWindow,
+  nextDreamWindowStart,
   FORGET_TOOL_NAME,
   MEMORY_TOOL_NAME,
   formatSoul,
@@ -109,8 +113,11 @@ import {
   loadNamedCredentials,
   discoverSkillsInDirectory,
   installSkillsFromDirectory,
+  isSoulFileName,
+  loadDreamFile,
   loadOperatorSkills,
   loadRosterSouls,
+  resolveDreamsPath,
   skillsDirPath,
   listAgentSummaries,
   loadSoulFile,
@@ -574,6 +581,13 @@ export interface ParsedSchedulesCommand {
   format: 'text' | 'json';
 }
 
+export interface ParsedDreamsCommand {
+  command: 'dreams';
+  format: 'text' | 'json';
+  /** Narrow the listing to one agent. */
+  agentId?: string;
+}
+
 export interface ParsedMemoryCommand {
   command: 'memory';
   action: 'list' | 'reassert';
@@ -665,6 +679,7 @@ export type ParsedCommand =
   | ParsedCredentialCommand
   | ParsedRestartCommand
   | ParsedSchedulesCommand
+  | ParsedDreamsCommand
   | ParsedMemoryCommand
   | ParsedSessionCommand
   | ParsedDoctorCommand
@@ -811,6 +826,8 @@ Usage:
   stratus restart
   stratus schedules
   stratus schedules cancel <id>
+  stratus dreams
+  stratus dreams --agent ava
   stratus memory list ava
   stratus memory reassert ava --trust user --all-unknown
   stratus session rollover slack:ava:T01ABCDEF:D07GHIJKL
@@ -902,6 +919,10 @@ Commands:
                    cancel <id>" stops the next firing and revokes the
                    destination that was approved with it
                    (also: stratus schedule list / schedule cancel <id>)
+  dreams           Show what each dreaming agent works on overnight — its
+                   dream file, the nightly window, the dreams in order, and
+                   how the last night went (--agent <id>, --format json).
+                   Dreaming is enabled per agent by a soul's dreams: key
   memory list      Show an agent's live memory with the trust label each
                    entry carries — user, agent, unknown (no recorded origin,
                    or written in a conversation with someone not configured
@@ -1333,6 +1354,39 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       ...(scheduleId ? { scheduleId } : {}),
       format,
     };
+  }
+
+  if (command === 'dreams') {
+    let format: 'text' | 'json' = 'text';
+    let agentId: string | undefined;
+    for (let index = 0; index < rest.length; index += 1) {
+      const token = rest[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--format') {
+        const value = readOptionValue(rest, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported format: ${value}`);
+        }
+        format = value;
+        index += 1;
+        continue;
+      }
+      if (token === '--agent') {
+        agentId = readOptionValue(rest, index, '--agent');
+        index += 1;
+        continue;
+      }
+      if (token.startsWith('--')) {
+        throw new Error(`Unknown option: ${token}`);
+      }
+      throw new Error(`Unexpected argument: ${token}. Try: stratus dreams, stratus dreams --agent ava`);
+    }
+    return { command: 'dreams', format, ...(agentId ? { agentId } : {}) };
   }
 
   if (command === 'doctor') {
@@ -5270,7 +5324,7 @@ export const collectDoctorReport = async (
 
   let rosterCount = 0;
   try {
-    rosterCount = (await readdir(agentsDirPath(env))).filter((file) => file.endsWith('.md')).length;
+    rosterCount = (await readdir(agentsDirPath(env))).filter(isSoulFileName).length;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       throw error;
@@ -6209,6 +6263,104 @@ export const runSchedules = async (
       writeLine(streams.stdout, `${record.id}  [${record.agentId}]  ${describeCadence(record.cadence)}${destination}`);
       writeLine(streams.stdout, `  next: ${record.nextFireAt ?? '(spent — awaiting cleanup)'}${record.lastFiredAt ? `   last: ${record.lastFiredAt}` : ''}`);
       writeLine(streams.stdout, `  prompt: ${record.prompt}`);
+    }
+    return 0;
+  } finally {
+    store.close();
+  }
+};
+
+/**
+ * `stratus dreams`: what the fleet works on overnight, and how last night
+ * went.
+ *
+ * Two sources, because dreaming has two halves and an operator debugging it
+ * needs to see which one is wrong: the *plan* comes from the souls and their
+ * dream files on disk (so a file that will not parse says so here, in
+ * daylight, rather than in a log line at 1am), and the *record* comes from
+ * the daemon's own database, the way `stratus schedules` reads it.
+ *
+ * Read-only by design. Dreaming is turned off by removing `dreams:` from the
+ * soul, which is where it was turned on — there is no row to cancel, because
+ * a dream is not a grant.
+ */
+export const runDreams = async (
+  command: ParsedDreamsCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  // Lazy like the other daemon-database commands: node:sqlite loads only
+  // where it is needed.
+  const { SqliteDreamStore, defaultSessionDbPath } = await import('@stratusagent/gateway');
+  // Narrowed to what dreaming needs — a declared file and the soul that
+  // declared it — rather than filtered and re-read, so the resolution below
+  // cannot be handed an empty path by a later edit.
+  const summaries = (await listAgentSummaries(env, (message) => writeLine(streams.stderr, `Warning: ${message}`)))
+    .flatMap((summary) => (
+      summary.dreams !== undefined
+        && summary.soulPath !== undefined
+        && (command.agentId === undefined || summary.id === command.agentId)
+        ? [{ id: summary.id, name: summary.name, dreams: summary.dreams, soulPath: summary.soulPath }]
+        : []
+    ));
+
+  const store = new SqliteDreamStore(defaultSessionDbPath(env));
+  try {
+    const nights = new Map(store.list().map((record) => [record.agentId, record]));
+    const now = new Date();
+    const rows = await Promise.all(summaries.map(async (summary) => {
+      const night = nights.get(summary.id);
+      let dreamsPath: string;
+      try {
+        dreamsPath = resolveDreamsPath(summary.dreams, summary.soulPath, env);
+        const file = await loadDreamFile(dreamsPath);
+        return {
+          agentId: summary.id,
+          name: summary.name,
+          source: dreamsPath,
+          window: formatDreamWindow(file.window),
+          maxPerNight: file.maxPerNight ?? DEFAULT_MAX_DREAMS_PER_NIGHT,
+          dreaming: dreamNightOf(file.window, now) !== undefined,
+          nextWindow: nextDreamWindowStart(file.window, now).toISOString(),
+          titles: file.dreams.map((dream) => dream.title),
+          ...(night ? { night } : {}),
+        };
+      } catch (error) {
+        return {
+          agentId: summary.id,
+          name: summary.name,
+          source: summary.dreams,
+          error: error instanceof Error ? error.message : String(error),
+          ...(night ? { night } : {}),
+        };
+      }
+    }));
+
+    if (command.format === 'json') {
+      writeLine(streams.stdout, JSON.stringify({ dreams: rows }, null, 2));
+      return 0;
+    }
+    if (rows.length === 0) {
+      writeLine(streams.stdout, command.agentId === undefined
+        ? 'No agent dreams. Add `dreams: ./their.dreams.md` to a soul and write the file beside it.'
+        : `${command.agentId} does not dream. Add \`dreams: ./their.dreams.md\` to their soul and write the file beside it.`);
+      return 0;
+    }
+    for (const row of rows) {
+      if ('error' in row) {
+        writeLine(streams.stdout, `${row.agentId}  ${row.source}`);
+        writeLine(streams.stdout, `  cannot dream: ${row.error}`);
+        continue;
+      }
+      writeLine(streams.stdout, `${row.agentId}  ${row.source}`);
+      writeLine(streams.stdout, `  window: ${row.window} local, up to ${row.maxPerNight} a night — ${row.dreaming ? 'open now' : `next opens ${row.nextWindow}`}`);
+      for (const [index, title] of row.titles.entries()) {
+        writeLine(streams.stdout, `  ${index + 1}. ${title}`);
+      }
+      if (row.night) {
+        const failed = row.night.lastError ? `, last error: ${row.night.lastError}` : '';
+        writeLine(streams.stdout, `  night of ${row.night.night}: ${row.night.started} started, ${row.night.finished} finished${failed}`);
+      }
     }
     return 0;
   } finally {
@@ -8332,6 +8484,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'schedules') {
       return await runSchedules(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'dreams') {
+      return await runDreams(command, streams, resolvedEnv);
     }
 
     if (command.command === 'memory') {

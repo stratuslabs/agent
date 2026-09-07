@@ -94,6 +94,31 @@ Nor does a clone get to decide **where your key goes, or which key it is**:
 - **`tool-shell` and stdio MCP servers get a replaced environment**: the
   daemon's own env vars, where API keys live, are not there to read.
 
+## Dreaming
+
+An agent's [dream file](../guides/dreams.md) is standing overnight work, so
+it is dispatched as **your** words — `user`-trusted, like a message you
+typed. Three rules keep that honest:
+
+- **A dream file may not live in `~/.stratus/workspaces/`.** That is the
+  agents' own scratch directory and the one place they write by default; a
+  dream file an agent can write is an agent that can set its own unattended
+  work at its operator's authority. The daemon refuses the path, names it,
+  and that agent does not dream. Everywhere else is your call — you are
+  already deciding what `fs.write` may reach, and a soul is at least as
+  powerful a file.
+- **A dream pre-authorizes nothing.** Unlike a schedule, which can carry a
+  destination a human approved with its cadence, a dream carries no
+  destination and no grant: a `gated` tool at 3am is refused under
+  `headless` and asked in Slack under `remote`, and `message.send` is not
+  special-cased. What a night has to show for itself is what it remembered.
+- **`dream:` session ids are reserved.** No external dispatch or observe
+  may name one (`400 session_id_reserved`), so the transcript you read in
+  the morning is the night's own work.
+
+What the dream then *reads* is labelled where it enters, like anything
+else: a page fetched at 2am is `external` at 2am.
+
 ## What is written down
 
 - **The daemon log is a trace, not a second transcript**: tool names,
