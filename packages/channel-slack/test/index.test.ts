@@ -1969,6 +1969,46 @@ test('a parked call is asked in the thread it came from, with three buttons', as
   await adapter.stop();
 });
 
+test('a request that says what always grants is rendered and resolved in those words', async () => {
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+
+  // A gated tool with no scope: "always" is a standing grant to the agent,
+  // and the prompt says so before anyone clicks — a grant that outlives the
+  // session is a larger thing to hand out than one that does not.
+  gateway.pendingApprovals.add('req-1');
+  await gateway.bus.emit(approvalRequest({
+    call: { id: 'call-1', toolName: 'web.fetch', input: { url: 'https://example.com' } },
+    always: 'tool',
+  }));
+  const posted = web.posts.at(-1);
+  assert.match(JSON.stringify(posted?.blocks), /Always allow\* grants this tool to Ava until an operator revokes it/);
+  assert.deepEqual(buttonIds(posted?.blocks), ['stratus_approve_once', 'stratus_approve_always', 'stratus_deny']);
+
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
+  const update = web.updates.at(-1);
+  assert.equal(buttonIds(update?.blocks).length, 0);
+  // The record names the grant that was made and how to take it back —
+  // no hedging, because the request said which lifetime this was.
+  assert.match(update?.text ?? '', /Allowed, and granted to Ava until revoked \(stratus grants ava\) by <@U-DYLAN>/);
+
+  // A send outside a schedule is the one shape still scoped to the session,
+  // and both the offer and the outcome say that instead.
+  gateway.pendingApprovals.add('req-2');
+  await gateway.bus.emit(approvalRequest({
+    requestId: 'req-2',
+    call: { id: 'call-2', toolName: 'message.send', input: { destination: 'slack:C1', text: 'hi' } },
+    always: 'session',
+  }));
+  assert.match(JSON.stringify(web.posts.at(-1)?.blocks), /stops this tool asking again for the rest of this session/);
+  await socket.deliver('interactive', click('stratus_approve_always', 'req-2', 'U-DYLAN'));
+  assert.match(web.updates.at(-1)?.text ?? '', /Allowed for the rest of this session by <@U-DYLAN>/);
+
+  await adapter.stop();
+});
+
 test('a click from outside the approver set is refused and the request stays pending', async () => {
   const { socket, web, gateway, adapter } = approvalAdapter([
     { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },

@@ -20,6 +20,7 @@ tree is where the depth lives.
 | Teach an agent a procedure | [Skills](./guides/skills.md) |
 | Write a skill that works on every agent, or check one against the spec | [Skill format](./reference/skill-format.md) |
 | Decide what runs unattended and approve the rest from Slack | [Approvals](./guides/approvals.md) |
+| See what an agent may do unattended, and take a grant back | [Approvals](./guides/approvals.md#standing-grants) |
 | Let agents act on their own schedule | [Schedules](./guides/schedules.md) |
 | Keep the daemon running after I close the terminal | [Always on](./guides/always-on.md) |
 | See what the daemon did overnight | [Logs](./guides/logs.md) |

@@ -46,11 +46,16 @@ import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
 import {
   createFileCommandWhitelist,
   createPermissionPolicy,
+  describeAgentGrants,
   describeCommandScope,
   describeOriginScope,
+  describeToolGrant,
+  whitelistPathFor,
+  type AgentGrantsListing,
   type CommandScope,
   type OriginScope,
   type PermissionDecision,
+  type ToolGrant,
 } from '@stratusagent/permissions';
 import {
   createOpenAICompatibleProvider,
@@ -574,6 +579,20 @@ export interface ParsedSchedulesCommand {
   format: 'text' | 'json';
 }
 
+export interface ParsedGrantsCommand {
+  command: 'grants';
+  action: 'list' | 'revoke';
+  agentId: string;
+  /** revoke: exactly one of the three names what goes. */
+  tool?: string;
+  /** The scope as `stratus grants` lists it — `git push`. */
+  scope?: string;
+  origin?: string;
+  format: 'text' | 'json';
+  gateway?: string;
+  token?: string;
+}
+
 export interface ParsedMemoryCommand {
   command: 'memory';
   action: 'list' | 'reassert';
@@ -665,6 +684,7 @@ export type ParsedCommand =
   | ParsedCredentialCommand
   | ParsedRestartCommand
   | ParsedSchedulesCommand
+  | ParsedGrantsCommand
   | ParsedMemoryCommand
   | ParsedSessionCommand
   | ParsedDoctorCommand
@@ -811,6 +831,8 @@ Usage:
   stratus restart
   stratus schedules
   stratus schedules cancel <id>
+  stratus grants ava
+  stratus grants revoke ava --tool web.fetch
   stratus memory list ava
   stratus memory reassert ava --trust user --all-unknown
   stratus session rollover slack:ava:T01ABCDEF:D07GHIJKL
@@ -902,6 +924,14 @@ Commands:
                    cancel <id>" stops the next firing and revokes the
                    destination that was approved with it
                    (also: stratus schedule list / schedule cancel <id>)
+  grants           What an agent may do unattended beyond the built-in safe
+                   list — its standing tool grants, command scopes, and
+                   sites, each an "always allow" somebody answered. From the
+                   running daemon when one is serving (--gateway, --token),
+                   else from ~/.stratus/agents/<id>.whitelist.json; --format
+                   json. "stratus grants revoke <agent> --tool <name> |
+                   --scope "<command>" | --origin <origin>" takes one back,
+                   and a running daemon stops honouring it at once
   memory list      Show an agent's live memory with the trust label each
                    entry carries — user, agent, unknown (no recorded origin,
                    or written in a conversation with someone not configured
@@ -1657,6 +1687,73 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       ...(agentId !== undefined ? { agentId } : {}),
       ...(reload ? {} : { reload }),
     };
+  }
+
+  if (command === 'grants') {
+    const action: ParsedGrantsCommand['action'] = rest[0] === 'revoke' ? 'revoke' : 'list';
+    const tokens = rest[0] === 'revoke' || rest[0] === 'list' ? rest.slice(1) : rest;
+    const usage = action === 'revoke'
+      ? 'stratus grants revoke <agent> --tool <name> | --scope "<command>" | --origin <origin>'
+      : 'stratus grants <agent>';
+    const parsed: ParsedGrantsCommand = { command: 'grants', action, agentId: '', format: 'text' };
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if (!token) {
+        continue;
+      }
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--format') {
+        const value = readOptionValue(tokens, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Unsupported format: ${value}`);
+        }
+        parsed.format = value;
+        index += 1;
+        continue;
+      }
+      if (token === '--gateway') {
+        parsed.gateway = readOptionValue(tokens, index, '--gateway');
+        index += 1;
+        continue;
+      }
+      if (token === '--token') {
+        parsed.token = readOptionValue(tokens, index, '--token');
+        index += 1;
+        continue;
+      }
+      if (action === 'revoke' && (token === '--tool' || token === '--scope' || token === '--origin')) {
+        const value = readOptionValue(tokens, index, token);
+        if (token === '--tool') {
+          parsed.tool = value;
+        } else if (token === '--scope') {
+          parsed.scope = value;
+        } else {
+          parsed.origin = value;
+        }
+        index += 1;
+        continue;
+      }
+      if (token.startsWith('--')) {
+        throw new Error(`Unknown option: ${token}`);
+      }
+      if (parsed.agentId === '') {
+        parsed.agentId = token;
+        continue;
+      }
+      throw new Error(`Unexpected argument: ${token}. Try: ${usage}`);
+    }
+    if (parsed.agentId === '') {
+      throw new Error(`grants${action === 'revoke' ? ' revoke' : ''} needs the agent id: ${usage}.`);
+    }
+    if (action === 'revoke') {
+      const named = [parsed.tool, parsed.scope, parsed.origin].filter((value) => value !== undefined).length;
+      if (named !== 1) {
+        throw new Error(`grants revoke names exactly one of --tool, --scope, or --origin: ${usage}.`);
+      }
+    }
+    return parsed;
   }
 
   if (command === 'memory') {
@@ -6200,6 +6297,148 @@ export const runSchedules = async (
   }
 };
 
+/** What `GET /agents/:id/grants` answers, and what the files answer when no daemon is serving. */
+interface GrantsListing extends AgentGrantsListing {
+  agentId: string;
+  tools: Array<ToolGrant & { stale?: string }>;
+}
+
+/**
+ * `stratus grants <agent>` and `stratus grants revoke <agent> …` — the
+ * operator's view of what an agent may do unattended, and the way to take
+ * one back.
+ *
+ * Through the running daemon when one says it is serving, and only then
+ * from the files, because of the daemon's cache: the store reads each
+ * agent's file once per process, so a revoke that edited the file behind a
+ * live daemon would leave the policy honouring a grant the listing no
+ * longer shows until the next restart. Going through `POST
+ * /agents/:id/grants/revoke` is what makes a revoke the next call's answer.
+ * A daemon that `gateway.json` names but that does not answer falls back
+ * to the files with a warning saying exactly that, since the file is still
+ * the truth for the next daemon to start.
+ */
+export const runGrants = async (
+  command: ParsedGrantsCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const agentId = command.agentId;
+  const encoded = encodeURIComponent(agentId);
+  const base = command.gateway
+    ? command.gateway.replace(/\/+$/, '')
+    : (await readGatewayInfo(env))?.url.replace(/\/+$/, '');
+
+  const revocation = command.action === 'revoke'
+    ? command.tool !== undefined
+      ? { tool: command.tool }
+      : command.scope !== undefined
+        ? { scope: command.scope }
+        : { origin: command.origin ?? '' }
+    : undefined;
+  const named = revocation?.tool ?? revocation?.scope ?? revocation?.origin ?? '';
+
+  const fromFiles = async (): Promise<number> => {
+    const store = createFileCommandWhitelist({
+      directory: agentsDirPath(env),
+      warn: (line) => writeLine(streams.stderr, `Warning: ${line}`),
+    });
+    if (revocation) {
+      const revoked = revocation.tool !== undefined
+        ? await store.forgetTool(agentId, revocation.tool)
+        : revocation.scope !== undefined
+          ? await store.forgetScope(agentId, revocation.scope)
+          : await store.forgetOrigin(agentId, revocation.origin ?? '');
+      return reportRevocation(revoked);
+    }
+    const listing: GrantsListing = { agentId, ...describeAgentGrants(await store.grantsFor(agentId)) };
+    return render(listing, `${whitelistPathFor(agentsDirPath(env), agentId)}`);
+  };
+
+  const reportRevocation = (revoked: boolean): number => {
+    if (!revoked) {
+      writeLine(streams.stderr, `${agentId} has no such grant. \`stratus grants ${agentId}\` lists what exists.`);
+      return 1;
+    }
+    writeLine(streams.stdout, `Revoked ${named} for ${agentId}.`);
+    return 0;
+  };
+
+  const render = (listing: GrantsListing, source: string): number => {
+    if (command.format === 'json') {
+      writeLine(streams.stdout, JSON.stringify({ ...listing, source }, null, 2));
+      return 0;
+    }
+    const total = listing.tools.length + listing.scopes.length + listing.origins.length;
+    if (total === 0) {
+      writeLine(streams.stdout, `${agentId} has no standing grants beyond the built-in safe list (${source}).`);
+      writeLine(streams.stdout, 'An "always allow" answered on one of its gated calls creates one.');
+      return 0;
+    }
+    writeLine(streams.stdout, `${agentId} may do this unattended, beyond the built-in safe list (${source}):`);
+    if (listing.tools.length > 0) {
+      writeLine(streams.stdout, '  tools');
+      for (const grant of listing.tools) {
+        const by = grant.grantedBy ? ` by ${grant.grantedBy}` : '';
+        const stale = grant.stale ? `  — stale: ${grant.stale}` : '';
+        writeLine(streams.stdout, `    ${describeToolGrant(grant)}  (granted ${grant.grantedAt}${by})${stale}`);
+      }
+    }
+    if (listing.scopes.length > 0) {
+      writeLine(streams.stdout, '  commands');
+      for (const row of listing.scopes) {
+        writeLine(streams.stdout, `    ${row.description}`);
+      }
+    }
+    if (listing.origins.length > 0) {
+      writeLine(streams.stdout, '  sites');
+      for (const row of listing.origins) {
+        writeLine(streams.stdout, `    ${row.origin}`);
+      }
+    }
+    writeLine(streams.stdout, `Take one back: stratus grants revoke ${agentId} --tool <name> | --scope "<command>" | --origin <origin>`);
+    return 0;
+  };
+
+  if (!base) {
+    return fromFiles();
+  }
+
+  let response: Response;
+  try {
+    response = revocation
+      ? await callRunningGateway(env, command, base, `/api/v1/agents/${encoded}/grants/revoke`, revocation)
+      : await callRunningGateway(env, command, base, `/api/v1/agents/${encoded}/grants`, undefined, 'GET');
+  } catch (error) {
+    if (command.gateway) {
+      throw error;
+    }
+    // Named by the file, not answering: a daemon that crashed leaves the
+    // file behind. The files are still the truth for the next one to
+    // start, so act on them — and say so, because if a daemon *is* alive
+    // behind a broken API it keeps its cached view until it restarts.
+    writeLine(
+      streams.stderr,
+      `Warning: ${gatewayInfoPath(env)} names a daemon at ${base}, but it did not answer `
+      + `(${error instanceof Error ? error.message : String(error)}). `
+      + `${revocation ? 'Revoking in' : 'Reading'} ${whitelistPathFor(agentsDirPath(env), agentId)} instead; `
+      + 'a daemon that is running will not notice until it restarts.',
+    );
+    return fromFiles();
+  }
+  if (response.status === 404 && revocation) {
+    return reportRevocation(false);
+  }
+  if (!response.ok) {
+    writeLine(streams.stderr, `Error: ${await gatewayErrorMessage(response)}`);
+    return 1;
+  }
+  if (revocation) {
+    return reportRevocation(true);
+  }
+  return render(await response.json() as GrantsListing, `from the daemon at ${base}`);
+};
+
 /**
  * `stratus credential set|list|remove`: the place a named credential goes.
  *
@@ -6411,6 +6650,7 @@ const callRunningGateway = async (
   base: string,
   pathname: string,
   body?: Record<string, unknown>,
+  method: 'GET' | 'POST' = 'POST',
 ): Promise<Response> => {
   const token = await gatewayToken(env, target.token);
   const fetchImpl = env.fetch ?? globalThis.fetch;
@@ -6420,7 +6660,7 @@ const callRunningGateway = async (
   let response: Response;
   try {
     response = await fetchImpl(`${base}${pathname}`, {
-      method: 'POST',
+      method,
       headers: {
         authorization: `Bearer ${token}`,
         ...(body ? { 'content-type': 'application/json' } : {}),
@@ -7699,6 +7939,17 @@ const serveHeldHome = async (
   // and this is where the file precedence is already understood.
   const pluginsConfig = await loadServePlugins(env, command.configPath, warn);
 
+  // Every kind of grant an agent holds — command scopes, origins, standing
+  // tool grants — in one file per agent beside its soul, through one store
+  // instance for the whole daemon. One instance, because the store caches
+  // each file for the life of the process: the control API's list and
+  // revoke go through this same object, which is what lets a revoke take
+  // effect on the policy's very next decision rather than at the next
+  // restart. A whitelist that exists and will not read is said here, once,
+  // and never written over — the daemon's log is where a grant list going
+  // quiet would otherwise go unnoticed.
+  const grantStore = createFileCommandWhitelist({ directory: agentsDirPath(env), warn });
+
   // The control API is a channel adapter like any other: started after the
   // roster loads, stopped before the store drains. It is optional because
   // installing it is how an operator says they want a port open.
@@ -7733,6 +7984,7 @@ const serveHeldHome = async (
         ...(apiHost !== undefined ? { host: apiHost } : {}),
         ...(apiPort !== undefined ? { port: apiPort } : {}),
         ...(command.configPath ? { configPath: command.configPath } : {}),
+        grants: grantStore,
         log,
         warn,
       });
@@ -7851,6 +8103,14 @@ const serveHeldHome = async (
   // not to bother.
   const onDecision = (decision: PermissionDecision): void => {
     if (decision.allowed) {
+      // A call that ran because somebody once said "always" is the one
+      // allowed decision the trace records: it is how something happened
+      // unattended, which is what an incident reconstruction needs to tell
+      // apart from a tool that was simply safe. Name and date, never input.
+      if (decision.grant) {
+        const by = decision.grant.grantedBy ? ` by ${decision.grant.grantedBy}` : '';
+        log(`${decision.agentId}: ${decision.toolName} ran under a standing grant (${describeToolGrant(decision.grant)}, granted ${decision.grant.grantedAt}${by}) (session ${decision.sessionId})`);
+      }
       return;
     }
     warn(`${decision.agentId}: ${decision.reason} (session ${decision.sessionId})`);
@@ -7863,10 +8123,7 @@ const serveHeldHome = async (
   // a tool that carries no command string is judged by its risk exactly as
   // before. The whitelist lives beside the agent's soul, per agent.
   const commands = {
-    // A whitelist that exists and will not read is said here, once, and
-    // never written over — the daemon's log is where a grant list going
-    // quiet would otherwise go unnoticed.
-    whitelist: createFileCommandWhitelist({ directory: agentsDirPath(env), warn }),
+    whitelist: grantStore,
     onScopeRemembered: ({ agentId, scope }: { agentId: string; scope: CommandScope }) => {
       // An approval that widens what runs unattended, for every future
       // session, is precisely the decision that must not be the one leaving
@@ -7879,20 +8136,34 @@ const serveHeldHome = async (
   // do unattended. Wired unconditionally for the same reason — a tool that
   // names no origin is judged by its risk exactly as before.
   const origins = {
-    whitelist: commands.whitelist,
+    whitelist: grantStore,
     onScopeRemembered: ({ agentId, scope }: { agentId: string; scope: OriginScope }) => {
       log(`${agentId}: ${describeOriginScope(scope)} is now acted on without asking`);
     },
   };
-  const approvals = (transport: ApprovalTransport): ApprovalPolicy => createPermissionPolicy(
-    // The destination scope rides along in BOTH modes — it is what lets a
-    // scheduled turn report to the channel a human approved with the
-    // schedule, and headless (where every other gated call is refused) is
-    // exactly the deployment it exists for.
-    approvalMode === 'remote'
-      ? { mode: 'remote', request: transport.request, onDecision, commands, origins, destinations: transport.destinations }
-      : { mode: 'headless', onDecision, commands, origins, destinations: transport.destinations },
-  );
+  const approvals = (transport: ApprovalTransport): ApprovalPolicy => {
+    // The standing-grant engine, in the same file again — and the tool's
+    // contributor from the gateway, so a grant records which package's
+    // tool the operator said yes to and stops applying when that changes.
+    const grants = {
+      store: grantStore,
+      contributorOf: transport.contributorOf,
+      onGranted: ({ agentId, grant }: { agentId: string; grant: ToolGrant }) => {
+        log(`${agentId}: ${describeToolGrant(grant)} now runs without asking, until revoked${grant.grantedBy ? ` (granted by ${grant.grantedBy})` : ''}`);
+      },
+    };
+    return createPermissionPolicy(
+      // The destination scope rides along in BOTH modes — it is what lets a
+      // scheduled turn report to the channel a human approved with the
+      // schedule, and headless (where every other gated call is refused) is
+      // exactly the deployment it exists for. So do the grants: a standing
+      // grant is the only path a scope-less gated tool has to running
+      // unattended, and headless is where that matters.
+      approvalMode === 'remote'
+        ? { mode: 'remote', request: transport.request, onDecision, commands, origins, grants, destinations: transport.destinations }
+        : { mode: 'headless', onDecision, commands, origins, grants, destinations: transport.destinations },
+    );
+  };
 
   if (approvalMode === 'remote') {
     // Only agents whose channel actually came up can be asked: tokens on
@@ -8316,6 +8587,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'schedules') {
       return await runSchedules(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'grants') {
+      return await runGrants(command, streams, resolvedEnv);
     }
 
     if (command.command === 'memory') {

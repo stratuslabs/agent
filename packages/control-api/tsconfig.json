@@ -23,6 +23,9 @@
       "path": "../gateway"
     },
     {
+      "path": "../permissions"
+    },
+    {
       "path": "../provider-anthropic"
     },
     {

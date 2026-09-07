@@ -38,13 +38,15 @@ which is why `stratus update` stops the service *before* it migrates
 rather than relying on the stamp to do it.
 
 One thing a rollback does lose, and it is not stamped: an agent's
-`origins` grants. `<id>.whitelist.json` holds both kinds of grant under the
-same version, so a daemon predating [browser actions](./browser.md) reads
-it happily and drops the origins the next time an "always" answer writes to
+`origins` and `tools` grants. `<id>.whitelist.json` holds every kind of
+grant under the same version, so a daemon predating
+[browser actions](./browser.md) or
+[standing grants](./approvals.md#standing-grants) reads it happily and
+drops the keys it does not know the next time an "always" answer writes to
 it. That fails in the safe direction — the calls ask again, or are refused
-in `headless` with a line naming the site — but the grants do not come back
-when you upgrade again, and you re-approve them. Copy the file first if a
-rollback is planned.
+in `headless` with a line naming the site or the tool — but the grants do
+not come back when you upgrade again, and you re-approve them. Copy the
+file first if a rollback is planned.
 
 The reverse direction refuses instead of guessing: against state stamped by
 a **newer** build than itself, anything that *writes* under `~/.stratus` —

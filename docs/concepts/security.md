@@ -77,6 +77,10 @@ Nor does a clone get to decide **where your key goes, or which key it is**:
 - **Shell commands are judged individually**, control operators disqualify
   a command outright, and "Always allow" persists a scope minus its
   destructive forms. ([Shell commands](../guides/shell.md))
+- **"Always allow" is a grant to one agent, never the fleet**, never for a
+  tool judged by a scope, never for `dangerous`, recorded with who gave it
+  and which package's tool it was given for, and listed and revocable with
+  `stratus grants`. ([Approvals](../guides/approvals.md#standing-grants))
 - **Network tools refuse local addresses** — loopback, RFC 1918,
   link-local, IPv6 unique-local, and their IPv4-mapped and NAT64
   spellings — validated on the connection, so a redirect or DNS answer

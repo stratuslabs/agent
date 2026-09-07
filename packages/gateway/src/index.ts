@@ -21,7 +21,9 @@ import {
   latestTurnReply,
   readPendingApproval,
   type AgentDefinition,
+  type AlwaysMeans,
   type ApprovalAnswer,
+  type ApprovalOutcome,
   type ApprovalPolicy,
   type ApprovalResolutionReason,
   type JsonObject,
@@ -427,6 +429,15 @@ export interface SessionRouting {
 export interface ApprovalTransport {
   request: ApprovalRequester;
   /**
+   * Which plugin package contributes a tool right now, or undefined for a
+   * kernel tool (`@stratusagent/permissions`' `grants.contributorOf` takes
+   * exactly this shape). Read live from the plugins' tool records rather
+   * than snapshotted, for the same reason `tools()` is: a bridge registers
+   * what its server advertises, and a grant compared against a stale map
+   * would follow the wrong tool.
+   */
+  contributorOf(toolName: string): string | undefined;
+  /**
    * The schedule carve-out, for a policy that understands destinations
    * (`@stratusagent/permissions`' `destinations` option takes exactly this
    * shape). True when the session is a firing of a schedule that still
@@ -459,6 +470,8 @@ export interface GatewayApprovalRequest {
    * nothing, so a renderer can stop offering one. Passed straight through.
    */
   oneShot?: boolean;
+  /** What `always` would remember, when it would. Passed straight through. */
+  always?: AlwaysMeans;
   /**
    * When this call first parked, if a restart is re-asking it. The wait is
    * measured from here, so a request keeps the window it started with
@@ -470,7 +483,12 @@ export interface GatewayApprovalRequest {
   signal?: AbortSignal;
 }
 
-export type ApprovalRequester = (request: GatewayApprovalRequest) => Promise<ApprovalAnswer>;
+/**
+ * Settles with the answer and, when a person gave it, who — the policy
+ * records the actor on a standing grant. Every ending settles: a timeout,
+ * an abort, and a shutdown are each a `deny` with nobody behind it.
+ */
+export type ApprovalRequester = (request: GatewayApprovalRequest) => Promise<ApprovalOutcome>;
 
 /**
  * A parked call as an observer sees it — everything `tool.approval-requested`
@@ -492,6 +510,8 @@ export interface PendingApproval {
   origin?: string;
   /** True when `always` on this call remembers nothing — see the event. */
   oneShot?: boolean;
+  /** What `always` would remember, when it would — see the event. */
+  always?: AlwaysMeans;
   /** When this call parked, ISO-8601. */
   parkedAt: string;
   /**
@@ -1089,7 +1109,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * so a click racing the timeout — or arriving after an abort — is refused
    * rather than executing a tool for a turn that has already moved on.
    */
-  const requestApproval: ApprovalRequester = (request) => new Promise<ApprovalAnswer>((resolve) => {
+  const requestApproval: ApprovalRequester = (request) => new Promise<ApprovalOutcome>((resolve) => {
     // A shutdown denies what is parked once, at the top of stop(). Turns
     // already running keep going through the drain, though, and one of them
     // can reach a gated tool AFTER that snapshot — finishing a provider
@@ -1098,7 +1118,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // stop() waits for the turn, the turn waits for the approval, and the
     // approval waits out its timeout — forever when there is none.
     if (stopping) {
-      resolve('deny');
+      resolve({ answer: 'deny' });
       void bus.emit({
         type: 'tool.approval-resolved',
         sessionId: request.session.id,
@@ -1145,7 +1165,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         clearTimeout(timer);
       }
       request.signal?.removeEventListener('abort', onAbort);
-      resolve(answer);
+      resolve({ answer, ...(actor ? { actor } : {}) });
       const emitted = announced.then(() => bus.emit({
         type: 'tool.approval-resolved',
         sessionId: request.session.id,
@@ -1181,6 +1201,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         risk: request.risk,
         ...(request.origin !== undefined ? { origin: request.origin } : {}),
         ...(request.oneShot ? { oneShot: true } : {}),
+        ...(request.always !== undefined ? { always: request.always } : {}),
         parkedAt: request.parkedAt ?? new Date().toISOString(),
         ...(expiresAt ? { expiresAt } : {}),
         ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
@@ -1232,6 +1253,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       risk: request.risk,
       ...(request.origin !== undefined ? { origin: request.origin } : {}),
       ...(request.oneShot ? { oneShot: true } : {}),
+      ...(request.always !== undefined ? { always: request.always } : {}),
       ...(request.session.metadata ? { metadata: request.session.metadata } : {}),
       ...(expiresAt ? { expiresAt } : {}),
     });
@@ -1306,6 +1328,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         destinations: {
           isPreauthorized: (session, destination) => scheduler.isPreauthorized(session, destination),
         },
+        contributorOf: (toolName) => toolProvenance().get(toolName)?.package,
       })
     : options.approvals;
 

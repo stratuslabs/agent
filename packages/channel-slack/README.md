@@ -128,12 +128,20 @@ the parser cannot reduce to a scope. The prompt says so instead, because a
 button that does exactly what **Allow once** does, under a label promising a
 standing grant, is worse than no button.
 
+Where it is offered, a line beside the buttons says what it would do,
+because that differs by tool and is the half of the question the button
+widens: for most gated tools it is a **standing grant** to the agent that
+lasts until an operator revokes it (`stratus grants <agent>` lists and
+revokes; see [Approvals](../../docs/guides/approvals.md)); for a shell
+command it is that command's scope; for a browser action it is the site;
+and for a send outside a schedule it is the rest of this session.
+
 The resolved message describes what the daemon did rather than which button
 was pressed — `POST /approvals` accepts `always` whatever this channel
-rendered, so the answer can arrive from somewhere else. It states the floor
-rather than the ceiling: a remembered answer lasts *at least* the session,
-and whether a scoped one also survives a restart depends on the daemon
-writing the whitelist, which is not known when the message is sent.
+rendered, so the answer can arrive from somewhere else — and names the grant
+that was made, since the request said in advance which kind it would be.
+The one thing it cannot promise is the disk write: a daemon that could not
+read the whitelist does not write over it, and by then the message is sent.
 `stratus logs` has the exact line.
 
 Who may answer is configured per agent, in `~/.stratus/config.json`:

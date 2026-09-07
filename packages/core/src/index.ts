@@ -1579,14 +1579,45 @@ export const readPendingApproval = (session: Session): PendingApprovalRecord | u
  * What a human decided about one gated call.
  *
  * - `once` — run this call, ask again next time.
- * - `always` — run it and stop asking for this tool in this session.
+ * - `always` — run it, and stop asking this agent's future calls that
+ *   the answer covers. What it covers is the policy's to say, in advance,
+ *   through `AlwaysMeans`.
  * - `deny` — refuse it.
- *
- * `always` is deliberately not "forever": a persistent whitelist is a
- * different, narrower promise (a normalized command scope) and belongs
- * with the shell tool that needs one.
  */
 export type ApprovalAnswer = 'once' | 'always' | 'deny';
+
+/**
+ * What answering `always` to one request would remember, said before
+ * anyone is asked so every surface can word the button honestly.
+ *
+ * - `scope` — the command's normalized scope, durable and per agent
+ *   (`Tool.commandFor`).
+ * - `origin` — the site the conversation is on, durable and per agent
+ *   (`Tool.originFor`).
+ * - `tool` — the tool itself, durable and per agent, until an operator
+ *   revokes it: the standing grant, for a gated tool that names no scope.
+ * - `session` — the tool, for this session and this process only. What a
+ *   tool judged by destination (`Tool.destinationFor`) gets outside a
+ *   schedule, because a durable grant there would be a standing yes to
+ *   every destination, and no per-destination grant exists yet.
+ *
+ * Absent when `always` remembers nothing at all — the one-shot case,
+ * which `oneShot` names.
+ */
+export type AlwaysMeans = 'scope' | 'origin' | 'tool' | 'session';
+
+/**
+ * A human's answer, and who gave it when a channel can say. What a
+ * transport settles a request with: the policy records the actor on a
+ * standing grant, and nothing else about the decision needs a person's
+ * id — which is why the plain answer is still accepted everywhere an
+ * outcome is.
+ */
+export interface ApprovalOutcome {
+  answer: ApprovalAnswer;
+  /** Channel-native id (a Slack user). */
+  actor?: string;
+}
 
 /**
  * Why an approval request stopped being pending. Only `decided` involved a
@@ -1640,6 +1671,14 @@ export type StratusEvent =
        * will not create. See `Tool.originFor` and `ToolRisk`.
        */
       oneShot?: boolean;
+      /**
+       * What `always` would remember, when it would remember something —
+       * see `AlwaysMeans`. A renderer that reports the outcome of an
+       * `always` reads this rather than guessing at a lifetime: a grant
+       * that survives restarts and one that dies with the session are the
+       * same button, and only the request knows which it is.
+       */
+      always?: AlwaysMeans;
       metadata?: JsonObject;
       /**
        * When the request gives up and denies itself, ISO-8601. Absent when

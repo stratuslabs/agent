@@ -44,8 +44,9 @@ surface when nobody has opened the console in a week.
   configuration it exists for: in `headless` — what every installed service
   runs — a gated call is refused unless it matches a **command** scope or a
   schedule's **destination** pre-authorization, and a fleet read has neither.
-  There is no durable per-tool grant to fall back on. So a `gated` `fleet.*`
-  would be refused on every unattended firing, and the digest would never be
+  There was no durable per-tool grant to fall back on until
+  [28](./28-standing-grants.md) shipped one. So a `gated` `fleet.*` would
+  have been refused on every unattended firing, and the digest never
   produced.
 
   `safe` is also the honest reading of the existing risk model, which grades

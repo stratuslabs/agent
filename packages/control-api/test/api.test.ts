@@ -429,7 +429,7 @@ test('a parked approval is listed and resolvable, and a late second click is ref
       body: JSON.stringify({ requestId: parked.requestId, answer: 'once', actor: 'web' }),
     });
     assert.equal(resolved.status, 200);
-    assert.equal(await settles(answer, 'the parked call'), 'once');
+    assert.deepEqual(await settles(answer, 'the parked call'), { answer: 'once', actor: 'web' });
 
     // The normal outcome of a button clicked a minute too late. Never a
     // "try again".
@@ -2155,6 +2155,130 @@ test('a session rolls over through the API, and the archive and the busy session
     });
     assert.equal(seeded.status, 400);
     assert.equal((await json<{ error: { code: string } }>(seeded)).error.code, 'metadata_reserved');
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('grants are listable and revocable over the API, through the daemon\'s own store', async () => {
+  const home = await newHome();
+  const packageDir = path.join(home, 'fake-plugin');
+  await mkdir(path.join(packageDir, 'dist'), { recursive: true });
+  await writeFile(
+    path.join(packageDir, 'package.json'),
+    JSON.stringify({
+      name: 'stratus-plugin-notes',
+      stratus: { pluginVersion: 1, contributes: { tools: [{ name: 'notes.write', risk: 'gated' }] } },
+    }),
+  );
+  const { createFileCommandWhitelist } = await import('@stratusagent/permissions');
+  const store = createFileCommandWhitelist({ directory: path.join(home, '.stratus', 'agents') });
+  await store.remember('stratus', { command: 'git', args: ['push'], denyRefspecForms: true });
+  await store.rememberOrigin('stratus', { origin: 'https://app.example.com' });
+  await store.rememberTool('stratus', { tool: 'notes.write', package: 'stratus-plugin-notes', grantedAt: '2026-09-07T00:00:00.000Z', grantedBy: 'U1' });
+  // Two grants the engine would not honour: one recorded against a package
+  // that no longer contributes the tool, one for a tool nothing loads.
+  await store.rememberTool('stratus', { tool: 'demo.echo', package: 'somebody-elses-demo', grantedAt: '2026-09-07T00:00:00.000Z' });
+  await store.rememberTool('stratus', { tool: 'gone.tool', grantedAt: '2026-09-07T00:00:00.000Z' });
+
+  const harness = await startApi({
+    home,
+    options: { grants: store },
+    gateway: {
+      plugins: { 'stratus-plugin-notes': { enabled: true } },
+      pluginHost: {
+        resolve: () => new URL(`file://${path.join(packageDir, 'dist', 'index.js')}`).href,
+        import: async () => ({
+          createPlugin: () => ({
+            name: 'notes',
+            setup(context: { tools: { register(tool: unknown): void } }) {
+              context.tools.register({ name: 'notes.write', risk: 'gated', async execute() { return null; } });
+            },
+          }),
+        }),
+      },
+    },
+  });
+  try {
+    const listed = await json<{
+      agentId: string;
+      scopes: Array<{ description: string; scope: { command: string } }>;
+      origins: Array<{ origin: string }>;
+      tools: Array<{ tool: string; package?: string; grantedBy?: string; stale?: string }>;
+    }>(await harness.call('/api/v1/agents/stratus/grants'));
+    assert.equal(listed.agentId, 'stratus');
+    assert.deepEqual(listed.scopes.map((row) => row.description), ['git push']);
+    assert.equal(listed.scopes[0]?.scope.command, 'git');
+    assert.deepEqual(listed.origins, [{ origin: 'https://app.example.com' }]);
+    assert.deepEqual(listed.tools.map((row) => row.tool), ['notes.write', 'demo.echo', 'gone.tool']);
+    assert.equal(listed.tools[0]?.grantedBy, 'U1');
+    assert.equal(listed.tools[0]?.stale, undefined, 'contributed by the package it was granted from');
+    assert.match(listed.tools[1]?.stale ?? '', /now contributed by the kernel, not somebody-elses-demo/);
+    assert.match(listed.tools[2]?.stale ?? '', /no loaded tool has this name/);
+
+    // A grant can outlive its agent, and its id is still the way to reach it.
+    const orphan = await json<{ tools: unknown[] }>(await harness.call('/api/v1/agents/nobody/grants'));
+    assert.deepEqual(orphan.tools, []);
+    const invalid = await harness.call('/api/v1/agents/.hidden/grants');
+    assert.equal(invalid.status, 400);
+
+    const revoke = (body: Record<string, string>): Promise<Response> => harness.call('/api/v1/agents/stratus/grants/revoke', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    assert.equal((await revoke({ tool: 'notes.write' })).status, 200);
+    assert.equal((await revoke({ scope: 'git push' })).status, 200);
+    assert.equal((await revoke({ origin: 'https://app.example.com' })).status, 200);
+    assert.equal((await revoke({ tool: 'notes.write' })).status, 404, 'already gone');
+    assert.equal((await revoke({ tool: 'x', scope: 'y' })).status, 400, 'exactly one kind');
+    assert.equal((await revoke({})).status, 400);
+
+    // Revoked through the same instance the policy reads, so the store
+    // itself — not just the file — no longer holds them.
+    const after = await store.grantsFor('stratus');
+    assert.deepEqual(after.scopes, []);
+    assert.deepEqual(after.origins, []);
+    assert.deepEqual(after.tools.map((grant) => grant.tool), ['demo.echo', 'gone.tool']);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('a whitelist that will not parse refuses a revoke with the fix, rather than being written over', async () => {
+  const home = await newHome();
+  const directory = path.join(home, '.stratus', 'agents');
+  await mkdir(directory, { recursive: true });
+  await writeFile(path.join(directory, 'stratus.whitelist.json'), '{ not json');
+  const { createFileCommandWhitelist } = await import('@stratusagent/permissions');
+  const store = createFileCommandWhitelist({ directory });
+  const harness = await startApi({ home, options: { grants: store } });
+  try {
+    // Unreadable reads as empty, said once in the daemon's log — the same
+    // view the policy has of it.
+    const listed = await json<{ tools: unknown[] }>(await harness.call('/api/v1/agents/stratus/grants'));
+    assert.deepEqual(listed.tools, []);
+    const response = await harness.call('/api/v1/agents/stratus/grants/revoke', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tool: 'web.fetch' }),
+    });
+    assert.equal(response.status, 409);
+    const body = await json<{ error: { code: string; message: string } }>(response);
+    assert.equal(body.error.code, 'grants_unreadable');
+    assert.match(body.error.message, /could not be read .* Fix the file and restart the daemon/);
+    assert.equal(await readFile(path.join(directory, 'stratus.whitelist.json'), 'utf8'), '{ not json');
+  } finally {
+    await harness.stop();
+  }
+});
+
+test('a daemon started without a grant store says so rather than listing nothing', async () => {
+  const harness = await startApi();
+  try {
+    const response = await harness.call('/api/v1/agents/stratus/grants');
+    assert.equal(response.status, 501);
+    assert.equal((await json<{ error: { code: string } }>(response)).error.code, 'grants_unavailable');
   } finally {
     await harness.stop();
   }

@@ -7243,6 +7243,132 @@ const fakeGateway = (answer: (call: CapturedCall) => Response | Promise<Response
   return { calls, fetchImpl };
 };
 
+// ---- stratus grants (step 28) -----------------------------------------------
+
+test('parseCommand reads the grants command and its revoke form', () => {
+  assert.deepEqual(parseCommand(['grants', 'ava']), { command: 'grants', action: 'list', agentId: 'ava', format: 'text' });
+  assert.deepEqual(parseCommand(['grants', 'list', 'ava', '--format', 'json', '--gateway', 'http://h:1', '--token', 't']), {
+    command: 'grants', action: 'list', agentId: 'ava', format: 'json', gateway: 'http://h:1', token: 't',
+  });
+  assert.deepEqual(parseCommand(['grants', 'revoke', 'ava', '--tool', 'web.fetch']), {
+    command: 'grants', action: 'revoke', agentId: 'ava', format: 'text', tool: 'web.fetch',
+  });
+  assert.deepEqual(parseCommand(['grants', 'revoke', 'ava', '--scope', 'git push']), {
+    command: 'grants', action: 'revoke', agentId: 'ava', format: 'text', scope: 'git push',
+  });
+  assert.deepEqual(parseCommand(['grants', 'revoke', 'ava', '--origin', 'https://app.example.com']), {
+    command: 'grants', action: 'revoke', agentId: 'ava', format: 'text', origin: 'https://app.example.com',
+  });
+  assert.throws(() => parseCommand(['grants']), /needs the agent id/);
+  assert.throws(() => parseCommand(['grants', 'revoke', 'ava']), /exactly one of --tool, --scope, or --origin/);
+  assert.throws(() => parseCommand(['grants', 'revoke', 'ava', '--tool', 'a', '--scope', 'b']), /exactly one of/);
+  assert.throws(() => parseCommand(['grants', 'ava', '--tool', 'a']), /Unknown option: --tool/);
+  assert.throws(() => parseCommand(['grants', 'ava', 'juno']), /Unexpected argument: juno/);
+});
+
+test('stratus grants reads and revokes from the whitelist file when no daemon is serving', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-cli-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const { createFileCommandWhitelist } = await import('@stratusagent/permissions');
+  const store = createFileCommandWhitelist({ directory: path.join(home, '.stratus', 'agents') });
+  await store.remember('ava', { command: 'git', args: ['push'], denyRefspecForms: true });
+  await store.rememberOrigin('ava', { origin: 'https://app.example.com' });
+  await store.rememberTool('ava', { tool: 'web.fetch', package: 'stratus-plugin-web', grantedAt: '2026-09-07T01:00:00.000Z', grantedBy: 'U1' });
+
+  const listing = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava'], streams: listing.streams, env }), 0);
+  assert.match(listing.output.stdout, /ava may do this unattended/);
+  assert.match(listing.output.stdout, /web\.fetch \(stratus-plugin-web\) {2}\(granted 2026-09-07T01:00:00\.000Z by U1\)/);
+  assert.match(listing.output.stdout, /commands\n {4}git push/);
+  assert.match(listing.output.stdout, /sites\n {4}https:\/\/app\.example\.com/);
+  assert.match(listing.output.stdout, /stratus grants revoke ava --tool/);
+
+  const asJson = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava', '--format', 'json'], streams: asJson.streams, env }), 0);
+  const parsed = JSON.parse(asJson.output.stdout) as { agentId: string; scopes: Array<{ description: string }>; tools: Array<{ tool: string }>; source: string };
+  assert.equal(parsed.agentId, 'ava');
+  assert.deepEqual(parsed.scopes.map((row) => row.description), ['git push']);
+  assert.deepEqual(parsed.tools.map((row) => row.tool), ['web.fetch']);
+  assert.match(parsed.source, /ava\.whitelist\.json$/);
+
+  const revoke = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'web.fetch'], streams: revoke.streams, env }), 0);
+  assert.match(revoke.output.stdout, /Revoked web\.fetch for ava\./);
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--scope', 'git push'], streams: createStreams().streams, env }), 0);
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--origin', 'https://app.example.com'], streams: createStreams().streams, env }), 0);
+
+  const missing = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'web.fetch'], streams: missing.streams, env }), 1);
+  assert.match(missing.output.stderr, /ava has no such grant/);
+
+  // Gone from the file, not just from a cache: a fresh store reads it back empty.
+  const after = await createFileCommandWhitelist({ directory: path.join(home, '.stratus', 'agents') }).grantsFor('ava');
+  assert.deepEqual(after, { scopes: [], origins: [], tools: [] });
+
+  const empty = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava'], streams: empty.streams, env }), 0);
+  assert.match(empty.output.stdout, /ava has no standing grants beyond the built-in safe list/);
+  await rm(home, { recursive: true, force: true });
+});
+
+test('stratus grants goes through the running daemon, whose store is the one the policy reads', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-daemon-'));
+  await publishGateway(home, 'http://127.0.0.1:4123');
+  const gateway = fakeGateway((call) => {
+    if (call.url.endsWith('/grants/revoke')) {
+      const body = call.body as { tool?: string };
+      return body.tool === 'web.fetch'
+        ? new Response(JSON.stringify({ revoked: true }), { status: 200 })
+        : new Response(JSON.stringify({ error: { code: 'grant_not_found', message: 'ava has no such grant.' } }), { status: 404 });
+    }
+    return new Response(JSON.stringify({
+      agentId: 'ava',
+      scopes: [],
+      origins: [],
+      tools: [{ tool: 'web.fetch', grantedAt: '2026-09-07T01:00:00.000Z', stale: 'no loaded tool has this name, so the grant applies to nothing until one does' }],
+    }), { status: 200 });
+  });
+  const env = { cwd: home, homeDir: home, processEnv: {}, fetch: gateway.fetchImpl };
+
+  const listing = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava'], streams: listing.streams, env }), 0);
+  assert.equal(gateway.calls[0]?.url, 'http://127.0.0.1:4123/api/v1/agents/ava/grants');
+  assert.equal(gateway.calls[0]?.method, 'GET');
+  assert.equal(gateway.calls[0]?.authorization, 'Bearer tok-1');
+  assert.match(listing.output.stdout, /from the daemon at http:\/\/127\.0\.0\.1:4123/);
+  // What only a live daemon can say: the grant would not apply right now.
+  assert.match(listing.output.stdout, /stale: no loaded tool has this name/);
+
+  const revoke = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'web.fetch'], streams: revoke.streams, env }), 0);
+  assert.equal(gateway.calls[1]?.url, 'http://127.0.0.1:4123/api/v1/agents/ava/grants/revoke');
+  assert.deepEqual(gateway.calls[1]?.body, { tool: 'web.fetch' });
+  assert.match(revoke.output.stdout, /Revoked web\.fetch for ava\./);
+
+  const missing = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'gone'], streams: missing.streams, env }), 1);
+  assert.match(missing.output.stderr, /ava has no such grant/);
+
+  // A daemon the file names but that does not answer: the files are still
+  // the truth for the next daemon, so act on them and say a live one would
+  // not notice — never fail silently, never pretend the daemon agreed.
+  const down = fakeGateway(() => {
+    throw new Error('ECONNREFUSED');
+  });
+  const fallback = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava'], streams: fallback.streams, env: { ...env, fetch: down.fetchImpl } }), 0);
+  assert.match(fallback.output.stderr, /names a daemon at http:\/\/127\.0\.0\.1:4123, but it did not answer/);
+  assert.match(fallback.output.stdout, /ava has no standing grants/);
+  // An explicit --gateway is a request for that daemon and nothing else.
+  const explicit = createStreams();
+  assert.equal(
+    await runCli({ argv: ['grants', 'ava', '--gateway', 'http://127.0.0.1:9'], streams: explicit.streams, env: { ...env, fetch: down.fetchImpl } }),
+    1,
+  );
+  assert.match(explicit.output.stderr, /Could not reach the gateway at http:\/\/127\.0\.0\.1:9/);
+  await rm(home, { recursive: true, force: true });
+});
+
 test('parseCommand parses skill reload, restart, and skill add --no-reload', () => {
   assert.deepEqual(parseCommand(['skill', 'reload']), { command: 'skill-reload' });
   assert.deepEqual(parseCommand(['skill', 'reload', '--gateway', 'http://h:1', '--token', 't']), {

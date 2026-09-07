@@ -102,6 +102,8 @@ log, and an address bar is one that gets noticed when it changes.
 | POST | `/agents` | Create an agent: writes a soul file and reloads the roster |
 | GET | `/agents/:id` | One agent in full: complete instructions, the raw soul markdown, its pins |
 | PUT | `/agents/:id` | Edit a soul, by field or as raw markdown |
+| GET | `/agents/:id/grants` | What this agent may do unattended beyond the built-in safe list — its command scopes, origins, and standing tool grants, from `~/.stratus/agents/<id>.whitelist.json`. A tool grant the engine would not honour carries `stale` saying why (the tool is now contributed by another package, or nothing loads it). The id is validated but not looked up: a grant can outlive its agent, and this is how it is found. `501 grants_unavailable` from a daemon started without a grant store |
+| POST | `/agents/:id/grants/revoke` | Take one back: exactly one of `{ tool }`, `{ scope }` (the listed `description`, such as `git push`), or `{ origin }` → `{ revoked: true }`. Through the daemon's own store, so the next call is judged without it — no restart. `404 grant_not_found` when nothing matched; `400 invalid_grant` for none or several; `409 grants_unreadable` when the agent's whitelist file exists but will not parse, since nothing is written over a grant list nobody can read |
 | POST | `/roster/reload` | Re-read the agents directory and the configured default soul |
 | POST | `/skills/reload` | Re-read `~/.stratus/skills` and serve it, no restart — the `skills` half of `/catalog/tools` as the response. A skill that will not load answers `422 skills_reload_refused` naming the file, and the previous set keeps serving |
 | POST | `/restart` | Announce a restart: `{ reason?, drainTimeoutMs? }` → `202 { restarting, reason?, drainTimeoutMs, inflight }`. New turns are refused from here, in-flight ones get the window, and the daemon comes back. `501 restart_unsupported` from a host that cannot bring it back; `409 not_restartable` while the daemon is still starting or already stopping |
@@ -110,7 +112,7 @@ log, and an address bar is one that gets noticed when it changes.
 | POST | `/sessions/:id/messages` | Dispatch a message; returns `202 { sessionId, turnId }`. A `schedule:`-prefixed id answers `400 session_id_reserved` — those belong to scheduled firings. An optional `metadata` object is attached to a new session as given, except the keys the daemon writes for itself (`pendingApproval`, `fallbackActive`, `delegatedBy`, `rootSessionId`, `delegationDepth`, `scheduled`, `scheduleId`, `sessionTrust`, `sessionTaintedBy`, `rolledOverFrom`, `rolledOverTo`), which answer `400 metadata_reserved`. `senderTrust` may be set to `unknown` to say the message is from someone the operator has not vouched for; it is read for the turn and never stored. Omitted, the sender is the operator; present with any value but a trust label, the sender reads `unknown` — a misspelled authorization is not one. An existing session whose agent has since left the roster answers `404 agent_not_found` |
 | POST | `/sessions/:id/rollover` | Start the conversation over under the same id: the transcript so far is saved as a new session (`<id>:rolledover:<time>-<suffix>`) and the live row is emptied, keeping only the routing metadata a channel needs → `200 { sessionId, archivedAs }`. The remedy for a session from before trust labels existed, which reads `unknown` for as long as it lasts. `409 session_busy` while a turn is running or parked, `409 session_archived` for an archive, `404` for an unknown id |
 | GET | `/approvals` | Calls parked on a human right now |
-| POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }`, where `answer` is `once`, `always`, or `deny` — see [below](#always-does-not-mean-one-thing) |
+| POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }`, where `answer` is `once`, `always`, or `deny` — see [below](#always-means-one-thing-and-the-request-says-which) |
 | GET | `/schedules` | Every schedule the fleet has set — cadence, prompt, pre-authorized destination, next firing. The audit list: each row with a destination is a standing permission to speak |
 | DELETE | `/schedules/:id` | Cancel a schedule. Also revokes the destination grant riding on the row — a still-running firing's next send is gated normally. 404 when no such schedule exists |
 | GET | `/catalog/models` | Models the stored sign-ins can actually reach, listed live |
@@ -406,79 +408,72 @@ not billed per token for them. That is deliberate: it is how you compare what
 a run *would* cost across providers, and a session that fell back mid-run
 makes that a live question rather than a hypothetical.
 
-### `always` does not mean one thing
+### `always` means one thing, and the request says which
 
 `POST /approvals` takes `answer` as exactly `once`, `always`, or `deny`;
 anything else is `400 invalid_answer`. `actor` is optional and records who
-decided — a channel-native id, such as a Slack user. A request that has
-already been decided, has expired, or whose turn was cancelled answers `409
-approval_not_pending` rather than silently doing nothing twice.
+decided — a channel-native id, such as a Slack user — and a standing grant
+made by that answer records it too, as `grantedBy` in the grants listing. A
+request that has already been decided, has expired, or whose turn was
+cancelled answers `409 approval_not_pending` rather than silently doing
+nothing twice.
 
-`once` and `deny` mean what they say, for this call. **`always` has two
-different lifetimes, and which one the approver got depends on the tool:**
+`once` and `deny` mean what they say, for this call. **`always` is a grant to
+the agent, and it lasts until an operator revokes it** — for every tool but
+one shape, described last. What it grants depends on how the tool is judged,
+and the request says so in advance: `tool.approval-requested` and the
+`GET /approvals` rows carry **`always`** with one of four values, or omit it
+when `always` would remember nothing.
 
-- For a tool whose call carries a **command** — `shell.run` today — it
-  remembers a *command scope*, durable and per agent. Approving `git push
-  origin main` persists `git push` minus its destructive forms, so `git push
-  --force` still asks. That grant survives restarts.
-- For a tool judged by an **origin** — `browser.act` today — it remembers
-  that origin, durable and per agent, in the same file. Approving a click on
+- **`scope`** — a tool whose call carries a **command** (`shell.run`) remembers
+  a *command scope*, durable and per agent. Approving `git push origin main`
+  persists `git push` minus its destructive forms, so `git push --force` still
+  asks.
+- **`origin`** — a tool judged by an **origin** (`browser.act`) remembers that
+  origin, durable and per agent, in the same file. Approving a click on
   `https://app.example.com/reports` persists `https://app.example.com`, so
-  `https://admin.example.com` still asks. It rides as `origin` on both the
-  `tool.approval-requested` event and the `GET /approvals` rows, and a
-  client offering **Always allow** must render it: the call's arguments are
-  a CSS selector and say nothing about which site is being widened.
-- For a **one-shot** request, it is not remembered at all: the call runs
-  once and the next one asks again. Three cases reach this — a `dangerous`
-  tool, which means a human every time whatever is answered; a call judged
-  by an origin whose conversation has no page to grant; and a command this
-  daemon's parser cannot reduce to a scope, such as a pipe or a subshell. This is the
-  one lifetime a client *can* tell in advance: `tool.approval-requested`
-  and the `GET /approvals` rows carry **`oneShot: true`** for it. **A client
-  must not offer an unconditional "always" on such a request** — it does
-  exactly what `once` does, under a label promising a grant nobody gets.
-  The Slack channel drops the button and says why; the dashboard does the
-  same. `POST /approvals` still *accepts* `always` on such a request — the
-  endpoint takes all three answers whatever was rendered — and the engine
-  treats it as `once`, which is also how the resolved message describes it.
-- For **every other tool**, it is remembered against the tool name in memory,
-  and lasts until the session ends **or the daemon restarts, whichever comes
-  first**. Sessions are durable and restarts are not; a session resumed in a
-  new process asks again, so this is strictly weaker than "for this
-  conversation".
+  `https://admin.example.com` still asks. The origin rides as `origin` on the
+  event and the rows, and a client offering **Always allow** must render it:
+  the call's arguments are a CSS selector and say nothing about which site is
+  being widened.
+- **`tool`** — every other gated tool that names no scope remembers the
+  **tool itself**: a standing grant, durable and per agent, recorded with the
+  package that contributed the tool and with who answered. It is consulted on
+  every later run, `headless` included — the only path such a tool has to
+  running unattended — and it follows the tool as it was when granted: the
+  same name contributed by a different package after a plugin update asks
+  again. `GET /agents/:id/grants` lists it and `POST /agents/:id/grants/revoke`
+  removes it, and a revoke is the next call's answer, with no restart. Never
+  for a tool with `commandFor` or `originFor` — a standing yes to `shell.run`
+  would be a yes to every command — and never for a `dangerous` tool.
+- **`session`** — the one shape that is not durable: a tool judged by a
+  **destination** (`message.send`) outside a schedule, remembered against the
+  tool name for this session and this process only. A durable grant there
+  would be a standing yes to every destination, and no per-destination grant
+  exists yet; the schedule carve-out is how a send runs unattended.
 
-That third case is the oldest of them: a command this daemon's parser
-cannot reduce to a scope is approved *once*, because widening to the bare
-tool would hand the agent every command for the rest of the session. The
-call runs; the grant is not remembered — and, like the other two, the
-request says so in advance with `oneShot`.
+For a **one-shot** request `always` is absent and **`oneShot: true`** is
+present: the call runs once and the next one asks again. Three cases reach
+this — a `dangerous` tool, which means a human every time whatever is
+answered; a call judged by an origin whose conversation has no page to grant;
+and a command this daemon's parser cannot reduce to a scope, such as a pipe or
+a subshell. **A client must not offer an unconditional "always" on such a
+request** — it does exactly what `once` does, under a label promising a grant
+nobody gets. The Slack channel drops the button and says why. `POST
+/approvals` still *accepts* `always` on such a request — the endpoint takes
+all three answers whatever was rendered — and the engine treats it as `once`,
+which is also how the resolved message describes it.
 
-So one grant is written to disk beside the agent's soul and the other lives
-in a `Set` for as long as the process does. Between *those two*, a client
-rendering `always` as one button is promising something whose duration it
-cannot know — and **nothing in this API tells it which it got**. `POST
-/approvals` answers `{ ok: true }`, and the `tool.approval-resolved` event
-carries the `answer` that was submitted plus a `reason` of `decided`,
-`timeout`, `cancelled`, or `undeliverable` — which is why the request stopped
-being pending, not how long the grant lasts. The daemon logs the difference
-(a remembered command scope or origin is logged as one); an API client cannot
-see it.
-
-The one-shot case is the exception, and the only one: `oneShot: true` on the
-request says in advance that `always` will remember nothing, so a client can
-and should stop offering it there. It does not say *why* — three shapes
-reach it, and only the `dangerous` one is visible from the request's `risk`.
-
-Note also that "past a restart" is the normal case for a scoped grant and
-not a guarantee: the daemon does not write over a whitelist it could not
-read, and a policy can be built without one. A surface reporting the
-outcome has already sent its message by the time that is known, so it
-should state the floor — remembered for this session at least — and leave
-the exact lifetime to the daemon's log.
-
-So for everything else, word the button for the weaker guarantee. "Allow" is
-honest for every lifetime; "always allow" is only true for the scoped cases,
-and a client cannot tell in advance that it is in one of them.
+So a client can word the button and the outcome from the request alone:
+`always: 'tool'` is "always allow for Ava, until revoked", `always: 'session'`
+is "for the rest of this session", and the two scoped values name what they
+widen. One thing the request cannot promise is the disk write: the daemon
+does not write over a whitelist it could not read, and a policy can be built
+without one, in which case the grant holds for the process and the daemon's
+log says it was not saved. The `tool.approval-resolved` event carries the
+`answer` that was submitted plus a `reason` of `decided`, `timeout`,
+`cancelled`, or `undeliverable` — why the request stopped being pending, not
+how long the grant lasts; the request already said that.
 
 ### Two invariants worth stating
 
