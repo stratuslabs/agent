@@ -577,6 +577,24 @@ test('config round-trips, and an unknown key is refused rather than quietly kept
     const reread = await json<{ config: Record<string, unknown> }>(await harness.call('/api/v1/config'));
     assert.deepEqual(reread.config.principals, { slackUsers: ['U1'] });
 
+    // `vision` is a boolean the loader accepts, so the round trip takes it
+    // back too — and `false` is the whole point of the key.
+    const withVision = await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { ...reread.config, vision: false } }),
+    });
+    assert.equal(withVision.status, 200);
+    const rereadVision = await json<{ config: Record<string, unknown> }>(await harness.call('/api/v1/config'));
+    assert.equal(rereadVision.config.vision, false);
+    const wrongVision = await harness.call('/api/v1/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ config: { ...reread.config, vision: 'no' } }),
+    });
+    assert.equal(wrongVision.status, 400);
+    assert.equal((await json<{ error: { code: string } }>(wrongVision)).error.code, 'invalid_config_value');
+
     // An unknown key would be silently preserved here and silently ignored by
     // every reader — and this endpoint must not become a way to write into a
     // namespace it does not own.

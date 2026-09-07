@@ -6,8 +6,14 @@ import path from 'node:path';
 import {
   latestTurnReply,
   SENDER_TRUST_METADATA_KEY,
+  imageDimensions,
+  isImageAttachmentMediaType,
+  IMAGE_ATTACHMENT_MAX_BYTES,
+  IMAGE_ATTACHMENT_MAX_DIMENSION,
+  IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
   type AlwaysMeans,
   type ApprovalAnswer,
+  type ImageAttachment,
   type JsonObject,
   type Session,
   type StratusEvent,
@@ -64,6 +70,16 @@ const THREAD_HANDOVER_DEPTH = 8;
 const MAX_UNRENDERED_FILES = 20;
 
 const PLACEHOLDER_TEXT = '…';
+
+/**
+ * A 5 MB image over a slow link is seconds, not minutes. Past this the
+ * downloads are abandoned and the turn runs with the attachments named as
+ * unreadable, rather than the thread waiting on them. One deadline for
+ * the whole message, not one per file: a message may carry ten, and ten
+ * stalls in a row would hold the thread — and `stop()` — ten times as
+ * long.
+ */
+const DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS = 30_000;
 /** What a turn that produced no text puts in its message, wherever it is posted from. */
 const NO_REPLY_TEXT = '(no reply)';
 
@@ -148,11 +164,56 @@ export interface SlackInboundEvent {
   /**
    * Attachments on a `file_share` message. Slack puts the file metadata in
    * the event and the bytes behind an authenticated URL that needs
-   * `files:read`, which this app does not ask for — so a turn learns that a
-   * file arrived and what it is called, never what is in it.
+   * `files:read`. An image the model can take is downloaded and sent with
+   * the message (see `readImageAttachments`); anything else — a log, a
+   * PDF, an image too large or in a format the API refuses — reaches the
+   * turn by name only, told that it cannot be opened.
    */
-  files?: Array<{ name?: string; title?: string }>;
+  files?: SlackInboundFile[];
 }
+
+/** The slice of Slack's file object the adapter reads. */
+export interface SlackInboundFile {
+  id?: string;
+  name?: string;
+  title?: string;
+  /** Slack's own `image/png`-style type, decided by the uploader's client. */
+  mimetype?: string;
+  /** Bytes, as Slack reports them; checked before anything is downloaded. */
+  size?: number;
+  url_private?: string;
+  url_private_download?: string;
+}
+
+/**
+ * What came back from fetching a file's private URL. Slack answers a
+ * request the app is not allowed to make — a token without `files:read` —
+ * with a **200 and a sign-in page**, never an error status, which is why
+ * the content type travels: it is the only thing that tells an image from
+ * an HTML apology for one.
+ */
+export interface SlackFileDownload {
+  status: number;
+  contentType?: string;
+  body: Buffer;
+  /**
+   * Set when the body was cut off at `maxBytes`: what is in `body` is not
+   * the file, only proof that the file was bigger than the caller would
+   * take.
+   */
+  truncated?: boolean;
+}
+
+/**
+ * Fetches a file's private URL with the bot token. `signal` is the
+ * download's deadline, and a fetcher MUST stop on it — headers and body
+ * both: the download runs inside the session's intake chain, so one that
+ * stalls holds every later message in the thread, and `stop()` waits on
+ * the handler too. `maxBytes` is the most body a fetcher may buffer; one
+ * that reads past it MUST stop there and report `truncated`, because
+ * Slack's reported size is advisory and a response is not.
+ */
+export type SlackFileFetcher = (url: string, botToken: string, signal: AbortSignal, maxBytes: number) => Promise<SlackFileDownload>;
 
 export interface SlackSocketLike {
   on(eventName: string, listener: (args: SlackSocketEventArgs) => void): void;
@@ -202,6 +263,18 @@ export interface SlackAdapterOptions {
   createSocketClient?: (appToken: string) => SlackSocketLike;
   /** Test injection: build a Web API client for a bot token. */
   createWebClient?: (botToken: string) => SlackWebLike;
+  /**
+   * Test injection: fetch a file's private URL with the bot token. The
+   * Web API client has no call for this — file bytes are served from a
+   * plain authenticated URL — so it is its own seam.
+   */
+  fetchFile?: SlackFileFetcher;
+  /**
+   * How long one message's attachment downloads may take, all of them
+   * together, before the turn goes on without whatever has not arrived.
+   * Defaults to `DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS`.
+   */
+  fileDownloadTimeoutMs?: number;
 }
 
 // Lazy (and CJS-interoperable) so tests with injected fakes never load the
@@ -217,6 +290,55 @@ const defaultWebClient = (botToken: string): SlackWebLike => {
   const { WebClient } = requireModule('@slack/web-api') as typeof import('@slack/web-api');
   return new WebClient(botToken) as unknown as SlackWebLike;
 };
+
+/**
+ * The default fetcher over a `fetch`. Exported as a factory so the bounded
+ * read can be tested against a fake `fetch` with a body that never ends;
+ * the adapter uses it over the global one.
+ *
+ * The body is read a chunk at a time and abandoned the moment it passes
+ * `maxBytes`: `arrayBuffer()` would buffer the whole response first, and
+ * the size the adapter checked before asking came from Slack's metadata,
+ * which an oversized response is under no obligation to match. A
+ * `content-length` that already says too much is refused before a byte is
+ * read.
+ */
+export const createSlackFileFetcher = (fetchImpl: typeof fetch): SlackFileFetcher => async (url, botToken, signal, maxBytes) => {
+  const response = await fetchImpl(url, { headers: { authorization: `Bearer ${botToken}` }, signal });
+  const contentType = response.headers.get('content-type');
+  const typed = contentType !== null ? { contentType } : {};
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel();
+    return { status: response.status, ...typed, body: Buffer.alloc(0), truncated: true };
+  }
+  if (response.body === null) {
+    return { status: response.status, ...typed, body: Buffer.alloc(0) };
+  }
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let received = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      received += value.byteLength;
+      if (received > maxBytes) {
+        await reader.cancel();
+        return { status: response.status, ...typed, body: Buffer.alloc(0), truncated: true };
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return { status: response.status, ...typed, body: Buffer.concat(chunks) };
+};
+
+const defaultFetchFile: SlackFileFetcher = (url, botToken, signal, maxBytes) =>
+  createSlackFileFetcher(fetch)(url, botToken, signal, maxBytes);
 
 /**
  * A hold on a queued renderer's placeholder, taken the moment an earlier
@@ -1092,16 +1214,167 @@ const MAX_LISTED_ATTACHMENTS = 5;
  * What a message's attachments are called, for a turn that cannot open
  * them. Without this the agent is handed "here's the log" and no log, and
  * answers as though it had read something — the note is what lets it say
- * the true thing instead.
+ * the true thing instead. Images the model was actually shown are not
+ * listed here: they travel on the dispatch, name included.
  */
-const attachmentNote = (files: SlackInboundEvent['files']): string => {
-  if (!files || files.length === 0) {
+const attachmentNote = (files: readonly SlackInboundFile[]): string => {
+  if (files.length === 0) {
     return '';
   }
   const names = files.slice(0, MAX_LISTED_ATTACHMENTS).map((file) => file.name ?? file.title ?? 'an unnamed file');
   const rest = files.length - names.length;
   const listed = rest > 0 ? `${names.join(', ')}, and ${rest} more` : names.join(', ');
   return `\n[Attached: ${listed}. Attachment contents cannot be read here — say so rather than guessing at them.]`;
+};
+
+/** What Slack calls a file, in a warning about it. */
+const fileLabel = (file: SlackInboundFile): string => file.name ?? file.title ?? file.id ?? 'an unnamed file';
+
+/**
+ * A message's attachments, sorted into the images the model will be shown
+ * and everything else. An image is fetched only when Slack's own metadata
+ * says it is one the API accepts and small enough to send; that keeps a
+ * 40 MB PNG from being downloaded just to be dropped, and a PDF from being
+ * fetched at all. What comes back is checked as well: without `files:read`
+ * Slack serves a sign-in page with a 200, and sending that to the model as
+ * an image would fail the turn with an error naming nothing the person can
+ * fix — the warning here names the scope instead, and the file falls back
+ * to the by-name note like any other attachment the turn cannot open.
+ */
+const readImageAttachments = async (
+  files: readonly SlackInboundFile[],
+  botToken: string,
+  fetchFile: SlackFileFetcher,
+  timeoutMs: number,
+  warn: (line: string) => void,
+): Promise<{ images: ImageAttachment[]; unread: SlackInboundFile[] }> => {
+  // Decided from the last file back, the way the replay window is spent:
+  // when a message's images do not all fit, the ones kept are the ones it
+  // listed last, so intake and replay agree about which survive. Delivered
+  // in the message's own order, because that is how the person sees them.
+  const kept = new Map<number, ImageAttachment>();
+  const dropped = new Set<number>();
+  // The message's one deadline, shared by every download in it.
+  const deadline = AbortSignal.timeout(timeoutMs);
+  // Decoded bytes accepted so far. Checked against Slack's reported size
+  // before a download and the real length after it, because the message
+  // as a whole has a budget the per-image cap alone cannot keep.
+  let total = 0;
+  // Once an image that fits on its own does not fit what is left of the
+  // message's budget, nothing listed before it is taken either: the window
+  // is contiguous, as the replay window is, and a smaller older image must
+  // not slip in past a larger newer one that was left out.
+  let windowClosed = false;
+  // Why an image is being left out, or nothing when it fits. One place for
+  // both limits so the warning and the fallback cannot disagree.
+  const overLimit = (label: string, bytes: number): string | undefined => {
+    if (bytes > IMAGE_ATTACHMENT_MAX_BYTES) {
+      return `slack: ${label} is ${bytes} bytes, over the ${IMAGE_ATTACHMENT_MAX_BYTES}-byte limit an image can be sent to the model at; the turn is told it cannot be read.`;
+    }
+    if (total + bytes > IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES) {
+      windowClosed = true;
+      return `slack: ${label} would take this message's images past the ${IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES} bytes one request can carry; the turn is told it cannot be read. Send it in a message of its own.`;
+    }
+    return undefined;
+  };
+  for (let position = files.length - 1; position >= 0; position -= 1) {
+    const file = files[position]!;
+    const url = file.url_private_download ?? file.url_private;
+    if (!isImageAttachmentMediaType(file.mimetype) || url === undefined) {
+      dropped.add(position);
+      continue;
+    }
+    if (windowClosed) {
+      warn(`slack: ${fileLabel(file)} was not taken: an image listed after it already filled what this message's images can carry; the turn is told it cannot be read.`);
+      dropped.add(position);
+      continue;
+    }
+    const tooBig = file.size === undefined ? undefined : overLimit(fileLabel(file), file.size);
+    if (tooBig !== undefined) {
+      warn(tooBig);
+      dropped.add(position);
+      continue;
+    }
+    // What this image may weigh: the per-image cap, or what is left of the
+    // message's budget if that is less. Handed to the fetcher so an
+    // oversized response is abandoned mid-body rather than buffered whole.
+    const maxBytes = Math.min(IMAGE_ATTACHMENT_MAX_BYTES, IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES - total);
+    if (deadline.aborted) {
+      warn(`slack: ${fileLabel(file)} was not downloaded: this message's downloads had already taken longer than ${timeoutMs}ms. The turn is told it cannot be read.`);
+      dropped.add(position);
+      continue;
+    }
+    let download: SlackFileDownload;
+    try {
+      download = await fetchFile(url, botToken, deadline, maxBytes);
+    } catch (error) {
+      const reason = error instanceof Error && error.name === 'TimeoutError'
+        ? `this message's downloads took longer than ${timeoutMs}ms`
+        : (error instanceof Error ? error.message : String(error));
+      warn(`slack: could not download ${fileLabel(file)}: ${reason}. The turn is told it cannot be read.`);
+      dropped.add(position);
+      continue;
+    }
+    // Refused on what Slack sends when it will not serve the file — a
+    // non-200, or a 200 whose body is a page — rather than on the label of
+    // what it does serve: a download URL may be typed as the image or as
+    // a plain octet stream, and either is the bytes Slack said it was.
+    const contentType = download.contentType?.split(';')[0]?.trim().toLowerCase() ?? '';
+    if (download.status !== 200 || contentType.startsWith('text/')) {
+      warn(`slack: ${fileLabel(file)} came back as ${contentType || 'no content type'} (HTTP ${download.status}) rather than an image. This is what a bot token without the files:read scope gets — add the scope under OAuth & Permissions and reinstall the app.`);
+      dropped.add(position);
+      continue;
+    }
+    if (download.truncated === true) {
+      // Cut off at what was left of the message's budget, rather than at
+      // the per-image cap: the same overflow the size check closes the
+      // window on, learned from the bytes instead of the metadata.
+      if (maxBytes < IMAGE_ATTACHMENT_MAX_BYTES) {
+        windowClosed = true;
+      }
+      warn(`slack: ${fileLabel(file)} is larger than the ${maxBytes} bytes this message could still take for an image; the download was abandoned and the turn is told it cannot be read.`);
+      dropped.add(position);
+      continue;
+    }
+    const stillTooBig = overLimit(fileLabel(file), download.body.length);
+    if (stillTooBig !== undefined) {
+      warn(stillTooBig);
+      dropped.add(position);
+      continue;
+    }
+    // Read from the bytes, not from Slack's metadata: an image the model
+    // API refuses fails the turn it arrives on and, once stored, every turn
+    // after — so what is stored has to be what the API takes.
+    const dimensions = imageDimensions(download.body, file.mimetype);
+    if (dimensions === undefined) {
+      warn(`slack: ${fileLabel(file)} is not a complete ${file.mimetype} — its header or trailer is missing; the turn is told it cannot be read.`);
+      dropped.add(position);
+      continue;
+    }
+    if (dimensions.width > IMAGE_ATTACHMENT_MAX_DIMENSION || dimensions.height > IMAGE_ATTACHMENT_MAX_DIMENSION) {
+      warn(`slack: ${fileLabel(file)} is ${dimensions.width}×${dimensions.height}, over the ${IMAGE_ATTACHMENT_MAX_DIMENSION}-pixel side the model can take; the turn is told it cannot be read.`);
+      dropped.add(position);
+      continue;
+    }
+    total += download.body.length;
+    const name = file.name ?? file.title;
+    kept.set(position, {
+      mediaType: file.mimetype,
+      data: download.body.toString('base64'),
+      ...(name !== undefined ? { name } : {}),
+    });
+  }
+  const images: ImageAttachment[] = [];
+  const unread: SlackInboundFile[] = [];
+  files.forEach((file, position) => {
+    const image = kept.get(position);
+    if (image !== undefined) {
+      images.push(image);
+    } else if (dropped.has(position)) {
+      unread.push(file);
+    }
+  });
+  return { images, unread };
 };
 
 /**
@@ -1264,6 +1537,14 @@ interface Admission {
   /** Absent for a DM, which has one agent by construction. */
   threadKey?: string;
   settled: boolean;
+  /**
+   * In the thread, if at all, as a listener: the message is somebody
+   * else's to answer, and this agent hears it into its session rather than
+   * replying. Decided here for the two cases the process can settle
+   * synchronously — a message naming another agent, and one an earlier
+   * handover gave to another agent — and by the sessions for the cold one.
+   */
+  overhear: boolean;
 }
 
 interface AgentConnection {
@@ -1299,6 +1580,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const editIntervalMs = options.editIntervalMs ?? DEFAULT_EDIT_INTERVAL_MS;
   const createSocket = options.createSocketClient ?? defaultSocketClient;
   const createWeb = options.createWebClient ?? defaultWebClient;
+  const fetchFile = options.fetchFile ?? defaultFetchFile;
+  const fileDownloadTimeoutMs = options.fileDownloadTimeoutMs ?? DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS;
 
   const connections: AgentConnection[] = [];
   // Every agent this adapter was asked to carry, connected or not — the
@@ -2331,10 +2614,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * the dedupe and the handover record included, which are the two pieces a
    * later message reads.
    *
-   * `undefined` means the message is not this agent's. `settled: false`
-   * means only the sessions can still decide it, which is the one case that
-   * has to wait — and it is the cold case, where by definition no message
-   * of this thread has been seen in this process.
+   * `undefined` means the message is nothing to this agent — a DM to
+   * someone else, the room rather than a thread, its own words.
+   * `overhear: true` means it is somebody else's to answer and this
+   * agent's to hear, if it is in the thread at all, which only the sessions
+   * can say. `settled: false` means only the sessions can decide even that
+   * much, which is the one case that has to wait — and it is the cold
+   * case, where by definition no message of this thread has been seen in
+   * this process.
    */
   const admit = (connection: AgentConnection, args: SlackSocketEventArgs): Admission | undefined => {
     const event = args.event;
@@ -2381,13 +2668,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // or stands alone, is a follow-up to nothing.
         return undefined;
       }
-      if (named) {
-        // Somebody else was asked. Tagging an agent hands it the question,
-        // and the agent that had it is no longer being asked — two answers
-        // to one message is what a thread with a roster in it must never
-        // produce.
-        return undefined;
-      }
     }
 
     // One Slack MESSAGE, not one delivery. An app subscribed to both
@@ -2400,7 +2680,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // After the handover record and not before it: a redelivery re-records
     // the same agent, which costs nothing, while deduping first would drop
     // the record whenever the other copy of a doubly-delivered mention is
-    // the one a connection sees second.
+    // the one a connection sees second. And before every stand-down below,
+    // because standing down is no longer nothing: an agent that hears a
+    // message it is not answering must hear it once.
     const eventKey = `${connection.config.agentId}:${event.channel}:${event.ts}`;
     if (alreadySeen(eventKey)) {
       return undefined;
@@ -2421,6 +2703,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       ...(thread ? { thread } : {}),
       ...(threadKey ? { threadKey } : {}),
       settled: true,
+      overhear: false,
     };
 
     if (addressed) {
@@ -2430,6 +2713,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // that all the sockets agree on, which is the only self-consistent
       // reading of a message that asked several.
       return admission;
+    }
+
+    if (named) {
+      // Somebody else was asked. Tagging an agent hands it the question,
+      // and the agent that had it is no longer being asked — two answers
+      // to one message is what a thread with a roster in it must never
+      // produce. But the agent that had it is still in the room, and a
+      // person in that position hears the question asked of their
+      // colleague: it goes into this agent's session, unanswered, so the
+      // next thing it is asked is asked of someone who followed along.
+      return { ...admission, overhear: true };
     }
 
     // An untagged reply. The record is what this process has actually seen,
@@ -2447,7 +2741,10 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         // membership the adapter does not track, and would have to be
         // tracked in the durable path too, since a removed app is still a
         // live connection with the newest session there.
-        return undefined;
+        //
+        // Standing down is not leaving: the reply is the holder's, and this
+        // agent hears it.
+        return { ...admission, overhear: true };
       }
       rememberAddressee(threadKey, connection.config.agentId, event.ts);
       return admission;
@@ -2499,6 +2796,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       // not lose its place to one that did not. A message that turns out
       // not to be this agent's leaves an empty link behind, which is all it
       // should cost.
+      let overhear = admitted.overhear;
       if (!admitted.settled) {
         // One verdict for this message, shared with whichever other agents
         // are asking about it — see `followUpWinner`.
@@ -2507,23 +2805,82 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           event.ts,
         );
         if (winner !== connection.config.agentId) {
-          return undefined;
-        }
-        // Answered from the store rather than from memory: hold it, so the
-        // rest of the thread is ordered by receipt like any other.
-        if (threadKey) {
+          // Not this agent's to answer — and, if it is in the thread,
+          // this agent's to hear, same as the two warm stand-downs.
+          overhear = true;
+        } else if (threadKey) {
+          // Answered from the store rather than from memory: hold it, so
+          // the rest of the thread is ordered by receipt like any other.
           rememberAddressee(threadKey, connection.config.agentId, event.ts);
         }
       }
       const cleaned = await humanizeMentions(connection, event.text ?? '');
-      if (cleaned.length === 0) {
+      // Fetched inside the chain, like the lookups below: it is network
+      // I/O, and a message whose screenshot is slow to arrive must not lose
+      // its place to the one typed after it. Only for a message this agent
+      // will answer: an overheard one is appended as text with no turn run
+      // on it, and its attachments reach the transcript by name, as every
+      // attachment did before images.
+      const { images, unread } = overhear
+        ? { images: [] as ImageAttachment[], unread: event.files ?? [] }
+        : await readImageAttachments(
+          event.files ?? [],
+          connection.config.botToken,
+          fetchFile,
+          fileDownloadTimeoutMs,
+          warn,
+        );
+      // An image with nothing said is still a question ("what's this?"); a
+      // file the turn could not open with nothing said is not one, and gets
+      // no reply.
+      if (cleaned.length === 0 && images.length === 0) {
         return undefined;
       }
       const author = await displayNameFor(connection, userId);
       // In shared channels the model should know who is speaking; a DM is
-      // unambiguous.
-      const spoken = isDm ? cleaned : `${author}: ${cleaned}`;
-      const userMessage = `${spoken}${attachmentNote(event.files)}`;
+      // unambiguous. A bare image in a channel still says who sent it.
+      const spoken = isDm ? cleaned : (cleaned.length > 0 ? `${author}: ${cleaned}` : `${author}:`);
+      const userMessage = `${spoken}${attachmentNote(unread)}`;
+      // Who sent this, judged against the operator's list — per message,
+      // never remembered from the first one in the thread. A DM proves
+      // nothing about who is typing, so a DM from an unlisted member is
+      // `unknown` exactly as a channel mention would be. The same label
+      // whether the agent answers or only hears: the text is in its
+      // transcript either way.
+      const senderTrust = (connection.config.principals ?? []).includes(userId) ? 'user' : 'unknown';
+      const metadata = {
+        channel: 'slack',
+        team,
+        slackChannel: event.channel,
+        slackUser: userId,
+        // Carried so a mid-turn approval question is asked in the thread
+        // the turn belongs to rather than at the top of a busy channel.
+        ...(thread ? { slackThread: thread } : {}),
+        [SENDER_TRUST_METADATA_KEY]: senderTrust,
+      };
+
+      if (overhear) {
+        // Heard, not answered: no placeholder, no turn. Only into a
+        // conversation this agent is already in — a session under this
+        // thread's key exists exactly when it was invited here — and the
+        // gateway is the one to say whether it is, on the session's chain:
+        // a first mention whose dispatch is queued ahead of this message
+        // has created the session by the time the observe runs, where a
+        // membership read from here would find nothing and drop a
+        // message said moments after the invitation. A host that cannot
+        // take it leaves the agent hearing what it answers, as every
+        // agent did before.
+        if (!gateway.observe) {
+          return undefined;
+        }
+        // Placed on the gateway's chain here, in receipt order, and not
+        // awaited here: a dispatch is placed the same way, and awaiting
+        // an overhear queued behind a long turn would hold the next
+        // message's place in this chain hostage to that turn.
+        return {
+          observed: gateway.observe({ sessionId, agentId: connection.config.agentId, message: userMessage, metadata }),
+        };
+      }
 
       const renderer = new ReplyRenderer(connection.web, event.channel, thread, editIntervalMs, warn);
       try {
@@ -2543,21 +2900,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         sessionId,
         agentId: connection.config.agentId,
         userMessage,
+        ...(images.length > 0 ? { images } : {}),
         turnId: renderer.turnId,
-        metadata: {
-          channel: 'slack',
-          team,
-          slackChannel: event.channel,
-          slackUser: userId,
-          // Carried so a mid-turn approval question is asked in the thread
-          // the turn belongs to rather than at the top of a busy channel.
-          ...(thread ? { slackThread: thread } : {}),
-          // This turn's sender, judged against the operator's list — per
-          // message, never remembered from the first one in the thread. A
-          // DM proves nothing about who is typing, so a DM from an unlisted
-          // member is `unknown` exactly as a channel mention would be.
-          [SENDER_TRUST_METADATA_KEY]: (connection.config.principals ?? []).includes(userId) ? 'user' : 'unknown',
-        },
+        metadata,
       });
       return { renderer, turn };
     });
@@ -2574,6 +2919,17 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
     const started = await intake;
     if (!started) {
+      return;
+    }
+    if ('observed' in started) {
+      // Nothing to render; the one outcome worth a line is the host
+      // refusing it — a turn parked across a restart, most likely — since
+      // a message dropped on the floor is the thing this exists to end.
+      try {
+        await started.observed;
+      } catch (error) {
+        warn(`slack: ${connection.config.agentId} could not overhear a message in ${event.channel}: ${error instanceof Error ? error.message : String(error)}`);
+      }
       return;
     }
     const { renderer, turn } = started;

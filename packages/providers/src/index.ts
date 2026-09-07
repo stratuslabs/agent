@@ -1,8 +1,14 @@
 import {
+  droppedImageNote,
+  imagesWithinReplayBudget,
+  omitImage,
   renderSystemPromptSections,
   uncachedInputTokens,
   type ExecutionContext,
+  type ImageAttachment,
+  type ImageReplayBudget,
   type JsonObject,
+  type Message,
   type ModelProvider,
   type ProviderCallUsage,
   type ProviderPart,
@@ -12,6 +18,7 @@ import {
   type ToolCall,
   type ToolDescriptor,
   type ToolResult,
+  promptTextOf,
 } from '@stratusagent/core';
 
 export interface ProviderResponseBuilder {
@@ -79,6 +86,22 @@ export interface OpenAICompatibleProviderConfig {
    * (and its caller's shutdown) forever. 0 disables. Default 5 minutes.
    */
   requestTimeoutMs?: number;
+  /**
+   * Whether the model takes images. Default true. A text-only model — the
+   * usual case for a local runtime — rejects a request with an `image_url`
+   * part in it, and because the image is stored with the message before the
+   * provider is called, every later turn of that session would replay the
+   * same part and fail the same way. Off, an image reaches the model as a
+   * note naming it instead, the same one a text-only harness gets.
+   */
+  vision?: boolean;
+  /**
+   * How much of the transcript's images one request may replay, newest
+   * first — decoded bytes and a count; older images past either are sent
+   * as a note. Each defaults to core's constant. Lower one for an endpoint
+   * with a smaller limit.
+   */
+  imageReplayBudget?: ImageReplayBudget;
 }
 
 interface OpenAICompatibleToolCall {
@@ -90,9 +113,19 @@ interface OpenAICompatibleToolCall {
   };
 }
 
+/**
+ * A user turn's content on the chat-completions wire: a string when it is
+ * only text, and the parts form — text plus `image_url` parts carrying
+ * data URLs — when the message has images. The string form is kept for
+ * the common case because some compatible servers accept only that.
+ */
+type OpenAICompatibleUserContent =
+  | string
+  | Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }>;
+
 interface OpenAICompatibleMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string | null;
+  content: OpenAICompatibleUserContent | null;
   name?: string;
   tool_calls?: Array<{
     id: string;
@@ -341,6 +374,8 @@ export const createOpenAICompatibleProvider = ({
   headers = {},
   fetch: fetchImpl = globalThis.fetch,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  vision = true,
+  imageReplayBudget,
 }: OpenAICompatibleProviderConfig): ModelProvider => {
   if (typeof fetchImpl !== 'function') {
     throw new Error('Global fetch is unavailable for the OpenAI-compatible provider.');
@@ -364,33 +399,58 @@ export const createOpenAICompatibleProvider = ({
 
       let payload;
       let response: Response;
-      try {
-        response = await fetchImpl(`${normalizedBaseUrl}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            authorization: `Bearer ${apiKey}`,
-            ...headers,
-          },
-          body: JSON.stringify({
-            model,
-            messages: createOpenAICompatibleMessages(request, systemPrompt, toolNames),
-            ...(tools.length > 0 ? { tools } : {}),
-          }),
-          ...(signal ? { signal } : {}),
-        });
-        payload = await parseOpenAICompatibleResponse(response);
-      } catch (error) {
-        // A timed-out request is a provider failure (fallback-eligible),
-        // never mistaken for the caller's own cancellation.
-        if (timeout?.aborted && !request.signal?.aborted) {
-          throw new Error(`Provider request timed out after ${requestTimeoutMs}ms: ${name}`);
+      // Sent at most twice: once as built, and once more with no images at
+      // all if the endpoint refused them. The retry is built as though the
+      // model had no vision rather than from what is left: omitting the
+      // refused images frees replay budget, and a rebuild that could see
+      // it would spend it on older images — sending a picture to an
+      // endpoint that just said it takes none.
+      let imagesRetried = false;
+      for (;;) {
+        const { messages, sent } = createOpenAICompatibleMessages(request, systemPrompt, toolNames, vision && !imagesRetried, imageReplayBudget);
+        try {
+          response = await fetchImpl(`${normalizedBaseUrl}/chat/completions`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              authorization: `Bearer ${apiKey}`,
+              ...headers,
+            },
+            body: JSON.stringify({
+              model,
+              messages,
+              ...(tools.length > 0 ? { tools } : {}),
+            }),
+            ...(signal ? { signal } : {}),
+          });
+          payload = await parseOpenAICompatibleResponse(response);
+        } catch (error) {
+          // A timed-out request is a provider failure (fallback-eligible),
+          // never mistaken for the caller's own cancellation.
+          if (timeout?.aborted && !request.signal?.aborted) {
+            throw new Error(`Provider request timed out after ${requestTimeoutMs}ms: ${name}`);
+          }
+          throw error;
         }
-        throw error;
-      }
 
-      if (!response.ok) {
-        throw new Error(payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`);
+        if (response.ok) {
+          break;
+        }
+        const message = payload.error?.message ?? payload.rawText ?? `Provider request failed with status ${response.status}`;
+        // A 400 that blames an image, from a request that carried some. This
+        // wire format has no one error shape across its vendors, so the
+        // whole batch is let go of rather than one block: the images are
+        // emptied on the session itself, since stored as they are they would
+        // fail every later turn the same way, and the turn goes on with a
+        // note in each one's place.
+        if (response.status === 400 && sent.length > 0 && !imagesRetried && /image/i.test(message)) {
+          for (const image of sent) {
+            omitImage(image);
+          }
+          imagesRetried = true;
+          continue;
+        }
+        throw new Error(message);
       }
 
       // Reported through the sink BEFORE the empty-response check below.
@@ -569,8 +629,15 @@ const createOpenAICompatibleMessages = (
   request: ProviderRequest,
   systemPrompt: string | undefined,
   toolNames: OpenAICompatibleToolNameMapping,
-): OpenAICompatibleMessage[] => {
+  vision: boolean,
+  imageReplayBudget: ImageReplayBudget | undefined,
+): { messages: OpenAICompatibleMessage[]; sent: ImageAttachment[] } => {
   const messages: OpenAICompatibleMessage[] = [];
+  const replayed = imagesWithinReplayBudget(request.session.messages, imageReplayBudget);
+  // The images this request actually carries, for a rejection to answer.
+  const sent: ImageAttachment[] = vision
+    ? request.session.messages.flatMap((message) => (message.images ?? []).filter((image) => replayed.has(image)))
+    : [];
 
   // One shared reading of what an agent is told about itself — persona,
   // memory, skills — rendered by the kernel (see core's system prompt
@@ -621,14 +688,36 @@ const createOpenAICompatibleMessages = (
       continue;
     }
 
+    // Framed by the kernel's one rule for it, so the OpenAI-compatible path
+    // says "said to somebody else" the way the API and harness paths do —
+    // an overheard message sent bare here would be an ordinary instruction
+    // on exactly the endpoint with no other provenance signal.
     messages.push({
       role: message.role,
-      content: message.content,
+      content: message.role === 'user'
+        ? (vision ? userContentParts(message, replayed) : userMessageText(message))
+        : message.content,
       ...(message.name ? { name: message.name } : {}),
     });
   }
 
-  return messages;
+  return { messages, sent };
+};
+
+const userContentParts = (
+  message: Pick<Message, 'content' | 'overheard' | 'images'>,
+  replayed: ReadonlySet<ImageAttachment>,
+): OpenAICompatibleUserContent => {
+  const text = promptTextOf(message);
+  if (message.images === undefined || message.images.length === 0) {
+    return text;
+  }
+  return [
+    ...(text.length > 0 ? [{ type: 'text' as const, text }] : []),
+    ...message.images.map((image) => (replayed.has(image)
+      ? { type: 'image_url' as const, image_url: { url: `data:${image.mediaType};base64,${image.data}` } }
+      : { type: 'text' as const, text: droppedImageNote(image) })),
+  ];
 };
 
 const extractOpenAICompatibleText = (payload: OpenAICompatibleResponse): string => {
@@ -747,13 +836,31 @@ export const bridgedToolNames = (descriptors: readonly ToolDescriptor[]): Map<st
  * when a harness session is fresh (or its stored session could not be
  * resumed) and knows nothing yet.
  */
+/**
+ * What a text-only runtime is told about the images on a user message. The
+ * harness providers hand their SDK one prompt string, so the image itself
+ * cannot travel; naming it is what lets the model say it cannot see the
+ * screenshot rather than describe one it was never shown.
+ */
+const describeImageAttachments = (images: readonly ImageAttachment[] | undefined): string => {
+  if (images === undefined || images.length === 0) {
+    return '';
+  }
+  const names = images.map((image) => image.name ?? `a ${image.mediaType} image`);
+  return `\n[Attached: ${names.join(', ')}. This runtime cannot see images — say so rather than guessing at them.]`;
+};
+
+/** A user message's text as a prompt carries it, with its images named after it. */
+const userMessageText = (message: Pick<Message, 'content' | 'overheard' | 'images'>): string =>
+  `${promptTextOf(message)}${describeImageAttachments(message.images)}`;
+
 export const renderTranscriptPrompt = (request: ProviderRequest): string => {
   const conversational = request.session.messages.filter(
     (message) => message.role === 'user' || message.role === 'assistant' || message.role === 'tool',
   );
 
   if (conversational.length === 1 && conversational[0]?.role === 'user') {
-    return conversational[0].content;
+    return userMessageText(conversational[0]);
   }
 
   const lines: string[] = ['Conversation so far:'];
@@ -774,24 +881,48 @@ export const renderTranscriptPrompt = (request: ProviderRequest): string => {
         continue;
       }
     }
-    lines.push(`[${message.role}] ${message.content}`);
+    lines.push(`[${message.role}] ${message.role === 'user' ? userMessageText(message) : message.content}`);
   }
   lines.push('', 'Continue the conversation by replying to the latest user message.');
   return lines.join('\n');
 };
 
 /**
- * The newest user message, which is all a resumed harness session needs:
- * the harness is holding everything before it. Falls back to the full
- * transcript when there is no user message to isolate, so a caller can
- * never end up sending nothing.
+ * What a resumed harness session has not heard yet: every message
+ * overheard since the agent last spoke, then the newest user message. The
+ * harness holds everything before its own last reply, and until `observe`
+ * that was always exactly one message — but a message overheard between
+ * turns is appended with no turn run on it, so by the next turn there can
+ * be several, and sending only the newest would leave the model answering
+ * with the thread's middle missing on precisely the path that cannot
+ * rebuild its history.
+ *
+ * Selected by the mark, not by position. "Every user message since the
+ * last assistant" reads the same in the common case and differs after a
+ * turn the harness accepted and then failed: no reply was appended, so
+ * that turn's message is still ahead of the last assistant, and scanning
+ * back would send it to a harness that already has it. An overheard
+ * message is one the harness has never seen, by construction; an
+ * addressed one before the newest was some turn's prompt.
+ *
+ * One addressed message with nothing overheard renders bare, as it always
+ * did. Falls back to the full transcript when there is no user message to
+ * isolate, so a caller can never end up sending nothing.
  */
 export const latestUserMessagePrompt = (request: ProviderRequest): string => {
-  for (let index = request.session.messages.length - 1; index >= 0; index -= 1) {
-    const message = request.session.messages[index];
-    if (message?.role === 'user') {
-      return message.content;
-    }
+  const messages = request.session.messages;
+  let start = messages.length;
+  while (start > 0 && messages[start - 1]?.role !== 'assistant') {
+    start -= 1;
   }
-  return renderTranscriptPrompt(request);
+  const since = messages.slice(start).filter((message) => message.role === 'user');
+  const newest = since.at(-1);
+  if (!newest) {
+    return renderTranscriptPrompt(request);
+  }
+  const unheard = since.filter((message) => message.overheard === true || message === newest);
+  if (unheard.length === 1 && newest.overheard !== true) {
+    return userMessageText(newest);
+  }
+  return unheard.map(userMessageText).join('\n');
 };

@@ -44,6 +44,10 @@ session's trust label drops, `session.tainted` records the new label and
 the **name** of what lowered it — a tool, or `memory`, `sender`, `legacy` —
 and never the content that did: "since when has this conversation been
 reading strangers' text" is answerable without the text being in the log.
+A message an agent overheard in a shared thread — said to somebody else,
+appended with no turn run — is `session.observed`, by session and agent
+alone; that it was heard is the trace, and what was heard stays in the
+session store like every other message.
 See [Memory](../concepts/memory.md#where-a-fact-came-from). For
 what it records about a shell command — the scope, never the command — see
 [Shell commands](./shell.md#what-the-log-records-about-a-command). A call

@@ -4,10 +4,11 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { EventBus, type ApprovalAnswer, type Session, type StratusEvent } from '@stratusagent/core';
+import { EventBus, type ApprovalAnswer, type ImageAttachment, type Session, type StratusEvent } from '@stratusagent/core';
 import type { GatewayLike } from '@stratusagent/channels';
 import {
   createSlackChannelAdapter,
+  createSlackFileFetcher,
   type SlackBlock,
   type SlackSocketEventArgs,
   type SlackSocketLike,
@@ -151,7 +152,9 @@ const sessionWithReply = (id: string, reply: string): Session => {
 };
 
 interface StubGateway extends GatewayLike {
-  dispatches: Array<{ sessionId: string; agentId?: string; userMessage: string }>;
+  dispatches: Array<{ sessionId: string; agentId?: string; userMessage: string; images?: ImageAttachment[] }>;
+  /** What each agent heard without answering, in the order the gateway was asked. */
+  observes: Array<{ sessionId: string; agentId?: string; message: string }>;
   resolutions: Array<{ requestId: string; answer: ApprovalAnswer; actor?: string; reason?: string }>;
   /** Request ids the gateway still considers pending. */
   pendingApprovals: Set<string>;
@@ -165,6 +168,7 @@ const createStubGateway = (
   const gateway: StubGateway = {
     bus,
     dispatches: [],
+    observes: [],
     resolutions: [],
     pendingApprovals: new Set<string>(),
     agents: () => [
@@ -191,6 +195,7 @@ const createStubGateway = (
         sessionId: input.sessionId,
         ...(input.agentId ? { agentId: input.agentId } : {}),
         userMessage: input.userMessage,
+        ...(input.images !== undefined ? { images: input.images } : {}),
       });
       // As the gateway does: the caller's turn id is the session's active
       // turn for as long as the turn runs, and the session reports
@@ -206,6 +211,24 @@ const createStubGateway = (
       }
     },
     activeTurnId: (sessionId) => activeTurns.get(sessionId),
+    async observe(input) {
+      // As the gateway does, on the session's chain: a session exists if a
+      // dispatch was placed for it ahead of this — the invitation still in
+      // flight — or the durable record knows it. "Not in that one" is an
+      // answer, not a refusal.
+      const invited = gateway.dispatches.some((dispatch) => dispatch.sessionId === input.sessionId)
+        || (await gateway.sessionRouting?.(input.sessionId)) !== undefined;
+      if (!invited) {
+        return undefined;
+      }
+      gateway.observes.push({
+        sessionId: input.sessionId,
+        ...(input.agentId ? { agentId: input.agentId } : {}),
+        message: input.message,
+      });
+      await bus.emit({ type: 'session.observed', sessionId: input.sessionId, agentId: input.agentId ?? 'ava' });
+      return sessionWithReply(input.sessionId, '');
+    },
   };
   return gateway;
 };
@@ -802,6 +825,172 @@ test('in a shared thread an untagged reply goes to whoever spoke last, and a men
     ['bea', 'Dylan: what do you think?'],
     ['bea', 'Dylan: go on'],
   ]);
+});
+
+test('an agent in a shared thread hears what is said to the other one, and posts nothing for it', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  // Both in the thread; Ava spoke last.
+  gateway.sessionRouting = routingOver(new Map([
+    ['slack:ava:T1:C1:900.0', '2026-01-01T00:00:01.000Z'],
+    ['slack:bea:T1:C1:900.0', '2026-01-01T00:00:00.000Z'],
+  ]));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // Cold: the sessions say Ava spoke last, so the untagged reply is hers —
+  // and Bea, in the thread but not asked, hears it.
+  const followUp = channelMessage({ text: 'say more', ts: '900.1', thread: '900.0' });
+  await socketAva.deliver('message', followUp);
+  await socketBea.deliver('message', followUp);
+
+  // Naming Bea hands her the question. Ava had it, and now hears it asked
+  // of her colleague instead — once, though Slack tells her app about a
+  // mention of another app through `message.channels` only, and tells
+  // Bea's about it twice.
+  const handover = channelMessage({ text: '<@B-BEA> what do you think?', ts: '900.2', thread: '900.0' });
+  await socketAva.deliver('message', handover);
+  // A redelivery — the same message, again — is heard once, exactly as
+  // it would be answered once.
+  await socketAva.deliver('message', handover);
+  await socketBea.deliver('message', handover);
+  await socketBea.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-handover' },
+    event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-BEA> what do you think?', ts: '900.2', thread_ts: '900.0', channel: 'C1' },
+  });
+
+  // Warm: the handover is in force, so the next untagged reply is Bea's to
+  // answer and Ava's to hear.
+  const afterHandover = channelMessage({ text: 'go on', ts: '900.3', thread: '900.0' });
+  await socketAva.deliver('message', afterHandover);
+  await socketBea.deliver('message', afterHandover);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['ava', 'Dylan: say more'],
+    ['bea', 'Dylan: what do you think?'],
+    ['bea', 'Dylan: go on'],
+  ]);
+  // Every message somebody else answered reached the agent that did not,
+  // into its own session for the thread, with the speaker named the way a
+  // turn's message names them.
+  assert.deepEqual(
+    gateway.observes.map((observed) => [observed.agentId, observed.sessionId, observed.message]),
+    [
+      ['bea', 'slack:bea:T1:C1:900.0', 'Dylan: say more'],
+      ['ava', 'slack:ava:T1:C1:900.0', 'Dylan: <@B-BEA> what do you think?'],
+      ['ava', 'slack:ava:T1:C1:900.0', 'Dylan: go on'],
+    ],
+  );
+  // Hearing is silent: a placeholder is a promise of a reply, and there
+  // is none coming. Every post either app made was for a turn it answered.
+  assert.equal(webAva.posts.length, 1);
+  assert.equal(webBea.posts.length, 2);
+});
+
+test('a message said moments after an agent was invited is heard, not dropped', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  // Every dispatch waits on a gate, so the invitation's session is still
+  // being created when the next message arrives — the durable record
+  // knows nothing of this thread yet.
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const gateway = createStubGateway(async ({ sessionId }) => {
+    await gate;
+    return sessionWithReply(sessionId, 'ok');
+  });
+  gateway.sessionRouting = routingOver(new Map());
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // Ava is mentioned; her first turn is queued and has not written a
+  // session. Before it can, the same person turns to Bea in that thread.
+  const invitation = socketAva.deliver('app_mention', mention('<@B-AVA> hello', { ts: '300.0' }));
+  const toBea = channelMessage({ text: '<@B-BEA> and you?', ts: '300.1', thread: '300.0' });
+  const heardByAva = socketAva.deliver('message', toBea);
+  const answeredByBea = socketBea.deliver('message', toBea);
+  release();
+  await Promise.all([invitation, heardByAva, answeredByBea]);
+  await adapter.stop();
+
+  // A membership check from the adapter would have found no session and
+  // dropped this. The gateway, asked on the session's chain behind the
+  // invitation, finds the session that dispatch created.
+  assert.deepEqual(
+    gateway.observes.map((observed) => [observed.agentId, observed.message]),
+    [['ava', 'Dylan: <@B-BEA> and you?']],
+  );
+  // And Bea, who was named, answers it — hearing and answering are the
+  // two sides of one message.
+  assert.deepEqual(gateway.dispatches.map((dispatch) => dispatch.agentId), ['ava', 'bea']);
+});
+
+test('an agent hears only threads it is in, and only where the host can take it', async () => {
+  const socketAva = createFakeSocket();
+  const socketBea = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  // Only Bea has a session under this thread: Ava was never invited.
+  gateway.sessionRouting = routingOver(new Map([['slack:bea:T1:C1:700.0', '2026-01-01T00:00:00.000Z']]));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-a', botToken: 'xoxb-a' },
+      { agentId: 'bea', appToken: 'xapp-b', botToken: 'xoxb-b' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: (appToken) => (appToken === 'xapp-a' ? socketAva : socketBea),
+    createWebClient: (botToken) => (botToken === 'xoxb-a' ? webAva : webBea),
+  });
+  await adapter.start(gateway);
+
+  // A thread Ava's app is told about, like every thread in the channel,
+  // and has no part in: nothing to hear into.
+  const toBea = channelMessage({ text: '<@B-BEA> thoughts?', ts: '700.1', thread: '700.0' });
+  await socketAva.deliver('message', toBea);
+  await socketBea.deliver('message', toBea);
+
+  // A host without `observe` leaves the agent hearing what it answers, as
+  // every agent did before — no error, and the answering is untouched.
+  delete gateway.observe;
+  const again = channelMessage({ text: '<@B-BEA> and?', ts: '700.2', thread: '700.0' });
+  await socketAva.deliver('message', again);
+  await socketBea.deliver('message', again);
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.agentId, dispatch.userMessage]), [
+    ['bea', 'Dylan: thoughts?'],
+    ['bea', 'Dylan: and?'],
+  ]);
+  assert.deepEqual(gateway.observes, []);
+  assert.equal(webAva.posts.length, 0);
 });
 
 test('a follow-up typed while the opening mention is still starting is answered, not dropped', async () => {
@@ -3724,4 +3913,580 @@ test('an agent with no principals configured takes every sender as unknown, its 
   // A DM proves nothing about who is typing: without a name to check
   // against, honest is `unknown`, not `user`.
   assert.deepEqual(senders, ['unknown']);
+});
+
+// A real PNG header with its size chunk, so what the test sends is bytes the
+// adapter can read a size out of and not a string that happens to be
+// called an image.
+const PNG_IEND = Buffer.from([0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
+const pngHeader = (width: number, height: number): Buffer => {
+  const bytes = Buffer.alloc(24);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  bytes.writeUInt32BE(13, 8);
+  bytes.write('IHDR', 12, 'ascii');
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  return Buffer.concat([bytes, PNG_IEND]);
+};
+const PNG_BYTES = pngHeader(1, 1);
+/** A PNG of `length` bytes that still opens and closes like one. */
+const pngOfLength = (length: number): Buffer => Buffer.concat([
+  PNG_BYTES.subarray(0, 24),
+  Buffer.alloc(length - PNG_BYTES.length, 1),
+  PNG_IEND,
+]);
+
+test('an attached image is downloaded and travels with the dispatch; other files stay a note', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'I see it'));
+  const fetched: Array<{ url: string; token: string }> = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url, token) => {
+      fetched.push({ url, token });
+      return { status: 200, contentType: 'image/png', body: PNG_BYTES };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: "<@B-AVA> what's wrong here?",
+      ts: '960.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [
+        { id: 'F1', name: 'error.png', mimetype: 'image/png', size: PNG_BYTES.length, url_private_download: 'https://files.slack.com/F1/download' },
+        { id: 'F2', name: 'server.log', mimetype: 'text/plain', size: 10, url_private_download: 'https://files.slack.com/F2/download' },
+      ],
+    },
+  });
+  await adapter.stop();
+
+  // The download carries the bot token — it is the transport's secret,
+  // used by the transport — and only the image was fetched.
+  assert.deepEqual(fetched, [{ url: 'https://files.slack.com/F1/download', token: 'xoxb-1' }]);
+  assert.deepEqual(gateway.dispatches, [{
+    sessionId: 'slack:ava:T1:C1:960.0',
+    agentId: 'ava',
+    // The image is not in the note: the model is shown it. The log still is.
+    userMessage: "Dylan: what's wrong here?\n[Attached: server.log. Attachment contents cannot be read here — say so rather than guessing at them.]",
+    images: [{ mediaType: 'image/png', data: PNG_BYTES.toString('base64'), name: 'error.png' }],
+  }]);
+});
+
+test('an image dropped in with nothing said is still a question', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'a screenshot'));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async () => ({ status: 200, contentType: 'image/png', body: PNG_BYTES }),
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-bare' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA>',
+      ts: '961.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [{ id: 'F3', title: 'shot', mimetype: 'image/png', url_private: 'https://files.slack.com/F3' }],
+    },
+  });
+  await adapter.stop();
+
+  assert.equal(gateway.dispatches.length, 1);
+  // The speaker is still named, so a bare image in a channel is not anonymous.
+  assert.equal(gateway.dispatches[0]!.userMessage, 'Dylan:');
+  assert.deepEqual(gateway.dispatches[0]!.images, [
+    { mediaType: 'image/png', data: PNG_BYTES.toString('base64'), name: 'shot' },
+  ]);
+});
+
+test('an image the token may not read falls back to the note and names the scope', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    // What Slack actually does without files:read: a 200 and a sign-in page.
+    fetchFile: async () => ({ status: 200, contentType: 'text/html; charset=utf-8', body: Buffer.from('<html>sign in</html>') }),
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-noscope' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> see attached',
+      ts: '962.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [{ id: 'F4', name: 'error.png', mimetype: 'image/png', size: 100, url_private_download: 'https://files.slack.com/F4/download' }],
+    },
+  });
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images]), [[
+    'Dylan: see attached\n[Attached: error.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    undefined,
+  ]]);
+  assert.equal(warnings.filter((line) => /error\.png/.test(line) && /files:read/.test(line)).length, 1);
+});
+
+test('an image over the model limit is never downloaded, while a smaller one beside it still is', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const fetched: string[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url) => {
+      fetched.push(url);
+      return { status: 200, contentType: 'image/png', body: PNG_BYTES };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-huge' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> full-res and a crop',
+      ts: '963.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [
+        { id: 'F5', name: 'poster.png', mimetype: 'image/png', size: 6 * 1024 * 1024, url_private_download: 'https://files.slack.com/F5/download' },
+        { id: 'F6', name: 'crop.png', mimetype: 'image/png', size: PNG_BYTES.length, url_private_download: 'https://files.slack.com/F6/download' },
+      ],
+    },
+  });
+  await adapter.stop();
+
+  // Slack's own size is trusted before any bytes move: the poster was never
+  // requested, and the crop went through as usual.
+  assert.deepEqual(fetched, ['https://files.slack.com/F6/download']);
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images?.map((image) => image.name)]), [[
+    'Dylan: full-res and a crop\n[Attached: poster.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    ['crop.png'],
+  ]]);
+});
+
+test('a download that stalls is abandoned at the deadline and the turn goes on without it', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fileDownloadTimeoutMs: 20,
+    // A fetcher that never answers on its own: it ends only when the
+    // adapter's deadline tells it to. Given no deadline at all — the
+    // regression — it answers at once with an image, and the assertions
+    // below fail rather than the test hanging.
+    fetchFile: (_url, _token, signal) => new Promise((resolve, reject) => {
+      if (!(signal instanceof AbortSignal)) {
+        resolve({ status: 200, contentType: 'image/png', body: PNG_BYTES });
+        return;
+      }
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }),
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-stall' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> slow one',
+      ts: '964.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [{ id: 'F7', name: 'slow.png', mimetype: 'image/png', size: 100, url_private_download: 'https://files.slack.com/F7/download' }],
+    },
+  });
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images]), [[
+    'Dylan: slow one\n[Attached: slow.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    undefined,
+  ]]);
+  assert.equal(warnings.filter((line) => /slow\.png/.test(line) && /longer than 20ms/.test(line)).length, 1);
+});
+
+test('one message\'s downloads share a single deadline, so ten stalls cost one wait', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+  const signals: AbortSignal[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fileDownloadTimeoutMs: 20,
+    // Every download stalls until its signal fires.
+    fetchFile: (_url, _token, signal) => new Promise((_resolve, reject) => {
+      signals.push(signal);
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }),
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-batch' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> three slow ones',
+      ts: '968.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [1, 2, 3].map((n) => ({ id: `S${n}`, name: `slow${n}.png`, mimetype: 'image/png', size: 100, url_private_download: `https://files.slack.com/S${n}/download` })),
+    },
+  });
+  await adapter.stop();
+
+  // One download waited out the deadline — the last-listed file, since
+  // files are decided from the end — and the rest were never started,
+  // because the deadline they would have shared had passed.
+  assert.equal(signals.length, 1);
+  assert.equal(
+    gateway.dispatches[0]?.userMessage,
+    'Dylan: three slow ones\n[Attached: slow1.png, slow2.png, slow3.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+  );
+  assert.equal(warnings.filter((line) => /slow3\.png/.test(line) && /longer than 20ms/.test(line)).length, 1);
+  assert.equal(warnings.filter((line) => /slow[12]\.png/.test(line) && /already taken longer/.test(line)).length, 2);
+});
+
+test('images that fit one by one are still held to the message\'s total budget', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+  const fetched: string[] = [];
+  // Each just under the per-image cap; five together are over what one
+  // request can carry, and past the per-message budget after four.
+  const nearCap = 5 * 1024 * 1024 - 1;
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url) => {
+      fetched.push(url);
+      return { status: 200, contentType: 'image/png', body: pngOfLength(nearCap) };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-budget' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> all of them',
+      ts: '965.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [1, 2, 3, 4, 5].map((n) => ({
+        id: `F${n}`, name: `shot${n}.png`, mimetype: 'image/png', size: nearCap, url_private_download: `https://files.slack.com/F${n}/download`,
+      })),
+    },
+  });
+  await adapter.stop();
+
+  // Decided from the last file back, as the replay window is spent: the
+  // first was never even requested, because Slack's size said it would not
+  // fit after the four listed after it. Delivered in the message's order.
+  assert.deepEqual(fetched, [5, 4, 3, 2].map((n) => `https://files.slack.com/F${n}/download`));
+  assert.deepEqual(gateway.dispatches[0]?.images?.map((image) => image.name), ['shot2.png', 'shot3.png', 'shot4.png', 'shot5.png']);
+  assert.equal(
+    gateway.dispatches[0]?.userMessage,
+    'Dylan: all of them\n[Attached: shot1.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+  );
+  assert.equal(warnings.filter((line) => /shot1\.png/.test(line) && /message of its own/.test(line)).length, 1);
+});
+
+test('the default fetcher stops reading a body the moment it passes what the caller will take', async () => {
+  let pulls = 0;
+  let cancelled = false;
+  // A body that never ends: each pull is another 1 KiB, forever.
+  const endless = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulls += 1;
+      controller.enqueue(new Uint8Array(1024));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const fetchImpl = (async () => new Response(endless, { status: 200, headers: { 'content-type': 'image/png' } })) as unknown as typeof fetch;
+
+  const download = await createSlackFileFetcher(fetchImpl)('https://files.slack.com/F9/download', 'xoxb-1', AbortSignal.timeout(5000), 4096);
+
+  assert.equal(download.truncated, true);
+  assert.equal(download.body.length, 0);
+  assert.equal(cancelled, true);
+  // Four chunks fit and the fifth did not; the stream reads one chunk
+  // ahead on its own, so the exact count is its business, not ours — what
+  // matters is that an endless body was let go of almost at once.
+  assert.ok(pulls >= 5 && pulls <= 8, `expected the read to stop after a handful of pulls, saw ${pulls}`);
+
+  // A body that fits comes back whole, and a declared length that does not
+  // is refused before a byte is read.
+  const small = await createSlackFileFetcher((async () => new Response(new Uint8Array([1, 2, 3]), { status: 200 })) as unknown as typeof fetch)('u', 't', AbortSignal.timeout(5000), 4096);
+  assert.deepEqual([...small.body], [1, 2, 3]);
+  assert.equal(small.truncated, undefined);
+  let readDeclared = 0;
+  const declared = new ReadableStream<Uint8Array>({ pull(controller) { readDeclared += 1; controller.enqueue(new Uint8Array(8)); } });
+  const refused = await createSlackFileFetcher((async () => new Response(declared, { status: 200, headers: { 'content-length': '5000' } })) as unknown as typeof fetch)('u', 't', AbortSignal.timeout(5000), 4096);
+  assert.equal(refused.truncated, true);
+  assert.equal(refused.body.length, 0);
+  // The stream primes one chunk for itself when it is built; the fetcher
+  // asked it for nothing.
+  assert.ok(readDeclared <= 1, `expected no reads beyond the stream's own priming, saw ${readDeclared}`);
+});
+
+test('an image whose download is cut off at the cap falls back to the note', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+  const caps: number[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    // Slack said nothing about the size, and the response was bigger than
+    // the fetcher was allowed to take.
+    fetchFile: async (_url, _token, _signal, maxBytes) => {
+      caps.push(maxBytes);
+      return { status: 200, contentType: 'image/png', body: Buffer.alloc(0), truncated: true };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-cut' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> unsized',
+      ts: '966.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [{ id: 'F8', name: 'unsized.png', mimetype: 'image/png', url_private_download: 'https://files.slack.com/F8/download' }],
+    },
+  });
+  await adapter.stop();
+
+  // The first image of a message may weigh the per-image cap.
+  assert.deepEqual(caps, [5 * 1024 * 1024]);
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images]), [[
+    'Dylan: unsized\n[Attached: unsized.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    undefined,
+  ]]);
+  assert.equal(warnings.filter((line) => /unsized\.png/.test(line) && /abandoned/.test(line)).length, 1);
+});
+
+test('an image the model API would refuse for its size in pixels is never stored', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url) => ({
+      status: 200,
+      contentType: 'image/png',
+      // A flat 9000-pixel-wide PNG is tiny on disk and refused by the API;
+      // the "jpeg" is a PNG under another name.
+      body: url.includes('F10') ? pngHeader(9000, 100) : PNG_BYTES,
+    }),
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-dims' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> the big one and a fake',
+      ts: '967.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: [
+        { id: 'F10', name: 'wide.png', mimetype: 'image/png', size: 36, url_private_download: 'https://files.slack.com/F10/download' },
+        { id: 'F11', name: 'fake.jpg', mimetype: 'image/jpeg', size: 36, url_private_download: 'https://files.slack.com/F11/download' },
+      ],
+    },
+  });
+  await adapter.stop();
+
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.images]), [[
+    'Dylan: the big one and a fake\n[Attached: wide.png, fake.jpg. Attachment contents cannot be read here — say so rather than guessing at them.]',
+    undefined,
+  ]]);
+  assert.equal(warnings.filter((line) => /wide\.png/.test(line) && /9000×100/.test(line)).length, 1);
+  assert.equal(warnings.filter((line) => /fake\.jpg/.test(line) && /not a complete image\/jpeg/.test(line)).length, 1);
+});
+
+test('an image left out for the message\'s budget closes the window to everything listed before it', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+  const fetched: string[] = [];
+  const mib = 1024 * 1024;
+  // Listed oldest first: a small one, a middling one, then four large ones.
+  // The four newest take 18 MiB; the middling one would pass 20 and is left
+  // out; the small one would fit what is left, and is left out anyway.
+  const sizes = [1 * mib, 4 * mib, 4.5 * mib, 4.5 * mib, 4.5 * mib, 4.5 * mib];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url) => {
+      fetched.push(url);
+      const n = Number(/F(\d)/.exec(url)![1]);
+      return { status: 200, contentType: 'image/png', body: pngOfLength(sizes[n - 1]!) };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-window' },
+    event: {
+      type: 'app_mention',
+      user: 'U-DYLAN',
+      text: '<@B-AVA> six of them',
+      ts: '969.0',
+      channel: 'C1',
+      subtype: 'file_share',
+      files: sizes.map((size, index) => ({
+        id: `F${index + 1}`, name: `shot${index + 1}.png`, mimetype: 'image/png', size, url_private_download: `https://files.slack.com/F${index + 1}/download`,
+      })),
+    },
+  });
+  await adapter.stop();
+
+  assert.deepEqual(fetched, [6, 5, 4, 3].map((n) => `https://files.slack.com/F${n}/download`));
+  assert.deepEqual(gateway.dispatches[0]?.images?.map((image) => image.name), ['shot3.png', 'shot4.png', 'shot5.png', 'shot6.png']);
+  assert.equal(
+    gateway.dispatches[0]?.userMessage,
+    'Dylan: six of them\n[Attached: shot1.png, shot2.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+  );
+  assert.equal(warnings.filter((line) => /shot2\.png/.test(line) && /message of its own/.test(line)).length, 1);
+  assert.equal(warnings.filter((line) => /shot1\.png/.test(line) && /listed after it/.test(line)).length, 1);
+});
+
+test('a download cut off at what was left of the budget closes the window too', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'noted'));
+  const warnings: string[] = [];
+  const fetched: Array<{ url: string; maxBytes: number }> = [];
+  const mib = 1024 * 1024;
+  // Oldest first: a small sized one, an unsized one that turns out to be
+  // 4 MiB, then four large ones. After the four newest take 18 MiB the
+  // unsized one is cut off at the 2 MiB left — and that closes the window
+  // to the small one, which would otherwise have fit.
+  const files = [
+    { id: 'F1', name: 'shot1.png', mimetype: 'image/png', size: 1 * mib, url_private_download: 'https://files.slack.com/F1/download' },
+    { id: 'F2', name: 'shot2.png', mimetype: 'image/png', url_private_download: 'https://files.slack.com/F2/download' },
+    ...[3, 4, 5, 6].map((n) => ({ id: `F${n}`, name: `shot${n}.png`, mimetype: 'image/png', size: 4.5 * mib, url_private_download: `https://files.slack.com/F${n}/download` })),
+  ];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    warn: (line) => warnings.push(line),
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    fetchFile: async (url, _token, _signal, maxBytes) => {
+      fetched.push({ url, maxBytes });
+      if (url.includes('F2')) {
+        return { status: 200, contentType: 'image/png', body: Buffer.alloc(0), truncated: true };
+      }
+      return { status: 200, contentType: 'image/png', body: pngOfLength(4.5 * mib) };
+    },
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('app_mention', {
+    body: { team_id: 'T1', event_id: 'evt-image-cut-window' },
+    event: { type: 'app_mention', user: 'U-DYLAN', text: '<@B-AVA> six again', ts: '970.0', channel: 'C1', subtype: 'file_share', files },
+  });
+  await adapter.stop();
+
+  assert.deepEqual(fetched.map((call) => call.url), [6, 5, 4, 3, 2].map((n) => `https://files.slack.com/F${n}/download`));
+  // The unsized one was offered only what was left, and that is what cut it off.
+  assert.equal(fetched.at(-1)?.maxBytes, 2 * mib);
+  assert.deepEqual(gateway.dispatches[0]?.images?.map((image) => image.name), ['shot3.png', 'shot4.png', 'shot5.png', 'shot6.png']);
+  assert.equal(
+    gateway.dispatches[0]?.userMessage,
+    'Dylan: six again\n[Attached: shot1.png, shot2.png. Attachment contents cannot be read here — say so rather than guessing at them.]',
+  );
+  assert.equal(warnings.filter((line) => /shot2\.png/.test(line) && /abandoned/.test(line)).length, 1);
+  assert.equal(warnings.filter((line) => /shot1\.png/.test(line) && /listed after it/.test(line)).length, 1);
 });

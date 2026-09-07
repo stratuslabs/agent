@@ -162,6 +162,9 @@ const describe = (envelope) => {
     case 'session.created': return 'started a conversation';
     case 'session.completed': return 'finished a turn';
     case 'session.failed': return `turn failed — ${event.error}`;
+    // News, unlike `session.updated`: a message entered the conversation
+    // with no turn to announce it, so this line is the only sign of it.
+    case 'session.observed': return 'overheard a message';
     case 'tool.called': return `ran ${event.call.toolName}`;
     case 'tool.completed': return `${event.result.toolName} ${event.result.ok ? 'succeeded' : 'failed'}`;
     case 'tool.denied': return `${event.call.toolName} was denied`;
@@ -220,7 +223,9 @@ const handleEnvelope = (envelope) => {
   if (type === 'tool.approval-requested' || type === 'tool.approval-resolved') {
     void refreshCore();
   }
-  if (type === 'session.completed' || type === 'session.failed' || type === 'session.created') {
+  // An overhear belongs here too: it moves the session's own timestamp,
+  // which is what the overview orders by, and emits nothing else.
+  if (type === 'session.completed' || type === 'session.failed' || type === 'session.created' || type === 'session.observed') {
     void refreshCore();
     void refreshForRoute();
   }

@@ -142,7 +142,9 @@ platform's models endpoint. Provider names on these routes are `anthropic`,
 `PUT /config` writes the `principals` block along with the other settings —
 who counts as the operator on each channel is a trusted-config setting, and
 the only file this endpoint writes is a trusted one — so the GET-modify-PUT
-round trip keeps it. `PUT /config` does not write the `plugins` block. `GET` returns it, and a
+round trip keeps it. The same goes for `vision`, the boolean that tells a
+text-only OpenAI-compatible model to take images as a note: `GET` returns
+it, so `PUT` takes it back. `PUT /config` does not write the `plugins` block. `GET` returns it, and a
 `PUT` carrying it back is accepted (the round trip has to work) but the value
 is ignored and the file's existing block is preserved rather than deleted by
 the replace. Enabling a plugin runs somebody else's code inside the daemon —
@@ -529,7 +531,10 @@ Frames are envelopes:
 The `event` is the existing `StratusEvent` union, unchanged — no new
 vocabulary. (`session.tainted` joined that union with provenance: it carries
 the session's new trust label and the name of what lowered it, never the
-content.) The **turn id lives on the envelope** because `StratusEvent`
+content. `session.observed` joined it with overhearing: a message entered
+the session with no turn run on it — its own event rather than a
+`session.updated`, because a client that takes `running` as "a reply is
+coming" would wait on a turn that never speaks. Session and agent ids only.) The **turn id lives on the envelope** because `StratusEvent`
 carries none and should not grow one: a session processes several messages in
 sequence, and without this a client that queued one has no way to tell its own
 deltas from the next caller's. The id is assigned at dispatch and returned by

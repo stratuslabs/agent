@@ -150,6 +150,11 @@ const CONFIG_KEYS = {
   fallbackModel: 'string',
   fallbackProvider: 'string',
   fallbackBaseUrl: 'string',
+  // A boolean the loader accepts, so GET returns it and PUT has to take it
+  // back: a text-only OpenAI-compatible model needs `vision: false`, and a
+  // round trip that refused the key would block every remote settings save
+  // for that operator.
+  vision: 'boolean',
   approvals: 'object',
   api: 'object',
   // Like `api`: GET returns it, so PUT has to take it back or the documented

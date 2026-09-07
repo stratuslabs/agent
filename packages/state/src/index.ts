@@ -250,6 +250,12 @@ export interface StratusConfigFile {
   promptCache?: boolean;
   /** Cache entry lifetime: '5m' (default) or '1h'. */
   promptCacheTtl?: '5m' | '1h';
+  /**
+   * Whether an OpenAI-compatible model takes images. Default true; set
+   * false for a text-only model (a local runtime, usually), which would
+   * otherwise reject every turn of a session an image was sent to.
+   */
+  vision?: boolean;
   /** Unattended-approval policy for `stratus serve`. */
   approvals?: ApprovalsConfig;
   /** Which channel senders are each agent's operator. Trusted configs only. */
@@ -297,6 +303,13 @@ export interface FallbackRuntime {
    */
   promptCache?: boolean;
   promptCacheTtl?: '5m' | '1h';
+  /**
+   * The daemon's `vision` setting, carried to an OpenAI-compatible fallback
+   * for the same reason as the caching settings above: a session that has
+   * gone fallback-sticky replays its images to the fallback, and a
+   * text-only one would reject every turn from then on.
+   */
+  vision?: boolean;
 }
 
 export type RuntimeConfig =
@@ -308,6 +321,8 @@ export type RuntimeConfig =
       apiKey: string;
       systemPrompt?: string;
       fetch?: typeof fetch;
+      /** See StratusConfigFile.vision. Absent means the adapter's default (true). */
+      vision?: boolean;
       soul?: ParsedSoul;
       /** Absolute path the soul was loaded from, for callers that re-read it. */
       soulPath?: string;
@@ -1352,6 +1367,10 @@ export const validateConfigFile = (parsed: unknown, label: string): StratusConfi
   }
   if (config.promptCacheTtl === '5m' || config.promptCacheTtl === '1h') {
     resolved.promptCacheTtl = config.promptCacheTtl;
+  }
+  // `false` is the whole point of this key too.
+  if (typeof config.vision === 'boolean') {
+    resolved.vision = config.vision;
   }
   const approvals = parseApprovalsConfig(config.approvals, configPath);
   if (approvals) {
@@ -2711,6 +2730,9 @@ export const resolveRuntimeConfig = async (
           model: String(model),
           baseUrl: String(baseUrl),
           apiKey: String(apiKey),
+          // Only this variant asks: the Anthropic models all take images,
+          // and the harnesses render a text prompt whatever the model.
+          ...(fileConfig.vision !== undefined ? { vision: fileConfig.vision } : {}),
           ...(envApiKeyEntry ? { apiKeyEnvVar: envApiKeyEntry.name } : {}),
         };
 
@@ -2822,6 +2844,9 @@ export const resolveRuntimeConfig = async (
           // providers, which do not build their own requests.
           ...(fileConfig.promptCache !== undefined ? { promptCache: fileConfig.promptCache } : {}),
           ...(fileConfig.promptCacheTtl ? { promptCacheTtl: fileConfig.promptCacheTtl } : {}),
+          // The one daemon-wide `vision` setting reaches an OpenAI-compatible
+          // fallback too; the other providers never ask.
+          ...(fallbackProvider === 'openai' && fileConfig.vision !== undefined ? { vision: fileConfig.vision } : {}),
           ...(fallbackProvider === 'openai'
             ? {
                 baseUrl: fallbackBoundUrl
@@ -3152,6 +3177,7 @@ export const createRuntimeProvider = (
     apiKey: config.apiKey,
     baseUrl: config.baseUrl,
     ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
+    ...(config.vision !== undefined ? { vision: config.vision } : {}),
     ...(config.fetch ? { fetch: config.fetch } : {}),
   });
 };

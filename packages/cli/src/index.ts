@@ -2135,6 +2135,8 @@ export const formatEvent = (event: StratusEvent): string | null => {
       return `• session.created ${event.sessionId}`;
     case 'session.updated':
       return `• session.updated ${event.status}`;
+    case 'session.observed':
+      return `• session.observed ${event.sessionId}`;
     case 'provider.response':
       return `• provider.response ${event.parts.length} part(s)`;
     case 'tool.called':
@@ -3366,6 +3368,11 @@ const SLACK_BOT_SCOPES = [
   // exists, and whether this app is a member of it.
   'channels:read',
   'chat:write',
+  // What lets an agent be shown a screenshot: file bytes sit behind an
+  // authenticated URL that answers a token without this scope with a
+  // sign-in page. An app installed without it still hears about the
+  // attachment, by name, and is told it cannot open it.
+  'files:read',
   'files:write',
   'groups:history',
   'groups:read',
@@ -3419,6 +3426,11 @@ interface SetupState {
   apiKeyEnv?: string;
   systemPrompt?: string;
   soulPath?: string;
+  /**
+   * Carried through a save untouched: setup has no menu for it, and a
+   * rewrite that dropped it would hand a text-only model its images back.
+   */
+  vision?: boolean;
   credentials: CredentialsFile;
   credentialsDirty: boolean;
   /** Channel tokens (Slack apps, keyed by agent id) and whether they changed. */
@@ -3507,6 +3519,7 @@ export const runSetup = async (
       ? { fallbackProvider: existing.fallbackProvider ?? existing.provider ?? 'anthropic' }
       : {}),
     ...(existing.fallbackBaseUrl ? { fallbackBaseUrl: existing.fallbackBaseUrl } : {}),
+    ...(existing.vision !== undefined ? { vision: existing.vision } : {}),
     credentials: await loadCredentials(env),
     credentialsDirty: false,
     channels: await loadChannelCredentials(env),
@@ -4714,7 +4727,7 @@ export const runSetup = async (
     // it for me" starts a daemon at login the user asked not to have, which
     // is no more a successful setup than one that will not come up at all.
     let serviceStepFailed = false;
-    const config: Record<string, string> = { provider: state.provider };
+    const config: Record<string, string | boolean> = { provider: state.provider };
     if (state.provider !== 'demo') {
       config.model = state.model ?? defaultModelFor(state.provider);
     }
@@ -4740,6 +4753,9 @@ export const runSetup = async (
       if (config.fallbackProvider === 'openai' && state.fallbackBaseUrl) {
         config.fallbackBaseUrl = state.fallbackBaseUrl;
       }
+    }
+    if (state.vision !== undefined) {
+      config.vision = state.vision;
     }
 
     await saveConfigFile(configPath, config);

@@ -26,6 +26,7 @@ import {
   type ApprovalOutcome,
   type ApprovalPolicy,
   type ApprovalResolutionReason,
+  type ImageAttachment,
   type JsonObject,
   type Session,
   type SessionStatus,
@@ -711,6 +712,8 @@ export interface DispatchInput {
   /** Roster agent id. Defaults to the gateway's default agent. */
   agentId?: string;
   userMessage: string;
+  /** Images sent with the message — see `Message.images` in `@stratusagent/core`. */
+  images?: ImageAttachment[];
   metadata?: JsonObject;
   signal?: AbortSignal;
   /**
@@ -725,11 +728,40 @@ export interface DispatchInput {
   turnId?: string;
 }
 
+export interface ObserveInput {
+  sessionId: string;
+  /** Must match the session's agent when given; a session never crosses identities. */
+  agentId?: string;
+  /** What was said, speaker included — see `ObserveInput.message` in core. */
+  message: string;
+  /** This message's metadata, read for the speaker's trust; never merged. */
+  metadata?: JsonObject;
+}
+
 export interface Gateway {
   start(): Promise<void>;
   stop(): Promise<void>;
   /** The one entrypoint: resolve the agent, load-or-create the session, run a turn. */
   dispatch(input: DispatchInput): Promise<Session>;
+  /**
+   * A message into an existing session with no turn run on it —
+   * `AgentRunner.observe`, on the session's chain so an overheard message
+   * and a turn never interleave writes, and behind the same two refusals
+   * as `dispatch`: the scheduler's reserved id namespace and the daemon's
+   * reserved metadata keys, since text entering a session's context is
+   * text entering its next prompt whichever door it came through.
+   *
+   * Existing only: an agent overhears a conversation it is already in, and
+   * a session that would have to be created is one it was never invited
+   * to — so a session that does not exist is nothing to hear into, and
+   * resolves `undefined` rather than refusing. Read on the chain, which is
+   * what makes that answer right: an invitation still in flight — a first
+   * mention whose dispatch is queued ahead of this — has created the
+   * session by the time this runs, where a read outside the chain would
+   * have found nothing and dropped the message for good. A rolled-over
+   * transcript refuses like a dispatch would.
+   */
+  observe(input: ObserveInput): Promise<Session | undefined>;
   /** Live events from every runner, one stream for all consumers. */
   readonly bus: EventBus;
   /** The store shared by every runner (durable across restarts). */
@@ -1752,6 +1784,32 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     return runner;
   };
 
+  /**
+   * The runner that hears and never speaks. `observe` runs no turn, so it
+   * needs no provider — and resolving one anyway would refuse an overhear
+   * whenever the agent's runtime cannot currently be built: credentials
+   * missing after a restart, a sign-in that lapsed. That is precisely the
+   * window in which the agent cannot answer and the thread carries on
+   * without it, so it is the window in which hearing matters most, and
+   * what it heard is there once the configuration is repaired.
+   *
+   * A runner rather than a store write, because the label a speaker
+   * lowers the session to is the runner's rule and there is one
+   * implementation of it. Same store and bus as every speaking runner, so
+   * a message it appends is the message the next turn reads, and its
+   * event goes where every other event goes.
+   */
+  const observer = new AgentRunner({
+    provider: {
+      name: 'observer',
+      async generate(): Promise<never> {
+        throw new Error('The observing runner never runs a turn.');
+      },
+    },
+    store,
+    bus,
+  });
+
   // ---- watchdog -----------------------------------------------------------
 
   /**
@@ -2184,6 +2242,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         return runner.resume({
           sessionId: input.sessionId,
           userMessage: input.userMessage,
+          ...(input.images !== undefined ? { images: input.images } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
           signal,
         });
@@ -2193,6 +2252,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         sessionId: input.sessionId,
         agent,
         userMessage: input.userMessage,
+        ...(input.images !== undefined ? { images: input.images } : {}),
         metadata,
         signal,
       });
@@ -2561,6 +2621,56 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     });
   };
 
+  const observe = async (input: ObserveInput): Promise<Session | undefined> => {
+    if (stopping) {
+      throw refusal();
+    }
+    // The same two doors `dispatch` guards, for the same reasons: a message
+    // overheard into a firing's session would sit in the scheduler's
+    // context, and a metadata key only the daemon may write is not one a
+    // channel gets to supply by hearing something.
+    if (isScheduleSessionId(input.sessionId)) {
+      throw new Error(
+        `Session ids beginning with "${SCHEDULE_SESSION_ID_PREFIX}" are reserved for scheduled firings and cannot be observed into externally.`,
+      );
+    }
+    const reserved = reservedSessionMetadataKey(input.metadata);
+    if (reserved !== undefined) {
+      throw new Error(
+        `Session metadata key "${reserved}" is reserved for the daemon's own records and cannot be supplied by an observe. Reserved keys: ${RESERVED_SESSION_METADATA_KEYS.join(', ')}.`,
+      );
+    }
+
+    return onSessionChain(input.sessionId, async () => {
+      assertStateCompatible(env);
+      const existing = await store.get(input.sessionId);
+      if (!existing) {
+        // Not a refusal: a channel asks this for every message in every
+        // thread its app can see, and "not in that one" is the ordinary
+        // answer. The chain has already run whatever dispatch was queued
+        // ahead, so this is a session the agent was genuinely never
+        // invited to, not one that is still being created.
+        return undefined;
+      }
+      if (input.agentId !== undefined && existing.agent.id !== input.agentId) {
+        throw new Error(
+          `Session ${input.sessionId} belongs to agent ${existing.agent.id}, not ${input.agentId} — sessions never cross agent identities.`,
+        );
+      }
+      const continuedAs = existing.metadata?.[ROLLED_OVER_TO_METADATA_KEY];
+      if (typeof continuedAs === 'string') {
+        throw new Error(
+          `Session ${input.sessionId} was rolled over; it is an archived transcript and the conversation continues as ${continuedAs}.`,
+        );
+      }
+      return observer.observe({
+        sessionId: input.sessionId,
+        message: input.message,
+        ...(input.metadata ? { metadata: input.metadata } : {}),
+      });
+    });
+  };
+
   /**
    * Load what the config asked for, and say what did not load.
    *
@@ -2921,6 +3031,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     },
 
     dispatch,
+    observe,
 
     async sessionRouting(sessionId: string) {
       const session = await store.get(sessionId);

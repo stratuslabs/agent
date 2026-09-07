@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { MemoryEntry, ProviderCallUsage, ProviderRequest, Session } from '@stratusagent/core';
+import type { ImageAttachment, MemoryEntry, ProviderCallUsage, ProviderRequest, Session } from '@stratusagent/core';
 import {
   createAnthropicProvider,
   DEFAULT_ANTHROPIC_MODEL,
@@ -230,6 +230,39 @@ test('history replay merges runner messages into API turns and keeps thinking bl
         tool_use_id: 'toolu_1',
         content: JSON.stringify({ received: 'hi', uppercase: 'HI' }),
       },
+    ],
+  });
+});
+
+test('a message overheard between turns reaches the API framed, in one user turn with the next', async () => {
+  const { fetchImpl, requests } = createMockFetch([
+    apiMessage([{ type: 'text', text: 'Both of you, then.' }]),
+  ]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const now = new Date().toISOString();
+  const session = createSession({
+    messages: [
+      { id: 's:u:1', role: 'user', content: 'Dylan: Ava, hello', createdAt: now },
+      { id: 's:a:2', role: 'assistant', content: 'Hello!', createdAt: now },
+      // Appended by `observe`, with no turn run on it.
+      { id: 's:u:3', role: 'user', content: 'Dylan: Bea, what do you think?', createdAt: now, overheard: true },
+      { id: 's:u:4', role: 'user', content: 'Dylan: Ava, and you?', createdAt: now },
+    ],
+  });
+
+  await provider.generate({ session });
+
+  // Consecutive user messages merge into one API turn, so the overheard
+  // one and the one that followed it arrive as two blocks of one user
+  // turn — the first framed by the kernel's one rule for it, not the
+  // provider's own.
+  const wire = requests[0]!.body.messages;
+  assert.equal(wire.length, 3);
+  assert.deepEqual(wire[2], {
+    role: 'user',
+    content: [
+      { type: 'text', text: '(overheard, not addressed to you)\n> Dylan: Bea, what do you think?' },
+      { type: 'text', text: 'Dylan: Ava, and you?' },
     ],
   });
 });
@@ -1033,5 +1066,205 @@ test('a body that ends cleanly before message_stop still reports its input', asy
 
   assert.deepEqual(reported, [
     { provider: 'anthropic', model: 'claude-served-1', inputTokens: 900, cacheReadTokens: 600, cacheWriteTokens: 0 },
+  ]);
+});
+
+test('a user message with images sends them as image blocks ahead of its text', async () => {
+  const { fetchImpl, requests } = createMockFetch([
+    apiMessage([{ type: 'text', text: 'A stack trace.' }]),
+  ]);
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const session = createSession({
+    messages: [
+      {
+        id: 'session-1:user:1',
+        role: 'user',
+        content: 'what is this?',
+        createdAt: new Date().toISOString(),
+        images: [{ mediaType: 'image/png', data: 'iVBORw0KGgo=', name: 'shot.png' }],
+      },
+      { id: 'session-1:assistant:2', role: 'assistant', content: 'A stack trace.', createdAt: new Date().toISOString() },
+      // An image with nothing typed is a turn with no text block at all —
+      // the API refuses an empty one.
+      {
+        id: 'session-1:user:3',
+        role: 'user',
+        content: '',
+        createdAt: new Date().toISOString(),
+        images: [{ mediaType: 'image/jpeg', data: '/9j/4AAQ' }],
+      },
+    ],
+  });
+
+  await provider.generate({ session });
+
+  assert.deepEqual(requests[0]!.body.messages, [
+    {
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } },
+        { type: 'text', text: 'what is this?' },
+      ],
+    },
+    { role: 'assistant', content: [{ type: 'text', text: 'A stack trace.' }] },
+    {
+      role: 'user',
+      content: [{ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: '/9j/4AAQ' } }],
+    },
+  ]);
+});
+
+test('images past the replay budget are replaced by a note, newest kept', async () => {
+  const { fetchImpl, requests } = createMockFetch([
+    apiMessage([{ type: 'text', text: 'Still looking.' }]),
+  ]);
+  // Each image is 6 decoded bytes; the budget holds two of the three.
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, imageReplayBudget: { bytes: 12 } });
+  const stamp = new Date().toISOString();
+  const session = createSession({
+    messages: [
+      { id: 'u1', role: 'user', content: 'first', createdAt: stamp, images: [{ mediaType: 'image/png', data: 'AAAAAAAA', name: 'one.png' }] },
+      { id: 'a1', role: 'assistant', content: 'ok', createdAt: stamp },
+      { id: 'u2', role: 'user', content: 'second', createdAt: stamp, images: [{ mediaType: 'image/png', data: 'BBBBBBBB' }] },
+      { id: 'a2', role: 'assistant', content: 'ok', createdAt: stamp },
+      { id: 'u3', role: 'user', content: 'third', createdAt: stamp, images: [{ mediaType: 'image/png', data: 'CCCCCCCC', name: 'three.png' }] },
+    ],
+  });
+
+  await provider.generate({ session });
+
+  const sent = requests[0]!.body.messages.filter((message: { role: string }) => message.role === 'user');
+  assert.deepEqual(sent, [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: '[An image attached here (one.png) is no longer sent: this conversation\'s images have passed what one request can carry, and only the most recent are kept.]' },
+        { type: 'text', text: 'first' },
+      ],
+    },
+    {
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'BBBBBBBB' } },
+        { type: 'text', text: 'second' },
+      ],
+    },
+    {
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'CCCCCCCC' } },
+        { type: 'text', text: 'third' },
+      ],
+    },
+  ]);
+});
+
+test('an image the API cannot process is dropped from the session and the turn retried', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_input: any, init?: any) => {
+    const body = JSON.parse(init?.body ?? '{}');
+    bodies.push(body);
+    const hasImage = body.messages.some((message: any) => Array.isArray(message.content)
+      && message.content.some((block: any) => block.type === 'image' && block.source.data === 'BADBADBA'));
+    if (hasImage) {
+      return new Response(
+        JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'messages.0.content.0.image.source.base64.data: Could not process image' } }),
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    return new Response(JSON.stringify(apiMessage([{ type: 'text', text: 'Only the second one, then.' }])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl });
+  const bad = { mediaType: 'image/png' as const, data: 'BADBADBA', name: 'bad.png' };
+  const good = { mediaType: 'image/png' as const, data: 'GOODGOOD', name: 'good.png' };
+  const session = createSession({
+    messages: [{ id: 'u1', role: 'user', content: 'both of these', createdAt: new Date().toISOString(), images: [bad, good] }],
+  });
+
+  const response = await provider.generate({ session });
+
+  assert.deepEqual(response.parts, [{ type: 'text', text: 'Only the second one, then.' }]);
+  // Two requests: the rejected one, then one with a note where the bad
+  // image was and the good image still in place.
+  assert.equal(bodies.length, 2);
+  assert.deepEqual(bodies[1]!.messages[0].content, [
+    { type: 'text', text: '[An image attached here (bad.png) is no longer sent: this conversation\'s images have passed what one request can carry, and only the most recent are kept.]' },
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'GOODGOOD' } },
+    { type: 'text', text: 'both of these' },
+  ]);
+  // Emptied on the session's own object, so the next turn never sends it.
+  assert.deepEqual(session.messages[0]!.images, [{ mediaType: 'image/png', data: '', omitted: true, name: 'bad.png' }, good]);
+});
+
+test('the oldest replayed images give way when the whole request body would not fit', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_input: any, init?: any) => {
+    bodies.push(JSON.parse(init?.body ?? '{}'));
+    return new Response(JSON.stringify(apiMessage([{ type: 'text', text: 'Fits now.' }])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  // Two images of 1800 bytes each are 2400 bytes of base64 apiece: together
+  // they overflow a 4000-byte body with the text around them, one does not.
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, requestBodyMaxBytes: 4000 });
+  const older: ImageAttachment = { mediaType: 'image/png', data: 'A'.repeat(2400), name: 'older.png' };
+  const newer: ImageAttachment = { mediaType: 'image/png', data: 'B'.repeat(2400), name: 'newer.png' };
+  const stamp = new Date().toISOString();
+  const session = createSession({
+    messages: [
+      { id: 'u1', role: 'user', content: 'first', createdAt: stamp, images: [older] },
+      { id: 'a1', role: 'assistant', content: 'ok', createdAt: stamp },
+      { id: 'u2', role: 'user', content: 'second', createdAt: stamp, images: [newer] },
+    ],
+  });
+
+  await provider.generate({ session });
+
+  assert.equal(bodies.length, 1);
+  assert.ok(JSON.stringify(bodies[0]).length <= 4000, 'the request body must fit the cap');
+  const users = bodies[0]!.messages.filter((message: { role: string }) => message.role === 'user');
+  assert.deepEqual(users[0].content, [
+    { type: 'text', text: '[An image attached here (older.png) is no longer sent: this conversation\'s images have passed what one request can carry, and only the most recent are kept.]' },
+    { type: 'text', text: 'first' },
+  ]);
+  assert.deepEqual(users[1].content, [
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'B'.repeat(2400) } },
+    { type: 'text', text: 'second' },
+  ]);
+  // Only the request gave way; the session still holds both, within its
+  // own window, and the next turn measures for itself.
+  assert.equal(older.omitted, undefined);
+  assert.equal(older.data.length, 2400);
+});
+
+test('an image is only swapped for a note when the note is smaller', async () => {
+  const bodies: Array<Record<string, any>> = [];
+  const fetchImpl = (async (_input: any, init?: any) => {
+    bodies.push(JSON.parse(init?.body ?? '{}'));
+    return new Response(JSON.stringify(apiMessage([{ type: 'text', text: 'Tiny.' }])), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  // A three-byte image whose block is far smaller than the note that would
+  // stand in for it. First, learn how large the body is with it in.
+  const tiny: ImageAttachment = { mediaType: 'image/png', data: 'AAAA', name: 'a-file-with-a-long-name.png' };
+  const session = createSession({
+    messages: [{ id: 'u1', role: 'user', content: 'tiny', createdAt: new Date().toISOString(), images: [tiny] }],
+  });
+  await createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl }).generate({ session });
+  const withImage = JSON.stringify(bodies[0]).length;
+
+  // A cap one byte under that: the body is over, and swapping the image
+  // for the note would only make it more so — so the image stays.
+  const provider = createAnthropicProvider({ apiKey: 'test-key', fetch: fetchImpl, requestBodyMaxBytes: withImage - 1 });
+  await provider.generate({ session });
+  assert.deepEqual(bodies[1]!.messages[0].content, [
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
+    { type: 'text', text: 'tiny' },
   ]);
 });
