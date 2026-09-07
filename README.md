@@ -42,6 +42,7 @@ line, 23.4+) — details in [Installation](docs/start/installation.md).
 | 🔌 | **Mount MCP servers** — the whole MCP ecosystem under Stratus policy | [MCP](docs/guides/mcp.md) |
 | 🛡 | **Ask before acting** — safe calls run unattended; risky ones ask a human, in Slack if that's where you are | [Approvals](docs/guides/approvals.md) |
 | ⏰ | **Act on their own** — schedules an agent sets for itself, approved once by a human, reporting into Slack | [Schedules](docs/guides/schedules.md) |
+| 🌙 | **Dream** — a file of experiments, builds, and reading an agent works through in a window at night, remembering what it learned | [Dreams](docs/guides/dreams.md) |
 | 📚 | **Learn procedures** — skills installed from any GitHub repo, loaded only when relevant | [Skills](docs/guides/skills.md) |
 | 🤝 | **Work as a team** — delegation between agents, routing that keeps the same face in the same places | [Agents](docs/concepts/agents.md) |
 | 🖥 | **Managed from anywhere** — one authenticated API, a web dashboard on top | [Remote access](docs/guides/remote-access.md) |
@@ -107,6 +108,7 @@ The trust model behind that is in
 | Put my agents in Slack | [Slack](docs/guides/slack.md) |
 | Give agents real capability, safely | [Tools](docs/guides/tools.md) · [Shell commands](docs/guides/shell.md) · [Browser actions](docs/guides/browser.md) · [Approvals](docs/guides/approvals.md) |
 | Let agents act on a schedule | [Schedules](docs/guides/schedules.md) |
+| Give an agent work to do overnight | [Dreams](docs/guides/dreams.md) |
 | Run it as a service, read its logs, upgrade it | [Always on](docs/guides/always-on.md) · [Logs](docs/guides/logs.md) · [Updating](docs/guides/updating.md) |
 | Fix a surprise | [Troubleshooting](docs/guides/troubleshooting.md) |
 | Look up any command, flag, or config key | [CLI reference](docs/reference/cli.md) · [Configuration](docs/reference/config.md) |

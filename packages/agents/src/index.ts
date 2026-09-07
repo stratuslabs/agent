@@ -353,6 +353,13 @@ export interface ParsedSoul {
   provider?: string;
   /** Model the soul prefers (e.g. "claude-opus-5"). Runtimes may override. */
   model?: string;
+  /**
+   * Dream file this agent works through overnight, as written — resolved
+   * relative to the soul, by whoever loaded the soul and therefore knows
+   * where it came from. Absent means the agent does not dream, which is
+   * every agent until an operator writes the file and names it here.
+   */
+  dreams?: string;
 }
 
 export interface ParseSoulOptions {
@@ -360,7 +367,7 @@ export interface ParseSoulOptions {
   seed?: string;
 }
 
-const SOUL_SCALAR_KEYS = ['name', 'id', 'provider', 'model'] as const;
+const SOUL_SCALAR_KEYS = ['name', 'id', 'provider', 'model', 'dreams'] as const;
 const SOUL_LIST_KEYS = ['tools', 'skills', 'credentials'] as const;
 
 const unquote = (value: string): string => {
@@ -659,6 +666,7 @@ export const parseSoul = (source: string, options: ParseSoulOptions = {}): Parse
     agent,
     ...(scalars.provider ? { provider: scalars.provider } : {}),
     ...(scalars.model ? { model: scalars.model } : {}),
+    ...(scalars.dreams ? { dreams: scalars.dreams } : {}),
   };
 };
 
@@ -674,6 +682,9 @@ export const formatSoul = (soul: ParsedSoul): string => {
   }
   if (soul.model) {
     lines.push(`model: ${soul.model}`);
+  }
+  if (soul.dreams) {
+    lines.push(`dreams: ${soul.dreams}`);
   }
   for (const [key, values] of [
     ['tools', soul.agent.tools],
@@ -1405,6 +1416,230 @@ export const createAgentTeam = (agents: AgentDefinition[]): AgentRegistry => {
   }
   return registry;
 };
+
+// ---- dreams -----------------------------------------------------------------
+//
+// The pure half of dreaming: what a dream file *is*, and the arithmetic of
+// which night a given moment belongs to. The runtime that reads the file,
+// claims one dream, and dispatches it lives in `@stratusagent/gateway` —
+// the same split schedules take, for the same reason: this package holds
+// neither the store nor the dispatcher.
+//
+// A dream is deliberately NOT a schedule. A schedule is a row an agent
+// creates and a human approves once, cadence and destination together; a
+// dream is a standing line of work its operator wrote in a file, re-read
+// every night, with no destination and nothing pre-authorized. Sharing the
+// schedule table would have made `schedule.cancel` able to delete the
+// operator's file-declared work, and made a row with no approval sit in
+// the one place every row carries one.
+
+/**
+ * A nightly window, in minutes from local midnight. `endMinutes` below
+ * `startMinutes` is the ordinary case rather than an error — dreaming
+ * happens across midnight, which is what makes "which night is this?" a
+ * question with an answer worth a function.
+ */
+export interface DreamWindow {
+  startMinutes: number;
+  endMinutes: number;
+}
+
+/** 01:00–05:00 local: after the operator is asleep, before they are up. */
+export const DEFAULT_DREAM_WINDOW: DreamWindow = { startMinutes: 60, endMinutes: 300 };
+
+/**
+ * The floor under a night's cost. Dreaming is the one thing in the system
+ * that spends money on work nobody asked for tonight, so the default is a
+ * few dreams rather than the whole file; `maxPerNight:` raises it
+ * deliberately, in the file the operator is already editing.
+ */
+export const DEFAULT_MAX_DREAMS_PER_NIGHT = 3;
+
+const clockOf = (minutes: number): string =>
+  `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+
+const parseClockMinutes = (value: string, label: string): number => {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+  const hours = match ? Number(match[1]) : Number.NaN;
+  const minutes = match ? Number(match[2]) : Number.NaN;
+  if (!match || hours > 23 || minutes > 59) {
+    throw new Error(`${label} is a 24-hour local time like 01:00; "${value.trim()}" is not one.`);
+  }
+  return hours * 60 + minutes;
+};
+
+/** `01:00-05:00` — two local times, in the order the night runs. */
+export const parseDreamWindow = (value: string): DreamWindow => {
+  const parts = value.split('-');
+  const [start, end] = parts;
+  if (parts.length !== 2 || start === undefined || end === undefined) {
+    throw new Error(
+      `A dream window is two 24-hour local times separated by a hyphen, like 01:00-05:00; "${value.trim()}" is not.`,
+    );
+  }
+  const startMinutes = parseClockMinutes(start, 'A dream window start');
+  const endMinutes = parseClockMinutes(end, 'A dream window end');
+  if (startMinutes === endMinutes) {
+    throw new Error(
+      `A dream window that starts and ends at ${clockOf(startMinutes)} never opens. Give it an end, like ${clockOf(startMinutes)}-${clockOf((startMinutes + 240) % 1440)}.`,
+    );
+  }
+  return { startMinutes, endMinutes };
+};
+
+export const formatDreamWindow = (window: DreamWindow): string =>
+  `${clockOf(window.startMinutes)}-${clockOf(window.endMinutes)}`;
+
+/** A local calendar date, `YYYY-MM-DD` — the identity of one night. */
+const localDateKey = (date: Date): string =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+
+/**
+ * Which night `now` belongs to, or undefined when the window is shut.
+ *
+ * A night is named for the local date its window **opened** on, so a
+ * 23:00–03:00 window is one night rather than two half-nights either side
+ * of midnight — the distinction the durable "what did we already dream
+ * tonight?" record rests on, since a restart at 01:00 must not read the
+ * small hours as a fresh night and start the list again.
+ *
+ * Local dates are built through the Date constructor's own field
+ * arithmetic rather than by subtracting 24 hours, so the day a DST change
+ * shortens or lengthens still resolves to the calendar date somebody would
+ * name it by.
+ */
+export const dreamNightOf = (window: DreamWindow, now: Date): string | undefined => {
+  const minutes = now.getHours() * 60 + now.getMinutes();
+  const { startMinutes, endMinutes } = window;
+  if (startMinutes < endMinutes) {
+    return minutes >= startMinutes && minutes < endMinutes ? localDateKey(now) : undefined;
+  }
+  // Crosses midnight: the evening half is tonight, the small hours belong
+  // to the night that opened yesterday.
+  if (minutes >= startMinutes) {
+    return localDateKey(now);
+  }
+  if (minutes < endMinutes) {
+    return localDateKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
+  }
+  return undefined;
+};
+
+/** The next moment the window opens, strictly after `from`. */
+export const nextDreamWindowStart = (window: DreamWindow, from: Date): Date => {
+  const today = new Date(from.getFullYear(), from.getMonth(), from.getDate(), 0, window.startMinutes);
+  return today.getTime() > from.getTime()
+    ? today
+    : new Date(from.getFullYear(), from.getMonth(), from.getDate() + 1, 0, window.startMinutes);
+};
+
+/** One standing piece of overnight work: a `##` section of a dream file. */
+export interface Dream {
+  /** The heading, which is also how the operator's listing names it. */
+  title: string;
+  /** The prose under it. May be empty — a title can be the whole dream. */
+  body: string;
+}
+
+/** A parsed dream file: when to dream, how much, and what about. */
+export interface DreamFile {
+  window: DreamWindow;
+  /** The file's own cap. Absent means `DEFAULT_MAX_DREAMS_PER_NIGHT`. */
+  maxPerNight?: number;
+  /**
+   * Everything before the first `##`, prepended to every dream's prompt —
+   * where the standing rules go ("nobody is awake; write what you learn to
+   * memory, open nothing you cannot close"), so each dream is the work
+   * rather than the work plus a re-typed preamble.
+   */
+  preamble?: string;
+  dreams: Dream[];
+}
+
+const DREAM_SCALAR_KEYS = ['window', 'maxPerNight'] as const;
+
+/**
+ * Parse a dream file: the same tiny frontmatter dialect souls use, then
+ * `##` headings as the dreams.
+ *
+ * Strict about frontmatter keys for the soul's reason rather than the
+ * skill's — nothing else reads this file, so an unrecognized key is a
+ * misspelling that would silently leave the default in place, and the
+ * default here decides when unattended work runs and how much of it.
+ */
+export const parseDreams = (source: string): DreamFile => {
+  const { lines, body } = extractFrontmatter(source, 'dream');
+  const { scalars } = lines
+    ? parseFrontmatterLines(lines, { kind: 'dream', scalarKeys: DREAM_SCALAR_KEYS, listKeys: [] })
+    : { scalars: {}, lists: {}, maps: {}, unknownKeys: [] } as ParsedFrontmatter;
+
+  const window = scalars.window ? parseDreamWindow(scalars.window) : DEFAULT_DREAM_WINDOW;
+
+  let maxPerNight: number | undefined;
+  if (scalars.maxPerNight !== undefined) {
+    const parsed = Number(scalars.maxPerNight);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      throw new Error(
+        `A dream file's "maxPerNight" is how many dreams one night may start — a whole number of at least 1; "${scalars.maxPerNight}" is not one.`,
+      );
+    }
+    maxPerNight = parsed;
+  }
+
+  const preambleLines: string[] = [];
+  const dreams: Dream[] = [];
+  let current: { title: string; lines: string[] } | undefined;
+  // Headings inside a fenced block are content — a dream that shows the
+  // command it wants run is the ordinary case, and splitting the file on
+  // the `## ` inside one would cut it in half.
+  let fence: string | undefined;
+
+  const flush = (): void => {
+    if (current) {
+      dreams.push({ title: current.title, body: current.lines.join('\n').trim() });
+      current = undefined;
+    }
+  };
+
+  for (const line of body.split('\n')) {
+    const fenceMatch = /^\s*(```+|~~~+)/.exec(line);
+    if (fenceMatch?.[1]) {
+      const marker = fenceMatch[1][0] === '`' ? '```' : '~~~';
+      fence = fence === undefined ? marker : (fence === marker ? undefined : fence);
+    }
+    const heading = fence === undefined ? /^##\s+(.+?)\s*$/.exec(line) : null;
+    if (heading?.[1]) {
+      flush();
+      current = { title: heading[1], lines: [] };
+      continue;
+    }
+    (current ? current.lines : preambleLines).push(line);
+  }
+  flush();
+
+  const preamble = preambleLines.join('\n').trim();
+  return {
+    window,
+    ...(maxPerNight !== undefined ? { maxPerNight } : {}),
+    ...(preamble ? { preamble } : {}),
+    dreams,
+  };
+};
+
+/** The prompt one dream is dispatched with: the file's preamble, then it. */
+export const dreamPrompt = (file: DreamFile, dream: Dream): string =>
+  [file.preamble, `## ${dream.title}`, dream.body]
+    .filter((section): section is string => section !== undefined && section.length > 0)
+    .join('\n\n');
+
+/**
+ * Metadata a dream's session carries. `dreaming: true` is what lets a
+ * renderer or a log line say this turn came from the dream file rather
+ * than from a person or a schedule, and the title says which dream —
+ * neither is a grant, because dreaming mints none.
+ */
+export const DREAMING_TURN_METADATA_KEY = 'dreaming';
+export const DREAM_TITLE_METADATA_KEY = 'dreamTitle';
 
 // ---- schedules --------------------------------------------------------------
 //

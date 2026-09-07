@@ -49,6 +49,7 @@ stratus skill validate ./my-skill      # check a skill against the spec without 
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
 stratus credentials                    # stored credential names (never values)
 stratus schedules                      # what the fleet has scheduled, and where it reports
+stratus dreams                         # what each dreaming agent works on overnight
 stratus memory list ava                # every live fact, with the trust label it carries
 stratus memory reassert ava --trust user --all-unknown   # vouch for the facts with no recorded origin
 stratus session rollover <session-id>  # archive a conversation's transcript and start the same id over
@@ -120,6 +121,7 @@ The reasoning:
 | Give agents files, a shell, the web, a browser | [Tools](https://github.com/stratuslabs/agent/blob/main/docs/guides/tools.md) |
 | Decide what runs unattended, approve the rest from Slack | [Approvals](https://github.com/stratuslabs/agent/blob/main/docs/guides/approvals.md) |
 | Let agents act on their own schedule | [Schedules](https://github.com/stratuslabs/agent/blob/main/docs/guides/schedules.md) |
+| Give an agent work to do overnight | [Dreams](https://github.com/stratuslabs/agent/blob/main/docs/guides/dreams.md) |
 | Teach an agent a procedure | [Skills](https://github.com/stratuslabs/agent/blob/main/docs/guides/skills.md) |
 | Run it as a service, read its logs, upgrade it | [Always on](https://github.com/stratuslabs/agent/blob/main/docs/guides/always-on.md) · [Logs](https://github.com/stratuslabs/agent/blob/main/docs/guides/logs.md) · [Updating](https://github.com/stratuslabs/agent/blob/main/docs/guides/updating.md) |
 | Understand souls, ids, and memory | [Agents](https://github.com/stratuslabs/agent/blob/main/docs/concepts/agents.md) · [Memory](https://github.com/stratuslabs/agent/blob/main/docs/concepts/memory.md) |

@@ -13,10 +13,13 @@ import {
   globalConfigPath,
   KNOWN_CLAUDE_MODELS,
   listAgentSummaries,
+  loadDreamFile,
   memoryFilePath,
+  resolveDreamsPath,
   saveConfigFile,
   servedRuntimes,
   verifyProviderKey,
+  workspacesDirPath,
   type StateEnvironment,
 } from '../src/index.ts';
 
@@ -308,4 +311,46 @@ test('saveConfigFile creates the directory and round-trips through loadAgentSumm
   // Nothing has remembered anything yet.
   assert.equal(summaries[0]?.memories, 0);
   assert.equal(memoryFilePath({ homeDir: home }).endsWith('memory.jsonl'), true);
+});
+
+test('a dream file resolves beside the soul, wherever the daemon was started from', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\ndreams: ./ava.dreams.md\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(agentsDirPath({ homeDir: home }), 'ava.dreams.md'), '## Read the CI log\n\nGroup the failures.\n');
+
+  const env: StateEnvironment = { homeDir: home, cwd: os.tmpdir(), processEnv: {} };
+  const summary = (await listAgentSummaries(env)).find((entry) => entry.id === 'ava');
+  assert.equal(summary?.dreams, './ava.dreams.md', 'the roster carries what the soul declared, verbatim');
+
+  const resolved = resolveDreamsPath(summary?.dreams ?? '', summary?.soulPath ?? '', env);
+  assert.equal(resolved, path.join(agentsDirPath({ homeDir: home }), 'ava.dreams.md'));
+  const file = await loadDreamFile(resolved);
+  assert.deepEqual(file.dreams.map((dream) => dream.title), ['Read the CI log']);
+});
+
+test('a dream file inside the agents\' own workspaces is refused, wherever it is reached from', async () => {
+  const home = await newHome();
+  const env: StateEnvironment = { homeDir: home, cwd: home, processEnv: {} };
+  const soulPath = path.join(agentsDirPath({ homeDir: home }), 'ava.md');
+  const workspace = path.join(workspacesDirPath(env), 'ava');
+
+  // Named outright, and reached by climbing out of the agents directory:
+  // both are a file the agent itself can write, which is a file that must
+  // not carry standing overnight instructions at its operator's authority.
+  assert.throws(() => resolveDreamsPath(path.join(workspace, 'DREAMS.md'), soulPath, env), /may not live in/);
+  assert.throws(() => resolveDreamsPath('../workspaces/ava/DREAMS.md', soulPath, env), /may not live in/);
+  // A file merely named like the workspaces directory is fine.
+  assert.ok(resolveDreamsPath('../workspaces-notes.md', soulPath, env).endsWith('workspaces-notes.md'));
+});
+
+test('a dream file that will not parse names the file and the reason', async () => {
+  const home = await newHome();
+  const dreamsPath = path.join(home, 'broken.dreams.md');
+  await writeFile(dreamsPath, '---\nwindow: some time after dark\n---\n\n## A dream\n');
+
+  await assert.rejects(
+    () => loadDreamFile(dreamsPath),
+    (error: Error) => /broken\.dreams\.md/.test(error.message) && /two 24-hour local times/.test(error.message),
+  );
+  await assert.rejects(() => loadDreamFile(path.join(home, 'absent.md')), /Dream file not found/);
 });

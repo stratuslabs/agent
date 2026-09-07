@@ -34,8 +34,10 @@ import {
   validateSkillDocument,
   defineAgent,
   isValidSkillId,
+  parseDreams,
   parseSkillDocument,
   parseSoul,
+  type DreamFile,
   type ParsedSkillDocument,
   type ParsedSoul,
 } from '@stratusagent/agents';
@@ -1851,6 +1853,88 @@ export const loadSoulFile = async (resolvedPath: string): Promise<ParsedSoul> =>
   }
 };
 
+/**
+ * The suffix a dream file takes when it lives beside the soul that declares
+ * it, which is the layout the docs recommend — `ava.md` and
+ * `ava.dreams.md` in `~/.stratus/agents`.
+ *
+ * The agents directory is scanned by extension, so without this every
+ * dream file in it would be read as a soul and skipped with a parse
+ * warning on every start, every listing, and every reload. A naming
+ * convention rather than a manifest because the alternative — resolving
+ * every soul's `dreams:` before deciding what is a soul — makes the
+ * roster load depend on the files it is loading.
+ *
+ * It is a convention, not a rule: `dreams:` may name any path outside the
+ * agents directory whatever it is called (see `resolveDreamsPath`).
+ */
+export const DREAM_FILE_SUFFIX = '.dreams.md';
+
+/** Whether a file in the agents directory is a soul rather than its dream file. */
+export const isSoulFileName = (file: string): boolean =>
+  file.endsWith('.md') && !file.endsWith(DREAM_FILE_SUFFIX);
+
+/**
+ * Where a soul's `dreams:` points, absolute.
+ *
+ * Relative to the **soul file**, not to the working directory: a soul in
+ * `~/.stratus/agents` is read by a daemon whose cwd is whatever the
+ * service manager gave it, and `dreams: ./ava.dreams.md` has to mean the
+ * file beside the soul on every one of them.
+ *
+ * Refuses a path inside `~/.stratus/workspaces`, and that refusal is the
+ * feature. A dream prompt is dispatched as the operator's own words (see
+ * the dream runtime's `SENDER_TRUST_METADATA_KEY`), and the workspace is
+ * the one directory an agent is handed write access to by default — an
+ * agent that could write its own dream file could give itself standing
+ * unattended instructions at its operator's authority. Everywhere else is
+ * the operator's call: they are already deciding what `fs.write` may
+ * reach.
+ */
+export const resolveDreamsPath = (
+  declared: string,
+  soulPath: string,
+  env: StateEnvironment = {},
+): string => {
+  const resolved = path.resolve(path.dirname(soulPath), declared);
+  const workspaces = workspacesDirPath(env);
+  if (resolved === workspaces || resolved.startsWith(`${workspaces}${path.sep}`)) {
+    throw new Error(
+      `A dream file may not live in ${workspaces} — that is the agents' own scratch directory, and a dream file an agent can write is an agent that can set its own overnight work. Move it beside the soul: ${soulPath}.`,
+    );
+  }
+  return resolved;
+};
+
+/** Reads and parses one dream file. */
+export const loadDreamFile = async (resolvedPath: string): Promise<DreamFile> => {
+  let raw: string;
+  try {
+    raw = await readFile(resolvedPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`Dream file not found: ${resolvedPath}`);
+    }
+    throw error;
+  }
+  try {
+    return parseDreams(raw);
+  } catch (error) {
+    throw new Error(
+      `Could not parse dream file ${resolvedPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+};
+
+/** An agent whose soul declares a dream file, and where that file is. */
+export interface DreamerEntry {
+  agentId: string;
+  /** The dream file, absolute — see `resolveDreamsPath`. */
+  dreamsPath: string;
+  /** The soul that declared it, for a message that names the fix. */
+  soulPath: string;
+}
+
 export interface RosterEntry {
   soul: ParsedSoul;
   /** Absolute path of the soul file this entry came from. */
@@ -1896,7 +1980,7 @@ export const loadRosterSouls = async (
   let rosterFiles: string[] = [];
   try {
     rosterFiles = (await readdir(agentsDirPath(env)))
-      .filter((file) => file.endsWith('.md'))
+      .filter(isSoulFileName)
       .sort()
       .map((file) => path.join(agentsDirPath(env), file));
   } catch (error) {
@@ -3740,6 +3824,8 @@ export interface AgentSummary {
   /** The soul's own frontmatter pin, verbatim. Absent when it pins nothing. */
   provider?: string;
   model?: string;
+  /** The soul's `dreams:` as written. Absent when the agent does not dream. */
+  dreams?: string;
   /** What a run as this agent resolves to right now. */
   runsOn: { provider: string; model?: string };
   memories: number;
@@ -3851,6 +3937,7 @@ export const listAgentSummaries = async (
       soulPath,
       ...(parsed.provider ? { provider: parsed.provider } : {}),
       ...(parsed.model ? { model: parsed.model } : {}),
+      ...(parsed.dreams ? { dreams: parsed.dreams } : {}),
       runsOn: runsOnFor(parsed),
       memories: (await memory.list(agent.id)).entries.length,
       ...(persona ? { persona } : {}),
@@ -3861,7 +3948,7 @@ export const listAgentSummaries = async (
   let rosterFiles: string[] = [];
   try {
     rosterFiles = (await readdir(agentsDirPath(env)))
-      .filter((file) => file.endsWith('.md'))
+      .filter(isSoulFileName)
       .sort()
       .map((file) => path.join(agentsDirPath(env), file));
   } catch (error) {

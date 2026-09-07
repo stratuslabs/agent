@@ -21,6 +21,7 @@ tree is where the depth lives.
 | Write a skill that works on every agent, or check one against the spec | [Skill format](./reference/skill-format.md) |
 | Decide what runs unattended and approve the rest from Slack | [Approvals](./guides/approvals.md) |
 | Let agents act on their own schedule | [Schedules](./guides/schedules.md) |
+| Give an agent work to do overnight | [Dreams](./guides/dreams.md) |
 | Keep the daemon running after I close the terminal | [Always on](./guides/always-on.md) |
 | See what the daemon did overnight | [Logs](./guides/logs.md) |
 | Upgrade without losing anything | [Updating](./guides/updating.md) |

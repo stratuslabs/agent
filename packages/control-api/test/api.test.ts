@@ -142,6 +142,41 @@ test('editing a soul round-trips through the parser and refuses an id change', a
   }
 });
 
+test("a field edit preserves the agent's dream file, and a raw edit sets it", async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\ndreams: ./ava.dreams.md\n---\n\nYou are Ava.\n');
+  const harness = await startApi({ home });
+  const soulPath = path.join(home, '.stratus', 'agents', 'ava.md');
+  try {
+    // A field edit renders the whole soul back, so anything it fails to
+    // carry is deleted — and a rename that silently stopped an agent
+    // dreaming is a loss nobody would connect to the edit that caused it.
+    const renamed = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Ava the Second' }),
+    });
+    assert.equal(renamed.status, 200);
+    assert.match(await readFile(soulPath, 'utf8'), /dreams: \.\/ava\.dreams\.md/);
+
+    // Setting one is a raw edit: pointing an agent at overnight work is not
+    // a field a dashboard rename should be able to reach past.
+    const raw = await harness.call('/api/v1/agents/ava', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ soul: '---\nname: Ava\nid: ava\ndreams: ./nights.md\n---\n\nYou are Ava.\n' }),
+    });
+    assert.equal(raw.status, 200);
+    assert.match(await readFile(soulPath, 'utf8'), /dreams: \.\/nights\.md/);
+
+    const listed = await harness.call('/api/v1/agents');
+    const agents = (await json<{ agents: Array<{ id: string; dreams?: string }> }>(listed)).agents;
+    assert.equal(agents.find((agent) => agent.id === 'ava')?.dreams, './nights.md');
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('sessions list and read back with provider replay state stripped', async () => {
   const harness = await startApi();
   try {

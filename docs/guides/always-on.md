@@ -64,6 +64,8 @@ The question every operator asks on their second day:
 | --- | --- | --- |
 | A soul's contents | No | Re-read before every turn |
 | A soul file added or deleted | No | `POST /roster/reload` — `POST /agents` and `PUT /agents/:id` perform it themselves |
+| A dream file's contents | No | Re-read at the start of every night. `stratus dreams` shows what tonight would run |
+| A soul's `dreams:` added or removed | No | `POST /roster/reload` — the roster is what the nightly check reads |
 | A skill installed, edited, or removed | No | `stratus skill add` reloads the daemon it finds; `stratus skill reload` after a hand edit. See [Skills](./skills.md#installing-while-the-daemon-runs) |
 | Tools from an MCP server that reconnects | No | Discovered on reconnect |
 | A plugin enabled, disabled, upgraded, or reconfigured | **Yes** | `stratus restart` |
