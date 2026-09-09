@@ -188,9 +188,17 @@ session and after every restart, until an operator revokes it. That is the
 only path such a tool has to running unattended at all: a `gated` call in
 `headless` mode is otherwise refused, whatever was approved in the past.
 
+**Grants are the daemon's, and only the daemon's.** `stratus run` and
+`stratus chat` do not consult them and cannot create one: at your own
+terminal `--approvals ask` is a per-call y/N on the tool call itself, with
+no **Always allow** to answer, exactly as it was before grants existed —
+you are the gate there, so there is nothing to remember. The same has
+always been true of [command scopes](./shell.md) and
+[sites](./browser.md).
+
 The grant is written to the same file as the agent's command scopes and
 sites, under `tools`, with the package that contributed the tool, when it
-was granted, and who answered (a Slack user id; nothing at a terminal):
+was granted, and who answered (a Slack user id, when a channel asked):
 
 ```jsonc
 // ~/.stratus/agents/ava.whitelist.json

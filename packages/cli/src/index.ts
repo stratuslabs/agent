@@ -1747,6 +1747,18 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     if (parsed.agentId === '') {
       throw new Error(`grants${action === 'revoke' ? ' revoke' : ''} needs the agent id: ${usage}.`);
     }
+    // The agents package's own rule, the same one the control API route and
+    // `credential --agent` apply — and the reason is sharper here: this id is
+    // joined into a path (`<id>.whitelist.json`), and the grant store
+    // documents it as an already-validated single segment by the time it
+    // reaches that join. Unchecked, `../../other` reads — and on a revoke
+    // rewrites — a grant file outside ~/.stratus/agents.
+    if (!isValidAgentId(parsed.agentId)) {
+      throw new Error(
+        `${JSON.stringify(parsed.agentId)} cannot be an agent id, so it names no grant file. `
+        + 'Use the id `stratus agents` lists.',
+      );
+    }
     if (action === 'revoke') {
       const named = [parsed.tool, parsed.scope, parsed.origin].filter((value) => value !== undefined).length;
       if (named !== 1) {

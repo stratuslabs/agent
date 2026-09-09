@@ -7264,6 +7264,14 @@ test('parseCommand reads the grants command and its revoke form', () => {
   assert.throws(() => parseCommand(['grants', 'revoke', 'ava', '--tool', 'a', '--scope', 'b']), /exactly one of/);
   assert.throws(() => parseCommand(['grants', 'ava', '--tool', 'a']), /Unknown option: --tool/);
   assert.throws(() => parseCommand(['grants', 'ava', 'juno']), /Unexpected argument: juno/);
+
+  // The id is joined into `<id>.whitelist.json`, and the grant store takes it
+  // as an already-validated single segment. Refused here, at the boundary, so
+  // no traversal reaches a file read — or, on a revoke, a file write.
+  for (const escape of ['../../other', '../peer', 'a/b', '.hidden', '__proto__']) {
+    assert.throws(() => parseCommand(['grants', escape]), /cannot be an agent id/, escape);
+    assert.throws(() => parseCommand(['grants', 'revoke', escape, '--tool', 'web.fetch']), /cannot be an agent id/, escape);
+  }
 });
 
 test('stratus grants reads and revokes from the whitelist file when no daemon is serving', async () => {
