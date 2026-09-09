@@ -20,9 +20,11 @@ pack for a daemon and this page is the whole story; run it yourself and
 
 1. **Scopes approved this session**, then
 2. **the agent's whitelist** — `~/.stratus/agents/<id>.whitelist.json`,
-   written by **Always allow**; its `scopes` array is this list, and the
+   written by **Always allow**; its `scopes` array is this list, the
    `origins` array beside it is the same file's answer for
-   [browser actions](./browser.md) — then
+   [browser actions](./browser.md), and `tools` holds the
+   [standing grants](./approvals.md#standing-grants) of every other gated
+   tool — then
 3. **the built-in safe list**: `git status`, `git log`, `git diff`,
    `git show`, `git blame`, `git rev-parse`, `git ls-files`, plus
    `git branch`, `git tag`, and `git remote` **in their listing forms
@@ -74,7 +76,10 @@ the answer counts once and the next call asks again.
 
 The whitelist file is `0600` and per agent: it decides what runs with nobody
 watching, so neither another account on the machine nor another agent
-inherits it. Delete an entry to withdraw the permission. A file that exists
+inherits it. `stratus grants ava` lists it and `stratus grants revoke ava
+--scope "git push"` withdraws a scope; through a running daemon the next
+command is judged without it, where a hand edit waits for a restart (see
+[Standing grants](./approvals.md#standing-grants)). A file that exists
 but no longer parses — a hand edit gone wrong — is ignored with one warning
 in the daemon's log, and no "always" answer is written over it until it is
 fixed and the daemon restarted: the answer still holds the way any "always"

@@ -11,6 +11,7 @@ import {
   IMAGE_ATTACHMENT_MAX_BYTES,
   IMAGE_ATTACHMENT_MAX_DIMENSION,
   IMAGE_ATTACHMENTS_MAX_TOTAL_BYTES,
+  type AlwaysMeans,
   type ApprovalAnswer,
   type ImageAttachment,
   type JsonObject,
@@ -1192,29 +1193,68 @@ const APPROVAL_ACTIONS: Record<string, ApprovalAnswer> = {
  * agent does unattended, and an approver should see the scope they granted
  * in the record of granting it.
  *
- * It states the **floor**, because that is the only thing true in every
- * case. A call judged by a scope — a shell command, a browser site —
- * persists that scope in the agent's whitelist and normally keeps it
- * across restarts, but not when the daemon cannot write the file (a
- * hand-edit that will not parse) or was built without one, and by then
- * this message has already been sent. Nothing on the bus distinguishes
- * any of it: the policy returns a boolean, and `tool.approval-resolved`
- * carries the answer that was submitted, not how long the grant lasts.
- *
- * So it says what is always so and no more. Claiming only the session
- * lifetime, as this line first did, tells an approver a durable grant
- * revokes itself; claiming the restart, as it then did, promises one the
- * daemon may have failed to save. The daemon's log has the exact line.
+ * What it lasts rode in on the request as `always` (see `AlwaysMeans`),
+ * so the line names the grant that was made rather than hedging between
+ * lifetimes — which this message once had to, when nothing on the bus said
+ * whether an "always" was the session's or the file's. One thing the
+ * request still cannot promise is the disk write: the daemon does not
+ * write over a whitelist it could not read, and by then this message has
+ * been sent. The daemon's log has that line; `stratus grants <agent>` has
+ * the list.
  */
 const OUTCOME_TEXT: Record<string, string> = {
   'decided:once': 'Allowed once',
-  'decided:always': 'Allowed and remembered — for this session at least',
   'decided:deny': 'Denied',
   'timeout:deny': 'Expired without an answer — denied',
   // Covers both endings that reach here: the turn was aborted, and the
   // daemon shut down with the request still outstanding.
   'cancelled:deny': 'Cancelled before anyone answered — denied',
   'undeliverable:deny': 'Could not be put to an approver — denied',
+};
+
+/**
+ * What **Always allow** did, by the grant the request said it would make.
+ * A tool grant names the agent because that is its scope — not this
+ * thread, not the session — and says how to take it back, since a grant
+ * an approver cannot find later is a ratchet.
+ */
+const alwaysOutcome = (always: AlwaysMeans | undefined, agentName: string, agentId: string): string => {
+  switch (always) {
+    case 'scope':
+      return 'Allowed, and this command\'s scope now runs without asking — until revoked';
+    case 'origin':
+      return 'Allowed, and this site is now acted on without asking — until revoked';
+    case 'tool':
+      return `Allowed, and granted to ${escapeSlackText(agentName)} until revoked (stratus grants ${escapeSlackText(agentId)})`;
+    case 'session':
+      return 'Allowed for the rest of this session';
+    default:
+      // An `always` submitted through `POST /approvals` against a request
+      // this daemon did not label — an older daemon's event, say. The
+      // request did not say, so neither does this.
+      return 'Allowed and remembered — for this session at least';
+  }
+};
+
+/**
+ * What **Always allow** would do, said beside the button. The lifetime is
+ * the half of the question the button widens, and it differs by tool: a
+ * standing grant to the agent is a larger thing to hand out than a session,
+ * and an approver should know which they are clicking.
+ */
+const alwaysOffer = (always: AlwaysMeans | undefined, agentName: string): string | undefined => {
+  switch (always) {
+    case 'tool':
+      return `*Always allow* grants this tool to ${escapeSlackText(agentName)} until an operator revokes it.`;
+    case 'session':
+      return '*Always allow* stops this tool asking again for the rest of this session.';
+    case 'scope':
+      return '*Always allow* remembers this command\'s scope for this agent, until revoked.';
+    case 'origin':
+      return '*Always allow* remembers this site for this agent, until revoked.';
+    default:
+      return undefined;
+  }
 };
 
 /** Comfortably inside Slack's 3000-character section limit. */
@@ -1465,8 +1505,10 @@ const approvalBlocks = (
   input: JsonObject,
   origin: string | undefined,
   oneShot: boolean,
+  always: AlwaysMeans | undefined,
 ): SlackBlock[] => {
   const invocation = renderInvocation(input);
+  const offer = oneShot ? undefined : alwaysOffer(always, agentName);
   return [
     {
       type: 'section',
@@ -1493,7 +1535,8 @@ const approvalBlocks = (
           elements: [{ type: 'mrkdwn', text: ':warning: Arguments shown are truncated — the full call is longer than this.' }],
         }]
       : []),
-    // Why there is no second button, when there is no second button.
+    // Why there is no second button, when there is no second button — and
+    // what the second button does, when there is one.
     ...(oneShot
       ? [{
           type: 'context',
@@ -1502,7 +1545,9 @@ const approvalBlocks = (
             text: ':lock: An approval covers this call only — nothing about it is remembered.',
           }],
         }]
-      : []),
+      : offer !== undefined
+        ? [{ type: 'context', elements: [{ type: 'mrkdwn', text: offer }] }]
+        : []),
     {
       type: 'actions',
       // The request id rides on every button rather than in the message
@@ -1542,6 +1587,9 @@ interface PendingApprovalPost {
    * submit `always` for a request this channel never offered it on.
    */
   oneShot: boolean;
+  /** What `always` would grant, from the request, for the same reason. */
+  always?: AlwaysMeans;
+  agentId: string;
   /** Bound at render time, so a later config change cannot widen a live request. */
   approvers: Set<string>;
 }
@@ -1967,6 +2015,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
           event.call.input,
           event.origin,
           event.oneShot === true,
+          event.always,
         ),
       });
       post = posted.ts
@@ -1979,6 +2028,8 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
             toolName: event.call.toolName,
             risk: event.risk,
             oneShot: event.oneShot === true,
+            ...(event.always !== undefined ? { always: event.always } : {}),
+            agentId: event.agentId,
             approvers,
           }
         : undefined;
@@ -2094,7 +2145,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       ? post.risk === 'dangerous'
         ? 'Allowed once — a dangerous tool is never remembered'
         : 'Allowed once — nothing about this call could be remembered'
-      : OUTCOME_TEXT[`${event.reason}:${event.answer}`] ?? 'Resolved';
+      : event.reason === 'decided' && event.answer === 'always'
+        ? alwaysOutcome(post.always, post.agentName, post.agentId)
+        : OUTCOME_TEXT[`${event.reason}:${event.answer}`] ?? 'Resolved';
     const by = event.actor ? ` by <@${event.actor}>` : '';
     const text = `*${escapeSlackText(post.agentName)}* — \`${escapeSlackText(post.toolName)}\` (${post.risk}): ${outcome}${by}.`;
     try {

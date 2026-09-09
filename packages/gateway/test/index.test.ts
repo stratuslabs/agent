@@ -8,6 +8,7 @@ import {
   PENDING_APPROVAL_METADATA_KEY,
   RunAbortedError,
   type ApprovalAnswer,
+  type ApprovalOutcome,
   type StratusEvent,
 } from '@stratusagent/core';
 import {
@@ -828,7 +829,7 @@ test('a start that fails after a channel parked an approval denies it before tha
   try {
     await assert.rejects(gateway.start(), /port could not start/);
     assert.ok(parked, 'the early channel parked a request');
-    assert.equal(await settles(parked as Promise<string>, 'the parked request'), 'deny');
+    assert.equal((await settles(parked as Promise<{ answer: string }>, 'the parked request')).answer, 'deny');
     assert.deepEqual(order, ['resolved:cancelled', 'early stopped']);
   } finally {
     await gateway.stop();
@@ -2122,7 +2123,7 @@ test('a parked call is announced, and the answer resumes it', async () => {
   assert.ok(Date.parse(request.expiresAt) > 0);
 
   assert.equal(gateway.resolveApproval({ requestId: request.requestId, answer: 'always', actor: 'U9' }), true);
-  assert.equal(await settles(answer, 'the parked call'), 'always');
+  assert.equal((await settles(answer, 'the parked call')).answer, 'always');
 
   const resolved = events.find((event) => event.type === 'tool.approval-resolved');
   assert.deepEqual(
@@ -2146,7 +2147,7 @@ test('a request nobody answers expires into a denial', async () => {
   const { gateway, transport } = await brokerHarness({ approvalTimeoutMs: 1 });
 
   const resolved = nextEvent(gateway.bus, 'tool.approval-resolved');
-  assert.equal(await settles(transport.request(parkedCall('sess-timeout')), 'the expiring request'), 'deny');
+  assert.equal((await settles(transport.request(parkedCall('sess-timeout')), 'the expiring request')).answer, 'deny');
   const event = await settles(resolved, 'the resolution event');
   assert.equal(event.reason, 'timeout');
   assert.equal(event.answer, 'deny');
@@ -2165,7 +2166,7 @@ test('aborting a turn invalidates its pending approval, and a later click is ref
   const request = await settles(requested, 'the approval request');
 
   controller.abort();
-  assert.equal(await settles(answer, 'the cancelled request'), 'deny');
+  assert.equal((await settles(answer, 'the cancelled request')).answer, 'deny');
   assert.equal((await settles(resolved, 'the resolution event')).reason, 'cancelled');
 
   // The acceptance criterion this exists for: an Allow arriving after the
@@ -2181,7 +2182,7 @@ test('a turn already aborted never parks at all', async () => {
   controller.abort();
 
   assert.equal(
-    await settles(transport.request(parkedCall('sess-pre-abort', controller.signal)), 'the request'),
+    (await settles(transport.request(parkedCall('sess-pre-abort', controller.signal)), 'the request')).answer,
     'deny',
   );
   // It still settles publicly: a denial that appears nowhere is exactly
@@ -2205,7 +2206,7 @@ test('shutting down denies what is parked instead of waiting it out', async () =
 
   await settles(gateway.stop(), 'the shutdown drain');
 
-  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  assert.equal((await settles(answer, 'the parked call')).answer, 'deny');
   assert.equal(gateway.resolveApproval({ requestId: request.requestId, answer: 'once' }), false);
 });
 
@@ -2248,7 +2249,7 @@ test('a resolution emitted at shutdown reaches channels before they stop', async
   await settles(requested, 'the approval request');
 
   await settles(gateway.stop(), 'the shutdown drain');
-  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  assert.equal((await settles(answer, 'the parked call')).answer, 'deny');
   assert.equal(sawResolutionBeforeStop, true, 'the channel stopped before its retraction arrived');
 });
 
@@ -2259,7 +2260,7 @@ test('a call that reaches approval during shutdown is refused, not parked', asyn
   // the same response. Parking it deadlocks the drain against a question
   // nobody is left to answer. A channel's stop() runs at exactly that
   // point in the sequence, which makes it the honest place to fire one.
-  let late: Promise<ApprovalAnswer> | undefined;
+  let late: Promise<ApprovalOutcome> | undefined;
   const channel: GatewayChannelAdapter = {
     name: 'fake',
     async start() {},
@@ -2276,7 +2277,7 @@ test('a call that reaches approval during shutdown is refused, not parked', asyn
 
   await settles(gateway.stop(), 'the shutdown drain');
   assert.ok(late, 'the channel fired a late request');
-  assert.equal(await settles(late, 'the late request'), 'deny');
+  assert.equal((await settles(late, 'the late request')).answer, 'deny');
 });
 
 test('an approval timeout past the timer range is clamped, not silently instant', async () => {
@@ -2315,7 +2316,7 @@ test('an approval timeout past the timer range is clamped, not silently instant'
     true,
     'the request had already expired, so the timeout overflowed to ~1ms',
   );
-  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  assert.equal((await settles(answer, 'the parked call')).answer, 'deny');
   await gateway.stop();
 });
 
@@ -2350,7 +2351,7 @@ test('a resolution a channel could not deliver is not filed as a human decision'
     gateway.resolveApproval({ requestId: request.requestId, answer: 'deny', reason: 'undeliverable' }),
     true,
   );
-  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  assert.equal((await settles(answer, 'the parked call')).answer, 'deny');
 
   const resolved = events.find((event) => event.type === 'tool.approval-resolved');
   assert.equal(resolved?.reason, 'undeliverable');
@@ -2393,7 +2394,7 @@ test('a resolution never reaches a subscriber before the request it answers', as
   assert.deepEqual(seen, [], 'nothing reached the channel while the announcement was held');
 
   releaseAnnouncement?.();
-  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  assert.equal((await settles(answer, 'the parked call')).answer, 'deny');
   await settles(gateway.stop(), 'the shutdown drain');
 
   assert.deepEqual(seen, ['tool.approval-requested', 'tool.approval-resolved']);
@@ -2692,7 +2693,7 @@ test('a re-asked request keeps the window it started with, not a fresh one', asy
   assert.ok(remainingMs <= 1_500, `expected about a second left, got ${remainingMs}ms`);
 
   gateway.resolveApproval({ requestId: request.requestId, answer: 'deny' });
-  assert.equal(await settles(answer, 'the parked call'), 'deny');
+  assert.equal((await settles(answer, 'the parked call')).answer, 'deny');
   await gateway.stop();
 });
 
@@ -2700,13 +2701,13 @@ test('a request whose window is already spent is denied without being announced'
   const { gateway, transport, events } = await brokerHarness({ approvalTimeoutMs: 60_000 });
 
   assert.equal(
-    await settles(
+    (await settles(
       transport.request({
         ...parkedCall('sess-spent'),
         parkedAt: new Date(Date.now() - 3_600_000).toISOString(),
       }),
       'the spent request',
-    ),
+    )).answer,
     'deny',
   );
   // Never asked: announcing a request that is already over would post
@@ -3435,7 +3436,7 @@ test('pending approvals are listable, and the listing agrees with the announceme
   assert.ok(only?.parkedAt && Date.parse(only.parkedAt) > 0);
 
   assert.equal(gateway.resolveApproval({ requestId: request.requestId, answer: 'once' }), true);
-  assert.equal(await settles(answer, 'the parked call'), 'once');
+  assert.equal((await settles(answer, 'the parked call')).answer, 'once');
 
   // Settled requests leave the list, so a panel rendered from it retracts
   // buttons instead of showing a decision that was already made.
@@ -4128,7 +4129,7 @@ test('a recovered firing retires only its own one-shot row, and does so even whe
     approvalTimeoutMs: 0,
     approvals: (transport) => ({
       approve: async ({ session, call, risk }) => (session.id === parkedFiring
-        ? (await transport.request({ session, call, risk })) !== 'deny'
+        ? (await transport.request({ session, call, risk })).answer !== 'deny'
         : true),
     }),
   });

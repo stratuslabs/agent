@@ -43,6 +43,10 @@ stratus credentials                    # stored names, never values (also: strat
 stratus credential remove search.apiKey
 stratus schedules                      # what the fleet has scheduled (also: stratus schedule list)
 stratus schedules cancel <id>          # stop the next firing, revoke its destination
+stratus grants ava                     # what ava may do unattended: standing tool grants, command scopes, sites
+stratus grants revoke ava --tool web.fetch              # take a standing grant back — a running daemon stops honouring it at once
+stratus grants revoke ava --scope "git push"            # or a command scope, by the line the listing shows
+stratus grants revoke ava --origin https://app.example.com
 stratus memory list ava                # every live fact, with the trust label it carries
 stratus memory list ava --trust unknown --format json
 stratus memory reassert ava --trust user --all-unknown   # re-label every fact with no recorded origin
@@ -65,6 +69,7 @@ stratus dashboard                      # local browser dashboard
 | `credential set`, `credentials`, `credential remove` | [Tools](../guides/tools.md#searching-the-web), [Security](../concepts/security.md) |
 | `restart` | [Always on](../guides/always-on.md#stratus-restart-announced-drained-and-back) |
 | `schedules …` | [Schedules](../guides/schedules.md) |
+| `grants`, `grants revoke` | [Approvals](../guides/approvals.md#standing-grants) |
 | `memory list`, `memory reassert` | [Memory](../concepts/memory.md#where-a-fact-came-from) |
 | `session rollover` | [Memory](../concepts/memory.md#the-label-is-yours-to-raise-and-only-yours), [Control API](../../packages/control-api/README.md) |
 | `dashboard` | [Remote access](../guides/remote-access.md) |
@@ -92,7 +97,8 @@ stratus dashboard                      # local browser dashboard
 | `--api` | `stratus serve`: serve it even where the config says `api.enabled: false` (what `stratus dashboard` asks of the daemon it starts) |
 | `--api-host` | `stratus serve`: control API interface (default `127.0.0.1`) |
 | `--api-port` | `stratus serve`: control API port (default `4123`; `0` picks any free port). A port the daemon cannot bind stops it — it does not serve without the API |
-| `--gateway <url>` | `stratus agents`, `skill reload`, `restart`, `session rollover`: a running daemon's control API (all but `agents` default to the daemon `~/.stratus/gateway.json` names) |
+| `--gateway <url>` | `stratus agents`, `skill reload`, `restart`, `session rollover`, `grants`: a running daemon's control API (all but `agents` default to the daemon `~/.stratus/gateway.json` names; `grants` reads the files instead when none is serving) |
+| `--tool`, `--scope`, `--origin` | `stratus grants revoke`: which grant goes — exactly one of them |
 | `--trust <level>` | `stratus memory list`: show only entries at this label. `stratus memory reassert`: the label to record — `user`, `agent`, `unknown`, or `external` |
 | `--all-unknown` | `stratus memory reassert`: every live entry with no recorded origin, the upgrade case; ids may be given as well |
 | `--port`, `--host` | `stratus dashboard`: where a daemon it starts should bind |

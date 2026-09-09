@@ -131,6 +131,9 @@ importers:
       '@stratusagent/gateway':
         specifier: workspace:*
         version: link:../gateway
+      '@stratusagent/permissions':
+        specifier: workspace:*
+        version: link:../permissions
       '@stratusagent/provider-anthropic':
         specifier: workspace:*
         version: link:../provider-anthropic

@@ -50,7 +50,10 @@ alone; that it was heard is the trace, and what was heard stays in the
 session store like every other message.
 See [Memory](../concepts/memory.md#where-a-fact-came-from). For
 what it records about a shell command — the scope, never the command — see
-[Shell commands](./shell.md#what-the-log-records-about-a-command).
+[Shell commands](./shell.md#what-the-log-records-about-a-command). A call
+that ran under a **standing grant** is recorded as such, with the grant's
+date and approver, so it can be told from one that ran because the tool was
+`safe` — see [Approvals](./approvals.md#what-the-log-records-about-a-grant).
 
 One exception worth knowing before you paste a log anywhere. A failed
 session records the **provider's error text verbatim**, and providers
