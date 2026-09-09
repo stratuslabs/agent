@@ -1027,6 +1027,45 @@ const convertHeadings = (text: string, code: ReadonlyArray<readonly [number, num
 };
 
 /**
+ * A stand-in for one code segment while the prose around it is rewritten.
+ *
+ * Emphasis was converted one prose fragment at a time until this existed,
+ * and a fragment is not a run: inline code cuts one in two, so the `**`
+ * opening a bold run and the `**` closing it land in different fragments
+ * whenever a snippet sits between them, and neither half ever finds its
+ * partner. ``**the `fs.read` tool**`` reached a reader as four literal
+ * asterisks around a snippet, and so did every link, italic and
+ * strikethrough written the same way. It is the defect #142 found in
+ * headings, in the rule right next to it, and it has the same answer:
+ * rewrite the whole text, with code held out of the rewrite rather than
+ * cut out of the text.
+ *
+ * One character stands for a whole segment, and no rewrite can move it: it
+ * is not a delimiter any rule looks for, and every rule copies what it
+ * matched through to its replacement. So the masks come back out in the
+ * order they went in, however much the prose around them changed length —
+ * which is what says where each snippet ended up, since nothing else
+ * survives the rewrite to be measured.
+ *
+ * The character is chosen against the text rather than fixed, because a
+ * reply that already contained it would have a snippet spliced in where
+ * the writer's own character stood — the one thing this conversion must
+ * never do. A reply holding all 6400 of the private-use characters has no
+ * mask to be given and is left in Markdown instead: prose that reads as it
+ * was written is a cosmetic loss, and a snippet spliced somewhere else is
+ * not.
+ */
+const maskFor = (text: string): string | undefined => {
+  for (let point = 0xe000; point <= 0xf8ff; point += 1) {
+    const candidate = String.fromCharCode(point);
+    if (!text.includes(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+};
+
+/**
  * Markdown as a model writes it, in the spelling Slack actually renders.
  *
  * Slack's mrkdwn is not Markdown, and the gap is not cosmetic: `**bold**`
@@ -1041,28 +1080,45 @@ const convertHeadings = (text: string, code: ReadonlyArray<readonly [number, num
  * add ways to be wrong and fix nothing.
  */
 const toSlackMrkdwn = (text: string): string => {
-  // Where each code span ends up in the converted text, which is not where
-  // it started: the prose before it changes length as it is rewritten.
-  const code: Array<readonly [number, number]> = [];
+  const mask = maskFor(text);
+  if (mask === undefined) {
+    return text;
+  }
   const segments = proseAndCode(text);
-  let converted = '';
-  segments.forEach((segment, index) => {
+  const code: string[] = [];
+  let masked = '';
+  for (const [index, segment] of segments.entries()) {
     if (index % 2 === 1) {
-      // A code segment that ends the text is the unterminated fence: every
-      // closed run is followed by a prose slice, even an empty one. It has
-      // no end to be past, so nothing may be appended after it either —
-      // recording the end as it looks would say a marker placed at the
-      // text's end was safely outside.
-      const ends = index === segments.length - 1
-        ? Number.POSITIVE_INFINITY
-        : converted.length + segment.length;
-      code.push([converted.length, ends]);
-      converted += segment;
-      return;
+      code.push(segment);
+      masked += mask;
+      continue;
     }
-    converted += convertInline(segment);
-  });
-  return convertHeadings(converted, code);
+    masked += segment;
+  }
+  // A code segment that ends the text is the unterminated fence: every
+  // closed run is followed by a prose slice, even an empty one, so only an
+  // unclosed one leaves the segments ending on a code index.
+  const unterminated = segments.length % 2 === 0;
+  // Where each code segment ends up in the converted text, which is not
+  // where it started: the prose around it changes length as it is
+  // rewritten, and the masks are the only record of where it went. One
+  // mask is one segment, so the prose between them comes back in the same
+  // count and the same order however the rewrite changed it.
+  const prose = convertInline(masked).split(mask);
+  const spans: Array<readonly [number, number]> = [];
+  let converted = prose[0] ?? '';
+  for (let index = 1; index < prose.length; index += 1) {
+    const segment = code[index - 1] ?? '';
+    // The unterminated fence has no end to be past, so nothing may be
+    // appended after it either — recording the end as it looks would say a
+    // marker placed at the text's end was safely outside.
+    const ends = unterminated && index === code.length
+      ? Number.POSITIVE_INFINITY
+      : converted.length + segment.length;
+    spans.push([converted.length, ends]);
+    converted += `${segment}${prose[index] ?? ''}`;
+  }
+  return convertHeadings(converted, spans);
 };
 
 const splitForSlack = (text: string): string[] => {
