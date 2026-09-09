@@ -39,6 +39,7 @@ export {
   loadOptionalModule,
   loadPlugins,
   pluginConfigWithHostDefaults,
+  preflightPlugin,
   readPluginManifest,
   type CreatePlugin,
   type LoadedPlugin,

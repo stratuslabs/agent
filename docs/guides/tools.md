@@ -196,7 +196,7 @@ them fails quietly on its own. `stratus plugins` walks all four:
 
 ```console
 $ stratus plugins
-approvals: headless — a gated call is refused unless a standing grant, an approved command scope, or an approved site already covers it (stratus grants <agent> lists those)
+approvals: headless — a gated call is refused unless a standing grant, an approved command scope, an approved site, or a destination pre-authorized with a schedule (stratus grants <agent> lists those)
 
 @stratusagent/tool-fs         installed, enabled
   fs.read                     safe → blair
@@ -227,13 +227,18 @@ spawn every server you configured. Two consequences worth knowing:
   "refused".
 - **Enabled and loadable are different questions.** A plugin whose settings
   its own schema rejects — `plugin-mcp` with no `servers`, a mistyped key
-  under `tool-fs` — is enabled and registers nothing. The listing validates
-  the block the way the loader does and says `will not load`, rather than
-  listing tools that will not be there.
+  under `tool-fs` — or which declares a skill file that is not there, is
+  enabled and registers nothing at all, tools included. The listing runs the
+  same preflight the loader runs before importing anything and says
+  `will not load`, rather than listing tools that will not be there. A
+  plugin you have not enabled is not preflighted: it is an install to switch
+  on, not a broken one.
 - **The approvals line is about this machine, not just the mode.** `headless`
   refuses a gated call *last*, after the standing grants, the command scopes,
-  and the approved sites — so a tool an agent was once told "always allow"
-  about runs unattended, and `stratus grants <agent>` is what lists those.
+  the approved sites, and a schedule's pre-authorized destination — so a tool
+  an agent was once told "always allow" about runs unattended, and
+  `stratus grants <agent>` is what lists those. `remote` carries the same
+  qualification: those calls are allowed before anyone is asked.
   `remote` only asks if somebody can be asked: with no channel installed a
   gated call waits out the timeout, and with no approver configured it is
   denied on arrival. See [Approvals](./approvals.md); the line says which of

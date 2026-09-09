@@ -9071,7 +9071,7 @@ test('plugins names every link in the chain from installed to callable', async (
   // only safe tools ever run.
   assert.match(
     output.stdout,
-    /approvals: headless — a gated call is refused unless a standing grant, an approved command scope, or an approved site already covers it/,
+    /approvals: headless — a gated call is refused unless a standing grant, an approved command scope, an approved site, or a destination pre-authorized with a schedule/,
   );
   // Granted, and granted to whom.
   assert.match(output.stdout, /fs\.read\s+safe → blair/);
@@ -9218,6 +9218,9 @@ test('plugins does not claim Slack is asked when nothing can ask it', async () =
   });
 
   assert.match(output.stdout, /approvals: remote — .*no channel is running to ask through/);
+  // And the same qualification the headless line carries: the engine allows
+  // an already-authorized call before it asks anyone, in either mode.
+  assert.match(output.stdout, /a gated call not already covered by a standing grant, .*or a destination pre-authorized with a schedule/);
 });
 
 test('plugins shows a toolRisks override on the concrete tool it names, under a declared namespace', async () => {
@@ -9253,4 +9256,25 @@ test('plugins shows a toolRisks override on the concrete tool it names, under a 
   // …and the one the operator re-rated is listed beside it, at the risk
   // they gave it, rather than silently reported as gated like the rest.
   assert.equal(mcp.tools.find((tool) => tool.name === 'mcp.linear.get_issue')?.risk, 'safe');
+});
+
+test('plugins tells you to enable an installed plugin rather than calling its unset settings broken', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // plugin-mcp requires `servers`, and an unconfigured plugin has no block
+  // at all — so validating one the loader would never reach reports the
+  // install to enable as a configuration failure, hiding the one line that
+  // says what to do about it.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(
+    output.stdout,
+    /@stratusagent\/plugin-mcp\s+installed, not enabled\n\s+installing granted nothing/,
+  );
+  assert.doesNotMatch(output.stdout, /missing required setting "servers"/);
 });

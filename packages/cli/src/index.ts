@@ -50,10 +50,9 @@ import {
   isFirstPartyPackage,
   loadPlugins,
   parseToolRiskOverrides,
-  pluginConfigWithHostDefaults,
+  preflightPlugin,
   readPluginManifest,
   riskFloorFor,
-  validatePluginConfig,
   type LoadedPlugin,
 } from '@stratusagent/plugins';
 import {
@@ -7213,6 +7212,20 @@ export interface PluginsReport {
 }
 
 /**
+ * The ways a gated call is already authorized before either mode's decision
+ * is reached — the standing tool grants, the approved command scopes, the
+ * approved sites, and a schedule's pre-authorized destination, in the order
+ * `createPermissionPolicy` checks them.
+ *
+ * Written once because it is read twice: enumerating it separately per mode
+ * is what left the destination path out of one of them and out of the other
+ * entirely. It is prose about a rule `@stratusagent/permissions` owns, so
+ * when that engine gains a path this string is what has to follow it.
+ */
+const ALREADY_AUTHORIZED = 'a standing grant, an approved command scope, an approved site, '
+  + 'or a destination pre-authorized with a schedule';
+
+/**
  * What a gated call would actually meet on this machine.
  *
  * The mode is not the answer on its own, in both directions. `headless`
@@ -7234,8 +7247,7 @@ const describeUnattendedReach = async (
   env: CliEnvironment,
 ): Promise<string> => {
   if (mode === 'headless') {
-    return 'headless — a gated call is refused unless a standing grant, an approved command scope, '
-      + 'or an approved site already covers it (stratus grants <agent> lists those)';
+    return `headless — a gated call is refused unless ${ALREADY_AUTHORIZED} (stratus grants <agent> lists those)`;
   }
   // The same condition `runServe` reports at startup, through the same
   // helper: an agent is askable when its tokens are stored and something is
@@ -7244,7 +7256,12 @@ const describeUnattendedReach = async (
   const askable = packageInstalled('@stratusagent/channel-slack', env)
     ? Object.keys(channels.slack ?? {})
     : [];
-  return `remote — a gated call parks and asks in Slack, ${describeApprovers(approvals, askable)}`;
+  // Qualified the same way the headless line is: the engine allows an
+  // already-authorized call before it asks anyone, so an unqualified "asks
+  // in Slack" hides unattended capability in precisely the configuration
+  // where Slack is set up correctly.
+  return `remote — a gated call not already covered by ${ALREADY_AUTHORIZED} parks and asks in Slack, `
+    + describeApprovers(approvals, askable);
 };
 
 /**
@@ -7331,16 +7348,23 @@ export const collectPluginsReport = async (
       continue;
     }
     try {
-      const { manifest } = await readPluginManifest(specifier, {
+      const { manifest, directory } = await readPluginManifest(specifier, {
         resolve: (target) => import.meta.resolve(target),
       });
       const floor = riskFloorFor(isFirstPartyPackage(manifest.packageName));
       const overrides = parseToolRiskOverrides(manifest, block);
-      // The same object the plugin will be handed, checked against the same
-      // schema `loadPlugins` checks it against. Without this a plugin whose
-      // settings the daemon rejects — `plugin-mcp` with no `servers` — reads
-      // here as enabled, with its tools listed as though they were there.
-      validatePluginConfig(manifest, pluginConfigWithHostDefaults(block, manifest, workspaceRoot));
+      // Everything the loader checks before importing, through the loader's
+      // own function — a plugin whose settings or skill files it rejects
+      // registers nothing, and reading here as enabled is the false clean
+      // bill this command exists to stop giving.
+      //
+      // Only for a plugin the loader would actually reach, though: it skips
+      // an absent or switched-off block before validating anything, so
+      // preflighting one would report `plugin-mcp` that nobody configured as
+      // broken settings instead of as the install to enable.
+      if (base.enabled) {
+        await preflightPlugin(manifest, directory, block, workspaceRoot);
+      }
       const declared: Array<{ name: string; discovered: boolean; declared: ToolRisk }> = [
         ...manifest.contributes.tools.map((tool) => ({
           name: tool.name,
