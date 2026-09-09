@@ -505,6 +505,14 @@ test('emphasis is converted around the inline code inside it, not cut in half by
     // snippet held out of the rewrite has to come back to the half of the
     // link it was written in — by name, not by the place it stood in.
     '[read `docs/cli.md`](https://example.com/a`b`c)',
+    // And a snippet held out of the rewrite may not hide the whitespace
+    // inside it: a destination that holds a space is not a destination, and
+    // a label may not cross a line. Both were converted and rearranged into
+    // a link Slack cannot render while a mask had no shape of its own.
+    '[label](https://example.com/`a b`)',
+    '[two `words` in `one label`](https://example.com/ok)',
+    // A space inside a snippet is not, on its own, the end of a bold run.
+    '**bold `a b` more**',
     // And the reason the halves may not simply be joined: what is inside a
     // span is the snippet, whatever it is spelled like.
     'the snippet keeps its own `**asterisks**`',
@@ -529,6 +537,9 @@ test('emphasis is converted around the inline code inside it, not cut in half by
     '*two `spans` in one `bold` run*',
     '*A heading with `code` in it*',
     '<https://example.com/a`b`c|read `docs/cli.md`>',
+    '[label](https://example.com/`a b`)',
+    '<https://example.com/ok|two `words` in `one label`>',
+    '*bold `a b` more*',
     'the snippet keeps its own `**asterisks**`',
   ].join('\n'));
 });

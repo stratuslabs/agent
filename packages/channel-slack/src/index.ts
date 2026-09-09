@@ -1049,6 +1049,17 @@ const convertHeadings = (text: string, code: ReadonlyArray<readonly [number, num
  * the name itself: none of the delimiters they look for appear in it, and
  * every rule copies what it matched through to its replacement.
  *
+ * A mask also carries whether its segment holds whitespace, because three
+ * rules refuse to cross it — a destination is `[^()\s]+`, a label and an
+ * emphasis run stop at a newline — and a name alone has none to stop them.
+ * `[label](https://host/`a b`)` is not a destination and was never meant to
+ * convert; masked shapelessly it did, and came back rearranged into a link
+ * Slack cannot render. Only whitespace is carried, and only ever so a rule
+ * refuses: a `*` in a snippet must still not act like one. Both ends of a
+ * mask stay the mask character, so a run that has to hug its content still
+ * hugs it — a segment opens and closes with a backtick, so that is not a
+ * lie about its ends.
+ *
  * The character is chosen against the text rather than fixed, because a
  * reply that already contained it would have a snippet spliced in where
  * the writer's own character stood — the one thing this conversion must
@@ -1091,7 +1102,8 @@ const toSlackMrkdwn = (text: string): string => {
   let masked = '';
   for (const [index, segment] of segments.entries()) {
     if (index % 2 === 1) {
-      masked += `${mask}${code.length}${mask}`;
+      const shape = /\n/.test(segment) ? '\n' : /\s/.test(segment) ? ' ' : '';
+      masked += `${mask}${code.length}${shape}${mask}`;
       code.push(segment);
       continue;
     }
@@ -1108,7 +1120,7 @@ const toSlackMrkdwn = (text: string): string => {
   // rewritten, and the masks are the only record of where it went. Split
   // on the names, so the pieces alternate prose and the name of the
   // segment that follows it.
-  const pieces = convertInline(masked).split(new RegExp(`${mask}(\\d+)${mask}`));
+  const pieces = convertInline(masked).split(new RegExp(`${mask}(\\d+)[ \\n]?${mask}`));
   const spans: Array<readonly [number, number]> = [];
   let converted = pieces[0] ?? '';
   for (let piece = 1; piece < pieces.length; piece += 2) {
