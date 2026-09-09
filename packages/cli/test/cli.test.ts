@@ -2451,6 +2451,51 @@ test('setup honors STRATUS_CONFIG and --config for the write target', async () =
   assert.deepEqual(flagWritten, { provider: 'demo' });
 });
 
+test('setup carries the blocks it has no menu for through a save', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  const configPath = path.join(home, '.stratus', 'config.json');
+  await mkdir(path.dirname(configPath), { recursive: true });
+  // Every block an operator writes by hand and setup never asks about. A
+  // save that rebuilt the file from its own menus would drop all four.
+  const carried = {
+    plugins: {
+      '@stratusagent/tool-shell': { enabled: true, cwd: '~/work' },
+    },
+    approvals: {
+      mode: 'remote',
+      slackApprovers: ['U01OPS'],
+      agents: { blair: { slackApprovers: ['U01DYLAN'] } },
+    },
+    api: { enabled: true, port: 4123 },
+    principals: { slackUsers: ['U01DYLAN'], agents: { blair: { slackUsers: ['U01BLAIR'] } } },
+  };
+  await writeFile(configPath, JSON.stringify({ provider: 'anthropic', vision: false, ...carried }, null, 2));
+
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: tempDir,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  const written = JSON.parse(await readFile(configPath, 'utf8'));
+  assert.deepEqual(written.plugins, carried.plugins);
+  assert.deepEqual(written.approvals, carried.approvals);
+  assert.deepEqual(written.api, carried.api);
+  assert.deepEqual(written.principals, carried.principals);
+  // The keys setup does own still get written, so this is a merge rather
+  // than a refusal to touch a file it did not create.
+  assert.equal(written.provider, 'anthropic');
+  assert.equal(written.vision, false);
+});
+
 test('run uses the stored sign-in from the global config and credentials', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const elsewhere = await mkdtemp(path.join(os.tmpdir(), 'stratus-elsewhere-'));

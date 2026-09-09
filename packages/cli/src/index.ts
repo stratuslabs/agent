@@ -3443,6 +3443,28 @@ interface SetupState {
    * rewrite that dropped it would hand a text-only model its images back.
    */
   vision?: boolean;
+  /**
+   * The four blocks an operator writes by hand, carried for the same reason
+   * `vision` is — with more at stake, because each one is a decision about
+   * what the daemon may do rather than a preference. `save` rebuilds the
+   * file from this state, so a key absent here is a key deleted from disk:
+   * re-running setup silently un-installed every plugin, un-appointed every
+   * approver, dropped every principal back to `unknown`, and returned the
+   * control API to its default binding. Found while working out why an
+   * agent had no tools — the plugins block granting them had been erased by
+   * a later `stratus setup` that never mentioned plugins.
+   *
+   * Carried as `loadConfigFile` normalized them, not as the bytes on disk.
+   * That is the shape `validateConfigFile` already vouches for, and its own
+   * documentation is why: a writer that answers this question differently
+   * from the loader writes a file the next read rejects. A hand-written key
+   * no parser recognizes is dropped here — but every reader was already
+   * ignoring it, so what is lost is a key that never did anything.
+   */
+  plugins?: PluginsConfig;
+  approvals?: ApprovalsConfig;
+  api?: ApiConfig;
+  principals?: PrincipalsConfig;
   credentials: CredentialsFile;
   credentialsDirty: boolean;
   /** Channel tokens (Slack apps, keyed by agent id) and whether they changed. */
@@ -3532,6 +3554,10 @@ export const runSetup = async (
       : {}),
     ...(existing.fallbackBaseUrl ? { fallbackBaseUrl: existing.fallbackBaseUrl } : {}),
     ...(existing.vision !== undefined ? { vision: existing.vision } : {}),
+    ...(existing.plugins !== undefined ? { plugins: existing.plugins } : {}),
+    ...(existing.approvals !== undefined ? { approvals: existing.approvals } : {}),
+    ...(existing.api !== undefined ? { api: existing.api } : {}),
+    ...(existing.principals !== undefined ? { principals: existing.principals } : {}),
     credentials: await loadCredentials(env),
     credentialsDirty: false,
     channels: await loadChannelCredentials(env),
@@ -4739,7 +4765,10 @@ export const runSetup = async (
     // it for me" starts a daemon at login the user asked not to have, which
     // is no more a successful setup than one that will not come up at all.
     let serviceStepFailed = false;
-    const config: Record<string, string | boolean> = { provider: state.provider };
+    // Typed as the file rather than as a bag of scalars: the carried blocks
+    // below are objects, and a `Record<string, string | boolean>` was what
+    // made dropping them the path of least resistance.
+    const config: CliConfigFile = { provider: state.provider };
     if (state.provider !== 'demo') {
       config.model = state.model ?? defaultModelFor(state.provider);
     }
@@ -4768,6 +4797,20 @@ export const runSetup = async (
     }
     if (state.vision !== undefined) {
       config.vision = state.vision;
+    }
+    // Written back exactly as they were read — no menu above sets any of
+    // them, so there is nothing here to merge, only to not lose.
+    if (state.plugins !== undefined) {
+      config.plugins = state.plugins;
+    }
+    if (state.approvals !== undefined) {
+      config.approvals = state.approvals;
+    }
+    if (state.api !== undefined) {
+      config.api = state.api;
+    }
+    if (state.principals !== undefined) {
+      config.principals = state.principals;
     }
 
     await saveConfigFile(configPath, config);
