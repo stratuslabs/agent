@@ -1040,12 +1040,14 @@ const convertHeadings = (text: string, code: ReadonlyArray<readonly [number, num
  * rewrite the whole text, with code held out of the rewrite rather than
  * cut out of the text.
  *
- * One character stands for a whole segment, and no rewrite can move it: it
- * is not a delimiter any rule looks for, and every rule copies what it
- * matched through to its replacement. So the masks come back out in the
- * order they went in, however much the prose around them changed length —
- * which is what says where each snippet ended up, since nothing else
- * survives the rewrite to be measured.
+ * A mask names its segment rather than merely standing in for one, because
+ * a rewrite is allowed to move it: the link rule writes its two captures
+ * back in the other order, so `[use `a`](https://host/`b`)` hands the URL's
+ * snippet to the label and the label's to the URL, and a snippet that
+ * arrives somewhere else is the same defect as one that is rewritten. Named,
+ * it comes back to the place holding its own name. No rewrite can damage
+ * the name itself: none of the delimiters they look for appear in it, and
+ * every rule copies what it matched through to its replacement.
  *
  * The character is chosen against the text rather than fixed, because a
  * reply that already contained it would have a snippet spliced in where
@@ -1089,34 +1091,37 @@ const toSlackMrkdwn = (text: string): string => {
   let masked = '';
   for (const [index, segment] of segments.entries()) {
     if (index % 2 === 1) {
+      masked += `${mask}${code.length}${mask}`;
       code.push(segment);
-      masked += mask;
       continue;
     }
     masked += segment;
   }
   // A code segment that ends the text is the unterminated fence: every
   // closed run is followed by a prose slice, even an empty one, so only an
-  // unclosed one leaves the segments ending on a code index.
-  const unterminated = segments.length % 2 === 0;
+  // unclosed one leaves the segments ending on a code index. Named, not
+  // last: a rewrite may have moved it, and it is the segment that ran to
+  // the text's end when it was cut, wherever it now sits.
+  const unterminated = segments.length % 2 === 0 ? code.length - 1 : -1;
   // Where each code segment ends up in the converted text, which is not
   // where it started: the prose around it changes length as it is
-  // rewritten, and the masks are the only record of where it went. One
-  // mask is one segment, so the prose between them comes back in the same
-  // count and the same order however the rewrite changed it.
-  const prose = convertInline(masked).split(mask);
+  // rewritten, and the masks are the only record of where it went. Split
+  // on the names, so the pieces alternate prose and the name of the
+  // segment that follows it.
+  const pieces = convertInline(masked).split(new RegExp(`${mask}(\\d+)${mask}`));
   const spans: Array<readonly [number, number]> = [];
-  let converted = prose[0] ?? '';
-  for (let index = 1; index < prose.length; index += 1) {
-    const segment = code[index - 1] ?? '';
+  let converted = pieces[0] ?? '';
+  for (let piece = 1; piece < pieces.length; piece += 2) {
+    const named = Number(pieces[piece]);
+    const segment = code[named] ?? '';
     // The unterminated fence has no end to be past, so nothing may be
     // appended after it either — recording the end as it looks would say a
     // marker placed at the text's end was safely outside.
-    const ends = unterminated && index === code.length
+    const ends = named === unterminated
       ? Number.POSITIVE_INFINITY
       : converted.length + segment.length;
     spans.push([converted.length, ends]);
-    converted += `${segment}${prose[index] ?? ''}`;
+    converted += `${segment}${pieces[piece + 1] ?? ''}`;
   }
   return convertHeadings(converted, spans);
 };

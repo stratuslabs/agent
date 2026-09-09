@@ -501,6 +501,10 @@ test('emphasis is converted around the inline code inside it, not cut in half by
     'see [the `--api-port` flag](https://example.com/docs)',
     '**two `spans` in one `bold` run**',
     '## A heading with `code` in it',
+    // The link rule writes its captures back in the other order, so a
+    // snippet held out of the rewrite has to come back to the half of the
+    // link it was written in — by name, not by the place it stood in.
+    '[read `docs/cli.md`](https://example.com/a`b`c)',
     // And the reason the halves may not simply be joined: what is inside a
     // span is the snippet, whatever it is spelled like.
     'the snippet keeps its own `**asterisks**`',
@@ -524,6 +528,7 @@ test('emphasis is converted around the inline code inside it, not cut in half by
     'see <https://example.com/docs|the `--api-port` flag>',
     '*two `spans` in one `bold` run*',
     '*A heading with `code` in it*',
+    '<https://example.com/a`b`c|read `docs/cli.md`>',
     'the snippet keeps its own `**asterisks**`',
   ].join('\n'));
 });
