@@ -244,7 +244,19 @@ const declares = (manifest: PluginManifest, key: string): boolean => Boolean(
   && key in (manifest.config.properties as JsonObject),
 );
 
-const configFor = (
+/**
+ * The configuration a plugin will actually be handed: its own block, minus
+ * the keys the host owns, plus the host defaults its manifest declares.
+ *
+ * Exported because validating a block against a manifest is only right on
+ * *this* object — `validatePluginConfig` on the raw block would refuse a
+ * manifest that declares `workspaceRoot` required for missing the very
+ * setting the host supplies. `stratus plugins` has to answer whether a
+ * daemon would accept a plugin's settings, and answering it from a
+ * different object than the loader uses is how a diagnostic ends up
+ * disagreeing with the thing it diagnoses.
+ */
+export const pluginConfigWithHostDefaults = (
   block: JsonObject,
   manifest: PluginManifest,
   workspaceRoot: string | undefined,
@@ -370,7 +382,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
       // is the configuration the plugin will actually be handed: a manifest
       // that declares `workspaceRoot` required would otherwise be refused
       // for missing the very setting the host supplies.
-      const config = configFor(block, manifest, options.workspaceRoot);
+      const config = pluginConfigWithHostDefaults(block, manifest, options.workspaceRoot);
       validatePluginConfig(manifest, config);
       const riskOverrides = parseToolRiskOverrides(manifest, block);
 

@@ -196,7 +196,7 @@ them fails quietly on its own. `stratus plugins` walks all four:
 
 ```console
 $ stratus plugins
-approvals: headless — a gated call is refused, so only safe tools run unattended
+approvals: headless — a gated call is refused unless a standing grant, an approved command scope, or an approved site already covers it (stratus grants <agent> lists those)
 
 @stratusagent/tool-fs         installed, enabled
   fs.read                     safe → blair
@@ -216,6 +216,8 @@ spawn every server you configured. Two consequences worth knowing:
 
 - **A namespace is listed as a namespace.** `mcp.*` says the names arrive at
   connect; a tool that has not arrived yet is not a tool that does not exist.
+  A `toolRisks` entry names a *concrete* tool under that namespace, so it is
+  listed beside it at the risk you gave it.
 - **The risk shown is a floor, not the last word.** It is the riskiest of the
   manifest's declaration, the floor the package is held to, and your
   `toolRisks` override — the three claims available without loading anything.
@@ -223,6 +225,19 @@ spawn every server you configured. Two consequences worth knowing:
   `browser.act` are then judged per call ([Shell commands](./shell.md),
   [Browser actions](./browser.md)), so `gated` there means "judged", not
   "refused".
+- **Enabled and loadable are different questions.** A plugin whose settings
+  its own schema rejects — `plugin-mcp` with no `servers`, a mistyped key
+  under `tool-fs` — is enabled and registers nothing. The listing validates
+  the block the way the loader does and says `will not load`, rather than
+  listing tools that will not be there.
+- **The approvals line is about this machine, not just the mode.** `headless`
+  refuses a gated call *last*, after the standing grants, the command scopes,
+  and the approved sites — so a tool an agent was once told "always allow"
+  about runs unattended, and `stratus grants <agent>` is what lists those.
+  `remote` only asks if somebody can be asked: with no channel installed a
+  gated call waits out the timeout, and with no approver configured it is
+  denied on arrival. See [Approvals](./approvals.md); the line says which of
+  those this machine has.
 
 `--format json` prints the same chain as data. The `plugins` block is read
 only from a trusted config, exactly as the daemon reads it, so a

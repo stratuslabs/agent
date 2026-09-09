@@ -47,12 +47,13 @@ import {
 // `stratus run` pay for it.
 import type { ApprovalTransport, GatewayChannelAdapter, HomeClaim, RestartOutcome } from '@stratusagent/gateway';
 import {
-  declaredRiskFor,
   isFirstPartyPackage,
   loadPlugins,
   parseToolRiskOverrides,
+  pluginConfigWithHostDefaults,
   readPluginManifest,
   riskFloorFor,
+  validatePluginConfig,
   type LoadedPlugin,
 } from '@stratusagent/plugins';
 import {
@@ -7182,13 +7183,25 @@ export interface PluginReport {
   /** Configured and not switched off. */
   enabled: boolean;
   tools: PluginToolReport[];
-  /** Why the manifest could not be read, when it could not. */
+  /**
+   * Why a daemon would register nothing for this plugin, when it would —
+   * an unreadable manifest, or settings its own schema rejects. Enabled and
+   * loadable are different questions, and a report that ran them together
+   * would call `plugin-mcp` with no `servers` ready to use.
+   */
   problem?: string;
 }
 
 export interface PluginsReport {
-  /** What the daemon would do with a gated call right now. */
   approvals: 'headless' | 'remote';
+  /**
+   * What this machine would really do with a gated call — the mode alone
+   * does not say. `headless` still runs one a standing grant, an approved
+   * command scope, or an approved site already covers (the engine checks
+   * all three before it refuses), and `remote` with no reachable approver
+   * denies on arrival rather than asking anybody.
+   */
+  approvalsSummary: string;
   /**
    * Set when the roster did not load, in which case every `grantedTo` is
    * withheld rather than reported empty — the same rule `stratus skills`
@@ -7198,6 +7211,41 @@ export interface PluginsReport {
   rosterUnreadable: boolean;
   plugins: PluginReport[];
 }
+
+/**
+ * What a gated call would actually meet on this machine.
+ *
+ * The mode is not the answer on its own, in both directions. `headless`
+ * refuses a gated call *last*: the engine checks the standing tool grants,
+ * the approved command scopes, and the approved sites first, so an agent
+ * that was ever told "always allow" runs that tool unattended for good
+ * (`stratus grants <agent>` is what lists them). And `remote` only asks if
+ * somebody can be asked — with no channel to render the request a gated
+ * call waits out the timeout, and with no approver configured it is denied
+ * on arrival, which is `headless` by another name.
+ *
+ * Stating either as "gated calls are refused" or "gated calls are asked in
+ * Slack" would be wrong in exactly the configurations an operator runs this
+ * command to understand.
+ */
+const describeUnattendedReach = async (
+  mode: 'headless' | 'remote',
+  approvals: ApprovalsConfig,
+  env: CliEnvironment,
+): Promise<string> => {
+  if (mode === 'headless') {
+    return 'headless — a gated call is refused unless a standing grant, an approved command scope, '
+      + 'or an approved site already covers it (stratus grants <agent> lists those)';
+  }
+  // The same condition `runServe` reports at startup, through the same
+  // helper: an agent is askable when its tokens are stored and something is
+  // installed to render the request.
+  const channels = await loadChannelCredentials(env);
+  const askable = packageInstalled('@stratusagent/channel-slack', env)
+    ? Object.keys(channels.slack ?? {})
+    : [];
+  return `remote — a gated call parks and asks in Slack, ${describeApprovers(approvals, askable)}`;
+};
 
 /**
  * What this machine's plugins are, and where the chain from installed to
@@ -7222,6 +7270,9 @@ export const collectPluginsReport = async (
 ): Promise<PluginsReport> => {
   const pluginsConfig = await loadServePlugins(env, command.configPath, warn);
   const approvals = await loadServeApprovals(env, command.configPath, warn);
+  // What the loader would fold in, so the validation below is against the
+  // object a daemon on this machine would build.
+  const workspaceRoot = workspacesDirPath(env);
 
   // Who grants what, from the roster a dispatch actually serves — the same
   // resolution `stratus skills` uses, so the two commands cannot disagree
@@ -7285,17 +7336,30 @@ export const collectPluginsReport = async (
       });
       const floor = riskFloorFor(isFirstPartyPackage(manifest.packageName));
       const overrides = parseToolRiskOverrides(manifest, block);
+      // The same object the plugin will be handed, checked against the same
+      // schema `loadPlugins` checks it against. Without this a plugin whose
+      // settings the daemon rejects — `plugin-mcp` with no `servers` — reads
+      // here as enabled, with its tools listed as though they were there.
+      validatePluginConfig(manifest, pluginConfigWithHostDefaults(block, manifest, workspaceRoot));
       const declared: Array<{ name: string; discovered: boolean; declared: ToolRisk }> = [
         ...manifest.contributes.tools.map((tool) => ({
           name: tool.name,
           discovered: false,
           declared: tool.risk,
         })),
-        ...manifest.contributes.toolsDiscovered.map((entry) => ({
-          name: entry.namespace,
-          discovered: true,
-          declared: entry.risk,
-        })),
+        ...manifest.contributes.toolsDiscovered.flatMap((entry) => [
+          { name: entry.namespace, discovered: true, declared: entry.risk },
+          // An override under a declared namespace names a concrete tool
+          // (`mcp.linear.get_issue`), which is the whole point of the key
+          // for a bridge — and it can never equal the namespace, so the
+          // namespace row alone would report the default risk for a tool
+          // the operator has deliberately re-rated. Listed beside it rather
+          // than folded in: they are different risks, and which tools carry
+          // the override is the thing worth seeing.
+          ...[...overrides.keys()]
+            .filter((name) => name !== entry.namespace && matchesToolAllowlist(name, [entry.namespace]))
+            .map((name) => ({ name, discovered: true, declared: entry.risk })),
+        ]),
       ];
       base.tools = declared.map((tool) => {
         const override = overrides.get(tool.name);
@@ -7316,7 +7380,13 @@ export const collectPluginsReport = async (
     plugins.push(base);
   }
 
-  return { approvals: approvals.mode ?? 'headless', rosterUnreadable, plugins };
+  const mode = approvals.mode ?? 'headless';
+  return {
+    approvals: mode,
+    approvalsSummary: await describeUnattendedReach(mode, approvals, env),
+    rosterUnreadable,
+    plugins,
+  };
 };
 
 /** `stratus plugins` — the chain from installed to callable, per plugin. */
@@ -7334,9 +7404,7 @@ export const runPlugins = async (
     return 0;
   }
 
-  writeLine(streams.stdout, report.approvals === 'headless'
-    ? 'approvals: headless — a gated call is refused, so only safe tools run unattended'
-    : 'approvals: remote — a gated call parks and asks in Slack');
+  writeLine(streams.stdout, `approvals: ${report.approvalsSummary}`);
   writeLine(streams.stdout);
 
   for (const plugin of report.plugins) {
@@ -7344,11 +7412,17 @@ export const runPlugins = async (
       ? 'not installed'
       : !plugin.configured
         ? 'installed, not enabled'
-        : plugin.enabled ? 'installed, enabled' : 'installed, switched off';
+        : !plugin.enabled
+          ? 'installed, switched off'
+          // Enabled and loadable are separate: a plugin whose settings its
+          // own schema rejects is enabled and registers nothing, and saying
+          // only "enabled" here is the false clean bill this command exists
+          // to stop giving.
+          : plugin.problem !== undefined ? 'installed, enabled, will not load' : 'installed, enabled';
     writeLine(streams.stdout, `${plugin.package.padEnd(30)}${state}`);
 
     if (plugin.problem !== undefined) {
-      writeLine(streams.stdout, `  its manifest did not read: ${plugin.problem}`);
+      writeLine(streams.stdout, `  a daemon would register nothing for it: ${plugin.problem}`);
       continue;
     }
     if (!plugin.installed) {

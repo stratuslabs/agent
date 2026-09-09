@@ -9066,8 +9066,13 @@ test('plugins names every link in the chain from installed to callable', async (
 
   assert.equal(exitCode, 0);
   // What the policy does with a gated call, which is the link no list of
-  // installed packages has ever shown.
-  assert.match(output.stdout, /approvals: headless — a gated call is refused/);
+  // installed packages has ever shown — and `headless` refuses one *last*,
+  // after the standing grants and scopes, so the line must not claim that
+  // only safe tools ever run.
+  assert.match(
+    output.stdout,
+    /approvals: headless — a gated call is refused unless a standing grant, an approved command scope, or an approved site already covers it/,
+  );
   // Granted, and granted to whom.
   assert.match(output.stdout, /fs\.read\s+safe → blair/);
   // Registered but granted to nobody: installing is not granting.
@@ -9174,4 +9179,78 @@ test('plugins rejects a format it cannot print', () => {
   );
   assert.throws(() => parseCommand(['plugins', '--wat']), /Unknown option: --wat/);
   assert.deepEqual(parseCommand(['plugin', 'list']), { command: 'plugins', format: 'text' });
+});
+
+test('plugins says a plugin whose settings the daemon rejects will not load', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // A typo, and the shape that makes it worth catching here: the block is
+  // enabled, so every other reading of this machine calls the plugin on —
+  // while `loadPlugins` refuses it and registers no filesystem at all.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-fs': { enabled: true, rootz: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(output.stdout, /@stratusagent\/tool-fs\s+installed, enabled, will not load/);
+  assert.match(output.stdout, /a daemon would register nothing for it: .*has no setting named "rootz"/);
+  // And it does not go on to list tools that will not be there.
+  assert.doesNotMatch(output.stdout, /fs\.read/);
+});
+
+test('plugins does not claim Slack is asked when nothing can ask it', async () => {
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    // remote, and no channel installed or tokens stored — which the daemon
+    // treats as wait-out-the-timeout-and-deny, not as asking anybody.
+    approvals: { mode: 'remote' },
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {}, packageResolver: () => false },
+  });
+
+  assert.match(output.stdout, /approvals: remote — .*no channel is running to ask through/);
+});
+
+test('plugins shows a toolRisks override on the concrete tool it names, under a declared namespace', async () => {
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      // The bridge declares a namespace rather than tool names, so an
+      // override necessarily names a tool the manifest never listed. Keyed
+      // by the namespace it could never be found.
+      '@stratusagent/plugin-mcp': {
+        enabled: true,
+        servers: { linear: { url: 'https://mcp.example.com/mcp' } },
+        toolRisks: { 'mcp.linear.get_issue': 'safe' },
+      },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins', '--format', 'json'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; risk: string }> }>;
+  };
+  const mcp = report.plugins.find((entry) => entry.package === '@stratusagent/plugin-mcp');
+  assert.ok(mcp);
+  // The namespace keeps the risk every bridged tool is held to…
+  assert.equal(mcp.tools.find((tool) => tool.name === 'mcp.*')?.risk, 'gated');
+  // …and the one the operator re-rated is listed beside it, at the risk
+  // they gave it, rather than silently reported as gated like the rest.
+  assert.equal(mcp.tools.find((tool) => tool.name === 'mcp.linear.get_issue')?.risk, 'safe');
 });
