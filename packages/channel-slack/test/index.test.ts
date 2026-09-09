@@ -487,6 +487,63 @@ test('a heading is found on the reply\'s own lines, not inside each fragment inl
   ].join('\n'));
 });
 
+test('emphasis is converted around the inline code inside it, not cut in half by it', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  // A fragment is not a run. Inline code cuts a bold run in two, and each
+  // half was rewritten on its own, so neither marker ever met its partner:
+  // every one of these reached Slack as the literal Markdown it was
+  // written in — the same defect headings had, one rule over.
+  const reply = [
+    '**the `fs.read` tool** is the one to use',
+    '*`memory.remember` writes it down*',
+    '~~`shell.run` was the old name~~',
+    'see [the `--api-port` flag](https://example.com/docs)',
+    '**two `spans` in one `bold` run**',
+    '## A heading with `code` in it',
+    // The link rule writes its captures back in the other order, so a
+    // snippet held out of the rewrite has to come back to the half of the
+    // link it was written in — by name, not by the place it stood in.
+    '[read `docs/cli.md`](https://example.com/a`b`c)',
+    // And a snippet held out of the rewrite may not hide the whitespace
+    // inside it: a destination that holds a space is not a destination, and
+    // a label may not cross a line. Both were converted and rearranged into
+    // a link Slack cannot render while a mask had no shape of its own.
+    '[label](https://example.com/`a b`)',
+    '[two `words` in `one label`](https://example.com/ok)',
+    // A space inside a snippet is not, on its own, the end of a bold run.
+    '**bold `a b` more**',
+    // And the reason the halves may not simply be joined: what is inside a
+    // span is the snippet, whatever it is spelled like.
+    'the snippet keeps its own `**asterisks**`',
+  ].join('\n');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, reply));
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+  await socket.deliver('app_mention', mention('<@B-AVA> name some tools'));
+  await adapter.stop();
+
+  assert.equal(web.updates.at(-1)?.text, [
+    '*the `fs.read` tool* is the one to use',
+    '_`memory.remember` writes it down_',
+    '~`shell.run` was the old name~',
+    'see <https://example.com/docs|the `--api-port` flag>',
+    '*two `spans` in one `bold` run*',
+    '*A heading with `code` in it*',
+    '<https://example.com/a`b`c|read `docs/cli.md`>',
+    '[label](https://example.com/`a b`)',
+    '<https://example.com/ok|two `words` in `one label`>',
+    '*bold `a b` more*',
+    'the snippet keeps its own `**asterisks**`',
+  ].join('\n'));
+});
+
 test('a reply keeps every character it was written with, whatever the markers around it', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
