@@ -2470,7 +2470,10 @@ test('setup carries the blocks it has no menu for through a save', async () => {
     api: { enabled: true, port: 4123 },
     principals: { slackUsers: ['U01DYLAN'], agents: { blair: { slackUsers: ['U01BLAIR'] } } },
   };
-  await writeFile(configPath, JSON.stringify({ provider: 'anthropic', vision: false, ...carried }, null, 2));
+  // The scalar preferences setup has no menu for either — same defect, and
+  // an operator who turned caching off was silently put back on it.
+  const preferences = { vision: false, promptCache: false, promptCacheTtl: '1h' };
+  await writeFile(configPath, JSON.stringify({ provider: 'anthropic', ...preferences, ...carried }, null, 2));
 
   const { streams } = createStreams();
   await runCli({
@@ -2490,6 +2493,8 @@ test('setup carries the blocks it has no menu for through a save', async () => {
   assert.deepEqual(written.approvals, carried.approvals);
   assert.deepEqual(written.api, carried.api);
   assert.deepEqual(written.principals, carried.principals);
+  assert.equal(written.promptCache, false);
+  assert.equal(written.promptCacheTtl, '1h');
   // The keys setup does own still get written, so this is a merge rather
   // than a refusal to touch a file it did not create.
   assert.equal(written.provider, 'anthropic');

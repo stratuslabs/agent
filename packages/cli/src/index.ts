@@ -3444,6 +3444,15 @@ interface SetupState {
    */
   vision?: boolean;
   /**
+   * Carried for the same reason `vision` is, and grouped with it because
+   * they are the same kind of thing: a preference about how requests are
+   * made, not a grant. Dropping them reverted an operator who had turned
+   * caching off — for a fleet that never reads a cached prefix back, where
+   * the write premium is a pure surcharge — to paying it again silently.
+   */
+  promptCache?: boolean;
+  promptCacheTtl?: '5m' | '1h';
+  /**
    * The four blocks an operator writes by hand, carried for the same reason
    * `vision` is — with more at stake, because each one is a decision about
    * what the daemon may do rather than a preference. `save` rebuilds the
@@ -3554,6 +3563,8 @@ export const runSetup = async (
       : {}),
     ...(existing.fallbackBaseUrl ? { fallbackBaseUrl: existing.fallbackBaseUrl } : {}),
     ...(existing.vision !== undefined ? { vision: existing.vision } : {}),
+    ...(existing.promptCache !== undefined ? { promptCache: existing.promptCache } : {}),
+    ...(existing.promptCacheTtl !== undefined ? { promptCacheTtl: existing.promptCacheTtl } : {}),
     ...(existing.plugins !== undefined ? { plugins: existing.plugins } : {}),
     ...(existing.approvals !== undefined ? { approvals: existing.approvals } : {}),
     ...(existing.api !== undefined ? { api: existing.api } : {}),
@@ -4797,6 +4808,12 @@ export const runSetup = async (
     }
     if (state.vision !== undefined) {
       config.vision = state.vision;
+    }
+    if (state.promptCache !== undefined) {
+      config.promptCache = state.promptCache;
+    }
+    if (state.promptCacheTtl !== undefined) {
+      config.promptCacheTtl = state.promptCacheTtl;
     }
     // Written back exactly as they were read — no menu above sets any of
     // them, so there is nothing here to merge, only to not lose.
