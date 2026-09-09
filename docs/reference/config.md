@@ -18,6 +18,11 @@ Precedence, highest first:
 [`stratus doctor`](../guides/troubleshooting.md) prints what a run would
 use right now and which file or env var decided each setting.
 
+Setup writes only the keys its own menus set, and carries every other key
+it finds through unchanged — the `plugins`, `approvals`, `api`, and
+`principals` blocks, and the `vision`, `promptCache`, and `promptCacheTtl`
+preferences. See [Setup](../start/setup.md#where-everything-lands).
+
 ## Every key the config file accepts
 
 ```json

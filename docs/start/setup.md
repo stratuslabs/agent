@@ -108,3 +108,11 @@ and settings in `~/.stratus/config.json`, so `stratus run` works from any
 directory afterwards. No env vars to export, no config files to hand-edit. A
 project-local `stratus.config.json` still wins when present, and env vars
 outrank both — see [Configuration](../reference/config.md).
+
+Re-running setup **edits** that file rather than rewriting it. The keys it
+has no menu for are read in and written back untouched — the `plugins`,
+`approvals`, `api`, and `principals` blocks, plus the `vision`,
+`promptCache`, and `promptCacheTtl` preferences — so a capability you
+granted an agent by hand survives the next time you change a model. It did
+not always: setup rebuilt the file from its own menus, and everything it
+had no menu for was deleted by a run that never mentioned it.
