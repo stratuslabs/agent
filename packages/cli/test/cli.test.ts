@@ -9030,3 +9030,148 @@ test('re-running setup carries a configured vision switch through the save', asy
   assert.equal(config.vision, false);
   assert.equal(config.provider, 'openai');
 });
+
+/**
+ * The chain this command exists for. Four things have to be true before an
+ * agent can call a plugin's tool, and each of these assertions is one of
+ * them failing on its own.
+ */
+const writePluginFixture = async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] },
+      '@stratusagent/tool-web': { enabled: false },
+    },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'blair.md'),
+    ['---', 'id: blair', 'name: Blair', 'tools:', '  - fs.read', '  - fs.search', '---', 'You are Blair.'].join('\n'),
+  );
+  return { home, cwd };
+};
+
+test('plugins names every link in the chain from installed to callable', async () => {
+  const { home, cwd } = await writePluginFixture();
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 0);
+  // What the policy does with a gated call, which is the link no list of
+  // installed packages has ever shown.
+  assert.match(output.stdout, /approvals: headless — a gated call is refused/);
+  // Granted, and granted to whom.
+  assert.match(output.stdout, /fs\.read\s+safe → blair/);
+  // Registered but granted to nobody: installing is not granting.
+  assert.match(output.stdout, /fs\.write\s+gated → nobody, until a soul’s tools: list names it/);
+  // Enabled false is not the same as absent, and says which it is.
+  assert.match(output.stdout, /@stratusagent\/tool-web\s+installed, switched off/);
+  assert.match(output.stdout, /switched off — remove "enabled": false to load it/);
+  // A switched-off plugin registers nothing, so its tools are not listed
+  // with a grant column beside them.
+  assert.doesNotMatch(output.stdout, /web\.fetch/);
+  // Installed and never enabled — the trap that started this.
+  assert.match(
+    output.stdout,
+    /@stratusagent\/tool-shell\s+installed, not enabled\n\s+installing granted nothing/,
+  );
+  assert.match(output.stdout, /More plugins — github\.com\/stratuslabs\/plugins/);
+});
+
+test('plugins tells you to install a package that is not there, rather than listing its tools', async () => {
+  const { home, cwd } = await writePluginFixture();
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: {
+      cwd,
+      homeDir: home,
+      processEnv: {},
+      // Everything but the shell resolves, so the two states are
+      // distinguishable in one run.
+      packageResolver: (specifier: string) => specifier !== '@stratusagent/tool-shell',
+    },
+  });
+
+  assert.match(
+    output.stdout,
+    /@stratusagent\/tool-shell\s+not installed\n\s+install it: npm install -g @stratusagent\/tool-shell/,
+  );
+  assert.doesNotMatch(output.stdout, /shell\.run/);
+});
+
+test('plugins --format json reports the chain as data', async () => {
+  const { home, cwd } = await writePluginFixture();
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins', '--format', 'json'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  const report = JSON.parse(output.stdout) as {
+    approvals: string;
+    rosterUnreadable: boolean;
+    plugins: Array<{
+      package: string;
+      installed: boolean;
+      configured: boolean;
+      enabled: boolean;
+      tools: Array<{ name: string; risk: string; grantedTo: string[] }>;
+    }>;
+  };
+
+  assert.equal(report.approvals, 'headless');
+  assert.equal(report.rosterUnreadable, false);
+  const fs = report.plugins.find((entry) => entry.package === '@stratusagent/tool-fs');
+  assert.ok(fs);
+  assert.deepEqual(
+    { installed: fs.installed, configured: fs.configured, enabled: fs.enabled },
+    { installed: true, configured: true, enabled: true },
+  );
+  assert.deepEqual(fs.tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['blair']);
+  // Risk is the manifest's declaration raised to its package's floor — the
+  // reason a write is not something the daemon does on its own.
+  assert.equal(fs.tools.find((tool) => tool.name === 'fs.write')?.risk, 'gated');
+  assert.deepEqual(fs.tools.find((tool) => tool.name === 'fs.write')?.grantedTo, []);
+});
+
+test('plugins ignores a plugins block a project-local config tried to set', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // The block a cloned repository must not get to decide, since a plugin
+  // runs inside the daemon's own process.
+  await writeFile(
+    path.join(cwd, 'stratus.config.json'),
+    JSON.stringify({ plugins: { '@stratusagent/tool-shell': { enabled: true } } }),
+  );
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  assert.match(output.stderr, /ignoring the plugins config in .*stratus\.config\.json/);
+  assert.match(output.stdout, /@stratusagent\/tool-shell\s+installed, not enabled/);
+});
+
+test('plugins rejects a format it cannot print', () => {
+  assert.throws(
+    () => parseCommand(['plugins', '--format', 'yaml']),
+    /Invalid value for --format: yaml\. Use text or json\./,
+  );
+  assert.throws(() => parseCommand(['plugins', '--wat']), /Unknown option: --wat/);
+  assert.deepEqual(parseCommand(['plugin', 'list']), { command: 'plugins', format: 'text' });
+});

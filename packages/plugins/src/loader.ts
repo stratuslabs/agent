@@ -99,6 +99,27 @@ const packageJsonFor = async (
 };
 
 /**
+ * A package's manifest, and the directory it was found in.
+ *
+ * Nothing here imports the package — the property `parsePluginManifest`
+ * exists for, and the reason this is worth having on its own. `stratus
+ * plugins` has to answer "what would this contribute, and at what risk"
+ * for a daemon that is not running, and running somebody's `setup` to find
+ * out would spawn the MCP subprocesses and open the sockets that a listing
+ * command has no business starting.
+ *
+ * `loadPlugins` goes through here too, so there is one answer to where a
+ * package's manifest is rather than a second walk that drifts from it.
+ */
+export const readPluginManifest = async (
+  specifier: string,
+  host: Pick<OptionalModuleHost, 'resolve'>,
+): Promise<{ manifest: PluginManifest; directory: string }> => {
+  const { packageJson, directory } = await packageJsonFor(host.resolve(specifier), specifier);
+  return { manifest: parsePluginManifest(packageJson, specifier), directory };
+};
+
+/**
  * Whether a package's code is trusted — which is to say whether its
  * manifest may declare a tool `safe`.
  *
@@ -343,9 +364,7 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
     // held for the life of a daemon that goes on running without it.
     let instance: Plugin | undefined;
     try {
-      const resolved = options.host.resolve(specifier);
-      const { packageJson, directory } = await packageJsonFor(resolved, specifier);
-      const manifest = parsePluginManifest(packageJson, specifier);
+      const { manifest, directory } = await readPluginManifest(specifier, options.host);
       const isTrusted = trusted(manifest.packageName);
       // Validated *after* the host's defaults are folded in, because that
       // is the configuration the plugin will actually be handed: a manifest

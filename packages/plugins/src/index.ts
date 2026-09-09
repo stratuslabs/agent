@@ -38,6 +38,7 @@ export {
   isFirstPartyPackage,
   loadOptionalModule,
   loadPlugins,
+  readPluginManifest,
   type CreatePlugin,
   type LoadedPlugin,
   type LoadPluginsOptions,

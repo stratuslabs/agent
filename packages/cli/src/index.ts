@@ -14,6 +14,9 @@ import {
   ToolRegistry,
   isTrustLevel,
   matchesSkillAllowlist,
+  matchesToolAllowlist,
+  raiseRiskTo,
+  toolScopesOverlap,
   escapeControlCharacters,
   memoryEntryTrust,
   missingSkillRequirements,
@@ -32,6 +35,7 @@ import {
   type ModelProvider,
   type Session,
   type StratusEvent,
+  type ToolRisk,
   type TrustLevel,
 } from '@stratusagent/core';
 import {
@@ -42,7 +46,15 @@ import {
 // and the whole runner stack), and a serve-only policy seam must not make
 // `stratus run` pay for it.
 import type { ApprovalTransport, GatewayChannelAdapter, HomeClaim, RestartOutcome } from '@stratusagent/gateway';
-import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
+import {
+  declaredRiskFor,
+  isFirstPartyPackage,
+  loadPlugins,
+  parseToolRiskOverrides,
+  readPluginManifest,
+  riskFloorFor,
+  type LoadedPlugin,
+} from '@stratusagent/plugins';
 import {
   createFileCommandWhitelist,
   createPermissionPolicy,
@@ -518,6 +530,13 @@ export interface ParsedSkillValidateCommand {
   target: string;
 }
 
+export interface ParsedPluginsCommand {
+  command: 'plugins';
+  format: 'text' | 'json';
+  /** The config whose plugins block to read, when not the default. */
+  configPath?: string;
+}
+
 export interface ParsedSkillsCommand {
   command: 'skills';
 }
@@ -679,6 +698,7 @@ export type ParsedCommand =
   | ParsedAgentsCommand
   | ParsedSkillAddCommand
   | ParsedSkillValidateCommand
+  | ParsedPluginsCommand
   | ParsedSkillsCommand
   | ParsedSkillReloadCommand
   | ParsedCredentialCommand
@@ -827,6 +847,8 @@ Usage:
   stratus skill add ./my-skills --skill code-review --agent ava
   stratus skill validate ./my-skill
   stratus skills
+  stratus plugins
+  stratus plugins --format json
   stratus skill reload
   stratus restart
   stratus schedules
@@ -897,6 +919,13 @@ Commands:
                    Exit 1 if anything would be refused
   skills           List installed skills and which agents enable each
                    (also: stratus skill list)
+  plugins          What this machine's plugins are, and where the chain from
+                   installed to callable breaks: whether the package resolves,
+                   whether a trusted config enables it, which agents' tools:
+                   lists select each tool it declares, and what the approval
+                   policy does with a gated call. Read from each package's
+                   manifest, so nothing is imported and no plugin's setup runs
+                   (--format json, --config <path>; also: stratus plugin list)
   skill reload     Ask the running daemon to re-read ~/.stratus/skills — for a
                    skill edited or removed by hand. A skill that will not
                    load refuses the whole reload and the previous set keeps
@@ -1569,6 +1598,34 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       ...(name !== undefined ? { name } : {}),
       ...(agentId !== undefined ? { agentId } : {}),
     };
+  }
+
+  if (command === 'plugins' || (command === 'plugin' && rest[0] === 'list')) {
+    const pluginsRest = command === 'plugins' ? rest : rest.slice(1);
+    let format: 'text' | 'json' = 'text';
+    let configPath: string | undefined;
+    for (let index = 0; index < pluginsRest.length; index += 1) {
+      const token = pluginsRest[index] as string;
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--format') {
+        const value = readOptionValue(pluginsRest, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Invalid value for --format: ${value}. Use text or json.`);
+        }
+        format = value;
+        index += 1;
+        continue;
+      }
+      if (token === '--config') {
+        configPath = readOptionValue(pluginsRest, index, '--config');
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+    return { command: 'plugins', format, ...(configPath !== undefined ? { configPath } : {}) };
   }
 
   if (command === 'skills' || (command === 'skill' && rest[0] === 'list')) {
@@ -3420,6 +3477,12 @@ export const slackAppManifest = (agentName: string): string => JSON.stringify({
     token_rotation_enabled: false,
   },
 }, null, 2);
+
+/**
+ * Where plugins other people publish are listed. Printed by `stratus
+ * plugins` and by setup's plugin menu, so the two cannot drift.
+ */
+const PLUGIN_MARKETPLACE_URL = 'github.com/stratuslabs/plugins';
 
 const DEFAULT_SOUL_STARTER = [
   'You are a helpful, warm generalist. Answer first, explain second, and',
@@ -7068,6 +7131,257 @@ export const runSkills = async (
   return 0;
 };
 
+// ---- stratus plugins -------------------------------------------------------
+
+/**
+ * The first-party capability packages, for the one question a manifest
+ * cannot answer: what exists that this machine has not installed.
+ *
+ * A discovery aid and nothing else. What a package *contributes* is always
+ * read from its own manifest, so this list falling behind can cost a
+ * suggestion and never a wrong answer about a plugin that is here.
+ */
+const FIRST_PARTY_CAPABILITY_PACKAGES = [
+  '@stratusagent/tool-fs',
+  '@stratusagent/tool-shell',
+  '@stratusagent/tool-web',
+  '@stratusagent/tool-browser',
+  '@stratusagent/plugin-mcp',
+];
+
+/** One tool a plugin's manifest declares, as this machine would have it. */
+export interface PluginToolReport {
+  name: string;
+  /**
+   * Declared as a namespace rather than named, so the tools under it arrive
+   * when the server connects. `mcp.*` is the case: a name that does not
+   * exist yet is not a name that does not exist.
+   */
+  discovered: boolean;
+  /**
+   * The riskiest of the manifest's declaration, the floor its package is
+   * held to, and an operator's `toolRisks` override — the same three claims
+   * `ManifestBoundToolRegistry` combines, minus the one only a running
+   * daemon has. A registered object may raise itself further, so this is a
+   * floor on what a call will face rather than the last word on it.
+   */
+  risk: ToolRisk;
+  /**
+   * Agent ids whose `tools:` allowlist selects this name. Empty is the
+   * finding, not the absence of one: installing a plugin grants nothing.
+   */
+  grantedTo: string[];
+}
+
+export interface PluginReport {
+  package: string;
+  /** Resolvable from this process. */
+  installed: boolean;
+  /** Named in the trusted config's plugins block, whatever its `enabled`. */
+  configured: boolean;
+  /** Configured and not switched off. */
+  enabled: boolean;
+  tools: PluginToolReport[];
+  /** Why the manifest could not be read, when it could not. */
+  problem?: string;
+}
+
+export interface PluginsReport {
+  /** What the daemon would do with a gated call right now. */
+  approvals: 'headless' | 'remote';
+  /**
+   * Set when the roster did not load, in which case every `grantedTo` is
+   * withheld rather than reported empty — the same rule `stratus skills`
+   * follows, and for the same reason: unreadable enablement must not print
+   * as "granted to nobody".
+   */
+  rosterUnreadable: boolean;
+  plugins: PluginReport[];
+}
+
+/**
+ * What this machine's plugins are, and where the chain from installed to
+ * callable breaks.
+ *
+ * Four things have to be true before an agent can call a plugin's tool —
+ * the package is installed, a trusted config enables it, the agent's
+ * `tools:` names it, and the approval policy lets the call through — and
+ * every one of them fails silently on its own. A listing of installed
+ * packages answers the first and reads as an answer to all four, which is
+ * how an agent ends up with a persona describing tools it never had.
+ *
+ * Manifests rather than a load: `readPluginManifest` imports nothing, so
+ * this never runs a plugin's `setup` — which for the MCP bridge would spawn
+ * every configured server's subprocess to answer a question about a
+ * daemon that is not running.
+ */
+export const collectPluginsReport = async (
+  command: ParsedPluginsCommand,
+  env: CliEnvironment,
+  warn: (line: string) => void,
+): Promise<PluginsReport> => {
+  const pluginsConfig = await loadServePlugins(env, command.configPath, warn);
+  const approvals = await loadServeApprovals(env, command.configPath, warn);
+
+  // Who grants what, from the roster a dispatch actually serves — the same
+  // resolution `stratus skills` uses, so the two commands cannot disagree
+  // about which souls are live.
+  let roster: Awaited<ReturnType<typeof loadRosterSouls>> = [];
+  let rosterUnreadable = false;
+  try {
+    const resolved = await rosterSoulsWithConfigured(env, warn);
+    roster = resolved.entries;
+    rosterUnreadable = !resolved.complete;
+  } catch (error) {
+    rosterUnreadable = true;
+    warn(`cannot say who is granted what — the roster did not load: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  /**
+   * Which agents a declared name reaches. A soul with no `tools:` key
+   * grants every registered tool, which is the opposite of an empty list —
+   * so an absent allowlist matches everything here too, or this would
+   * report the most permissive agents as the least.
+   */
+  const grantedTo = (name: string, discovered: boolean): string[] => roster
+    .filter((entry) => {
+      const allowlist = entry.soul.agent.tools;
+      if (allowlist === undefined) {
+        return true;
+      }
+      return discovered
+        ? allowlist.some((granted) => toolScopesOverlap(granted, name))
+        : matchesToolAllowlist(name, allowlist);
+    })
+    .map((entry) => entry.soul.agent.id);
+
+  // Configured first, in the operator's own order, then the first-party
+  // packages they have not configured — the second group is why an install
+  // that granted nothing is visible at all.
+  const configured = Object.keys(pluginsConfig);
+  const packages = [
+    ...configured,
+    ...FIRST_PARTY_CAPABILITY_PACKAGES.filter((name) => !configured.includes(name)),
+  ];
+
+  const plugins: PluginReport[] = [];
+  for (const specifier of packages) {
+    const block = pluginsConfig[specifier] ?? {};
+    const isConfigured = configured.includes(specifier);
+    const base: PluginReport = {
+      package: specifier,
+      installed: packageInstalled(specifier, env),
+      configured: isConfigured,
+      enabled: isConfigured && block.enabled !== false,
+      tools: [],
+    };
+    if (!base.installed) {
+      plugins.push(base);
+      continue;
+    }
+    try {
+      const { manifest } = await readPluginManifest(specifier, {
+        resolve: (target) => import.meta.resolve(target),
+      });
+      const floor = riskFloorFor(isFirstPartyPackage(manifest.packageName));
+      const overrides = parseToolRiskOverrides(manifest, block);
+      const declared: Array<{ name: string; discovered: boolean; declared: ToolRisk }> = [
+        ...manifest.contributes.tools.map((tool) => ({
+          name: tool.name,
+          discovered: false,
+          declared: tool.risk,
+        })),
+        ...manifest.contributes.toolsDiscovered.map((entry) => ({
+          name: entry.namespace,
+          discovered: true,
+          declared: entry.risk,
+        })),
+      ];
+      base.tools = declared.map((tool) => {
+        const override = overrides.get(tool.name);
+        return {
+          name: tool.name,
+          discovered: tool.discovered,
+          risk: override !== undefined
+            ? raiseRiskTo(override, floor)
+            : raiseRiskTo(tool.declared, floor),
+          grantedTo: grantedTo(tool.name, tool.discovered),
+        };
+      });
+    } catch (error) {
+      // Reported per plugin rather than thrown: one package with a broken
+      // manifest must not take down the listing that would have shown it.
+      base.problem = error instanceof Error ? error.message : String(error);
+    }
+    plugins.push(base);
+  }
+
+  return { approvals: approvals.mode ?? 'headless', rosterUnreadable, plugins };
+};
+
+/** `stratus plugins` — the chain from installed to callable, per plugin. */
+export const runPlugins = async (
+  command: ParsedPluginsCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const report = await collectPluginsReport(command, env, (line) => {
+    writeLine(streams.stderr, `Warning: ${line}`);
+  });
+
+  if (command.format === 'json') {
+    writeLine(streams.stdout, JSON.stringify(report, null, 2));
+    return 0;
+  }
+
+  writeLine(streams.stdout, report.approvals === 'headless'
+    ? 'approvals: headless — a gated call is refused, so only safe tools run unattended'
+    : 'approvals: remote — a gated call parks and asks in Slack');
+  writeLine(streams.stdout);
+
+  for (const plugin of report.plugins) {
+    const state = !plugin.installed
+      ? 'not installed'
+      : !plugin.configured
+        ? 'installed, not enabled'
+        : plugin.enabled ? 'installed, enabled' : 'installed, switched off';
+    writeLine(streams.stdout, `${plugin.package.padEnd(30)}${state}`);
+
+    if (plugin.problem !== undefined) {
+      writeLine(streams.stdout, `  its manifest did not read: ${plugin.problem}`);
+      continue;
+    }
+    if (!plugin.installed) {
+      writeLine(streams.stdout, `  install it: npm install -g ${plugin.package}`);
+      continue;
+    }
+    // Nothing is registered for a plugin that will not load, so its tools
+    // are not listed: a grant column beside a name no agent can call reads
+    // as capability this machine has.
+    if (!plugin.configured) {
+      writeLine(streams.stdout, `  installing granted nothing — add "${plugin.package}" to the plugins block of a trusted config to load it`);
+      continue;
+    }
+    if (!plugin.enabled) {
+      writeLine(streams.stdout, '  switched off — remove "enabled": false to load it');
+      continue;
+    }
+    for (const tool of plugin.tools) {
+      const granted = report.rosterUnreadable
+        ? ''
+        : tool.grantedTo.length > 0
+          ? ` → ${tool.grantedTo.join(', ')}`
+          : ' → nobody, until a soul’s tools: list names it';
+      const shape = tool.discovered ? ' (names arrive at connect)' : '';
+      writeLine(streams.stdout, `  ${tool.name.padEnd(28)}${tool.risk}${shape}${granted}`);
+    }
+  }
+
+  writeLine(streams.stdout);
+  writeLine(streams.stdout, `More plugins — ${PLUGIN_MARKETPLACE_URL}`);
+  return 0;
+};
+
 /**
  * The provider/model a newly created soul pins. Frontmatter pins what a run
  * from this directory would actually use: env vars outrank the active
@@ -8659,6 +8973,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'skills') {
       return await runSkills(streams, resolvedEnv);
+    }
+
+    if (command.command === 'plugins') {
+      return await runPlugins(command, streams, resolvedEnv);
     }
 
     if (command.command === 'credential') {

@@ -91,7 +91,9 @@ apart. The two surfaces are the deliberate exceptions: the Slack channel
 connects when an agent's tokens are stored (the decision you made
 connecting the app), and installing the control API + dashboard *is* the
 decision to open an authenticated local port (`--no-api` takes it back).
-`stratus setup` offers the packages your answers imply.
+`stratus setup` offers the packages your answers imply, and
+[`stratus plugins`](docs/guides/tools.md#which-link-in-the-chain-is-broken)
+says which of those gates a tool is currently stuck behind.
 
 The trust model behind that is in
 [Plugins](docs/concepts/plugins.md) and

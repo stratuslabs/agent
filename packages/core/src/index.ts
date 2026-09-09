@@ -675,6 +675,25 @@ export const matchesToolAllowlist = (toolName: string, allowlist: readonly strin
   matchesGlobbedAllowlist(toolName, allowlist, '.*');
 
 /**
+ * Whether an allowlist entry and a declared namespace select any of the
+ * same tools — true when either sits under the other.
+ *
+ * Namespaces nest, so both shapes are real: `mcp.linear.*` sits under a
+ * declared `mcp.*`, and a granted `mcp.*` covers everything a narrower
+ * declared `mcp.linear.*` will register. Both arguments are passed where a
+ * tool name goes on purpose — entry and namespace are the same dotted-prefix
+ * glob, so this is the reading the allowlists already use rather than a
+ * second one.
+ *
+ * Exported because the dead-entry check is no longer the only caller:
+ * `stratus plugins` answers which agents a namespace reaches before any of
+ * its tools exist, and a second hand-rolled overlap would drift from this
+ * one immediately.
+ */
+export const toolScopesOverlap = (entry: string, namespace: string): boolean =>
+  matchesToolAllowlist(entry, [namespace]) || matchesToolAllowlist(namespace, [entry]);
+
+/**
  * Whether an agent's `skills:` allowlist permits a skill id.
  *
  * The same machinery as `matchesToolAllowlist` — one implementation of
@@ -835,14 +854,7 @@ export const unmatchedToolAllowlist = (
   // arrived yet, not a typo.
   //
   // Overlap either way excuses the entry, because either way the entry
-  // selects tools that namespace will bring: `mcp.linear.*` sits under a
-  // declared `mcp.*`, and a granted `mcp.*` covers everything a narrower
-  // declared `mcp.linear.*` will register — namespaces nest, so both
-  // shapes are real. Entry and namespace are passed where a tool name
-  // goes on purpose: both are the same dotted-prefix glob, so this is the
-  // reading the allowlists already use rather than a second one.
-  const overlaps = (entry: string, namespace: string): boolean =>
-    matchesToolAllowlist(entry, [namespace]) || matchesToolAllowlist(namespace, [entry]);
+  // selects tools that namespace will bring — see `toolScopesOverlap`.
   // The reader is registered but this key never grants it: both of the
   // runner's gates key on the agent having a skill enabled, and neither
   // consults `tools:`. Matching against it would let it stand in for a
@@ -854,7 +866,7 @@ export const unmatchedToolAllowlist = (
     : registered;
   const dead = allowlist.filter(
     (entry) => !grantable.some((name) => matchesToolAllowlist(name, [entry]))
-      && !mayRegister.some((namespace) => overlaps(entry, namespace)),
+      && !mayRegister.some((namespace) => toolScopesOverlap(entry, namespace)),
   );
   if (dead.length === 0) {
     return undefined;

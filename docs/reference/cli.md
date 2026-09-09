@@ -36,6 +36,8 @@ stratus skill add owner/repo --skill hn-search --agent ava
 stratus skill validate ./my-skill      # check a skill (or a repo of them, or an installed id) against the Agent Skills spec
 stratus skills                         # what is installed, who enables it (also: stratus skill list)
 stratus skill reload                   # a running daemon re-reads ~/.stratus/skills — no restart
+stratus plugins                        # installed → enabled → granted → what approvals does with it (also: stratus plugin list)
+stratus plugins --format json          # the same chain as data
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
 printf %s "$KEY" | stratus credential set search.apiKey   # store a named credential (value from stdin, never a flag)
 stratus credential set search.apiKey --agent ava         # one agent's own key, over the shared one

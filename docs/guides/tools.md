@@ -187,6 +187,48 @@ risk levels. Four things are worth knowing here:
   thing that lowers one. A stdio server's environment is replaced the way
   `tool-shell`'s is. See [MCP](./mcp.md).
 
+## Which link in the chain is broken
+
+Four things have to be true before an agent can call a plugin's tool — the
+package is installed, a trusted config enables it, the agent's `tools:`
+names it, and the approval policy lets the call through — and every one of
+them fails quietly on its own. `stratus plugins` walks all four:
+
+```console
+$ stratus plugins
+approvals: headless — a gated call is refused, so only safe tools run unattended
+
+@stratusagent/tool-fs         installed, enabled
+  fs.read                     safe → blair
+  fs.write                    gated → nobody, until a soul’s tools: list names it
+@stratusagent/tool-shell      installed, not enabled
+  installing granted nothing — add "@stratusagent/tool-shell" to the plugins block of a trusted config to load it
+@stratusagent/plugin-mcp      not installed
+  install it: npm install -g @stratusagent/plugin-mcp
+
+More plugins — github.com/stratuslabs/plugins
+```
+
+It reads each package's **manifest**, which is the thing designed to be
+trusted about a package nothing has imported — so the command runs no
+plugin's `setup`, and asking what the MCP bridge would contribute does not
+spawn every server you configured. Two consequences worth knowing:
+
+- **A namespace is listed as a namespace.** `mcp.*` says the names arrive at
+  connect; a tool that has not arrived yet is not a tool that does not exist.
+- **The risk shown is a floor, not the last word.** It is the riskiest of the
+  manifest's declaration, the floor the package is held to, and your
+  `toolRisks` override — the three claims available without loading anything.
+  A registered tool may raise itself further, and `shell.run` and
+  `browser.act` are then judged per call ([Shell commands](./shell.md),
+  [Browser actions](./browser.md)), so `gated` there means "judged", not
+  "refused".
+
+`--format json` prints the same chain as data. The `plugins` block is read
+only from a trusted config, exactly as the daemon reads it, so a
+project-local `stratus.config.json` is ignored here too — with the same
+warning naming the file.
+
 `GET /api/v1/catalog/tools` lists what a running daemon actually has, and
 the dashboard's **Plugins** screen renders it — including a plugin you
 enabled that failed to load, which is invisible in a list of tools.
