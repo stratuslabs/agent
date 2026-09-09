@@ -224,10 +224,22 @@ than scoping choices:
   judged by site. A `dangerous` tool asks every time, whatever the answer.
   A `tools` row written by hand for either kind is ignored.
 - **Scoped to the tool as it was when granted.** The grant records which
-  package contributed the tool. If the same name is later contributed by a
-  different package — the realistic case is a plugin update — the call asks
-  again, and the listing marks the old grant stale. A kernel tool records
-  no package and matches only a kernel tool.
+  package contributed the tool, and stops applying when that changes: a
+  *different* package claiming a name you granted — one plugin swapped for
+  another, an MCP server's tool taken over — asks again, and the listing
+  marks the old grant stale. A kernel tool records no package and matches
+  only a kernel tool.
+
+  **What this does not catch is the same package upgraded in place.** The
+  name is unchanged, so the grant survives the new version, and a tool that
+  quietly does more after an update keeps running unattended. That is a
+  deliberate limit rather than an oversight: pinning a grant to a version
+  would revoke every grant on every routine upgrade, which teaches an
+  operator to re-approve without reading — the opposite of what a standing
+  grant is for. Tighter identity is worth arguing on its own terms, and
+  until it exists the remedy is `stratus grants revoke` after an upgrade
+  you have reason to distrust. Grant durable tools from packages you would
+  also let update themselves.
 
 ### Seeing and revoking them
 

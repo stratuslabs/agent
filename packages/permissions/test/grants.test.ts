@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -285,6 +285,41 @@ test('without a store, a standing grant still holds for the process and for the 
   assert.equal(asks, 1, 'another session of the same agent is covered');
   assert.equal(await policy.approve(contextFor(plainTool('web.fetch', 'gated'), 'juno')), true);
   assert.equal(asks, 2, 'another agent is not');
+});
+
+test('a revoke whose write fails leaves the grant standing, rather than dropping it until the next restart', async () => {
+  const directory = await newDirectory();
+  const store = createFileCommandWhitelist({ directory });
+  await store.rememberTool('ava', { tool: 'web.fetch', grantedAt: '2026-09-07T00:00:00.000Z' });
+
+  // The grant is readable and cached; the *write* is what fails — a
+  // read-only mount, a full disk. Staged by putting a directory where the
+  // file goes, which `writeFile` refuses for any user, root included: a
+  // mode-only trick passes as root and would make this test prove nothing.
+  const file = whitelistPathFor(directory, 'ava');
+  const saved = await readFile(file, 'utf8');
+  await rm(file);
+  await mkdir(file);
+
+  await assert.rejects(store.forgetTool('ava', 'web.fetch'), 'the revoke reported its failure');
+
+  // The direction that matters: the caller was told the revoke failed, so
+  // the grant must still be honoured. Updating the cache before the write
+  // landed meant the daemon stopped honouring it anyway and then handed it
+  // back at the next restart — a grant returning from the dead.
+  assert.deepEqual(
+    (await store.toolGrantsFor('ava')).map((grant) => grant.tool),
+    ['web.fetch'],
+    'the live view still holds the grant the file still holds',
+  );
+
+  // And the file was never touched, so a restarted daemon agrees with both.
+  await rm(file, { recursive: true });
+  await writeFile(file, saved);
+  assert.deepEqual(
+    (await createFileCommandWhitelist({ directory }).toolGrantsFor('ava')).map((grant) => grant.tool),
+    ['web.fetch'],
+  );
 });
 
 test('grant rows are read leniently and written back whole, beside the scopes they sit with', async () => {

@@ -250,7 +250,6 @@ export const createFileCommandWhitelist = (options: {
    * loss the unreadable-file guard above exists to prevent.
    */
   const save = async (agentId: string, grants: Grants): Promise<void> => {
-    cache.set(agentId, Promise.resolve(grants));
     await mkdir(options.directory, { recursive: true });
     const file: WhitelistFile = {
       version: WHITELIST_VERSION,
@@ -261,6 +260,17 @@ export const createFileCommandWhitelist = (options: {
     const target = whitelistPathFor(options.directory, agentId);
     await writeFile(target, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
     await chmod(target, 0o600);
+    // The cache is updated only once the file holds the same thing, and the
+    // direction that matters is revocation. Updating it first meant a write
+    // that failed — a read-only mount, a full disk — still dropped the grant
+    // from the daemon's live view while leaving it in the file: the operator
+    // is told the revoke failed, the agent stops being able to act anyway,
+    // and the grant they thought they had removed comes back at the next
+    // restart. A grant that returns from the dead is the ratchet this whole
+    // step exists to prevent, so the cache follows the file rather than
+    // leading it. Writes are serialized per agent, so a reader mid-write
+    // sees the old grants, which is what the file still says.
+    cache.set(agentId, Promise.resolve(grants));
   };
 
   /**

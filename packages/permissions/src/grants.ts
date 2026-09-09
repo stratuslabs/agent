@@ -10,12 +10,23 @@
  * the opposite, and never receives one of these; the engine keeps that
  * structural rather than remembered, by resolving scopes first.
  *
- * A grant is scoped to the tool *as it was when granted*. The realistic
- * way a tool changes what it does under the same name is a plugin update,
- * so the grant records the package that contributed the tool, and one
- * whose package no longer matches does not apply — the call asks again,
- * and the listing says why. A kernel tool records no package, and matches
- * only a kernel tool.
+ * A grant is scoped to the tool *as it was when granted*, so it records the
+ * package that contributed it and stops applying when that changes: a
+ * different package claiming a granted name — one plugin swapped for
+ * another, a bridged server's tool taken over — asks again, and the listing
+ * says why. A kernel tool records no package, and matches only a kernel one.
+ *
+ * The same package upgraded **in place** keeps its grants, and that is a
+ * decision rather than a gap. Pinning identity to a version would revoke
+ * every grant on every routine upgrade, which trains an operator to
+ * re-approve without reading and buys nothing against the case that
+ * actually worries anyone — a package whose new version is hostile is one
+ * whose next version is too. 28 scoped this to recording the package,
+ * "the only thing that makes the question answerable later"; answering it
+ * properly wants an integrity identifier the plugin host does not have
+ * yet, and belongs with whatever introduces one. Until then the operator's
+ * remedy is `stratus grants revoke` after an upgrade they distrust, which
+ * is why the listing shows the package it was granted from.
  */
 
 /** One standing permission to run a tool: the tool, and its provenance. */
