@@ -9061,3 +9061,120 @@ test('the example template in this repository installs', async () => {
   await stat(path.join(home, '.stratus', 'agents', 'scribe.md'));
   await stat(path.join(home, '.stratus', 'skills', 'meeting-notes', 'SKILL.md'));
 });
+
+test('a soul with no tools list is reviewed as unrestricted, not as "no tools"', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const source = await writeTemplateDir({
+    'template.json': EXAMPLE_MANIFEST,
+    // No `tools:` line at all. `executeToolCall` skips the allowlist check
+    // for an undefined list, so this agent may call every registered tool —
+    // the opposite of the empty list it looks like.
+    'agents/wide.md': '---\nname: Wide\n---\n\nI have no tools list.\n',
+  });
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['template', 'add', source, '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.match(output.stdout, /EVERY tool, because the soul has no tools: list/);
+  assert.doesNotMatch(output.stdout, /Wide \(wide\) — no tools/);
+});
+
+test('a soul whose id is already claimed by another file is refused, --force included', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\n---\n\nI was here first.\n');
+  const source = await writeTemplateDir({
+    'template.json': EXAMPLE_MANIFEST,
+    // A different filename claiming an id the roster already has. The
+    // filename check alone says "available"; `loadRosterSouls` then refuses
+    // the whole roster, so the daemon serves nobody until this file is found.
+    'agents/brandnew.md': '---\nname: Whoever\nid: ava\n---\n\nI collide.\n',
+  });
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['template', 'add', source, '--yes', '--force'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 1);
+  assert.match(output.stdout, /cannot install brandnew\.md: .*already claims the id ava/);
+  await assert.rejects(stat(path.join(home, '.stratus', 'agents', 'brandnew.md')), { code: 'ENOENT' });
+  // The roster still loads, which is the whole point.
+  assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), ['ava.md']);
+});
+
+test('two souls in one template claiming the same id are refused', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const source = await writeTemplateDir({
+    'template.json': EXAMPLE_MANIFEST,
+    'agents/one.md': '---\nname: Ava\n---\n\nfirst\n',
+    'agents/two.md': '---\nname: Whoever\nid: ava\n---\n\nsecond\n',
+  });
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['template', 'add', source, '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.match(output.stderr, /Warning: skipped two\.md — one\.md in this template already claims the id ava/);
+  assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), ['one.md']);
+});
+
+test('a config fragment the loader would reject installs nothing', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ provider: 'anthropic' })}\n`);
+  const source = await writeTemplateDir({
+    'template.json': EXAMPLE_MANIFEST,
+    // Structurally wrong one level down, which the manifest read does not
+    // see. Written blind it makes the whole global config unreadable.
+    'config.json': JSON.stringify({ api: { port: 'bad' } }),
+    'agents/scribe.md': EXAMPLE_SOUL,
+  });
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['template', 'add', source, '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 1);
+  assert.match(output.stderr, /would make .* unreadable/);
+  await assert.rejects(stat(path.join(home, '.stratus', 'agents', 'scribe.md')), { code: 'ENOENT' });
+  assert.deepEqual(
+    JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8')),
+    { provider: 'anthropic' },
+    'and the config it would have broken is untouched',
+  );
+});
+
+test('adding an agent tells you to restart, even with no plugins involved', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const source = await writeTemplateDir({
+    'template.json': EXAMPLE_MANIFEST,
+    'agents/scribe.md': EXAMPLE_SOUL,
+  });
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['template', 'add', source, '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  // A running daemon re-reads souls only for agents already in its roster,
+  // so a new one is not served until the restart.
+  assert.equal(code, 0, output.stderr);
+  assert.match(output.stdout, /stratus restart/);
+});

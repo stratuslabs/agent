@@ -127,6 +127,7 @@ import {
   resolveEnvApiKey,
   DEFAULT_CONFIG_FILENAME,
   loadConfigFile,
+  validateConfigFile,
   resolveConfigLocation,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
   saveChannelCredentials,
@@ -6150,13 +6151,36 @@ const TEMPLATE_SKILLS_DIRNAME = 'skills';
 const NPM_PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
 
 interface TemplateAgentPlan {
-  /** The file inside `agents/`, which is also the id it installs under. */
+  /** The file inside `agents/`, and the name it installs under. */
   file: string;
+  /**
+   * The id the soul actually claims, which need not match the filename: an
+   * explicit `id:` wins, and a bare `name:` derives one. Ids are what key
+   * sessions, memory, and credentials, so they are what a collision is
+   * about.
+   */
   id: string;
   name: string;
-  tools: string[];
-  /** An agent already using this id in `~/.stratus/agents`. */
+  /**
+   * The soul's allowlist, `undefined` when it has no `tools:` line — which
+   * means **every registered tool**, because `executeToolCall` skips the
+   * allowlist check entirely for an undefined list. Kept undefined rather
+   * than normalised to `[]` so the review can say so: an empty list and a
+   * missing one are opposites, and reporting the wider one as "no tools"
+   * is the review lying in the one direction that matters.
+   */
+  tools: string[] | undefined;
+  /** Already installed under this filename; `--force` replaces it. */
   taken: boolean;
+  /**
+   * Why this soul cannot be installed at all, if it cannot. An id claimed
+   * by a *different* file — another template soul, or a roster soul under
+   * another name — is fatal rather than skippable: `loadRosterSouls`
+   * refuses a duplicate id, so installing one takes down the whole roster
+   * until somebody finds the file. `--force` cannot help, because the
+   * clash is not with the file this would overwrite.
+   */
+  blocked?: string;
 }
 
 interface TemplatePlan {
@@ -6194,6 +6218,32 @@ const mergeTemplateConfig = (base: JsonValue | undefined, incoming: JsonValue): 
   return merged;
 };
 
+/**
+ * The document a template's config would produce, refused if the loader
+ * would refuse it.
+ *
+ * `validateConfigFile` exists for this — "anything that *writes* a config
+ * has to answer the same question the loader answers", says its own doc
+ * comment — and a template's `config.json` is only checked for being an
+ * object, so `plugins: []` or `api: { port: "bad" }` would otherwise be
+ * written and make the whole global config unreadable on the next run.
+ */
+const mergedTemplateConfig = (
+  current: CliConfigFile,
+  fragment: JsonObject,
+  configPath: string,
+): CliConfigFile => {
+  const merged = mergeTemplateConfig(current as JsonValue, fragment);
+  try {
+    return validateConfigFile(merged, configPath);
+  } catch (error) {
+    throw new Error(
+      `This template's ${TEMPLATE_CONFIG_FILENAME} would make ${configPath} unreadable: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+};
+
 const readTemplateJson = async (file: string): Promise<JsonObject | undefined> => {
   let raw: string;
   try {
@@ -6220,6 +6270,7 @@ const readTemplateJson = async (file: string): Promise<JsonObject | undefined> =
 const planTemplateInstall = async (
   env: CliEnvironment,
   directory: string,
+  warn: (line: string) => void,
 ): Promise<TemplatePlan> => {
   const manifest = await readTemplateJson(path.join(directory, TEMPLATE_MANIFEST_FILENAME));
   if (!manifest) {
@@ -6270,24 +6321,50 @@ const planTemplateInstall = async (
       throw error;
     }
   }
+  // The ids already spoken for, by path, so a soul whose id matches the very
+  // file it would replace is the ordinary `--force` case rather than a
+  // collision. A roster that is already broken is warned about and skipped:
+  // this command is not the place to refuse over somebody else's duplicate.
+  const rosterIds = new Map<string, string>();
+  if (agentFiles.length > 0) {
+    try {
+      for (const entry of await loadRosterSouls(env, () => {})) {
+        rosterIds.set(entry.soul.agent.id, entry.path);
+      }
+    } catch (error) {
+      warn(`could not read your roster, so ids were not checked against it: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const claimedHere = new Map<string, string>();
   for (const file of agentFiles) {
     // Parsed rather than copied blind: the review below can only name the
     // agent and its tools if the soul actually reads, and a template
     // shipping a broken one should fail here rather than at the next run.
     const soul = await loadSoulFile(path.join(agentsDir, file));
+    const destination = path.join(agentsDirPath(env), file);
     let taken = false;
     try {
-      await stat(path.join(agentsDirPath(env), file));
+      await stat(destination);
       taken = true;
     } catch {
       // Not installed under this name; nothing to refuse.
     }
+    const alsoHere = claimedHere.get(soul.agent.id);
+    const inRoster = rosterIds.get(soul.agent.id);
+    const blocked = alsoHere !== undefined
+      ? `${alsoHere} in this template already claims the id ${soul.agent.id}`
+      : inRoster !== undefined && path.resolve(inRoster) !== path.resolve(destination)
+        ? `${inRoster} already claims the id ${soul.agent.id}`
+        : undefined;
+    claimedHere.set(soul.agent.id, file);
     agents.push({
       file,
       id: soul.agent.id,
       name: soul.agent.name,
-      tools: [...soul.agent.tools ?? []],
+      tools: soul.agent.tools ? [...soul.agent.tools] : undefined,
       taken,
+      ...(blocked !== undefined ? { blocked } : {}),
     });
   }
 
@@ -6303,6 +6380,21 @@ const planTemplateInstall = async (
     }
   }
 
+  // Validated against the config as it stands, so a fragment the loader
+  // would reject refuses the whole command before a single file is copied.
+  // Checked again under the write below, in case the file moved underneath.
+  if (Object.keys(config).length > 0) {
+    let current: CliConfigFile = {};
+    try {
+      current = await loadConfigFile(globalConfigPath(env));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+    }
+    mergedTemplateConfig(current, config, globalConfigPath(env));
+  }
+
   return { name, description, directory, agents, skills, packages, missing, config };
 };
 
@@ -6311,9 +6403,14 @@ const writeTemplatePlan = (streams: CliStreams, plan: TemplatePlan, env: CliEnvi
   writeLine(streams.stdout, `${plan.name} — ${plan.description}`);
   writeLine(streams.stdout);
   for (const agent of plan.agents) {
-    const tools = agent.tools.length > 0 ? agent.tools.join(', ') : 'no tools';
+    // An absent `tools:` is not "none", it is "all" — see TemplateAgentPlan.
+    const tools = agent.tools === undefined
+      ? 'EVERY tool, because the soul has no tools: list'
+      : agent.tools.length > 0 ? agent.tools.join(', ') : 'no tools';
     writeLine(streams.stdout, `  agent    ${agent.name} (${agent.id}) — ${tools}`);
-    if (agent.taken) {
+    if (agent.blocked !== undefined) {
+      writeLine(streams.stdout, `           cannot install ${agent.file}: ${agent.blocked}.`);
+    } else if (agent.taken) {
       writeLine(streams.stdout, `           ${agent.file} is already in your roster; --force replaces it.`);
     }
   }
@@ -6372,7 +6469,7 @@ export const runTemplateAdd = async (
   }
 
   try {
-    const plan = await planTemplateInstall(env, directory);
+    const plan = await planTemplateInstall(env, directory, (line) => writeLine(streams.stderr, `Warning: ${line}`));
     writeTemplatePlan(streams, plan, env);
 
     if (!command.yes && !await confirmTemplateInstall(streams, env)) {
@@ -6396,8 +6493,15 @@ export const runTemplateAdd = async (
     await mkdir(agentsDirPath(env), { recursive: true });
     const installedAgents: string[] = [];
     const refusedAgents: string[] = [];
+    const blockedAgents: string[] = [];
     for (const agent of plan.agents) {
       const destination = path.join(agentsDirPath(env), agent.file);
+      // Never, with or without --force: two files claiming one id is what
+      // `loadRosterSouls` refuses, and it refuses the whole roster.
+      if (agent.blocked !== undefined) {
+        blockedAgents.push(`${agent.file} — ${agent.blocked}`);
+        continue;
+      }
       if (agent.taken && !command.force) {
         refusedAgents.push(agent.file);
         continue;
@@ -6425,10 +6529,7 @@ export const runTemplateAdd = async (
           throw error;
         }
       }
-      await saveConfigFile(
-        configPath,
-        mergeTemplateConfig(current as JsonValue, plan.config) as CliConfigFile,
-      );
+      await saveConfigFile(configPath, mergedTemplateConfig(current, plan.config, configPath));
     }
 
     for (const agent of installedAgents) {
@@ -6448,6 +6549,9 @@ export const runTemplateAdd = async (
     for (const file of refusedAgents) {
       writeLine(streams.stderr, `Warning: skipped ${file} — an agent of that name is already in your roster (--force replaces it).`);
     }
+    for (const blocked of blockedAgents) {
+      writeLine(streams.stderr, `Warning: skipped ${blocked}. Ids key sessions, memory, and credentials, so one of them has to change.`);
+    }
     for (const skipped of skillResult.skipped) {
       writeLine(streams.stderr, `Warning: skipped skill ${skipped.id}: ${skipped.reason}`);
     }
@@ -6456,11 +6560,13 @@ export const runTemplateAdd = async (
       return 1;
     }
 
-    if (plan.packages.length > 0) {
-      writeLine(streams.stdout);
-      writeLine(streams.stdout, 'A plugin change needs a restart:');
-      writeLine(streams.stdout, '  stratus restart          # see docs/guides/always-on.md');
-    }
+    // A running daemon holds its roster and its plugins in memory: souls are
+    // re-read only for agents it already has, and a plugin is loaded at
+    // start. So anything that landed needs the announced restart before it
+    // is served — not only a plugin change.
+    writeLine(streams.stdout);
+    writeLine(streams.stdout, 'Tell a running daemon about it:');
+    writeLine(streams.stdout, '  stratus restart          # picks up new agents, skills, and plugins');
     return 0;
   } finally {
     await cleanup?.();

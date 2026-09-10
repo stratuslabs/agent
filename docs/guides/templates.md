@@ -36,7 +36,9 @@ here, for the same reason.
 - `--force` replaces an agent or skill already installed under that name.
   Without it those are skipped and everything else still installs.
 
-A plugin change needs `stratus restart` before a running daemon sees it.
+A running daemon holds its roster and its plugins in memory, so anything a
+template adds needs `stratus restart` before it is served — a new agent as
+much as a new plugin.
 
 ## What a template holds
 
@@ -53,7 +55,13 @@ with `template.json` and `agents/` in it.
 
 The config merge is additive where it can be: objects merge key by key, so a
 template naming one plugin never takes away the plugins you already had.
-Scalars and arrays replace.
+Scalars and arrays replace. The merged document is checked the way
+`stratus run` would read it, so a template whose `config.json` would leave
+your config unreadable is refused before anything is copied.
+
+**Read the tool list.** A soul with no `tools:` line may call *every*
+registered tool, and the review says so in those words. An empty list and a
+missing one are opposites.
 
 ## Writing one
 
@@ -73,6 +81,14 @@ on disk, which is what makes reading the folder a real review.
 
 - **No rollback.** Files are copied one at a time. If something fails
   partway, what already landed stays; the output says what was installed.
+  The two things that refuse *before* anything is copied are a config
+  fragment your config would not survive, and a package name that is not an
+  npm package name.
+- **It will not install two agents with one id.** Ids key sessions, memory,
+  and credentials, and a duplicate makes the whole roster refuse to load —
+  so a soul claiming an id another file already has is skipped and named,
+  and `--force` does not override that. `--force` only replaces the file of
+  the same name.
 - **It does not create schedules.** A schedule is a decision about cadence
   and destination — ask the agent for one and approve it, see
   [Schedules](./schedules.md).
