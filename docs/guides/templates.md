@@ -86,9 +86,16 @@ on disk, which is what makes reading the folder a real review.
   npm package name.
 - **It will not install two agents with one id.** Ids key sessions, memory,
   and credentials, and a duplicate makes the whole roster refuse to load —
-  so a soul claiming an id another file already has is skipped and named,
-  and `--force` does not override that. `--force` only replaces the file of
-  the same name.
+  so a soul claiming an id anything already holds is skipped and named.
+  That set is your roster, the `soul:` your config points at even when it
+  lives outside `~/.stratus/agents`, and the built-in `stratus`. `--force`
+  does not override it: `--force` replaces the file of the same name, which
+  is a different thing.
+- **What you reviewed is what installs.** The soul files are read while the
+  review is printed and written from that, so a template directory edited
+  while you are deciding cannot slip in a wider tool list. An agent that
+  appears at the destination in the meantime is skipped rather than
+  overwritten, `--force` aside.
 - **It does not create schedules.** A schedule is a decision about cadence
   and destination — ask the agent for one and approve it, see
   [Schedules](./schedules.md).

@@ -128,6 +128,7 @@ import {
   discoverSkillsInDirectory,
   installSkillsFromDirectory,
   loadOperatorSkills,
+  declaredAgentIds,
   loadRosterSouls,
   skillsDirPath,
   listAgentSummaries,
@@ -6366,6 +6367,8 @@ const NPM_PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
 interface TemplateAgentPlan {
   /** The file inside `agents/`, and the name it installs under. */
   file: string;
+  /** The reviewed bytes, so what installs is what was shown. */
+  contents: string;
   /**
    * The id the soul actually claims, which need not match the filename: an
    * explicit `id:` wins, and a bare `name:` derives one. Ids are what key
@@ -6538,15 +6541,16 @@ const planTemplateInstall = async (
   // file it would replace is the ordinary `--force` case rather than a
   // collision. A roster that is already broken is warned about and skipped:
   // this command is not the place to refuse over somebody else's duplicate.
-  const rosterIds = new Map<string, string>();
-  if (agentFiles.length > 0) {
-    try {
-      for (const entry of await loadRosterSouls(env, () => {})) {
-        rosterIds.set(entry.soul.agent.id, entry.path);
-      }
-    } catch (error) {
-      warn(`could not read your roster, so ids were not checked against it: ${error instanceof Error ? error.message : String(error)}`);
-    }
+  // `declaredAgentIds`, not a roster read of this command's own: it is the
+  // set an id is actually claimed against — the roster, the configured
+  // default soul (which can live outside `agents/` and still be served),
+  // and the built-in `stratus`. Reading the roster alone said "available"
+  // for ids the daemon would then hand to somebody else.
+  const declared = agentFiles.length > 0
+    ? await declaredAgentIds(env)
+    : { ids: new Set<string>(), unread: [] as string[] };
+  if (declared.unread.length > 0) {
+    warn(`could not read ${declared.unread.join(' or ')}, so ids were not checked against what it declares.`);
   }
 
   const claimedHere = new Map<string, string>();
@@ -6554,25 +6558,36 @@ const planTemplateInstall = async (
     // Parsed rather than copied blind: the review below can only name the
     // agent and its tools if the soul actually reads, and a template
     // shipping a broken one should fail here rather than at the next run.
-    const soul = await loadSoulFile(path.join(agentsDir, file));
+    const soulPath = path.join(agentsDir, file);
+    const soul = await loadSoulFile(soulPath);
+    // The bytes the review is about, kept rather than re-read at copy time:
+    // a local template is a directory something else can edit, and the gap
+    // between the prompt and the copy is however long a human takes. What
+    // lands has to be what was shown.
+    const contents = await readFile(soulPath, 'utf8');
     const destination = path.join(agentsDirPath(env), file);
     let taken = false;
+    let replacesOwnId = false;
     try {
       await stat(destination);
       taken = true;
+      // The id at the destination is the one this file would replace, so a
+      // match there is the ordinary `--force` case rather than a clash.
+      replacesOwnId = (await loadSoulFile(destination)).agent.id === soul.agent.id;
     } catch {
-      // Not installed under this name; nothing to refuse.
+      // Not installed under this name, or unreadable: either way this file
+      // is not the one already holding the id.
     }
     const alsoHere = claimedHere.get(soul.agent.id);
-    const inRoster = rosterIds.get(soul.agent.id);
     const blocked = alsoHere !== undefined
       ? `${alsoHere} in this template already claims the id ${soul.agent.id}`
-      : inRoster !== undefined && path.resolve(inRoster) !== path.resolve(destination)
-        ? `${inRoster} already claims the id ${soul.agent.id}`
+      : !replacesOwnId && declared.ids.has(soul.agent.id)
+        ? `something already claims the id ${soul.agent.id}`
         : undefined;
     claimedHere.set(soul.agent.id, file);
     agents.push({
       file,
+      contents,
       id: soul.agent.id,
       name: soul.agent.name,
       tools: soul.agent.tools ? [...soul.agent.tools] : undefined,
@@ -6581,17 +6596,15 @@ const planTemplateInstall = async (
     });
   }
 
-  let skills: string[] = [];
-  try {
-    skills = (await readdir(path.join(directory, TEMPLATE_SKILLS_DIRNAME), { withFileTypes: true }))
-      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
-      .map((entry) => entry.name)
-      .sort((left, right) => left.localeCompare(right));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw error;
-    }
-  }
+  // Discovered by the same call that will install them. A directory listing
+  // is a different rule: `discoverSkillsInDirectory` also finds a root
+  // `SKILL.md` and the nested `.claude/skills/` layout, so a listing here
+  // would omit skills the installer then adds — the review under-reporting
+  // what lands, which is the one thing it must not do.
+  const skills = (await discoverSkillsInDirectory(path.join(directory, TEMPLATE_SKILLS_DIRNAME)))
+    .candidates
+    .map((candidate) => candidate.id)
+    .sort((left, right) => left.localeCompare(right));
 
   // Validated against the config as it stands, so a fragment the loader
   // would reject refuses the whole command before a single file is copied.
@@ -6705,6 +6718,7 @@ export const runTemplateAdd = async (
 
     await mkdir(agentsDirPath(env), { recursive: true });
     const installedAgents: string[] = [];
+    const enabledPackages: Array<{ specifier: string; on: boolean }> = [];
     const refusedAgents: string[] = [];
     const blockedAgents: string[] = [];
     for (const agent of plan.agents) {
@@ -6719,7 +6733,20 @@ export const runTemplateAdd = async (
         refusedAgents.push(agent.file);
         continue;
       }
-      await copyFile(path.join(directory, TEMPLATE_AGENTS_DIRNAME, agent.file), destination);
+      try {
+        // `wx` unless replacing on purpose: the destination was checked
+        // while planning, and another `template add`, a setup flow, or an
+        // editor can create it in the meantime. Without the exclusive flag
+        // the documented "refused without --force" quietly becomes an
+        // overwrite of somebody's newer file.
+        await writeFile(destination, agent.contents, command.force ? undefined : { flag: 'wx' });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw error;
+        }
+        refusedAgents.push(agent.file);
+        continue;
+      }
       installedAgents.push(`${agent.name} (${agent.id})`);
     }
 
@@ -6730,7 +6757,7 @@ export const runTemplateAdd = async (
       ? await installSkillsFromDirectory(env, path.join(directory, TEMPLATE_SKILLS_DIRNAME), {
         ...(command.force ? { force: true } : {}),
       })
-      : { installed: [], skipped: [] };
+      : { installed: [], skipped: [], warnings: [], alreadyInstalled: [] };
 
     if (Object.keys(plan.config).length > 0) {
       const configPath = globalConfigPath(env);
@@ -6742,7 +6769,17 @@ export const runTemplateAdd = async (
           throw error;
         }
       }
-      await saveConfigFile(configPath, mergedTemplateConfig(current, plan.config, configPath));
+      const merged = mergedTemplateConfig(current, plan.config, configPath);
+      await saveConfigFile(configPath, merged);
+      // What the merged block says, not what the template asked for. A
+      // fragment carrying `enabled: false`, or one that says nothing about
+      // `enabled` over a block already disabled, leaves the plugin off —
+      // and "enabled X" would then be the command reporting a capability
+      // the next restart will not provide.
+      for (const specifier of plan.packages) {
+        const block = merged.plugins?.[specifier];
+        enabledPackages.push({ specifier, on: block?.enabled !== false });
+      }
     }
 
     for (const agent of installedAgents) {
@@ -6751,8 +6788,13 @@ export const runTemplateAdd = async (
     for (const skill of skillResult.installed) {
       writeLine(streams.stdout, `installed skill ${skill.id}`);
     }
-    if (plan.packages.length > 0) {
-      writeLine(streams.stdout, `enabled ${plan.packages.join(', ')} in ${globalConfigPath(env)}`);
+    const enabled = enabledPackages.filter((entry) => entry.on).map((entry) => entry.specifier);
+    const stillOff = enabledPackages.filter((entry) => !entry.on).map((entry) => entry.specifier);
+    if (enabled.length > 0) {
+      writeLine(streams.stdout, `enabled ${enabled.join(', ')} in ${globalConfigPath(env)}`);
+    }
+    for (const specifier of stillOff) {
+      writeLine(streams.stdout, `configured ${specifier} in ${globalConfigPath(env)}, still disabled`);
     }
 
     // Warnings rather than failures, on stderr, for the reason `skill add`
@@ -6767,6 +6809,13 @@ export const runTemplateAdd = async (
     }
     for (const skipped of skillResult.skipped) {
       writeLine(streams.stderr, `Warning: skipped skill ${skipped.id}: ${skipped.reason}`);
+    }
+    // What installed *with* a caveat — a field another host owns, a bundled
+    // scripts/ — said the same way `skill add` says it. The operator
+    // deciding whether to enable a skill is the one who needs to hear it,
+    // and a template installs skills without their asking for each.
+    for (const warning of skillResult.warnings) {
+      writeLine(streams.stderr, `Warning: ${warning.id}: ${warning.message}`);
     }
     if (installedAgents.length === 0 && skillResult.installed.length === 0 && Object.keys(plan.config).length === 0) {
       writeLine(streams.stderr, 'Error: nothing was installed.');
