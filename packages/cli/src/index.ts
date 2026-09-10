@@ -7339,15 +7339,34 @@ const describeUnattendedReach = async (
   // already-authorized call before it asks anyone, so an unqualified "asks
   // in Slack" hides unattended capability in precisely the configuration
   // where Slack is set up correctly.
+  //
+  // The *verdict* is composed with the control API in view rather than
+  // corrected afterwards. `describeApprovers` answers a Slack question and
+  // is right to — `runServe` asks it before anything else is known — but
+  // its no-channel and no-approver answers both end in "denied", which is
+  // false wherever `POST /api/v1/approvals` can settle the call. Appending
+  // the API as a later clause left the two halves contradicting each other.
+  const slack = describeApprovers(approvals, askable);
   const parts = [
-    `remote — an uncovered gated call parks and asks in Slack, ${describeApprovers(approvals, askable)}`,
+    apiReachable
+      ? askable.length === 0
+        ? 'remote — an uncovered gated call parks with no Slack channel to ask through, so the control API '
+          + 'is the only way to answer it before the timeout denies it'
+        : `remote — an uncovered gated call parks until it is answered, in Slack or through the control API (${slack})`
+      : `remote — an uncovered gated call parks and asks in Slack, ${slack}`,
   ];
   // The reverse of a stale token, and the failure that actually bites: an
   // agent the daemon serves that no channel can ask for parks its gated
   // calls until the timeout denies them. `runServe` warns about exactly
   // this once its roster loads; the difference here is only that both
   // halves are in view from the start.
-  const unreachable = (servedAgentIds ?? []).filter((agentId) => !askable.includes(agentId));
+  //
+  // Named only when *some* agent is askable: with none, the verdict above
+  // has already said no Slack channel is running at all, and listing every
+  // served agent under it repeats that in more words.
+  const unreachable = askable.length === 0
+    ? []
+    : (servedAgentIds ?? []).filter((agentId) => !askable.includes(agentId));
   if (unreachable.length > 0) {
     // Slack is not the only way to answer. `GET /api/v1/approvals` lists
     // what is parked and `POST` settles it, so with the control API up

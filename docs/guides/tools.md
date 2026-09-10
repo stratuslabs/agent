@@ -278,8 +278,9 @@ spawn every server you configured. Two consequences worth knowing:
   In `remote` the line also names what is missing: an agent the daemon
   serves that no Slack channel can ask for — its gated calls park until the
   control API answers them, or, with no API serving either, until the
-  timeout denies them, which is what `stratus serve` warns about at startup
-  — and approvers with no `slackChannel` — they can only be asked on turns that started in Slack,
+  timeout denies them, which is what `stratus serve` warns about at startup.
+  Where nothing is askable in Slack at all, the line says so once rather
+  than naming every agent. It also names approvers with no `slackChannel` — they can only be asked on turns that started in Slack,
   because a turn from the API, the dashboard, or a delegation reaches the
   adapter with nowhere to post.
   `remote` only asks if somebody can be asked: with no channel installed a

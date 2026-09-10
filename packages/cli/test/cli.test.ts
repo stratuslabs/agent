@@ -9448,7 +9448,10 @@ test('plugins does not offer a stale Slack token as an approver route', async ()
   });
 
   assert.doesNotMatch(output.stdout, /approvers set for ghost/);
-  assert.match(output.stdout, /no channel is running to ask through/);
+  // With the token intersected away nothing is askable in Slack, and the
+  // control API resolves here — so the verdict is the API one, not a
+  // Slack-shaped denial.
+  assert.match(output.stdout, /parks with no Slack channel to ask through, so the control API is the only way/);
 });
 
 test('plugins names the served agents no channel can ask for, and approvers with no fallback', async () => {
@@ -9807,4 +9810,31 @@ test('plugins does not show a nested wildcard risk override as effective either'
   assert.equal(tools.find((tool) => tool.name === 'mcp.*')?.risk, 'gated');
   // Not listed at all: a wildcard names no tool the daemon will re-rate.
   assert.equal(tools.find((tool) => tool.name === 'mcp.linear.*'), undefined);
+});
+
+test('plugins does not both deny and offer the control API in one verdict', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // Remote, control API serving, and no Slack tokens for anybody. The
+  // Slack-shaped verdict ends in "denied"; the API sentence says the call
+  // can be answered. Appending the second to the first said both.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote' },
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {}, packageResolver: () => true },
+  });
+
+  assert.match(
+    output.stdout,
+    /remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it/,
+  );
+  // The contradiction, in either of the two shapes it took.
+  assert.doesNotMatch(output.stdout, /wait out the approval timeout and then be denied/);
+  assert.doesNotMatch(output.stdout, /no channel is running to ask through/);
 });
