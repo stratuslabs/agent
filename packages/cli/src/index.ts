@@ -4840,12 +4840,18 @@ export const runSetup = async (
    */
   const pluginContributions = async (
     name: string,
-  ): Promise<{ tools: string[]; namespaces: string[]; skills: string[] } | undefined> => {
+  ): Promise<{ packageName: string; tools: string[]; namespaces: string[]; skills: string[] } | undefined> => {
     try {
       const { manifest } = await readPluginManifest(name, {
         resolve: (target) => import.meta.resolve(target),
       });
       return {
+        // The manifest's own name, which is *not* the config key: the same
+        // package reached through an alias or a subpath specifier is a
+        // different key and the same `packageName`, and the loader
+        // qualifies skills with this one. Carried out of here so callers
+        // cannot reach for the specifier by accident.
+        packageName: manifest.packageName,
         tools: manifest.contributes.tools.map((tool) => tool.name),
         namespaces: manifest.contributes.toolsDiscovered.map((entry) => entry.namespace),
         // The qualified form the loader stages them under, which is what a
@@ -5002,10 +5008,16 @@ export const runSetup = async (
       writeLine(streams.stdout, `It also contributes ${one ? 'a skill' : 'skills'}: ${contributed.skills.join(', ')}.`);
       // Every id, not the first: `matchesSkillAllowlist` selects an exact id
       // or a package wildcard, so a one-item list from a plural sentence
-      // grants one skill and silently leaves the rest off. `${name}:*` is
-      // offered beside them because it is the entry that keeps working when
-      // the package adds one.
-      writeLine(streams.stdout, `Those are not granted by \`tools:\` and no soul gets them by default — an omitted \`skills:\` list is none. Add \`skills: [${contributed.skills.join(', ')}]\` to grant ${one ? 'it' : 'them'}${one ? '' : `, or \`skills: [${name}:*]\` for every skill this package contributes`}.`);
+      // grants one skill and silently leaves the rest off.
+      //
+      // The wildcard is built from the *manifest's* package name, never the
+      // config key this menu was called with. They are the same for every
+      // ordinary install and differ for an alias or a subpath specifier,
+      // and the loader qualifies skills with the manifest's — so a wildcard
+      // spelled from the key would grant nothing while the exact ids beside
+      // it worked, which is the worst way for two halves of one sentence to
+      // disagree.
+      writeLine(streams.stdout, `Those are not granted by \`tools:\` and no soul gets them by default — an omitted \`skills:\` list is none. Add \`skills: [${contributed.skills.join(', ')}]\` to grant ${one ? 'it' : 'them'}${one ? '' : `, or \`skills: [${contributed.packageName}:*]\` for every skill this package contributes`}.`);
     };
 
     if (callable.length > 0) {
