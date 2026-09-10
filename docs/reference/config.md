@@ -11,10 +11,7 @@ Precedence, highest first:
 4. **Config file** — a project-local `stratus.config.json` outranks the
    global `~/.stratus/config.json`
 
-`stratus setup` writes the global file for you — replacing only the
-settings it asks about (provider, model, base URL, key env var, system
-prompt, default soul, and the fallback settings) and carrying everything
-else in the file across untouched, `plugins` included; a project can carry its own
+`stratus setup` writes the global file for you; a project can carry its own
 `stratus.config.json` (start from
 [`stratus.config.json.example`](../../stratus.config.json.example)), and
 `--config <file>` / `STRATUS_CONFIG` load a specific one.
