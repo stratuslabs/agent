@@ -7640,14 +7640,19 @@ export const collectPluginsReport = async (
           const subject = pattern === claim.pattern
             ? `${pattern} is`
             : `${pattern} overlaps ${claim.pattern}, which is`;
-          // What a collision costs depends on *when* the name registers.
-          // A tool the manifest names outright registers during `setup()`,
-          // where a clash rejects the whole plugin. A namespace's tools
-          // arrive later — a bridge discovering them at connect — and by
-          // then the registry commits live, so a clash there rejects that
-          // one registration and leaves the plugin serving the rest.
+          // What a collision costs depends on *when* the name registers,
+          // which a manifest cannot tell you. Everything registered before
+          // a plugin commits is refused with the plugin — that is every
+          // manifest-named tool, and also every tool a bridge discovers at
+          // its first connect, because plugin-mcp awaits that connect
+          // inside `setup()` and its names stage like any declared one.
+          // Only a name arriving on a later reconnect registers against a
+          // committed registry, where a clash costs that one registration
+          // and nothing else. Keying this on `.*` claimed the cheap half
+          // for every namespace and was wrong for the common case: a
+          // server that answers at startup.
           const cost = pattern.endsWith('.*')
-            ? 'a daemon keeps the first and refuses that one discovered tool, leaving the rest of this plugin serving'
+            ? 'a daemon keeps the first and refuses the other whole when the clashing tool is discovered before that plugin finishes loading — a bridge whose server answers at startup discovers inside setup() — and refuses just that one tool when it arrives on a later reconnect'
             : 'a daemon keeps the first and refuses the other whole, tools and skills together';
           base.warnings = [
             ...(base.warnings ?? []),

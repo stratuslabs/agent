@@ -9716,11 +9716,14 @@ test('plugins warns when a declared namespace covers a name already claimed', as
 
   await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
 
-  // A namespace's tools arrive at connect, after the plugin has committed,
-  // so a clash there costs that one discovered tool rather than the plugin.
+  // A bridge's first connect happens inside `setup()` when its server is
+  // reachable — plugin-mcp awaits it there — so a namespace's tools are
+  // staged like declared ones and a clash costs the whole plugin. Only a
+  // reconnect registers against a committed registry, where it costs one
+  // tool. The warning must say both, because a manifest cannot tell which.
   assert.match(
     output.stdout,
-    /warning: memory\.\* overlaps memory\.remember, which is already registered by the daemon itself; if both register that name, a daemon keeps the first and refuses that one discovered tool, leaving the rest of this plugin serving/,
+    /warning: memory\.\* overlaps memory\.remember, which is already registered by the daemon itself; if both register that name, a daemon keeps the first and refuses the other whole when the clashing tool is discovered before that plugin finishes loading — a bridge whose server answers at startup discovers inside setup\(\) — and refuses just that one tool when it arrives on a later reconnect/,
   );
 });
 

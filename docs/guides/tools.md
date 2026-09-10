@@ -249,9 +249,13 @@ spawn every server you configured. Two consequences worth knowing:
   registers is therefore reported as a `warning`, not a failure: whether it
   actually registers that name is `setup()`'s business, and an optional tool
   may never claim it. What a clash costs depends on *when* the name
-  registers — a manifest-named tool registers during `setup()`, where a
-  clash rejects the whole plugin, while a namespace's tools arrive at
-  connect, by which point only that one discovered tool is refused. Between two plugins the warning says *if both register
+  registers, which a manifest cannot tell you: a name registered before its
+  plugin finishes loading is refused with the plugin, and that covers every
+  manifest-named tool *and* every tool a bridge discovers at its first
+  connect, since `plugin-mcp` awaits that connect inside `setup()`. Only a
+  tool that arrives on a later reconnect — a server unreachable at startup,
+  or one that added a tool since — costs just that one registration.
+  Between two plugins the warning says *if both register
   it*, since neither side is known to; against the daemon's own tools it is
   definite on one side, because those are already registered. One package
   configured twice — through its name and a path, say — is two entries to
