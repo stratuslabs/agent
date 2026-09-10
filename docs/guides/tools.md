@@ -249,16 +249,13 @@ spawn every server you configured. Two consequences worth knowing:
   registers is therefore reported as a `warning`, not a failure: whether it
   actually registers that name is `setup()`'s business, and an optional tool
   may never claim it. What a clash costs depends on *when* the name
-  registers, which a manifest cannot tell you: a name registered before its
-  plugin finishes loading is refused with the plugin, and that covers every
-  manifest-named tool *and* every tool a bridge discovers at its first
-  connect, since `plugin-mcp` awaits that connect inside `setup()`. Only a
-  tool that arrives on a later reconnect — a server unreachable at startup,
-  or one that added a tool since — costs just that one registration. That
-  uncertainty belongs to the *pair*: a plainly-named tool colliding with
-  another plugin's declared namespace may cost that plugin its whole self
-  or a single tool, depending on whether its server was up, so the warning
-  is qualified whenever either side is a namespace.
+  registers, and a manifest never says: a name registered before its plugin
+  finishes loading is refused with the plugin, tools and skills together,
+  while one registered after costs that single tool and nothing else. Which
+  happens is not a property of the declaration. A bridge's first connect is
+  inside `setup()` when its server is up and a reconnect when it is not, and
+  any plugin may keep the registry it was handed and add a tool from a timer
+  hours later. So the warning states both outcomes for every collision.
   Between two plugins the warning says *if both register
   it*, since neither side is known to; against the daemon's own tools it is
   definite on one side, because those are already registered. One package

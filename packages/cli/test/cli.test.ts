@@ -9558,7 +9558,7 @@ test('plugins warns that a declared tool name is already registered elsewhere', 
   // that loads perfectly well.
   assert.match(
     output.stdout,
-    /warning: db\.query is also declared by .*; if both register that name, a daemon keeps the first and refuses the other whole/,
+    /warning: db\.query is also declared by .*; if both register that name, a daemon keeps the first and refuses the second registration — the whole plugin, tools and skills together, if it happens before that plugin finishes loading, or just that one tool if it happens after/,
   );
   // And it stays enabled with its tools listed, because it may well load.
   assert.doesNotMatch(output.stdout, /a daemon would register nothing for it/);
@@ -9716,14 +9716,11 @@ test('plugins warns when a declared namespace covers a name already claimed', as
 
   await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
 
-  // A bridge's first connect happens inside `setup()` when its server is
-  // reachable — plugin-mcp awaits it there — so a namespace's tools are
-  // staged like declared ones and a clash costs the whole plugin. Only a
-  // reconnect registers against a committed registry, where it costs one
-  // tool. The warning must say both, because a manifest cannot tell which.
+  // Both costs, always: staging versus live registration decides which,
+  // and no manifest says when a name registers.
   assert.match(
     output.stdout,
-    /warning: memory\.\* overlaps memory\.remember, which is already registered by the daemon itself; if both register that name, a daemon keeps the first and refuses the other whole when the clashing tool is discovered before that plugin finishes loading — a bridge whose server answers at startup discovers inside setup\(\) — and refuses just that one tool when it arrives on a later reconnect/,
+    /warning: memory\.\* overlaps memory\.remember, which is already registered by the daemon itself; if both register that name, a daemon keeps the first and refuses the second registration — the whole plugin, tools and skills together, if it happens before that plugin finishes loading, or just that one tool if it happens after/,
   );
 });
 
@@ -9749,17 +9746,10 @@ test('plugins warns when a later literal falls under an earlier namespace', asyn
 
   await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
 
-  // The cost belongs to the pair, not to the side being examined. This
-  // literal registers during its own setup(), but the plugin that loses
-  // something may be the bridge: if its server was down at startup it has
-  // already committed, so discovering this name on a reconnect costs it
-  // that one tool. Whole-plugin wording here would state one of the two
-  // outcomes as the only one.
   assert.match(
     output.stdout,
-    /warning: mcp\.linear\.get_issue overlaps mcp\.\*, which is also declared by .*; if both register that name, a daemon keeps the first and refuses the other whole when the clashing tool is discovered before that plugin finishes loading/,
+    /warning: mcp\.linear\.get_issue overlaps mcp\.\*, which is also declared by .*; if both register that name, a daemon keeps the first and refuses the second registration — the whole plugin, tools and skills together, if it happens before that plugin finishes loading, or just that one tool if it happens after/,
   );
-  assert.doesNotMatch(output.stdout, /refuses the other whole, tools and skills together/);
 });
 
 test('plugins says a gated call waits out the timeout only when nothing can answer it', async () => {

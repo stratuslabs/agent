@@ -7640,29 +7640,27 @@ export const collectPluginsReport = async (
           const subject = pattern === claim.pattern
             ? `${pattern} is`
             : `${pattern} overlaps ${claim.pattern}, which is`;
-          // What a collision costs depends on *when* the name registers,
-          // which a manifest cannot tell you. Everything registered before
-          // a plugin commits is refused with the plugin — that is every
-          // manifest-named tool, and also every tool a bridge discovers at
-          // its first connect, because plugin-mcp awaits that connect
-          // inside `setup()` and its names stage like any declared one.
-          // Only a name arriving on a later reconnect registers against a
-          // committed registry, where a clash costs that one registration
-          // and nothing else.
+          // One sentence for every collision, because a manifest cannot
+          // tell when a name registers and the cost turns entirely on
+          // that. `ManifestBoundToolRegistry` stages while `owners` is
+          // unset and registers live once `commit` sets it, so a clash
+          // before the plugin commits rolls it back whole and a clash
+          // after refuses that one registration. Neither side of the
+          // declaration says which: a bridge's first connect happens
+          // inside `setup()` when its server is up and on a reconnect
+          // when it is not, and a plugin may hold `context.tools` and
+          // register a plainly-named tool from a timer long after.
           //
-          // So the qualified wording belongs to the *pair*, not to the
-          // side being examined: a literal colliding with an earlier
-          // namespace is refused whole only if that bridge was up at
-          // startup, and costs the bridge one tool if it reconnects later
-          // and finds the name taken. Asking only whether `pattern` ends
-          // in `.*` reads one side of a symmetric relation — twice now.
-          const cost = pattern.endsWith('.*') || claim.pattern.endsWith('.*')
-            ? 'a daemon keeps the first and refuses the other whole when the clashing tool is discovered before that plugin finishes loading — a bridge whose server answers at startup discovers inside setup() — and refuses just that one tool when it arrives on a later reconnect'
-            : 'a daemon keeps the first and refuses the other whole, tools and skills together';
+          // Three rounds of review went into splitting this by
+          // declaration kind, then by which side of the pair held the
+          // namespace. Both splits claimed knowledge the manifest does
+          // not have. Do not reintroduce one.
           base.warnings = [
             ...(base.warnings ?? []),
             `${subject} ${claim.registered ? 'already registered by' : 'also declared by'} ${claim.owner}; `
-            + `if both register that name, ${cost}`,
+            + 'if both register that name, a daemon keeps the first and refuses the second registration — '
+            + 'the whole plugin, tools and skills together, if it happens before that plugin finishes loading, '
+            + 'or just that one tool if it happens after',
           ];
         }
       }
