@@ -9422,3 +9422,29 @@ test('plugins lets a configured soul take the built-in id over rather than listi
   assert.deepEqual(tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['stratus', 'blair']);
   assert.deepEqual(tools.find((tool) => tool.name === 'fs.write')?.grantedTo, []);
 });
+
+test('plugins does not offer a stale Slack token as an approver route', async () => {
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    // An approver configured for an agent that no longer exists. The
+    // adapter skips an id the gateway is not serving, so a token that
+    // outlived its agent is not somebody who can be asked.
+    approvals: { mode: 'remote', agents: { ghost: { slackApprovers: ['U01OPS'] } } },
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ghost: { botToken: 'xoxb-gone', appToken: 'xapp-gone' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {}, packageResolver: () => true },
+  });
+
+  assert.doesNotMatch(output.stdout, /approvers set for ghost/);
+  assert.match(output.stdout, /no channel is running to ask through/);
+});

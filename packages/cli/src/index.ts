@@ -7271,6 +7271,18 @@ const describeUnattendedReach = async (
   mode: 'headless' | 'remote',
   approvals: ApprovalsConfig,
   env: CliEnvironment,
+  /**
+   * The agents actually being served, or undefined when the roster did not
+   * load. Stored Slack tokens outlive the agent they were stored for, and
+   * the adapter skips an id the gateway is not serving — so a token with no
+   * agent behind it must not read as somebody who can be asked.
+   *
+   * `runServe` prints its own line without this intersection, and is right
+   * to: at startup the roster has not loaded yet. It reports the reverse
+   * direction separately once it has one, warning about served agents no
+   * channel can ask for. Here both are in view from the start.
+   */
+  servedAgentIds: readonly string[] | undefined,
 ): Promise<string> => {
   if (mode === 'headless') {
     return `headless — a gated call is refused unless ${ALREADY_AUTHORIZED} (stratus grants <agent> lists those)`;
@@ -7279,9 +7291,12 @@ const describeUnattendedReach = async (
   // helper: an agent is askable when its tokens are stored and something is
   // installed to render the request.
   const channels = await loadChannelCredentials(env);
-  const askable = packageInstalled('@stratusagent/channel-slack', env)
+  const stored = packageInstalled('@stratusagent/channel-slack', env)
     ? Object.keys(channels.slack ?? {})
     : [];
+  const askable = servedAgentIds === undefined
+    ? stored
+    : stored.filter((agentId) => servedAgentIds.includes(agentId));
   // Qualified the same way the headless line is: the engine allows an
   // already-authorized call before it asks anyone, so an unqualified "asks
   // in Slack" hides unattended capability in precisely the configuration
@@ -7401,31 +7416,42 @@ export const collectPluginsReport = async (
       if (base.enabled) {
         await preflightPlugin(manifest, directory, block, workspaceRoot);
       }
-      const declared: Array<{ name: string; discovered: boolean; namespace: boolean; declared: ToolRisk }> = [
-        ...manifest.contributes.tools.map((tool) => ({
-          name: tool.name,
-          discovered: false,
-          namespace: false,
-          declared: tool.risk,
-        })),
-        ...manifest.contributes.toolsDiscovered.flatMap((entry) => [
-          { name: entry.namespace, discovered: true, namespace: true, declared: entry.risk },
-          // An override under a declared namespace names a concrete tool
-          // (`mcp.linear.get_issue`), which is the whole point of the key
-          // for a bridge — and it can never equal the namespace, so the
-          // namespace row alone would report the default risk for a tool
-          // the operator has deliberately re-rated. Listed beside it rather
-          // than folded in: they are different risks, and which tools carry
-          // the override is the thing worth seeing.
-          ...[...overrides.keys()]
-            // Not one the manifest already names outright: a package may
-            // declare both `mcp.ping` and `mcp.*`, and that tool already has
-            // its row above, with the same override applied to it.
-            .filter((name) => !manifest.contributes.tools.some((tool) => tool.name === name))
-            .filter((name) => name !== entry.namespace && matchesToolAllowlist(name, [entry.namespace]))
-            .map((name) => ({ name, discovered: true, namespace: false, declared: entry.risk })),
-        ]),
-      ];
+      // One row per tool the report will name, tracked as they are emitted.
+      // A concrete name can be reached more than one way — declared outright
+      // *and* covered by a namespace, or covered by two nested namespaces
+      // like `mcp.*` and `mcp.linear.*` — and every one of those is a single
+      // runtime tool. Filtering each source against the others is what
+      // produced two rounds of duplicate rows; one set, checked as rows are
+      // added, cannot miss a path.
+      const seen = new Set<string>();
+      const declared: Array<{ name: string; discovered: boolean; namespace: boolean; declared: ToolRisk }> = [];
+      const emit = (row: { name: string; discovered: boolean; namespace: boolean; declared: ToolRisk }): void => {
+        if (seen.has(row.name)) {
+          return;
+        }
+        seen.add(row.name);
+        declared.push(row);
+      };
+      // Literal declarations first: a name the manifest states outright is
+      // described best by its own entry, not by a namespace that covers it.
+      for (const tool of manifest.contributes.tools) {
+        emit({ name: tool.name, discovered: false, namespace: false, declared: tool.risk });
+      }
+      for (const entry of manifest.contributes.toolsDiscovered) {
+        emit({ name: entry.namespace, discovered: true, namespace: true, declared: entry.risk });
+        // An override under a declared namespace names a concrete tool
+        // (`mcp.linear.get_issue`), which is the whole point of the key for
+        // a bridge — and it can never equal the namespace, so the namespace
+        // row alone would report the default risk for a tool the operator
+        // has deliberately re-rated. Listed beside it rather than folded in:
+        // they are different risks, and which tools carry the override is
+        // the thing worth seeing.
+        for (const name of overrides.keys()) {
+          if (name !== entry.namespace && matchesToolAllowlist(name, [entry.namespace])) {
+            emit({ name, discovered: true, namespace: false, declared: entry.risk });
+          }
+        }
+      }
       base.tools = declared.map((tool) => {
         // Never on the namespace row. `parseToolRiskOverrides` accepts a
         // namespace-shaped key, but the registry looks an override up by
@@ -7453,7 +7479,12 @@ export const collectPluginsReport = async (
   const mode = approvals.mode ?? 'headless';
   return {
     approvals: mode,
-    approvalsSummary: await describeUnattendedReach(mode, approvals, env),
+    approvalsSummary: await describeUnattendedReach(
+      mode,
+      approvals,
+      env,
+      rosterUnreadable ? undefined : roster.map((entry) => entry.soul.agent.id),
+    ),
     rosterUnreadable,
     plugins,
   };
