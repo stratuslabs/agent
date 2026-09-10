@@ -4962,7 +4962,7 @@ export const runSetup = async (
    * into; piped output keeps the full text, which is what tests and
    * scripts read, and where nothing is redrawn anyway.
    */
-  const fitMenuRow = (text: string): string => {
+  const fitMenuRow = (text: string, reserved = 27): string => {
     // `process.stdout` rather than the injected stream, which is typed to
     // `write` alone — the same place `selectInteractive` reads `isTTY`
     // from, and only consulted when it is actually driving a terminal.
@@ -4970,9 +4970,10 @@ export const runSetup = async (
     if (typeof columns !== 'number' || columns <= 0) {
       return text;
     }
-    // `  N) ` plus the 21-column label, and one spare so a full-width row
-    // does not wrap on terminals that advance the cursor eagerly.
-    const budget = columns - 27;
+    // `  N) ` plus whatever the caller's own prefix costs, and one spare so
+    // a full-width row does not wrap on terminals that advance the cursor
+    // eagerly.
+    const budget = columns - reserved;
     return text.length <= budget ? text : `${text.slice(0, Math.max(budget - 1, 0))}…`;
   };
 
@@ -4998,8 +4999,13 @@ export const runSetup = async (
             : own === undefined
               ? `${approvers.join(', ')} (inherited)`
               : approvers.join(', ');
-          options.push(`  approvers for ${agentId}`.padEnd(26) + label
-            + (approvers.length > 0 && !resolved.slackChannel ? ' · no fallback channel' : ''));
+          // Fitted like the top-level row, and for the same reason: several
+          // approvers, or one long agent id, is enough to wrap — and the
+          // redraw rewinds by option count, not by rendered rows. Every
+          // option in every menu has this constraint; these are the ones
+          // this PR adds.
+          options.push(fitMenuRow(`  approvers for ${agentId}`.padEnd(26) + label
+            + (approvers.length > 0 && !resolved.slackChannel ? ' · no fallback channel' : ''), 6));
         }
       }
       options.push('Back');
@@ -5016,10 +5022,12 @@ export const runSetup = async (
       const footnote = adapterPending
         ? `${verdict}. @stratusagent/channel-slack is not installed yet — Save & finish offers it, and these approvers apply once it is. ${serveCommand()} brings them online.`
         : mode === 'remote' && connected.length === 0
-        // The failure `stratus plugins` reports, said before it can happen
-        // rather than after: remote mode with no Slack app is not a
-        // waiting daemon, it is a denying one.
-        ? 'No agent is connected to Slack, so there is nobody to ask — connect one under Channels first.'
+          // The advice comes *after* the verdict, never instead of it: with
+          // the control API up a parked call is already answerable, and
+          // replacing the verdict here told the operator to go connect
+          // Slack while the row above said the API had it. The screen that
+          // changes the mode must not answer differently from the row.
+          ? `${verdict}. No agent is connected to Slack, so connect one under Channels to be asked there.`
           : verdict;
       const choice = await prompter.select(
         'Approvals — what happens to a gated call with nobody watching',

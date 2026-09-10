@@ -6567,8 +6567,10 @@ test('setup says remote approvals deny everything while no agent is connected to
   // `remote` with nobody to ask does not behave like `headless` while the
   // control API is installed: `POST /api/v1/approvals` can still settle a
   // parked call, so the summary says that rather than promising a denial.
-  assert.match(output.stdout, /No agent is connected to Slack, so there is nobody to ask/);
-  assert.match(output.stdout, /remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it/);
+  // The advice follows the verdict rather than replacing it: with the
+  // control API installed a parked call is already answerable, and telling
+  // the operator to connect Slack *instead* contradicted the row above.
+  assert.match(output.stdout, /remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it[^\n]*No agent is connected to Slack, so connect one under Channels to be asked there/);
 });
 
 test('setup says remote approvals are denied when nothing can answer them at all', async () => {
