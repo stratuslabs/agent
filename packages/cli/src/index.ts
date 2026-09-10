@@ -6254,12 +6254,34 @@ const cloneSkillSource = async (url: string, destination: string): Promise<void>
 const rosterSoulsWithConfigured = async (
   env: CliEnvironment,
   warn: (line: string) => void,
-  // The config whose `soul` key names the configured agent. A caller
-  // reading everything else from `--config` and this from the default file
-  // would answer for a roster the daemon it is describing does not serve.
-  configPath?: string,
+  options: {
+    /**
+     * The config whose `soul` key names the configured agent. A caller
+     * reading everything else from `--config` and this from the default
+     * file would answer for a roster the daemon it describes does not
+     * serve.
+     */
+    configPath?: string;
+    /**
+     * Seed the reserved built-in agent, the way `loadRoster` does. It has
+     * no `tools:` key, so it is granted every registered tool — and on a
+     * fresh install it is the only agent there is, which made "granted to
+     * nobody" exactly backwards for the most common configuration of all.
+     * Off by default: a caller reporting on souls should not have one
+     * appear that has no file.
+     */
+    includeBuiltIn?: boolean;
+  } = {},
 ): Promise<{ entries: Awaited<ReturnType<typeof loadRosterSouls>>; complete: boolean }> => {
-  const entries = await loadRosterSouls(env, warn);
+  const { configPath, includeBuiltIn = false } = options;
+  // Before the roster, exactly as the gateway registers it: a roster file
+  // claiming the reserved id is dropped by `loadRosterSouls`, and only the
+  // configured default soul may take it over — which the replace below
+  // does on id, so nothing extra is needed for that case.
+  const entries = includeBuiltIn
+    ? [{ soul: { agent: { ...DEFAULT_STRATUS_AGENT } } } as Awaited<ReturnType<typeof loadRosterSouls>>[number],
+      ...await loadRosterSouls(env, warn)]
+    : await loadRosterSouls(env, warn);
   let complete = true;
   try {
     const configured = await resolveConfiguredSoul(configPath !== undefined ? { configPath } : {}, env);
@@ -7301,7 +7323,10 @@ export const collectPluginsReport = async (
   let roster: Awaited<ReturnType<typeof loadRosterSouls>> = [];
   let rosterUnreadable = false;
   try {
-    const resolved = await rosterSoulsWithConfigured(env, warn, command.configPath);
+    const resolved = await rosterSoulsWithConfigured(env, warn, {
+      ...(command.configPath !== undefined ? { configPath: command.configPath } : {}),
+      includeBuiltIn: true,
+    });
     roster = resolved.entries;
     rosterUnreadable = !resolved.complete;
   } catch (error) {
@@ -7393,6 +7418,10 @@ export const collectPluginsReport = async (
           // than folded in: they are different risks, and which tools carry
           // the override is the thing worth seeing.
           ...[...overrides.keys()]
+            // Not one the manifest already names outright: a package may
+            // declare both `mcp.ping` and `mcp.*`, and that tool already has
+            // its row above, with the same override applied to it.
+            .filter((name) => !manifest.contributes.tools.some((tool) => tool.name === name))
             .filter((name) => name !== entry.namespace && matchesToolAllowlist(name, [entry.namespace]))
             .map((name) => ({ name, discovered: true, namespace: false, declared: entry.risk })),
         ]),

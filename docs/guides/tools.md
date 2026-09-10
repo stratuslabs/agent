@@ -236,6 +236,11 @@ spawn every server you configured. Two consequences worth knowing:
   `will not load`, rather than listing tools that will not be there. A
   plugin you have not enabled is not preflighted: it is an install to switch
   on, not a broken one.
+- **The built-in agent counts, and grants everything.** Unless a configured
+  default soul takes the reserved `stratus` id over, the daemon registers
+  the built-in agent, and it has no `tools:` key — so it may call every
+  registered tool. On a fresh install it is the only agent there is, which
+  is why nothing there reads `granted to nobody`.
 - **The approvals line is about this machine, not just the mode.** `headless`
   refuses a gated call *last*, after the standing grants, the command scopes,
   the approved sites, and a schedule's pre-authorized destination — so a tool

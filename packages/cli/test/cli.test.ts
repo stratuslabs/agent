@@ -9040,8 +9040,19 @@ const writePluginFixture = async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  // A configured default soul taking the reserved `stratus` id over, so the
+  // built-in — which has no `tools:` key and is therefore granted
+  // everything — is displaced. Without that, no tool on this fixture is
+  // ever granted to nobody, and the "installing is not granting" case these
+  // tests exist for could not be reached at all.
+  const configuredSoul = path.join(home, '.stratus', 'stratus.md');
+  await writeFile(
+    configuredSoul,
+    ['---', 'id: stratus', 'name: Stratus', 'tools:', '  - fs.read', '---', 'You are Stratus.'].join('\n'),
+  );
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
     provider: 'anthropic',
+    soul: configuredSoul,
     plugins: {
       '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] },
       '@stratusagent/tool-web': { enabled: false },
@@ -9074,7 +9085,7 @@ test('plugins names every link in the chain from installed to callable', async (
     /approvals: headless — a gated call is refused unless a standing grant, an approved command scope, an approved site, or a destination pre-authorized with a schedule/,
   );
   // Granted, and granted to whom.
-  assert.match(output.stdout, /fs\.read\s+safe → blair/);
+  assert.match(output.stdout, /fs\.read\s+safe → stratus, blair/);
   // Registered but granted to nobody: installing is not granting.
   assert.match(output.stdout, /fs\.write\s+gated → nobody, until a soul’s tools: list names it/);
   // Enabled false is not the same as absent, and says which it is.
@@ -9145,7 +9156,7 @@ test('plugins --format json reports the chain as data', async () => {
     { installed: fs.installed, configured: fs.configured, enabled: fs.enabled },
     { installed: true, configured: true, enabled: true },
   );
-  assert.deepEqual(fs.tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['blair']);
+  assert.deepEqual(fs.tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['stratus', 'blair']);
   // Risk is the manifest's declaration raised to its package's floor — the
   // reason a write is not something the daemon does on its own.
   assert.equal(fs.tools.find((tool) => tool.name === 'fs.write')?.risk, 'gated');
@@ -9354,5 +9365,60 @@ test('plugins reads the configured soul from the config it was given', async () 
   // Read from the same file the plugins block came from. Resolving the
   // configured soul from the default config instead would answer for a
   // roster the daemon this describes does not serve.
-  assert.match(output.stdout, /fs\.write\s+gated → juno/);
+  assert.match(output.stdout, /fs\.write\s+gated → stratus, juno/);
+});
+
+test('plugins names the built-in agent a fresh install actually grants tools to', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // No soul files at all — the shape of a fresh install. The gateway still
+  // registers the reserved built-in, and it has no `tools:` key, so it is
+  // granted every registered tool. Reporting "nobody" here was backwards
+  // for the most common configuration there is.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(output.stdout, /fs\.read\s+safe → stratus/);
+  assert.match(output.stdout, /fs\.write\s+gated → stratus/);
+  assert.doesNotMatch(output.stdout, /nobody, until a soul’s tools: list names it/);
+});
+
+test('plugins lets a configured soul take the built-in id over rather than listing both', async () => {
+  const { home, cwd } = await writePluginFixture();
+  const soulPath = path.join(cwd, 'stratus.md');
+  // Only the explicitly configured default soul may take the reserved id —
+  // a roster file claiming it is dropped. Taking it over must replace the
+  // built-in, not sit beside it.
+  await writeFile(
+    soulPath,
+    ['---', 'id: stratus', 'name: Stratus', 'tools:', '  - fs.read', '---', 'You are Stratus.'].join('\n'),
+  );
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    soul: soulPath,
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins', '--format', 'json'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; grantedTo: string[] }> }>;
+  };
+  const tools = report.plugins.find((entry) => entry.package === '@stratusagent/tool-fs')?.tools ?? [];
+  // Named once — not beside a built-in of the same id — and now bounded by
+  // the soul's allowlist rather than granted everything the way the
+  // built-in is. `blair` is the fixture's roster soul, which also lists it.
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['stratus', 'blair']);
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.write')?.grantedTo, []);
 });
