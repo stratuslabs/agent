@@ -99,6 +99,27 @@ const packageJsonFor = async (
 };
 
 /**
+ * A package's manifest, and the directory it was found in.
+ *
+ * Nothing here imports the package — the property `parsePluginManifest`
+ * exists for, and the reason this is worth having on its own. `stratus
+ * plugins` has to answer "what would this contribute, and at what risk"
+ * for a daemon that is not running, and running somebody's `setup` to find
+ * out would spawn the MCP subprocesses and open the sockets that a listing
+ * command has no business starting.
+ *
+ * `loadPlugins` goes through here too, so there is one answer to where a
+ * package's manifest is rather than a second walk that drifts from it.
+ */
+export const readPluginManifest = async (
+  specifier: string,
+  host: Pick<OptionalModuleHost, 'resolve'>,
+): Promise<{ manifest: PluginManifest; directory: string }> => {
+  const { packageJson, directory } = await packageJsonFor(host.resolve(specifier), specifier);
+  return { manifest: parsePluginManifest(packageJson, specifier), directory };
+};
+
+/**
  * Whether a package's code is trusted — which is to say whether its
  * manifest may declare a tool `safe`.
  *
@@ -223,7 +244,19 @@ const declares = (manifest: PluginManifest, key: string): boolean => Boolean(
   && key in (manifest.config.properties as JsonObject),
 );
 
-const configFor = (
+/**
+ * The configuration a plugin will actually be handed: its own block, minus
+ * the keys the host owns, plus the host defaults its manifest declares.
+ *
+ * Exported because validating a block against a manifest is only right on
+ * *this* object — `validatePluginConfig` on the raw block would refuse a
+ * manifest that declares `workspaceRoot` required for missing the very
+ * setting the host supplies. `stratus plugins` has to answer whether a
+ * daemon would accept a plugin's settings, and answering it from a
+ * different object than the loader uses is how a diagnostic ends up
+ * disagreeing with the thing it diagnoses.
+ */
+export const pluginConfigWithHostDefaults = (
   block: JsonObject,
   manifest: PluginManifest,
   workspaceRoot: string | undefined,
@@ -308,6 +341,36 @@ const stageManifestSkills = async (
 };
 
 /**
+ * Everything `loadPlugins` checks before it imports a package: that the
+ * settings match the manifest's own schema, and that every skill file the
+ * manifest names is present, inside the package, and readable.
+ *
+ * One function because either failing rejects the *whole* plugin — it
+ * registers no tools and no skills — so a caller that ran only one of them
+ * would report a plugin ready that the daemon refuses. `stratus plugins`
+ * is that caller, and it got exactly half of this right the first time.
+ *
+ * Nothing here imports the package, which is what lets a diagnostic ask the
+ * question without starting anything.
+ *
+ * `loadPlugins` calls the same two checks rather than this composition of
+ * them, because it needs what the staging *returns* and stages only when it
+ * has a registry to put skills in. The checks themselves are shared, so
+ * there is no second reading of a schema or a skill path here — only a
+ * second caller of each. Anything added to the loader's preflight belongs
+ * in both.
+ */
+export const preflightPlugin = async (
+  manifest: PluginManifest,
+  directory: string,
+  block: JsonObject,
+  workspaceRoot: string | undefined,
+): Promise<void> => {
+  validatePluginConfig(manifest, pluginConfigWithHostDefaults(block, manifest, workspaceRoot));
+  await stageManifestSkills(manifest, directory);
+};
+
+/**
  * Turn a `plugins` config block into running capability.
  *
  * Ordered the way the trust model requires: **nothing auto-loads** (only
@@ -343,15 +406,13 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
     // held for the life of a daemon that goes on running without it.
     let instance: Plugin | undefined;
     try {
-      const resolved = options.host.resolve(specifier);
-      const { packageJson, directory } = await packageJsonFor(resolved, specifier);
-      const manifest = parsePluginManifest(packageJson, specifier);
+      const { manifest, directory } = await readPluginManifest(specifier, options.host);
       const isTrusted = trusted(manifest.packageName);
       // Validated *after* the host's defaults are folded in, because that
       // is the configuration the plugin will actually be handed: a manifest
       // that declares `workspaceRoot` required would otherwise be refused
       // for missing the very setting the host supplies.
-      const config = configFor(block, manifest, options.workspaceRoot);
+      const config = pluginConfigWithHostDefaults(block, manifest, options.workspaceRoot);
       validatePluginConfig(manifest, config);
       const riskOverrides = parseToolRiskOverrides(manifest, block);
 

@@ -46,6 +46,7 @@ stratus agent new                      # create an agent (guided on a terminal)
 stratus agents                         # who's on the team: souls, models, memory
 stratus skill add owner/repo           # install skills from GitHub (validated against the Agent Skills spec) — a running daemon picks them up, no restart
 stratus skill validate ./my-skill      # check a skill against the spec without installing it
+stratus plugins                        # installed → enabled → granted → what approvals does with it
 stratus restart                        # announced restart: refuse, drain, come back — what a plugin change needs
 stratus credentials                    # stored credential names (never values)
 stratus schedules                      # what the fleet has scheduled, and where it reports

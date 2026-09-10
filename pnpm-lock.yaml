@@ -101,6 +101,9 @@ importers:
       '@stratusagent/dashboard':
         specifier: workspace:*
         version: link:../dashboard
+      '@stratusagent/plugin-mcp':
+        specifier: workspace:*
+        version: link:../plugin-mcp
       '@stratusagent/tool-browser':
         specifier: workspace:*
         version: link:../tool-browser

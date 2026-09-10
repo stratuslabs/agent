@@ -187,6 +187,135 @@ risk levels. Four things are worth knowing here:
   thing that lowers one. A stdio server's environment is replaced the way
   `tool-shell`'s is. See [MCP](./mcp.md).
 
+## Which link in the chain is broken
+
+Four things have to be true before an agent can call a plugin's tool — the
+package is installed, a trusted config enables it, the agent's `tools:`
+names it, and the approval policy lets the call through — and every one of
+them fails quietly on its own. `stratus plugins` walks all four:
+
+```console
+$ stratus plugins
+approvals: headless — an uncovered gated call is refused. Already-authorized ones still run: standing grants, approved command scopes and sites (stratus grants <agent>), and destinations pre-authorized with a schedule (stratus schedules)
+
+@stratusagent/tool-fs         installed, enabled
+  fs.read                     safe → blair
+  fs.write                    gated → nobody, until a soul’s tools: list names it
+@stratusagent/tool-shell      installed, not enabled
+  installing granted nothing — add "@stratusagent/tool-shell" to the plugins block of a trusted config to load it
+@stratusagent/plugin-mcp      not installed
+  install it: npm install -g @stratusagent/plugin-mcp
+
+More plugins — github.com/stratuslabs/plugins
+```
+
+It reads each package's **manifest**, which is the thing designed to be
+trusted about a package nothing has imported — so the command runs no
+plugin's `setup`, and asking what the MCP bridge would contribute does not
+spawn every server you configured. Two consequences worth knowing:
+
+- **A namespace is listed as a namespace.** `mcp.*` says the names arrive at
+  connect; a tool that has not arrived yet is not a tool that does not exist.
+  A `toolRisks` entry names a *concrete* tool under that namespace, so it is
+  listed beside it at the risk you gave it. An entry keyed by *any*
+  wildcard — the declared namespace or a narrower one — is accepted but
+  inert, because the registry applies an override by each concrete
+  registered name. Those keys are not listed at all, rather than advertising
+  a re-rating no call will get. Where namespaces
+  overlap, the risk shown is the one registration uses: the *first* matching
+  declaration, not the narrowest.
+- **The risk shown is a floor, not the last word.** Without a `toolRisks`
+  entry it is the riskier of the manifest's declaration and the floor the
+  package is held to. With one, your override *replaces* the declaration and
+  only the floor still binds it — lowering a manifest's risk is what the key
+  is for, so a first-party tool declared `dangerous` and overridden `safe`
+  reads `safe`, and a third-party one cannot go below `gated`.
+  A registered tool may raise itself further, and `shell.run` and
+  `browser.act` are then judged per call ([Shell commands](./shell.md),
+  [Browser actions](./browser.md)), so `gated` there means "judged", not
+  "refused".
+- **Where a gated call can be answered from is not only Slack.** The
+  control API's `/approvals` endpoints list what is parked and settle it,
+  so an agent with no Slack tokens is not necessarily unreachable. An agent
+  the Slack adapter *does* cover is a different case: it denies on the spot
+  when there are no approvers or no conversation to ask in, leaving nothing
+  for an API client to answer. Stored tokens are a *configured* route and
+  not a proven one — the adapter keeps a connection only once the app
+  authenticates and its socket starts, and denies undeliverable for a
+  configured agent without one. This command starts no daemon, so it says
+  so and points at `stratus logs`, where `slack: could not connect <agent>`
+  is the actual answer. With neither — no stored tokens and no API —
+  nothing receives the request at all, and the line says that rather than
+  naming a route. And an `approvals.timeoutMs` of `0` means a call nobody
+  answers parks for the life of the daemon rather than being denied — the
+  line says which of these you have.
+- **A tool name belongs to whoever registers it first.** The daemon's own
+  kernel tools go in before any plugin, and the first plugin to claim a name
+  keeps it — a later one registering the same name is refused whole, tools
+  and skills together. A manifest declaring a name something else already
+  registers is therefore reported as a `warning`, not a failure: whether it
+  actually registers that name is `setup()`'s business, and an optional tool
+  may never claim it. What a clash costs depends on *when* the name
+  registers, and a manifest never says: a name registered before its plugin
+  finishes loading is refused with the plugin, tools and skills together,
+  while one registered after costs that single tool and nothing else. Which
+  happens is not a property of the declaration. A bridge's first connect is
+  inside `setup()` when its server is up and a reconnect when it is not, and
+  any plugin may keep the registry it was handed and add a tool from a timer
+  hours later. So the warning states both outcomes for every collision.
+  Between two plugins the warning says *if both register
+  it*, since neither side is known to; against the daemon's own tools it is
+  definite on one side, because those are already registered. One package
+  configured twice — through its name and a path, say — is two entries to
+  the loader, and warns like any other pair. The same goes for a contributed
+  **skill**: ids qualify to `packageName:id`, so a clash there means one
+  package configured twice, and the loader refuses the second entry whole
+  rather than merging them. A declared *namespace* is checked too — a
+  `memory.*` covers the daemon's own `memory.recall` without ever naming
+  it.
+- **Enabled and loadable are different questions.** A plugin whose settings
+  its own schema rejects — `plugin-mcp` with no `servers`, a mistyped key
+  under `tool-fs` — or which declares a skill file that is not there, is
+  enabled and registers nothing at all, tools included. The listing runs the
+  same preflight the loader runs before importing anything and says
+  `will not load`, rather than listing tools that will not be there. A
+  plugin you have not enabled is not preflighted: it is an install to switch
+  on, not a broken one.
+- **The built-in agent counts, and grants everything.** Unless a configured
+  default soul takes the reserved `stratus` id over, the daemon registers
+  the built-in agent, and it has no `tools:` key — so it may call every
+  registered tool. On a fresh install it is the only agent there is, which
+  is why nothing there reads `granted to nobody`.
+- **The approvals line is about this machine, not just the mode.** `headless`
+  refuses a gated call *last*, after the standing grants, the command scopes,
+  the approved sites, and a schedule's pre-authorized destination — so a tool
+  an agent was once told "always allow" about runs unattended. Two commands
+  list those, not one: `stratus grants <agent>` for the first three, and
+  `stratus schedules` for a destination approved with a schedule. `remote`
+  carries the same qualification — they are allowed before anyone is asked —
+  and adds whatever an "always allow" answer persisted: a standing grant
+  for an unscoped tool, a command scope, or a site — all until revoked — and
+  only a call scoped by destination, such as an outbound `message.send`,
+  lasting just the session.
+
+  In `remote` the line also names what is missing: an agent the daemon
+  serves that no Slack channel can ask for — its gated calls park until the
+  control API answers them, or, with no API serving either, until the
+  timeout denies them, which is what `stratus serve` warns about at startup.
+  Where nothing is askable in Slack at all, the line says so once rather
+  than naming every agent. It also names approvers with no `slackChannel` — they can only be asked on turns that started in Slack,
+  because a turn from the API, the dashboard, or a delegation reaches the
+  adapter with nowhere to post.
+  `remote` only asks if somebody can be asked: with no channel installed a
+  gated call waits out the timeout, and with no approver configured it is
+  denied on arrival. See [Approvals](./approvals.md); the line says which of
+  those this machine has.
+
+`--format json` prints the same chain as data. The `plugins` block is read
+only from a trusted config, exactly as the daemon reads it, so a
+project-local `stratus.config.json` is ignored here too — with the same
+warning naming the file.
+
 `GET /api/v1/catalog/tools` lists what a running daemon actually has, and
 the dashboard's **Plugins** screen renders it — including a plugin you
 enabled that failed to load, which is invisible in a list of tools.

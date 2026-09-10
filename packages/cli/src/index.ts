@@ -14,6 +14,9 @@ import {
   ToolRegistry,
   isTrustLevel,
   matchesSkillAllowlist,
+  matchesToolAllowlist,
+  raiseRiskTo,
+  toolScopesOverlap,
   escapeControlCharacters,
   memoryEntryTrust,
   missingSkillRequirements,
@@ -32,6 +35,7 @@ import {
   type ModelProvider,
   type Session,
   type StratusEvent,
+  type ToolRisk,
   type TrustLevel,
 } from '@stratusagent/core';
 import {
@@ -42,7 +46,16 @@ import {
 // and the whole runner stack), and a serve-only policy seam must not make
 // `stratus run` pay for it.
 import type { ApprovalTransport, GatewayChannelAdapter, HomeClaim, RestartOutcome } from '@stratusagent/gateway';
-import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
+import {
+  declaredRiskFor,
+  isFirstPartyPackage,
+  loadPlugins,
+  parseToolRiskOverrides,
+  preflightPlugin,
+  readPluginManifest,
+  riskFloorFor,
+  type LoadedPlugin,
+} from '@stratusagent/plugins';
 import {
   createFileCommandWhitelist,
   createPermissionPolicy,
@@ -518,6 +531,13 @@ export interface ParsedSkillValidateCommand {
   target: string;
 }
 
+export interface ParsedPluginsCommand {
+  command: 'plugins';
+  format: 'text' | 'json';
+  /** The config whose plugins block to read, when not the default. */
+  configPath?: string;
+}
+
 export interface ParsedSkillsCommand {
   command: 'skills';
 }
@@ -679,6 +699,7 @@ export type ParsedCommand =
   | ParsedAgentsCommand
   | ParsedSkillAddCommand
   | ParsedSkillValidateCommand
+  | ParsedPluginsCommand
   | ParsedSkillsCommand
   | ParsedSkillReloadCommand
   | ParsedCredentialCommand
@@ -827,6 +848,8 @@ Usage:
   stratus skill add ./my-skills --skill code-review --agent ava
   stratus skill validate ./my-skill
   stratus skills
+  stratus plugins
+  stratus plugins --format json
   stratus skill reload
   stratus restart
   stratus schedules
@@ -897,6 +920,13 @@ Commands:
                    Exit 1 if anything would be refused
   skills           List installed skills and which agents enable each
                    (also: stratus skill list)
+  plugins          What this machine's plugins are, and where the chain from
+                   installed to callable breaks: whether the package resolves,
+                   whether a trusted config enables it, which agents' tools:
+                   lists select each tool it declares, and what the approval
+                   policy does with a gated call. Read from each package's
+                   manifest, so nothing is imported and no plugin's setup runs
+                   (--format json, --config <path>; also: stratus plugin list)
   skill reload     Ask the running daemon to re-read ~/.stratus/skills — for a
                    skill edited or removed by hand. A skill that will not
                    load refuses the whole reload and the previous set keeps
@@ -1569,6 +1599,34 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       ...(name !== undefined ? { name } : {}),
       ...(agentId !== undefined ? { agentId } : {}),
     };
+  }
+
+  if (command === 'plugins' || (command === 'plugin' && rest[0] === 'list')) {
+    const pluginsRest = command === 'plugins' ? rest : rest.slice(1);
+    let format: 'text' | 'json' = 'text';
+    let configPath: string | undefined;
+    for (let index = 0; index < pluginsRest.length; index += 1) {
+      const token = pluginsRest[index] as string;
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--format') {
+        const value = readOptionValue(pluginsRest, index, '--format');
+        if (value !== 'text' && value !== 'json') {
+          throw new Error(`Invalid value for --format: ${value}. Use text or json.`);
+        }
+        format = value;
+        index += 1;
+        continue;
+      }
+      if (token === '--config') {
+        configPath = readOptionValue(pluginsRest, index, '--config');
+        index += 1;
+        continue;
+      }
+      throw new Error(`Unknown option: ${token}`);
+    }
+    return { command: 'plugins', format, ...(configPath !== undefined ? { configPath } : {}) };
   }
 
   if (command === 'skills' || (command === 'skill' && rest[0] === 'list')) {
@@ -3420,6 +3478,12 @@ export const slackAppManifest = (agentName: string): string => JSON.stringify({
     token_rotation_enabled: false,
   },
 }, null, 2);
+
+/**
+ * Where plugins other people publish are listed. Printed by `stratus
+ * plugins` and by setup's plugin menu, so the two cannot drift.
+ */
+const PLUGIN_MARKETPLACE_URL = 'github.com/stratuslabs/plugins';
 
 const DEFAULT_SOUL_STARTER = [
   'You are a helpful, warm generalist. Answer first, explain second, and',
@@ -5754,15 +5818,29 @@ const describePrincipals = (principals: PrincipalsConfig, agentIds: string[]): s
     : `principals set for ${covered.join(', ')}; none for ${uncovered.join(', ')}, whose Slack senders are all unknown`;
 };
 
+/**
+ * Which of these agents the Slack adapter would actually ask about, and
+ * which it would decline for. Separated from the sentence below because
+ * two callers need the *answer* and only one needs it as prose: a summary
+ * that says a call "asks in Slack" must not say it about an agent the
+ * adapter denies on arrival.
+ */
+const classifyApprovers = (
+  approvals: ApprovalsConfig,
+  agentIds: string[],
+): { covered: string[]; uncovered: string[] } => {
+  const covered = agentIds.filter((agentId) => (resolveAgentApprovals(approvals, agentId).slackApprovers ?? []).length > 0);
+  return { covered, uncovered: agentIds.filter((agentId) => !covered.includes(agentId)) };
+};
+
 const describeApprovers = (approvals: ApprovalsConfig, agentIds: string[]): string => {
   if (agentIds.length === 0) {
     return 'but no channel is running to ask through, so gated calls will wait out the approval timeout and then be denied';
   }
-  const covered = agentIds.filter((agentId) => (resolveAgentApprovals(approvals, agentId).slackApprovers ?? []).length > 0);
+  const { covered, uncovered } = classifyApprovers(approvals, agentIds);
   if (covered.length === 0) {
     return 'but no approvers are configured, so every gated call is denied on arrival';
   }
-  const uncovered = agentIds.filter((agentId) => !covered.includes(agentId));
   return uncovered.length === 0
     ? `approvers set for ${covered.join(', ')}`
     : `approvers set for ${covered.join(', ')}; none for ${uncovered.join(', ')}, whose calls are denied on arrival`;
@@ -6191,11 +6269,37 @@ const cloneSkillSource = async (url: string, destination: string): Promise<void>
 const rosterSoulsWithConfigured = async (
   env: CliEnvironment,
   warn: (line: string) => void,
+  options: {
+    /**
+     * The config whose `soul` key names the configured agent. A caller
+     * reading everything else from `--config` and this from the default
+     * file would answer for a roster the daemon it describes does not
+     * serve.
+     */
+    configPath?: string;
+    /**
+     * Seed the reserved built-in agent, the way `loadRoster` does. It has
+     * no `tools:` key, so it is granted every registered tool — and on a
+     * fresh install it is the only agent there is, which made "granted to
+     * nobody" exactly backwards for the most common configuration of all.
+     * Off by default: a caller reporting on souls should not have one
+     * appear that has no file.
+     */
+    includeBuiltIn?: boolean;
+  } = {},
 ): Promise<{ entries: Awaited<ReturnType<typeof loadRosterSouls>>; complete: boolean }> => {
-  const entries = await loadRosterSouls(env, warn);
+  const { configPath, includeBuiltIn = false } = options;
+  // Before the roster, exactly as the gateway registers it: a roster file
+  // claiming the reserved id is dropped by `loadRosterSouls`, and only the
+  // configured default soul may take it over — which the replace below
+  // does on id, so nothing extra is needed for that case.
+  const entries = includeBuiltIn
+    ? [{ soul: { agent: { ...DEFAULT_STRATUS_AGENT } } } as Awaited<ReturnType<typeof loadRosterSouls>>[number],
+      ...await loadRosterSouls(env, warn)]
+    : await loadRosterSouls(env, warn);
   let complete = true;
   try {
-    const configured = await resolveConfiguredSoul({}, env);
+    const configured = await resolveConfiguredSoul(configPath !== undefined ? { configPath } : {}, env);
     if (configured) {
       const entry = { soul: configured.soul, path: configured.path };
       const clash = entries.findIndex((candidate) => candidate.soul.agent.id === configured.soul.agent.id);
@@ -7065,6 +7169,682 @@ export const runSkills = async (
     }
     writeLine(streams.stdout, `${skill.id.padEnd(24)}${skill.description}${suffix}`);
   }
+  return 0;
+};
+
+// ---- stratus plugins -------------------------------------------------------
+
+/**
+ * The first-party capability packages, for the one question a manifest
+ * cannot answer: what exists that this machine has not installed.
+ *
+ * A discovery aid and nothing else. What a package *contributes* is always
+ * read from its own manifest, so this list falling behind can cost a
+ * suggestion and never a wrong answer about a plugin that is here.
+ */
+const FIRST_PARTY_CAPABILITY_PACKAGES = [
+  '@stratusagent/tool-fs',
+  '@stratusagent/tool-shell',
+  '@stratusagent/tool-web',
+  '@stratusagent/tool-browser',
+  '@stratusagent/plugin-mcp',
+];
+
+/**
+ * The tool names the gateway registers before it loads any plugin. A plugin
+ * that registers one of these is refused whole, so a manifest declaring one
+ * is worth naming — advisory only, since whether it *registers* the name is
+ * a question no manifest answers. A name going stale here costs a warning,
+ * never a wrong answer about a plugin that loads.
+ */
+const KERNEL_TOOL_NAMES = [
+  'demo.echo',
+  'memory.remember',
+  'memory.recall',
+  'memory.forget',
+  'skill.read',
+  'schedule.every',
+  'schedule.at',
+  'schedule.list',
+  'schedule.cancel',
+  'message.send',
+  'agent.delegate',
+];
+
+/** One tool a plugin's manifest declares, as this machine would have it. */
+export interface PluginToolReport {
+  name: string;
+  /**
+   * Declared as a namespace rather than named, so the tools under it arrive
+   * when the server connects. `mcp.*` is the case: a name that does not
+   * exist yet is not a name that does not exist.
+   */
+  discovered: boolean;
+  /**
+   * What `ManifestBoundToolRegistry` would settle on, minus the claim only a
+   * running daemon has. An operator's `toolRisks` override *replaces* the
+   * manifest's declaration and is bounded only by the package's floor —
+   * lowering one is the whole point of the key — and without an override it
+   * is the riskier of the declaration and that floor. A registered object
+   * may then raise itself further, so this is a floor on what a call will
+   * face rather than the last word on it.
+   */
+  risk: ToolRisk;
+  /**
+   * Agent ids whose `tools:` allowlist selects this name. Empty is the
+   * finding, not the absence of one: installing a plugin grants nothing.
+   */
+  grantedTo: string[];
+}
+
+export interface PluginReport {
+  package: string;
+  /** Resolvable from this process. */
+  installed: boolean;
+  /** Named in the trusted config's plugins block, whatever its `enabled`. */
+  configured: boolean;
+  /** Configured and not switched off. */
+  enabled: boolean;
+  tools: PluginToolReport[];
+  /**
+   * Why a daemon would register nothing for this plugin, when it would —
+   * an unreadable manifest, or settings its own schema rejects. Enabled and
+   * loadable are different questions, and a report that ran them together
+   * would call `plugin-mcp` with no `servers` ready to use.
+   */
+  problem?: string;
+  /**
+   * What might go wrong that a manifest cannot settle. A name two packages
+   * both declare collides only if both *register* it, and registration is
+   * `setup()`'s business — so this says "if it does" rather than reporting
+   * a failure that may never happen.
+   */
+  warnings?: string[];
+}
+
+export interface PluginsReport {
+  approvals: 'headless' | 'remote';
+  /**
+   * What this machine would really do with a gated call — the mode alone
+   * does not say. `headless` still runs one a standing grant, an approved
+   * command scope, or an approved site already covers (the engine checks
+   * all three before it refuses), and `remote` with no reachable approver
+   * denies on arrival rather than asking anybody.
+   */
+  approvalsSummary: string;
+  /**
+   * Set when the roster did not load, in which case every `grantedTo` is
+   * withheld rather than reported empty — the same rule `stratus skills`
+   * follows, and for the same reason: unreadable enablement must not print
+   * as "granted to nobody".
+   */
+  rosterUnreadable: boolean;
+  plugins: PluginReport[];
+}
+
+/**
+ * The ways a gated call is already authorized before either mode's decision
+ * is reached — the standing tool grants, the approved command scopes, the
+ * approved sites, and a schedule's pre-authorized destination, in the order
+ * `createPermissionPolicy` checks them.
+ *
+ * Written once because it is read twice: enumerating it separately per mode
+ * is what left the destination path out of one of them and out of the other
+ * entirely. It is prose about a rule `@stratusagent/permissions` owns, so
+ * when that engine gains a path this string is what has to follow it.
+ */
+const ALREADY_AUTHORIZED = 'standing grants, approved command scopes and sites (stratus grants <agent>), '
+  + 'and destinations pre-authorized with a schedule (stratus schedules)';
+
+/**
+ * What a gated call would actually meet on this machine.
+ *
+ * The mode is not the answer on its own, in both directions. `headless`
+ * refuses a gated call *last*: the engine checks the standing tool grants,
+ * the approved command scopes, and the approved sites first, so an agent
+ * that was ever told "always allow" runs that tool unattended for good
+ * (`stratus grants <agent>` is what lists them). And `remote` only asks if
+ * somebody can be asked — with no channel to render the request a gated
+ * call waits out the timeout, and with no approver configured it is denied
+ * on arrival, which is `headless` by another name.
+ *
+ * Stating either as "gated calls are refused" or "gated calls are asked in
+ * Slack" would be wrong in exactly the configurations an operator runs this
+ * command to understand.
+ */
+const describeUnattendedReach = async (
+  mode: 'headless' | 'remote',
+  approvals: ApprovalsConfig,
+  env: CliEnvironment,
+  /**
+   * The agents actually being served, or undefined when the roster did not
+   * load. Stored Slack tokens outlive the agent they were stored for, and
+   * the adapter skips an id the gateway is not serving — so a token with no
+   * agent behind it must not read as somebody who can be asked.
+   *
+   * `runServe` prints its own line without this intersection, and is right
+   * to: at startup the roster has not loaded yet. It reports the reverse
+   * direction separately once it has one, warning about served agents no
+   * channel can ask for. Here both are in view from the start.
+   */
+  servedAgentIds: readonly string[] | undefined,
+  /**
+   * Whether the control API would be serving. It is a second way to answer
+   * a parked call — `GET /api/v1/approvals` lists them, `POST` settles one
+   * — so an agent no Slack channel can ask for is not necessarily an agent
+   * nobody can ask.
+   */
+  apiReachable: boolean,
+): Promise<string> => {
+  if (mode === 'headless') {
+    return `headless — an uncovered gated call is refused. Already-authorized ones still run: ${ALREADY_AUTHORIZED}`;
+  }
+  // The same condition `runServe` reports at startup, through the same
+  // helper: an agent is askable when its tokens are stored and something is
+  // installed to render the request.
+  const channels = await loadChannelCredentials(env);
+  const stored = packageInstalled('@stratusagent/channel-slack', env)
+    ? Object.keys(channels.slack ?? {})
+    : [];
+  const askable = servedAgentIds === undefined
+    ? stored
+    : stored.filter((agentId) => servedAgentIds.includes(agentId));
+  // Qualified the same way the headless line is: the engine allows an
+  // already-authorized call before it asks anyone, so an unqualified "asks
+  // in Slack" hides unattended capability in precisely the configuration
+  // where Slack is set up correctly.
+  //
+  // The *verdict* is composed with the control API in view rather than
+  // corrected afterwards. `describeApprovers` answers a Slack question and
+  // is right to — `runServe` asks it before anything else is known — but
+  // its no-channel and no-approver answers both end in "denied", which is
+  // false wherever `POST /api/v1/approvals` can settle the call. Appending
+  // the API as a later clause left the two halves contradicting each other.
+  const slack = describeApprovers(approvals, askable);
+  const { covered } = classifyApprovers(approvals, askable);
+  // An explicit `timeoutMs: 0` is documented as "wait indefinitely", and
+  // the gateway arms no timer for it — so a call nobody answers is not
+  // eventually denied, it is parked for the life of the daemon. Promising
+  // a denial understates that, and holding a turn open forever is the more
+  // alarming outcome to leave unsaid.
+  const expires = approvals.timeoutMs !== 0;
+  const unanswered = expires ? 'before the timeout denies it' : 'and nothing else will — this daemon\'s approval timeout is 0, so it parks indefinitely';
+  // Three verdicts, selected by what can actually receive the request.
+  //
+  // With nobody askable there is no Slack adapter in the picture at all,
+  // so neither of the first two may say the call "asks in Slack" —
+  // appending `describeApprovers` to that phrasing produced a sentence
+  // that asked Slack and then said no Slack was running.
+  //
+  // The control API is offered only where Slack leaves a request parked.
+  // The Slack adapter handles the same event synchronously and *denies*
+  // when an agent has no approvers or no conversation to ask in, so for an
+  // agent it covers there is nothing left for an API client to answer.
+  // That is only true of agents it covers: one with no tokens at all
+  // reaches no adapter, and its request stays parked.
+  const verdict = (): string => {
+    if (askable.length === 0) {
+      return apiReachable
+        ? `remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it ${unanswered}`
+        : 'remote — an uncovered gated call parks with no channel to ask through and no control API to answer it, so it '
+          + (expires
+            ? 'waits out the approval timeout and is denied'
+            : 'is never answered: this daemon\'s approval timeout is 0, so it parks indefinitely');
+    }
+    // "Parks and asks" is false for an agent the adapter declines: with no
+    // approvers configured it calls `resolveApproval(deny)` synchronously
+    // (channel-slack decline()), so nothing parks and nobody is asked.
+    // Same defect as the branch above, one case over — found by auditing
+    // the rest of this function after that one, not by review.
+    if (covered.length === 0) {
+      return 'remote — an uncovered gated call reaches Slack and is denied on arrival, because no approvers are configured';
+    }
+    return `remote — an uncovered gated call parks and asks in Slack, ${slack}`;
+  };
+  const parts = [verdict()];
+  // The reverse of a stale token, and the failure that actually bites: an
+  // agent the daemon serves that no channel can ask for parks its gated
+  // calls until the timeout denies them. `runServe` warns about exactly
+  // this once its roster loads; the difference here is only that both
+  // halves are in view from the start.
+  //
+  // Named only when *some* agent is askable: with none, the verdict above
+  // has already said no Slack channel is running at all, and listing every
+  // served agent under it repeats that in more words.
+  const unreachable = askable.length === 0
+    ? []
+    : (servedAgentIds ?? []).filter((agentId) => !askable.includes(agentId));
+  if (unreachable.length > 0) {
+    // Slack is not the only way to answer. `GET /api/v1/approvals` lists
+    // what is parked and `POST` settles it, so with the control API up
+    // these calls wait for a client rather than for the timeout — a very
+    // different thing to tell an operator.
+    parts.push(apiReachable
+      ? `no Slack channel can ask for ${unreachable.join(', ')}, so their gated calls park until the control `
+        + `API answers them${expires ? ' or the timeout denies them' : ' — with a timeout of 0, nothing else ever will'}`
+      : `no channel can ask for ${unreachable.join(', ')}, so their gated calls `
+        + (expires ? 'wait out the timeout and are denied' : 'park indefinitely: this daemon\'s approval timeout is 0'));
+  }
+  // Stored tokens are a *configured* route, not a live one. The adapter
+  // pushes a connection only after `auth.test()` and `socket.start()` both
+  // succeed, and `renderApprovalRequest` denies undeliverable for a
+  // configured agent with no live connection — so a revoked token or a
+  // dead app token turns "asks in Slack" into "denies on arrival". This
+  // command reads config and manifests by design and starts no daemon, so
+  // it cannot know which; saying so is the only honest option, and the
+  // daemon log is where the answer actually is (`warn` writes there, so
+  // `slack: could not connect <agent>` is in `stratus logs`).
+  if (covered.length > 0) {
+    parts.push('whether those apps are connected is not something this command can see — it reads config, '
+      + 'and one whose token no longer authenticates denies its gated calls instead of asking; '
+      + '`stratus logs` shows which came up');
+  }
+  // Approvers with nowhere to be asked outside their own thread. A turn
+  // that did not start in Slack — the API, the dashboard, a delegation —
+  // reaches the adapter with no destination and is denied undeliverable,
+  // so "approvers set" is only half an answer without a fallback channel.
+  const noFallback = askable.filter((agentId) => {
+    const resolved = resolveAgentApprovals(approvals, agentId);
+    return (resolved.slackApprovers ?? []).length > 0 && !resolved.slackChannel;
+  });
+  if (noFallback.length > 0) {
+    parts.push(`${noFallback.join(', ')} ${noFallback.length === 1 ? 'has' : 'have'} no slackChannel, `
+      + 'so only turns already in Slack can be asked');
+  }
+  // What an "always allow" answer persists depends on what the call names,
+  // and mostly it is not the session: `createPermissionPolicy` maps an
+  // unscoped gated tool to a standing grant that outlives every restart,
+  // a command to a scope, a click to a site, and only a schedule's
+  // destination to the session. Saying "for the rest of its session" flat
+  // understated durable unattended access, which is the wrong direction to
+  // be wrong about approvals in.
+  // The session case is a call scoped by *destination*, which an ordinary
+  // outbound `message.send` is — not only a scheduled one. Naming the
+  // schedule alone read as though the everyday case were durable.
+  parts.push('an "always allow" answer persists — a standing grant for an unscoped tool, a command scope, '
+    + 'or a site, all until revoked; only a call scoped by destination, such as message.send, '
+    + 'lasts just the session');
+  return parts.join('; ');
+};
+
+/**
+ * What this machine's plugins are, and where the chain from installed to
+ * callable breaks.
+ *
+ * Four things have to be true before an agent can call a plugin's tool —
+ * the package is installed, a trusted config enables it, the agent's
+ * `tools:` names it, and the approval policy lets the call through — and
+ * every one of them fails silently on its own. A listing of installed
+ * packages answers the first and reads as an answer to all four, which is
+ * how an agent ends up with a persona describing tools it never had.
+ *
+ * Manifests rather than a load: `readPluginManifest` imports nothing, so
+ * this never runs a plugin's `setup` — which for the MCP bridge would spawn
+ * every configured server's subprocess to answer a question about a
+ * daemon that is not running.
+ */
+export const collectPluginsReport = async (
+  command: ParsedPluginsCommand,
+  env: CliEnvironment,
+  warn: (line: string) => void,
+): Promise<PluginsReport> => {
+  const pluginsConfig = await loadServePlugins(env, command.configPath, warn);
+  const approvals = await loadServeApprovals(env, command.configPath, warn);
+  // What the loader would fold in, so the validation below is against the
+  // object a daemon on this machine would build.
+  const workspaceRoot = workspacesDirPath(env);
+  // Read the same way the daemon reads it: installed, and not switched off
+  // by the trusted config's `api` block.
+  const api = await loadServeApi(env, command.configPath, warn);
+  const apiReachable = packageInstalled('@stratusagent/control-api', env) && api.enabled !== false;
+
+  // Who grants what, from the roster a dispatch actually serves — the same
+  // resolution `stratus skills` uses, so the two commands cannot disagree
+  // about which souls are live.
+  let roster: Awaited<ReturnType<typeof loadRosterSouls>> = [];
+  let rosterUnreadable = false;
+  try {
+    const resolved = await rosterSoulsWithConfigured(env, warn, {
+      ...(command.configPath !== undefined ? { configPath: command.configPath } : {}),
+      includeBuiltIn: true,
+    });
+    roster = resolved.entries;
+    rosterUnreadable = !resolved.complete;
+  } catch (error) {
+    rosterUnreadable = true;
+    warn(`cannot say who is granted what — the roster did not load: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  /**
+   * Which agents a declared name reaches. A soul with no `tools:` key
+   * grants every registered tool, which is the opposite of an empty list —
+   * so an absent allowlist matches everything here too, or this would
+   * report the most permissive agents as the least.
+   */
+  const grantedTo = (name: string, discovered: boolean): string[] => roster
+    .filter((entry) => {
+      const allowlist = entry.soul.agent.tools;
+      if (allowlist === undefined) {
+        return true;
+      }
+      return discovered
+        ? allowlist.some((granted) => toolScopesOverlap(granted, name))
+        : matchesToolAllowlist(name, allowlist);
+    })
+    .map((entry) => entry.soul.agent.id);
+
+  // Configured first, in the operator's own order, then the first-party
+  // packages they have not configured — the second group is why an install
+  // that granted nothing is visible at all.
+  const configured = Object.keys(pluginsConfig);
+  const packages = [
+    ...configured,
+    ...FIRST_PARTY_CAPABILITY_PACKAGES.filter((name) => !configured.includes(name)),
+  ];
+
+  const plugins: PluginReport[] = [];
+  // Which package claimed each literal tool name, across the whole loop.
+  // `loadPlugins` keeps the same map and rejects the *later* plugin whole
+  // when a registration collides, so a per-plugin check would report two
+  // packages ready to serve one name that only one of them will get.
+  //
+  // Literal declarations only: the registry claims names as they register,
+  // and a namespace has none until its server connects.
+  // Qualified skill ids, tracked the same way and for the same reason.
+  const claimedSkills = new Map<string, string>();
+  /**
+   * Every name or namespace some plugin may register, in config order.
+   *
+   * One list rather than a map of literals, because a collision is an
+   * *overlap* and overlap has no preferred direction: a later literal falls
+   * under an earlier namespace exactly as a later namespace covers an
+   * earlier literal. Two one-way passes is what this was, and it missed
+   * whichever direction was written second.
+   *
+   * The daemon's own tools are *registered*, unconditionally, before any
+   * plugin loads; a plugin's entry is only a declaration, which is why the
+   * two produce different warnings.
+   */
+  const claims: Array<{ pattern: string; owner: string; registered: boolean }> = KERNEL_TOOL_NAMES
+    .map((name) => ({ pattern: name, owner: 'the daemon itself', registered: true }));
+  for (const specifier of packages) {
+    const block = pluginsConfig[specifier] ?? {};
+    const isConfigured = configured.includes(specifier);
+    const base: PluginReport = {
+      package: specifier,
+      installed: packageInstalled(specifier, env),
+      configured: isConfigured,
+      enabled: isConfigured && block.enabled !== false,
+      tools: [],
+    };
+    // Nothing below runs for a plugin the loader would skip. It skips an
+    // absent or switched-off block before it reads a manifest, parses an
+    // override, or validates anything — so doing any of that here invents a
+    // failure for a plugin that has none, and the renderer shows no tools
+    // for one either way. Gating the whole block rather than each call is
+    // deliberate: gating them one at a time is what left the override parse
+    // unconditional after the preflight moved.
+    if (!base.installed || !base.enabled) {
+      plugins.push(base);
+      continue;
+    }
+    try {
+      const { manifest, directory } = await readPluginManifest(specifier, {
+        resolve: (target) => import.meta.resolve(target),
+      });
+      const floor = riskFloorFor(isFirstPartyPackage(manifest.packageName));
+      const overrides = parseToolRiskOverrides(manifest, block);
+      // Everything the loader checks before importing, through the loader's
+      // own function — a plugin whose settings or skill files it rejects
+      // registers nothing, and reading here as enabled is the false clean
+      // bill this command exists to stop giving.
+      //
+      // Only for a plugin the loader would actually reach, though: it skips
+      // an absent or switched-off block before validating anything, so
+      // preflighting one would report `plugin-mcp` that nobody configured as
+      // broken settings instead of as the install to enable.
+      if (base.enabled) {
+        await preflightPlugin(manifest, directory, block, workspaceRoot);
+      }
+      // One row per tool the report will name, tracked as they are emitted.
+      // A concrete name can be reached more than one way — declared outright
+      // *and* covered by a namespace, or covered by two nested namespaces
+      // like `mcp.*` and `mcp.linear.*` — and every one of those is a single
+      // runtime tool. Filtering each source against the others is what
+      // produced two rounds of duplicate rows; one set, checked as rows are
+      // added, cannot miss a path.
+      const seen = new Set<string>();
+      const declared: Array<{ name: string; discovered: boolean; namespace: boolean; declared: ToolRisk }> = [];
+      const emit = (row: { name: string; discovered: boolean; namespace: boolean; declared: ToolRisk }): void => {
+        if (seen.has(row.name)) {
+          return;
+        }
+        seen.add(row.name);
+        declared.push(row);
+      };
+      // Literal declarations first: a name the manifest states outright is
+      // described best by its own entry, not by a namespace that covers it.
+      // Risk through `declaredRiskFor`, never the declaration in hand: with
+      // overlapping namespaces (`mcp.*` and `mcp.linear.*`) it is the *first*
+      // match that registration uses, so reading each entry's own risk would
+      // show a narrower namespace at a risk none of its tools will have.
+      const riskOf = (name: string, fallback: ToolRisk): ToolRisk => declaredRiskFor(manifest, name) ?? fallback;
+      for (const tool of manifest.contributes.tools) {
+        emit({ name: tool.name, discovered: false, namespace: false, declared: riskOf(tool.name, tool.risk) });
+      }
+      for (const entry of manifest.contributes.toolsDiscovered) {
+        emit({
+          name: entry.namespace,
+          discovered: true,
+          namespace: true,
+          declared: riskOf(entry.namespace, entry.risk),
+        });
+        // An override under a declared namespace names a concrete tool
+        // (`mcp.linear.get_issue`), which is the whole point of the key for
+        // a bridge — and it can never equal the namespace, so the namespace
+        // row alone would report the default risk for a tool the operator
+        // has deliberately re-rated. Listed beside it rather than folded in:
+        // they are different risks, and which tools carry the override is
+        // the thing worth seeing.
+        for (const name of overrides.keys()) {
+          // Any wildcard key, not merely the declared namespace itself: the
+          // registry applies an override by each concrete *registered*
+          // name, so a nested `mcp.linear.*` is exactly as inert as
+          // `mcp.*`. Excluding only the equal case left the nested one
+          // advertising a re-rating no call gets.
+          if (name.endsWith('.*')) {
+            continue;
+          }
+          if (matchesToolAllowlist(name, [entry.namespace])) {
+            emit({ name, discovered: true, namespace: false, declared: riskOf(name, entry.risk) });
+          }
+        }
+      }
+      // A warning, not a failure. Ownership is claimed at registration —
+      // `view.commit(owners)` records what `setup()` actually registered —
+      // so a name two manifests both declare collides only if both plugins
+      // go on to register it, which nothing here can know. Reporting it as
+      // a load failure would condemn a plugin that loads perfectly well
+      // because its tool is optional.
+      // Keyed by config entry, never by package name: the same package
+      // configured through two specifiers is two entries the loader treats
+      // as two plugins, and exempting them for sharing a `packageName`
+      // would hide the collision an operator is likeliest to create by
+      // accident.
+      //
+      // A plugin never collides with itself: everything it declares is
+      // gathered first, checked against what came before, and only then
+      // added. That ordering is what makes a manifest declaring both
+      // `mcp.ping` and `mcp.*` silent — it registers that name once — and
+      // it is load-bearing, so adding claims inside the loop below would
+      // reintroduce a warning telling operators to fix a working config.
+      const declaredHere = [
+        ...manifest.contributes.tools.map((tool) => tool.name),
+        ...manifest.contributes.toolsDiscovered.map((entry) => entry.namespace),
+      ];
+      for (const pattern of declaredHere) {
+        for (const claim of claims) {
+          if (!toolScopesOverlap(pattern, claim.pattern)) {
+            continue;
+          }
+          const subject = pattern === claim.pattern
+            ? `${pattern} is`
+            : `${pattern} overlaps ${claim.pattern}, which is`;
+          // One sentence for every collision, because a manifest cannot
+          // tell when a name registers and the cost turns entirely on
+          // that. `ManifestBoundToolRegistry` stages while `owners` is
+          // unset and registers live once `commit` sets it, so a clash
+          // before the plugin commits rolls it back whole and a clash
+          // after refuses that one registration. Neither side of the
+          // declaration says which: a bridge's first connect happens
+          // inside `setup()` when its server is up and on a reconnect
+          // when it is not, and a plugin may hold `context.tools` and
+          // register a plainly-named tool from a timer long after.
+          //
+          // Three rounds of review went into splitting this by
+          // declaration kind, then by which side of the pair held the
+          // namespace. Both splits claimed knowledge the manifest does
+          // not have. Do not reintroduce one.
+          base.warnings = [
+            ...(base.warnings ?? []),
+            `${subject} ${claim.registered ? 'already registered by' : 'also declared by'} ${claim.owner}; `
+            + 'if both register that name, a daemon keeps the first and refuses the second registration — '
+            + 'the whole plugin, tools and skills together, if it happens before that plugin finishes loading, '
+            + 'or just that one tool if it happens after',
+          ];
+        }
+      }
+      for (const pattern of declaredHere) {
+        claims.push({ pattern, owner: specifier, registered: false });
+      }
+
+      // Skills collide on the qualified `packageName:id`, so a clash means
+      // one package configured twice — the two-specifier case again. Firmer
+      // than the tool warning and worded that way: the loader stages skills
+      // from the manifest and refuses the second entry outright rather than
+      // waiting to see what `setup()` does. Still "if it loads", since a
+      // plugin that fails to import never reaches the check.
+      for (const skill of manifest.contributes.skills) {
+        const qualified = `${manifest.packageName}:${skill.id}`;
+        const owner = claimedSkills.get(qualified);
+        if (owner !== undefined) {
+          base.warnings = [
+            ...(base.warnings ?? []),
+            `skill ${qualified} is already declared by ${owner}; if both load, a daemon keeps the first `
+            + 'and refuses this one whole, tools and skills together',
+          ];
+        } else {
+          claimedSkills.set(qualified, specifier);
+        }
+      }
+      base.tools = declared.map((tool) => {
+        // Never on the namespace row. `parseToolRiskOverrides` accepts a
+        // namespace-shaped key, but the registry looks an override up by
+        // each concrete *registered* name — so `toolRisks: { "mcp.*": … }`
+        // changes no call, and showing the row at that risk would advertise
+        // a re-rating the daemon will not honour.
+        const override = tool.namespace ? undefined : overrides.get(tool.name);
+        return {
+          name: tool.name,
+          discovered: tool.discovered,
+          risk: override !== undefined
+            ? raiseRiskTo(override, floor)
+            : raiseRiskTo(tool.declared, floor),
+          grantedTo: grantedTo(tool.name, tool.discovered),
+        };
+      });
+    } catch (error) {
+      // Reported per plugin rather than thrown: one package with a broken
+      // manifest must not take down the listing that would have shown it.
+      base.problem = error instanceof Error ? error.message : String(error);
+    }
+    plugins.push(base);
+  }
+
+  const mode = approvals.mode ?? 'headless';
+  return {
+    approvals: mode,
+    approvalsSummary: await describeUnattendedReach(
+      mode,
+      approvals,
+      env,
+      rosterUnreadable ? undefined : roster.map((entry) => entry.soul.agent.id),
+      apiReachable,
+    ),
+    rosterUnreadable,
+    plugins,
+  };
+};
+
+/** `stratus plugins` — the chain from installed to callable, per plugin. */
+export const runPlugins = async (
+  command: ParsedPluginsCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const report = await collectPluginsReport(command, env, (line) => {
+    writeLine(streams.stderr, `Warning: ${line}`);
+  });
+
+  if (command.format === 'json') {
+    writeLine(streams.stdout, JSON.stringify(report, null, 2));
+    return 0;
+  }
+
+  writeLine(streams.stdout, `approvals: ${report.approvalsSummary}`);
+  writeLine(streams.stdout);
+
+  for (const plugin of report.plugins) {
+    const state = !plugin.installed
+      ? 'not installed'
+      : !plugin.configured
+        ? 'installed, not enabled'
+        : !plugin.enabled
+          ? 'installed, switched off'
+          // Enabled and loadable are separate: a plugin whose settings its
+          // own schema rejects is enabled and registers nothing, and saying
+          // only "enabled" here is the false clean bill this command exists
+          // to stop giving.
+          : plugin.problem !== undefined ? 'installed, enabled, will not load' : 'installed, enabled';
+    // Padded to a column, but never run together: a package name longer
+    // than the column would otherwise touch its own status.
+    writeLine(streams.stdout, `${plugin.package.padEnd(29)} ${state}`);
+
+    if (plugin.problem !== undefined) {
+      writeLine(streams.stdout, `  a daemon would register nothing for it: ${plugin.problem}`);
+      continue;
+    }
+    if (!plugin.installed) {
+      writeLine(streams.stdout, `  install it: npm install -g ${plugin.package}`);
+      continue;
+    }
+    // Nothing is registered for a plugin that will not load, so its tools
+    // are not listed: a grant column beside a name no agent can call reads
+    // as capability this machine has.
+    if (!plugin.configured) {
+      writeLine(streams.stdout, `  installing granted nothing — add "${plugin.package}" to the plugins block of a trusted config to load it`);
+      continue;
+    }
+    if (!plugin.enabled) {
+      writeLine(streams.stdout, '  switched off — remove "enabled": false to load it');
+      continue;
+    }
+    for (const warning of plugin.warnings ?? []) {
+      writeLine(streams.stdout, `  warning: ${warning}`);
+    }
+    for (const tool of plugin.tools) {
+      const granted = report.rosterUnreadable
+        ? ''
+        : tool.grantedTo.length > 0
+          ? ` → ${tool.grantedTo.join(', ')}`
+          : ' → nobody, until a soul’s tools: list names it';
+      const shape = tool.discovered ? ' (names arrive at connect)' : '';
+      writeLine(streams.stdout, `  ${tool.name.padEnd(28)}${tool.risk}${shape}${granted}`);
+    }
+  }
+
+  writeLine(streams.stdout);
+  writeLine(streams.stdout, `More plugins — ${PLUGIN_MARKETPLACE_URL}`);
   return 0;
 };
 
@@ -8659,6 +9439,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'skills') {
       return await runSkills(streams, resolvedEnv);
+    }
+
+    if (command.command === 'plugins') {
+      return await runPlugins(command, streams, resolvedEnv);
     }
 
     if (command.command === 'credential') {
