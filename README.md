@@ -44,7 +44,6 @@ line, 23.4+) — details in [Installation](docs/start/installation.md).
 | ⏰ | **Act on their own** — schedules an agent sets for itself, approved once by a human, reporting into Slack | [Schedules](docs/guides/schedules.md) |
 | 📚 | **Learn procedures** — skills installed from any GitHub repo, loaded only when relevant | [Skills](docs/guides/skills.md) |
 | 🤝 | **Work as a team** — delegation between agents, routing that keeps the same face in the same places | [Agents](docs/concepts/agents.md) |
-| 🧩 | **Start from a template** — a soul, its allowlist, and the plugin configuration behind it, as one bundle you review once | [Agent templates](docs/guides/templates.md) |
 | 🖥 | **Managed from anywhere** — one authenticated API, a web dashboard on top | [Remote access](docs/guides/remote-access.md) |
 
 Providers: Claude via the official Anthropic SDK, Claude subscription
@@ -81,19 +80,6 @@ palette from their name, so the team looks cohesive on every surface. What
 they learn in one thread they know in every other — memory belongs to the
 agent, never to a session. More in [Agents](docs/concepts/agents.md).
 
-Or start from a template and get a teammate that already does something —
-the soul, the tool allowlist, and the plugin configuration behind it, shown
-as one bundle you accept once:
-
-```bash
-stratus agent templates
-stratus agent new --template triage
-```
-
-Both gates stay exactly where they were; you answer them by reviewing a
-bundle instead of authoring one. More in
-[Agent templates](docs/guides/templates.md).
-
 ## How it fits together
 
 One package, `@stratusagent/cli`, carries the runtime: the kernel, the
@@ -118,7 +104,6 @@ The trust model behind that is in
 | --- | --- |
 | Install and set up | [Installation](docs/start/installation.md) · [Setup](docs/start/setup.md) |
 | Run something right now | [Quickstart](docs/start/quickstart.md) |
-| Create an agent that already does something | [Agent templates](docs/guides/templates.md) |
 | Put my agents in Slack | [Slack](docs/guides/slack.md) |
 | Give agents real capability, safely | [Tools](docs/guides/tools.md) · [Shell commands](docs/guides/shell.md) · [Browser actions](docs/guides/browser.md) · [Approvals](docs/guides/approvals.md) |
 | Let agents act on a schedule | [Schedules](docs/guides/schedules.md) |

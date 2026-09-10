@@ -98,44 +98,6 @@ const packageJsonFor = async (
   throw new PluginManifestError(`Could not find a package.json for ${specifier}.`);
 };
 
-/** An installed package's manifest, read without importing its code. */
-export interface InstalledPluginManifest {
-  manifest: PluginManifest;
-  /** The package root — what a manifest's relative skill paths resolve against. */
-  directory: string;
-  /** The `version` the installed package.json names, when it names one. */
-  version?: string;
-}
-
-/**
- * Read the manifest of a package that is installed, without importing it.
- *
- * The one place package.json becomes a `PluginManifest`, because there are
- * two callers with the same requirement and no licence to disagree: the
- * loader, deciding what a plugin may register, and the template planner,
- * telling an operator what a bundle would grant *before* anything runs. A
- * second reading would be a second answer to what a package contributes.
- *
- * Resolution failure propagates rather than becoming `undefined` — a
- * package that is installed but missing one of its own dependencies throws
- * from `resolve` too, and reading that as "not installed" would silently
- * drop something the operator's config says should be running. Callers who
- * mean "is it installed" ask `host.resolve` themselves; see
- * `loadOptionalModule`.
- */
-export const readPluginManifest = async (
-  specifier: string,
-  host: OptionalModuleHost,
-): Promise<InstalledPluginManifest> => {
-  const resolved = host.resolve(specifier);
-  const { packageJson, directory } = await packageJsonFor(resolved, specifier);
-  const manifest = parsePluginManifest(packageJson, specifier);
-  const version = typeof (packageJson as { version?: unknown }).version === 'string'
-    ? (packageJson as { version: string }).version
-    : undefined;
-  return { manifest, directory, ...(version !== undefined ? { version } : {}) };
-};
-
 /**
  * Whether a package's code is trusted — which is to say whether its
  * manifest may declare a tool `safe`.
@@ -261,18 +223,7 @@ const declares = (manifest: PluginManifest, key: string): boolean => Boolean(
   && key in (manifest.config.properties as JsonObject),
 );
 
-/**
- * The configuration a plugin will actually be handed: the operator's block
- * with the host's keys stripped and the host's defaults folded in.
- *
- * Exported because validating a block means validating *this*, not the raw
- * entry — a manifest that requires `workspaceRoot` would be refused for
- * missing the very setting the host supplies. The loader validates it
- * before importing a plugin, and the template planner validates it before
- * telling an operator what a bundle would grant; a second fold would be a
- * second answer to what the daemon is about to load.
- */
-export const effectivePluginConfig = (
+const configFor = (
   block: JsonObject,
   manifest: PluginManifest,
   workspaceRoot: string | undefined,
@@ -305,13 +256,8 @@ interface StagedPluginSkill {
  * file that is missing, escapes its package, or will not parse refuses the
  * plugin whole, before its code is imported — a skill is prose, so the
  * host reads it from the declaration alone.
- *
- * Exported for the template planner, which calls it for that refusal alone
- * and discards what it returns: a plan that accepted a package this would
- * reject would print a tool list that stops existing at the next start.
- * Nothing here registers or caches, so a second call is only a second read.
  */
-export const stageManifestSkills = async (
+const stageManifestSkills = async (
   manifest: PluginManifest,
   packageDirectory: string,
 ): Promise<StagedPluginSkill[]> => {
@@ -397,13 +343,15 @@ export const loadPlugins = async (options: LoadPluginsOptions): Promise<LoadPlug
     // held for the life of a daemon that goes on running without it.
     let instance: Plugin | undefined;
     try {
-      const { manifest, directory } = await readPluginManifest(specifier, options.host);
+      const resolved = options.host.resolve(specifier);
+      const { packageJson, directory } = await packageJsonFor(resolved, specifier);
+      const manifest = parsePluginManifest(packageJson, specifier);
       const isTrusted = trusted(manifest.packageName);
       // Validated *after* the host's defaults are folded in, because that
       // is the configuration the plugin will actually be handed: a manifest
       // that declares `workspaceRoot` required would otherwise be refused
       // for missing the very setting the host supplies.
-      const config = effectivePluginConfig(block, manifest, options.workspaceRoot);
+      const config = configFor(block, manifest, options.workspaceRoot);
       validatePluginConfig(manifest, config);
       const riskOverrides = parseToolRiskOverrides(manifest, block);
 

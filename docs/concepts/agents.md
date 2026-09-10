@@ -36,22 +36,6 @@ const scout = defineAgent({ instructions: 'You research things thoroughly.' });
 // scout.name → "Arlo", scout.avatar → matching palette + style
 ```
 
-That gives you an identity with no capability. `--template` gives you a
-working teammate instead — the soul plus the tool allowlist it needs and the
-plugin configuration behind that allowlist, presented as one bundle you
-review once. Both gates stay where they are; see
-[Agent templates](../guides/templates.md).
-
-```bash
-stratus agent templates
-stratus agent new --template research
-```
-
-Two agents may share a name — they are still two people, because the id is
-what memory, credentials, and per-agent settings are keyed by. When a name
-is already taken the second agent gets a suffixed id **and a palette derived
-from that id**, so a roster with two Kits does not draw them identically.
-
 ## Soul files
 
 An agent can live in a file. A soul file is markdown with frontmatter — the

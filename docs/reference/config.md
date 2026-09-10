@@ -11,7 +11,10 @@ Precedence, highest first:
 4. **Config file** — a project-local `stratus.config.json` outranks the
    global `~/.stratus/config.json`
 
-`stratus setup` writes the global file for you; a project can carry its own
+`stratus setup` writes the global file for you — replacing only the
+settings it asks about (provider, model, base URL, key env var, system
+prompt, default soul, and the fallback settings) and carrying everything
+else in the file across untouched, `plugins` included; a project can carry its own
 `stratus.config.json` (start from
 [`stratus.config.json.example`](../../stratus.config.json.example)), and
 `--config <file>` / `STRATUS_CONFIG` load a specific one.
@@ -46,63 +49,6 @@ use right now and which file or env var decided each setting.
 | `principals` | Which channel senders are each agent's operator: `slackUsers` (Slack user ids), with a per-agent `agents` sub-block — trusted configs only, see below |
 | `api` | Control API binding for `stratus serve` — trusted configs only, see below |
 | `plugins` | Plugins to load, keyed by package name — trusted configs only, see below |
-
-### Who writes this file
-
-`stratus setup`, `stratus agent new` (setting a default agent), `stratus
-agent new --template` (plugin entries), and `PUT /api/v1/config` all write
-it. Each reads and writes under a lock beside the file itself
-(`config.json.lock`), so two of them running at once cannot undo each other
-— a save built on a read from before another writer committed would put the
-earlier document back. The lock is keyed to the destination the write
-actually resolves to, not to `~/.stratus` and not to the spelling used: two
-operators with different homes pointing `--config` at one shared file take
-the same lock, and so do one addressing a symlinked config through the link
-and another addressing its target.
-
-Because both the lock and the temporary sit beside the config rather than
-inside `~/.stratus`, they can land in a directory other people may write.
-Five rules follow. Most exist because without them a file planted there
-turns an ordinary save into a way to destroy something else:
-
-- A lock path that is a symbolic link, or a damaged lock file belonging to
-  another user, is refused rather than emptied. Remove the file and run the
-  command again.
-- A lock this command creates is `0600` exactly, set through the descriptor
-  it was created on rather than left to the umask — a restrictive one would
-  otherwise produce a lock the process that made it cannot open. A lock that
-  already exists keeps whatever mode its creator gave it.
-- Clearing a damaged lock opens it without following links and truncates
-  *that descriptor*, so the file checked and the file emptied cannot be
-  different ones.
-- The temporary is created exclusively, under an unguessable name, and
-  without following links, and its mode and ownership are set through the
-  descriptor. Nothing pre-created at that path is ever written through.
-- The path is resolved **once** per transaction, and the lock, the read, and
-  the write all name that one file. A config replaced by a symbolic link
-  after that — under the lock the write is holding — is refused rather than
-  followed, because the file the command set out to replace is no longer
-  there and the link's target is not a file it was asked to touch.
-
-**Each writer replaces only the keys it is about.** `stratus setup` rewrites
-the provider, model, base URL, key env var, system prompt, default soul, and
-the fallback settings; everything else in the file — `plugins`, `api`,
-`approvals`, `principals`, the prompt-cache keys — is carried across
-untouched. Before this it wrote a document built from its own menu answers
-alone, so saving a model change deleted the whole `plugins` block and every
-agent silently lost its tools.
-
-The file is written to a temporary beside it and renamed into place, so a
-failure partway through leaves the previous version whole rather than half a
-document. Replacing a file rather than writing through it means two things
-are carried across deliberately: a symlinked `config.json` — one managed
-from a dotfiles repository — is followed and written where it actually
-lives, including when the link is in place before its target exists; and the
-file keeps the permissions **and ownership** it had, so a `0640` config, or
-one chgrp'd to a shared group, stays readable by a daemon running as another
-user. Ownership is best effort — a process cannot give a file away to
-another uid — but where it cannot be reproduced the writer could not have
-set it, or modified the file, in the first place.
 
 Credentials stored by setup live in `~/.stratus/credentials.json`
 (owner-read-only) and are **endpoint-bound**: a credential saved for one

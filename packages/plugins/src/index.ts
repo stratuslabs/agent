@@ -35,14 +35,10 @@ export {
 } from './registry.ts';
 
 export {
-  effectivePluginConfig,
   isFirstPartyPackage,
   loadOptionalModule,
   loadPlugins,
-  readPluginManifest,
-  stageManifestSkills,
   type CreatePlugin,
-  type InstalledPluginManifest,
   type LoadedPlugin,
   type LoadPluginsOptions,
   type LoadPluginsResult,

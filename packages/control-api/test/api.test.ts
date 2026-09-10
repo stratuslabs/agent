@@ -6,7 +6,6 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createGateway } from '@stratusagent/gateway';
-import { claimFileLock, configLockPath } from '@stratusagent/state';
 
 import { CONTROL_API_VERSION, createControlApi } from '../src/index.ts';
 import { newHome, openSocket, rawPost, settles, startApi, writeSoul } from './harness.ts';
@@ -2157,65 +2156,6 @@ test('a session rolls over through the API, and the archive and the busy session
     assert.equal(seeded.status, 400);
     assert.equal((await json<{ error: { code: string } }>(seeded)).error.code, 'metadata_reserved');
   } finally {
-    await harness.stop();
-  }
-});
-
-test('a config write waits for the config lock, so it cannot clobber a concurrent one', async () => {
-  const home = await newHome();
-  const harness = await startApi({ home });
-  // Held the way `stratus agent new --template` holds it while it claims a
-  // soul and merges its plugin entry. Without this endpoint taking the same
-  // lock, its read-modify-write reads a config that command is midway
-  // through changing and then saves the copy from before it — dropping a
-  // plugin entry and leaving the committed soul without the tools that were
-  // reviewed.
-  const claim = claimFileLock(await configLockPath(path.join(home, '.stratus', 'config.json')));
-  let released = false;
-  try {
-    const put = harness.call('/api/v1/config', {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ config: { provider: 'anthropic', model: 'claude-opus-5' } }),
-    }).then((response) => ({ response, releasedFirst: released }));
-
-    // A wall-clock number that has to stay one: the assertion is that a
-    // phase outlasts a window, so the window sits far above the work inside
-    // it — an HTTP round trip and one file read.
-    const HELD_MS = 500;
-    const stillHeld = Symbol('held');
-    const raced = await Promise.race([
-      put,
-      new Promise<typeof stillHeld>((resolve) => {
-        setTimeout(() => resolve(stillHeld), HELD_MS).unref?.();
-      }),
-    ]);
-    assert.equal(raced, stillHeld, 'the write went ahead while another process held the lock');
-
-    // The write the plugin entry stands in for, committed under the lock.
-    await writeFile(
-      path.join(home, '.stratus', 'config.json'),
-      `${JSON.stringify({ plugins: { '@stratusagent/tool-fs': { enabled: true } } })}\n`,
-    );
-    released = true;
-    claim.release();
-
-    const { response, releasedFirst } = await settles(put, 'the config write');
-    assert.equal(response.status, 200);
-    assert.equal(releasedFirst, true);
-
-    // Read after the release, so the entry written under the lock is carried
-    // across rather than deleted by omission.
-    const written = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8')) as {
-      model?: string;
-      plugins?: Record<string, unknown>;
-    };
-    assert.equal(written.model, 'claude-opus-5');
-    assert.deepEqual(written.plugins, { '@stratusagent/tool-fs': { enabled: true } });
-  } finally {
-    if (!released) {
-      claim.release();
-    }
     await harness.stop();
   }
 });

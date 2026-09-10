@@ -39,7 +39,6 @@ import {
   resolveRuntimeConfig,
   saveChannelCredentials,
   saveConfigFile,
-  updateConfigFile,
   saveCredentials,
   validateConfigFile,
   servedRuntimes,
@@ -1247,39 +1246,28 @@ export const routes: Route[] = [
       // `enabled` of `"false"` would otherwise be written, reported as saved,
       // and then make every later read of the file fail.
       const configPath = await activeConfigPath(context);
-      // Read and write under the config lock, because the read is what the
-      // write is built on and this is not the only writer: `stratus agent
-      // new --template` adds a plugin entry the same way. Interleaved
-      // without the lock, this endpoint reads, that command commits its
-      // entry, and this save then puts the pre-template copy back — leaving
-      // a soul whose allowlist names tools nothing enables, reported as
-      // created. Every read-modify-write of this file takes the same lock.
-      // `updateConfigFile` holds the config lock across the read and the
-      // write, which is what stops a concurrent `stratus agent new
-      // --template` from having its plugin entry undone by a save built on
-      // a read from before it.
+      // PUT replaces, so anything this endpoint does not write has to be
+      // carried across explicitly or it is deleted by omission — and
+      // deleting somebody's plugin list because they saved a model change
+      // would silently take capability away from every agent.
+      try {
+        const current = await loadConfigFile(configPath);
+        if (current.plugins) {
+          next.plugins = current.plugins;
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw new ApiError(500, 'config_unreadable', error instanceof Error ? error.message : String(error));
+        }
+      }
       let validated: StratusConfigFile;
       try {
-        validated = await updateConfigFile(configPath, context.env, (current) => {
-          // PUT replaces, so anything this endpoint does not write has to be
-          // carried across explicitly or it is deleted by omission — and
-          // deleting somebody's plugin list because they saved a model change
-          // would silently take capability away from every agent.
-          if (current.plugins) {
-            next.plugins = current.plugins;
-          }
-          try {
-            return validateConfigFile(next, configPath);
-          } catch (error) {
-            throw new ApiError(400, 'invalid_config_value', error instanceof Error ? error.message : String(error));
-          }
-        });
+        validated = validateConfigFile(next, configPath);
       } catch (error) {
-        if (error instanceof ApiError) {
-          throw error;
-        }
-        throw new ApiError(500, 'config_unreadable', error instanceof Error ? error.message : String(error));
+        throw new ApiError(400, 'invalid_config_value', error instanceof Error ? error.message : String(error));
       }
+
+      await saveConfigFile(configPath, validated);
       // Settings feed provider resolution, which the gateway re-reads per
       // dispatch — but the default *soul* is roster identity, so a changed
       // one only reaches dispatches after a reload.

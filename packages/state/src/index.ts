@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { constants as fsConstants, readFileSync } from 'node:fs';
-import { appendFile, chmod, cp, lstat, mkdir, open, readdir, readFile, readlink, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { appendFile, chmod, cp, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -28,7 +28,6 @@ import {
 } from '@stratusagent/core';
 import {
   agentIdWithSuffix,
-  generateAvatarTheme,
   createLazySkill,
   isLoadableSkillId,
   SKILL_ID_RULE,
@@ -805,25 +804,11 @@ const readNameMap = (value: unknown): Record<string, string> => {
   return entries;
 };
 
-/**
- * No credentials at all, in the shape `loadNamedCredentials` returns —
- * prototype-less maps included, because a caller indexing one of these by
- * an arbitrary credential name must not reach `Object.prototype`.
- *
- * Exported for a caller that already knows it needs none: reading the file
- * to find that out would let a `credentials.json` somebody broke refuse
- * work that never touches it.
- */
-export const emptyNamedCredentials = (): NamedCredentials => ({
-  shared: emptyNameMap<string>(),
-  agents: emptyNameMap<Record<string, string>>(),
-});
-
 export const loadNamedCredentials = async (env: StateEnvironment): Promise<NamedCredentials> => {
   const raw = await loadRawCredentialsFile(env);
   const named = raw.named;
   if (typeof named !== 'object' || named === null || Array.isArray(named)) {
-    return emptyNamedCredentials();
+    return { shared: emptyNameMap<string>(), agents: emptyNameMap<Record<string, string>>() };
   }
   const block = named as Record<string, unknown>;
   const agents = emptyNameMap<Record<string, string>>();
@@ -3696,19 +3681,10 @@ export const claimSoulFile = async (
         }
       }
     }
-    const id = agentIdWithSuffix(baseId, randomUUID().slice(0, 4));
     agent = defineAgent({
-      id,
+      id: agentIdWithSuffix(baseId, randomUUID().slice(0, 4)),
       ...(input.name ? { name: input.name } : { name: agent.name }),
       instructions: input.instructions,
-      // Themed on the id rather than the name, and only here. This agent
-      // exists because another one already answers to that name, and a
-      // roster where the second Kit is drawn identically to the first is
-      // exactly what the palette is there to prevent — two agents from one
-      // template, whose default name they both take, is the ordinary case.
-      // Every agent whose id nothing contested keeps the palette its name
-      // has always given it.
-      avatar: generateAvatarTheme(id),
     });
   }
 };
@@ -3908,292 +3884,15 @@ export const listAgentSummaries = async (
 /**
  * Persist settings, creating the directory if it is not there yet.
  *
- * Written to a temporary beside the destination and renamed over it, never
- * straight to the file: a plain write truncates first, so a failure partway
- * through — a full disk, a process killed mid-write — leaves the operator
- * with a config that is empty or half a document. Every caller here is a
- * read-modify-write of settings somebody else's agents depend on, and one
- * of them (`applyAgentTemplate`) advertises an all-or-nothing commit that a
- * truncating write cannot deliver. The rename is atomic within a
- * filesystem, and the temporary is beside the resolved target so it is one.
- *
- * Replacing a file rather than writing through it means two things it would
- * otherwise inherit have to be carried across by hand, and both matter:
- *
- * - **The symlink.** A rename replaces a directory entry, so renaming onto
- *   a symlinked `config.json` — a dotfiles repository, usually — would
- *   detach the link and leave the file it pointed at holding the previous
- *   contents forever. `linkTarget` follows the chain by hand rather than
- *   through `realpath`, which needs the final target to exist: a link put
- *   in place before the file it names is exactly the case a dotfiles setup
- *   produces.
- * - **The mode, and the ownership.** A `0640` config read by a daemon
- *   running as another user becomes `0600` if the temporary is renamed over
- *   it under umask 077, and a config chgrp'd to a shared group loses that
- *   group to the writer's own — either way the daemon can no longer read
- *   it. That is the shared-machine setup the paragraph below exists to
- *   protect, so both are copied onto the temporary before it replaces the
- *   destination. Ownership is best effort by necessity: a process cannot
- *   give a file away to another uid, and where the copy fails the writer
- *   could not have set that ownership — or modified the file — in the first
- *   place. Only a file being *created* takes the umask's answer.
- *
  * Deliberately NOT 0600: `config.json` holds no secrets (those live in
  * `credentials.json`, which has its own posture), and tightening it here
  * would be a security theatre that also breaks a shared-machine setup where
  * the daemon runs as another user.
- */
-/**
- * Where a config path actually leads, following symlinks by hand.
- *
- * Exported because every part of one config transaction has to agree on
- * *which file* it is operating on: the lock, the read, and the write. A
- * caller that resolved separately at each step could lock one target and
- * replace another if the link were retargeted in between, holding a lock
- * that guards nothing.
- *
- * `realpath` cannot be used: it resolves the whole chain and fails if the
- * final target does not exist, and a link standing in front of a file that
- * has not been created yet is ordinary — a dotfiles repository puts the
- * link there first. `readlink` per hop answers for a dangling link too.
- *
- * Bounded, and a chain that outruns the bound **throws**. Returning the
- * last link reached would hand the caller an intermediate symlink to
- * rename over — replacing a link and leaving the real config stale, which
- * is the failure this function exists to prevent. A path that is not a link
- * (EINVAL) or is not there at all (ENOENT) is its own target.
- */
-const MAX_CONFIG_LINK_HOPS = 32;
-
-export const resolveConfigTarget = async (from: string): Promise<string> => {
-  let current = from;
-  for (let depth = 0; depth < MAX_CONFIG_LINK_HOPS; depth += 1) {
-    let next: string;
-    try {
-      next = await readlink(current);
-    } catch {
-      return current;
-    }
-    current = path.resolve(path.dirname(current), next);
-  }
-  throw new Error(
-    `Could not follow ${from} to a real file: more than ${MAX_CONFIG_LINK_HOPS} symlinks deep, or a loop. `
-    + 'Point it at the file itself, or shorten the chain.',
-  );
-};
-
-/**
- * Replace a config file at a path that is **already resolved**.
- *
- * The write half of a config transaction, split from `saveConfigFile`
- * because resolving again here would undo the point of resolving once. A
- * caller takes the lock on the target it resolved; if this then followed
- * the path afresh, somebody who can write that directory could put a link
- * there in between and have the rename land on whatever the link named —
- * any file the operator can write — while the lock still guards a file
- * nothing touched. `updateConfigFile` and the template transaction both
- * documented that invariant before either of them held it.
- *
- * A target that has *become* a symlink is refused rather than replaced. By
- * contract it was a real file when the caller resolved it, so a link there
- * now means something changed it under the lock, and the answer to that is
- * to stop rather than to guess which file was meant.
- */
-export const saveResolvedConfigFile = async (
-  target: string,
-  config: StratusConfigFile,
-): Promise<void> => {
-  await mkdir(path.dirname(target), { recursive: true });
-  // Unguessable, created exclusively, and never through a link. The
-  // temporary lands beside the config — which for a shared config is a
-  // directory somebody else may write — and a predictable name there can be
-  // pre-created as a symlink: the write would truncate whatever it pointed
-  // at, the chmod and chown would follow it, and the rename would put the
-  // link where the config belongs. `O_EXCL` means this process created what
-  // it is writing to; `O_NOFOLLOW` means it is not a link; and the mode and
-  // ownership are set through the descriptor, so they cannot be redirected
-  // either.
-  const staged = `${target}.${randomUUID()}.tmp`;
-  const handle = await open(
-    staged,
-    fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
-    // Masked by the umask, so a file this creates carries exactly what a
-    // plain write would have given it.
-    0o666,
-  );
-  let closed = false;
-  try {
-    await handle.writeFile(`${JSON.stringify(config, null, 2)}\n`);
-    // The mode and ownership the file already has, so a replacement is not
-    // also a permission change. Absent (a first write) it keeps whatever
-    // the umask and the process's own identity give it.
-    // `lstat`, not `stat`: a link here is the case above, and following it
-    // would copy the victim's mode and ownership onto the config.
-    const existing = await lstat(target).catch(() => undefined);
-    if (existing?.isSymbolicLink()) {
-      throw new Error(
-        `Refusing to replace ${target}: it is a symlink now and was a real file when this write was planned. `
-        + 'Something changed it underneath. Check what put a link there before running this again.',
-      );
-    }
-    if (existing) {
-      await handle.chmod(existing.mode & 0o7777);
-      // Best effort, and it has to be: a process cannot give a file away to
-      // another uid, so this can only succeed where the writer already had
-      // the standing to produce that ownership. That is exactly the case
-      // worth covering — an operator who chgrp'd their config so a daemon
-      // running as another user could read it, whose own primary group
-      // would otherwise become the file's on every save. Where it fails,
-      // the writer could not have modified the file at all: a rename needs
-      // write on the directory, and the ownership it could not reproduce is
-      // ownership it could not have set.
-      await handle.chown(existing.uid, existing.gid).catch(() => {
-        // Left as the umask made it. See the note above.
-      });
-    }
-    await handle.close();
-    closed = true;
-    await rename(staged, target);
-  } catch (error) {
-    if (!closed) {
-      await handle.close().catch(() => {
-        // Already failing; the original error is the one to report.
-      });
-    }
-    await rm(staged, { force: true }).catch(() => {
-      // The write's failure is the one to report.
-    });
-    throw error;
-  }
-};
-
-/**
- * Resolve a config path to the file it names, then replace that file.
- *
- * The entry point for a caller that has not resolved anything itself. One
- * that has — because it also took the lock on the resolved target — calls
- * `saveResolvedConfigFile` directly, which is the only way the lock and the
- * write can be talking about the same file.
  */
 export const saveConfigFile = async (
   configPath: string,
   config: StratusConfigFile,
 ): Promise<void> => {
   await mkdir(path.dirname(configPath), { recursive: true });
-  await saveResolvedConfigFile(await resolveConfigTarget(configPath), config);
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 };
-
-// ---------------------------------------------------------------------------
-// Cross-process file locks, and agent templates
-// ---------------------------------------------------------------------------
-
-export {
-  claimFileLock,
-  withFileLock,
-  FileLockBusyError,
-  FileLockTimeoutError,
-  FileLockUnsafeError,
-  type FileClaim,
-  type WithFileLockOptions,
-} from './lock.ts';
-import { withFileLock } from './lock.ts';
-
-/**
- * The lock every writer of one config file takes: `<that file>.lock`,
- * resolved through symlinks exactly as the write itself resolves.
- *
- * Keyed to the destination rather than to the home, because the home is not
- * what two writers of the same file have in common: two invocations with
- * different `STRATUS_HOME` can name one explicit `--config`, and a
- * home-derived lock would hand them a lock each — no lock at all for the
- * file they are both replacing.
- *
- * Keyed to the *resolved* destination for the same reason one step further
- * in. `saveConfigFile` follows the link chain before renaming, so a writer
- * addressing a config through a symlink and one addressing its target are
- * replacing the same file; locking on the spelling rather than the file
- * would let them past each other.
- *
- * Beside the file it guards, which asks for nothing the write does not
- * already need: replacing a config by rename requires write on its
- * directory, so a lock file there is never the thing that fails.
- */
-export const configLockPath = async (configPath: string): Promise<string> =>
-  `${await resolveConfigTarget(configPath)}.lock`;
-
-/**
- * Read-modify-write the config, holding the lock across both halves.
- *
- * The only correct way to change one setting: the read is what the write is
- * built on, and there are several writers — `stratus setup`, `agent new`,
- * `agent new --template`, and `PUT /api/v1/config`. Any of them reading
- * before another commits and saving after will put the earlier document
- * back, silently undoing a change nobody asked to undo. That is not
- * hypothetical for plugin entries: a template commits a soul whose
- * allowlist depends on one.
- *
- * A config file that is not there yet is an empty document, not a failure —
- * every caller here can create one, and `--config new.json` is a thing an
- * operator is allowed to type. Anything else about the read propagates: a
- * malformed config is recoverable by hand and must never be overwritten.
- *
- * `applyAgentTemplate` is the one caller that does not use this and cannot:
- * it has to hold the same lock across the soul claim as well, so it
- * composes `withFileLock` itself. The lock is not reentrant.
- */
-export const updateConfigFile = async (
-  configPath: string,
-  env: StateEnvironment,
-  mutate: (current: StratusConfigFile) => StratusConfigFile | Promise<StratusConfigFile>,
-): Promise<StratusConfigFile> => {
-  // Resolved once, and then the lock, the read and the write all name the
-  // same file. Resolving at each step would let a link retargeted mid
-  // transaction have this read one target and replace another while holding
-  // a lock on neither.
-  const target = await resolveConfigTarget(configPath);
-  return withFileLock(`${target}.lock`, async () => {
-    let current: StratusConfigFile = {};
-    try {
-      current = await loadConfigFile(target);
-    } catch (error) {
-      if (!(error instanceof ConfigFileError && error.code === 'ENOENT')) {
-        throw error;
-      }
-    }
-    const next = await mutate(current);
-    await saveResolvedConfigFile(target, next);
-    return next;
-  });
-};
-
-export {
-  AGENT_TEMPLATE_VERSION,
-  KERNEL_TOOL_RISKS,
-  TemplateApplyError,
-  applyAgentTemplate,
-  decidePluginConfig,
-  planAgentTemplate,
-  planRiskCeiling,
-  type AgentTemplate,
-  type AppliedTemplate,
-  type ApplyAgentTemplateOptions,
-  type PlanAgentTemplateOptions,
-  type TemplateBlocker,
-  type TemplateCredentialNeed,
-  type TemplateMergeOutcome,
-  type TemplatePlan,
-  type TemplatePluginOutcome,
-  type TemplatePluginRequirement,
-  type TemplateRenderContext,
-  type TemplateResolvedTool,
-  type TemplateScheduleProposal,
-  type TemplateSettingConflict,
-  type TemplateSkillNeed,
-  type TemplateToolGrant,
-} from './templates.ts';
-
-export {
-  AGENT_TEMPLATES,
-  agentTemplateIds,
-  findAgentTemplate,
-} from './template-catalog.ts';

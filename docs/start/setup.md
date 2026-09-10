@@ -58,7 +58,10 @@ digits to jump, Esc to go back.
   same way for the same failures.
 - **Test run** — say hello with the current settings before saving anything.
 - **Save & finish** — writes everything, offers any optional package your
-  choices imply, then installs the always-on service.
+  choices imply, then installs the always-on service. Only the settings
+  setup asked about are replaced: anything else in `~/.stratus/config.json`
+  — your `plugins` entries above all, plus `api` and `approvals` — is left
+  exactly as it was.
 
 ## What Save & finish offers
 

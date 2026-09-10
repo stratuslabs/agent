@@ -32,7 +32,6 @@ import {
   type ModelProvider,
   type Session,
   type StratusEvent,
-  type ToolRisk,
   type TrustLevel,
 } from '@stratusagent/core';
 import {
@@ -43,7 +42,7 @@ import {
 // and the whole runner stack), and a serve-only policy seam must not make
 // `stratus run` pay for it.
 import type { ApprovalTransport, GatewayChannelAdapter, HomeClaim, RestartOutcome } from '@stratusagent/gateway';
-import { loadPlugins, readPluginManifest, type LoadedPlugin } from '@stratusagent/plugins';
+import { loadPlugins, type LoadedPlugin } from '@stratusagent/plugins';
 import {
   createFileCommandWhitelist,
   createPermissionPolicy,
@@ -93,10 +92,6 @@ import {
   apiKeyEnvNameFor,
   claimSoulFile,
   collectAvailableModels as collectModels,
-  agentTemplateIds,
-  agentWorkspacePath,
-  applyAgentTemplate,
-  resolveConfigTarget,
   createDemoTool,
   createFileCredentialResolver,
   createFileMemoryStore,
@@ -111,18 +106,11 @@ import {
   globalConfigPath,
   loadChannelCredentials,
   loadCredentials,
-  emptyNamedCredentials,
   loadNamedCredentials,
   discoverSkillsInDirectory,
   installSkillsFromDirectory,
   loadOperatorSkills,
   loadRosterSouls,
-  findAgentTemplate,
-  ConfigFileError,
-  planAgentTemplate,
-  planRiskCeiling,
-  AGENT_TEMPLATES,
-  TemplateApplyError,
   skillsDirPath,
   listAgentSummaries,
   loadSoulFile,
@@ -139,12 +127,10 @@ import {
   resolveEnvApiKey,
   DEFAULT_CONFIG_FILENAME,
   loadConfigFile,
-  updateConfigFile,
   resolveConfigLocation,
   resolveRuntimeConfig as resolveStateRuntimeConfig,
   saveChannelCredentials,
   saveConfigFile,
-  saveResolvedConfigFile,
   readTrustedConfigBlock,
   saveCredentials,
   saveNamedCredentials,
@@ -178,9 +164,6 @@ import {
   type StoredCredential,
   type StratusConfigFile,
   type StratusProviderName,
-  type TemplateBlocker,
-  type TemplatePlan,
-  type TemplatePluginOutcome,
 } from '@stratusagent/state';
 
 import {
@@ -259,20 +242,6 @@ export interface CliEnvironment {
   dashboardAutoShutdownMs?: number;
   /** Shuts down `stratus serve` the way SIGTERM would (tests). */
   shutdownSignal?: AbortSignal;
-  /**
-   * Fails a template's apply between the soul write and the config write
-   * (tests). Injected because the rollback is the whole point of committing
-   * them together, and a test that asserted it by inspection would prove
-   * nothing about the path that runs.
-   */
-  templateFailBeforeConfigWrite?: () => Promise<void>;
-  /**
-   * Runs inside a template's lock, immediately before the soul is claimed
-   * (tests). The claim reads the config to see which ids are already
-   * declared, so this is where a retarget has to land to prove that read
-   * uses the file the transaction locked.
-   */
-  templateBeforeSoulClaim?: () => Promise<void>;
   /**
    * Starts the fresh daemon an announced restart asks for and resolves
    * with its exit code. Injected so tests never spawn a process; the
@@ -509,17 +478,6 @@ export interface ParsedAgentNewCommand {
   name?: string;
   instructions?: string;
   format: 'text' | 'json' | 'soul';
-  /** A first-party template id, as `stratus agent templates` lists them. */
-  template?: string;
-  /** Skip the confirmation. For scripting; not the documented path. */
-  yes?: boolean;
-  /** The trusted config a template's plugin entries land in. */
-  configPath?: string;
-}
-
-export interface ParsedAgentTemplatesCommand {
-  command: 'agent-templates';
-  format: 'text' | 'json';
 }
 
 export interface ParsedChatCommand {
@@ -699,7 +657,6 @@ export type ParsedCommand =
   | ParsedDashboardCommand
   | ParsedSetupCommand
   | ParsedAgentNewCommand
-  | ParsedAgentTemplatesCommand
   | ParsedAgentsCommand
   | ParsedSkillAddCommand
   | ParsedSkillValidateCommand
@@ -963,17 +920,7 @@ Commands:
                    session (a Slack DM) that predates provenance tracking
                    and would otherwise write unknown forever. Asks the
                    running daemon (--gateway, --token)
-  agent new        Create an agent identity (generates a human-ish name + avatar theme).
-                   --template <id> creates a working teammate instead: a soul,
-                   the tool allowlist it needs, and the plugin configuration
-                   behind it, printed as what they will grant on THIS machine
-                   — every tool with its resolved risk, every plugin entry as
-                   a diff against the config you have — and written only once
-                   you say yes. A missing plugin or a setting the template
-                   contradicts stops it and creates nothing. --yes skips the
-                   question, for scripting
-  agent templates  The first-party templates and what each needs installed
-                   (--format json)
+  agent new        Create an agent identity (generates a human-ish name + avatar theme)
   agents           List your agents: who they are, where their souls live, what
                    they run on, what they remember (also: stratus agent list).
                    --gateway <url> asks a running daemon instead of resolving
@@ -997,12 +944,7 @@ Commands:
 
 Agent options:
   --name           Agent name (omit to have one generated)
-  --instructions   The agent's persona/instructions (not with --template, which
-                   carries its own)
-  --template       agent new: create from a first-party bundle — see
-                   stratus agent templates
-  --yes, -y        agent new --template: skip the confirmation. The reviewed
-                   path is the documented one; stdout is identical either way
+  --instructions   The agent's persona/instructions
   --format         Output format for agent new: text, json, or soul (a ready-to-edit soul file)
 
 Options:
@@ -1880,38 +1822,12 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     if (subcommand === '--help' || subcommand === '-h') {
       return { command: 'help' };
     }
-    if (subcommand === 'templates') {
-      let format: 'text' | 'json' = 'text';
-      for (let index = 0; index < agentRest.length; index += 1) {
-        const token = agentRest[index];
-        if (!token) {
-          continue;
-        }
-        if (token === '--help' || token === '-h') {
-          return { command: 'help' };
-        }
-        if (token === '--format') {
-          const value = readOptionValue(agentRest, index, '--format');
-          if (value !== 'text' && value !== 'json') {
-            throw new Error(`Unsupported format: ${value}`);
-          }
-          format = value;
-          index += 1;
-          continue;
-        }
-        throw new Error(`Unknown option: ${token}`);
-      }
-      return { command: 'agent-templates', format };
-    }
     if (subcommand !== 'new') {
-      throw new Error(`Unknown agent subcommand: ${subcommand ?? '(missing)'}. Try: stratus agent new, stratus agent templates, stratus agent list`);
+      throw new Error(`Unknown agent subcommand: ${subcommand ?? '(missing)'}. Try: stratus agent new, stratus agent list`);
     }
 
     let name: string | undefined;
     let instructions: string | undefined;
-    let template: string | undefined;
-    let configPath: string | undefined;
-    let yes = false;
     let format: 'text' | 'json' | 'soul' = 'text';
 
     for (let index = 0; index < agentRest.length; index += 1) {
@@ -1932,20 +1848,6 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
         index += 1;
         continue;
       }
-      if (token === '--template') {
-        template = readOptionValue(agentRest, index, '--template');
-        index += 1;
-        continue;
-      }
-      if (token === '--config') {
-        configPath = readOptionValue(agentRest, index, '--config');
-        index += 1;
-        continue;
-      }
-      if (token === '--yes' || token === '-y') {
-        yes = true;
-        continue;
-      }
       if (token === '--format') {
         const value = readOptionValue(agentRest, index, '--format');
         if (value !== 'text' && value !== 'json' && value !== 'soul') {
@@ -1958,29 +1860,10 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       throw new Error(`Unknown option: ${token}`);
     }
 
-    // A template writes a soul and a config entry; --format json/soul asks
-    // for a definition on stdout and writes nothing. Refused rather than
-    // silently doing one of the two — the flags say opposite things about
-    // what the command is for.
-    if (template !== undefined && format !== 'text') {
-      throw new Error(
-        `--template writes an agent to disk and --format ${format} only prints one. Use one or the other.`,
-      );
-    }
-    if (template !== undefined && instructions !== undefined) {
-      throw new Error(
-        'A template carries its own persona, so --instructions would silently replace the one you are being shown. '
-        + 'Create the agent from the template, then edit its soul file.',
-      );
-    }
-
     return {
       command: 'agent-new',
       ...(name ? { name } : {}),
       ...(instructions ? { instructions } : {}),
-      ...(template ? { template } : {}),
-      ...(configPath ? { configPath } : {}),
-      ...(yes ? { yes } : {}),
       format,
     };
   }
@@ -2977,11 +2860,11 @@ interface SetupPrompter {
  * The config keys `stratus setup` decides, and therefore the only ones its
  * save may replace or remove.
  *
- * Everything outside this list is the operator's, written by a different
- * command or by hand, and is carried across untouched — `plugins` most of
- * all, since deleting it takes every agent's tools away without saying so.
- * Listed as what setup owns rather than as what to preserve, so a config
- * key added later survives by default instead of being silently dropped
+ * Everything outside this list belongs to another writer or to the
+ * operator's own hand, and is carried across untouched — `plugins` most of
+ * all, since dropping it takes every agent's tools away without saying so.
+ * Listed as what setup *owns* rather than as what to preserve, so a config
+ * key added later survives by default instead of being silently discarded
  * until somebody notices.
  */
 const SETUP_OWNED_CONFIG_KEYS = [
@@ -2994,7 +2877,7 @@ const SETUP_OWNED_CONFIG_KEYS = [
   'fallbackModel',
   'fallbackProvider',
   'fallbackBaseUrl',
-] as const satisfies readonly (keyof StratusConfigFile)[];
+] as const satisfies readonly (keyof CliConfigFile)[];
 
 const createSetupPrompter = (
   streams: CliStreams,
@@ -4785,26 +4668,34 @@ export const runSetup = async (
       }
     }
 
-    // Read and written under the config lock, and merged onto whatever the
-    // file says *now* rather than onto the copy read when the menu opened —
-    // a human sits between those two moments, and another writer can commit
-    // inside it.
-    //
-    // Only the keys setup asks about are replaced. Everything else survives
-    // verbatim: `plugins` above all, but `api`, `approvals`, `principals`
-    // and the prompt-cache settings too. Setup used to write a document
-    // built from its own state alone, so saving a model change deleted the
-    // operator's whole plugin list — every agent silently losing its tools
-    // because somebody re-ran setup. `PUT /api/v1/config` had already been
-    // taught to carry these across for exactly this reason; this is the
-    // same rule at the other writer.
-    await updateConfigFile(configPath, env, (current) => {
-      const preserved = { ...current };
-      for (const key of SETUP_OWNED_CONFIG_KEYS) {
-        delete preserved[key];
+    // Re-read rather than reusing the copy seeded at the top of setup: a
+    // human sat between those two moments, and another writer can commit
+    // inside it. Only the keys setup asks about are replaced; everything
+    // else survives verbatim. Setup used to save a document built from its
+    // own menu answers alone, so changing a model deleted the operator's
+    // whole `plugins` block — every agent silently losing its tools for
+    // the crime of re-running setup — along with `api`, `approvals` and
+    // `principals`.
+    let current: CliConfigFile = {};
+    try {
+      current = await loadConfigFile(configPath);
+    } catch (error) {
+      // Same answer as the seed read above: a config that will not parse
+      // is replaced, not merged onto, because there is nothing to merge.
+      // Said louder here, because this is where the keys are lost.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        writeLine(
+          streams.stderr,
+          `Warning: could not read ${configPath} (${error instanceof Error ? error.message : String(error)}), `
+          + 'so anything it held outside the settings below — plugins, api, approvals — is not carried across.',
+        );
       }
-      return { ...preserved, ...config } as CliConfigFile;
-    });
+    }
+    const preserved: CliConfigFile = { ...current };
+    for (const key of SETUP_OWNED_CONFIG_KEYS) {
+      delete preserved[key];
+    }
+    await saveConfigFile(configPath, { ...preserved, ...config } as CliConfigFile);
 
     writeLine(streams.stdout);
     writeLine(streams.stdout, `Wrote ${configPath}`);
@@ -6937,580 +6828,19 @@ export const soulPinForNewAgent = (
   return { provider, model };
 };
 
-// ---------------------------------------------------------------------------
-// Agent templates
-// ---------------------------------------------------------------------------
-
-/**
- * Ask, on stderr.
- *
- * Deliberately not the setup prompter: that one clears the screen for a
- * menu, which would wipe the bundle the operator is being asked about. And
- * deliberately stderr, because it is what makes `--yes` produce
- * byte-identical stdout to the reviewed path — the property that says the
- * scripted path is the same decision, not a different one.
- */
-const askConfirmation = async (
-  streams: CliStreams,
-  env: CliEnvironment,
-  question: string,
-): Promise<boolean> => {
-  streams.stderr.write(question);
-  // The same reading of "is somebody there" the setup prompter uses.
-  const atTerminal = env.setupInput === undefined && process.stdin.isTTY === true;
-  const readline = createInterface({ input: env.setupInput ?? process.stdin, terminal: false });
-  try {
-    for await (const line of readline) {
-      // A terminal echoes the answer and its Enter; piped input echoes
-      // nothing, so the next line would run into the question.
-      if (!atTerminal) {
-        streams.stderr.write('\n');
-      }
-      return /^y(es)?$/i.test(String(line).trim());
-    }
-    return false;
-  } finally {
-    readline.close();
-    if (env.setupInput === undefined) {
-      // A resumed stdin keeps the event loop alive, so the command would
-      // print its result and then hang. The setup prompter's `close` does
-      // the same thing for the same reason.
-      process.stdin.pause();
-    }
-  }
-};
-
-const RISK_NOTES: Record<ToolRisk, string> = {
-  safe: 'runs unattended',
-  gated: 'asks a human every time, until you grant it a scope',
-  dangerous: 'asks a human every time, and never runs unattended',
-};
-
-const describePluginOutcome = (outcome: TemplatePluginOutcome): string[] => {
-  const version = 'version' in outcome && outcome.version ? ` ${outcome.version}` : '';
-  const head = `  ${outcome.package}${version}`;
-  switch (outcome.status) {
-    case 'add':
-      return [`${head} — added, for ${outcome.reason}`, ...indentedJson(outcome.settings)];
-    case 'amend':
-      return [`${head} — already configured; these keys are added, for ${outcome.reason}`, ...indentedJson(outcome.adds)];
-    case 'reuse':
-      return [`${head} — already configured the way this needs it; kept exactly as it is`];
-    case 'conflict':
-      return [
-        `${head} — CONFLICT, and nothing will be written:`,
-        ...outcome.conflicts.map((entry) => `      ${entry.key}: yours is ${JSON.stringify(entry.existing)}, this asks for ${JSON.stringify(entry.requested)}`),
-      ];
-    case 'missing':
-      return [`${head} — NOT INSTALLED, and needed for ${outcome.reason}`, `      ${outcome.installCommand}`];
-    case 'unreadable':
-      return [`${head} — installed, but its manifest could not be read: ${outcome.error}`];
-  }
-};
-
-const indentedJson = (value: JsonObject): string[] =>
-  JSON.stringify(value, null, 2).split('\n').map((line) => `      ${line}`);
-
-/**
- * The review step, which is the product: what the bundle grants, computed
- * against the config that exists rather than read off the template.
- *
- * Every line comes from the plan `@stratusagent/state` built, so the
- * dashboard rendering the same flow renders the same answer.
- */
-const writeTemplatePlan = (streams: CliStreams, plan: TemplatePlan): void => {
-  const out = streams.stdout;
-  writeLine(out, `${plan.template.title} — ${plan.template.summary}`);
-  writeLine(out);
-  writeLine(out, `Creates ${plan.agent.name} (id ${plan.agent.id})`);
-  writeLine(out, `  soul    ${plan.soulPath}`);
-  // Named only when this write would touch it. A template that needs no
-  // plugin changes nothing there, and saying otherwise would put a file in
-  // front of the operator that the command never opens.
-  if (plan.plugins.some((outcome) => outcome.status === 'add' || outcome.status === 'amend')) {
-    writeLine(out, `  config  ${plan.configPath}`);
-  }
-  writeLine(out);
-
-  writeLine(out, 'Tools this agent may call:');
-  for (const grant of plan.tools) {
-    if (grant.unresolved) {
-      writeLine(out, `  ${grant.entry.padEnd(20)}nothing installed answers this — it grants nothing today`);
-      continue;
-    }
-    if (grant.wildcard) {
-      // A glob authorizes tools registered later too. Disclosed as a glob,
-      // never expanded into the list it happens to reach today, because the
-      // list is the narrower claim and the soul carries the wider one.
-      writeLine(out, `  ${grant.entry.padEnd(20)}every tool in this namespace, INCLUDING ones a later plugin update adds`);
-      for (const tool of grant.resolves) {
-        writeLine(out, `    today: ${tool.name} (${tool.risk})`);
-      }
-      continue;
-    }
-    for (const tool of grant.resolves) {
-      const from = tool.package ?? 'the kernel';
-      const floored = tool.declaredRisk !== undefined
-        ? ` — its manifest says ${tool.declaredRisk}; ${tool.raisedBy === 'override' ? 'your config' : 'the third-party floor'} makes it ${tool.risk}`
-        : '';
-      writeLine(out, `  ${tool.name.padEnd(20)}${tool.risk.padEnd(10)}${from}${floored}`);
-    }
-  }
-  const ceiling = planRiskCeiling(plan);
-  writeLine(out, `  ${''.padEnd(20)}${ceiling}: ${RISK_NOTES[ceiling]}.`);
-  writeLine(out);
-
-  if (plan.plugins.length > 0) {
-    writeLine(out, 'Plugin configuration:');
-    for (const outcome of plan.plugins) {
-      for (const line of describePluginOutcome(outcome)) {
-        writeLine(out, line);
-      }
-    }
-    writeLine(out);
-  }
-
-  if (plan.skills.length > 0) {
-    writeLine(out, 'Skills:');
-    for (const skill of plan.skills) {
-      writeLine(out, `  ${skill.entry.padEnd(20)}${skill.installed ? 'installed' : 'not installed — stratus skill add, then this entry starts matching'}`);
-    }
-    writeLine(out);
-  }
-
-  if (plan.credentials.length > 0) {
-    writeLine(out, 'Credentials this names (a template never carries one):');
-    for (const credential of plan.credentials) {
-      writeLine(out, credential.provided === 'missing'
-        ? `  ${credential.name.padEnd(20)}not provided — the agent is still created; provide it with:\n      ${credential.provideCommand}`
-        : `  ${credential.name.padEnd(20)}provided (${credential.provided === 'agent' ? 'this agent’s own' : 'the fleet’s shared entry'})`);
-    }
-    writeLine(out);
-  }
-
-  if (plan.schedule) {
-    // Proposed, never written: a schedule's cadence, prompt, and
-    // destination are a decision, and `schedule.every` is gated precisely
-    // so a human makes it. A bundle that inserted rows would put
-    // unattended recurring work behind something nobody read as such.
-    writeLine(out, 'This agent is most useful on a schedule, which this does NOT create.');
-    writeLine(out, `  Ask them, once they are running: "schedule yourself every ${plan.schedule.every}: ${plan.schedule.prompt}"`);
-    writeLine(out, '  They will ask you to approve it — that is the second reviewed step.');
-    writeLine(out);
-  }
-};
-
-const writeTemplateBlockers = (streams: CliStreams, plan: TemplatePlan): void => {
-  writeLine(streams.stderr, `Nothing was created. ${plan.template.id} cannot be applied here:`);
-  for (const blocker of plan.blockers) {
-    writeLine(streams.stderr, blocker.message);
-  }
-};
-
-export const runAgentTemplates = async (
-  command: ParsedAgentTemplatesCommand,
-  streams: CliStreams,
-): Promise<number> => {
-  if (command.format === 'json') {
-    writeLine(streams.stdout, JSON.stringify(
-      AGENT_TEMPLATES.map((template) => ({
-        id: template.id,
-        title: template.title,
-        summary: template.summary,
-        defaultName: template.defaultName,
-        tools: template.tools,
-        skills: template.skills,
-        credentials: template.credentials,
-        plugins: template.plugins.map((entry) => ({ package: entry.package, reason: entry.reason })),
-        ...(template.schedule ? { schedule: template.schedule } : {}),
-      })),
-      null,
-      2,
-    ));
-    return 0;
-  }
-  for (const template of AGENT_TEMPLATES) {
-    writeLine(streams.stdout, `${template.id.padEnd(12)}${template.title} — ${template.summary}`);
-    const needs = template.plugins.map((entry) => entry.package);
-    writeLine(streams.stdout, `${''.padEnd(12)}needs ${needs.length > 0 ? needs.join(', ') : 'nothing installed'}`);
-  }
-  writeLine(streams.stdout);
-  writeLine(streams.stdout, 'See what one would grant on this machine, and create it:');
-  writeLine(streams.stdout, `  stratus agent new --template ${AGENT_TEMPLATES[0]?.id ?? 'research'}`);
-  return 0;
-};
-
-/**
- * Skill ids anything on this host answers: the operator directory, plus
- * what the configured plugins' manifests declare.
- *
- * Manifests rather than a registry, because this runs with no daemon —
- * and a manifest is exactly what the daemon reads to register them, so the
- * two agree by construction.
- */
-const installedSkillIds = async (
-  env: CliEnvironment,
-  plugins: PluginsConfig,
-  host: { resolve: (specifier: string) => string; import: (specifier: string) => Promise<unknown> },
-): Promise<string[]> => {
-  const registry = new SkillRegistry();
-  const ids = (await loadOperatorSkills(env, registry, () => {})).map((skill) => skill.id);
-  for (const [specifier, block] of Object.entries(plugins)) {
-    if (block.enabled === false) {
-      continue;
-    }
-    try {
-      const { manifest } = await readPluginManifest(specifier, host);
-      for (const skill of manifest.contributes.skills) {
-        ids.push(`${manifest.packageName}:${skill.id}`, skill.id);
-      }
-    } catch {
-      // A plugin that will not resolve or whose manifest will not parse is
-      // reported where it matters — beside the tools the template needs.
-      // Here it just contributes no skills.
-    }
-  }
-  return ids;
-};
-
-/**
- * `stratus agent new --template <id>`: propose a soul, an allowlist, and
- * the plugin configuration behind them, then commit the whole thing once.
- *
- * The two gates are untouched. What changes is that they are answered by
- * reviewing a bundle rather than by authoring one.
- */
-const runAgentNewFromTemplate = async (
-  command: ParsedAgentNewCommand & { template: string },
-  streams: CliStreams,
-  env: CliEnvironment,
-): Promise<number> => {
-  const template = findAgentTemplate(command.template);
-  if (!template) {
-    writeLine(streams.stderr, `No template named ${command.template}. Installed templates: ${agentTemplateIds().join(', ')}.`);
-    writeLine(streams.stderr, 'stratus agent templates describes each one.');
-    return 1;
-  }
-
-  const host = {
-    // `import.meta.resolve` answers relative to the module that calls it,
-    // so the CLI asks its own question: what this install can reach is what
-    // the daemon it starts can reach.
-    resolve: (specifier: string) => import.meta.resolve(specifier),
-    import: (specifier: string) => import(specifier),
-  };
-
-  // Plugin entries are trusted-config-only, and this command writes them:
-  // a project-local `stratus.config.json` ships in any cloned repository
-  // and does not get to decide which code runs in a daemon. So the target
-  // is the config the operator chose — and when that is an auto-discovered
-  // one, this refuses rather than writing somewhere it would be ignored.
-  // One question, asked at each of the four places this flow would
-  // otherwise touch the config: does this bundle have anything to write
-  // there? `applyAgentTemplate` asks the same one to decide whether to run
-  // a transaction at all, and the answers have to agree — a plan that
-  // refused over a file the commit never opens is the over-blocking every
-  // one of these exemptions exists to undo.
-  const needsConfig = template.plugins.length > 0;
-
-  // Discovery reads each candidate to find the active one, so a config
-  // that exists and cannot be opened — a self-referential symlink someone
-  // left in a checkout — throws here, ahead of every exemption below. A
-  // bundle with no plugin entries neither reads that file nor writes it,
-  // which is the same reason the trust rule and the parse failure already
-  // let `assistant` through; this is only the third place the exemption
-  // has to be spelled, because it is the one that runs first.
-  let location;
-  try {
-    location = await resolveConfigLocation(command.configPath ? { configPath: command.configPath } : {}, env);
-  } catch (error) {
-    if (needsConfig) {
-      throw error;
-    }
-    writeLine(
-      streams.stderr,
-      `Warning: ${error instanceof Error ? error.message : String(error)}. ${template.id} writes no plugin config, so it was not needed.`,
-    );
-  }
-  const blockers: TemplateBlocker[] = [];
-  let configPath = globalConfigPath(env);
-  let config: StratusConfigFile = {};
-  // Only when this bundle would actually write plugin config. A template
-  // with no plugins writes a soul and nothing else, and the trust rule is
-  // about which file may decide what code runs in the daemon — refusing
-  // `assistant` because the working directory happens to hold a project
-  // config would be applying a plugin rule to a bundle that has none.
-  if (location && !location.trusted && needsConfig) {
-    blockers.push({
-      kind: 'untrusted-config',
-      message: `${location.path} is a project-local config, which cannot enable plugins — a file that ships in a cloned `
-        + 'repository does not decide which code runs in your daemon. Run this again with --config pointing at a '
-        + `config you chose, or move those settings into ${globalConfigPath(env)}.`,
-    });
-  } else if (location) {
-    configPath = location.path;
-    try {
-      config = await loadConfigFile(location.path);
-    } catch (error) {
-      // A config that is not there yet is an empty merge base, not a
-      // failure: `--config new.json` is a thing an operator is allowed to
-      // type, and the commit half creates the file. Anything else is a
-      // config that exists and cannot be read, where computing the diff is
-      // impossible and guessing at it is how the summary becomes a lie.
-      // Only a bundle that would write plugin entries needs this file
-      // readable: what it cannot compute is the diff against them. A
-      // template with no plugins reads nothing from it and writes nothing
-      // to it, so a broken config somebody left in a checkout is no reason
-      // to refuse a soul — untemplated `agent new` treats it as a hint and
-      // carries on for the same reason.
-      if (!(error instanceof ConfigFileError && error.code === 'ENOENT') && needsConfig) {
-        blockers.push({
-          kind: 'unreadable-config',
-          message: `${location.path} could not be read (${error instanceof Error ? error.message : String(error)}), `
-            + 'so what this bundle would change cannot be computed. Fix it, then run this again.',
-        });
-      }
-    }
-  }
-
-  const processEnv = readProcessEnv(env);
-  const { provider: soulProvider, model: soulModel } = soulPinForNewAgent(config, processEnv);
-  const soulPin = soulProvider !== 'demo' && soulModel !== undefined
-    ? { provider: soulProvider, model: soulModel }
-    : {};
-
-  const name = command.name ?? template.defaultName;
-  // The candidate: `applyAgentTemplate` claims an id atomically under the
-  // lock and reports one it had to change, which is the only thing here
-  // that can differ from what was reviewed.
-  const agent = defineAgent({
-    name,
-    instructions: template.persona,
-    ...(template.tools.length > 0 ? { tools: template.tools } : {}),
-    ...(template.skills.length > 0 ? { skills: template.skills } : {}),
-    ...(template.credentials.length > 0 ? { credentials: template.credentials } : {}),
-  });
-
-  // One call, used twice: to print, and again under the lock to commit.
-  // Location blockers are only for the first — they are about which file is
-  // active, which nothing under the lock can change.
-  // Read only what this bundle names. A `credentials.json` somebody broke,
-  // or a skills directory that turns out to be a file, would otherwise
-  // refuse a template that declares neither and reads neither — and since
-  // no shipped template declares a credential today, that is every one of
-  // them. Same rule the config exemptions follow: what a bundle does not
-  // touch is not its problem.
-  const namedCredentials = template.credentials.length > 0
-    ? await loadNamedCredentials(env)
-    : emptyNamedCredentials();
-  const installedSkills = template.skills.length > 0
-    ? await installedSkillIds(env, config.plugins ?? {}, host)
-    : [];
-  const planFor = (
-    identity: AgentDefinition,
-    current: { plugins?: PluginsConfig },
-    locationBlockers: readonly TemplateBlocker[] = [],
-  ) => planAgentTemplate({
-    template,
-    agent: identity,
-    soulPath: path.join(agentsDirPath(env), `${identity.id}.md`),
-    configPath,
-    config: current,
-    workspacePath: agentWorkspacePath(env, identity.id),
-    workspaceRoot: workspacesDirPath(env),
-    host,
-    credentials: namedCredentials,
-    installedSkills,
-    blockers: locationBlockers,
-  });
-
-  const plan = await planFor(agent, config as { plugins?: PluginsConfig }, blockers);
-
-  writeTemplatePlan(streams, plan);
-  if (plan.blockers.length > 0) {
-    writeTemplateBlockers(streams, plan);
-    return 1;
-  }
-
-  if (!command.yes) {
-    const confirmed = await askConfirmation(streams, env, `Create ${plan.agent.name} with exactly this? [y/N] `);
-    if (!confirmed) {
-      writeLine(streams.stderr, 'Nothing was created.');
-      return 1;
-    }
-  }
-
-  // Resolved once, so the lock, the read and the write all name the same
-  // file — the same rule `updateConfigFile` follows, and it has to be
-  // stated here too because this transaction is composed by hand rather
-  // than run through it.
-  //
-  // Only for a bundle that has a transaction to run. A template with no
-  // plugin entries never locks, reads, or writes the config, so resolving
-  // a path it will not touch would let a symlink loop or an over-long
-  // chain refuse a soul — after the operator already confirmed it — over
-  // a file the command was never going to open.
-  const configTarget = needsConfig ? await resolveConfigTarget(configPath) : configPath;
-
-  // What the id check reads. Claiming an id resolves the config for the
-  // default soul it declares, and a resolution of its own could see a
-  // different file than the one this transaction locked — handing the agent
-  // an id that config's configured soul already answers to, and then
-  // writing its per-agent settings under an id that soul shadows.
-  //
-  // Only when a config was actually selected. With none, `configTarget` is
-  // a global path that need not exist, and naming it would turn "there is
-  // no config" into "the configured default soul could not be read".
-  const idCheckConfig = needsConfig && location !== undefined ? configTarget : command.configPath;
-
-  let applied;
-  try {
-    applied = await applyAgentTemplate({
-      plan,
-      replan: planFor,
-      claimSoul: async (render) => {
-        await env.templateBeforeSoulClaim?.();
-        return claimSoulFile(
-          env,
-          { name, instructions: template.persona },
-          render,
-          (message) => writeLine(streams.stderr, message),
-          idCheckConfig,
-        );
-      },
-      // `formatSoul`, exactly as the untemplated path calls it — there is
-      // no template-only way into the roster, because a second one would be
-      // a second set of validation rules to disagree with the first.
-      renderSoul: (claimed) => formatSoul({
-        agent: {
-          ...claimed,
-          ...(template.tools.length > 0 ? { tools: template.tools } : {}),
-          ...(template.skills.length > 0 ? { skills: template.skills } : {}),
-          ...(template.credentials.length > 0 ? { credentials: template.credentials } : {}),
-        },
-        ...soulPin,
-      }),
-      workspacePathFor: (agentId) => agentWorkspacePath(env, agentId),
-      readConfig: async () => {
-        try {
-          return await loadConfigFile(configTarget) as Record<string, JsonValue>;
-        } catch (error) {
-          // A config file that is not there yet is the ordinary first
-          // case, not a failure: the merge base is an empty object.
-          if (error instanceof ConfigFileError && error.code === 'ENOENT') {
-            return {};
-          }
-          throw error;
-        }
-      },
-      // The resolved variant: `configTarget` is what the lock names, and a
-      // second resolution here could land the write on a different file.
-      writeConfig: (merged) => saveResolvedConfigFile(configTarget, merged as StratusConfigFile),
-      removeSoul: (soulPath) => rm(soulPath, { force: true }),
-      lockPath: `${configTarget}.lock`,
-      ...(env.templateFailBeforeConfigWrite ? { beforeConfigWrite: env.templateFailBeforeConfigWrite } : {}),
-    });
-  } catch (error) {
-    writeLine(streams.stderr, error instanceof TemplateApplyError
-      ? error.message
-      : `Nothing was created: ${error instanceof Error ? error.message : String(error)}`);
-    return 1;
-  }
-
-  writeLine(streams.stdout, `Say hello to ${applied.agent.name}.`);
-  if (applied.reassignedFrom) {
-    writeLine(streams.stdout, `Their id is ${applied.agent.id}, not ${applied.reassignedFrom} — something claimed that one first.`);
-  }
-  writeLine(streams.stdout, `  soul    ${applied.soulPath}`);
-  if (applied.configured.length > 0) {
-    writeLine(streams.stdout, `  config  ${applied.configPath} (${applied.configured.join(', ')})`);
-  }
-  const missing = plan.credentials.filter((credential) => credential.provided === 'missing');
-  for (const credential of missing) {
-    writeLine(streams.stdout, `  ${credential.name} is not provided yet — their other tools work without it:`);
-    writeLine(streams.stdout, `    ${credential.provideCommand}`);
-  }
-  writeLine(streams.stdout);
-  // What a bare `stratus run` from here would select *now*, which is not
-  // always the file this template's plugins are configured in. Keyed to
-  // whether the bundle needs plugins at all, never to whether it wrote
-  // any: a run whose every required block was already there writes
-  // nothing and depends on that file exactly as much.
-  //
-  // A project `stratus.config.json` created while the review was on screen
-  // takes precedence over the global config, cannot enable plugins, and
-  // would start this agent with none of the tools just approved. Asked
-  // after the transaction rather than before it, because the answer
-  // changes no part of what was written — plugin entries have one legal
-  // home and that is where they are — only which command reproduces it.
-  let shadowedBy: string | undefined;
-  if (needsConfig && command.configPath === undefined) {
-    const activeNow = await resolveConfigLocation({}, env).catch(() => undefined);
-    const activeTarget = activeNow
-      ? await resolveConfigTarget(activeNow.path).catch(() => activeNow.path)
-      : undefined;
-    if (activeTarget !== undefined && activeTarget !== configTarget) {
-      shadowedBy = activeNow?.path;
-    }
-  }
-  if (shadowedBy !== undefined) {
-    writeLine(
-      streams.stderr,
-      `Note: ${shadowedBy} is what a bare run here selects now, and a project config cannot enable plugins. `
-      + 'The commands below name the file this agent\'s plugins are configured in.',
-    );
-  }
-
-  writeLine(streams.stdout, 'Try:');
-  // Carrying `--config` when one was given: the plugin entries went into
-  // that file, and a run without it resolves whatever config is active
-  // here instead — starting the agent with none of the tools just
-  // reviewed. Same flag, same reason, when nothing was given but the
-  // active config has since become a file this did not write.
-  const configFlag = command.configPath
-    ? ` --config ${quoteShellArg(command.configPath)}`
-    : shadowedBy !== undefined ? ` --config ${quoteShellArg(applied.configPath)}` : '';
-  writeLine(streams.stdout, `  stratus run${configFlag} --soul ${quoteShellArg(applied.soulPath)} "introduce yourself"`);
-  if (applied.configured.length > 0) {
-    writeLine(streams.stdout, '  stratus restart          # a plugin change needs one; see docs/guides/always-on.md');
-  }
-  return 0;
-};
-
-/**
- * Whether `agent new` will take its guided path — the one that claims a
- * soul and may set the default agent — as opposed to printing an identity
- * and writing nothing.
- *
- * Exported and consulted in two places on purpose: here, to choose the
- * path, and by `runCli`'s state-schema guard, to decide whether this
- * invocation writes. A second reading of "is somebody at a terminal" could
- * disagree with the first, and the disagreement that matters is a
- * downgraded build refusing a command that only prints, or running one that
- * writes.
- */
-export const agentNewIsGuided = (
-  command: ParsedAgentNewCommand,
-  env: CliEnvironment,
-): boolean => env.setupInput === undefined
-  && process.stdin.isTTY === true
-  && command.format === 'text';
-
 export const runAgentNew = async (
   command: ParsedAgentNewCommand,
   streams: CliStreams,
   env: CliEnvironment = {},
 ): Promise<number> => {
-  if (command.template !== undefined) {
-    return runAgentNewFromTemplate({ ...command, template: command.template }, streams, env);
-  }
-
-  const interactive = agentNewIsGuided(command, env);
-
   // On a real terminal, creating an agent is the same guided experience as
   // setup: a headed screen, a prefilled (editable) name, a personality, and
   // an offer to make them the default. Scripted formats and piped input
   // keep the plain one-shot output.
+  const interactive = env.setupInput === undefined
+    && process.stdin.isTTY === true
+    && command.format === 'text';
+
   if (interactive) {
     const prompter = createSetupPrompter(streams, env, {
       header: stratusHeaderLines,
@@ -7537,7 +6867,7 @@ export const runAgentNew = async (
       // feeds the soul's provider/model hint, so fall back to defaults.
       const { location: configLocation, config: activeConfig } = await discoverActiveConfig(env, (message) => {
         writeLine(streams.stdout, `Note: ${message}.`);
-      }, command.configPath);
+      });
       const { provider: soulProvider, model: soulModel } = soulPinForNewAgent(activeConfig, processEnv);
       const soulPin = soulProvider !== 'demo' && soulModel !== undefined
         ? { provider: soulProvider, model: soulModel }
@@ -7548,7 +6878,6 @@ export const runAgentNew = async (
         { name, instructions: persona },
         (candidate) => formatSoul({ agent: candidate, ...soulPin }),
         (message) => writeLine(streams.stdout, message),
-        command.configPath,
       );
       const { agent, soulPath } = claimed;
 
@@ -7560,28 +6889,32 @@ export const runAgentNew = async (
       if (makeDefault.kind === 'index' && makeDefault.index === 0) {
         // The default agent is a machine-wide setting, so it lands in the
         // global config even when a project config is active here.
+        let globalConfig: CliConfigFile | undefined;
         try {
-          // Read and written under the config lock, like every other
-          // read-modify-write of this file: a concurrent `agent new
-          // --template` commits a plugin entry the soul it just wrote
-          // depends on, and a save built on a read from before it would put
-          // the pre-template document back.
-          await updateConfigFile(globalConfigPath(env), env, (globalConfig) => ({
+          globalConfig = await loadConfigFile(globalConfigPath(env));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            globalConfig = {};
+          } else {
+            // A malformed config is recoverable by hand — never overwrite it.
+            writeLine(streams.stdout, `Could not read ${globalConfigPath(env)} (${error instanceof Error ? error.message : String(error)}), so it was left untouched. Fix it, then make ${agent.name} the default from stratus setup.`);
+          }
+        }
+        if (globalConfig !== undefined) {
+          // Re-validated rather than cast: `readNonEmptyString` widens to
+          // `string`, and the shared parser is what says which strings are
+          // provider names. Every source feeding soulProvider is already one,
+          // so this narrows without being able to throw.
+          const config: CliConfigFile = {
             ...globalConfig,
-            // Re-validated rather than cast: `readNonEmptyString` widens to
-            // `string`, and the shared parser is what says which strings are
-            // provider names. Every source feeding soulProvider is already one,
-            // so this narrows without being able to throw.
             provider: globalConfig.provider ?? parseProviderName(soulProvider, 'provider'),
             soul: soulPath,
-          }));
+          };
+          await saveConfigFile(globalConfigPath(env), config);
           madeDefault = true;
           if (configLocation && configLocation.path !== globalConfigPath(env)) {
             writeLine(streams.stdout, `Note: ${configLocation.path} takes precedence over the global config for runs started in this directory.`);
           }
-        } catch (error) {
-          // A malformed config is recoverable by hand — never overwrite it.
-          writeLine(streams.stdout, `Could not read ${globalConfigPath(env)} (${error instanceof Error ? error.message : String(error)}), so it was left untouched. Fix it, then make ${agent.name} the default from stratus setup.`);
         }
       }
 
@@ -8950,14 +8283,6 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
         || (command.command === 'credential' && command.action !== 'list')
         || (command.command === 'schedules' && command.action === 'cancel')
         || (command.command === 'memory' && command.action === 'reassert')
-        // `agent new` writes on two paths: `--template` merges plugin
-        // entries into the config, and the guided path claims a soul and may
-        // set the default agent. Asked of the same predicate that chooses
-        // the path, so a scripted `--format text` — which only prints — is
-        // not refused on a home this build must not touch, and the guided
-        // one is never let through.
-        || (command.command === 'agent-new'
-          && (command.template !== undefined || agentNewIsGuided(command, resolvedEnv)))
         || command.command === 'session'
         || (command.command === 'service' && (command.action === 'install' || command.action === 'start'));
       if (stamp.schemaVersion > STATE_SCHEMA_VERSION) {
@@ -8967,8 +8292,8 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
         // hazard the stamp exists to close. Read-only commands warn and
         // continue, because reading logs or the roster is how someone
         // diagnoses their way OUT of this state; so do `service stop`,
-        // `status`, and `uninstall`, for the same reason. (`agent new
-        // --format json|soul` only prints an identity, and still runs.)
+        // `status`, and `uninstall`, for the same reason. (`agent new`
+        // only prints an identity — it writes nothing.)
         if (writesState) {
           writeLine(streams.stderr, newerStateMessage(stamp.schemaVersion));
           writeLine(streams.stderr, `Refusing \`stratus ${command.command}\` — it writes state the newer format owns. Read-only commands (logs, agents, doctor, service status/stop) still work.`);
@@ -9009,10 +8334,6 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     // a raw rejection instead of the error line and exit code below.
     if (command.command === 'agent-new') {
       return await runAgentNew(command, streams, resolvedEnv);
-    }
-
-    if (command.command === 'agent-templates') {
-      return await runAgentTemplates(command, streams);
     }
 
     if (command.command === 'agents') {

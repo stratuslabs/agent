@@ -147,15 +147,6 @@ the replace. Enabling a plugin runs somebody else's code inside the daemon —
 that is the boundary the whole trust model rests on, and it stays a
 deliberate edit to a file rather than a settings save.
 
-The read and the write happen under `~/.stratus/config.lock`, because the
-read is what the write is built on and this is not the only writer:
-`stratus agent new --template` adds a plugin entry to the same file.
-Interleaved without the lock, this endpoint reads, that command commits its
-entry, and this save puts the pre-template copy back — leaving a soul whose
-allowlist names tools nothing enables, reported as created. Every
-read-modify-write of this file takes the same lock; a client may see a `PUT`
-wait briefly while another writer holds it.
-
 ### Reload and restart
 
 Three things change under a running daemon without a restart, and the API
