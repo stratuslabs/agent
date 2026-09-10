@@ -54,6 +54,7 @@ import {
   preflightPlugin,
   readPluginManifest,
   riskFloorFor,
+  PluginConfigError,
   type LoadedPlugin,
 } from '@stratusagent/plugins';
 import {
@@ -4635,18 +4636,7 @@ export const runSetup = async (
      * the setting being absent, never about the package: a block that
      * already has it is enabled and disabled like any other.
      */
-    byHand?: {
-      key: string;
-      reason: string;
-      /**
-       * Whether the value already in the config is the shape the plugin
-       * requires. Presence alone is not the question: the config loader
-       * accepts any plugin-owned value, so `servers: "invalid"` parses and
-       * reads as configured, and enabling on that basis writes a block the
-       * daemon then refuses to load while this menu reports it enabled.
-       */
-      configured: (value: unknown) => boolean;
-    };
+    byHand?: { key: string; reason: string };
   }> = {
     '@stratusagent/tool-fs': {
       label: 'Files',
@@ -4692,9 +4682,6 @@ export const runSetup = async (
       byHand: {
         key: 'servers',
         reason: 'it needs a servers block naming each MCP server — see docs/reference/config.md',
-        // The bridge throws `McpConfigError` on anything but an object,
-        // one entry per server, so nothing else is a config to re-enable.
-        configured: (value) => typeof value === 'object' && value !== null && !Array.isArray(value),
       },
     },
   };
@@ -4708,6 +4695,38 @@ export const runSetup = async (
   const pluginEnabled = (name: string): boolean => {
     const block = state.plugins?.[name];
     return block !== undefined && block.enabled !== false;
+  };
+
+  /**
+   * What the daemon would refuse about a block, or `undefined` if it would
+   * take it — the loader's own preflight, not a third opinion.
+   *
+   * `stratus plugins` already runs `preflightPlugin` to answer exactly this
+   * about an enabled plugin, and the menu asking it a different way was how
+   * three rounds of review found a different hand-rolled check short of the
+   * real rule: a `servers` that is a string, `roots` that are numbers, a
+   * `timeoutMs` that is not an integer. The manifest's schema knows all
+   * three, so the fix is to ask it rather than to keep guessing at it.
+   *
+   * A package that will not resolve has no manifest to ask, and that is
+   * `undefined` too: setup cannot preflight what is not installed, and
+   * saying nothing is wrong is the same answer it has always given there.
+   */
+  const pluginConfigProblem = async (name: string, block: PluginConfigBlock): Promise<string | undefined> => {
+    try {
+      const { manifest, directory } = await readPluginManifest(name, {
+        resolve: (target) => import.meta.resolve(target),
+      });
+      await preflightPlugin(manifest, directory, block as JsonObject, workspacesDirPath(env));
+      return undefined;
+    } catch (error) {
+      // A package that is absent or unreadable is not a verdict about the
+      // config. Only a rejection of the settings themselves is.
+      if (error instanceof PluginConfigError) {
+        return error.message;
+      }
+      return undefined;
+    }
   };
 
   /**
@@ -4732,15 +4751,13 @@ export const runSetup = async (
       && key in (own as Record<string, unknown>)
       ? (own as Record<string, unknown>)[key]
       : block?.[key];
-    // The same value the fleet-wide prompt writes: a nonempty list of
-    // nonempty strings. Not a copy of the plugin's schema — it is this
-    // menu holding a hand-edited value to the shape its own prompt
-    // produces, which is the only shape it has ever claimed to accept.
-    // Length alone let `roots: [123]` stand in as configured, and tool-fs
-    // rejects the whole plugin at preflight for it.
-    return Array.isArray(value)
-      && value.length > 0
-      && value.every((entry) => typeof entry === 'string' && entry.trim().length > 0);
+    // Nonempty is this menu's own question — "would an agent get anything"
+    // — and the only part of it the manifest does not answer, since a
+    // schema that permits `roots: []` is right to. Whether the entries are
+    // the right *type* is the manifest's, checked by `pluginConfigProblem`
+    // before enabling, so a second test for it here would be the copy this
+    // file keeps growing.
+    return Array.isArray(value) && value.length > 0;
   };
 
   const pluginsSummary = (): string => {
@@ -4883,16 +4900,23 @@ export const runSetup = async (
     // for turning it back on — must be able to come back, or the promise is
     // false and the switch is one-way.
     const byHandValue = setup?.byHand !== undefined ? state.plugins?.[name]?.[setup.byHand.key] : undefined;
-    const configuredByHand = setup?.byHand !== undefined && setup.byHand.configured(byHandValue);
+    // Present *and* something the loader would take. Presence alone read
+    // `servers: "invalid"` as a config to switch back on; asking the
+    // manifest instead of inventing a shape test here is the same move the
+    // enable path makes, and there is one rule between them.
+    const byHandProblem = setup?.byHand !== undefined && byHandValue !== undefined
+      ? await pluginConfigProblem(name, state.plugins?.[name] ?? {})
+      : undefined;
+    const configuredByHand = byHandValue !== undefined && byHandProblem === undefined;
     if (setup?.byHand && !enabled && !configuredByHand) {
       writeLine(streams.stdout);
       writeLine(streams.stdout, `${name} contributes ${setup.grants}.`);
       writeLine(streams.stdout, `Setup does not enable it: ${setup.byHand.reason}.`);
-      if (byHandValue !== undefined) {
-        // Present, and not what the plugin will accept. Without this the
+      if (byHandProblem !== undefined) {
+        // Present, and not what the loader will take. Without this the
         // refusal reads as "you have not set it", which sends an operator
         // who plainly has to look for a menu bug rather than at the value.
-        writeLine(streams.stdout, `The ${setup.byHand.key} already in your config is not that shape, so a daemon refuses to load the plugin until it is fixed.`);
+        writeLine(streams.stdout, `A daemon would refuse the block you have: ${byHandProblem}`);
       }
       if (!installed) {
         writeLine(streams.stdout, `Install it with: npm install -g ${name}`);
@@ -5006,6 +5030,20 @@ export const runSetup = async (
   const enablePlugin = async (name: string): Promise<void> => {
     const setup = PLUGIN_SETUP[name];
     const existing = state.plugins?.[name] ?? {};
+    // Before anything is asked, because the settings under review are ones
+    // an operator hand-wrote and setup is about to switch on. Enabling a
+    // block the loader rejects writes `enabled: true` on a plugin that
+    // registers nothing, and the grant line then names agents that can call
+    // it — the "configured and useless" state, arrived at through the menu
+    // meant to prevent it. What setup itself writes below is valid by
+    // construction, so this is the only place the question arises.
+    const problem = await pluginConfigProblem(name, existing);
+    if (problem !== undefined) {
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, `${name} was not enabled — a daemon would refuse these settings: ${problem}`);
+      writeLine(streams.stdout, `Fix that in your config, then enable it here. \`stratus plugins\` reports the same check.`);
+      return;
+    }
     const block: PluginConfigBlock = { ...existing, enabled: true };
 
     if (setup?.needs) {
@@ -5212,9 +5250,14 @@ export const runSetup = async (
     while (true) {
       const mode = state.approvals?.mode ?? 'headless';
       const connected = await configurableSlackAgents();
+      // Static text, and still fitted: with `(current)` shown this row runs
+      // to 76 columns including the selection prefix, so it clears an
+      // 80-column terminal by four and wraps on anything narrower — and a
+      // wrapped row corrupts every redraw, because the rewind counts
+      // options rather than rendered rows. Being static is not being short.
       const options = [
-        `Headless${mode === 'headless' ? ' (current)' : ''}          refuse gated calls when nobody is watching`,
-        `Ask in Slack${mode === 'remote' ? ' (current)' : ''}       park the turn and ask an approver`,
+        fitMenuRow(`Headless${mode === 'headless' ? ' (current)' : ''}          refuse gated calls when nobody is watching`, 6),
+        fitMenuRow(`Ask in Slack${mode === 'remote' ? ' (current)' : ''}       park the turn and ask an approver`, 6),
       ];
       if (mode === 'remote') {
         for (const agentId of connected) {

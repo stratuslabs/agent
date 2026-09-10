@@ -44,17 +44,21 @@ digits to jump, Esc to go back.
 - **Plugins** — what your agents *can* do. The list shows each first-party
   package as installed, enabled, or neither; picking one installs it with
   `npm install -g` and enables it in the same step, writing the `plugins`
-  block for you. Two things it deliberately will not do:
+  block for you. What it deliberately will not do, in each case because the
+  alternative is a config that looks configured and is not:
   - **Enable a plugin without the setting it is useless without.** `tool-fs`
     with no `roots` loads and then fails every call, so setup asks for them
     and writes nothing if you leave the answer blank — unless roots are
     already set per agent under `agents.<id>` for an agent the roster still
     serves, which is a working config and a narrower one than any fleet-wide
     answer, so that is kept as it is. An override left behind by a deleted
-    agent does not count: it would grant nobody anything. Nor does one of
-    the wrong type — the override has to be the same nonempty list of
-    strings the prompt itself writes, since anything else is rejected when
-    the daemon loads the plugin.
+    agent does not count: it would grant nobody anything.
+  - **Enable a block a daemon would refuse.** Settings you wrote by hand are
+    checked before the switch goes on — through `preflightPlugin`, the same
+    function the loader runs and `stratus plugins` reports from, so the
+    three surfaces cannot disagree. A `timeoutMs` that is not an integer, or
+    a `roots` entry that is not a string, is named where it is and the
+    plugin is left off rather than switched on to register nothing.
   - **Switch off a plugin whose package is gone.** A config copied from
     another machine, or an uninstall, leaves a block enabling a package that
     is not there; the row offers to clear it without installing first. A key
@@ -68,15 +72,12 @@ digits to jump, Esc to go back.
   - **Enable `plugin-mcp` from scratch.** It requires a `servers` block
     naming endpoints only you know, and a block written without one is
     refused at load. Setup says so and points at
-    [Config](../reference/config.md). A block that already has a `servers`
-    *object* is switched on and off like any other — the refusal is about
-    the missing setting, not the package. A `servers` of some other shape
-    is not a config to switch back on: the bridge refuses it at load, so
-    setup says the value is wrong rather than enabling on the strength of
-    the key being there. It checks no further than that. Whether each entry
-    inside is one the bridge accepts is the plugin's rule, and reading it
-    means loading the plugin, which setup never does — so enabling says so,
-    and points at the `plugin … did not load` the daemon prints at startup.
+    [Config](../reference/config.md). A block that already has one is
+    switched on and off like any other — the refusal is about the missing
+    setting, not the package. Whether each entry inside `servers` is one the
+    bridge accepts is past what any manifest states, and reading it means
+    loading the plugin, which setup never does — so enabling says so, and
+    points at the `plugin … did not load` the daemon prints.
 
   It also names a prerequisite it cannot install: `tool-browser` depends on
   `playwright-core`, which deliberately downloads no browser, so enabling it

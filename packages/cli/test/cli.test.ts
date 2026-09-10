@@ -6198,7 +6198,44 @@ test('setup does not call a plugin callable by an agent its required setting mis
   assert.doesNotMatch(output.stdout, /Ava \(ava\), Stratus \(stratus\) have no `tools:` list/);
 });
 
-test('setup refuses to enable a plugin whose by-hand setting is the wrong shape', async () => {
+test('setup will not enable a plugin whose preserved settings fail its manifest', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // tool-shell needs no setting to be useful, so nothing in this menu had
+  // ever looked at its block — it has no `needs` and no `byHand`. The
+  // manifest wants an integer, the config loader takes any plugin-owned
+  // value, and preflight rejects the whole plugin. Switching it on and then
+  // naming the agents that can call `shell.run` is the state this menu
+  // exists to prevent, reached through the menu.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-shell': { enabled: false, timeoutMs: 'bad' } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-shell (2) → Enable it (1) → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '2\n', '1\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /a daemon would refuse these settings: plugins\["@stratusagent\/tool-shell"\]\.timeoutMs must be a integer/);
+  // The claim the refusal replaces — the plugin is not enabled, so nothing
+  // is callable and the grant line must not have run.
+  assert.doesNotMatch(output.stdout, /is enabled/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins['@stratusagent/tool-shell'].enabled, false);
+});
+
+test('setup refuses to enable a plugin whose preserved settings a daemon would reject', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   // The config loader takes any plugin-owned value, so this parses. The
@@ -6227,7 +6264,9 @@ test('setup refuses to enable a plugin whose by-hand setting is the wrong shape'
 
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /Setup does not enable it: it needs a servers block/);
-  assert.match(output.stdout, /The servers already in your config is not that shape/);
+  // The loader's own words, not a shape test written here: `stratus plugins`
+  // reports this same sentence about this same block.
+  assert.match(output.stdout, /A daemon would refuse the block you have: plugins\["@stratusagent\/plugin-mcp"\]\.servers must be a object/);
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
   assert.deepEqual(config.plugins['@stratusagent/plugin-mcp'], { enabled: false, servers: 'invalid' });
 });
@@ -6386,7 +6425,9 @@ test('setup does not treat per-agent roots of the wrong type as configured', asy
   });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /it grants nothing without roots/);
+  // Named down to the offending element, because the check is the manifest's
+  // rather than a type test rewritten in the menu.
+  assert.match(output.stdout, /a daemon would refuse these settings: plugins\["@stratusagent\/tool-fs"\]\.agents\.ava\.roots\[0\] must be a string/);
   assert.doesNotMatch(output.stdout, /Keeping the per-agent roots/);
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
   assert.equal(config.plugins['@stratusagent/tool-fs'].enabled, false);
