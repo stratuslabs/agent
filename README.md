@@ -43,6 +43,7 @@ line, 23.4+) — details in [Installation](docs/start/installation.md).
 | 🛡 | **Ask before acting** — safe calls run unattended; risky ones ask a human, in Slack if that's where you are | [Approvals](docs/guides/approvals.md) |
 | ⏰ | **Act on their own** — schedules an agent sets for itself, approved once by a human, reporting into Slack | [Schedules](docs/guides/schedules.md) |
 | 📚 | **Learn procedures** — skills installed from any GitHub repo, loaded only when relevant | [Skills](docs/guides/skills.md) |
+| 📦 | **Start from a template** — a folder or repo carrying an agent, its skills, and the plugins behind its tools, installed in one reviewed command | [Templates](docs/guides/templates.md) |
 | 🤝 | **Work as a team** — delegation between agents, routing that keeps the same face in the same places | [Agents](docs/concepts/agents.md) |
 | 🖥 | **Managed from anywhere** — one authenticated API, a web dashboard on top | [Remote access](docs/guides/remote-access.md) |
 

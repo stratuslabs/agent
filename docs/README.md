@@ -18,6 +18,7 @@ tree is where the depth lives.
 | Control which shell commands run unattended | [Shell commands](./guides/shell.md) |
 | Control which sites an agent may click on unattended | [Browser actions](./guides/browser.md) |
 | Teach an agent a procedure | [Skills](./guides/skills.md) |
+| Set up an agent from a folder or a repo | [Templates](./guides/templates.md) |
 | Write a skill that works on every agent, or check one against the spec | [Skill format](./reference/skill-format.md) |
 | Decide what runs unattended and approve the rest from Slack | [Approvals](./guides/approvals.md) |
 | Let agents act on their own schedule | [Schedules](./guides/schedules.md) |

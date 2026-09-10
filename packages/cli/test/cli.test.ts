@@ -8849,3 +8849,215 @@ test('stratus session rollover without a running daemon says so', async () => {
   assert.equal(await runCli({ argv: ['session', 'rollover', 's-1'], streams: failed.streams, env: { cwd: home, homeDir: home, processEnv: {} } }), 1);
   assert.match(failed.output.stderr, /no running daemon found/);
 });
+
+// ---------------------------------------------------------------------------
+// stratus template add
+// ---------------------------------------------------------------------------
+
+/** A template on disk: the layout is the format, so fixtures are just files. */
+const writeTemplateDir = async (files: Record<string, string>): Promise<string> => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stratus-template-src-'));
+  for (const [relative, content] of Object.entries(files)) {
+    const target = path.join(dir, relative);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, content);
+  }
+  return dir;
+};
+
+const EXAMPLE_MANIFEST = JSON.stringify({ name: 'Example', description: 'A template written for a test.' });
+const EXAMPLE_SOUL = '---\nname: Scribe\ntools:\n  - fs.read\n---\n\nYou keep notes.\n';
+
+test('template add installs the souls, skills, and plugin config a template carries', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const source = await writeTemplateDir({
+    'template.json': EXAMPLE_MANIFEST,
+    'config.json': JSON.stringify({ plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } } }),
+    'agents/scribe.md': EXAMPLE_SOUL,
+    'skills/note-taking/SKILL.md': '---\nname: note-taking\ndescription: How to take a note, for a test.\n---\n\nWrite it down.\n',
+  });
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['template', 'add', source, '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  // The review names every file it is about to add, because that is the
+  // only thing standing between a downloaded folder and an npm install.
+  assert.match(output.stdout, /agent {4}Scribe \(scribe\) — fs\.read/);
+  assert.match(output.stdout, /skill {4}note-taking/);
+  assert.match(output.stdout, /plugin {3}@stratusagent\/tool-fs/);
+
+  assert.equal(
+    await readFile(path.join(home, '.stratus', 'agents', 'scribe.md'), 'utf8'),
+    EXAMPLE_SOUL,
+    'the soul lands verbatim — a template is a copy, not a render',
+  );
+  await stat(path.join(home, '.stratus', 'skills', 'note-taking', 'SKILL.md'));
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.plugins, { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } });
+});
+
+test('template add merges the plugins block rather than replacing it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-web': { enabled: true } },
+  })}\n`);
+  const source = await writeTemplateDir({
+    'template.json': EXAMPLE_MANIFEST,
+    'config.json': JSON.stringify({ plugins: { '@stratusagent/tool-fs': { enabled: true } } }),
+  });
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['template', 'add', source, '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  // Replacing the block would take away a plugin the operator enabled and
+  // the template never mentioned — the same loss setup used to cause.
+  assert.deepEqual(Object.keys(config.plugins).sort(), ['@stratusagent/tool-fs', '@stratusagent/tool-web']);
+  assert.equal(config.provider, 'anthropic', 'and keys the template says nothing about are untouched');
+});
+
+test('template add refuses a plugins key that is not an npm package name', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const source = await writeTemplateDir({
+    'template.json': EXAMPLE_MANIFEST,
+    // These names reach `npm install -g`, which runs through a shell on
+    // Windows. A template is a folder somebody downloaded, so the names in
+    // it are not this repository's constants any more.
+    'config.json': JSON.stringify({ plugins: { '@stratusagent/tool-fs && touch pwned': { enabled: true } } }),
+  });
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['template', 'add', source, '--yes'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      packageInstaller: async () => {
+        throw new Error('the installer must never see a name like that');
+      },
+    },
+  });
+
+  assert.equal(code, 1);
+  assert.match(output.stderr, /is not an npm package name/);
+  await assert.rejects(stat(path.join(home, '.stratus', 'config.json')), { code: 'ENOENT' });
+});
+
+test('template add installs the packages a template names, and only the missing ones', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const source = await writeTemplateDir({
+    'template.json': EXAMPLE_MANIFEST,
+    'config.json': JSON.stringify({
+      plugins: {
+        // Resolvable from this checkout, so it is already installed.
+        '@stratusagent/tool-fs': { enabled: true },
+        '@stratusagent/not-a-real-plugin': { enabled: true },
+      },
+    }),
+  });
+
+  const asked: string[][] = [];
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['template', 'add', source, '--yes'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      packageInstaller: async (packages) => {
+        asked.push([...packages]);
+        return { ok: true, message: '' };
+      },
+    },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  assert.deepEqual(asked, [['@stratusagent/not-a-real-plugin']]);
+  assert.match(output.stdout, /@stratusagent\/tool-fs \(already installed\)/);
+});
+
+test('declining the review installs nothing', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const source = await writeTemplateDir({
+    'template.json': EXAMPLE_MANIFEST,
+    'config.json': JSON.stringify({ plugins: { '@stratusagent/tool-fs': { enabled: true } } }),
+    'agents/scribe.md': EXAMPLE_SOUL,
+  });
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['template', 'add', source],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, templateInput: Readable.from(['n\n']) },
+  });
+
+  assert.equal(code, 1);
+  assert.match(output.stderr, /Nothing was installed/);
+  await assert.rejects(stat(path.join(home, '.stratus', 'agents', 'scribe.md')), { code: 'ENOENT' });
+  await assert.rejects(stat(path.join(home, '.stratus', 'config.json')), { code: 'ENOENT' });
+});
+
+test('an agent already installed under that name is refused, and --force replaces it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'scribe.md'), '---\nname: Mine\n---\n\nI was here first.\n');
+  const source = await writeTemplateDir({
+    'template.json': EXAMPLE_MANIFEST,
+    'agents/scribe.md': EXAMPLE_SOUL,
+  });
+
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['template', 'add', source, '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  // Nothing else in this template, so nothing landed at all — which is the
+  // only thing `skill add` treats as a failure, and this matches it.
+  assert.equal(code, 1);
+  assert.match(output.stderr, /Warning: skipped scribe\.md/);
+  assert.match(
+    await readFile(path.join(home, '.stratus', 'agents', 'scribe.md'), 'utf8'),
+    /I was here first/,
+  );
+
+  const forced = createStreams();
+  const forcedCode = await runCli({
+    argv: ['template', 'add', source, '--yes', '--force'],
+    streams: forced.streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(forcedCode, 0, forced.output.stderr);
+  assert.equal(await readFile(path.join(home, '.stratus', 'agents', 'scribe.md'), 'utf8'), EXAMPLE_SOUL);
+});
+
+test('the example template in this repository installs', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['template', 'add', path.join(packageDir, '..', '..', 'examples', 'templates', 'example'), '--yes'],
+    streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+
+  assert.equal(code, 0, output.stderr);
+  await stat(path.join(home, '.stratus', 'agents', 'scribe.md'));
+  await stat(path.join(home, '.stratus', 'skills', 'meeting-notes', 'SKILL.md'));
+});

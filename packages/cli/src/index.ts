@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { appendFile, chmod, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
@@ -233,6 +233,7 @@ export interface CliEnvironment {
   stdinStream?: NodeJS.ReadableStream;
   approvalInput?: NodeJS.ReadableStream;
   setupInput?: NodeJS.ReadableStream;
+  templateInput?: NodeJS.ReadableStream;
   processEnv?: NodeJS.ProcessEnv;
   cwd?: string;
   /** Home directory override (tests). Defaults to os.homedir(). */
@@ -493,6 +494,16 @@ export interface ParsedChatCommand {
   maxTurns?: number;
 }
 
+export interface ParsedTemplateAddCommand {
+  command: 'template-add';
+  /** A GitHub `owner/repo`, a git URL, or a local path. */
+  source: string;
+  /** Skip the review and install straight away. */
+  yes?: boolean;
+  /** Replace an agent or skill already installed under the same name. */
+  force?: boolean;
+}
+
 export interface ParsedSkillAddCommand {
   command: 'skill-add';
   /** A GitHub `owner/repo`, a git URL, or a local path. */
@@ -659,6 +670,7 @@ export type ParsedCommand =
   | ParsedAgentNewCommand
   | ParsedAgentsCommand
   | ParsedSkillAddCommand
+  | ParsedTemplateAddCommand
   | ParsedSkillValidateCommand
   | ParsedSkillsCommand
   | ParsedSkillReloadCommand
@@ -803,6 +815,8 @@ Usage:
   stratus run --config ./stratus.config.json --provider openai "Say hello"
   stratus agents
   stratus agents --gateway http://127.0.0.1:4123
+  stratus template add ./examples/templates/example
+  stratus template add stratuslabs/template-oncall --yes
   stratus skill add stratuslabs/skill-code-review
   stratus skill add ./my-skills --skill code-review --agent ava
   stratus skill validate ./my-skill
@@ -857,6 +871,15 @@ Commands:
   logs             Read the daemon's log from any terminal: -f to follow,
                    -n <count> for backlog, --agent / --session to filter,
                    --format json for the raw records
+  template add     Install a template — a folder (or GitHub repo) holding
+                   soul files, skills, and the plugin config they need. Prints
+                   every agent, skill, plugin package and config key it would
+                   add, then asks; --yes installs without asking, --force
+                   replaces an agent or skill already installed under the same
+                   name. Plugin packages the template's config.json names are
+                   installed with npm install -g and enabled in
+                   ~/.stratus/config.json, which needs a restart to take
+                   effect. See docs/guides/templates.md for the layout
   skill add        Install skills from a GitHub repo (owner/repo or URL) or a
                    local path into ~/.stratus/skills — whole directories, one
                    per skill; works with skills published for other agents
@@ -973,6 +996,7 @@ Options:
   --all-unknown    memory reassert: every live entry with no recorded origin
   --token          Bearer token for --gateway (default: ~/.stratus/gateway-token)
   --no-reload      skill add: install without reloading a running daemon
+  -y, --yes        template add: install without the review prompt
   --reason         restart: why, for the daemon's log
   --drain-timeout  restart: seconds the daemon lets in-flight turns finish
                    before aborting them (default: 30)
@@ -1550,6 +1574,48 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
       throw new Error(`Unknown option: ${token}`);
     }
     return { command: 'skills' };
+  }
+
+  if (command === 'template') {
+    const [subcommand, ...templateRest] = rest;
+    if (subcommand === undefined || subcommand === '--help' || subcommand === '-h') {
+      return { command: 'help' };
+    }
+    if (subcommand !== 'add') {
+      throw new Error(`Unknown template subcommand: ${subcommand}. Try: stratus template add <path or owner/repo>`);
+    }
+    let source: string | undefined;
+    let yes = false;
+    let force = false;
+    for (const token of templateRest) {
+      if (token === '--help' || token === '-h') {
+        return { command: 'help' };
+      }
+      if (token === '--yes' || token === '-y') {
+        yes = true;
+        continue;
+      }
+      if (token === '--force') {
+        force = true;
+        continue;
+      }
+      if (token.startsWith('--')) {
+        throw new Error(`Unknown option: ${token}`);
+      }
+      if (source !== undefined) {
+        throw new Error(`template add takes one source; got both ${JSON.stringify(source)} and ${JSON.stringify(token)}.`);
+      }
+      source = token;
+    }
+    if (source === undefined) {
+      throw new Error('template add needs a source: a GitHub owner/repo, a git URL, or a local path.');
+    }
+    return {
+      command: 'template-add',
+      source,
+      ...(yes ? { yes } : {}),
+      ...(force ? { force } : {}),
+    };
   }
 
   if (command === 'skill') {
@@ -5972,9 +6038,10 @@ const runUpdate = async (
  * shorthand is the form skills.sh and its CLI print, so a skill published
  * there installs by the name its listing shows.
  */
-const resolveSkillSource = async (
+const resolveSource = async (
   source: string,
   env: CliEnvironment,
+  what: 'skill' | 'template',
 ): Promise<{ kind: 'local'; directory: string } | { kind: 'git'; url: string }> => {
   const localPath = path.resolve(readWorkingDirectory(env), source);
   try {
@@ -5995,7 +6062,7 @@ const resolveSkillSource = async (
     return { kind: 'git', url: source };
   }
   throw new Error(
-    `Cannot read ${JSON.stringify(source)} as a skill source. Pass a GitHub owner/repo, a git URL, or a local path.`,
+    `Cannot read ${JSON.stringify(source)} as a ${what} source. Pass a GitHub owner/repo, a git URL, or a local path.`,
   );
 };
 
@@ -6020,8 +6087,8 @@ const redactedSourceUrl = (url: string): string => {
   }
 };
 
-/** Shallow-clone a skills source. Git owns every transport we would otherwise re-implement. */
-const cloneSkillSource = async (url: string, destination: string): Promise<void> => {
+/** Shallow-clone a source repository. Git owns every transport we would otherwise re-implement. */
+const cloneSource = async (url: string, destination: string): Promise<void> => {
   const display = redactedSourceUrl(url);
   await new Promise<void>((resolve, reject) => {
     const child = spawn('git', ['clone', '--depth', '1', '--quiet', url, destination], {
@@ -6044,6 +6111,360 @@ const cloneSkillSource = async (url: string, destination: string): Promise<void>
       }
     });
   });
+};
+
+// ---------------------------------------------------------------------------
+// Templates: a folder of files, copied into ~/.stratus
+// ---------------------------------------------------------------------------
+
+/**
+ * What a template directory holds. Every entry is a file somebody could
+ * have written by hand into `~/.stratus`, which is the whole design:
+ * installing one is copying, and reviewing one is reading a folder.
+ *
+ *   template.json     name and description — the only required file
+ *   config.json       merged into ~/.stratus/config.json
+ *   agents/<id>.md    soul files, copied to ~/.stratus/agents/
+ *   skills/<id>/      skill directories, installed exactly as `skill add` does
+ *
+ * There is deliberately no list of packages to install. The keys of
+ * `config.json`'s `plugins` block already name them, and a second list
+ * would be a second answer that drifts from the first.
+ */
+const TEMPLATE_MANIFEST_FILENAME = 'template.json';
+const TEMPLATE_CONFIG_FILENAME = 'config.json';
+const TEMPLATE_AGENTS_DIRNAME = 'agents';
+const TEMPLATE_SKILLS_DIRNAME = 'skills';
+
+/**
+ * A package specifier this command will hand to `npm install -g`.
+ *
+ * `defaultPackageInstaller` spawns npm through a shell on Windows, and its
+ * comment says every package name reaching that shell is a constant in
+ * this file. A template makes that false — these names come out of a
+ * folder somebody downloaded — so anything that is not a plain npm package
+ * name is refused before it can be re-parsed as a command. No version
+ * suffix either: a template names packages, and the installed version is
+ * reported rather than pinned.
+ */
+const NPM_PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+
+interface TemplateAgentPlan {
+  /** The file inside `agents/`, which is also the id it installs under. */
+  file: string;
+  id: string;
+  name: string;
+  tools: string[];
+  /** An agent already using this id in `~/.stratus/agents`. */
+  taken: boolean;
+}
+
+interface TemplatePlan {
+  name: string;
+  description: string;
+  directory: string;
+  agents: TemplateAgentPlan[];
+  skills: string[];
+  /** Plugin packages the config block names, in the order it names them. */
+  packages: string[];
+  /** Packages of those that this install would have to fetch. */
+  missing: string[];
+  config: JsonObject;
+}
+
+const isPlainObject = (value: unknown): value is JsonObject =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * Merge a template's `config.json` onto the config that exists.
+ *
+ * Plain objects merge key by key; scalars and arrays replace. That rule is
+ * what keeps `plugins` additive — a template naming one package must not
+ * take away the packages already enabled, which is exactly the data loss
+ * `stratus setup` used to cause.
+ */
+const mergeTemplateConfig = (base: JsonValue | undefined, incoming: JsonValue): JsonValue => {
+  if (!isPlainObject(base) || !isPlainObject(incoming)) {
+    return incoming;
+  }
+  const merged: JsonObject = { ...base };
+  for (const [key, value] of Object.entries(incoming)) {
+    merged[key] = mergeTemplateConfig(base[key], value as JsonValue);
+  }
+  return merged;
+};
+
+const readTemplateJson = async (file: string): Promise<JsonObject | undefined> => {
+  let raw: string;
+  try {
+    raw = await readFile(file, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`${file} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!isPlainObject(parsed)) {
+    throw new Error(`${file} must contain a JSON object.`);
+  }
+  return parsed;
+};
+
+/** Read a template directory and work out what installing it would do. */
+const planTemplateInstall = async (
+  env: CliEnvironment,
+  directory: string,
+): Promise<TemplatePlan> => {
+  const manifest = await readTemplateJson(path.join(directory, TEMPLATE_MANIFEST_FILENAME));
+  if (!manifest) {
+    throw new Error(
+      `${directory} has no ${TEMPLATE_MANIFEST_FILENAME}, so it is not a template. `
+      + 'A template is a directory with template.json in it; see docs/guides/templates.md.',
+    );
+  }
+  const name = typeof manifest.name === 'string' ? manifest.name.trim() : '';
+  const description = typeof manifest.description === 'string' ? manifest.description.trim() : '';
+  if (!name || !description) {
+    throw new Error(`${path.join(directory, TEMPLATE_MANIFEST_FILENAME)} needs a "name" and a "description".`);
+  }
+
+  const config = await readTemplateJson(path.join(directory, TEMPLATE_CONFIG_FILENAME)) ?? {};
+  const pluginsBlock = config.plugins;
+  const packages = isPlainObject(pluginsBlock) ? Object.keys(pluginsBlock) : [];
+  for (const specifier of packages) {
+    if (!NPM_PACKAGE_NAME.test(specifier)) {
+      throw new Error(
+        `${JSON.stringify(specifier)} is not an npm package name, so this template will not be installed. `
+        + 'A plugins key names the package to install and enable, nothing else.',
+      );
+    }
+  }
+  // What this install would have to fetch. Resolved the way the daemon
+  // resolves a plugin, so "already installed" means the same thing here as
+  // it does when the plugin is loaded.
+  const missing = packages.filter((specifier) => {
+    try {
+      import.meta.resolve(specifier);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+
+  const agents: TemplateAgentPlan[] = [];
+  const agentsDir = path.join(directory, TEMPLATE_AGENTS_DIRNAME);
+  let agentFiles: string[] = [];
+  try {
+    agentFiles = (await readdir(agentsDir, { withFileTypes: true }))
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
+      .map((entry) => entry.name)
+      .sort((left, right) => left.localeCompare(right));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+  for (const file of agentFiles) {
+    // Parsed rather than copied blind: the review below can only name the
+    // agent and its tools if the soul actually reads, and a template
+    // shipping a broken one should fail here rather than at the next run.
+    const soul = await loadSoulFile(path.join(agentsDir, file));
+    let taken = false;
+    try {
+      await stat(path.join(agentsDirPath(env), file));
+      taken = true;
+    } catch {
+      // Not installed under this name; nothing to refuse.
+    }
+    agents.push({
+      file,
+      id: soul.agent.id,
+      name: soul.agent.name,
+      tools: [...soul.agent.tools ?? []],
+      taken,
+    });
+  }
+
+  let skills: string[] = [];
+  try {
+    skills = (await readdir(path.join(directory, TEMPLATE_SKILLS_DIRNAME), { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+      .map((entry) => entry.name)
+      .sort((left, right) => left.localeCompare(right));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  return { name, description, directory, agents, skills, packages, missing, config };
+};
+
+/** What the operator says yes to: every file this would add, and every package. */
+const writeTemplatePlan = (streams: CliStreams, plan: TemplatePlan, env: CliEnvironment): void => {
+  writeLine(streams.stdout, `${plan.name} — ${plan.description}`);
+  writeLine(streams.stdout);
+  for (const agent of plan.agents) {
+    const tools = agent.tools.length > 0 ? agent.tools.join(', ') : 'no tools';
+    writeLine(streams.stdout, `  agent    ${agent.name} (${agent.id}) — ${tools}`);
+    if (agent.taken) {
+      writeLine(streams.stdout, `           ${agent.file} is already in your roster; --force replaces it.`);
+    }
+  }
+  for (const skill of plan.skills) {
+    writeLine(streams.stdout, `  skill    ${skill}`);
+  }
+  for (const specifier of plan.packages) {
+    const note = plan.missing.includes(specifier) ? 'npm install -g' : 'already installed';
+    writeLine(streams.stdout, `  plugin   ${specifier} (${note})`);
+  }
+  const configKeys = Object.keys(plan.config);
+  if (configKeys.length > 0) {
+    writeLine(streams.stdout, `  config   ${configKeys.join(', ')} → ${globalConfigPath(env)}`);
+  }
+  writeLine(streams.stdout);
+};
+
+/** A y/N on stderr, so stdout stays exactly what `--yes` would have printed. */
+const confirmTemplateInstall = async (streams: CliStreams, env: CliEnvironment): Promise<boolean> => {
+  const input = env.templateInput ?? process.stdin;
+  const readline = createInterface({ input, terminal: false });
+  streams.stderr.write('Install this? [y/N] ');
+  try {
+    const answer = await new Promise<string>((resolve) => {
+      readline.once('line', resolve);
+      readline.once('close', () => resolve(''));
+    });
+    writeLine(streams.stderr);
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    readline.close();
+  }
+};
+
+export const runTemplateAdd = async (
+  command: ParsedTemplateAddCommand,
+  streams: CliStreams,
+  env: CliEnvironment = {},
+): Promise<number> => {
+  const resolved = await resolveSource(command.source, env, 'template');
+  let directory: string;
+  let cleanup: (() => Promise<void>) | undefined;
+  if (resolved.kind === 'local') {
+    directory = resolved.directory;
+  } else {
+    const scratch = await mkdtemp(path.join(os.tmpdir(), 'stratus-template-add-'));
+    cleanup = () => rm(scratch, { recursive: true, force: true });
+    writeLine(streams.stdout, `Fetching ${redactedSourceUrl(resolved.url)} …`);
+    try {
+      await cloneSource(resolved.url, scratch);
+    } catch (error) {
+      await cleanup();
+      throw error;
+    }
+    directory = scratch;
+  }
+
+  try {
+    const plan = await planTemplateInstall(env, directory);
+    writeTemplatePlan(streams, plan, env);
+
+    if (!command.yes && !await confirmTemplateInstall(streams, env)) {
+      writeLine(streams.stderr, 'Nothing was installed.');
+      return 1;
+    }
+
+    // Packages first, config last. A package installed with nothing
+    // enabling it is inert; a config enabling a package that is not
+    // installed makes the daemon warn and skip it on every start.
+    if (plan.missing.length > 0) {
+      const installer = env.packageInstaller ?? defaultPackageInstaller;
+      const result = await installer(plan.missing);
+      if (!result.ok) {
+        writeLine(streams.stderr, `Could not install ${plan.missing.join(' ')}: ${result.message}`);
+        writeLine(streams.stderr, 'Nothing was installed.');
+        return 1;
+      }
+    }
+
+    await mkdir(agentsDirPath(env), { recursive: true });
+    const installedAgents: string[] = [];
+    const refusedAgents: string[] = [];
+    for (const agent of plan.agents) {
+      const destination = path.join(agentsDirPath(env), agent.file);
+      if (agent.taken && !command.force) {
+        refusedAgents.push(agent.file);
+        continue;
+      }
+      await copyFile(path.join(directory, TEMPLATE_AGENTS_DIRNAME, agent.file), destination);
+      installedAgents.push(`${agent.name} (${agent.id})`);
+    }
+
+    // The same installer `skill add` uses, so a skill a template carries
+    // and a skill installed by hand land identically — including the
+    // refuse-rather-than-overwrite rule.
+    const skillResult = plan.skills.length > 0
+      ? await installSkillsFromDirectory(env, path.join(directory, TEMPLATE_SKILLS_DIRNAME), {
+        ...(command.force ? { force: true } : {}),
+      })
+      : { installed: [], skipped: [] };
+
+    if (Object.keys(plan.config).length > 0) {
+      const configPath = globalConfigPath(env);
+      let current: CliConfigFile = {};
+      try {
+        current = await loadConfigFile(configPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
+      }
+      await saveConfigFile(
+        configPath,
+        mergeTemplateConfig(current as JsonValue, plan.config) as CliConfigFile,
+      );
+    }
+
+    for (const agent of installedAgents) {
+      writeLine(streams.stdout, `installed ${agent}`);
+    }
+    for (const skill of skillResult.installed) {
+      writeLine(streams.stdout, `installed skill ${skill.id}`);
+    }
+    if (plan.packages.length > 0) {
+      writeLine(streams.stdout, `enabled ${plan.packages.join(', ')} in ${globalConfigPath(env)}`);
+    }
+
+    // Warnings rather than failures, on stderr, for the reason `skill add`
+    // puts its own there: the rest of the template installed, and stdout is
+    // the record of what landed. Only a template that added nothing at all
+    // is an error.
+    for (const file of refusedAgents) {
+      writeLine(streams.stderr, `Warning: skipped ${file} — an agent of that name is already in your roster (--force replaces it).`);
+    }
+    for (const skipped of skillResult.skipped) {
+      writeLine(streams.stderr, `Warning: skipped skill ${skipped.id}: ${skipped.reason}`);
+    }
+    if (installedAgents.length === 0 && skillResult.installed.length === 0 && Object.keys(plan.config).length === 0) {
+      writeLine(streams.stderr, 'Error: nothing was installed.');
+      return 1;
+    }
+
+    if (plan.packages.length > 0) {
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, 'A plugin change needs a restart:');
+      writeLine(streams.stdout, '  stratus restart          # see docs/guides/always-on.md');
+    }
+    return 0;
+  } finally {
+    await cleanup?.();
+  }
 };
 
 /**
@@ -6087,7 +6508,7 @@ export const runSkillAdd = async (
   streams: CliStreams,
   env: CliEnvironment = {},
 ): Promise<number> => {
-  const resolved = await resolveSkillSource(command.source, env);
+  const resolved = await resolveSource(command.source, env, 'skill');
   let sourceDir: string;
   let cleanup: (() => Promise<void>) | undefined;
   if (resolved.kind === 'local') {
@@ -6097,7 +6518,7 @@ export const runSkillAdd = async (
     cleanup = () => rm(scratch, { recursive: true, force: true });
     writeLine(streams.stdout, `Fetching ${redactedSourceUrl(resolved.url)} …`);
     try {
-      await cloneSkillSource(resolved.url, scratch);
+      await cloneSource(resolved.url, scratch);
     } catch (error) {
       await cleanup();
       throw error;
@@ -8279,6 +8700,7 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
         || command.command === 'chat'
         || command.command === 'run'
         || command.command === 'skill-add'
+        || command.command === 'template-add'
         || command.command === 'dashboard'
         || (command.command === 'credential' && command.action !== 'list')
         || (command.command === 'schedules' && command.action === 'cancel')
@@ -8338,6 +8760,10 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
 
     if (command.command === 'agents') {
       return await runAgents(command, streams, resolvedEnv);
+    }
+
+    if (command.command === 'template-add') {
+      return await runTemplateAdd(command, streams, resolvedEnv);
     }
 
     if (command.command === 'skill-add') {
