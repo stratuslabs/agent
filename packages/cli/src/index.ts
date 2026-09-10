@@ -4629,10 +4629,31 @@ export const runSetup = async (
    * also the honest thing: which agent gets a tool is not a decision this
    * menu has the standing to make.
    */
-  const printSoulGrantLine = (name: string): void => {
-    const first = PLUGIN_SETUP[name]?.grants.split(',')[0]?.trim();
+  const printSoulGrantLine = async (name: string): Promise<void> => {
+    const grants = PLUGIN_SETUP[name]?.grants;
+    const first = grants?.split(',')[0]?.trim();
     writeLine(streams.stdout);
-    writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — a soul grants tools by naming them:`);
+
+    // A soul with no `tools:` key is allowlisted for *every* registered
+    // tool — `matchesToolAllowlist` treats an omitted list as permissive,
+    // and the built-in `stratus` agent has none, so a fresh install always
+    // has one. Enabling a plugin therefore can grant capability
+    // immediately, and saying "no agent can call it yet" would understate
+    // what just happened in the most common configuration there is. Read
+    // the roster and say which of the two it was.
+    const { entries } = await channelRoster();
+    const permissive = entries
+      .filter((entry) => entry.soul.agent.tools === undefined)
+      .map((entry) => `${entry.soul.agent.name} (${entry.soul.agent.id})`);
+
+    if (permissive.length > 0) {
+      writeLine(streams.stdout, `${name} is enabled — and ${permissive.join(', ')} ${permissive.length === 1 ? 'has' : 'have'} no \`tools:\` list, which means every registered tool.`);
+      writeLine(streams.stdout, `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} callable by ${permissive.length === 1 ? 'that agent' : 'those agents'} the next time the daemon starts.`);
+      writeLine(streams.stdout, 'Give a soul a `tools:` list to narrow that. `stratus plugins` shows who can call what.');
+      return;
+    }
+
+    writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — every soul in the roster has a \`tools:\` list, and a soul grants tools by naming them:`);
     if (first !== undefined) {
       writeLine(streams.stdout, `  tools: [${first}]`);
     } else {
@@ -4820,7 +4841,7 @@ export const runSetup = async (
     }
 
     state.plugins = { ...(state.plugins ?? {}), [name]: block };
-    printSoulGrantLine(name);
+    await printSoulGrantLine(name);
   };
 
   /**
@@ -4917,9 +4938,23 @@ export const runSetup = async (
       const unchanged = approvers.length === current.length
         && approvers.every((id, index) => id === current[index]);
       if (approvers.length === 0) {
-        // Only reachable with nothing to prefill, so this clears an override
-        // rather than a global list.
-        delete entry.slackApprovers;
+        // An empty answer must never *widen*. With a top-level list in play
+        // this writes the explicit `[]` the config reserves for excluding
+        // an agent from it, because deleting the key would hand those
+        // approvers an agent that had been kept from them — either one the
+        // operator excluded on purpose, or one whose narrower list they
+        // just erased. `[]` and an absent key differ here in exactly the
+        // direction that matters, and the previous round fixed the other
+        // half of this: never write `[]` over a list nobody touched.
+        const globalApprovers = state.approvals?.slackApprovers ?? [];
+        if (globalApprovers.length > 0) {
+          entry.slackApprovers = [];
+          writeLine(streams.stdout, `${agentId} is excluded from the top-level approvers (${globalApprovers.join(', ')}), so nobody may approve for it and its gated calls are denied.`);
+        } else {
+          // Nothing to inherit, so `[]` and an absent key say the same
+          // thing and the absent one reads better.
+          delete entry.slackApprovers;
+        }
       } else if (inheriting && unchanged) {
         // Keeping an inherited list must not freeze it: writing the same ids
         // as this agent's own override would look identical today and stop
@@ -4953,10 +4988,17 @@ export const runSetup = async (
         } else if (channelAnswer.length > 0) {
           entry.slackChannel = channelAnswer;
         } else if (resolved.slackChannel !== undefined) {
-          // Blanked deliberately: an editable prefill makes this reachable,
-          // and it means "stop asking in that channel for this agent".
+          // Blanked deliberately: an editable prefill makes this reachable.
+          // What it can mean depends on whether a top-level channel exists,
+          // and only one of the two is "no fallback" — clearing the
+          // override otherwise moves the agent onto the global channel,
+          // which is a different, possibly wider place to post approval
+          // details. Setup says which happened rather than assuming.
           delete entry.slackChannel;
-          writeLine(streams.stdout, `${agentId} has no fallback channel now: only turns already in Slack can be asked.`);
+          const globalChannel = state.approvals?.slackChannel;
+          writeLine(streams.stdout, globalChannel !== undefined
+            ? `${agentId} now uses the top-level fallback channel (${globalChannel}) instead of its own. Setup cannot turn the fallback off for one agent — remove approvals.slackChannel to drop it for everyone.`
+            : `${agentId} has no fallback channel now: only turns already in Slack can be asked.`);
         } else {
           writeLine(streams.stdout, `No fallback channel for ${agentId}: only turns already in Slack can be asked, and a scheduled or API-started call is denied undeliverable.`);
         }

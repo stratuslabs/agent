@@ -58,9 +58,13 @@ digits to jump, Esc to go back.
     setting, not the package.
 
   Enabling is only the second of the two gates — the soul's `tools:` list is
-  the other, and setup does not edit souls. It prints the line to paste and
-  points at `stratus plugins`, which shows where the chain is broken. See
-  [Tools](../guides/tools.md), and
+  the other, and setup does not edit souls. What it prints depends on which
+  it is: a soul with **no** `tools:` list is allowlisted for every registered
+  tool, and the built-in `stratus` agent has none, so on a fresh install
+  enabling a plugin makes its tools callable at the next daemon start and
+  setup says exactly that, naming the agents. Where every soul has a list,
+  it prints the line to paste instead. Either way `stratus plugins` shows
+  who can call what. See [Tools](../guides/tools.md), and
   [github.com/stratuslabs/plugins](https://github.com/stratuslabs/plugins)
   for what else exists.
 - **Channels** — put an agent on Slack without opening a file. Pick the
@@ -88,6 +92,12 @@ digits to jump, Esc to go back.
     `slackChannel`; the row marks those as *(inherited)*, and keeping a
     value leaves it inheriting rather than freezing today's setting as that
     agent's own override.
+  - **Clearing a list never widens one.** With a top-level list in play,
+    emptying an agent's approvers writes the explicit `[]` that *excludes*
+    it, rather than deleting the key and handing it the global list. The
+    fallback channel has no such per-agent opt-out: clearing it moves the
+    agent onto the top-level channel, and setup says so and names it
+    instead of claiming the agent has no fallback.
 
   See [Approvals](../guides/approvals.md).
 - **Always on** — whether the roster keeps answering once you close the

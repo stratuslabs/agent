@@ -5768,9 +5768,48 @@ test('setup enables a plugin and writes the setting it is useless without', asyn
   assert.deepEqual(config.plugins, {
     '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes', '~/work'] },
   });
-  // Enabling is the second of two gates and setup owns only that one, so
-  // the soul line is printed rather than applied.
-  assert.match(output.stdout, /No agent can call it yet/);
+  // No soul files, so the roster is the built-in `stratus` agent — which
+  // has no `tools:` key and is therefore allowlisted for every registered
+  // tool. Enabling granted capability here and now, and the line has to
+  // say so: this is the commonest configuration there is, and claiming
+  // "no agent can call it yet" would understate what just happened.
+  assert.match(output.stdout, /Stratus \(stratus\) has no `tools:` list, which means every registered tool/);
+  assert.match(output.stdout, /callable by that agent the next time the daemon starts/);
+  assert.doesNotMatch(output.stdout, /No agent can call it yet/);
+});
+
+test('setup says a plugin grants nothing yet when every soul has a tools list', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // Only a configured default soul may take the reserved `stratus` id over,
+  // so this is what it takes for the roster to hold no permissive agent.
+  const soul = path.join(agentsDir, 'ava.md');
+  await writeFile(soul, '---\nname: Ava\nid: stratus\ntools: [memory.remember]\n---\n\nYou are Ava.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'anthropic', soul }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // The clause is the point, not the headline: the old line said "no agent
+  // can call it yet" unconditionally, so asserting that alone would pass
+  // with or without the roster check.
+  assert.match(output.stdout, /No agent can call it yet — every soul in the roster has a `tools:` list/);
   assert.match(output.stdout, /tools: \[fs\.read\]/);
 });
 
@@ -6083,6 +6122,45 @@ test('setup does not freeze an inherited fallback channel onto one agent', async
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
   assert.equal(config.approvals.agents?.ava?.slackChannel, undefined);
   assert.equal(config.approvals.slackChannel, 'C0GLOBAL');
+});
+
+test('setup keeps an agent excluded from the top-level approvers', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // `[]` is how the config excludes an agent from a global list, and
+  // `resolveAgentApprovals` reads `agent ?? global` — so deleting the key
+  // would hand those approvers an agent deliberately kept from them.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: {
+      mode: 'remote',
+      slackApprovers: ['U0GLOBAL'],
+      agents: { ava: { slackApprovers: [] } },
+    },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → approvers for ava (3) → blank → blank → Back (4) → Save (9)
+      setupInput: Readable.from(['6\n', '3\n', '\n', '\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /ava is excluded from the top-level approvers \(U0GLOBAL\)/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.approvals.agents.ava.slackApprovers, []);
 });
 
 test('setup says remote approvals deny everything while no agent is connected to Slack', async () => {
