@@ -243,7 +243,10 @@ spawn every server you configured. Two consequences worth knowing:
   it*, since neither side is known to; against the daemon's own tools it is
   definite on one side, because those are already registered. One package
   configured twice — through its name and a path, say — is two entries to
-  the loader, and warns like any other pair.
+  the loader, and warns like any other pair. The same goes for a contributed
+  **skill**: ids qualify to `packageName:id`, so a clash there means one
+  package configured twice, and the loader refuses the second entry whole
+  rather than merging them.
 - **Enabled and loadable are different questions.** A plugin whose settings
   its own schema rejects — `plugin-mcp` with no `servers`, a mistyped key
   under `tool-fs` — or which declares a skill file that is not there, is

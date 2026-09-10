@@ -9502,6 +9502,17 @@ const writeFixturePlugin = async (
   );
   const entry = path.join(directory, 'index.js');
   await writeFile(entry, 'export const createPlugin = () => ({ name: "fixture", setup() {} });\n');
+  // Any skill the manifest declares has to be on disk: the loader stages
+  // declared skills before importing anything, and a missing file refuses
+  // the plugin outright — which would mask whatever the test is about.
+  for (const declared of (stratus.contributes as { skills?: Array<{ id: string; path: string }> } | undefined)?.skills ?? []) {
+    const file = path.resolve(directory, declared.path);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(
+      file,
+      ['---', `name: ${declared.id}`, `description: A fixture skill named ${declared.id} for tests.`, '---', '', 'Do the thing.'].join('\n'),
+    );
+  }
   return entry;
 };
 
@@ -9639,4 +9650,30 @@ test('plugins warns about one package configured through two specifiers', async 
   await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
 
   assert.match(output.stdout, /warning: twice\.run is also declared by/);
+});
+
+test('plugins warns when two entries would claim one qualified skill id', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // Skill ids qualify to `packageName:id`, so a clash means one package
+  // configured twice — and the loader refuses the second entry whole,
+  // tools included, rather than merging them.
+  const entry = await writeFixturePlugin('stratus-plugin-skilled', {
+    pluginVersion: 1,
+    contributes: {
+      tools: [{ name: 'skilled.run', risk: 'gated' }],
+      skills: [{ id: 'review', path: './skills/review/SKILL.md' }],
+    },
+  });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { [entry]: { enabled: true }, [`${entry}?again`]: { enabled: true } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(
+    output.stdout,
+    /warning: skill stratus-plugin-skilled:review is already declared by .*; if both load, a daemon keeps the first and refuses this one whole/,
+  );
 });

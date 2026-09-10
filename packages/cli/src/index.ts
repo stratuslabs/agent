@@ -7446,6 +7446,8 @@ export const collectPluginsReport = async (
   // The daemon's own tools are *registered*, unconditionally, before any
   // plugin loads. A plugin's entry is only a declaration, which is why the
   // two produce different warnings below.
+  // Qualified skill ids, tracked the same way and for the same reason.
+  const claimedSkills = new Map<string, string>();
   const claimedBy = new Map<string, { owner: string; registered: boolean }>(
     KERNEL_TOOL_NAMES.map((name) => [name, { owner: 'the daemon itself', registered: true }]),
   );
@@ -7564,6 +7566,26 @@ export const collectPluginsReport = async (
       for (const tool of manifest.contributes.tools) {
         if (!claimedBy.has(tool.name)) {
           claimedBy.set(tool.name, { owner: specifier, registered: false });
+        }
+      }
+
+      // Skills collide on the qualified `packageName:id`, so a clash means
+      // one package configured twice — the two-specifier case again. Firmer
+      // than the tool warning and worded that way: the loader stages skills
+      // from the manifest and refuses the second entry outright rather than
+      // waiting to see what `setup()` does. Still "if it loads", since a
+      // plugin that fails to import never reaches the check.
+      for (const skill of manifest.contributes.skills) {
+        const qualified = `${manifest.packageName}:${skill.id}`;
+        const owner = claimedSkills.get(qualified);
+        if (owner !== undefined) {
+          base.warnings = [
+            ...(base.warnings ?? []),
+            `skill ${qualified} is already declared by ${owner}; if both load, a daemon keeps the first `
+            + 'and refuses this one whole, tools and skills together',
+          ];
+        } else {
+          claimedSkills.set(qualified, specifier);
         }
       }
       base.tools = declared.map((tool) => {
