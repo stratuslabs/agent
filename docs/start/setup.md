@@ -67,7 +67,10 @@ digits to jump, Esc to go back.
     the missing setting, not the package. A `servers` of some other shape
     is not a config to switch back on: the bridge refuses it at load, so
     setup says the value is wrong rather than enabling on the strength of
-    the key being there.
+    the key being there. It checks no further than that. Whether each entry
+    inside is one the bridge accepts is the plugin's rule, and reading it
+    means loading the plugin, which setup never does — so enabling says so,
+    and points at the `plugin … did not load` the daemon prints at startup.
 
   It also names a prerequisite it cannot install: `tool-browser` depends on
   `playwright-core`, which deliberately downloads no browser, so enabling it
@@ -122,7 +125,9 @@ digits to jump, Esc to go back.
     uses the top-level `approvals.slackApprovers`, and the same goes for
     `slackChannel`; the row marks those as *(inherited)*, and keeping a
     value leaves it inheriting rather than freezing today's setting as that
-    agent's own override.
+    agent's own override. The channel prompt offers what the agent actually
+    owns: an override can be cleared, an inherited channel cannot — there
+    is no per-agent key to delete, so it offers to replace it instead.
   - **The row is the same verdict `stratus plugins` prints.** Not a summary
     of it — the same clauses, from one renderer, so the two cannot disagree
     about whether your approvals work. That is what carries the details a

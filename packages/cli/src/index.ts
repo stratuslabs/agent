@@ -4571,10 +4571,10 @@ export const runSetup = async (
     /** Asked for on enable; the block is not written without an answer. */
     needs?: { key: string; question: string; placeholder: string; list: boolean };
     /**
-     * A prerequisite outside the package that setup can neither supply nor
-     * detect without importing the plugin — which this menu never does.
-     * Printed on enable rather than blocking, because unlike a missing
-     * `roots` it is usually already satisfied and setup cannot tell.
+     * Something setup can neither supply nor check without importing the
+     * plugin — which this menu never does. Printed on enable rather than
+     * blocking, because unlike a missing `roots` it is usually already
+     * satisfied and setup cannot tell which.
      */
     note?: string;
     /**
@@ -4622,6 +4622,20 @@ export const runSetup = async (
     '@stratusagent/plugin-mcp': {
       label: 'MCP bridge',
       grants: 'mcp.<server>.<tool>, discovered at connect',
+      // Setup checks that `servers` is an object and stops there. What
+      // each entry needs — exactly one of `command` or `url`, and the
+      // rest of `resolveServerSpec` — is the plugin's rule, and both ways
+      // to apply it here are worse than not applying it: a copy in this
+      // file drifts from the plugin the first time it gains a transport,
+      // and importing the package to ask means calling `createPlugin`,
+      // which the loader's own comment says may open a socket. So the
+      // menu says what it did not check instead of implying it did. The
+      // claim that needs qualifying is the grant line's "the next time
+      // the daemon starts", which is a prediction about a block setup
+      // never wrote.
+      note: 'Setup checked that servers is a block and no further — reading what is inside it means loading the plugin, '
+        + 'which setup never does. If the bridge refuses an entry, the daemon says "plugin @stratusagent/plugin-mcp did not load" '
+        + 'at startup, and `stratus serve` shows that directly.',
       byHand: {
         key: 'servers',
         reason: 'it needs a servers block naming each MCP server — see docs/reference/config.md',
@@ -5238,10 +5252,25 @@ export const runSetup = async (
         // Enter *keeps* it — an operator told otherwise would believe they
         // had removed a fallback that goes on receiving approval details.
         // The same correction the approvers prompt above already carries.
+        //
+        // What clearing the line does, though, is decided by whether this
+        // agent *owns* the channel, not by whether one resolves: clearing
+        // an inherited one deletes a key that was never there and the
+        // global goes on resolving. Reading the offer off the resolved
+        // value promised a removal the branch below then refuses — the
+        // prompt and its own outcome disagreeing about the same keypress.
+        const ownChannel = state.approvals?.agents?.[agentId]?.slackChannel;
+        const globalChannel = state.approvals?.slackChannel;
         const hasChannel = resolved.slackChannel !== undefined;
+        const channelOffer = ownChannel !== undefined
+          ? (globalChannel !== undefined
+            ? `(Enter to keep it; clear the line to fall back to the top-level ${globalChannel}): `
+            : '(Enter to keep it; clear the line to remove it): ')
+          : hasChannel
+            ? '(Enter to go on inheriting it; type another to give this agent its own): '
+            : '(e.g. C0123456, Enter to skip): ';
         const channelAnswer = (await prompter.ask(
-          `Which Slack channel should ${agentId} ask in when the turn did not start in Slack? `
-          + (hasChannel ? '(Enter to keep it; clear the line to remove it): ' : '(e.g. C0123456, Enter to skip): '),
+          `Which Slack channel should ${agentId} ask in when the turn did not start in Slack? ${channelOffer}`,
           ...(hasChannel ? [{ prefill: resolved.slackChannel as string }] : []),
         )).trim();
         // The same inheritance trap as the approvers above, one field over:
@@ -5249,7 +5278,7 @@ export const runSetup = async (
         // inherited channel would write it as this agent's own and stop it
         // tracking the top-level one. Both fields need the guard; fixing
         // only the one under review is how this arrived here twice.
-        const inheritsChannel = state.approvals?.agents?.[agentId]?.slackChannel === undefined;
+        const inheritsChannel = ownChannel === undefined;
         if (channelAnswer.length > 0 && inheritsChannel && channelAnswer === resolved.slackChannel) {
           writeLine(streams.stdout, `${agentId} still inherits the top-level fallback channel (${channelAnswer}).`);
         } else if (channelAnswer.length > 0) {
@@ -5267,9 +5296,8 @@ export const runSetup = async (
           // the piped prompter returns `line || prefill` and `setupInput`
           // forces it.
           delete entry.slackChannel;
-          const globalChannel = state.approvals?.slackChannel;
           writeLine(streams.stdout, globalChannel !== undefined
-            ? `${agentId} now uses the top-level fallback channel (${globalChannel}) instead of its own. Setup cannot turn the fallback off for one agent — remove approvals.slackChannel to drop it for everyone.`
+            ? `${agentId} ${inheritsChannel ? 'still uses' : 'now uses'} the top-level fallback channel (${globalChannel})${inheritsChannel ? '' : ' instead of its own'}. Setup cannot turn the fallback off for one agent — remove approvals.slackChannel to drop it for everyone.`
             : `${agentId} has no fallback channel now: only turns already in Slack can be asked.`);
         } else {
           writeLine(streams.stdout, `No fallback channel for ${agentId}: only turns already in Slack can be asked, and a scheduled or API-started call is denied undeliverable.`);

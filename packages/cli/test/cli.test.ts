@@ -6231,6 +6231,78 @@ test('setup refuses to enable a plugin whose by-hand setting is the wrong shape'
   assert.deepEqual(config.plugins['@stratusagent/plugin-mcp'], { enabled: false, servers: 'invalid' });
 });
 
+test('setup says what it did not check when enabling a plugin it could not have configured', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Object-shaped, so setup offers Enable — and the entry is still one the
+  // bridge refuses, because a server needs exactly one of `command` or
+  // `url`. Applying that rule here would either copy `resolveServerSpec`
+  // into the CLI or import the package to ask it; the menu does neither,
+  // so it must not imply the daemon will load what it just enabled.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/plugin-mcp': { enabled: false, servers: { linear: {} } } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → plugin-mcp (5) → Enable it (1) → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '5\n', '1\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Setup checked that servers is a block and no further/);
+  assert.match(output.stdout, /did not load/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins['@stratusagent/plugin-mcp'].enabled, true);
+});
+
+test('setup does not offer to remove a fallback channel an agent only inherits', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // Ava owns no `slackChannel`; the top-level one resolves for her. Clearing
+  // the line would delete a key that was never there and leave the global
+  // resolving — which the branch that handles it already says. The prompt
+  // has to agree with its own outcome.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', slackApprovers: ['U0GLOBAL'], slackChannel: 'C0GLOBAL' },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → Ask in Slack (2) → approvers (3) → ava → keep → keep
+      // → Back (4) → Save (9)
+      setupInput: Readable.from(['6\n', '2\n', '3\n', '\n', '\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Enter to go on inheriting it; type another to give this agent its own/);
+  assert.doesNotMatch(output.stdout, /clear the line to remove it/);
+});
+
 test('setup can re-enable a configured plugin it would not have enabled from scratch', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
