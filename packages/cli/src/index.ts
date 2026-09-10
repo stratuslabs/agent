@@ -4856,22 +4856,45 @@ export const runSetup = async (
     if (mode === 'headless') {
       return 'headless — gated calls are refused while unattended';
     }
-    const connected = await connectedSlackAgents();
-    if (connected.length === 0) {
-      return 'remote — but nothing is connected to Slack, so gated calls are still denied';
+    // Through the same classification `stratus plugins` renders, so the two
+    // cannot disagree about who can be asked: the package has to be
+    // installed, the agent still served, and an approver named — and the
+    // control API is a second way to answer a parked call. Every one of
+    // those was a separate finding against a hand-rolled version of this.
+    const { askable, covered, noFallback } = await approvalReach();
+    if (askable.length === 0) {
+      return apiApprovalsReachable()
+        ? 'remote — nothing is connected to Slack, so gated calls park until the control API answers them'
+        : 'remote — but nothing is connected to Slack, so gated calls are still denied';
     }
-    // Counted per connected agent through the daemon's own rule, never from
-    // the top-level list alone: an agent excluded with `slackApprovers: []`
-    // keeps that exclusion, so "all agents" was a claim the config could
-    // contradict for the very agent an operator had singled out.
-    const covered = connected
-      .filter((agentId) => (resolveAgentApprovals(state.approvals, agentId).slackApprovers ?? []).length > 0);
     if (covered.length === 0) {
       return 'remote — but no approvers yet, so gated calls still get denied';
     }
-    return covered.length === connected.length
-      ? `remote — asks in Slack, approvers for ${connected.length === 1 ? 'the connected agent' : `all ${connected.length} connected agents`}`
-      : `remote — asks in Slack for ${covered.length} of ${connected.length} connected agents; the rest are denied`;
+    // Approvers without a channel is not full coverage: a turn that did not
+    // start in Slack has no thread to answer in and is denied undeliverable.
+    // The submenu labels those rows; the summary counted them as covered.
+    const gap = noFallback.length > 0
+      ? `; ${noFallback.length} with no fallback channel`
+      : '';
+    return covered.length === askable.length
+      ? `remote — asks in Slack, approvers for ${askable.length === 1 ? 'the connected agent' : `all ${askable.length} connected agents`}${gap}`
+      : `remote — asks in Slack for ${covered.length} of ${askable.length} connected agents; the rest are denied${gap}`;
+  };
+
+  /** Whether a parked call could be settled through `POST /api/v1/approvals`. */
+  const apiApprovalsReachable = (): boolean =>
+    packageInstalled('@stratusagent/control-api', env) && state.api?.enabled !== false;
+
+  const approvalReach = async (): Promise<ApprovalReach> => {
+    const { entries, loaded } = await channelRoster();
+    return classifyApprovalReach(
+      state.approvals ?? {},
+      state.channels,
+      // Undefined when the roster did not load: "no agent has this id" is a
+      // claim it cannot support, and this feeds a screen that writes config.
+      loaded ? entries.map((entry) => entry.soul.agent.id) : undefined,
+      env,
+    );
   };
 
   /**
@@ -4887,14 +4910,7 @@ export const runSetup = async (
    * for the same reason: acting on "no agent has this id" when the roster
    * could not say who its agents are destroys working configuration.
    */
-  const connectedSlackAgents = async (): Promise<string[]> => {
-    const stored = Object.keys(state.channels.slack ?? {});
-    const { entries, loaded } = await channelRoster();
-    if (!loaded) {
-      return stored;
-    }
-    return stored.filter((agentId) => entries.some((entry) => entry.soul.agent.id === agentId));
-  };
+  const connectedSlackAgents = async (): Promise<string[]> => (await approvalReach()).askable;
 
   const chooseApprovals = async (): Promise<void> => {
     while (true) {
@@ -4978,12 +4994,21 @@ export const runSetup = async (
         // direction that matters, and the previous round fixed the other
         // half of this: never write `[]` over a list nobody touched.
         const globalApprovers = state.approvals?.slackApprovers ?? [];
-        if (globalApprovers.length > 0) {
+        const hadOwn = state.approvals?.agents?.[agentId]?.slackApprovers !== undefined;
+        if (globalApprovers.length > 0 || hadOwn) {
+          // `[]` outlives the list it excludes from. With no top-level
+          // approvers today the two look identical, but deleting the key
+          // means the agent silently joins whatever list is added tomorrow
+          // — so an exclusion already on disk is preserved, not tidied
+          // away because it happens to be inert right now.
           entry.slackApprovers = [];
-          writeLine(streams.stdout, `${agentId} is excluded from the top-level approvers (${globalApprovers.join(', ')}), so nobody may approve for it and its gated calls are denied.`);
+          writeLine(streams.stdout, globalApprovers.length > 0
+            ? `${agentId} is excluded from the top-level approvers (${globalApprovers.join(', ')}), so nobody may approve for it and its gated calls are denied.`
+            : `${agentId} has no approvers, so its gated calls are denied — and it stays excluded if a top-level list is added later.`);
         } else {
-          // Nothing to inherit, so `[]` and an absent key say the same
-          // thing and the absent one reads better.
+          // Never had one and nothing to inherit: an absent key is what
+          // "unset" looks like, and writing `[]` would invent an exclusion
+          // the operator never asked for.
           delete entry.slackApprovers;
         }
       } else if (inheriting && unchanged) {
@@ -7823,6 +7848,45 @@ const ALREADY_AUTHORIZED = 'standing grants, approved command scopes and sites (
  * Slack" would be wrong in exactly the configurations an operator runs this
  * command to understand.
  */
+/**
+ * Who can actually be asked, and what is missing for the rest. Split out of
+ * the sentence below because two surfaces need the *answer*: `stratus
+ * plugins` renders it as a paragraph, setup's Approvals row as a menu
+ * summary, and a second hand-rolled copy of "who is askable" drifted from
+ * this one within three PRs — stored tokens read as reachable agents when
+ * the package was absent, when the agent had left the roster, and when the
+ * only route left was the control API.
+ */
+interface ApprovalReach {
+  /** Tokens stored, package installed, agent still served. */
+  askable: string[];
+  /** Of those, the ones an approver is named for — the rest are denied on arrival. */
+  covered: string[];
+  /** Of those, the ones with no conversation to ask in for a turn that did not start in Slack. */
+  noFallback: string[];
+}
+
+const classifyApprovalReach = (
+  approvals: ApprovalsConfig,
+  channels: ChannelCredentials,
+  servedAgentIds: readonly string[] | undefined,
+  env: CliEnvironment,
+): ApprovalReach => {
+  // An adapter that is not installed renders nothing, so its stored tokens
+  // are not a route — `runServe` starts without the Slack channel and says
+  // so. Undefined served ids means the roster did not load, which is not
+  // evidence that any token is orphaned.
+  const stored = packageInstalled('@stratusagent/channel-slack', env)
+    ? Object.keys(channels.slack ?? {})
+    : [];
+  const askable = servedAgentIds === undefined
+    ? stored
+    : stored.filter((agentId) => servedAgentIds.includes(agentId));
+  const { covered } = classifyApprovers(approvals, askable);
+  const noFallback = covered.filter((agentId) => resolveAgentApprovals(approvals, agentId).slackChannel === undefined);
+  return { askable, covered, noFallback };
+};
+
 const describeUnattendedReach = async (
   mode: 'headless' | 'remote',
   approvals: ApprovalsConfig,
@@ -7854,12 +7918,7 @@ const describeUnattendedReach = async (
   // helper: an agent is askable when its tokens are stored and something is
   // installed to render the request.
   const channels = await loadChannelCredentials(env);
-  const stored = packageInstalled('@stratusagent/channel-slack', env)
-    ? Object.keys(channels.slack ?? {})
-    : [];
-  const askable = servedAgentIds === undefined
-    ? stored
-    : stored.filter((agentId) => servedAgentIds.includes(agentId));
+  const { askable, covered, noFallback } = classifyApprovalReach(approvals, channels, servedAgentIds, env);
   // Qualified the same way the headless line is: the engine allows an
   // already-authorized call before it asks anyone, so an unqualified "asks
   // in Slack" hides unattended capability in precisely the configuration
@@ -7872,7 +7931,6 @@ const describeUnattendedReach = async (
   // false wherever `POST /api/v1/approvals` can settle the call. Appending
   // the API as a later clause left the two halves contradicting each other.
   const slack = describeApprovers(approvals, askable);
-  const { covered } = classifyApprovers(approvals, askable);
   // An explicit `timeoutMs: 0` is documented as "wait indefinitely", and
   // the gateway arms no timer for it — so a call nobody answers is not
   // eventually denied, it is parked for the life of the daemon. Promising
@@ -7954,10 +8012,6 @@ const describeUnattendedReach = async (
   // that did not start in Slack — the API, the dashboard, a delegation —
   // reaches the adapter with no destination and is denied undeliverable,
   // so "approvers set" is only half an answer without a fallback channel.
-  const noFallback = askable.filter((agentId) => {
-    const resolved = resolveAgentApprovals(approvals, agentId);
-    return (resolved.slackApprovers ?? []).length > 0 && !resolved.slackChannel;
-  });
   if (noFallback.length > 0) {
     parts.push(`${noFallback.join(', ')} ${noFallback.length === 1 ? 'has' : 'have'} no slackChannel, `
       + 'so only turns already in Slack can be asked');

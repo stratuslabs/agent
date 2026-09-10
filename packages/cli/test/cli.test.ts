@@ -6267,6 +6267,43 @@ test('setup does not claim every agent is covered when one is excluded', async (
   assert.doesNotMatch(output.stdout, /all agents/);
 });
 
+test('setup keeps an exclusion that no top-level list makes visible yet', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // An exclusion with no top-level list to exclude from. Inert today and
+  // identical to an absent key — but deleting it means the agent silently
+  // joins whatever list is added tomorrow.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', agents: { ava: { slackApprovers: [] } } },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → approvers for ava (3) → blank → blank → Back (4) → Save (9)
+      setupInput: Readable.from(['6\n', '3\n', '\n', '\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /it stays excluded if a top-level list is added later/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.approvals.agents.ava.slackApprovers, []);
+});
+
 test('setup says remote approvals deny everything while no agent is connected to Slack', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
@@ -6286,10 +6323,116 @@ test('setup says remote approvals deny everything while no agent is connected to
   });
 
   assert.equal(exitCode, 0);
-  // `remote` with nobody to ask behaves exactly like `headless`. Said on
-  // the screen that sets it, rather than discovered from a denied call.
+  // `remote` with nobody to ask does not behave like `headless` while the
+  // control API is installed: `POST /api/v1/approvals` can still settle a
+  // parked call, so the summary says that rather than promising a denial.
   assert.match(output.stdout, /No agent is connected to Slack, so there is nobody to ask/);
+  assert.match(output.stdout, /remote — nothing is connected to Slack, so gated calls park until the control API answers them/);
+});
+
+test('setup says remote approvals are denied when nothing can answer them at all', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote' },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // No Slack app and no control API: now the denial really is the end
+      // of it, and only now may the summary say so.
+      //
+      // A negative control, not evidence: the old code printed this line
+      // unconditionally, so it passes with or without the API branch. What
+      // pins that branch is the test above, which asserts the API wording
+      // where the package resolves. This one guards the reverse — claiming
+      // an API route where there is none.
+      packageResolver: (specifier: string) => specifier !== '@stratusagent/control-api',
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
   assert.match(output.stdout, /remote — but nothing is connected to Slack, so gated calls are still denied/);
+  assert.doesNotMatch(output.stdout, /control API answers them/);
+});
+
+test('setup does not count an agent with no fallback channel as fully covered', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // Approvers but no channel: a turn that started in Slack is answered in
+  // its own thread, and a scheduled or API-started one is denied
+  // undeliverable. The submenu labels that row; the summary counted it as
+  // covered and said the route works.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', agents: { ava: { slackApprovers: ['U01ABCDEF'] } } },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Approvals            remote — asks in Slack, approvers for the connected agent; 1 with no fallback channel/);
+});
+
+test('setup does not offer approvers when the Slack channel package is not installed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', agents: { ava: { slackApprovers: ['U01ABCDEF'] } } },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Stored tokens with nothing to render them: `runServe` starts
+      // without the Slack channel, so these are not a route.
+      packageResolver: (specifier: string) => specifier !== '@stratusagent/channel-slack',
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Approvals            remote — nothing is connected to Slack/);
+  assert.doesNotMatch(output.stdout, /approvers for all/);
 });
 
 test('setup installs the always-on service when it saves', async () => {
