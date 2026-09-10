@@ -223,17 +223,23 @@ spawn every server you configured. Two consequences worth knowing:
   rather than advertising a re-rating no call will get. Where namespaces
   overlap, the risk shown is the one registration uses: the *first* matching
   declaration, not the narrowest.
-- **The risk shown is a floor, not the last word.** It is the riskiest of the
-  manifest's declaration, the floor the package is held to, and your
-  `toolRisks` override — the three claims available without loading anything.
+- **The risk shown is a floor, not the last word.** Without a `toolRisks`
+  entry it is the riskier of the manifest's declaration and the floor the
+  package is held to. With one, your override *replaces* the declaration and
+  only the floor still binds it — lowering a manifest's risk is what the key
+  is for, so a first-party tool declared `dangerous` and overridden `safe`
+  reads `safe`, and a third-party one cannot go below `gated`.
   A registered tool may raise itself further, and `shell.run` and
   `browser.act` are then judged per call ([Shell commands](./shell.md),
   [Browser actions](./browser.md)), so `gated` there means "judged", not
   "refused".
-- **Two plugins cannot share a tool name.** The first to claim one keeps it
-  and the daemon refuses the other whole — tools and skills together — so a
-  package whose declared name another already registers is reported as one
-  that will not load, rather than as a second source for that tool.
+- **A tool name belongs to whoever registers it first.** The daemon's own
+  kernel tools go in before any plugin, and the first plugin to claim a name
+  keeps it — a later one registering the same name is refused whole, tools
+  and skills together. A manifest declaring a name something else already
+  registers is therefore reported as a `warning`, not a failure: whether it
+  actually registers that name is `setup()`'s business, and an optional tool
+  may never claim it.
 - **Enabled and loadable are different questions.** A plugin whose settings
   its own schema rejects — `plugin-mcp` with no `servers`, a mistyped key
   under `tool-fs` — or which declares a skill file that is not there, is

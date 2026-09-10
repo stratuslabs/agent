@@ -9505,7 +9505,7 @@ const writeFixturePlugin = async (
   return entry;
 };
 
-test('plugins reports a plugin whose tool another package already registers', async () => {
+test('plugins warns that a declared tool name is already registered elsewhere', async () => {
   const { home, cwd } = await writePluginFixture();
   const contributes = { tools: [{ name: 'db.query', risk: 'gated' }] };
   const first = await writeFixturePlugin('stratus-plugin-alpha', { pluginVersion: 1, contributes });
@@ -9518,14 +9518,18 @@ test('plugins reports a plugin whose tool another package already registers', as
 
   await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
 
-  // The first keeps the name and loads; the daemon refuses the second whole,
-  // so reporting both as enabled with a usable `db.query` would promise a
-  // tool only one of them ever gets.
+  // Conditional, and deliberately so: ownership is claimed at registration,
+  // not at declaration, so two manifests naming one tool collide only if
+  // both plugins go on to register it. Reporting a failure here would
+  // condemn a plugin that loads fine because its tool is optional — these
+  // fixtures being the case in point, since neither registers anything.
   assert.match(output.stdout, /db\.query/);
   assert.match(
     output.stdout,
-    /it declares db\.query, which stratus-plugin-alpha already registers — a daemon loads the first and refuses this one whole/,
+    /warning: db\.query is already registered by stratus-plugin-alpha; if this plugin registers it too, a daemon keeps the first and refuses this one whole/,
   );
+  // And it stays enabled with its tools listed, because it may well load.
+  assert.doesNotMatch(output.stdout, /a daemon would register nothing for it/);
 });
 
 test('plugins reads an overlapping namespace at the risk registration will use', async () => {
@@ -9590,4 +9594,23 @@ test('plugins emits one row for a tool reachable more than one way', async () =>
   };
   const tools = report.plugins.find((plugin) => plugin.package === entry)?.tools ?? [];
   assert.equal(tools.filter((tool) => tool.name === 'mcp.ping').length, 1);
+});
+
+test('plugins warns when a plugin declares a name the daemon itself registers', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // The gateway registers its kernel tools before it loads any plugin, so a
+  // plugin that registers one of these names is refused whole.
+  const entry = await writeFixturePlugin('stratus-plugin-shadow', {
+    pluginVersion: 1,
+    contributes: { tools: [{ name: 'memory.remember', risk: 'gated' }] },
+  });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { [entry]: { enabled: true } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(output.stdout, /warning: memory\.remember is already registered by the daemon itself/);
 });

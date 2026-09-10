@@ -7176,6 +7176,27 @@ const FIRST_PARTY_CAPABILITY_PACKAGES = [
   '@stratusagent/plugin-mcp',
 ];
 
+/**
+ * The tool names the gateway registers before it loads any plugin. A plugin
+ * that registers one of these is refused whole, so a manifest declaring one
+ * is worth naming — advisory only, since whether it *registers* the name is
+ * a question no manifest answers. A name going stale here costs a warning,
+ * never a wrong answer about a plugin that loads.
+ */
+const KERNEL_TOOL_NAMES = [
+  'demo.echo',
+  'memory.remember',
+  'memory.recall',
+  'memory.forget',
+  'skill.read',
+  'schedule.every',
+  'schedule.at',
+  'schedule.list',
+  'schedule.cancel',
+  'message.send',
+  'agent.delegate',
+];
+
 /** One tool a plugin's manifest declares, as this machine would have it. */
 export interface PluginToolReport {
   name: string;
@@ -7186,11 +7207,13 @@ export interface PluginToolReport {
    */
   discovered: boolean;
   /**
-   * The riskiest of the manifest's declaration, the floor its package is
-   * held to, and an operator's `toolRisks` override — the same three claims
-   * `ManifestBoundToolRegistry` combines, minus the one only a running
-   * daemon has. A registered object may raise itself further, so this is a
-   * floor on what a call will face rather than the last word on it.
+   * What `ManifestBoundToolRegistry` would settle on, minus the claim only a
+   * running daemon has. An operator's `toolRisks` override *replaces* the
+   * manifest's declaration and is bounded only by the package's floor —
+   * lowering one is the whole point of the key — and without an override it
+   * is the riskier of the declaration and that floor. A registered object
+   * may then raise itself further, so this is a floor on what a call will
+   * face rather than the last word on it.
    */
   risk: ToolRisk;
   /**
@@ -7216,6 +7239,13 @@ export interface PluginReport {
    * would call `plugin-mcp` with no `servers` ready to use.
    */
   problem?: string;
+  /**
+   * What might go wrong that a manifest cannot settle. A name two packages
+   * both declare collides only if both *register* it, and registration is
+   * `setup()`'s business — so this says "if it does" rather than reporting
+   * a failure that may never happen.
+   */
+  warnings?: string[];
 }
 
 export interface PluginsReport {
@@ -7413,7 +7443,9 @@ export const collectPluginsReport = async (
   //
   // Literal declarations only: the registry claims names as they register,
   // and a namespace has none until its server connects.
-  const claimedBy = new Map<string, string>();
+  const claimedBy = new Map<string, string>(
+    KERNEL_TOOL_NAMES.map((name) => [name, 'the daemon itself']),
+  );
   for (const specifier of packages) {
     const block = pluginsConfig[specifier] ?? {};
     const isConfigured = configured.includes(specifier);
@@ -7499,17 +7531,26 @@ export const collectPluginsReport = async (
           }
         }
       }
-      const collision = manifest.contributes.tools
+      // A warning, not a failure. Ownership is claimed at registration —
+      // `view.commit(owners)` records what `setup()` actually registered —
+      // so a name two manifests both declare collides only if both plugins
+      // go on to register it, which nothing here can know. Reporting it as
+      // a load failure would condemn a plugin that loads perfectly well
+      // because its tool is optional.
+      const collisions = manifest.contributes.tools
         .map((tool) => ({ name: tool.name, owner: claimedBy.get(tool.name) }))
-        .find((entry) => entry.owner !== undefined && entry.owner !== manifest.packageName);
-      if (collision !== undefined) {
-        throw new Error(
-          `it declares ${collision.name}, which ${collision.owner} already registers — `
-          + 'a daemon loads the first and refuses this one whole, tools and skills together',
-        );
+        .filter((entry) => entry.owner !== undefined && entry.owner !== manifest.packageName);
+      for (const collision of collisions) {
+        base.warnings = [
+          ...(base.warnings ?? []),
+          `${collision.name} is already registered by ${collision.owner}; if this plugin registers it too, `
+          + 'a daemon keeps the first and refuses this one whole, tools and skills together',
+        ];
       }
       for (const tool of manifest.contributes.tools) {
-        claimedBy.set(tool.name, manifest.packageName);
+        if (!claimedBy.has(tool.name)) {
+          claimedBy.set(tool.name, manifest.packageName);
+        }
       }
       base.tools = declared.map((tool) => {
         // Never on the namespace row. `parseToolRiskOverrides` accepts a
@@ -7601,6 +7642,9 @@ export const runPlugins = async (
     if (!plugin.enabled) {
       writeLine(streams.stdout, '  switched off — remove "enabled": false to load it');
       continue;
+    }
+    for (const warning of plugin.warnings ?? []) {
+      writeLine(streams.stdout, `  warning: ${warning}`);
     }
     for (const tool of plugin.tools) {
       const granted = report.rosterUnreadable
