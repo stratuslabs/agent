@@ -5818,15 +5818,29 @@ const describePrincipals = (principals: PrincipalsConfig, agentIds: string[]): s
     : `principals set for ${covered.join(', ')}; none for ${uncovered.join(', ')}, whose Slack senders are all unknown`;
 };
 
+/**
+ * Which of these agents the Slack adapter would actually ask about, and
+ * which it would decline for. Separated from the sentence below because
+ * two callers need the *answer* and only one needs it as prose: a summary
+ * that says a call "asks in Slack" must not say it about an agent the
+ * adapter denies on arrival.
+ */
+const classifyApprovers = (
+  approvals: ApprovalsConfig,
+  agentIds: string[],
+): { covered: string[]; uncovered: string[] } => {
+  const covered = agentIds.filter((agentId) => (resolveAgentApprovals(approvals, agentId).slackApprovers ?? []).length > 0);
+  return { covered, uncovered: agentIds.filter((agentId) => !covered.includes(agentId)) };
+};
+
 const describeApprovers = (approvals: ApprovalsConfig, agentIds: string[]): string => {
   if (agentIds.length === 0) {
     return 'but no channel is running to ask through, so gated calls will wait out the approval timeout and then be denied';
   }
-  const covered = agentIds.filter((agentId) => (resolveAgentApprovals(approvals, agentId).slackApprovers ?? []).length > 0);
+  const { covered, uncovered } = classifyApprovers(approvals, agentIds);
   if (covered.length === 0) {
     return 'but no approvers are configured, so every gated call is denied on arrival';
   }
-  const uncovered = agentIds.filter((agentId) => !covered.includes(agentId));
   return uncovered.length === 0
     ? `approvers set for ${covered.join(', ')}`
     : `approvers set for ${covered.join(', ')}; none for ${uncovered.join(', ')}, whose calls are denied on arrival`;
@@ -7375,6 +7389,14 @@ const describeUnattendedReach = async (
           + (expires
             ? 'waits out the approval timeout and is denied'
             : 'is never answered: this daemon\'s approval timeout is 0, so it parks indefinitely');
+    }
+    // "Parks and asks" is false for an agent the adapter declines: with no
+    // approvers configured it calls `resolveApproval(deny)` synchronously
+    // (channel-slack decline()), so nothing parks and nobody is asked.
+    // Same defect as the branch above, one case over — found by auditing
+    // the rest of this function after that one, not by review.
+    if (classifyApprovers(approvals, askable).covered.length === 0) {
+      return 'remote — an uncovered gated call reaches Slack and is denied on arrival, because no approvers are configured';
     }
     return `remote — an uncovered gated call parks and asks in Slack, ${slack}`;
   };

@@ -9872,8 +9872,14 @@ test('plugins does not offer the control API where Slack denies first', async ()
     env: { cwd, homeDir: home, processEnv: {}, packageResolver: () => true },
   });
 
-  assert.match(output.stdout, /no approvers are configured, so every gated call is denied on arrival/);
+  assert.match(
+    output.stdout,
+    /remote — an uncovered gated call reaches Slack and is denied on arrival, because no approvers are configured/,
+  );
   assert.doesNotMatch(output.stdout, /the control API is the only way to answer it/);
+  // The adapter denies synchronously here, so nothing parks and nobody is
+  // asked — the verdict must not say the call asks in Slack.
+  assert.doesNotMatch(output.stdout, /parks and asks in Slack/);
 });
 
 test('plugins reads the approval timeout with no channel and no control API', async () => {
