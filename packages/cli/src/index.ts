@@ -4901,12 +4901,35 @@ export const runSetup = async (
    * for the same reason: acting on "no agent has this id" when the roster
    * could not say who its agents are destroys working configuration.
    */
-  const connectedSlackAgents = async (): Promise<string[]> => (await approvalReach()).askable;
+  /**
+   * Agents whose approvers this screen may edit: stored tokens intersected
+   * with the roster, and deliberately *not* gated on the adapter being
+   * installed.
+   *
+   * Reachability and editability are different questions here, and only on
+   * this screen. `offerOptionalPackages()` runs inside `save()`, after the
+   * menu — so on a first install the operator connects Slack under
+   * Channels, opens Approvals, and the package that will be installed
+   * moments later is still absent. Gating the rows on it left the fresh
+   * install with nothing to configure and no way back into the menu,
+   * which is the one path this whole PR exists to make work.
+   *
+   * The *verdict* keeps the package gate, because that is a claim about
+   * what a daemon would do rather than about what may be written now.
+   */
+  const configurableSlackAgents = async (): Promise<string[]> => {
+    const stored = Object.keys(state.channels.slack ?? {});
+    const { entries, loaded } = await channelRoster();
+    if (!loaded) {
+      return stored;
+    }
+    return stored.filter((agentId) => entries.some((entry) => entry.soul.agent.id === agentId));
+  };
 
   const chooseApprovals = async (): Promise<void> => {
     while (true) {
       const mode = state.approvals?.mode ?? 'headless';
-      const connected = await connectedSlackAgents();
+      const connected = await configurableSlackAgents();
       const options = [
         `Headless${mode === 'headless' ? ' (current)' : ''}          refuse gated calls when nobody is watching`,
         `Ask in Slack${mode === 'remote' ? ' (current)' : ''}       park the turn and ask an approver`,
@@ -4931,17 +4954,18 @@ export const runSetup = async (
       }
       options.push('Back');
 
-      // The clauses the row had no space for — an agent no channel can ask
-      // for, approvers with no fallback channel, tokens that may no longer
-      // authenticate. They belong on the screen that sets them.
-      const detail = (await approvalsSummary()).slice(1);
-      const footnote = mode === 'remote' && connected.length === 0
+      // Said here because it is only true here: tokens are stored, the
+      // adapter is not installed yet, and Save is about to offer it. The
+      // rows are editable regardless — the alternative was a first install
+      // with nothing to configure.
+      const adapterPending = connected.length > 0 && !packageInstalled('@stratusagent/channel-slack', env);
+      const footnote = adapterPending
+        ? `@stratusagent/channel-slack is not installed yet — Save & finish offers it, and these approvers apply once it is. ${serveCommand()} brings them online.`
+        : mode === 'remote' && connected.length === 0
         // The failure `stratus plugins` reports, said before it can happen
         // rather than after: remote mode with no Slack app is not a
         // waiting daemon, it is a denying one.
         ? 'No agent is connected to Slack, so there is nobody to ask — connect one under Channels first.'
-        : detail.length > 0
-          ? detail.join('; ')
           : 'A gated call already covered by a standing grant runs without asking, in either mode.';
       const choice = await prompter.select(
         'Approvals — what happens to a gated call with nobody watching',
@@ -5581,7 +5605,12 @@ export const runSetup = async (
       writeLine(streams.stdout);
       // Awaited before the menu is drawn: the approvals summary reads the
       // roster, to intersect stored Slack tokens with agents that exist.
-      const approvals = (await approvalsSummary())[0] ?? '';
+      // Every clause, not the first: a prefix of this sentence has been
+      // wrong twice now — the mixed roster where Slack denies one agent and
+      // the control API answers for another reads as a flat denial without
+      // the clause that follows. There is no safe prefix to pick, so the
+      // row carries what `stratus plugins` prints and wraps if it must.
+      const approvals = (await approvalsSummary()).join('; ');
       const choice = await prompter.select('', [
         `Providers            ${providersSummary()}`,
         `Models               ${modelsSummary()}`,

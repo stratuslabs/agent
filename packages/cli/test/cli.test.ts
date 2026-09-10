@@ -6365,6 +6365,85 @@ test('setup says a gated call parks for good when the approval timeout is zero',
   assert.doesNotMatch(output.stdout, /waits out the approval timeout and is denied/);
 });
 
+test('setup can set approvers before the Slack adapter is installed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // The fresh-install order: Channels stores and verifies tokens through
+  // the Slack API, and `offerOptionalPackages()` installs the adapter
+  // inside `save()` — after this menu. Gating the rows on the package left
+  // a first-time operator with nothing to configure and no way back.
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote' },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: (specifier: string) => specifier !== '@stratusagent/channel-slack',
+      // Approvals (6) → approvers for ava (3) → ids → channel → Back (4) → Save (9)
+      setupInput: Readable.from(['6\n', '3\n', 'U01ABCDEF\n', 'C0123456\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /@stratusagent\/channel-slack is not installed yet — Save & finish offers it/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.approvals.agents.ava, {
+    slackApprovers: ['U01ABCDEF'],
+    slackChannel: 'C0123456',
+  });
+});
+
+test('setup does not report a flat denial when the control API answers for another agent', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // `ava` has tokens but no approvers, so Slack denies on arrival. The
+  // built-in `stratus` agent is served with no tokens at all, so its calls
+  // park and the control API can settle them. The verdict's first clause
+  // alone says only the first half.
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote' },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /reaches Slack and is denied on arrival/);
+  // The clause a prefix would have dropped.
+  assert.match(output.stdout, /no Slack channel can ask for stratus, so their gated calls park until the control API answers them/);
+});
+
 test('setup says remote approvals deny everything while no agent is connected to Slack', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
