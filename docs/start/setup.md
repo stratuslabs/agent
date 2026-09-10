@@ -47,7 +47,9 @@ digits to jump, Esc to go back.
   block for you. Two things it deliberately will not do:
   - **Enable a plugin without the setting it is useless without.** `tool-fs`
     with no `roots` loads and then fails every call, so setup asks for them
-    and writes nothing if you leave the answer blank.
+    and writes nothing if you leave the answer blank — unless roots are
+    already set per agent under `agents.<id>`, which is a working config and
+    a narrower one than any fleet-wide answer, so that is kept as it is.
   - **Enable `plugin-mcp`.** It requires a `servers` block naming endpoints
     only you know, and a block written without one is refused at load. Setup
     says so and points at [Config](../reference/config.md).
@@ -71,7 +73,19 @@ digits to jump, Esc to go back.
   parks and the timeout denies it — so setup says that on the screen rather
   than leaving it to be discovered from a denied call. The agents offered are
   the ones **Channels** connected, since an agent Slack cannot reach is not
-  one approvers can be named for. See [Approvals](../guides/approvals.md).
+  one approvers can be named for. Two details it gets right so you don't
+  have to:
+  - **A fallback channel, not just approvers.** A turn that arrived through
+    Slack is answered in its own thread, but one started by a schedule, a
+    delegation, or the control API reaches the adapter with no destination
+    and is denied undeliverable. Setup asks for the channel to use for those,
+    and says plainly what you lose if you skip it.
+  - **Inherited approvers stay inherited.** An agent with no list of its own
+    uses the top-level `approvals.slackApprovers`; the row marks that as
+    *(inherited)*, and keeping the value leaves it inheriting rather than
+    freezing today's list as that agent's own override.
+
+  See [Approvals](../guides/approvals.md).
 - **Always on** — whether the roster keeps answering once you close the
   terminal. On by default, because an agent you have to remember to start is
   not always-on, and every Slack app you connected above stays silent until

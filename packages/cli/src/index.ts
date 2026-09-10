@@ -4768,13 +4768,30 @@ export const runSetup = async (
       )).trim();
       const values = answer.split(',').map((value) => value.trim()).filter((value) => value.length > 0);
       if (values.length === 0) {
-        // Not written at all rather than written empty: an enabled block
-        // with no roots is the exact "installed, enabled, and useless"
-        // state this menu exists to prevent somebody reaching by accident.
-        writeLine(streams.stdout, `Nothing entered, so ${name} was left as it was — it grants nothing without ${setup.needs.key}.`);
-        return;
+        // A per-agent block satisfies this on its own: the plugin resolves
+        // its settings per session, so `agents.<id>.roots` with nothing at
+        // the top level is a working config — and a narrower one than any
+        // fleet-wide answer this prompt could take. Demanding a global
+        // value here would push an operator to widen access to get past a
+        // menu.
+        const perAgent = existing.agents;
+        const coveredPerAgent = typeof perAgent === 'object' && perAgent !== null && !Array.isArray(perAgent)
+          && Object.values(perAgent as Record<string, unknown>).some((agent) => {
+            const value = (agent as Record<string, unknown> | null)?.[setup.needs?.key ?? ''];
+            return Array.isArray(value) && value.length > 0;
+          });
+        if (!coveredPerAgent) {
+          // Otherwise not written at all rather than written empty: an
+          // enabled block with no roots anywhere is the exact "installed,
+          // enabled, and useless" state this menu exists to keep anyone
+          // from reaching by accident.
+          writeLine(streams.stdout, `Nothing entered, so ${name} was left as it was — it grants nothing without ${setup.needs.key}.`);
+          return;
+        }
+        writeLine(streams.stdout, `Keeping the per-agent ${setup.needs.key} already configured for ${name}; nothing is granted fleet-wide.`);
+      } else {
+        block[setup.needs.key] = values;
       }
-      block[setup.needs.key] = values;
     }
 
     state.plugins = { ...(state.plugins ?? {}), [name]: block };
@@ -4812,9 +4829,20 @@ export const runSetup = async (
       ];
       if (mode === 'remote') {
         for (const agentId of connected) {
-          const approvers = state.approvals?.agents?.[agentId]?.slackApprovers ?? [];
-          options.push(`  approvers for ${agentId}`.padEnd(26)
-            + (approvers.length > 0 ? approvers.join(', ') : '— nobody, so its calls are denied'));
+          // The *resolved* answer, through the rule the daemon uses: an
+          // agent with no override of its own inherits the top-level list,
+          // and reading the override alone would report "nobody" for an
+          // agent a global list already covers.
+          const resolved = resolveAgentApprovals(state.approvals, agentId);
+          const own = state.approvals?.agents?.[agentId]?.slackApprovers;
+          const approvers = resolved.slackApprovers ?? [];
+          const label = approvers.length === 0
+            ? '— nobody, so its calls are denied'
+            : own === undefined
+              ? `${approvers.join(', ')} (inherited)`
+              : approvers.join(', ');
+          options.push(`  approvers for ${agentId}`.padEnd(26) + label
+            + (approvers.length > 0 && !resolved.slackChannel ? ' · no fallback channel' : ''));
         }
       }
       options.push('Back');
@@ -4845,17 +4873,58 @@ export const runSetup = async (
       if (!agentId) {
         continue;
       }
-      const current = state.approvals?.agents?.[agentId]?.slackApprovers ?? [];
+      const resolved = resolveAgentApprovals(state.approvals, agentId);
+      const current = resolved.slackApprovers ?? [];
+      // Prefilled with the resolved list, and `ask` returns the prefill for
+      // an empty line — so Enter keeps what is on screen and can never
+      // revoke anything. That matters here more than elsewhere:
+      // `resolveAgentApprovals` reads `agent ?? global` and an empty array
+      // is not nullish, so a written `[]` is the config's way of *excluding*
+      // an agent from the global list, not of leaving it alone.
       const answer = (await prompter.ask(
-        `Slack user ids who may approve for ${agentId} (comma-separated, e.g. U01ABCDEF): `,
+        `Slack user ids who may approve for ${agentId} (comma-separated, e.g. U01ABCDEF; Enter to keep): `,
         ...(current.length > 0 ? [{ prefill: current.join(', ') }] : []),
       )).trim();
       const approvers = answer.split(',').map((value) => value.trim()).filter((value) => value.length > 0);
       const agents = { ...(state.approvals?.agents ?? {}) };
-      // An explicit empty array, not a deleted key: the config distinguishes
-      // them, and "nobody may approve for this agent" is a different
-      // statement from "inherit whoever is listed globally".
-      agents[agentId] = { ...(agents[agentId] ?? {}), slackApprovers: approvers };
+      const entry = { ...(agents[agentId] ?? {}) };
+      const inheriting = state.approvals?.agents?.[agentId]?.slackApprovers === undefined;
+      const unchanged = approvers.length === current.length
+        && approvers.every((id, index) => id === current[index]);
+      if (approvers.length === 0) {
+        // Only reachable with nothing to prefill, so this clears an override
+        // rather than a global list.
+        delete entry.slackApprovers;
+      } else if (inheriting && unchanged) {
+        // Keeping an inherited list must not freeze it: writing the same ids
+        // as this agent's own override would look identical today and stop
+        // tracking the top-level list the operator edits tomorrow.
+        writeLine(streams.stdout, `${agentId} still inherits the top-level approvers (${current.join(', ')}).`);
+      } else {
+        entry.slackApprovers = approvers;
+      }
+
+      if (entry.slackApprovers !== undefined || resolved.slackApprovers !== undefined) {
+        // The other half of a working route, and the half a fresh install
+        // has no way to guess it needs. A turn that arrived through Slack
+        // is answered in its own thread, but one from a schedule, a
+        // delegation or the control API reaches the adapter with no
+        // destination and is denied undeliverable — so approvers alone
+        // configure approvals for exactly the calls least likely to need
+        // them. `stratus plugins` reports this state; better not to create
+        // it here in the first place.
+        const channelAnswer = (await prompter.ask(
+          `Which Slack channel should ${agentId} ask in when the turn did not start in Slack? (e.g. C0123456, Enter to skip): `,
+          ...(resolved.slackChannel !== undefined ? [{ prefill: resolved.slackChannel }] : []),
+        )).trim();
+        if (channelAnswer.length > 0) {
+          entry.slackChannel = channelAnswer;
+        } else if (resolved.slackChannel === undefined) {
+          writeLine(streams.stdout, `No fallback channel for ${agentId}: only turns already in Slack can be asked, and a scheduled or API-started call is denied undeliverable.`);
+        }
+      }
+
+      agents[agentId] = entry;
       state.approvals = { ...(state.approvals ?? {}), mode: 'remote', agents };
     }
   };

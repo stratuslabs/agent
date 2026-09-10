@@ -5886,8 +5886,9 @@ test('setup sets the approval mode and the approvers for a connected agent', asy
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      // Approvals (6) → Ask in Slack (2) → approvers for ava (3) → ids → Back (4) → Save (9)
-      setupInput: Readable.from(['6\n', '2\n', '3\n', 'U01ABCDEF, U02GHIJKL\n', '4\n', '9\n']),
+      // Approvals (6) → Ask in Slack (2) → approvers for ava (3) → ids →
+      // fallback channel → Back (4) → Save (9)
+      setupInput: Readable.from(['6\n', '2\n', '3\n', 'U01ABCDEF, U02GHIJKL\n', 'C0123456\n', '4\n', '9\n']),
     },
   });
 
@@ -5895,11 +5896,118 @@ test('setup sets the approval mode and the approvers for a connected agent', asy
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
   assert.deepEqual(config.approvals, {
     mode: 'remote',
-    agents: { ava: { slackApprovers: ['U01ABCDEF', 'U02GHIJKL'] } },
+    agents: { ava: { slackApprovers: ['U01ABCDEF', 'U02GHIJKL'], slackChannel: 'C0123456' } },
   });
   // The agent list comes from Channels: an agent with no Slack app is not
   // one that approvers can be named for.
   assert.match(output.stdout, /approvers for ava/);
+});
+
+test('setup does not revoke inherited approvers when the answer is left blank', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A top-level list every agent inherits. `resolveAgentApprovals` reads
+  // `agent ?? global`, and an empty array is not nullish — so writing `[]`
+  // for this agent is the config's way of excluding it, not of leaving it
+  // alone. The menu must never do that for an empty answer.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', slackApprovers: ['U0GLOBAL'], slackChannel: 'C0GLOBAL' },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → approvers for ava (3) → blank → blank → Back (4) → Save (9)
+      setupInput: Readable.from(['6\n', '3\n', '\n', '\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // Shown as inherited rather than as nobody, and left inheriting: keeping
+  // the prefilled value must not freeze it as this agent's own override.
+  assert.match(output.stdout, /U0GLOBAL \(inherited\)/);
+  assert.match(output.stdout, /ava still inherits the top-level approvers \(U0GLOBAL\)/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.approvals.agents?.ava?.slackApprovers, undefined);
+  assert.deepEqual(config.approvals.slackApprovers, ['U0GLOBAL']);
+});
+
+test('setup says who cannot be asked when approvers have no fallback channel', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → Ask in Slack (2) → approvers (3) → ids → skip the
+      // channel → Back (4) → Save (9)
+      setupInput: Readable.from(['6\n', '2\n', '3\n', 'U01ABCDEF\n', '\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // Approvers alone leave a schedule- or API-started call denied
+  // undeliverable — the state `stratus plugins` reports, said here instead.
+  assert.match(output.stdout, /only turns already in Slack can be asked/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.approvals.agents.ava, { slackApprovers: ['U01ABCDEF'] });
+});
+
+test('setup enables a plugin whose roots are configured per agent', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Roots under `agents` and none at the top level is a working config —
+  // tool-fs resolves per session — and a narrower one than any fleet-wide
+  // answer this prompt could take.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/tool-fs': { enabled: false, agents: { ava: { roots: ['~/work/ava'] } } },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Keeping the per-agent roots already configured/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.plugins['@stratusagent/tool-fs'], {
+    enabled: true,
+    agents: { ava: { roots: ['~/work/ava'] } },
+  });
 });
 
 test('setup says remote approvals deny everything while no agent is connected to Slack', async () => {
