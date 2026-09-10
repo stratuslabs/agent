@@ -9486,6 +9486,14 @@ test('plugins names the served agents no channel can ask for, and approvers with
   });
 
   assert.match(output.stdout, /approvers set for stratus/);
+  // Stored tokens are configuration, not a live app: the adapter keeps a
+  // connection only once auth.test() and socket.start() both succeed, and
+  // denies undeliverable for a configured agent without one. This command
+  // starts no daemon, so it must not present the route as working.
+  assert.match(
+    output.stdout,
+    /whether those apps are connected is not something this command can see — it reads config, and one whose token no longer authenticates denies its gated calls instead of asking; `stratus logs` shows which came up/,
+  );
   // The control API resolves in this fixture, so a parked call is not
   // simply doomed — it waits for a client rather than for the timeout.
   assert.match(

@@ -239,7 +239,12 @@ spawn every server you configured. Two consequences worth knowing:
   so an agent with no Slack tokens is not necessarily unreachable. An agent
   the Slack adapter *does* cover is a different case: it denies on the spot
   when there are no approvers or no conversation to ask in, leaving nothing
-  for an API client to answer. With neither — no stored tokens and no API —
+  for an API client to answer. Stored tokens are a *configured* route and
+  not a proven one — the adapter keeps a connection only once the app
+  authenticates and its socket starts, and denies undeliverable for a
+  configured agent without one. This command starts no daemon, so it says
+  so and points at `stratus logs`, where `slack: could not connect <agent>`
+  is the actual answer. With neither — no stored tokens and no API —
   nothing receives the request at all, and the line says that rather than
   naming a route. And an `approvals.timeoutMs` of `0` means a call nobody
   answers parks for the life of the daemon rather than being denied — the

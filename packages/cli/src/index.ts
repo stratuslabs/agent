@@ -7361,6 +7361,7 @@ const describeUnattendedReach = async (
   // false wherever `POST /api/v1/approvals` can settle the call. Appending
   // the API as a later clause left the two halves contradicting each other.
   const slack = describeApprovers(approvals, askable);
+  const { covered } = classifyApprovers(approvals, askable);
   // An explicit `timeoutMs: 0` is documented as "wait indefinitely", and
   // the gateway arms no timer for it — so a call nobody answers is not
   // eventually denied, it is parked for the life of the daemon. Promising
@@ -7395,7 +7396,7 @@ const describeUnattendedReach = async (
     // (channel-slack decline()), so nothing parks and nobody is asked.
     // Same defect as the branch above, one case over — found by auditing
     // the rest of this function after that one, not by review.
-    if (classifyApprovers(approvals, askable).covered.length === 0) {
+    if (covered.length === 0) {
       return 'remote — an uncovered gated call reaches Slack and is denied on arrival, because no approvers are configured';
     }
     return `remote — an uncovered gated call parks and asks in Slack, ${slack}`;
@@ -7423,6 +7424,20 @@ const describeUnattendedReach = async (
         + `API answers them${expires ? ' or the timeout denies them' : ' — with a timeout of 0, nothing else ever will'}`
       : `no channel can ask for ${unreachable.join(', ')}, so their gated calls `
         + (expires ? 'wait out the timeout and are denied' : 'park indefinitely: this daemon\'s approval timeout is 0'));
+  }
+  // Stored tokens are a *configured* route, not a live one. The adapter
+  // pushes a connection only after `auth.test()` and `socket.start()` both
+  // succeed, and `renderApprovalRequest` denies undeliverable for a
+  // configured agent with no live connection — so a revoked token or a
+  // dead app token turns "asks in Slack" into "denies on arrival". This
+  // command reads config and manifests by design and starts no daemon, so
+  // it cannot know which; saying so is the only honest option, and the
+  // daemon log is where the answer actually is (`warn` writes there, so
+  // `slack: could not connect <agent>` is in `stratus logs`).
+  if (covered.length > 0) {
+    parts.push('whether those apps are connected is not something this command can see — it reads config, '
+      + 'and one whose token no longer authenticates denies its gated calls instead of asking; '
+      + '`stratus logs` shows which came up');
   }
   // Approvers with nowhere to be asked outside their own thread. A turn
   // that did not start in Slack — the API, the dashboard, a delegation —
