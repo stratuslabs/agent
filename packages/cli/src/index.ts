@@ -4743,11 +4743,24 @@ export const runSetup = async (
     }
 
     if (!installed) {
+      // Enabled with the package gone — an uninstall, or a config copied
+      // from another machine. The block is exactly what an operator would
+      // want to clear, and reaching it used to require installing the
+      // package first in order to switch it off.
+      const actions = enabled
+        ? ['Install it with npm install -g', 'Switch it off in the config', 'Back']
+        : ['Install it with npm install -g, then enable it', 'Back'];
       const answer = await prompter.select(
-        `${name} is not installed. It contributes ${setup?.grants ?? 'its own tools'}.`,
-        [`Install it with npm install -g, then enable it`, 'Back'],
+        enabled
+          ? `${name} is enabled in your config but not installed, so a daemon registers nothing for it.`
+          : `${name} is not installed. It contributes ${setup?.grants ?? 'its own tools'}.`,
+        actions,
       );
-      if (answer.kind !== 'index' || answer.index === 1) {
+      if (answer.kind !== 'index' || answer.index === actions.length - 1) {
+        return;
+      }
+      if (enabled && answer.index === 1) {
+        disablePlugin(name);
         return;
       }
       writeLine(streams.stdout, `Running: npm install -g ${name}`);
@@ -4800,16 +4813,24 @@ export const runSetup = async (
       await enablePlugin(name);
       return;
     }
-    // Switched off, never deleted. The loader treats `enabled: false` and an
-    // absent key the same, but the operator does not: a block carries
-    // `agents` overrides and `toolRisks` that setup never asked about, and
-    // dropping them would be #161 again — a menu deleting config it does
-    // not own, one plugin at a time instead of all four blocks at once.
+    disablePlugin(name);
+  };
+
+  /**
+   * Switched off, never deleted. The loader treats `enabled: false` and an
+   * absent key the same, but the operator does not: a block carries
+   * `agents` overrides and `toolRisks` that setup never asked about, and
+   * dropping them would be #161 again — a menu deleting config it does not
+   * own, one plugin at a time instead of all four blocks at once.
+   */
+  const disablePlugin = (name: string): void => {
     state.plugins = {
       ...(state.plugins ?? {}),
       [name]: { ...(state.plugins?.[name] ?? {}), enabled: false },
     };
-    writeLine(streams.stdout, `${name} is switched off. The package is still installed, and its settings are kept for when you turn it back on.`);
+    writeLine(streams.stdout, packageInstalled(name, env)
+      ? `${name} is switched off. The package is still installed, and its settings are kept for when you turn it back on.`
+      : `${name} is switched off, so a daemon stops trying to load it. Its settings are kept for when you install it again.`);
   };
 
   const enablePlugin = async (name: string): Promise<void> => {
@@ -4888,14 +4909,23 @@ export const runSetup = async (
    * the two can differ in length and never in fact.
    */
   const approvalsSummary = async (): Promise<string[]> => {
+    const mode = state.approvals?.mode ?? 'headless';
     const { entries, loaded } = await channelRoster();
+    // `headless` is a statement about the policy, not the roster, so it
+    // survives a roster that will not load. Everything else here depends on
+    // who is served: passing `undefined` would make `classifyApprovalReach`
+    // skip the intersection and read every stored token as askable, so the
+    // row would promise Slack asks for a fleet whose gateway refuses to
+    // start. Same rule as the grant line and the Channels menu — an
+    // unreadable roster is not evidence in either direction.
+    if (mode === 'remote' && !loaded) {
+      return ['remote — who can be asked is unknown until the roster loads; fix the error above, then `stratus plugins`'];
+    }
     return unattendedReachParts(
-      state.approvals?.mode ?? 'headless',
+      mode,
       state.approvals ?? {},
       state.channels,
-      // Undefined when the roster did not load: "no agent has this id" is a
-      // claim it cannot support, and this feeds a screen that writes config.
-      loaded ? entries.map((entry) => entry.soul.agent.id) : undefined,
+      entries.map((entry) => entry.soul.agent.id),
       apiApprovalsReachable(),
       env,
     );
@@ -5693,7 +5723,7 @@ export const runSetup = async (
         `Providers            ${providersSummary()}`,
         `Models               ${modelsSummary()}`,
         `Agent                ${agentSummary()}`,
-        `Plugins              ${pluginsSummary()}`,
+        `Plugins              ${fitMenuRow(pluginsSummary())}`,
         `Channels             ${channelsSummary()}`,
         `Approvals            ${approvals}`,
         `Always on            ${serviceSummary()}`,

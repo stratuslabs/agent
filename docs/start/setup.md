@@ -50,6 +50,9 @@ digits to jump, Esc to go back.
     and writes nothing if you leave the answer blank — unless roots are
     already set per agent under `agents.<id>`, which is a working config and
     a narrower one than any fleet-wide answer, so that is kept as it is.
+  - **Switch off a plugin whose package is gone.** A config copied from
+    another machine, or an uninstall, leaves a block enabling a package that
+    is not there; the row offers to clear it without installing first.
   - **Say nothing about who can call it when the roster will not load.** A
     roster that refuses (two souls claiming one id, say) tells you nothing
     about anyone's `tools:` list, so setup says the answer is unknown until
@@ -86,9 +89,12 @@ digits to jump, Esc to go back.
 - **Approvals** — what happens to a gated call with nobody watching.
   `headless` refuses it; **ask in Slack** parks the turn and asks an
   approver. Both halves are set on one screen because they are one decision:
-  `remote` with nobody listed behaves exactly like `headless` — the call
-  parks and the timeout denies it — so setup says that on the screen rather
-  than leaving it to be discovered from a denied call. The agents offered are
+  `remote` with nobody listed ends in a denial too, and setup says which
+  kind on the screen rather than leaving it to be discovered from a refused
+  call: an agent Slack *covers* but has no approvers for is denied **on
+  arrival**, because the adapter answers the request itself; an agent no
+  channel reaches at all parks until the timeout, or for the life of the
+  daemon when `approvals.timeoutMs` is `0`. The agents offered are
   the ones **Channels** connected *and* the roster still has — a token that
   outlived its agent is skipped by the Slack adapter, so approvers named for
   it would configure a route no call can take. (Those orphaned tokens are

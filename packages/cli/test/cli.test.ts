@@ -6545,6 +6545,76 @@ test('setup puts the whole approval verdict on the screen that sets it', async (
   assert.match(screen, /no Slack channel can ask for stratus, so their gated calls park until the control API answers them/);
 });
 
+test('setup withholds the approval verdict when the roster will not load', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // Two souls claiming one id: the gateway refuses to start with this
+  // roster. Without the intersection every stored token reads as askable,
+  // so the row would promise Slack asks for a fleet that cannot run.
+  await writeFile(path.join(agentsDir, 'a-first.md'), '---\nname: First\nid: twin\n---\n\nYou are First.\n');
+  await writeFile(path.join(agentsDir, 'b-second.md'), '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', agents: { ava: { slackApprovers: ['U01ABCDEF'] } } },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /remote — who can be asked is unknown until the roster loads/);
+  assert.doesNotMatch(output.stdout, /parks and asks in Slack/);
+});
+
+test('setup can switch off a plugin whose package is no longer installed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A config copied from another machine, or an uninstall: the block still
+  // enables a package that is gone, so a daemon registers nothing for it.
+  // Clearing it used to require installing the package first.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: (specifier: string) => specifier !== '@stratusagent/tool-fs',
+      // Plugins (4) → tool-fs (1) → Switch it off (2) → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '2\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /is enabled in your config but not installed, so a daemon registers nothing for it/);
+  assert.match(output.stdout, /switched off, so a daemon stops trying to load it/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  // Switched off, not deleted: the roots are still the operator's.
+  assert.deepEqual(config.plugins['@stratusagent/tool-fs'], { enabled: false, roots: ['~/notes'] });
+});
+
 test('setup says remote approvals deny everything while no agent is connected to Slack', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
