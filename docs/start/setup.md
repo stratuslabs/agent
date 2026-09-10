@@ -50,9 +50,12 @@ digits to jump, Esc to go back.
     and writes nothing if you leave the answer blank — unless roots are
     already set per agent under `agents.<id>`, which is a working config and
     a narrower one than any fleet-wide answer, so that is kept as it is.
-  - **Enable `plugin-mcp`.** It requires a `servers` block naming endpoints
-    only you know, and a block written without one is refused at load. Setup
-    says so and points at [Config](../reference/config.md).
+  - **Enable `plugin-mcp` from scratch.** It requires a `servers` block
+    naming endpoints only you know, and a block written without one is
+    refused at load. Setup says so and points at
+    [Config](../reference/config.md). A block that already has `servers` is
+    switched on and off like any other — the refusal is about the missing
+    setting, not the package.
 
   Enabling is only the second of the two gates — the soul's `tools:` list is
   the other, and setup does not edit souls. It prints the line to paste and
@@ -80,10 +83,11 @@ digits to jump, Esc to go back.
     delegation, or the control API reaches the adapter with no destination
     and is denied undeliverable. Setup asks for the channel to use for those,
     and says plainly what you lose if you skip it.
-  - **Inherited approvers stay inherited.** An agent with no list of its own
-    uses the top-level `approvals.slackApprovers`; the row marks that as
-    *(inherited)*, and keeping the value leaves it inheriting rather than
-    freezing today's list as that agent's own override.
+  - **Inherited values stay inherited.** An agent with no list of its own
+    uses the top-level `approvals.slackApprovers`, and the same goes for
+    `slackChannel`; the row marks those as *(inherited)*, and keeping a
+    value leaves it inheriting rather than freezing today's setting as that
+    agent's own override.
 
   See [Approvals](../guides/approvals.md).
 - **Always on** — whether the roster keeps answering once you close the

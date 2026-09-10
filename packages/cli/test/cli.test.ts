@@ -6010,6 +6010,81 @@ test('setup enables a plugin whose roots are configured per agent', async () => 
   });
 });
 
+test('setup can re-enable a configured plugin it would not have enabled from scratch', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A `servers` block setup could never have written, switched off. The
+  // refusal is about the setting being absent, not about the package — and
+  // this menu promises the settings are kept for turning it back on, which
+  // is false if the switch is one-way.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/plugin-mcp': {
+        enabled: false,
+        servers: { linear: { url: 'https://mcp.example.com/mcp' } },
+      },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → plugin-mcp (5) → Enable it (1) → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '5\n', '1\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.doesNotMatch(output.stdout, /Setup does not enable it/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.plugins['@stratusagent/plugin-mcp'], {
+    enabled: true,
+    servers: { linear: { url: 'https://mcp.example.com/mcp' } },
+  });
+});
+
+test('setup does not freeze an inherited fallback channel onto one agent', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', slackApprovers: ['U0GLOBAL'], slackChannel: 'C0GLOBAL' },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → approvers for ava (3) → keep both prefills → Back (4) → Save (9)
+      setupInput: Readable.from(['6\n', '3\n', '\n', '\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // The same trap as the approvers, one field over: keeping the displayed
+  // value must not write it as this agent's own.
+  assert.match(output.stdout, /ava still inherits the top-level fallback channel \(C0GLOBAL\)/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.approvals.agents?.ava?.slackChannel, undefined);
+  assert.equal(config.approvals.slackChannel, 'C0GLOBAL');
+});
+
 test('setup says remote approvals deny everything while no agent is connected to Slack', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });

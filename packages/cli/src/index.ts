@@ -4570,8 +4570,12 @@ export const runSetup = async (
     grants: string;
     /** Asked for on enable; the block is not written without an answer. */
     needs?: { key: string; question: string; placeholder: string; list: boolean };
-    /** Configured by hand only, with the reason. */
-    byHand?: string;
+    /**
+     * A setting setup cannot invent, and the reason. The refusal is about
+     * the setting being absent, never about the package: a block that
+     * already has it is enabled and disabled like any other.
+     */
+    byHand?: { key: string; reason: string };
   }> = {
     '@stratusagent/tool-fs': {
       label: 'Files',
@@ -4592,7 +4596,10 @@ export const runSetup = async (
     '@stratusagent/plugin-mcp': {
       label: 'MCP bridge',
       grants: 'mcp.<server>.<tool>, discovered at connect',
-      byHand: 'it needs a servers block naming each MCP server — see docs/reference/config.md',
+      byHand: {
+        key: 'servers',
+        reason: 'it needs a servers block naming each MCP server — see docs/reference/config.md',
+      },
     },
   };
 
@@ -4673,10 +4680,16 @@ export const runSetup = async (
     const installed = packageInstalled(name, env);
     const enabled = pluginEnabled(name);
 
-    if (setup?.byHand && !enabled) {
+    // Only a block still *missing* that setting is refused. A configured
+    // one switched off — by this menu, which promises its settings are kept
+    // for turning it back on — must be able to come back, or the promise is
+    // false and the switch is one-way.
+    const configuredByHand = setup?.byHand !== undefined
+      && state.plugins?.[name]?.[setup.byHand.key] !== undefined;
+    if (setup?.byHand && !enabled && !configuredByHand) {
       writeLine(streams.stdout);
       writeLine(streams.stdout, `${name} contributes ${setup.grants}.`);
-      writeLine(streams.stdout, `Setup does not enable it: ${setup.byHand}.`);
+      writeLine(streams.stdout, `Setup does not enable it: ${setup.byHand.reason}.`);
       if (!installed) {
         writeLine(streams.stdout, `Install it with: npm install -g ${name}`);
       }
@@ -4780,6 +4793,18 @@ export const runSetup = async (
             const value = (agent as Record<string, unknown> | null)?.[setup.needs?.key ?? ''];
             return Array.isArray(value) && value.length > 0;
           });
+        // Deleted, not merely left unwritten: `block` is a copy of the
+        // existing one, so keeping the key would leave every unoverridden
+        // agent on the old fleet-wide roots while the line below says
+        // nothing is granted fleet-wide. Saying access narrowed while it
+        // did not is the worst way for this menu to be wrong.
+        //
+        // Only an interactive run reaches this with a key to delete: the
+        // prefill is editable on a TTY, while the piped prompter returns it
+        // for an empty line. So there is no test — `setupInput` forces the
+        // non-interactive path, where an empty answer means "keep" and this
+        // deletes a key that was never there.
+        delete block[setup.needs.key];
         if (!coveredPerAgent) {
           // Otherwise not written at all rather than written empty: an
           // enabled block with no roots anywhere is the exact "installed,
@@ -4917,9 +4942,22 @@ export const runSetup = async (
           `Which Slack channel should ${agentId} ask in when the turn did not start in Slack? (e.g. C0123456, Enter to skip): `,
           ...(resolved.slackChannel !== undefined ? [{ prefill: resolved.slackChannel }] : []),
         )).trim();
-        if (channelAnswer.length > 0) {
+        // The same inheritance trap as the approvers above, one field over:
+        // the prompt is prefilled with the resolved value, so keeping an
+        // inherited channel would write it as this agent's own and stop it
+        // tracking the top-level one. Both fields need the guard; fixing
+        // only the one under review is how this arrived here twice.
+        const inheritsChannel = state.approvals?.agents?.[agentId]?.slackChannel === undefined;
+        if (channelAnswer.length > 0 && inheritsChannel && channelAnswer === resolved.slackChannel) {
+          writeLine(streams.stdout, `${agentId} still inherits the top-level fallback channel (${channelAnswer}).`);
+        } else if (channelAnswer.length > 0) {
           entry.slackChannel = channelAnswer;
-        } else if (resolved.slackChannel === undefined) {
+        } else if (resolved.slackChannel !== undefined) {
+          // Blanked deliberately: an editable prefill makes this reachable,
+          // and it means "stop asking in that channel for this agent".
+          delete entry.slackChannel;
+          writeLine(streams.stdout, `${agentId} has no fallback channel now: only turns already in Slack can be asked.`);
+        } else {
           writeLine(streams.stdout, `No fallback channel for ${agentId}: only turns already in Slack can be asked, and a scheduled or API-started call is denied undeliverable.`);
         }
       }
