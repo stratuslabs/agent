@@ -6263,7 +6263,9 @@ test('setup does not claim every agent is covered when one is excluded', async (
   });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /Approvals            remote — asks in Slack for 1 of 2 connected agents; the rest are denied/);
+  // The daemon's own verdict, which names the excluded agent rather than
+  // counting it as covered.
+  assert.match(output.stdout, /Approvals            remote — an uncovered gated call parks and asks in Slack, approvers set for ava; none for juno, whose calls are denied on arrival/);
   assert.doesNotMatch(output.stdout, /all agents/);
 });
 
@@ -6304,6 +6306,65 @@ test('setup keeps an exclusion that no top-level list makes visible yet', async 
   assert.deepEqual(config.approvals.agents.ava.slackApprovers, []);
 });
 
+test('setup does not say headless refuses a call an existing grant already covers', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'headless' },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // The engine allows a standing grant, an approved command scope, a site,
+  // and a schedule's destination *before* it reaches the headless refusal.
+  // A flat "refused while unattended" would tell an operator that switching
+  // to headless disabled unattended access that is still live.
+  assert.match(output.stdout, /headless — an uncovered gated call is refused\. Already-authorized ones still run/);
+  assert.match(output.stdout, /stratus grants/);
+});
+
+test('setup says a gated call parks for good when the approval timeout is zero', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Nothing to ask and no API — but an explicit 0 arms no timer, so the
+  // call is not denied, it is held for the life of the daemon.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', timeoutMs: 0 },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: (specifier: string) => specifier !== '@stratusagent/control-api',
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /approval timeout is 0, so it parks indefinitely/);
+  assert.doesNotMatch(output.stdout, /waits out the approval timeout and is denied/);
+});
+
 test('setup says remote approvals deny everything while no agent is connected to Slack', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
@@ -6327,7 +6388,7 @@ test('setup says remote approvals deny everything while no agent is connected to
   // control API is installed: `POST /api/v1/approvals` can still settle a
   // parked call, so the summary says that rather than promising a denial.
   assert.match(output.stdout, /No agent is connected to Slack, so there is nobody to ask/);
-  assert.match(output.stdout, /remote — nothing is connected to Slack, so gated calls park until the control API answers them/);
+  assert.match(output.stdout, /remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it/);
 });
 
 test('setup says remote approvals are denied when nothing can answer them at all', async () => {
@@ -6361,8 +6422,10 @@ test('setup says remote approvals are denied when nothing can answer them at all
   });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /remote — but nothing is connected to Slack, so gated calls are still denied/);
-  assert.doesNotMatch(output.stdout, /control API answers them/);
+  assert.match(output.stdout, /remote — an uncovered gated call parks with no channel to ask through and no control API to answer it, so it waits out the approval timeout and is denied/);
+  // The verdict names the absent API ("no control API to answer it"), so
+  // the assertion is that no route is offered, not that the words are gone.
+  assert.doesNotMatch(output.stdout, /the control API is the only way/);
 });
 
 test('setup does not count an agent with no fallback channel as fully covered', async () => {
@@ -6392,12 +6455,17 @@ test('setup does not count an agent with no fallback channel as fully covered', 
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['9\n']),
+      // Approvals (6) → Back (4) → Save (9): the per-agent rows only exist
+      // on the screen that sets them.
+      setupInput: Readable.from(['6\n', '4\n', '9\n']),
     },
   });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /Approvals            remote — asks in Slack, approvers for the connected agent; 1 with no fallback channel/);
+  // The row carries the verdict and the screen that sets it carries the
+  // qualifiers — the same split `stratus plugins` prints as one paragraph.
+  assert.match(output.stdout, /Approvals            remote — an uncovered gated call parks and asks in Slack, approvers set for ava/);
+  assert.match(output.stdout, /approvers for ava\s+U01ABCDEF · no fallback channel/);
 });
 
 test('setup does not offer approvers when the Slack channel package is not installed', async () => {
@@ -6431,8 +6499,8 @@ test('setup does not offer approvers when the Slack channel package is not insta
   });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /Approvals            remote — nothing is connected to Slack/);
-  assert.doesNotMatch(output.stdout, /approvers for all/);
+  assert.match(output.stdout, /Approvals            remote — an uncovered gated call parks with no Slack channel to ask through/);
+  assert.doesNotMatch(output.stdout, /approvers set for ava/);
 });
 
 test('setup installs the always-on service when it saves', async () => {

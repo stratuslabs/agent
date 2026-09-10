@@ -4851,34 +4851,27 @@ export const runSetup = async (
    * and the approvers are set on the same screen rather than in two places
    * that can disagree.
    */
-  const approvalsSummary = async (): Promise<string> => {
-    const mode = state.approvals?.mode ?? 'headless';
-    if (mode === 'headless') {
-      return 'headless — gated calls are refused while unattended';
-    }
-    // Through the same classification `stratus plugins` renders, so the two
-    // cannot disagree about who can be asked: the package has to be
-    // installed, the agent still served, and an approver named — and the
-    // control API is a second way to answer a parked call. Every one of
-    // those was a separate finding against a hand-rolled version of this.
-    const { askable, covered, noFallback } = await approvalReach();
-    if (askable.length === 0) {
-      return apiApprovalsReachable()
-        ? 'remote — nothing is connected to Slack, so gated calls park until the control API answers them'
-        : 'remote — but nothing is connected to Slack, so gated calls are still denied';
-    }
-    if (covered.length === 0) {
-      return 'remote — but no approvers yet, so gated calls still get denied';
-    }
-    // Approvers without a channel is not full coverage: a turn that did not
-    // start in Slack has no thread to answer in and is denied undeliverable.
-    // The submenu labels those rows; the summary counted them as covered.
-    const gap = noFallback.length > 0
-      ? `; ${noFallback.length} with no fallback channel`
-      : '';
-    return covered.length === askable.length
-      ? `remote — asks in Slack, approvers for ${askable.length === 1 ? 'the connected agent' : `all ${askable.length} connected agents`}${gap}`
-      : `remote — asks in Slack for ${covered.length} of ${askable.length} connected agents; the rest are denied${gap}`;
+  /**
+   * The daemon's own verdict, not a second version of it. Every round of
+   * review on this row found the hand-written summary short a clause the
+   * engine applies — headless still runs already-authorized calls, an
+   * explicit `timeoutMs: 0` parks instead of denying, the control API can
+   * answer for an agent Slack cannot reach. The row now takes the first
+   * clause `stratus plugins` prints and the submenu carries the rest, so
+   * the two can differ in length and never in fact.
+   */
+  const approvalsSummary = async (): Promise<string[]> => {
+    const { entries, loaded } = await channelRoster();
+    return unattendedReachParts(
+      state.approvals?.mode ?? 'headless',
+      state.approvals ?? {},
+      state.channels,
+      // Undefined when the roster did not load: "no agent has this id" is a
+      // claim it cannot support, and this feeds a screen that writes config.
+      loaded ? entries.map((entry) => entry.soul.agent.id) : undefined,
+      apiApprovalsReachable(),
+      env,
+    );
   };
 
   /** Whether a parked call could be settled through `POST /api/v1/approvals`. */
@@ -4890,8 +4883,6 @@ export const runSetup = async (
     return classifyApprovalReach(
       state.approvals ?? {},
       state.channels,
-      // Undefined when the roster did not load: "no agent has this id" is a
-      // claim it cannot support, and this feeds a screen that writes config.
       loaded ? entries.map((entry) => entry.soul.agent.id) : undefined,
       env,
     );
@@ -4940,12 +4931,18 @@ export const runSetup = async (
       }
       options.push('Back');
 
+      // The clauses the row had no space for — an agent no channel can ask
+      // for, approvers with no fallback channel, tokens that may no longer
+      // authenticate. They belong on the screen that sets them.
+      const detail = (await approvalsSummary()).slice(1);
       const footnote = mode === 'remote' && connected.length === 0
         // The failure `stratus plugins` reports, said before it can happen
         // rather than after: remote mode with no Slack app is not a
         // waiting daemon, it is a denying one.
         ? 'No agent is connected to Slack, so there is nobody to ask — connect one under Channels first.'
-        : 'A gated call already covered by a standing grant runs without asking, in either mode.';
+        : detail.length > 0
+          ? detail.join('; ')
+          : 'A gated call already covered by a standing grant runs without asking, in either mode.';
       const choice = await prompter.select(
         'Approvals — what happens to a gated call with nobody watching',
         options,
@@ -5584,7 +5581,7 @@ export const runSetup = async (
       writeLine(streams.stdout);
       // Awaited before the menu is drawn: the approvals summary reads the
       // roster, to intersect stored Slack tokens with agents that exist.
-      const approvals = await approvalsSummary();
+      const approvals = (await approvalsSummary())[0] ?? '';
       const choice = await prompter.select('', [
         `Providers            ${providersSummary()}`,
         `Models               ${modelsSummary()}`,
@@ -7911,13 +7908,36 @@ const describeUnattendedReach = async (
    */
   apiReachable: boolean,
 ): Promise<string> => {
+  const channels = await loadChannelCredentials(env);
+  return unattendedReachParts(mode, approvals, channels, servedAgentIds, apiReachable, env).join('; ');
+};
+
+/**
+ * The clauses above, unjoined and without reading the filesystem, so a
+ * caller holding unsaved state can render the same verdict. The first
+ * element is always the verdict itself; the rest qualify it.
+ *
+ * Split out because setup's Approvals row wrote its own version of this
+ * sentence, and every review round found it short a different clause the
+ * daemon actually applies — the headless exceptions, an explicit
+ * `timeoutMs: 0`, the control API on a mixed roster. There is one renderer
+ * now; a menu that wants a shorter line takes fewer clauses, never
+ * different words.
+ */
+const unattendedReachParts = (
+  mode: 'headless' | 'remote',
+  approvals: ApprovalsConfig,
+  channels: ChannelCredentials,
+  servedAgentIds: readonly string[] | undefined,
+  apiReachable: boolean,
+  env: CliEnvironment,
+): string[] => {
   if (mode === 'headless') {
-    return `headless — an uncovered gated call is refused. Already-authorized ones still run: ${ALREADY_AUTHORIZED}`;
+    return [`headless — an uncovered gated call is refused. Already-authorized ones still run: ${ALREADY_AUTHORIZED}`];
   }
   // The same condition `runServe` reports at startup, through the same
   // helper: an agent is askable when its tokens are stored and something is
   // installed to render the request.
-  const channels = await loadChannelCredentials(env);
   const { askable, covered, noFallback } = classifyApprovalReach(approvals, channels, servedAgentIds, env);
   // Qualified the same way the headless line is: the engine allows an
   // already-authorized call before it asks anyone, so an unqualified "asks
@@ -8029,7 +8049,7 @@ const describeUnattendedReach = async (
   parts.push('an "always allow" answer persists — a standing grant for an unscoped tool, a command scope, '
     + 'or a site, all until revoked; only a call scoped by destination, such as message.send, '
     + 'lasts just the session');
-  return parts.join('; ');
+  return parts;
 };
 
 /**
