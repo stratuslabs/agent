@@ -459,17 +459,41 @@ export const npmNeedsShell = (platform: NodeJS.Platform): boolean => platform ==
  */
 export const menuPrefixWidth = (optionCount: number): number => `  ${optionCount}) `.length + 1;
 
+/**
+ * npm's package-name grammar, and nothing else: an optional `@scope/`, then
+ * lowercase alphanumerics with `-`, `_` and `.`, no leading `.` or `_`, 214
+ * characters at most.
+ *
+ * This is what a `plugins` config key has to be, because that key is *also*
+ * the module specifier the loader hands `import.meta.resolve`. A version
+ * suffix is a thing npm installs and Node cannot resolve, so a key carrying
+ * one names a plugin that is permanently absent however many times it is
+ * installed.
+ */
+export const isPackageName = (name: string): boolean =>
+  name.length <= 214 && /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name);
+
+/**
+ * A package name, optionally with a plain version — what npm may be handed.
+ *
+ * A wider question than `isPackageName` and a different one: the updater
+ * installs `@stratusagent/cli@latest`, which is a valid thing to install and
+ * an invalid thing to import. Using one predicate for both let a versioned
+ * `plugins` key through the menu's install offer.
+ *
+ * The version half is deliberately not npm's full range syntax: `^1.0.0` is
+ * a valid range and `^` is cmd.exe's escape character. Only the plain forms
+ * this CLI actually passes are accepted, and a range that needs more is a
+ * thing to install by hand.
+ */
 export const isInstallableSpecifier = (specifier: string): boolean => {
-  if (specifier.length > 214) {
-    return false;
-  }
   const scoped = specifier.startsWith('@');
   // Split on the `@` that introduces a version, never the one that opens a
   // scope — `@scope/pkg` has both and only the first is part of the name.
   const at = specifier.indexOf('@', scoped ? 1 : 0);
   const name = at === -1 ? specifier : specifier.slice(0, at);
   const version = at === -1 ? undefined : specifier.slice(at + 1);
-  if (!/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name)) {
+  if (!isPackageName(name)) {
     return false;
   }
   return version === undefined || /^[a-z0-9][a-z0-9.-]*$/.test(version);
@@ -4957,18 +4981,25 @@ export const runSetup = async (
       // want to clear, and reaching it used to require installing the
       // package first in order to switch it off.
       //
-      // A key npm could never install is offered no install: the row comes
-      // from `Object.keys(state.plugins)`, so a typo or a stray character
-      // arrives here as a package name, and `npm install -g` on it fails
-      // whatever it looks like. Switching it off stays available — a block
-      // keyed by nonsense is exactly one to clear.
-      const installable = isInstallableSpecifier(name);
+      // A key that could never end up loaded is offered no install: the row
+      // comes from `Object.keys(state.plugins)`, so a typo, a stray
+      // character or a copied `pkg@1.2.3` arrives here as a package name.
+      //
+      // The bare-name rule, not the installable-specifier one: this key is
+      // what the loader hands `import.meta.resolve`, and Node does not
+      // resolve a version suffix — so `npm install -g @scope/foo@latest`
+      // succeeds and the plugin stays "not installed" forever. Switching it
+      // off stays available either way; a block keyed by something that can
+      // never load is exactly one to clear.
+      const installable = isPackageName(name);
       const actions = enabled
         ? [...(installable ? ['Install it with npm install -g'] : []), 'Switch it off in the config', 'Back']
         : [...(installable ? ['Install it with npm install -g, then enable it'] : []), 'Back'];
       if (!installable) {
         writeLine(streams.stdout);
-        writeLine(streams.stdout, `${name} is not a package name npm can install — check the key in your plugins config.`);
+        writeLine(streams.stdout, isInstallableSpecifier(name)
+          ? `${name} carries a version, and a plugins key is also the module specifier a daemon imports — Node does not resolve one, so installing it would leave the plugin absent. Key the block by the package name alone.`
+          : `${name} is not a package name npm can install — check the key in your plugins config.`);
       }
       const answer = await prompter.select(
         enabled

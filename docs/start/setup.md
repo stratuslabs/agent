@@ -65,9 +65,12 @@ digits to jump, Esc to go back.
   - **Switch off a plugin whose package is gone.** A config copied from
     another machine, or an uninstall, leaves a block enabling a package that
     is not there; the row offers to clear it without installing first. A key
-    that is not a package name npm could install — a typo, a stray
-    character — is offered no install at all, only the switch-off, since the
-    row is built from whatever keys your `plugins` block has.
+    that could never end up loaded is offered no install at all, only the
+    switch-off, since the row is built from whatever keys your `plugins`
+    block has. That covers a typo or a stray character, and also a key like
+    `@scope/foo@latest`: npm installs that happily, but the key is *also*
+    the specifier a daemon imports, and Node does not resolve a version — so
+    the plugin would stay absent however often it is installed.
   - **Say nothing about who can call it when the roster will not load.** A
     roster that refuses (two souls claiming one id, say) tells you nothing
     about anyone's `tools:` list, so setup says the answer is unknown until

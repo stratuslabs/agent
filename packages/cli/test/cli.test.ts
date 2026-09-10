@@ -20,6 +20,7 @@ import {
   withoutSqliteExperimentalWarning,
   CLI_VERSION,
   isInstallableSpecifier,
+  isPackageName,
   menuPrefixWidth,
   createLogWriter,
   createApprovalPolicy,
@@ -6419,6 +6420,38 @@ test('setup does not offer to remove a fallback channel an agent only inherits',
   assert.doesNotMatch(output.stdout, /clear the line to remove it/);
 });
 
+test('setup will not offer to install a plugins key that carries a version', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // npm would install this happily — it is a valid package spec. The loader
+  // hands the same string to `import.meta.resolve`, which does not take a
+  // version, so the plugin would stay "not installed" however many times it
+  // is installed.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-fs@latest': { enabled: false } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → the config's own key (6) → Back (1, the only action)
+      // → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '6\n', '1\n', '7\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /carries a version, and a plugins key is also the module specifier/);
+  assert.doesNotMatch(output.stdout, /Install it with npm install -g/);
+});
+
 test('setup will not offer to install a plugins key npm could never install', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
@@ -6481,6 +6514,16 @@ test('npm specifiers that reach a shell are held to npm\'s own name grammar', ()
   assert.equal(isInstallableSpecifier('`id`'), false);
   assert.equal(isInstallableSpecifier('a;b'), false);
   assert.equal(isInstallableSpecifier(''), false);
+
+  // A narrower question, and a different one. A `plugins` key is also the
+  // specifier the loader hands `import.meta.resolve`, which does not take a
+  // version — so what npm will install and what a daemon can load are not
+  // the same set, and one predicate for both offered to install a key that
+  // could never be loaded.
+  assert.equal(isPackageName('@stratusagent/tool-fs'), true);
+  assert.equal(isPackageName('@stratusagent/cli@latest'), false);
+  assert.equal(isPackageName('tool-fs@1.2.3'), false);
+  assert.equal(isPackageName('pkg & whoami'), false);
 });
 
 test('setup does not treat per-agent roots of the wrong type as configured', async () => {
