@@ -9677,3 +9677,25 @@ test('plugins warns when two entries would claim one qualified skill id', async 
     /warning: skill stratus-plugin-skilled:review is already declared by .*; if both load, a daemon keeps the first and refuses this one whole/,
   );
 });
+
+test('plugins warns when a declared namespace covers a name already claimed', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // A namespace lists nothing, but it covers names — including the kernel's
+  // own, which are registered before any plugin loads.
+  const entry = await writeFixturePlugin('stratus-plugin-wide', {
+    pluginVersion: 1,
+    contributes: { toolsDiscovered: [{ namespace: 'memory.*', risk: 'gated' }] },
+  });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { [entry]: { enabled: true } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(
+    output.stdout,
+    /warning: memory\.\* covers memory\.remember, which the daemon itself already registers; if this plugin registers that name/,
+  );
+});

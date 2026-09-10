@@ -246,7 +246,9 @@ spawn every server you configured. Two consequences worth knowing:
   the loader, and warns like any other pair. The same goes for a contributed
   **skill**: ids qualify to `packageName:id`, so a clash there means one
   package configured twice, and the loader refuses the second entry whole
-  rather than merging them.
+  rather than merging them. A declared *namespace* is checked too — a
+  `memory.*` covers the daemon's own `memory.recall` without ever naming
+  it.
 - **Enabled and loadable are different questions.** A plugin whose settings
   its own schema rejects — `plugin-mcp` with no `servers`, a mistyped key
   under `tool-fs` — or which declares a skill file that is not there, is

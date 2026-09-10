@@ -7569,6 +7569,26 @@ export const collectPluginsReport = async (
         }
       }
 
+      // A namespace covers names it never lists, so a declared `memory.*`
+      // reaches the kernel's `memory.recall` and an `mcp.*` reaches
+      // whatever an earlier plugin claimed under it. Checked against the
+      // literal claims rather than the other way round: only a concrete
+      // name is ever registered, so those are the collisions that can
+      // actually happen.
+      for (const entry of manifest.contributes.toolsDiscovered) {
+        for (const [claimed, claim] of claimedBy) {
+          if (!matchesToolAllowlist(claimed, [entry.namespace])) {
+            continue;
+          }
+          base.warnings = [
+            ...(base.warnings ?? []),
+            `${entry.namespace} covers ${claimed}, which ${claim.owner} `
+            + `${claim.registered ? 'already registers' : 'also declares'}; if this plugin registers that name, `
+            + 'a daemon keeps the first and refuses this one whole, tools and skills together',
+          ];
+        }
+      }
+
       // Skills collide on the qualified `packageName:id`, so a clash means
       // one package configured twice — the two-specifier case again. Firmer
       // than the tool warning and worded that way: the loader stages skills
