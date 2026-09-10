@@ -7314,6 +7314,13 @@ const describeUnattendedReach = async (
    * channel can ask for. Here both are in view from the start.
    */
   servedAgentIds: readonly string[] | undefined,
+  /**
+   * Whether the control API would be serving. It is a second way to answer
+   * a parked call — `GET /api/v1/approvals` lists them, `POST` settles one
+   * — so an agent no Slack channel can ask for is not necessarily an agent
+   * nobody can ask.
+   */
+  apiReachable: boolean,
 ): Promise<string> => {
   if (mode === 'headless') {
     return `headless — an uncovered gated call is refused. Already-authorized ones still run: ${ALREADY_AUTHORIZED}`;
@@ -7342,7 +7349,14 @@ const describeUnattendedReach = async (
   // halves are in view from the start.
   const unreachable = (servedAgentIds ?? []).filter((agentId) => !askable.includes(agentId));
   if (unreachable.length > 0) {
-    parts.push(`no channel can ask for ${unreachable.join(', ')}, so their gated calls wait out the timeout and are denied`);
+    // Slack is not the only way to answer. `GET /api/v1/approvals` lists
+    // what is parked and `POST` settles it, so with the control API up
+    // these calls wait for a client rather than for the timeout — a very
+    // different thing to tell an operator.
+    parts.push(apiReachable
+      ? `no Slack channel can ask for ${unreachable.join(', ')}, so their gated calls park until the control `
+        + 'API answers them or the timeout denies them'
+      : `no channel can ask for ${unreachable.join(', ')}, so their gated calls wait out the timeout and are denied`);
   }
   // Approvers with nowhere to be asked outside their own thread. A turn
   // that did not start in Slack — the API, the dashboard, a delegation —
@@ -7356,11 +7370,15 @@ const describeUnattendedReach = async (
     parts.push(`${noFallback.join(', ')} ${noFallback.length === 1 ? 'has' : 'have'} no slackChannel, `
       + 'so only turns already in Slack can be asked');
   }
-  // An "always allow" answer on an unscoped gated tool covers it for the
-  // rest of that session, so a call there is accepted without asking again.
-  // Named rather than folded into ALREADY_AUTHORIZED: it is per session and
-  // per process, so it describes no durable state this report could read.
-  parts.push('an "always allow" answer covers that tool for the rest of its session');
+  // What an "always allow" answer persists depends on what the call names,
+  // and mostly it is not the session: `createPermissionPolicy` maps an
+  // unscoped gated tool to a standing grant that outlives every restart,
+  // a command to a scope, a click to a site, and only a schedule's
+  // destination to the session. Saying "for the rest of its session" flat
+  // understated durable unattended access, which is the wrong direction to
+  // be wrong about approvals in.
+  parts.push('an "always allow" answer persists — a standing grant for an unscoped tool, a command scope, '
+    + 'or a site, all until revoked; only a scheduled destination lasts just the session');
   return parts.join('; ');
 };
 
@@ -7390,6 +7408,10 @@ export const collectPluginsReport = async (
   // What the loader would fold in, so the validation below is against the
   // object a daemon on this machine would build.
   const workspaceRoot = workspacesDirPath(env);
+  // Read the same way the daemon reads it: installed, and not switched off
+  // by the trusted config's `api` block.
+  const api = await loadServeApi(env, command.configPath, warn);
+  const apiReachable = packageInstalled('@stratusagent/control-api', env) && api.enabled !== false;
 
   // Who grants what, from the roster a dispatch actually serves — the same
   // resolution `stratus skills` uses, so the two commands cannot disagree
@@ -7638,6 +7660,7 @@ export const collectPluginsReport = async (
       approvals,
       env,
       rosterUnreadable ? undefined : roster.map((entry) => entry.soul.agent.id),
+      apiReachable,
     ),
     rosterUnreadable,
     plugins,

@@ -269,13 +269,15 @@ spawn every server you configured. Two consequences worth knowing:
   list those, not one: `stratus grants <agent>` for the first three, and
   `stratus schedules` for a destination approved with a schedule. `remote`
   carries the same qualification — they are allowed before anyone is asked —
-  and adds a session-wide one, since an "always allow" answered in Slack
-  covers that tool for the rest of that conversation.
+  and adds whatever an "always allow" answer persisted: a standing grant
+  for an unscoped tool, a command scope, or a site — all until revoked — and
+  only a schedule's destination lasting just the session.
 
   In `remote` the line also names what is missing: an agent the daemon
-  serves that no channel can ask for (its gated calls wait out the timeout,
-  which is what `stratus serve` warns about at startup), and approvers with
-  no `slackChannel` — they can only be asked on turns that started in Slack,
+  serves that no Slack channel can ask for — its gated calls park until the
+  control API answers them, or, with no API serving either, until the
+  timeout denies them, which is what `stratus serve` warns about at startup
+  — and approvers with no `slackChannel` — they can only be asked on turns that started in Slack,
   because a turn from the API, the dashboard, or a delegation reaches the
   adapter with nowhere to post.
   `remote` only asks if somebody can be asked: with no channel installed a

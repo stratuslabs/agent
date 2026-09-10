@@ -9475,13 +9475,21 @@ test('plugins names the served agents no channel can ask for, and approvers with
   });
 
   assert.match(output.stdout, /approvers set for stratus/);
-  assert.match(output.stdout, /no channel can ask for blair, so their gated calls wait out the timeout/);
+  // The control API resolves in this fixture, so a parked call is not
+  // simply doomed — it waits for a client rather than for the timeout.
+  assert.match(
+    output.stdout,
+    /no Slack channel can ask for blair, so their gated calls park until the control API answers them/,
+  );
   // Approvers with nowhere to be asked outside their own thread: a turn
   // that did not start in Slack reaches the adapter with no destination.
   assert.match(output.stdout, /stratus has no slackChannel, so only turns already in Slack can be asked/);
   // The session-wide answer, which is why "parks and asks" is not the whole
   // story even for a call nothing durable covers.
-  assert.match(output.stdout, /"always allow" answer covers that tool for the rest of its session/);
+  assert.match(
+    output.stdout,
+    /"always allow" answer persists — a standing grant for an unscoped tool, a command scope, or a site, all until revoked/,
+  );
 });
 
 /**
@@ -9731,4 +9739,34 @@ test('plugins warns when a later literal falls under an earlier namespace', asyn
     output.stdout,
     /warning: mcp\.linear\.get_issue overlaps mcp\.\*, which is also declared by/,
   );
+});
+
+test('plugins says a gated call waits out the timeout only when nothing can answer it', async () => {
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', agents: { stratus: { slackApprovers: ['U01OPS'] } } },
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { stratus: { botToken: 'xoxb-a', appToken: 'xapp-a' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: {
+      cwd,
+      homeDir: home,
+      processEnv: {},
+      // No control API installed — now nothing can answer for `blair`, and
+      // the timeout really is the end of it.
+      packageResolver: (specifier: string) => specifier !== '@stratusagent/control-api',
+    },
+  });
+
+  assert.match(output.stdout, /no channel can ask for blair, so their gated calls wait out the timeout and are denied/);
+  assert.doesNotMatch(output.stdout, /the control API answers them/);
 });
