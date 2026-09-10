@@ -7443,14 +7443,23 @@ export const collectPluginsReport = async (
   //
   // Literal declarations only: the registry claims names as they register,
   // and a namespace has none until its server connects.
-  // The daemon's own tools are *registered*, unconditionally, before any
-  // plugin loads. A plugin's entry is only a declaration, which is why the
-  // two produce different warnings below.
   // Qualified skill ids, tracked the same way and for the same reason.
   const claimedSkills = new Map<string, string>();
-  const claimedBy = new Map<string, { owner: string; registered: boolean }>(
-    KERNEL_TOOL_NAMES.map((name) => [name, { owner: 'the daemon itself', registered: true }]),
-  );
+  /**
+   * Every name or namespace some plugin may register, in config order.
+   *
+   * One list rather than a map of literals, because a collision is an
+   * *overlap* and overlap has no preferred direction: a later literal falls
+   * under an earlier namespace exactly as a later namespace covers an
+   * earlier literal. Two one-way passes is what this was, and it missed
+   * whichever direction was written second.
+   *
+   * The daemon's own tools are *registered*, unconditionally, before any
+   * plugin loads; a plugin's entry is only a declaration, which is why the
+   * two produce different warnings.
+   */
+  const claims: Array<{ pattern: string; owner: string; registered: boolean }> = KERNEL_TOOL_NAMES
+    .map((name) => ({ pattern: name, owner: 'the daemon itself', registered: true }));
   for (const specifier of packages) {
     const block = pluginsConfig[specifier] ?? {};
     const isConfigured = configured.includes(specifier);
@@ -7543,50 +7552,39 @@ export const collectPluginsReport = async (
       // a load failure would condemn a plugin that loads perfectly well
       // because its tool is optional.
       // Keyed by config entry, never by package name: the same package
-      // configured through two specifiers — its name and an absolute path —
-      // is two entries the loader treats as two plugins, and exempting them
-      // for sharing a `packageName` would hide the one collision an
-      // operator is most likely to create by accident.
-      const collisions = manifest.contributes.tools
-        .map((tool) => ({ name: tool.name, claim: claimedBy.get(tool.name) }))
-        .filter((entry) => entry.claim !== undefined);
-      for (const { name, claim } of collisions) {
-        base.warnings = [
-          ...(base.warnings ?? []),
-          claim?.registered === true
-            ? `${name} is already registered by ${claim.owner}; if this plugin registers it too, `
-              + 'a daemon keeps the first and refuses this one whole, tools and skills together'
-            // Neither side is known to register it: both are declarations,
-            // and `setup()` decides. Saying the other plugin *has* the name
-            // would send an operator to disable a pair that loads fine.
-            : `${name} is also declared by ${claim?.owner}; if both register it, a daemon keeps whichever `
-              + 'loads first and refuses the other whole, tools and skills together',
-        ];
-      }
-      for (const tool of manifest.contributes.tools) {
-        if (!claimedBy.has(tool.name)) {
-          claimedBy.set(tool.name, { owner: specifier, registered: false });
-        }
-      }
-
-      // A namespace covers names it never lists, so a declared `memory.*`
-      // reaches the kernel's `memory.recall` and an `mcp.*` reaches
-      // whatever an earlier plugin claimed under it. Checked against the
-      // literal claims rather than the other way round: only a concrete
-      // name is ever registered, so those are the collisions that can
-      // actually happen.
-      for (const entry of manifest.contributes.toolsDiscovered) {
-        for (const [claimed, claim] of claimedBy) {
-          if (!matchesToolAllowlist(claimed, [entry.namespace])) {
+      // configured through two specifiers is two entries the loader treats
+      // as two plugins, and exempting them for sharing a `packageName`
+      // would hide the collision an operator is likeliest to create by
+      // accident.
+      //
+      // A plugin never collides with itself: everything it declares is
+      // gathered first, checked against what came before, and only then
+      // added. That ordering is what makes a manifest declaring both
+      // `mcp.ping` and `mcp.*` silent — it registers that name once — and
+      // it is load-bearing, so adding claims inside the loop below would
+      // reintroduce a warning telling operators to fix a working config.
+      const declaredHere = [
+        ...manifest.contributes.tools.map((tool) => tool.name),
+        ...manifest.contributes.toolsDiscovered.map((entry) => entry.namespace),
+      ];
+      for (const pattern of declaredHere) {
+        for (const claim of claims) {
+          if (!toolScopesOverlap(pattern, claim.pattern)) {
             continue;
           }
+          const subject = pattern === claim.pattern
+            ? `${pattern} is`
+            : `${pattern} overlaps ${claim.pattern}, which is`;
           base.warnings = [
             ...(base.warnings ?? []),
-            `${entry.namespace} covers ${claimed}, which ${claim.owner} `
-            + `${claim.registered ? 'already registers' : 'also declares'}; if this plugin registers that name, `
-            + 'a daemon keeps the first and refuses this one whole, tools and skills together',
+            `${subject} ${claim.registered ? 'already registered by' : 'also declared by'} ${claim.owner}; `
+            + 'if both register that name, a daemon keeps the first and refuses the other whole, '
+            + 'tools and skills together',
           ];
         }
+      }
+      for (const pattern of declaredHere) {
+        claims.push({ pattern, owner: specifier, registered: false });
       }
 
       // Skills collide on the qualified `packageName:id`, so a clash means

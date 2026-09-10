@@ -9541,7 +9541,7 @@ test('plugins warns that a declared tool name is already registered elsewhere', 
   // that loads perfectly well.
   assert.match(
     output.stdout,
-    /warning: db\.query is also declared by .*; if both register it, a daemon keeps whichever loads first and refuses the other whole/,
+    /warning: db\.query is also declared by .*; if both register that name, a daemon keeps the first and refuses the other whole/,
   );
   // And it stays enabled with its tools listed, because it may well load.
   assert.doesNotMatch(output.stdout, /a daemon would register nothing for it/);
@@ -9609,6 +9609,11 @@ test('plugins emits one row for a tool reachable more than one way', async () =>
   };
   const tools = report.plugins.find((plugin) => plugin.package === entry)?.tools ?? [];
   assert.equal(tools.filter((tool) => tool.name === 'mcp.ping').length, 1);
+  // And no self-collision: one manifest declaring both a literal and a
+  // namespace covering it registers that name once, which collides with
+  // nothing. Warning about it would send an operator to fix a working
+  // config.
+  assert.doesNotMatch(output.stdout, /warning:/);
 });
 
 test('plugins warns when a plugin declares a name the daemon itself registers', async () => {
@@ -9696,6 +9701,34 @@ test('plugins warns when a declared namespace covers a name already claimed', as
 
   assert.match(
     output.stdout,
-    /warning: memory\.\* covers memory\.remember, which the daemon itself already registers; if this plugin registers that name/,
+    /warning: memory\.\* overlaps memory\.remember, which is already registered by the daemon itself/,
+  );
+});
+
+test('plugins warns when a later literal falls under an earlier namespace', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // The direction a one-way pass cannot see: the namespace is declared
+  // first and has no earlier literal to compare against, and the literal
+  // arrives later with only literals to compare against. Overlap has no
+  // preferred direction, so the check must not either.
+  const bridge = await writeFixturePlugin('stratus-plugin-first', {
+    pluginVersion: 1,
+    contributes: { toolsDiscovered: [{ namespace: 'mcp.*', risk: 'gated' }] },
+  });
+  const literal = await writeFixturePlugin('stratus-plugin-second', {
+    pluginVersion: 1,
+    contributes: { tools: [{ name: 'mcp.linear.get_issue', risk: 'gated' }] },
+  });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { [bridge]: { enabled: true }, [literal]: { enabled: true } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(
+    output.stdout,
+    /warning: mcp\.linear\.get_issue overlaps mcp\.\*, which is also declared by/,
   );
 });
