@@ -51,10 +51,16 @@ digits to jump, Esc to go back.
     already set per agent under `agents.<id>` for an agent the roster still
     serves, which is a working config and a narrower one than any fleet-wide
     answer, so that is kept as it is. An override left behind by a deleted
-    agent does not count: it would grant nobody anything.
+    agent does not count: it would grant nobody anything. Nor does one of
+    the wrong type — the override has to be the same nonempty list of
+    strings the prompt itself writes, since anything else is rejected when
+    the daemon loads the plugin.
   - **Switch off a plugin whose package is gone.** A config copied from
     another machine, or an uninstall, leaves a block enabling a package that
-    is not there; the row offers to clear it without installing first.
+    is not there; the row offers to clear it without installing first. A key
+    that is not a package name npm could install — a typo, a stray
+    character — is offered no install at all, only the switch-off, since the
+    row is built from whatever keys your `plugins` block has.
   - **Say nothing about who can call it when the roster will not load.** A
     roster that refuses (two souls claiming one id, say) tells you nothing
     about anyone's `tools:` list, so setup says the answer is unknown until
@@ -83,7 +89,10 @@ digits to jump, Esc to go back.
   it is: a soul with **no** `tools:` list is allowlisted for every registered
   tool, and the built-in `stratus` agent has none, so on a fresh install
   enabling a plugin makes its tools callable at the next daemon start and
-  setup says exactly that, naming the agents. Where every soul has a list,
+  setup says exactly that, naming the agents — except where it has just
+  said it did not check something the plugin needs, as for `tool-browser`
+  and MCP, and then the same line is qualified rather than promising an
+  outcome the caveat above it contradicts. Where every soul has a list,
   it prints the line to paste instead. An agent is only named as one that
   can call the plugin if the setting the plugin needs resolves for it:
   `tool-fs` enabled from a per-agent `roots` block leaves the other

@@ -19,6 +19,7 @@ import {
   filterSqliteExperimentalWarning,
   withoutSqliteExperimentalWarning,
   CLI_VERSION,
+  isInstallableSpecifier,
   createLogWriter,
   createApprovalPolicy,
   currentLogPosition,
@@ -6261,6 +6262,11 @@ test('setup says what it did not check when enabling a plugin it could not have 
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /Setup checked that servers is a block and no further/);
   assert.match(output.stdout, /did not load/);
+  // The caveat is only half of saying what it did not check: the verdict
+  // below it used to promise the tools were callable at the next daemon
+  // start regardless, leaving two sentences that contradict each other.
+  assert.match(output.stdout, /subject to the caveat above, which setup did not check/);
+  assert.doesNotMatch(output.stdout, /callable by that agent the next time the daemon starts/);
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
   assert.equal(config.plugins['@stratusagent/plugin-mcp'].enabled, true);
 });
@@ -6301,6 +6307,89 @@ test('setup does not offer to remove a fallback channel an agent only inherits',
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /Enter to go on inheriting it; type another to give this agent its own/);
   assert.doesNotMatch(output.stdout, /clear the line to remove it/);
+});
+
+test('setup will not offer to install a plugins key npm could never install', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The row is built from `Object.keys(state.plugins)`, so whatever is in
+  // the config arrives here as a package name. `npm install -g` on this one
+  // cannot succeed however it is spawned, and on Windows npm needs a shell.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { 'pkg & whoami': { enabled: false } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → the config's own key (6) → Back (1, the only action)
+      // → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '6\n', '1\n', '7\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /is not a package name npm can install/);
+  assert.doesNotMatch(output.stdout, /Install it with npm install -g/);
+});
+
+test('npm specifiers that reach a shell are held to npm\'s own name grammar', () => {
+  // The fence is at the spawn, so it covers callers added later — which is
+  // how the "every name here is a constant" invariant was lost in the first
+  // place. Versions are deliberately narrower than npm's range syntax:
+  // `^1.0.0` is a valid range and `^` is cmd.exe's escape character.
+  assert.equal(isInstallableSpecifier('@stratusagent/tool-fs'), true);
+  assert.equal(isInstallableSpecifier('@stratusagent/cli@latest'), true);
+  assert.equal(isInstallableSpecifier('npm'), true);
+  assert.equal(isInstallableSpecifier('pkg & whoami'), false);
+  assert.equal(isInstallableSpecifier('pkg^1.0.0'), false);
+  assert.equal(isInstallableSpecifier('`id`'), false);
+  assert.equal(isInstallableSpecifier('a;b'), false);
+  assert.equal(isInstallableSpecifier(''), false);
+});
+
+test('setup does not treat per-agent roots of the wrong type as configured', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // The config loader takes any plugin-owned value, so this parses; tool-fs
+  // requires every root to be a string and preflight rejects the whole
+  // plugin. Counting it as the per-agent config that justifies enabling
+  // would write `enabled: true` on a block the daemon refuses.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/tool-fs': { enabled: false, agents: { ava: { roots: [123] } } },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /it grants nothing without roots/);
+  assert.doesNotMatch(output.stdout, /Keeping the per-agent roots/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins['@stratusagent/tool-fs'].enabled, false);
 });
 
 test('setup can re-enable a configured plugin it would not have enabled from scratch', async () => {

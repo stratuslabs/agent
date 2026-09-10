@@ -410,13 +410,66 @@ export const compareVersions = (a: string, b: string): number => {
  * both land in the caller's error handler, so a Windows setup would report
  * that it could not install and leave Slack and the dashboard missing.
  *
- * Every package name reaching the shell is a constant in this file, so
- * there is nothing user-supplied here for it to re-parse.
+ * `shell: true` concatenates the arguments without escaping — Node 24
+ * deprecates the pattern as DEP0190 for exactly that reason — so what may
+ * reach it is fenced by `isInstallablePackageName` below rather than by an
+ * argument about where the names come from. That argument used to be
+ * "every name here is a constant in this file", and it stopped being true
+ * the moment the Plugins menu started listing package names read from a
+ * config.
  */
 export const npmNeedsShell = (platform: NodeJS.Platform): boolean => platform === 'win32';
 
+/**
+ * Whether a string is a specifier npm would install — and therefore one
+ * safe to hand a shell.
+ *
+ * npm's own name grammar, which is far narrower than anything a shell
+ * treats as special: an optional `@scope/`, then lowercase alphanumerics
+ * with `-`, `_` and `.`, no leading `.` or `_`, 214 characters at most,
+ * and an optional `@version` of the same restricted alphabet. Nothing that
+ * matches contains a space, a quote, or a metacharacter — not `&`, not
+ * `|`, not `` ` ``, and not cmd.exe's `^` — so the fence and the
+ * correctness check are one check.
+ *
+ * The version half is deliberately not npm's full range syntax: `^1.0.0`
+ * is a valid range and `^` is cmd.exe's escape character. Only the plain
+ * forms this CLI actually passes are accepted, and a range that needs more
+ * is a thing to install by hand.
+ *
+ * A config key that fails this was never installable, so refusing costs no
+ * capability: `npm install -g 'pkg & whoami'` is not a thing that works
+ * and quietly becomes a thing that runs.
+ */
+export const isInstallableSpecifier = (specifier: string): boolean => {
+  if (specifier.length > 214) {
+    return false;
+  }
+  const scoped = specifier.startsWith('@');
+  // Split on the `@` that introduces a version, never the one that opens a
+  // scope — `@scope/pkg` has both and only the first is part of the name.
+  const at = specifier.indexOf('@', scoped ? 1 : 0);
+  const name = at === -1 ? specifier : specifier.slice(0, at);
+  const version = at === -1 ? undefined : specifier.slice(at + 1);
+  if (!/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name)) {
+    return false;
+  }
+  return version === undefined || /^[a-z0-9][a-z0-9.-]*$/.test(version);
+};
+
 const defaultPackageInstaller: PackageInstaller = async (packages) => {
   const { spawn } = await import('node:child_process');
+  // The fence, at the one place that touches a shell, so every caller is
+  // behind it — including ones added later, which is how the old invariant
+  // was lost.
+  const rejected = packages.filter((entry) => !isInstallableSpecifier(entry));
+  if (rejected.length > 0) {
+    return {
+      ok: false,
+      message: `${rejected.join(', ')} ${rejected.length === 1 ? 'is not a package name' : 'are not package names'} npm can install. `
+        + 'Fix the key in your config, or install it yourself.',
+    };
+  }
   return new Promise<PackageInstallResult>((resolve) => {
     // npm's own output is inherited rather than captured: a global install
     // runs for tens of seconds, and a silent one is indistinguishable from
@@ -4679,7 +4732,15 @@ export const runSetup = async (
       && key in (own as Record<string, unknown>)
       ? (own as Record<string, unknown>)[key]
       : block?.[key];
-    return Array.isArray(value) && value.length > 0;
+    // The same value the fleet-wide prompt writes: a nonempty list of
+    // nonempty strings. Not a copy of the plugin's schema — it is this
+    // menu holding a hand-edited value to the shape its own prompt
+    // produces, which is the only shape it has ever claimed to accept.
+    // Length alone let `roots: [123]` stand in as configured, and tool-fs
+    // rejects the whole plugin at preflight for it.
+    return Array.isArray(value)
+      && value.length > 0
+      && value.every((entry) => typeof entry === 'string' && entry.trim().length > 0);
   };
 
   const pluginsSummary = (): string => {
@@ -4742,7 +4803,16 @@ export const runSetup = async (
 
     if (callable.length > 0) {
       writeLine(streams.stdout, `${name} is enabled — and ${label(callable)} ${callable.length === 1 ? 'has' : 'have'} no \`tools:\` list, which means every registered tool.`);
-      writeLine(streams.stdout, `So ${grants ?? 'what it contributes'} ${callable.length === 1 ? 'is' : 'are'} callable by ${callable.length === 1 ? 'that agent' : 'those agents'} the next time the daemon starts.`);
+      // "callable the next time the daemon starts" is a prediction, and
+      // for a plugin carrying a `note` it is one setup has just said it
+      // could not make: the browser may not exist, the servers block may
+      // hold an entry the bridge refuses. Printing the caveat and then the
+      // categorical claim leaves the operator to decide which of the two
+      // sentences to believe.
+      const unchecked = PLUGIN_SETUP[name]?.note !== undefined;
+      writeLine(streams.stdout, unchecked
+        ? `So ${grants ?? 'what it contributes'} ${callable.length === 1 ? 'is' : 'are'} what ${callable.length === 1 ? 'that agent' : 'those agents'} would gain at the next daemon start — subject to the caveat above, which setup did not check.`
+        : `So ${grants ?? 'what it contributes'} ${callable.length === 1 ? 'is' : 'are'} callable by ${callable.length === 1 ? 'that agent' : 'those agents'} the next time the daemon starts.`);
       if (shortfall !== undefined) {
         writeLine(streams.stdout, `${label(shortfall.agents)} ${shortfall.one ? 'is' : 'are'} allowlisted too, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} — every call would fail until it is, under plugins["${name}"].agents.`);
       }
@@ -4836,9 +4906,20 @@ export const runSetup = async (
       // from another machine. The block is exactly what an operator would
       // want to clear, and reaching it used to require installing the
       // package first in order to switch it off.
+      //
+      // A key npm could never install is offered no install: the row comes
+      // from `Object.keys(state.plugins)`, so a typo or a stray character
+      // arrives here as a package name, and `npm install -g` on it fails
+      // whatever it looks like. Switching it off stays available — a block
+      // keyed by nonsense is exactly one to clear.
+      const installable = isInstallableSpecifier(name);
       const actions = enabled
-        ? ['Install it with npm install -g', 'Switch it off in the config', 'Back']
-        : ['Install it with npm install -g, then enable it', 'Back'];
+        ? [...(installable ? ['Install it with npm install -g'] : []), 'Switch it off in the config', 'Back']
+        : [...(installable ? ['Install it with npm install -g, then enable it'] : []), 'Back'];
+      if (!installable) {
+        writeLine(streams.stdout);
+        writeLine(streams.stdout, `${name} is not a package name npm can install — check the key in your plugins config.`);
+      }
       const answer = await prompter.select(
         enabled
           ? `${name} is enabled in your config but not installed, so a daemon registers nothing for it.`
@@ -4848,7 +4929,7 @@ export const runSetup = async (
       if (answer.kind !== 'index' || answer.index === actions.length - 1) {
         return;
       }
-      if (enabled && answer.index === 1) {
+      if (enabled && answer.index === actions.length - 2) {
         disablePlugin(name);
         return;
       }
@@ -4972,7 +5053,22 @@ export const runSetup = async (
           // enabled block with no roots anywhere is the exact "installed,
           // enabled, and useless" state this menu exists to keep anyone
           // from reaching by accident.
-          writeLine(streams.stdout, `Nothing entered, so ${name} was left as it was — it grants nothing without ${needsKey}.`);
+          //
+          // "Left as it was" is the whole outcome, and what that means
+          // differs by where the operator came from. Reaching this by
+          // erasing an existing value — Change roots, prefill deleted —
+          // leaves the old value in the saved config, because the return
+          // is before `state.plugins` is written. Saying "it grants
+          // nothing without roots" there describes a block that still has
+          // roots, and an operator who meant to take access away would
+          // read it as confirmation. Setup names what it kept instead, and
+          // how to actually drop it, rather than dropping it on a guess:
+          // an empty answer is not an unambiguous "revoke", and this menu
+          // does not widen or narrow a boundary the operator did not.
+          const kept = existing[needsKey];
+          writeLine(streams.stdout, Array.isArray(kept) && kept.length > 0
+            ? `Nothing entered, so ${name} kept the ${needsKey} it already had (${kept.join(', ')}) — setup did not remove them. Edit plugins["${name}"].${needsKey} to change what is reachable.`
+            : `Nothing entered, so ${name} was left as it was — it grants nothing without ${needsKey}.`);
           return;
         }
         writeLine(streams.stdout, `Keeping the per-agent ${needsKey} already configured for ${name}; nothing is granted fleet-wide.`);
