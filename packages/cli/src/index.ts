@@ -7648,10 +7648,15 @@ export const collectPluginsReport = async (
           // inside `setup()` and its names stage like any declared one.
           // Only a name arriving on a later reconnect registers against a
           // committed registry, where a clash costs that one registration
-          // and nothing else. Keying this on `.*` claimed the cheap half
-          // for every namespace and was wrong for the common case: a
-          // server that answers at startup.
-          const cost = pattern.endsWith('.*')
+          // and nothing else.
+          //
+          // So the qualified wording belongs to the *pair*, not to the
+          // side being examined: a literal colliding with an earlier
+          // namespace is refused whole only if that bridge was up at
+          // startup, and costs the bridge one tool if it reconnects later
+          // and finds the name taken. Asking only whether `pattern` ends
+          // in `.*` reads one side of a symmetric relation — twice now.
+          const cost = pattern.endsWith('.*') || claim.pattern.endsWith('.*')
             ? 'a daemon keeps the first and refuses the other whole when the clashing tool is discovered before that plugin finishes loading — a bridge whose server answers at startup discovers inside setup() — and refuses just that one tool when it arrives on a later reconnect'
             : 'a daemon keeps the first and refuses the other whole, tools and skills together';
           base.warnings = [

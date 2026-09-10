@@ -254,7 +254,11 @@ spawn every server you configured. Two consequences worth knowing:
   manifest-named tool *and* every tool a bridge discovers at its first
   connect, since `plugin-mcp` awaits that connect inside `setup()`. Only a
   tool that arrives on a later reconnect — a server unreachable at startup,
-  or one that added a tool since — costs just that one registration.
+  or one that added a tool since — costs just that one registration. That
+  uncertainty belongs to the *pair*: a plainly-named tool colliding with
+  another plugin's declared namespace may cost that plugin its whole self
+  or a single tool, depending on whether its server was up, so the warning
+  is qualified whenever either side is a namespace.
   Between two plugins the warning says *if both register
   it*, since neither side is known to; against the daemon's own tools it is
   definite on one side, because those are already registered. One package

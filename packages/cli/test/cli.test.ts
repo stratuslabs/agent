@@ -9749,10 +9749,17 @@ test('plugins warns when a later literal falls under an earlier namespace', asyn
 
   await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
 
+  // The cost belongs to the pair, not to the side being examined. This
+  // literal registers during its own setup(), but the plugin that loses
+  // something may be the bridge: if its server was down at startup it has
+  // already committed, so discovering this name on a reconnect costs it
+  // that one tool. Whole-plugin wording here would state one of the two
+  // outcomes as the only one.
   assert.match(
     output.stdout,
-    /warning: mcp\.linear\.get_issue overlaps mcp\.\*, which is also declared by/,
+    /warning: mcp\.linear\.get_issue overlaps mcp\.\*, which is also declared by .*; if both register that name, a daemon keeps the first and refuses the other whole when the clashing tool is discovered before that plugin finishes loading/,
   );
+  assert.doesNotMatch(output.stdout, /refuses the other whole, tools and skills together/);
 });
 
 test('plugins says a gated call waits out the timeout only when nothing can answer it', async () => {
