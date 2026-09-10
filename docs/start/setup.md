@@ -108,14 +108,16 @@ digits to jump, Esc to go back.
     value leaves it inheriting rather than freezing today's setting as that
     agent's own override.
   - **The row is the same verdict `stratus plugins` prints.** Not a summary
-    of it — literally its first clause, from one renderer, so the two cannot
-    disagree about whether your approvals work. That is what carries the
-    details a shorter sentence kept losing: `headless` refuses an
-    *uncovered* call and says so, because a standing grant or an approved
-    scope still runs unattended; an `approvals.timeoutMs` of `0` parks a
-    call for the daemon's life rather than denying it; and the control API
-    counts as a way to answer. The remaining clauses appear on the Approvals
-    screen itself.
+    of it — the same clauses, from one renderer, so the two cannot disagree
+    about whether your approvals work. That is what carries the details a
+    shorter sentence kept losing: `headless` refuses an *uncovered* call and
+    says so, because a standing grant or an approved scope still runs
+    unattended; an `approvals.timeoutMs` of `0` parks a call for the
+    daemon's life rather than denying it; and the control API counts as a
+    way to answer. On a terminal too narrow for the whole line the row ends
+    in `…` — visibly cut rather than quietly shortened, since a chosen
+    prefix reads as the whole verdict and was wrong twice — and the
+    Approvals screen carries all of it.
   - **Clearing a list never widens one.** With a top-level list in play,
     emptying an agent's approvers writes the explicit `[]` that *excludes*
     it, rather than deleting the key and handing it the global list. The
