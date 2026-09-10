@@ -50,12 +50,22 @@ digits to jump, Esc to go back.
     and writes nothing if you leave the answer blank — unless roots are
     already set per agent under `agents.<id>`, which is a working config and
     a narrower one than any fleet-wide answer, so that is kept as it is.
+  - **Say nothing about who can call it when the roster will not load.** A
+    roster that refuses (two souls claiming one id, say) tells you nothing
+    about anyone's `tools:` list, so setup says the answer is unknown until
+    you fix it rather than guessing either way.
   - **Enable `plugin-mcp` from scratch.** It requires a `servers` block
     naming endpoints only you know, and a block written without one is
     refused at load. Setup says so and points at
     [Config](../reference/config.md). A block that already has `servers` is
     switched on and off like any other — the refusal is about the missing
     setting, not the package.
+
+  It also names a prerequisite it cannot install: `tool-browser` depends on
+  `playwright-core`, which deliberately downloads no browser, so enabling it
+  prints how to point it at one you have or fetch a dedicated Chromium.
+  Setup cannot check for a browser without importing the plugin, which it
+  never does — so it tells you instead of blocking.
 
   Enabling is only the second of the two gates — the soul's `tools:` list is
   the other, and setup does not edit souls. What it prints depends on which

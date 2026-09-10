@@ -4571,6 +4571,13 @@ export const runSetup = async (
     /** Asked for on enable; the block is not written without an answer. */
     needs?: { key: string; question: string; placeholder: string; list: boolean };
     /**
+     * A prerequisite outside the package that setup can neither supply nor
+     * detect without importing the plugin — which this menu never does.
+     * Printed on enable rather than blocking, because unlike a missing
+     * `roots` it is usually already satisfied and setup cannot tell.
+     */
+    note?: string;
+    /**
      * A setting setup cannot invent, and the reason. The refusal is about
      * the setting being absent, never about the package: a block that
      * already has it is enabled and disabled like any other.
@@ -4592,6 +4599,14 @@ export const runSetup = async (
     '@stratusagent/tool-browser': {
       label: 'Browser',
       grants: 'browser.goto, browser.read, browser.screenshot, browser.act',
+      // The package depends on `playwright-core`, which downloads no
+      // browser on purpose — a few megabytes rather than 150. So the
+      // browser is one you already have or one you fetch, and without
+      // either every call fails: enabled and unusable, the state this menu
+      // exists to prevent. Setup cannot check for it without importing the
+      // plugin, so it says so instead.
+      note: 'It drives a browser you already have. If none is found, run `npx playwright install chromium`, '
+        + 'or point it at yours with `channel` or `executablePath` under plugins["@stratusagent/tool-browser"].',
     },
     '@stratusagent/plugin-mcp': {
       label: 'MCP bridge',
@@ -4641,7 +4656,16 @@ export const runSetup = async (
     // immediately, and saying "no agent can call it yet" would understate
     // what just happened in the most common configuration there is. Read
     // the roster and say which of the two it was.
-    const { entries } = await channelRoster();
+    const { entries, loaded } = await channelRoster();
+    if (!loaded) {
+      // The roster refused to load, so `entries` is empty — which is not
+      // evidence that every soul has a `tools:` list. Claiming nothing can
+      // call the plugin would be a statement about a file this command
+      // could not read, and false the moment the collision is fixed if any
+      // soul omits its allowlist. Same posture as the Channels menu.
+      writeLine(streams.stdout, `${name} is enabled. Who can call it is unknown until the roster loads — fix the error above, then run \`stratus plugins\`.`);
+      return;
+    }
     const permissive = entries
       .filter((entry) => entry.soul.agent.tools === undefined)
       .map((entry) => `${entry.soul.agent.name} (${entry.soul.agent.id})`);
@@ -4841,6 +4865,9 @@ export const runSetup = async (
     }
 
     state.plugins = { ...(state.plugins ?? {}), [name]: block };
+    if (setup?.note) {
+      writeLine(streams.stdout, setup.note);
+    }
     await printSoulGrantLine(name);
   };
 

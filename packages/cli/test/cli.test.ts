@@ -5813,6 +5813,65 @@ test('setup says a plugin grants nothing yet when every soul has a tools list', 
   assert.match(output.stdout, /tools: \[fs\.read\]/);
 });
 
+test('setup names the browser tool-browser needs but cannot install', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-browser (4) → Enable it (1) → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '4\n', '1\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // `playwright-core` downloads no browser, so enabling this without one
+  // is the same "enabled and unusable" state the roots prompt prevents.
+  // Setup cannot detect a browser without importing the plugin, which this
+  // menu never does — so it names the follow-up rather than blocking.
+  assert.match(output.stdout, /npx playwright install chromium/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.plugins['@stratusagent/tool-browser'], { enabled: true });
+});
+
+test('setup claims nothing about who can call a plugin when the roster will not load', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // Two souls claiming one id: `loadRosterSouls` refuses the whole roster,
+  // so there is no list of allowlists to reason from. "Every soul has a
+  // tools: list" would be a claim about a file setup could not read — and
+  // false the moment the collision is fixed, if any soul omits one.
+  await writeFile(path.join(agentsDir, 'a-first.md'), '---\nname: First\nid: twin\n---\n\nYou are First.\n');
+  await writeFile(path.join(agentsDir, 'b-second.md'), '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Who can call it is unknown until the roster loads/);
+  assert.doesNotMatch(output.stdout, /No agent can call it yet/);
+  assert.doesNotMatch(output.stdout, /which means every registered tool/);
+});
+
 test('setup does not write an enabled plugin block without the setting that makes it work', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
