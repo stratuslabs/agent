@@ -82,8 +82,11 @@ digits to jump, Esc to go back.
   the ones **Channels** connected *and* the roster still has — a token that
   outlived its agent is skipped by the Slack adapter, so approvers named for
   it would configure a route no call can take. (Those orphaned tokens are
-  shown under **Channels**, which is where they can be cleared.) Two details it gets right so you don't
-  have to:
+  shown under **Channels**, which is where they can be cleared.) The rows
+  stay editable before `@stratusagent/channel-slack` is installed, since Save
+  is what offers it: on a first run you connect Slack and name its approvers
+  in one pass, and the screen says the adapter is still coming. Some details
+  it gets right so you don't have to:
   - **A fallback channel, not just approvers.** A turn that arrived through
     Slack is answered in its own thread, but one started by a schedule, a
     delegation, or the control API reaches the adapter with no destination
