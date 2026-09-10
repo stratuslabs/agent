@@ -9716,9 +9716,11 @@ test('plugins warns when a declared namespace covers a name already claimed', as
 
   await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
 
+  // A namespace's tools arrive at connect, after the plugin has committed,
+  // so a clash there costs that one discovered tool rather than the plugin.
   assert.match(
     output.stdout,
-    /warning: memory\.\* overlaps memory\.remember, which is already registered by the daemon itself/,
+    /warning: memory\.\* overlaps memory\.remember, which is already registered by the daemon itself; if both register that name, a daemon keeps the first and refuses that one discovered tool, leaving the rest of this plugin serving/,
   );
 });
 
@@ -9837,4 +9839,52 @@ test('plugins does not both deny and offer the control API in one verdict', asyn
   // The contradiction, in either of the two shapes it took.
   assert.doesNotMatch(output.stdout, /wait out the approval timeout and then be denied/);
   assert.doesNotMatch(output.stdout, /no channel is running to ask through/);
+});
+
+test('plugins does not offer the control API where Slack denies first', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // Tokens stored for `stratus` but no approvers. The Slack adapter handles
+  // the same event synchronously and denies — so there is nothing left
+  // parked for an API client to answer, and offering one would send an
+  // operator to a route that cannot help.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote' },
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { stratus: { botToken: 'xoxb-a', appToken: 'xapp-a' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {}, packageResolver: () => true },
+  });
+
+  assert.match(output.stdout, /no approvers are configured, so every gated call is denied on arrival/);
+  assert.doesNotMatch(output.stdout, /the control API is the only way to answer it/);
+});
+
+test('plugins says a call parks indefinitely when the approval timeout is zero', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // An explicit 0 is documented as "wait indefinitely", and the gateway
+  // arms no timer for it — so an unanswered call is not eventually denied.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', timeoutMs: 0 },
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {}, packageResolver: () => true },
+  });
+
+  assert.match(output.stdout, /approval timeout is 0, so it parks indefinitely/);
+  assert.doesNotMatch(output.stdout, /before the timeout denies it/);
 });

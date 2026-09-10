@@ -234,13 +234,24 @@ spawn every server you configured. Two consequences worth knowing:
   `browser.act` are then judged per call ([Shell commands](./shell.md),
   [Browser actions](./browser.md)), so `gated` there means "judged", not
   "refused".
+- **Where a gated call can be answered from is not only Slack.** The
+  control API's `/approvals` endpoints list what is parked and settle it,
+  so an agent with no Slack tokens is not necessarily unreachable. An agent
+  the Slack adapter *does* cover is a different case: it denies on the spot
+  when there are no approvers or no conversation to ask in, leaving nothing
+  for an API client to answer. And an `approvals.timeoutMs` of `0` means a
+  call nobody answers parks for the life of the daemon rather than being
+  denied — the line says which of these you have.
 - **A tool name belongs to whoever registers it first.** The daemon's own
   kernel tools go in before any plugin, and the first plugin to claim a name
   keeps it — a later one registering the same name is refused whole, tools
   and skills together. A manifest declaring a name something else already
   registers is therefore reported as a `warning`, not a failure: whether it
   actually registers that name is `setup()`'s business, and an optional tool
-  may never claim it. Between two plugins the warning says *if both register
+  may never claim it. What a clash costs depends on *when* the name
+  registers — a manifest-named tool registers during `setup()`, where a
+  clash rejects the whole plugin, while a namespace's tools arrive at
+  connect, by which point only that one discovered tool is refused. Between two plugins the warning says *if both register
   it*, since neither side is known to; against the daemon's own tools it is
   definite on one side, because those are already registered. One package
   configured twice — through its name and a path, say — is two entries to

@@ -7347,12 +7347,23 @@ const describeUnattendedReach = async (
   // false wherever `POST /api/v1/approvals` can settle the call. Appending
   // the API as a later clause left the two halves contradicting each other.
   const slack = describeApprovers(approvals, askable);
+  // An explicit `timeoutMs: 0` is documented as "wait indefinitely", and
+  // the gateway arms no timer for it — so a call nobody answers is not
+  // eventually denied, it is parked for the life of the daemon. Promising
+  // a denial understates that, and holding a turn open forever is the more
+  // alarming outcome to leave unsaid.
+  const expires = approvals.timeoutMs !== 0;
+  const unanswered = expires ? 'before the timeout denies it' : 'and nothing else will — this daemon\'s approval timeout is 0, so it parks indefinitely';
   const parts = [
-    apiReachable
-      ? askable.length === 0
-        ? 'remote — an uncovered gated call parks with no Slack channel to ask through, so the control API '
-          + 'is the only way to answer it before the timeout denies it'
-        : `remote — an uncovered gated call parks until it is answered, in Slack or through the control API (${slack})`
+    // The control API is offered only where Slack leaves a request parked.
+    // The Slack adapter handles the same event synchronously and *denies*
+    // when an agent has no approvers or no conversation to ask in, so for
+    // an agent it covers there is nothing left for an API client to
+    // answer. That is only true of agents it covers: one with no tokens at
+    // all reaches no adapter, and its request stays parked — which is the
+    // unreachable clause below, where the API belongs.
+    apiReachable && askable.length === 0
+      ? `remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it ${unanswered}`
       : `remote — an uncovered gated call parks and asks in Slack, ${slack}`,
   ];
   // The reverse of a stale token, and the failure that actually bites: an
@@ -7374,8 +7385,9 @@ const describeUnattendedReach = async (
     // different thing to tell an operator.
     parts.push(apiReachable
       ? `no Slack channel can ask for ${unreachable.join(', ')}, so their gated calls park until the control `
-        + 'API answers them or the timeout denies them'
-      : `no channel can ask for ${unreachable.join(', ')}, so their gated calls wait out the timeout and are denied`);
+        + `API answers them${expires ? ' or the timeout denies them' : ' — with a timeout of 0, nothing else ever will'}`
+      : `no channel can ask for ${unreachable.join(', ')}, so their gated calls `
+        + (expires ? 'wait out the timeout and are denied' : 'park indefinitely: this daemon\'s approval timeout is 0'));
   }
   // Approvers with nowhere to be asked outside their own thread. A turn
   // that did not start in Slack — the API, the dashboard, a delegation —
@@ -7628,11 +7640,19 @@ export const collectPluginsReport = async (
           const subject = pattern === claim.pattern
             ? `${pattern} is`
             : `${pattern} overlaps ${claim.pattern}, which is`;
+          // What a collision costs depends on *when* the name registers.
+          // A tool the manifest names outright registers during `setup()`,
+          // where a clash rejects the whole plugin. A namespace's tools
+          // arrive later — a bridge discovering them at connect — and by
+          // then the registry commits live, so a clash there rejects that
+          // one registration and leaves the plugin serving the rest.
+          const cost = pattern.endsWith('.*')
+            ? 'a daemon keeps the first and refuses that one discovered tool, leaving the rest of this plugin serving'
+            : 'a daemon keeps the first and refuses the other whole, tools and skills together';
           base.warnings = [
             ...(base.warnings ?? []),
             `${subject} ${claim.registered ? 'already registered by' : 'also declared by'} ${claim.owner}; `
-            + 'if both register that name, a daemon keeps the first and refuses the other whole, '
-            + 'tools and skills together',
+            + `if both register that name, ${cost}`,
           ];
         }
       }
