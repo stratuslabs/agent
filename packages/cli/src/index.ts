@@ -47,6 +47,7 @@ import {
 // `stratus run` pay for it.
 import type { ApprovalTransport, GatewayChannelAdapter, HomeClaim, RestartOutcome } from '@stratusagent/gateway';
 import {
+  declaredRiskFor,
   isFirstPartyPackage,
   loadPlugins,
   parseToolRiskOverrides,
@@ -7405,6 +7406,14 @@ export const collectPluginsReport = async (
   ];
 
   const plugins: PluginReport[] = [];
+  // Which package claimed each literal tool name, across the whole loop.
+  // `loadPlugins` keeps the same map and rejects the *later* plugin whole
+  // when a registration collides, so a per-plugin check would report two
+  // packages ready to serve one name that only one of them will get.
+  //
+  // Literal declarations only: the registry claims names as they register,
+  // and a namespace has none until its server connects.
+  const claimedBy = new Map<string, string>();
   for (const specifier of packages) {
     const block = pluginsConfig[specifier] ?? {};
     const isConfigured = configured.includes(specifier);
@@ -7462,11 +7471,21 @@ export const collectPluginsReport = async (
       };
       // Literal declarations first: a name the manifest states outright is
       // described best by its own entry, not by a namespace that covers it.
+      // Risk through `declaredRiskFor`, never the declaration in hand: with
+      // overlapping namespaces (`mcp.*` and `mcp.linear.*`) it is the *first*
+      // match that registration uses, so reading each entry's own risk would
+      // show a narrower namespace at a risk none of its tools will have.
+      const riskOf = (name: string, fallback: ToolRisk): ToolRisk => declaredRiskFor(manifest, name) ?? fallback;
       for (const tool of manifest.contributes.tools) {
-        emit({ name: tool.name, discovered: false, namespace: false, declared: tool.risk });
+        emit({ name: tool.name, discovered: false, namespace: false, declared: riskOf(tool.name, tool.risk) });
       }
       for (const entry of manifest.contributes.toolsDiscovered) {
-        emit({ name: entry.namespace, discovered: true, namespace: true, declared: entry.risk });
+        emit({
+          name: entry.namespace,
+          discovered: true,
+          namespace: true,
+          declared: riskOf(entry.namespace, entry.risk),
+        });
         // An override under a declared namespace names a concrete tool
         // (`mcp.linear.get_issue`), which is the whole point of the key for
         // a bridge — and it can never equal the namespace, so the namespace
@@ -7476,9 +7495,21 @@ export const collectPluginsReport = async (
         // the thing worth seeing.
         for (const name of overrides.keys()) {
           if (name !== entry.namespace && matchesToolAllowlist(name, [entry.namespace])) {
-            emit({ name, discovered: true, namespace: false, declared: entry.risk });
+            emit({ name, discovered: true, namespace: false, declared: riskOf(name, entry.risk) });
           }
         }
+      }
+      const collision = manifest.contributes.tools
+        .map((tool) => ({ name: tool.name, owner: claimedBy.get(tool.name) }))
+        .find((entry) => entry.owner !== undefined && entry.owner !== manifest.packageName);
+      if (collision !== undefined) {
+        throw new Error(
+          `it declares ${collision.name}, which ${collision.owner} already registers — `
+          + 'a daemon loads the first and refuses this one whole, tools and skills together',
+        );
+      }
+      for (const tool of manifest.contributes.tools) {
+        claimedBy.set(tool.name, manifest.packageName);
       }
       base.tools = declared.map((tool) => {
         // Never on the namespace row. `parseToolRiskOverrides` accepts a
@@ -7548,7 +7579,9 @@ export const runPlugins = async (
           // only "enabled" here is the false clean bill this command exists
           // to stop giving.
           : plugin.problem !== undefined ? 'installed, enabled, will not load' : 'installed, enabled';
-    writeLine(streams.stdout, `${plugin.package.padEnd(30)}${state}`);
+    // Padded to a column, but never run together: a package name longer
+    // than the column would otherwise touch its own status.
+    writeLine(streams.stdout, `${plugin.package.padEnd(29)} ${state}`);
 
     if (plugin.problem !== undefined) {
       writeLine(streams.stdout, `  a daemon would register nothing for it: ${plugin.problem}`);

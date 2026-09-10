@@ -9483,3 +9483,111 @@ test('plugins names the served agents no channel can ask for, and approvers with
   // story even for a call nothing durable covers.
   assert.match(output.stdout, /"always allow" answer covers that tool for the rest of its session/);
 });
+
+/**
+ * A plugin package written to a temp directory, keyed into the config by
+ * absolute path. `readPluginManifest` resolves through `import.meta.resolve`,
+ * which takes one — so manifest shapes no shipped package has (overlapping
+ * namespaces, colliding tool names) are reachable without adding a fixture
+ * package to the workspace for them.
+ */
+const writeFixturePlugin = async (
+  name: string,
+  stratus: Record<string, unknown>,
+): Promise<string> => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'stratus-plugin-'));
+  await writeFile(
+    path.join(directory, 'package.json'),
+    JSON.stringify({ name, version: '1.0.0', type: 'module', main: 'index.js', stratus }),
+  );
+  const entry = path.join(directory, 'index.js');
+  await writeFile(entry, 'export const createPlugin = () => ({ name: "fixture", setup() {} });\n');
+  return entry;
+};
+
+test('plugins reports a plugin whose tool another package already registers', async () => {
+  const { home, cwd } = await writePluginFixture();
+  const contributes = { tools: [{ name: 'db.query', risk: 'gated' }] };
+  const first = await writeFixturePlugin('stratus-plugin-alpha', { pluginVersion: 1, contributes });
+  const second = await writeFixturePlugin('stratus-plugin-beta', { pluginVersion: 1, contributes });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { [first]: { enabled: true }, [second]: { enabled: true } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  // The first keeps the name and loads; the daemon refuses the second whole,
+  // so reporting both as enabled with a usable `db.query` would promise a
+  // tool only one of them ever gets.
+  assert.match(output.stdout, /db\.query/);
+  assert.match(
+    output.stdout,
+    /it declares db\.query, which stratus-plugin-alpha already registers — a daemon loads the first and refuses this one whole/,
+  );
+});
+
+test('plugins reads an overlapping namespace at the risk registration will use', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // `declaredRiskFor` takes the *first* matching namespace, so every
+  // concrete `mcp.linear.*` tool registers `dangerous` despite the narrower
+  // declaration below saying `safe`.
+  const entry = await writeFixturePlugin('stratus-plugin-bridge', {
+    pluginVersion: 1,
+    contributes: {
+      toolsDiscovered: [
+        { namespace: 'mcp.*', risk: 'dangerous' },
+        { namespace: 'mcp.linear.*', risk: 'safe' },
+      ],
+    },
+  });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { [entry]: { enabled: true } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins', '--format', 'json'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; risk: string }> }>;
+  };
+  const tools = report.plugins.find((plugin) => plugin.package === entry)?.tools ?? [];
+  assert.equal(tools.find((tool) => tool.name === 'mcp.*')?.risk, 'dangerous');
+  assert.equal(tools.find((tool) => tool.name === 'mcp.linear.*')?.risk, 'dangerous');
+});
+
+test('plugins emits one row for a tool reachable more than one way', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // Declared outright *and* covered by a namespace, with an override on the
+  // literal name — three paths to one runtime tool.
+  const entry = await writeFixturePlugin('stratus-plugin-both', {
+    pluginVersion: 1,
+    contributes: {
+      tools: [{ name: 'mcp.ping', risk: 'safe' }],
+      toolsDiscovered: [{ namespace: 'mcp.*', risk: 'gated' }],
+    },
+  });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { [entry]: { enabled: true, toolRisks: { 'mcp.ping': 'dangerous' } } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins', '--format', 'json'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string }> }>;
+  };
+  const tools = report.plugins.find((plugin) => plugin.package === entry)?.tools ?? [];
+  assert.equal(tools.filter((tool) => tool.name === 'mcp.ping').length, 1);
+});

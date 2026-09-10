@@ -220,7 +220,9 @@ spawn every server you configured. Two consequences worth knowing:
   listed beside it at the risk you gave it. An entry keyed by the namespace
   itself is accepted but inert — the registry applies an override by each
   concrete registered name — so the namespace row keeps the declared risk
-  rather than advertising a re-rating no call will get.
+  rather than advertising a re-rating no call will get. Where namespaces
+  overlap, the risk shown is the one registration uses: the *first* matching
+  declaration, not the narrowest.
 - **The risk shown is a floor, not the last word.** It is the riskiest of the
   manifest's declaration, the floor the package is held to, and your
   `toolRisks` override — the three claims available without loading anything.
@@ -228,6 +230,10 @@ spawn every server you configured. Two consequences worth knowing:
   `browser.act` are then judged per call ([Shell commands](./shell.md),
   [Browser actions](./browser.md)), so `gated` there means "judged", not
   "refused".
+- **Two plugins cannot share a tool name.** The first to claim one keeps it
+  and the daemon refuses the other whole — tools and skills together — so a
+  package whose declared name another already registers is reported as one
+  that will not load, rather than as a second source for that tool.
 - **Enabled and loadable are different questions.** A plugin whose settings
   its own schema rejects — `plugin-mcp` with no `servers`, a mistyped key
   under `tool-fs` — or which declares a skill file that is not there, is
