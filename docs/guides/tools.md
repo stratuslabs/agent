@@ -196,7 +196,7 @@ them fails quietly on its own. `stratus plugins` walks all four:
 
 ```console
 $ stratus plugins
-approvals: headless — a gated call is refused unless a standing grant, an approved command scope, an approved site, or a destination pre-authorized with a schedule (stratus grants <agent> lists those)
+approvals: headless — an uncovered gated call is refused. Already-authorized ones still run: standing grants, approved command scopes and sites (stratus grants <agent>), and destinations pre-authorized with a schedule (stratus schedules)
 
 @stratusagent/tool-fs         installed, enabled
   fs.read                     safe → blair
@@ -244,9 +244,19 @@ spawn every server you configured. Two consequences worth knowing:
 - **The approvals line is about this machine, not just the mode.** `headless`
   refuses a gated call *last*, after the standing grants, the command scopes,
   the approved sites, and a schedule's pre-authorized destination — so a tool
-  an agent was once told "always allow" about runs unattended, and
-  `stratus grants <agent>` is what lists those. `remote` carries the same
-  qualification: those calls are allowed before anyone is asked.
+  an agent was once told "always allow" about runs unattended. Two commands
+  list those, not one: `stratus grants <agent>` for the first three, and
+  `stratus schedules` for a destination approved with a schedule. `remote`
+  carries the same qualification — they are allowed before anyone is asked —
+  and adds a session-wide one, since an "always allow" answered in Slack
+  covers that tool for the rest of that conversation.
+
+  In `remote` the line also names what is missing: an agent the daemon
+  serves that no channel can ask for (its gated calls wait out the timeout,
+  which is what `stratus serve` warns about at startup), and approvers with
+  no `slackChannel` — they can only be asked on turns that started in Slack,
+  because a turn from the API, the dashboard, or a delegation reaches the
+  adapter with nowhere to post.
   `remote` only asks if somebody can be asked: with no channel installed a
   gated call waits out the timeout, and with no approver configured it is
   denied on arrival. See [Approvals](./approvals.md); the line says which of

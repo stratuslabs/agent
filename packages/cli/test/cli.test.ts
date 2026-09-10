@@ -9080,10 +9080,12 @@ test('plugins names every link in the chain from installed to callable', async (
   // installed packages has ever shown — and `headless` refuses one *last*,
   // after the standing grants and scopes, so the line must not claim that
   // only safe tools ever run.
-  assert.match(
-    output.stdout,
-    /approvals: headless — a gated call is refused unless a standing grant, an approved command scope, an approved site, or a destination pre-authorized with a schedule/,
-  );
+  assert.match(output.stdout, /approvals: headless — an uncovered gated call is refused/);
+  // Named with the command that lists each, because "already authorized"
+  // spans two of them: grants, scopes and sites are `stratus grants`, a
+  // schedule's destination is `stratus schedules`.
+  assert.match(output.stdout, /standing grants, approved command scopes and sites \(stratus grants <agent>\)/);
+  assert.match(output.stdout, /destinations pre-authorized with a schedule \(stratus schedules\)/);
   // Granted, and granted to whom.
   assert.match(output.stdout, /fs\.read\s+safe → stratus, blair/);
   // Registered but granted to nobody: installing is not granting.
@@ -9231,7 +9233,7 @@ test('plugins does not claim Slack is asked when nothing can ask it', async () =
   assert.match(output.stdout, /approvals: remote — .*no channel is running to ask through/);
   // And the same qualification the headless line carries: the engine allows
   // an already-authorized call before it asks anyone, in either mode.
-  assert.match(output.stdout, /a gated call not already covered by a standing grant, .*or a destination pre-authorized with a schedule/);
+  assert.match(output.stdout, /remote — an uncovered gated call parks and asks in Slack/);
 });
 
 test('plugins shows a toolRisks override on the concrete tool it names, under a declared namespace', async () => {
@@ -9447,4 +9449,37 @@ test('plugins does not offer a stale Slack token as an approver route', async ()
 
   assert.doesNotMatch(output.stdout, /approvers set for ghost/);
   assert.match(output.stdout, /no channel is running to ask through/);
+});
+
+test('plugins names the served agents no channel can ask for, and approvers with no fallback', async () => {
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    // Approvers for the configured soul only. `blair` is served from the
+    // roster with no tokens of its own, which `runServe` warns about once
+    // its roster loads: those gated calls park until the timeout denies
+    // them. Filtering to the askable set alone would hide that entirely.
+    approvals: { mode: 'remote', agents: { stratus: { slackApprovers: ['U01OPS'] } } },
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { stratus: { botToken: 'xoxb-a', appToken: 'xapp-a' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {}, packageResolver: () => true },
+  });
+
+  assert.match(output.stdout, /approvers set for stratus/);
+  assert.match(output.stdout, /no channel can ask for blair, so their gated calls wait out the timeout/);
+  // Approvers with nowhere to be asked outside their own thread: a turn
+  // that did not start in Slack reaches the adapter with no destination.
+  assert.match(output.stdout, /stratus has no slackChannel, so only turns already in Slack can be asked/);
+  // The session-wide answer, which is why "parks and asks" is not the whole
+  // story even for a call nothing durable covers.
+  assert.match(output.stdout, /"always allow" answer covers that tool for the rest of its session/);
 });

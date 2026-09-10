@@ -7248,8 +7248,8 @@ export interface PluginsReport {
  * entirely. It is prose about a rule `@stratusagent/permissions` owns, so
  * when that engine gains a path this string is what has to follow it.
  */
-const ALREADY_AUTHORIZED = 'a standing grant, an approved command scope, an approved site, '
-  + 'or a destination pre-authorized with a schedule';
+const ALREADY_AUTHORIZED = 'standing grants, approved command scopes and sites (stratus grants <agent>), '
+  + 'and destinations pre-authorized with a schedule (stratus schedules)';
 
 /**
  * What a gated call would actually meet on this machine.
@@ -7285,7 +7285,7 @@ const describeUnattendedReach = async (
   servedAgentIds: readonly string[] | undefined,
 ): Promise<string> => {
   if (mode === 'headless') {
-    return `headless — a gated call is refused unless ${ALREADY_AUTHORIZED} (stratus grants <agent> lists those)`;
+    return `headless — an uncovered gated call is refused. Already-authorized ones still run: ${ALREADY_AUTHORIZED}`;
   }
   // The same condition `runServe` reports at startup, through the same
   // helper: an agent is askable when its tokens are stored and something is
@@ -7301,8 +7301,36 @@ const describeUnattendedReach = async (
   // already-authorized call before it asks anyone, so an unqualified "asks
   // in Slack" hides unattended capability in precisely the configuration
   // where Slack is set up correctly.
-  return `remote — a gated call not already covered by ${ALREADY_AUTHORIZED} parks and asks in Slack, `
-    + describeApprovers(approvals, askable);
+  const parts = [
+    `remote — an uncovered gated call parks and asks in Slack, ${describeApprovers(approvals, askable)}`,
+  ];
+  // The reverse of a stale token, and the failure that actually bites: an
+  // agent the daemon serves that no channel can ask for parks its gated
+  // calls until the timeout denies them. `runServe` warns about exactly
+  // this once its roster loads; the difference here is only that both
+  // halves are in view from the start.
+  const unreachable = (servedAgentIds ?? []).filter((agentId) => !askable.includes(agentId));
+  if (unreachable.length > 0) {
+    parts.push(`no channel can ask for ${unreachable.join(', ')}, so their gated calls wait out the timeout and are denied`);
+  }
+  // Approvers with nowhere to be asked outside their own thread. A turn
+  // that did not start in Slack — the API, the dashboard, a delegation —
+  // reaches the adapter with no destination and is denied undeliverable,
+  // so "approvers set" is only half an answer without a fallback channel.
+  const noFallback = askable.filter((agentId) => {
+    const resolved = resolveAgentApprovals(approvals, agentId);
+    return (resolved.slackApprovers ?? []).length > 0 && !resolved.slackChannel;
+  });
+  if (noFallback.length > 0) {
+    parts.push(`${noFallback.join(', ')} ${noFallback.length === 1 ? 'has' : 'have'} no slackChannel, `
+      + 'so only turns already in Slack can be asked');
+  }
+  // An "always allow" answer on an unscoped gated tool covers it for the
+  // rest of that session, so a call there is accepted without asking again.
+  // Named rather than folded into ALREADY_AUTHORIZED: it is per session and
+  // per process, so it describes no durable state this report could read.
+  parts.push('an "always allow" answer covers that tool for the rest of its session');
+  return parts.join('; ');
 };
 
 /**
