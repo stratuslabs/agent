@@ -4994,6 +4994,11 @@ export const runSetup = async (
           // override otherwise moves the agent onto the global channel,
           // which is a different, possibly wider place to post approval
           // details. Setup says which happened rather than assuming.
+          //
+          // Untested for the same reason the roots deletion above is: an
+          // empty answer where a prefill exists is a TTY-only path, since
+          // the piped prompter returns `line || prefill` and `setupInput`
+          // forces it.
           delete entry.slackChannel;
           const globalChannel = state.approvals?.slackChannel;
           writeLine(streams.stdout, globalChannel !== undefined
