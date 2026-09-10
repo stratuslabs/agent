@@ -6254,11 +6254,15 @@ const cloneSkillSource = async (url: string, destination: string): Promise<void>
 const rosterSoulsWithConfigured = async (
   env: CliEnvironment,
   warn: (line: string) => void,
+  // The config whose `soul` key names the configured agent. A caller
+  // reading everything else from `--config` and this from the default file
+  // would answer for a roster the daemon it is describing does not serve.
+  configPath?: string,
 ): Promise<{ entries: Awaited<ReturnType<typeof loadRosterSouls>>; complete: boolean }> => {
   const entries = await loadRosterSouls(env, warn);
   let complete = true;
   try {
-    const configured = await resolveConfiguredSoul({}, env);
+    const configured = await resolveConfiguredSoul(configPath !== undefined ? { configPath } : {}, env);
     if (configured) {
       const entry = { soul: configured.soul, path: configured.path };
       const clash = entries.findIndex((candidate) => candidate.soul.agent.id === configured.soul.agent.id);
@@ -7297,7 +7301,7 @@ export const collectPluginsReport = async (
   let roster: Awaited<ReturnType<typeof loadRosterSouls>> = [];
   let rosterUnreadable = false;
   try {
-    const resolved = await rosterSoulsWithConfigured(env, warn);
+    const resolved = await rosterSoulsWithConfigured(env, warn, command.configPath);
     roster = resolved.entries;
     rosterUnreadable = !resolved.complete;
   } catch (error) {
@@ -7343,7 +7347,14 @@ export const collectPluginsReport = async (
       enabled: isConfigured && block.enabled !== false,
       tools: [],
     };
-    if (!base.installed) {
+    // Nothing below runs for a plugin the loader would skip. It skips an
+    // absent or switched-off block before it reads a manifest, parses an
+    // override, or validates anything — so doing any of that here invents a
+    // failure for a plugin that has none, and the renderer shows no tools
+    // for one either way. Gating the whole block rather than each call is
+    // deliberate: gating them one at a time is what left the override parse
+    // unconditional after the preflight moved.
+    if (!base.installed || !base.enabled) {
       plugins.push(base);
       continue;
     }
@@ -7365,14 +7376,15 @@ export const collectPluginsReport = async (
       if (base.enabled) {
         await preflightPlugin(manifest, directory, block, workspaceRoot);
       }
-      const declared: Array<{ name: string; discovered: boolean; declared: ToolRisk }> = [
+      const declared: Array<{ name: string; discovered: boolean; namespace: boolean; declared: ToolRisk }> = [
         ...manifest.contributes.tools.map((tool) => ({
           name: tool.name,
           discovered: false,
+          namespace: false,
           declared: tool.risk,
         })),
         ...manifest.contributes.toolsDiscovered.flatMap((entry) => [
-          { name: entry.namespace, discovered: true, declared: entry.risk },
+          { name: entry.namespace, discovered: true, namespace: true, declared: entry.risk },
           // An override under a declared namespace names a concrete tool
           // (`mcp.linear.get_issue`), which is the whole point of the key
           // for a bridge — and it can never equal the namespace, so the
@@ -7382,11 +7394,16 @@ export const collectPluginsReport = async (
           // the override is the thing worth seeing.
           ...[...overrides.keys()]
             .filter((name) => name !== entry.namespace && matchesToolAllowlist(name, [entry.namespace]))
-            .map((name) => ({ name, discovered: true, declared: entry.risk })),
+            .map((name) => ({ name, discovered: true, namespace: false, declared: entry.risk })),
         ]),
       ];
       base.tools = declared.map((tool) => {
-        const override = overrides.get(tool.name);
+        // Never on the namespace row. `parseToolRiskOverrides` accepts a
+        // namespace-shaped key, but the registry looks an override up by
+        // each concrete *registered* name — so `toolRisks: { "mcp.*": … }`
+        // changes no call, and showing the row at that risk would advertise
+        // a re-rating the daemon will not honour.
+        const override = tool.namespace ? undefined : overrides.get(tool.name);
         return {
           name: tool.name,
           discovered: tool.discovered,

@@ -217,7 +217,10 @@ spawn every server you configured. Two consequences worth knowing:
 - **A namespace is listed as a namespace.** `mcp.*` says the names arrive at
   connect; a tool that has not arrived yet is not a tool that does not exist.
   A `toolRisks` entry names a *concrete* tool under that namespace, so it is
-  listed beside it at the risk you gave it.
+  listed beside it at the risk you gave it. An entry keyed by the namespace
+  itself is accepted but inert — the registry applies an override by each
+  concrete registered name — so the namespace row keeps the declared risk
+  rather than advertising a re-rating no call will get.
 - **The risk shown is a floor, not the last word.** It is the riskiest of the
   manifest's declaration, the floor the package is held to, and your
   `toolRisks` override — the three claims available without loading anything.

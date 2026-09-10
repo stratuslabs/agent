@@ -9278,3 +9278,81 @@ test('plugins tells you to enable an installed plugin rather than calling its un
   );
   assert.doesNotMatch(output.stdout, /missing required setting "servers"/);
 });
+
+test('plugins does not show a namespace-keyed risk override as effective', async () => {
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/plugin-mcp': {
+        enabled: true,
+        servers: { linear: { url: 'https://mcp.example.com/mcp' } },
+        // Accepted by the manifest parser, and inert: the registry looks an
+        // override up by each concrete registered name, which this can
+        // never equal. Showing `mcp.*` as safe would advertise unattended
+        // capability the daemon does not grant.
+        toolRisks: { 'mcp.*': 'safe' },
+      },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins', '--format', 'json'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; risk: string }> }>;
+  };
+  const mcp = report.plugins.find((entry) => entry.package === '@stratusagent/plugin-mcp');
+  assert.equal(mcp?.tools.find((tool) => tool.name === 'mcp.*')?.risk, 'gated');
+});
+
+test('plugins does not invent a load failure for a plugin that is switched off', async () => {
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      // Switched off, with a stale override naming a tool this package does
+      // not declare. The loader skips the block before it parses any of
+      // that, so there is no failure here to report.
+      '@stratusagent/tool-fs': { enabled: false, toolRisks: { 'fs.teleport': 'safe' } },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(output.stdout, /@stratusagent\/tool-fs\s+installed, switched off/);
+  assert.doesNotMatch(output.stdout, /a daemon would register nothing for it/);
+});
+
+test('plugins reads the configured soul from the config it was given', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // A soul named only by the selected config, and not in ~/.stratus/agents.
+  const soulPath = path.join(cwd, 'juno.md');
+  await writeFile(
+    soulPath,
+    ['---', 'id: juno', 'name: Juno', 'tools:', '  - fs.write', '---', 'You are Juno.'].join('\n'),
+  );
+  const configPath = path.join(cwd, 'elsewhere.json');
+  await writeFile(configPath, JSON.stringify({
+    provider: 'anthropic',
+    soul: soulPath,
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins', '--config', configPath],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  // Read from the same file the plugins block came from. Resolving the
+  // configured soul from the default config instead would answer for a
+  // roster the daemon this describes does not serve.
+  assert.match(output.stdout, /fs\.write\s+gated → juno/);
+});
