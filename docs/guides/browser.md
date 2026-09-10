@@ -60,8 +60,10 @@ at your permissions. Anything not granted asks, and in
 ## Granting a site
 
 In `remote` mode, **Always allow** on a `browser.act` request persists that
-origin, and a saved one **survives a restart** — unlike the same button on
-an ordinary tool, which is forgotten when the daemon stops. The prompt names
+origin, and a saved one **survives a restart**, like every other kind of
+grant (see [Standing grants](./approvals.md#standing-grants) — `stratus
+grants ava` lists the sites beside the rest, and `stratus grants revoke ava
+--origin https://app.example.com` withdraws one). The prompt names
 the site: the arguments are a selector and say nothing about where the
 click lands, so the site is shown next to the tool name rather than left
 for the approver to infer.
@@ -71,8 +73,8 @@ for the approver to infer.
 longer parses is never written over, so the grant holds for that agent for
 the life of the daemon and is gone after a restart. The log line says so
 when it happens — the Slack message cannot, because it is sent before the
-write is attempted, and says only that the answer is remembered for the
-session at least.
+write is attempted, and names the grant that was made rather than whether
+it was saved.
 
 For a `headless` daemon nothing is ever asked, so the grant is written by
 hand. The file is per agent, `0600`, and read once at startup:

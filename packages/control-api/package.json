@@ -25,6 +25,7 @@
     "@stratusagent/agents": "workspace:*",
     "@stratusagent/core": "workspace:*",
     "@stratusagent/gateway": "workspace:*",
+    "@stratusagent/permissions": "workspace:*",
     "@stratusagent/provider-anthropic": "workspace:*",
     "@stratusagent/state": "workspace:*",
     "ws": "^8.18.0"

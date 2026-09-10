@@ -1,6 +1,7 @@
 import { ago, duration, el, until } from '../lib/dom.js';
 import { api } from '../lib/api.js';
 import { avatar } from '../lib/avatar.js';
+import { alwaysOffer } from '../lib/grants.js';
 import { isActive, navigate, refreshCore, store } from '../app.js';
 
 export const activityPanel = (filter) => {
@@ -46,6 +47,7 @@ const approvalCard = () => {
     ),
     el('div', { class: 'approvals-list' }, ...store.approvals.map((request) => {
       const agent = store.agents.find((candidate) => candidate.id === request.agentId);
+      const offer = request.oneShot ? undefined : alwaysOffer(request.always, agent?.name ?? request.agentId);
       return el('div', { class: 'approval' },
         el('div', { class: 'row' },
           agent ? avatar(agent, 24) : null,
@@ -66,9 +68,16 @@ const approvalCard = () => {
         // answer — a `dangerous` tool, or a browser action with no page to
         // grant. There it does exactly what **Allow once** does, under a
         // label promising a standing grant nobody gets.
+        //
+        // And where there IS one, what it grants: for most gated tools that
+        // is a standing grant to the agent, outliving this session and every
+        // restart, which is a larger thing to hand out than the session the
+        // button used to buy.
         request.oneShot
           ? el('div', { class: 'sub' }, 'An approval covers this call only — nothing about it is remembered.')
-          : null,
+          : offer
+            ? el('div', { class: 'sub' }, offer)
+            : null,
         el('div', { class: 'actions' },
           el('button', { class: 'primary small', onClick: () => decide(request.requestId, 'once') }, 'Allow once'),
           request.oneShot

@@ -36,7 +36,7 @@ line, 23.4+) — details in [Installation](docs/start/installation.md).
 | | Capability | |
 | --- | --- | --- |
 | 🕐 | **Always on** — the whole roster as a daemon that survives reboots, with durable sessions | [Always on](docs/guides/always-on.md) |
-| 💬 | **Live in Slack** — each agent its own app: avatar, presence, DMs, threads it keeps following without being re-tagged, streaming replies | [Slack](docs/guides/slack.md) |
+| 💬 | **Live in Slack** — each agent its own app: avatar, presence, DMs, threads it keeps following without being re-tagged, streaming replies, screenshots it can look at | [Slack](docs/guides/slack.md) |
 | 🧠 | **Remember** — memory keyed to the agent, searched and pruned by the agent itself, every fact labelled with where it came from | [Memory](docs/concepts/memory.md) |
 | 🛠 | **Use real tools** — files, a shell, the web, a browser; each an opt-in plugin, allowlisted per agent | [Tools](docs/guides/tools.md) |
 | 🔌 | **Mount MCP servers** — the whole MCP ecosystem under Stratus policy | [MCP](docs/guides/mcp.md) |
@@ -92,7 +92,9 @@ apart. The two surfaces are the deliberate exceptions: the Slack channel
 connects when an agent's tokens are stored (the decision you made
 connecting the app), and installing the control API + dashboard *is* the
 decision to open an authenticated local port (`--no-api` takes it back).
-`stratus setup` offers the packages your answers imply.
+`stratus setup` offers the packages your answers imply, and
+[`stratus plugins`](docs/guides/tools.md#which-link-in-the-chain-is-broken)
+says which of those gates a tool is currently stuck behind.
 
 The trust model behind that is in
 [Plugins](docs/concepts/plugins.md) and

@@ -4,6 +4,7 @@ import type { Duplex } from 'node:stream';
 import path from 'node:path';
 
 import type { Gateway, GatewayChannelAdapter } from '@stratusagent/gateway';
+import type { AgentGrantStore } from '@stratusagent/permissions';
 import { gatewayInfoPath, type StateEnvironment } from '@stratusagent/state';
 import { WebSocketServer } from 'ws';
 
@@ -83,6 +84,16 @@ export interface ControlApiOptions {
    * a headless deployment that has it present anyway.
    */
   ui?: DashboardAssets | false;
+  /**
+   * The daemon's own grant store — the instance its permission policy
+   * reads, never a second one over the same files. The store caches each
+   * agent's file for the life of the process, so a revoke through any
+   * other instance would write the file and change nothing the policy
+   * sees until a restart. Omitted, the grants routes answer
+   * `501 grants_unavailable`: a daemon with no store has nothing to list
+   * and nothing a revoke could reach.
+   */
+  grants?: AgentGrantStore;
   log?: (line: string) => void;
   warn?: (line: string) => void;
 }
@@ -205,6 +216,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       gateway,
       env,
       configPath: options.configPath,
+      grants: options.grants,
       principal,
       params: resolved.params,
       url: requestUrl,

@@ -1,7 +1,8 @@
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { parseCommandScope, sameScope, type CommandScope } from './commands.ts';
+import { describeCommandScope, parseCommandScope, sameScope, type CommandScope } from './commands.ts';
+import { parseToolGrant, sameToolGrant, type ToolGrant } from './grants.ts';
 import { parseOriginScope, sameOriginScope, type OriginScope } from './origins.ts';
 
 /**
@@ -31,6 +32,70 @@ export interface OriginWhitelistStore {
   rememberOrigin(agentId: string, scope: OriginScope): Promise<void>;
 }
 
+/**
+ * Which tools one agent may run unattended by name — the third answer in
+ * the same file, for a gated tool that names no scope at all.
+ *
+ * Its own interface for the same reason the origin half is: a host that
+ * judges commands need not keep standing grants, and the engine treats a
+ * policy built without this the way it treats one built without a
+ * whitelist — the answer holds for the process, and `headless` cannot use
+ * it, because `headless` never asks anyone.
+ */
+export interface ToolGrantStore {
+  toolGrantsFor(agentId: string): Promise<ToolGrant[]>;
+  rememberTool(agentId: string, grant: ToolGrant): Promise<void>;
+}
+
+/** Everything one agent may do unattended beyond the built-in safe list, as one read. */
+export interface AgentGrants {
+  scopes: CommandScope[];
+  origins: OriginScope[];
+  tools: ToolGrant[];
+}
+
+/**
+ * One agent's grants as an operator reads them — every kind, each with the
+ * line a listing shows. The one renderer for `stratus grants` and for
+ * `GET /agents/:id/grants`, so a scope revokes by exactly the string both
+ * of them print (`forgetScope` takes it).
+ */
+export interface AgentGrantsListing {
+  scopes: Array<{ description: string; scope: CommandScope }>;
+  origins: Array<{ origin: string }>;
+  tools: ToolGrant[];
+}
+
+export const describeAgentGrants = (grants: AgentGrants): AgentGrantsListing => ({
+  scopes: grants.scopes.map((scope) => ({ description: describeCommandScope(scope), scope })),
+  origins: grants.origins.map((scope) => ({ origin: scope.origin })),
+  tools: [...grants.tools],
+});
+
+/**
+ * The operator's view of one agent's file: all three kinds together, and
+ * the way to take one back.
+ *
+ * Revocation lives here and not on the three engine-facing interfaces
+ * above, because the engine never revokes — an operator does, through
+ * `stratus grants revoke` or the control API — and a host implementing
+ * only the half the engine reads should not have to implement the half it
+ * does not. Each `forget` answers whether anything was removed, and a
+ * removal is visible to the next call on this store at once: a revoked
+ * grant that kept working until a restart would be a ratchet with a delay.
+ */
+export interface AgentGrantStore extends CommandWhitelistStore, OriginWhitelistStore, ToolGrantStore {
+  grantsFor(agentId: string): Promise<AgentGrants>;
+  /**
+   * By the line the listing shows (`describeCommandScope`), since that is
+   * what an operator has in front of them. Two stored scopes reading the
+   * same are the same permission to a person, and both go.
+   */
+  forgetScope(agentId: string, description: string): Promise<boolean>;
+  forgetOrigin(agentId: string, origin: string): Promise<boolean>;
+  forgetTool(agentId: string, tool: string): Promise<boolean>;
+}
+
 interface WhitelistFile {
   version: number;
   scopes: CommandScope[];
@@ -51,15 +116,19 @@ interface WhitelistFile {
    * so where rolling back is documented.
    */
   origins?: OriginScope[];
+  /**
+   * The standing tool grants, on the same terms as `origins`: additive,
+   * version still 1, and dropped by a rolled-back daemon's next write. The
+   * loss fails the same safe way — the tool asks again, or is refused in
+   * `headless`, and the log names it.
+   */
+  tools?: ToolGrant[];
 }
 
 const WHITELIST_VERSION = 1;
 
 /** What one agent's file grants, as this store holds it in memory. */
-interface Grants {
-  scopes: CommandScope[];
-  origins: OriginScope[];
-}
+type Grants = AgentGrants;
 
 /** `<id>.whitelist.json`, beside the agent's soul in ~/.stratus/agents. */
 export const whitelistPathFor = (directory: string, agentId: string): string =>
@@ -78,8 +147,9 @@ export class WhitelistUnreadableError extends Error {
 }
 
 /**
- * The persistent tier of the scope resolution, on disk — both kinds of
- * grant, in one file per agent.
+ * The persistent tier of the scope resolution, on disk — every kind of
+ * grant, in one file per agent: command scopes, origins, and the standing
+ * tool grants an operator's "always allow" answers with.
  *
  * Written `0600` with an explicit `chmod`, like every other file in
  * `~/.stratus` that decides something: this one lists commands that run,
@@ -92,7 +162,10 @@ export class WhitelistUnreadableError extends Error {
  * Scopes are cached in memory once read. A daemon therefore does not notice
  * a hand-edited file until it restarts — which is the right way round for a
  * file whose edits grant permissions, and the same bargain the credential
- * store makes.
+ * store makes. It is also why revocation is a method here rather than a
+ * file edit: a `forget` through the daemon's own instance is the next
+ * decision's answer, and the control API and `stratus grants` reach it that
+ * way.
  */
 export const createFileCommandWhitelist = (options: {
   directory: string;
@@ -102,7 +175,7 @@ export const createFileCommandWhitelist = (options: {
    * no line about it.
    */
   warn?: (line: string) => void;
-}): CommandWhitelistStore & OriginWhitelistStore => {
+}): AgentGrantStore => {
   /**
    * One read per agent per process, shared by everyone who asks — as a
    * promise, so two sessions asking for the same agent at once share the
@@ -130,6 +203,7 @@ export const createFileCommandWhitelist = (options: {
   const readFresh = async (agentId: string): Promise<Grants> => {
     let scopes: CommandScope[] = [];
     let origins: OriginScope[] = [];
+    let tools: ToolGrant[] = [];
     // The agent id is a validated invariant by the time it reaches any
     // path join (see 03) — it is a single path segment or it was refused
     // at the parse boundary, so this does not re-check it.
@@ -143,6 +217,9 @@ export const createFileCommandWhitelist = (options: {
       origins = Array.isArray(parsed.origins)
         ? parsed.origins.map(parseOriginScope).filter((scope): scope is OriginScope => scope !== undefined)
         : [];
+      tools = Array.isArray(parsed.tools)
+        ? parsed.tools.map(parseToolGrant).filter((grant): grant is ToolGrant => grant !== undefined)
+        : [];
     } catch (error) {
       // No whitelist means no stored scopes, and is not worth failing a
       // turn over: the fallback is asking a human, which is where an agent
@@ -153,6 +230,7 @@ export const createFileCommandWhitelist = (options: {
       // every grant it held. So it is said once, and `remember` refuses.
       scopes = [];
       origins = [];
+      tools = [];
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         const reason = error instanceof Error ? error.message : String(error);
         unreadable.set(agentId, reason);
@@ -162,26 +240,37 @@ export const createFileCommandWhitelist = (options: {
         );
       }
     }
-    return { scopes, origins };
+    return { scopes, origins, tools };
   };
 
   /**
-   * Both lists, always — a write of one carries the other through
-   * untouched. Persisting only the half that changed would drop the other
-   * half of a file this daemon had read and understood, which is the same
-   * data loss the unreadable-file guard above exists to prevent.
+   * Every list, always — a write of one carries the others through
+   * untouched. Persisting only the kind that changed would drop the rest
+   * of a file this daemon had read and understood, which is the same data
+   * loss the unreadable-file guard above exists to prevent.
    */
   const save = async (agentId: string, grants: Grants): Promise<void> => {
-    cache.set(agentId, Promise.resolve(grants));
     await mkdir(options.directory, { recursive: true });
     const file: WhitelistFile = {
       version: WHITELIST_VERSION,
       scopes: grants.scopes,
       ...(grants.origins.length > 0 ? { origins: grants.origins } : {}),
+      ...(grants.tools.length > 0 ? { tools: grants.tools } : {}),
     };
     const target = whitelistPathFor(options.directory, agentId);
     await writeFile(target, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
     await chmod(target, 0o600);
+    // The cache is updated only once the file holds the same thing, and the
+    // direction that matters is revocation. Updating it first meant a write
+    // that failed — a read-only mount, a full disk — still dropped the grant
+    // from the daemon's live view while leaving it in the file: the operator
+    // is told the revoke failed, the agent stops being able to act anyway,
+    // and the grant they thought they had removed comes back at the next
+    // restart. A grant that returns from the dead is the ratchet this whole
+    // step exists to prevent, so the cache follows the file rather than
+    // leading it. Writes are serialized per agent, so a reader mid-write
+    // sees the old grants, which is what the file still says.
+    cache.set(agentId, Promise.resolve(grants));
   };
 
   /**
@@ -246,6 +335,60 @@ export const createFileCommandWhitelist = (options: {
           return;
         }
         await save(agentId, { ...grants, origins: [...grants.origins, scope] });
+      });
+    },
+    async toolGrantsFor(agentId) {
+      return [...(await read(agentId)).tools];
+    },
+    async rememberTool(agentId, grant) {
+      return serialized(agentId, async () => {
+        const grants = await read(agentId);
+        refuseIfUnreadable(agentId);
+        // Replaces rather than skips: the new row carries the package the
+        // operator was just shown, and a stale row for the same name would
+        // otherwise shadow it in the listing. See `sameToolGrant`.
+        const kept = grants.tools.filter((existing) => !sameToolGrant(existing, grant));
+        await save(agentId, { ...grants, tools: [...kept, grant] });
+      });
+    },
+    async grantsFor(agentId) {
+      const grants = await read(agentId);
+      return { scopes: [...grants.scopes], origins: [...grants.origins], tools: [...grants.tools] };
+    },
+    async forgetScope(agentId, description) {
+      return serialized(agentId, async () => {
+        const grants = await read(agentId);
+        refuseIfUnreadable(agentId);
+        const kept = grants.scopes.filter((scope) => describeCommandScope(scope) !== description);
+        if (kept.length === grants.scopes.length) {
+          return false;
+        }
+        await save(agentId, { ...grants, scopes: kept });
+        return true;
+      });
+    },
+    async forgetOrigin(agentId, origin) {
+      return serialized(agentId, async () => {
+        const grants = await read(agentId);
+        refuseIfUnreadable(agentId);
+        const kept = grants.origins.filter((scope) => scope.origin !== origin);
+        if (kept.length === grants.origins.length) {
+          return false;
+        }
+        await save(agentId, { ...grants, origins: kept });
+        return true;
+      });
+    },
+    async forgetTool(agentId, tool) {
+      return serialized(agentId, async () => {
+        const grants = await read(agentId);
+        refuseIfUnreadable(agentId);
+        const kept = grants.tools.filter((grant) => grant.tool !== tool);
+        if (kept.length === grants.tools.length) {
+          return false;
+        }
+        await save(agentId, { ...grants, tools: kept });
+        return true;
       });
     },
   };

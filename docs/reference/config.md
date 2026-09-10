@@ -21,6 +21,11 @@ else in the file across untouched, `plugins` included; a project can carry its o
 [`stratus doctor`](../guides/troubleshooting.md) prints what a run would
 use right now and which file or env var decided each setting.
 
+Setup writes only the keys its own menus set, and carries every other key
+it finds through unchanged — the `plugins`, `approvals`, `api`, and
+`principals` blocks, and the `vision`, `promptCache`, and `promptCacheTtl`
+preferences. See [Setup](../start/setup.md#where-everything-lands).
+
 ## Every key the config file accepts
 
 ```json
@@ -45,6 +50,7 @@ use right now and which file or env var decided each setting.
 | `fallbackBaseUrl` | Base URL for an OpenAI-compatible fallback (e.g. a local model) |
 | `promptCache` | Cache the stable head of each Anthropic request. Default `true` — see below |
 | `promptCacheTtl` | How long a cache entry lives: `5m` (default) or `1h` |
+| `vision` | Whether an OpenAI-compatible model takes images — the main one or the fallback, it is one setting. Default `true`; set `false` for a text-only model, which would otherwise reject every turn of a session an image was sent to — see [Slack](../guides/slack.md#sending-an-image) |
 | `approvals` | Unattended-approval policy for `stratus serve` — trusted configs only, see below |
 | `principals` | Which channel senders are each agent's operator: `slackUsers` (Slack user ids), with a per-agent `agents` sub-block — trusted configs only, see below |
 | `api` | Control API binding for `stratus serve` — trusted configs only, see below |

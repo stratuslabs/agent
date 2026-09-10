@@ -2023,43 +2023,6 @@ test('runCli json output never exposes Claude replay state or thinking text', as
   assert.equal(payload.session.metadata.provider, 'anthropic');
 });
 
-test('setup replaces only the settings it asks about, and carries the rest across', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
-  // None of these are setup's: `plugins` belongs to the operator and to
-  // `template add`, `approvals` and `api` to whoever configured the daemon.
-  // Only keys setup does not own are seeded, so the menu sees the same
-  // empty provider state the other setup tests drive and the same
-  // keystrokes mean the same things.
-  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({
-    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
-    approvals: { mode: 'headless' },
-    api: { port: 4200 },
-  })}\n`);
-
-  const { streams, output } = createStreams();
-  const exitCode = await runCli({
-    argv: ['setup'],
-    streams,
-    env: {
-      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
-      homeDir: home,
-      processEnv: {},
-      serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-test-key\n', '7\n']),
-      fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
-    },
-  });
-
-  assert.equal(exitCode, 0, output.stderr);
-  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
-  assert.equal(config.provider, 'anthropic', 'what setup asked about is replaced');
-  assert.equal(config.model, 'claude-opus-5');
-  assert.deepEqual(config.plugins, { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } });
-  assert.deepEqual(config.approvals, { mode: 'headless' });
-  assert.deepEqual(config.api, { port: 4200 });
-});
-
 test('setup signs into Claude with a pasted API key, verifies it, and saves credentials', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const { streams, output } = createStreams();
@@ -2486,6 +2449,56 @@ test('setup honors STRATUS_CONFIG and --config for the write target', async () =
   assert.match(viaFlag.output.stdout, /stratus run --config \.\/custom\.json "say hello"/);
   const flagWritten = JSON.parse(await readFile(path.join(tempDir, 'custom.json'), 'utf8'));
   assert.deepEqual(flagWritten, { provider: 'demo' });
+});
+
+test('setup carries the blocks it has no menu for through a save', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-'));
+  const configPath = path.join(home, '.stratus', 'config.json');
+  await mkdir(path.dirname(configPath), { recursive: true });
+  // Every block an operator writes by hand and setup never asks about. A
+  // save that rebuilt the file from its own menus would drop all four.
+  const carried = {
+    plugins: {
+      '@stratusagent/tool-shell': { enabled: true, cwd: '~/work' },
+    },
+    approvals: {
+      mode: 'remote',
+      slackApprovers: ['U01OPS'],
+      agents: { blair: { slackApprovers: ['U01DYLAN'] } },
+    },
+    api: { enabled: true, port: 4123 },
+    principals: { slackUsers: ['U01DYLAN'], agents: { blair: { slackUsers: ['U01BLAIR'] } } },
+  };
+  // The scalar preferences setup has no menu for either — same defect, and
+  // an operator who turned caching off was silently put back on it.
+  const preferences = { vision: false, promptCache: false, promptCacheTtl: '1h' };
+  await writeFile(configPath, JSON.stringify({ provider: 'anthropic', ...preferences, ...carried }, null, 2));
+
+  const { streams } = createStreams();
+  await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: tempDir,
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['7\n']),
+    },
+  });
+
+  const written = JSON.parse(await readFile(configPath, 'utf8'));
+  assert.deepEqual(written.plugins, carried.plugins);
+  assert.deepEqual(written.approvals, carried.approvals);
+  assert.deepEqual(written.api, carried.api);
+  assert.deepEqual(written.principals, carried.principals);
+  assert.equal(written.promptCache, false);
+  assert.equal(written.promptCacheTtl, '1h');
+  // The keys setup does own still get written, so this is a merge rather
+  // than a refusal to touch a file it did not create.
+  assert.equal(written.provider, 'anthropic');
+  assert.equal(written.vision, false);
 });
 
 test('run uses the stored sign-in from the global config and credentials', async () => {
@@ -7280,6 +7293,140 @@ const fakeGateway = (answer: (call: CapturedCall) => Response | Promise<Response
   return { calls, fetchImpl };
 };
 
+// ---- stratus grants (step 28) -----------------------------------------------
+
+test('parseCommand reads the grants command and its revoke form', () => {
+  assert.deepEqual(parseCommand(['grants', 'ava']), { command: 'grants', action: 'list', agentId: 'ava', format: 'text' });
+  assert.deepEqual(parseCommand(['grants', 'list', 'ava', '--format', 'json', '--gateway', 'http://h:1', '--token', 't']), {
+    command: 'grants', action: 'list', agentId: 'ava', format: 'json', gateway: 'http://h:1', token: 't',
+  });
+  assert.deepEqual(parseCommand(['grants', 'revoke', 'ava', '--tool', 'web.fetch']), {
+    command: 'grants', action: 'revoke', agentId: 'ava', format: 'text', tool: 'web.fetch',
+  });
+  assert.deepEqual(parseCommand(['grants', 'revoke', 'ava', '--scope', 'git push']), {
+    command: 'grants', action: 'revoke', agentId: 'ava', format: 'text', scope: 'git push',
+  });
+  assert.deepEqual(parseCommand(['grants', 'revoke', 'ava', '--origin', 'https://app.example.com']), {
+    command: 'grants', action: 'revoke', agentId: 'ava', format: 'text', origin: 'https://app.example.com',
+  });
+  assert.throws(() => parseCommand(['grants']), /needs the agent id/);
+  assert.throws(() => parseCommand(['grants', 'revoke', 'ava']), /exactly one of --tool, --scope, or --origin/);
+  assert.throws(() => parseCommand(['grants', 'revoke', 'ava', '--tool', 'a', '--scope', 'b']), /exactly one of/);
+  assert.throws(() => parseCommand(['grants', 'ava', '--tool', 'a']), /Unknown option: --tool/);
+  assert.throws(() => parseCommand(['grants', 'ava', 'juno']), /Unexpected argument: juno/);
+
+  // The id is joined into `<id>.whitelist.json`, and the grant store takes it
+  // as an already-validated single segment. Refused here, at the boundary, so
+  // no traversal reaches a file read — or, on a revoke, a file write.
+  for (const escape of ['../../other', '../peer', 'a/b', '.hidden', '__proto__']) {
+    assert.throws(() => parseCommand(['grants', escape]), /cannot be an agent id/, escape);
+    assert.throws(() => parseCommand(['grants', 'revoke', escape, '--tool', 'web.fetch']), /cannot be an agent id/, escape);
+  }
+});
+
+test('stratus grants reads and revokes from the whitelist file when no daemon is serving', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-cli-'));
+  const env = { cwd: home, homeDir: home, processEnv: {} };
+  const { createFileCommandWhitelist } = await import('@stratusagent/permissions');
+  const store = createFileCommandWhitelist({ directory: path.join(home, '.stratus', 'agents') });
+  await store.remember('ava', { command: 'git', args: ['push'], denyRefspecForms: true });
+  await store.rememberOrigin('ava', { origin: 'https://app.example.com' });
+  await store.rememberTool('ava', { tool: 'web.fetch', package: 'stratus-plugin-web', grantedAt: '2026-09-07T01:00:00.000Z', grantedBy: 'U1' });
+
+  const listing = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava'], streams: listing.streams, env }), 0);
+  assert.match(listing.output.stdout, /ava may do this unattended/);
+  assert.match(listing.output.stdout, /web\.fetch \(stratus-plugin-web\) {2}\(granted 2026-09-07T01:00:00\.000Z by U1\)/);
+  assert.match(listing.output.stdout, /commands\n {4}git push/);
+  assert.match(listing.output.stdout, /sites\n {4}https:\/\/app\.example\.com/);
+  assert.match(listing.output.stdout, /stratus grants revoke ava --tool/);
+
+  const asJson = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava', '--format', 'json'], streams: asJson.streams, env }), 0);
+  const parsed = JSON.parse(asJson.output.stdout) as { agentId: string; scopes: Array<{ description: string }>; tools: Array<{ tool: string }>; source: string };
+  assert.equal(parsed.agentId, 'ava');
+  assert.deepEqual(parsed.scopes.map((row) => row.description), ['git push']);
+  assert.deepEqual(parsed.tools.map((row) => row.tool), ['web.fetch']);
+  assert.match(parsed.source, /ava\.whitelist\.json$/);
+
+  const revoke = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'web.fetch'], streams: revoke.streams, env }), 0);
+  assert.match(revoke.output.stdout, /Revoked web\.fetch for ava\./);
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--scope', 'git push'], streams: createStreams().streams, env }), 0);
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--origin', 'https://app.example.com'], streams: createStreams().streams, env }), 0);
+
+  const missing = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'web.fetch'], streams: missing.streams, env }), 1);
+  assert.match(missing.output.stderr, /ava has no such grant/);
+
+  // Gone from the file, not just from a cache: a fresh store reads it back empty.
+  const after = await createFileCommandWhitelist({ directory: path.join(home, '.stratus', 'agents') }).grantsFor('ava');
+  assert.deepEqual(after, { scopes: [], origins: [], tools: [] });
+
+  const empty = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava'], streams: empty.streams, env }), 0);
+  assert.match(empty.output.stdout, /ava has no standing grants beyond the built-in safe list/);
+  await rm(home, { recursive: true, force: true });
+});
+
+test('stratus grants goes through the running daemon, whose store is the one the policy reads', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-grants-daemon-'));
+  await publishGateway(home, 'http://127.0.0.1:4123');
+  const gateway = fakeGateway((call) => {
+    if (call.url.endsWith('/grants/revoke')) {
+      const body = call.body as { tool?: string };
+      return body.tool === 'web.fetch'
+        ? new Response(JSON.stringify({ revoked: true }), { status: 200 })
+        : new Response(JSON.stringify({ error: { code: 'grant_not_found', message: 'ava has no such grant.' } }), { status: 404 });
+    }
+    return new Response(JSON.stringify({
+      agentId: 'ava',
+      scopes: [],
+      origins: [],
+      tools: [{ tool: 'web.fetch', grantedAt: '2026-09-07T01:00:00.000Z', stale: 'no loaded tool has this name, so the grant applies to nothing until one does' }],
+    }), { status: 200 });
+  });
+  const env = { cwd: home, homeDir: home, processEnv: {}, fetch: gateway.fetchImpl };
+
+  const listing = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava'], streams: listing.streams, env }), 0);
+  assert.equal(gateway.calls[0]?.url, 'http://127.0.0.1:4123/api/v1/agents/ava/grants');
+  assert.equal(gateway.calls[0]?.method, 'GET');
+  assert.equal(gateway.calls[0]?.authorization, 'Bearer tok-1');
+  assert.match(listing.output.stdout, /from the daemon at http:\/\/127\.0\.0\.1:4123/);
+  // What only a live daemon can say: the grant would not apply right now.
+  assert.match(listing.output.stdout, /stale: no loaded tool has this name/);
+
+  const revoke = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'web.fetch'], streams: revoke.streams, env }), 0);
+  assert.equal(gateway.calls[1]?.url, 'http://127.0.0.1:4123/api/v1/agents/ava/grants/revoke');
+  assert.deepEqual(gateway.calls[1]?.body, { tool: 'web.fetch' });
+  assert.match(revoke.output.stdout, /Revoked web\.fetch for ava\./);
+
+  const missing = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'revoke', 'ava', '--tool', 'gone'], streams: missing.streams, env }), 1);
+  assert.match(missing.output.stderr, /ava has no such grant/);
+
+  // A daemon the file names but that does not answer: the files are still
+  // the truth for the next daemon, so act on them and say a live one would
+  // not notice — never fail silently, never pretend the daemon agreed.
+  const down = fakeGateway(() => {
+    throw new Error('ECONNREFUSED');
+  });
+  const fallback = createStreams();
+  assert.equal(await runCli({ argv: ['grants', 'ava'], streams: fallback.streams, env: { ...env, fetch: down.fetchImpl } }), 0);
+  assert.match(fallback.output.stderr, /names a daemon at http:\/\/127\.0\.0\.1:4123, but it did not answer/);
+  assert.match(fallback.output.stdout, /ava has no standing grants/);
+  // An explicit --gateway is a request for that daemon and nothing else.
+  const explicit = createStreams();
+  assert.equal(
+    await runCli({ argv: ['grants', 'ava', '--gateway', 'http://127.0.0.1:9'], streams: explicit.streams, env: { ...env, fetch: down.fetchImpl } }),
+    1,
+  );
+  assert.match(explicit.output.stderr, /Could not reach the gateway at http:\/\/127\.0\.0\.1:9/);
+  await rm(home, { recursive: true, force: true });
+});
+
 test('parseCommand parses skill reload, restart, and skill add --no-reload', () => {
   assert.deepEqual(parseCommand(['skill', 'reload']), { command: 'skill-reload' });
   assert.deepEqual(parseCommand(['skill', 'reload', '--gateway', 'http://h:1', '--token', 't']), {
@@ -9177,4 +9324,946 @@ test('adding an agent tells you to restart, even with no plugins involved', asyn
   // so a new one is not served until the restart.
   assert.equal(code, 0, output.stderr);
   assert.match(output.stdout, /stratus restart/);
+});
+
+test('re-running setup carries a configured vision switch through the save', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A text-only local model, told so. Setup has no menu for this key, so
+  // a rewrite that forgot it would hand the model its images back.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'local-text-model',
+    baseUrl: 'https://local.test/v1',
+    vision: false,
+  }));
+  await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({
+    openai: { type: 'api_key', value: 'sk-openai-key', baseUrl: 'https://local.test/v1' },
+  }));
+  const { streams } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['6\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.vision, false);
+  assert.equal(config.provider, 'openai');
+});
+
+/**
+ * The chain this command exists for. Four things have to be true before an
+ * agent can call a plugin's tool, and each of these assertions is one of
+ * them failing on its own.
+ */
+const writePluginFixture = async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  // A configured default soul taking the reserved `stratus` id over, so the
+  // built-in — which has no `tools:` key and is therefore granted
+  // everything — is displaced. Without that, no tool on this fixture is
+  // ever granted to nobody, and the "installing is not granting" case these
+  // tests exist for could not be reached at all.
+  const configuredSoul = path.join(home, '.stratus', 'stratus.md');
+  await writeFile(
+    configuredSoul,
+    ['---', 'id: stratus', 'name: Stratus', 'tools:', '  - fs.read', '---', 'You are Stratus.'].join('\n'),
+  );
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    soul: configuredSoul,
+    plugins: {
+      '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] },
+      '@stratusagent/tool-web': { enabled: false },
+    },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'agents', 'blair.md'),
+    ['---', 'id: blair', 'name: Blair', 'tools:', '  - fs.read', '  - fs.search', '---', 'You are Blair.'].join('\n'),
+  );
+  return { home, cwd };
+};
+
+test('plugins names every link in the chain from installed to callable', async () => {
+  const { home, cwd } = await writePluginFixture();
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  assert.equal(exitCode, 0);
+  // What the policy does with a gated call, which is the link no list of
+  // installed packages has ever shown — and `headless` refuses one *last*,
+  // after the standing grants and scopes, so the line must not claim that
+  // only safe tools ever run.
+  assert.match(output.stdout, /approvals: headless — an uncovered gated call is refused/);
+  // Named with the command that lists each, because "already authorized"
+  // spans two of them: grants, scopes and sites are `stratus grants`, a
+  // schedule's destination is `stratus schedules`.
+  assert.match(output.stdout, /standing grants, approved command scopes and sites \(stratus grants <agent>\)/);
+  assert.match(output.stdout, /destinations pre-authorized with a schedule \(stratus schedules\)/);
+  // Granted, and granted to whom.
+  assert.match(output.stdout, /fs\.read\s+safe → stratus, blair/);
+  // Registered but granted to nobody: installing is not granting.
+  assert.match(output.stdout, /fs\.write\s+gated → nobody, until a soul’s tools: list names it/);
+  // Enabled false is not the same as absent, and says which it is.
+  assert.match(output.stdout, /@stratusagent\/tool-web\s+installed, switched off/);
+  assert.match(output.stdout, /switched off — remove "enabled": false to load it/);
+  // A switched-off plugin registers nothing, so its tools are not listed
+  // with a grant column beside them.
+  assert.doesNotMatch(output.stdout, /web\.fetch/);
+  // Installed and never enabled — the trap that started this.
+  assert.match(
+    output.stdout,
+    /@stratusagent\/tool-shell\s+installed, not enabled\n\s+installing granted nothing/,
+  );
+  assert.match(output.stdout, /More plugins — github\.com\/stratuslabs\/plugins/);
+});
+
+test('plugins tells you to install a package that is not there, rather than listing its tools', async () => {
+  const { home, cwd } = await writePluginFixture();
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: {
+      cwd,
+      homeDir: home,
+      processEnv: {},
+      // Everything but the shell resolves, so the two states are
+      // distinguishable in one run.
+      packageResolver: (specifier: string) => specifier !== '@stratusagent/tool-shell',
+    },
+  });
+
+  assert.match(
+    output.stdout,
+    /@stratusagent\/tool-shell\s+not installed\n\s+install it: npm install -g @stratusagent\/tool-shell/,
+  );
+  assert.doesNotMatch(output.stdout, /shell\.run/);
+});
+
+test('plugins --format json reports the chain as data', async () => {
+  const { home, cwd } = await writePluginFixture();
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins', '--format', 'json'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  const report = JSON.parse(output.stdout) as {
+    approvals: string;
+    rosterUnreadable: boolean;
+    plugins: Array<{
+      package: string;
+      installed: boolean;
+      configured: boolean;
+      enabled: boolean;
+      tools: Array<{ name: string; risk: string; grantedTo: string[] }>;
+    }>;
+  };
+
+  assert.equal(report.approvals, 'headless');
+  assert.equal(report.rosterUnreadable, false);
+  const fs = report.plugins.find((entry) => entry.package === '@stratusagent/tool-fs');
+  assert.ok(fs);
+  assert.deepEqual(
+    { installed: fs.installed, configured: fs.configured, enabled: fs.enabled },
+    { installed: true, configured: true, enabled: true },
+  );
+  assert.deepEqual(fs.tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['stratus', 'blair']);
+  // Risk is the manifest's declaration raised to its package's floor — the
+  // reason a write is not something the daemon does on its own.
+  assert.equal(fs.tools.find((tool) => tool.name === 'fs.write')?.risk, 'gated');
+  assert.deepEqual(fs.tools.find((tool) => tool.name === 'fs.write')?.grantedTo, []);
+});
+
+test('plugins ignores a plugins block a project-local config tried to set', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // The block a cloned repository must not get to decide, since a plugin
+  // runs inside the daemon's own process.
+  await writeFile(
+    path.join(cwd, 'stratus.config.json'),
+    JSON.stringify({ plugins: { '@stratusagent/tool-shell': { enabled: true } } }),
+  );
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  assert.match(output.stderr, /ignoring the plugins config in .*stratus\.config\.json/);
+  assert.match(output.stdout, /@stratusagent\/tool-shell\s+installed, not enabled/);
+});
+
+test('plugins rejects a format it cannot print', () => {
+  assert.throws(
+    () => parseCommand(['plugins', '--format', 'yaml']),
+    /Invalid value for --format: yaml\. Use text or json\./,
+  );
+  assert.throws(() => parseCommand(['plugins', '--wat']), /Unknown option: --wat/);
+  assert.deepEqual(parseCommand(['plugin', 'list']), { command: 'plugins', format: 'text' });
+});
+
+test('plugins says a plugin whose settings the daemon rejects will not load', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // A typo, and the shape that makes it worth catching here: the block is
+  // enabled, so every other reading of this machine calls the plugin on —
+  // while `loadPlugins` refuses it and registers no filesystem at all.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-fs': { enabled: true, rootz: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(output.stdout, /@stratusagent\/tool-fs\s+installed, enabled, will not load/);
+  assert.match(output.stdout, /a daemon would register nothing for it: .*has no setting named "rootz"/);
+  // And it does not go on to list tools that will not be there.
+  assert.doesNotMatch(output.stdout, /fs\.read/);
+});
+
+test('plugins does not claim Slack is asked when nothing can ask it', async () => {
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    // remote, and no channel installed or tokens stored — which the daemon
+    // treats as wait-out-the-timeout-and-deny, not as asking anybody.
+    approvals: { mode: 'remote' },
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {}, packageResolver: () => false },
+  });
+
+  // Nothing receives the request: no tokens, no adapter, no control API.
+  // This test used to assert "parks and asks in Slack" *and* that no
+  // channel was running to ask through — pinning a sentence that named a
+  // route and then withdrew it in the same breath.
+  assert.match(
+    output.stdout,
+    /approvals: remote — an uncovered gated call parks with no channel to ask through and no control API to answer it, so it waits out the approval timeout and is denied/,
+  );
+  assert.doesNotMatch(output.stdout, /asks in Slack/);
+  // The same qualification the headless line carries: the engine allows an
+  // already-authorized call before it asks anyone, in either mode.
+  assert.match(output.stdout, /an "always allow" answer persists/);
+});
+
+test('plugins shows a toolRisks override on the concrete tool it names, under a declared namespace', async () => {
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      // The bridge declares a namespace rather than tool names, so an
+      // override necessarily names a tool the manifest never listed. Keyed
+      // by the namespace it could never be found.
+      '@stratusagent/plugin-mcp': {
+        enabled: true,
+        servers: { linear: { url: 'https://mcp.example.com/mcp' } },
+        toolRisks: { 'mcp.linear.get_issue': 'safe' },
+      },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins', '--format', 'json'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; risk: string }> }>;
+  };
+  const mcp = report.plugins.find((entry) => entry.package === '@stratusagent/plugin-mcp');
+  assert.ok(mcp);
+  // The namespace keeps the risk every bridged tool is held to…
+  assert.equal(mcp.tools.find((tool) => tool.name === 'mcp.*')?.risk, 'gated');
+  // …and the one the operator re-rated is listed beside it, at the risk
+  // they gave it, rather than silently reported as gated like the rest.
+  assert.equal(mcp.tools.find((tool) => tool.name === 'mcp.linear.get_issue')?.risk, 'safe');
+});
+
+test('plugins tells you to enable an installed plugin rather than calling its unset settings broken', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // plugin-mcp requires `servers`, and an unconfigured plugin has no block
+  // at all — so validating one the loader would never reach reports the
+  // install to enable as a configuration failure, hiding the one line that
+  // says what to do about it.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(
+    output.stdout,
+    /@stratusagent\/plugin-mcp\s+installed, not enabled\n\s+installing granted nothing/,
+  );
+  assert.doesNotMatch(output.stdout, /missing required setting "servers"/);
+});
+
+test('plugins does not show a namespace-keyed risk override as effective', async () => {
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/plugin-mcp': {
+        enabled: true,
+        servers: { linear: { url: 'https://mcp.example.com/mcp' } },
+        // Accepted by the manifest parser, and inert: the registry looks an
+        // override up by each concrete registered name, which this can
+        // never equal. Showing `mcp.*` as safe would advertise unattended
+        // capability the daemon does not grant.
+        toolRisks: { 'mcp.*': 'safe' },
+      },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins', '--format', 'json'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; risk: string }> }>;
+  };
+  const mcp = report.plugins.find((entry) => entry.package === '@stratusagent/plugin-mcp');
+  assert.equal(mcp?.tools.find((tool) => tool.name === 'mcp.*')?.risk, 'gated');
+});
+
+test('plugins does not invent a load failure for a plugin that is switched off', async () => {
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      // Switched off, with a stale override naming a tool this package does
+      // not declare. The loader skips the block before it parses any of
+      // that, so there is no failure here to report.
+      '@stratusagent/tool-fs': { enabled: false, toolRisks: { 'fs.teleport': 'safe' } },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(output.stdout, /@stratusagent\/tool-fs\s+installed, switched off/);
+  assert.doesNotMatch(output.stdout, /a daemon would register nothing for it/);
+});
+
+test('plugins reads the configured soul from the config it was given', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // A soul named only by the selected config, and not in ~/.stratus/agents.
+  const soulPath = path.join(cwd, 'juno.md');
+  await writeFile(
+    soulPath,
+    ['---', 'id: juno', 'name: Juno', 'tools:', '  - fs.write', '---', 'You are Juno.'].join('\n'),
+  );
+  const configPath = path.join(cwd, 'elsewhere.json');
+  await writeFile(configPath, JSON.stringify({
+    provider: 'anthropic',
+    soul: soulPath,
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins', '--config', configPath],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  // Read from the same file the plugins block came from. Resolving the
+  // configured soul from the default config instead would answer for a
+  // roster the daemon this describes does not serve.
+  assert.match(output.stdout, /fs\.write\s+gated → stratus, juno/);
+});
+
+test('plugins names the built-in agent a fresh install actually grants tools to', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // No soul files at all — the shape of a fresh install. The gateway still
+  // registers the reserved built-in, and it has no `tools:` key, so it is
+  // granted every registered tool. Reporting "nobody" here was backwards
+  // for the most common configuration there is.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(output.stdout, /fs\.read\s+safe → stratus/);
+  assert.match(output.stdout, /fs\.write\s+gated → stratus/);
+  assert.doesNotMatch(output.stdout, /nobody, until a soul’s tools: list names it/);
+});
+
+test('plugins lets a configured soul take the built-in id over rather than listing both', async () => {
+  const { home, cwd } = await writePluginFixture();
+  const soulPath = path.join(cwd, 'stratus.md');
+  // Only the explicitly configured default soul may take the reserved id —
+  // a roster file claiming it is dropped. Taking it over must replace the
+  // built-in, not sit beside it.
+  await writeFile(
+    soulPath,
+    ['---', 'id: stratus', 'name: Stratus', 'tools:', '  - fs.read', '---', 'You are Stratus.'].join('\n'),
+  );
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    soul: soulPath,
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins', '--format', 'json'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; grantedTo: string[] }> }>;
+  };
+  const tools = report.plugins.find((entry) => entry.package === '@stratusagent/tool-fs')?.tools ?? [];
+  // Named once — not beside a built-in of the same id — and now bounded by
+  // the soul's allowlist rather than granted everything the way the
+  // built-in is. `blair` is the fixture's roster soul, which also lists it.
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.read')?.grantedTo, ['stratus', 'blair']);
+  assert.deepEqual(tools.find((tool) => tool.name === 'fs.write')?.grantedTo, []);
+});
+
+test('plugins does not offer a stale Slack token as an approver route', async () => {
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    // An approver configured for an agent that no longer exists. The
+    // adapter skips an id the gateway is not serving, so a token that
+    // outlived its agent is not somebody who can be asked.
+    approvals: { mode: 'remote', agents: { ghost: { slackApprovers: ['U01OPS'] } } },
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ghost: { botToken: 'xoxb-gone', appToken: 'xapp-gone' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {}, packageResolver: () => true },
+  });
+
+  assert.doesNotMatch(output.stdout, /approvers set for ghost/);
+  // With the token intersected away nothing is askable in Slack, and the
+  // control API resolves here — so the verdict is the API one, not a
+  // Slack-shaped denial.
+  assert.match(output.stdout, /parks with no Slack channel to ask through, so the control API is the only way/);
+});
+
+test('plugins names the served agents no channel can ask for, and approvers with no fallback', async () => {
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    // Approvers for the configured soul only. `blair` is served from the
+    // roster with no tokens of its own, which `runServe` warns about once
+    // its roster loads: those gated calls park until the timeout denies
+    // them. Filtering to the askable set alone would hide that entirely.
+    approvals: { mode: 'remote', agents: { stratus: { slackApprovers: ['U01OPS'] } } },
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { stratus: { botToken: 'xoxb-a', appToken: 'xapp-a' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {}, packageResolver: () => true },
+  });
+
+  assert.match(output.stdout, /approvers set for stratus/);
+  // Stored tokens are configuration, not a live app: the adapter keeps a
+  // connection only once auth.test() and socket.start() both succeed, and
+  // denies undeliverable for a configured agent without one. This command
+  // starts no daemon, so it must not present the route as working.
+  assert.match(
+    output.stdout,
+    /whether those apps are connected is not something this command can see — it reads config, and one whose token no longer authenticates denies its gated calls instead of asking; `stratus logs` shows which came up/,
+  );
+  // The control API resolves in this fixture, so a parked call is not
+  // simply doomed — it waits for a client rather than for the timeout.
+  assert.match(
+    output.stdout,
+    /no Slack channel can ask for blair, so their gated calls park until the control API answers them/,
+  );
+  // Approvers with nowhere to be asked outside their own thread: a turn
+  // that did not start in Slack reaches the adapter with no destination.
+  assert.match(output.stdout, /stratus has no slackChannel, so only turns already in Slack can be asked/);
+  // The session-wide answer, which is why "parks and asks" is not the whole
+  // story even for a call nothing durable covers.
+  assert.match(
+    output.stdout,
+    /"always allow" answer persists — a standing grant for an unscoped tool, a command scope, or a site, all until revoked/,
+  );
+  // The session case is destination-scoped, of which an ordinary outbound
+  // send is the everyday example — not only a scheduled one.
+  assert.match(
+    output.stdout,
+    /only a call scoped by destination, such as message\.send, lasts just the session/,
+  );
+});
+
+/**
+ * A plugin package written to a temp directory, keyed into the config by
+ * absolute path. `readPluginManifest` resolves through `import.meta.resolve`,
+ * which takes one — so manifest shapes no shipped package has (overlapping
+ * namespaces, colliding tool names) are reachable without adding a fixture
+ * package to the workspace for them.
+ */
+const writeFixturePlugin = async (
+  name: string,
+  stratus: Record<string, unknown>,
+): Promise<string> => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'stratus-plugin-'));
+  await writeFile(
+    path.join(directory, 'package.json'),
+    JSON.stringify({ name, version: '1.0.0', type: 'module', main: 'index.js', stratus }),
+  );
+  const entry = path.join(directory, 'index.js');
+  await writeFile(entry, 'export const createPlugin = () => ({ name: "fixture", setup() {} });\n');
+  // Any skill the manifest declares has to be on disk: the loader stages
+  // declared skills before importing anything, and a missing file refuses
+  // the plugin outright — which would mask whatever the test is about.
+  for (const declared of (stratus.contributes as { skills?: Array<{ id: string; path: string }> } | undefined)?.skills ?? []) {
+    const file = path.resolve(directory, declared.path);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(
+      file,
+      ['---', `name: ${declared.id}`, `description: A fixture skill named ${declared.id} for tests.`, '---', '', 'Do the thing.'].join('\n'),
+    );
+  }
+  return entry;
+};
+
+test('plugins warns that a declared tool name is already registered elsewhere', async () => {
+  const { home, cwd } = await writePluginFixture();
+  const contributes = { tools: [{ name: 'db.query', risk: 'gated' }] };
+  const first = await writeFixturePlugin('stratus-plugin-alpha', { pluginVersion: 1, contributes });
+  const second = await writeFixturePlugin('stratus-plugin-beta', { pluginVersion: 1, contributes });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { [first]: { enabled: true }, [second]: { enabled: true } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  // Conditional, and deliberately so: ownership is claimed at registration,
+  // not at declaration, so two manifests naming one tool collide only if
+  // both plugins go on to register it. Reporting a failure here would
+  // condemn a plugin that loads fine because its tool is optional — these
+  // fixtures being the case in point, since neither registers anything.
+  assert.match(output.stdout, /db\.query/);
+  // Both sides are declarations — neither plugin is known to register the
+  // name — so the warning says "if both register it", not that the earlier
+  // one has it. Stating otherwise would send an operator to disable a pair
+  // that loads perfectly well.
+  assert.match(
+    output.stdout,
+    /warning: db\.query is also declared by .*; if both register that name, a daemon keeps the first and refuses the second registration — the whole plugin, tools and skills together, if it happens before that plugin finishes loading, or just that one tool if it happens after/,
+  );
+  // And it stays enabled with its tools listed, because it may well load.
+  assert.doesNotMatch(output.stdout, /a daemon would register nothing for it/);
+});
+
+test('plugins reads an overlapping namespace at the risk registration will use', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // `declaredRiskFor` takes the *first* matching namespace, so every
+  // concrete `mcp.linear.*` tool registers `dangerous` despite the narrower
+  // declaration below saying `safe`.
+  const entry = await writeFixturePlugin('stratus-plugin-bridge', {
+    pluginVersion: 1,
+    contributes: {
+      toolsDiscovered: [
+        { namespace: 'mcp.*', risk: 'dangerous' },
+        { namespace: 'mcp.linear.*', risk: 'safe' },
+      ],
+    },
+  });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { [entry]: { enabled: true } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins', '--format', 'json'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; risk: string }> }>;
+  };
+  const tools = report.plugins.find((plugin) => plugin.package === entry)?.tools ?? [];
+  assert.equal(tools.find((tool) => tool.name === 'mcp.*')?.risk, 'dangerous');
+  assert.equal(tools.find((tool) => tool.name === 'mcp.linear.*')?.risk, 'dangerous');
+});
+
+test('plugins emits one row for a tool reachable more than one way', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // Declared outright *and* covered by a namespace, with an override on the
+  // literal name — three paths to one runtime tool.
+  const entry = await writeFixturePlugin('stratus-plugin-both', {
+    pluginVersion: 1,
+    contributes: {
+      tools: [{ name: 'mcp.ping', risk: 'safe' }],
+      toolsDiscovered: [{ namespace: 'mcp.*', risk: 'gated' }],
+    },
+  });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { [entry]: { enabled: true, toolRisks: { 'mcp.ping': 'dangerous' } } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins', '--format', 'json'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string }> }>;
+  };
+  const tools = report.plugins.find((plugin) => plugin.package === entry)?.tools ?? [];
+  assert.equal(tools.filter((tool) => tool.name === 'mcp.ping').length, 1);
+  // And no self-collision: one manifest declaring both a literal and a
+  // namespace covering it registers that name once, which collides with
+  // nothing. Warning about it would send an operator to fix a working
+  // config.
+  assert.doesNotMatch(output.stdout, /warning:/);
+});
+
+test('plugins warns when a plugin declares a name the daemon itself registers', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // The gateway registers its kernel tools before it loads any plugin, so a
+  // plugin that registers one of these names is refused whole.
+  const entry = await writeFixturePlugin('stratus-plugin-shadow', {
+    pluginVersion: 1,
+    contributes: { tools: [{ name: 'memory.remember', risk: 'gated' }] },
+  });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { [entry]: { enabled: true } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(output.stdout, /warning: memory\.remember is already registered by the daemon itself/);
+});
+
+test('plugins warns about one package configured through two specifiers', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // Same package, two config entries — its own name and the absolute path
+  // of its entry point. `loadPlugins` treats them as two plugins and its
+  // shared owners map rejects the second, so sharing a `packageName` is not
+  // grounds for exempting the pair.
+  const entry = await writeFixturePlugin('stratus-plugin-twice', {
+    pluginVersion: 1,
+    contributes: { tools: [{ name: 'twice.run', risk: 'gated' }] },
+  });
+  const alias = path.join(path.dirname(entry), 'index.js');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { [entry]: { enabled: true }, [`${alias}?second`]: { enabled: true } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(output.stdout, /warning: twice\.run is also declared by/);
+});
+
+test('plugins warns when two entries would claim one qualified skill id', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // Skill ids qualify to `packageName:id`, so a clash means one package
+  // configured twice — and the loader refuses the second entry whole,
+  // tools included, rather than merging them.
+  const entry = await writeFixturePlugin('stratus-plugin-skilled', {
+    pluginVersion: 1,
+    contributes: {
+      tools: [{ name: 'skilled.run', risk: 'gated' }],
+      skills: [{ id: 'review', path: './skills/review/SKILL.md' }],
+    },
+  });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { [entry]: { enabled: true }, [`${entry}?again`]: { enabled: true } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(
+    output.stdout,
+    /warning: skill stratus-plugin-skilled:review is already declared by .*; if both load, a daemon keeps the first and refuses this one whole/,
+  );
+});
+
+test('plugins warns when a declared namespace covers a name already claimed', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // A namespace lists nothing, but it covers names — including the kernel's
+  // own, which are registered before any plugin loads.
+  const entry = await writeFixturePlugin('stratus-plugin-wide', {
+    pluginVersion: 1,
+    contributes: { toolsDiscovered: [{ namespace: 'memory.*', risk: 'gated' }] },
+  });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { [entry]: { enabled: true } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  // Both costs, always: staging versus live registration decides which,
+  // and no manifest says when a name registers.
+  assert.match(
+    output.stdout,
+    /warning: memory\.\* overlaps memory\.remember, which is already registered by the daemon itself; if both register that name, a daemon keeps the first and refuses the second registration — the whole plugin, tools and skills together, if it happens before that plugin finishes loading, or just that one tool if it happens after/,
+  );
+});
+
+test('plugins warns when a later literal falls under an earlier namespace', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // The direction a one-way pass cannot see: the namespace is declared
+  // first and has no earlier literal to compare against, and the literal
+  // arrives later with only literals to compare against. Overlap has no
+  // preferred direction, so the check must not either.
+  const bridge = await writeFixturePlugin('stratus-plugin-first', {
+    pluginVersion: 1,
+    contributes: { toolsDiscovered: [{ namespace: 'mcp.*', risk: 'gated' }] },
+  });
+  const literal = await writeFixturePlugin('stratus-plugin-second', {
+    pluginVersion: 1,
+    contributes: { tools: [{ name: 'mcp.linear.get_issue', risk: 'gated' }] },
+  });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { [bridge]: { enabled: true }, [literal]: { enabled: true } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(
+    output.stdout,
+    /warning: mcp\.linear\.get_issue overlaps mcp\.\*, which is also declared by .*; if both register that name, a daemon keeps the first and refuses the second registration — the whole plugin, tools and skills together, if it happens before that plugin finishes loading, or just that one tool if it happens after/,
+  );
+});
+
+test('plugins says a gated call waits out the timeout only when nothing can answer it', async () => {
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', agents: { stratus: { slackApprovers: ['U01OPS'] } } },
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { stratus: { botToken: 'xoxb-a', appToken: 'xapp-a' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: {
+      cwd,
+      homeDir: home,
+      processEnv: {},
+      // No control API installed — now nothing can answer for `blair`, and
+      // the timeout really is the end of it.
+      packageResolver: (specifier: string) => specifier !== '@stratusagent/control-api',
+    },
+  });
+
+  assert.match(output.stdout, /no channel can ask for blair, so their gated calls wait out the timeout and are denied/);
+  assert.doesNotMatch(output.stdout, /the control API answers them/);
+});
+
+test('plugins does not show a nested wildcard risk override as effective either', async () => {
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/plugin-mcp': {
+        enabled: true,
+        servers: { linear: { url: 'https://mcp.example.com/mcp' } },
+        // Accepted by the manifest parser and inert for the same reason
+        // `mcp.*` is: the registry applies an override by each concrete
+        // registered name, which no wildcard can equal.
+        toolRisks: { 'mcp.linear.*': 'safe' },
+      },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins', '--format', 'json'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; risk: string }> }>;
+  };
+  const tools = report.plugins.find((entry) => entry.package === '@stratusagent/plugin-mcp')?.tools ?? [];
+  assert.equal(tools.find((tool) => tool.name === 'mcp.*')?.risk, 'gated');
+  // Not listed at all: a wildcard names no tool the daemon will re-rate.
+  assert.equal(tools.find((tool) => tool.name === 'mcp.linear.*'), undefined);
+});
+
+test('plugins does not both deny and offer the control API in one verdict', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // Remote, control API serving, and no Slack tokens for anybody. The
+  // Slack-shaped verdict ends in "denied"; the API sentence says the call
+  // can be answered. Appending the second to the first said both.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote' },
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {}, packageResolver: () => true },
+  });
+
+  assert.match(
+    output.stdout,
+    /remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it/,
+  );
+  // The contradiction, in either of the two shapes it took.
+  assert.doesNotMatch(output.stdout, /wait out the approval timeout and then be denied/);
+  assert.doesNotMatch(output.stdout, /no channel is running to ask through/);
+});
+
+test('plugins does not offer the control API where Slack denies first', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // Tokens stored for `stratus` but no approvers. The Slack adapter handles
+  // the same event synchronously and denies — so there is nothing left
+  // parked for an API client to answer, and offering one would send an
+  // operator to a route that cannot help.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote' },
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { stratus: { botToken: 'xoxb-a', appToken: 'xapp-a' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {}, packageResolver: () => true },
+  });
+
+  assert.match(
+    output.stdout,
+    /remote — an uncovered gated call reaches Slack and is denied on arrival, because no approvers are configured/,
+  );
+  assert.doesNotMatch(output.stdout, /the control API is the only way to answer it/);
+  // The adapter denies synchronously here, so nothing parks and nobody is
+  // asked — the verdict must not say the call asks in Slack.
+  assert.doesNotMatch(output.stdout, /parks and asks in Slack/);
+});
+
+test('plugins reads the approval timeout with no channel and no control API', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // The timeout fix reached the control-API verdict and the unreachable
+  // clause, but this branch went through describeApprovers, which promises
+  // a denial in a string of its own. With no timer armed there is no
+  // denial to promise.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', timeoutMs: 0 },
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: {
+      cwd,
+      homeDir: home,
+      processEnv: {},
+      packageResolver: (specifier: string) => specifier !== '@stratusagent/control-api',
+    },
+  });
+
+  assert.match(output.stdout, /approval timeout is 0, so it parks indefinitely/);
+  assert.doesNotMatch(output.stdout, /wait out the approval timeout and then be denied/);
+});
+
+test('plugins says a call parks indefinitely when the approval timeout is zero', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // An explicit 0 is documented as "wait indefinitely", and the gateway
+  // arms no timer for it — so an unanswered call is not eventually denied.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', timeoutMs: 0 },
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {}, packageResolver: () => true },
+  });
+
+  assert.match(output.stdout, /approval timeout is 0, so it parks indefinitely/);
+  assert.doesNotMatch(output.stdout, /before the timeout denies it/);
 });
