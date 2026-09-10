@@ -105,9 +105,11 @@ digits to jump, Esc to go back.
   question only a daemon start answers. Where every soul has a list, it
   prints the line to paste instead — unless one of those lists already
   names what the plugin contributes, which setup checks against the
-  manifest and reports as granted, naming the tools that list actually
-  matches and the ones it does not, using the rule `stratus plugins`
-  reports from. **Skills are said separately**, because they are gated the
+  manifest and reports as granted — naming the soul's own entries and the
+  contributed tools they miss, using the rule `stratus plugins` reports
+  from. Its own entries rather than the plugin's declarations, because a
+  soul granting one tool under a discovered namespace like `mcp.*` reaches
+  the plugin without being granted the namespace. **Skills are said separately**, because they are gated the
   other way round: an omitted `skills:` list is *none*, so no soul gains a
   plugin's skills by default and a `tools:` entry never grants one. An
   agent is only named as one that

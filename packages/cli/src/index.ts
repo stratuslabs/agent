@@ -4935,6 +4935,15 @@ export const runSetup = async (
     // What one soul's allowlist actually reaches — the *names*, not a
     // yes/no. `tools: [fs.read]` grants one of the four tool-fs
     // contributes, and reporting the plugin as callable said all four were.
+    //
+    // Reported as the soul's own **entries**, never as the plugin's
+    // declarations, because `toolScopesOverlap` is overlap and not
+    // containment: a soul granting `mcp.linear.get_issue` overlaps a
+    // declared `mcp.*` — which is the right test for "does this soul reach
+    // the plugin" and the wrong thing to print, since it read back as the
+    // soul granting the whole namespace. An entry says exactly what it
+    // says, and a discovered namespace has no tool names to enumerate
+    // until the bridge connects.
     const reached = (entry: ChannelRosterEntry): string[] => {
       const tools = entry.soul.agent.tools;
       if (tools === undefined) {
@@ -4945,10 +4954,19 @@ export const runSetup = async (
         // that named something specific.
         return [];
       }
-      return [
-        ...contributed.tools.filter((tool) => soulGrantsTool(tools, tool, false)),
-        ...contributed.namespaces.filter((namespace) => soulGrantsTool(tools, namespace, true)),
-      ];
+      return tools.filter((granted) =>
+        contributed.tools.some((tool) => soulGrantsTool([granted], tool, false))
+        || contributed.namespaces.some((namespace) => soulGrantsTool([granted], namespace, true)));
+    };
+    /** Concrete contributed tools no entry of this soul's reaches. */
+    const missedTools = (entry: ChannelRosterEntry): string[] => {
+      const tools = entry.soul.agent.tools;
+      if (tools === undefined || contributed === undefined) {
+        return [];
+      }
+      // Only the concrete ones: a declared namespace registers its tools at
+      // connect time, so setup cannot say which of them an entry misses.
+      return contributed.tools.filter((tool) => !soulGrantsTool(tools, tool, false));
     };
 
     // Allowlisted is not the same as able to call it. `tool-fs` enabled
@@ -4980,9 +4998,14 @@ export const runSetup = async (
       if (contributed === undefined || contributed.skills.length === 0) {
         return;
       }
-      const first = contributed.skills[0] as string;
-      writeLine(streams.stdout, `It also contributes ${contributed.skills.length === 1 ? 'a skill' : 'skills'}: ${contributed.skills.join(', ')}.`);
-      writeLine(streams.stdout, `Those are not granted by \`tools:\` and no soul gets them by default — an omitted \`skills:\` list is none. Add \`skills: [${first}]\` to grant ${contributed.skills.length === 1 ? 'it' : 'them'}.`);
+      const one = contributed.skills.length === 1;
+      writeLine(streams.stdout, `It also contributes ${one ? 'a skill' : 'skills'}: ${contributed.skills.join(', ')}.`);
+      // Every id, not the first: `matchesSkillAllowlist` selects an exact id
+      // or a package wildcard, so a one-item list from a plural sentence
+      // grants one skill and silently leaves the rest off. `${name}:*` is
+      // offered beside them because it is the entry that keeps working when
+      // the package adds one.
+      writeLine(streams.stdout, `Those are not granted by \`tools:\` and no soul gets them by default — an omitted \`skills:\` list is none. Add \`skills: [${contributed.skills.join(', ')}]\` to grant ${one ? 'it' : 'them'}${one ? '' : `, or \`skills: [${name}:*]\` for every skill this package contributes`}.`);
     };
 
     if (callable.length > 0) {
@@ -4999,7 +5022,7 @@ export const runSetup = async (
         // reported the other three as available when the runtime denies
         // them.
         const names = reached(entry);
-        const rest = everyTool.filter((tool) => !names.includes(tool));
+        const rest = missedTools(entry);
         writeLine(streams.stdout, `${name} is enabled — and ${entry.soul.agent.name} (${entry.soul.agent.id}) already grants ${names.join(', ')} in \`tools:\`${rest.length > 0 ? `, but not ${rest.join(', ')}` : ''}.`);
       }
       if (shortfall !== undefined) {

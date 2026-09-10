@@ -6162,6 +6162,48 @@ test('setup enables a plugin whose roots are configured per agent', async () => 
   });
 });
 
+test('setup reports the entry a soul granted, not the namespace it overlaps', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // plugin-mcp declares the discovered namespace `mcp.*`, and Ava grants one
+  // concrete tool under it. `toolScopesOverlap` is overlap, not containment,
+  // so testing the declaration against her list is right for "does she reach
+  // the plugin" and wrong to print: it read back as her granting `mcp.*`.
+  await writeFile(
+    path.join(agentsDir, 'ava.md'),
+    '---\nname: Ava\ntools: [mcp.linear.get_issue]\n---\n\nYou are Ava.\n',
+  );
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/plugin-mcp': {
+        enabled: false,
+        servers: { linear: { url: 'https://mcp.example.com/mcp' } },
+      },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → plugin-mcp (5) → Enable it (1) → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '5\n', '1\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Ava \(ava\) already grants mcp\.linear\.get_issue in `tools:`/);
+  // The claim this replaces: the whole namespace, which the runtime denies.
+  assert.doesNotMatch(output.stdout, /already grants mcp\.\* in `tools:`/);
+});
+
 test('setup counts a soul whose explicit tools list already names the plugin', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const agentsDir = path.join(home, '.stratus', 'agents');
