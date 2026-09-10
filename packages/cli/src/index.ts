@@ -7377,8 +7377,12 @@ const describeUnattendedReach = async (
   // destination to the session. Saying "for the rest of its session" flat
   // understated durable unattended access, which is the wrong direction to
   // be wrong about approvals in.
+  // The session case is a call scoped by *destination*, which an ordinary
+  // outbound `message.send` is — not only a scheduled one. Naming the
+  // schedule alone read as though the everyday case were durable.
   parts.push('an "always allow" answer persists — a standing grant for an unscoped tool, a command scope, '
-    + 'or a site, all until revoked; only a scheduled destination lasts just the session');
+    + 'or a site, all until revoked; only a call scoped by destination, such as message.send, '
+    + 'lasts just the session');
   return parts.join('; ');
 };
 
@@ -7562,7 +7566,15 @@ export const collectPluginsReport = async (
         // they are different risks, and which tools carry the override is
         // the thing worth seeing.
         for (const name of overrides.keys()) {
-          if (name !== entry.namespace && matchesToolAllowlist(name, [entry.namespace])) {
+          // Any wildcard key, not merely the declared namespace itself: the
+          // registry applies an override by each concrete *registered*
+          // name, so a nested `mcp.linear.*` is exactly as inert as
+          // `mcp.*`. Excluding only the equal case left the nested one
+          // advertising a re-rating no call gets.
+          if (name.endsWith('.*')) {
+            continue;
+          }
+          if (matchesToolAllowlist(name, [entry.namespace])) {
             emit({ name, discovered: true, namespace: false, declared: riskOf(name, entry.risk) });
           }
         }

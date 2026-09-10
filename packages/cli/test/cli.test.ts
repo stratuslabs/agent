@@ -9490,6 +9490,12 @@ test('plugins names the served agents no channel can ask for, and approvers with
     output.stdout,
     /"always allow" answer persists — a standing grant for an unscoped tool, a command scope, or a site, all until revoked/,
   );
+  // The session case is destination-scoped, of which an ordinary outbound
+  // send is the everyday example — not only a scheduled one.
+  assert.match(
+    output.stdout,
+    /only a call scoped by destination, such as message\.send, lasts just the session/,
+  );
 });
 
 /**
@@ -9769,4 +9775,36 @@ test('plugins says a gated call waits out the timeout only when nothing can answ
 
   assert.match(output.stdout, /no channel can ask for blair, so their gated calls wait out the timeout and are denied/);
   assert.doesNotMatch(output.stdout, /the control API answers them/);
+});
+
+test('plugins does not show a nested wildcard risk override as effective either', async () => {
+  const { home, cwd } = await writePluginFixture();
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/plugin-mcp': {
+        enabled: true,
+        servers: { linear: { url: 'https://mcp.example.com/mcp' } },
+        // Accepted by the manifest parser and inert for the same reason
+        // `mcp.*` is: the registry applies an override by each concrete
+        // registered name, which no wildcard can equal.
+        toolRisks: { 'mcp.linear.*': 'safe' },
+      },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins', '--format', 'json'],
+    streams,
+    env: { cwd, homeDir: home, processEnv: {} },
+  });
+
+  const report = JSON.parse(output.stdout) as {
+    plugins: Array<{ package: string; tools: Array<{ name: string; risk: string }> }>;
+  };
+  const tools = report.plugins.find((entry) => entry.package === '@stratusagent/plugin-mcp')?.tools ?? [];
+  assert.equal(tools.find((tool) => tool.name === 'mcp.*')?.risk, 'gated');
+  // Not listed at all: a wildcard names no tool the daemon will re-rate.
+  assert.equal(tools.find((tool) => tool.name === 'mcp.linear.*'), undefined);
 });

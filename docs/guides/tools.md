@@ -217,10 +217,11 @@ spawn every server you configured. Two consequences worth knowing:
 - **A namespace is listed as a namespace.** `mcp.*` says the names arrive at
   connect; a tool that has not arrived yet is not a tool that does not exist.
   A `toolRisks` entry names a *concrete* tool under that namespace, so it is
-  listed beside it at the risk you gave it. An entry keyed by the namespace
-  itself is accepted but inert — the registry applies an override by each
-  concrete registered name — so the namespace row keeps the declared risk
-  rather than advertising a re-rating no call will get. Where namespaces
+  listed beside it at the risk you gave it. An entry keyed by *any*
+  wildcard — the declared namespace or a narrower one — is accepted but
+  inert, because the registry applies an override by each concrete
+  registered name. Those keys are not listed at all, rather than advertising
+  a re-rating no call will get. Where namespaces
   overlap, the risk shown is the one registration uses: the *first* matching
   declaration, not the narrowest.
 - **The risk shown is a floor, not the last word.** Without a `toolRisks`
@@ -271,7 +272,8 @@ spawn every server you configured. Two consequences worth knowing:
   carries the same qualification — they are allowed before anyone is asked —
   and adds whatever an "always allow" answer persisted: a standing grant
   for an unscoped tool, a command scope, or a site — all until revoked — and
-  only a schedule's destination lasting just the session.
+  only a call scoped by destination, such as an outbound `message.send`,
+  lasting just the session.
 
   In `remote` the line also names what is missing: an agent the daemon
   serves that no Slack channel can ask for — its gated calls park until the
