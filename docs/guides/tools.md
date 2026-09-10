@@ -239,9 +239,11 @@ spawn every server you configured. Two consequences worth knowing:
   so an agent with no Slack tokens is not necessarily unreachable. An agent
   the Slack adapter *does* cover is a different case: it denies on the spot
   when there are no approvers or no conversation to ask in, leaving nothing
-  for an API client to answer. And an `approvals.timeoutMs` of `0` means a
-  call nobody answers parks for the life of the daemon rather than being
-  denied — the line says which of these you have.
+  for an API client to answer. With neither — no stored tokens and no API —
+  nothing receives the request at all, and the line says that rather than
+  naming a route. And an `approvals.timeoutMs` of `0` means a call nobody
+  answers parks for the life of the daemon rather than being denied — the
+  line says which of these you have.
 - **A tool name belongs to whoever registers it first.** The daemon's own
   kernel tools go in before any plugin, and the first plugin to claim a name
   keeps it — a later one registering the same name is refused whole, tools

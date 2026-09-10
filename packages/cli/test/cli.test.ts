@@ -9230,10 +9230,18 @@ test('plugins does not claim Slack is asked when nothing can ask it', async () =
     env: { cwd, homeDir: home, processEnv: {}, packageResolver: () => false },
   });
 
-  assert.match(output.stdout, /approvals: remote — .*no channel is running to ask through/);
-  // And the same qualification the headless line carries: the engine allows
-  // an already-authorized call before it asks anyone, in either mode.
-  assert.match(output.stdout, /remote — an uncovered gated call parks and asks in Slack/);
+  // Nothing receives the request: no tokens, no adapter, no control API.
+  // This test used to assert "parks and asks in Slack" *and* that no
+  // channel was running to ask through — pinning a sentence that named a
+  // route and then withdrew it in the same breath.
+  assert.match(
+    output.stdout,
+    /approvals: remote — an uncovered gated call parks with no channel to ask through and no control API to answer it, so it waits out the approval timeout and is denied/,
+  );
+  assert.doesNotMatch(output.stdout, /asks in Slack/);
+  // The same qualification the headless line carries: the engine allows an
+  // already-authorized call before it asks anyone, in either mode.
+  assert.match(output.stdout, /an "always allow" answer persists/);
 });
 
 test('plugins shows a toolRisks override on the concrete tool it names, under a declared namespace', async () => {
@@ -9866,6 +9874,34 @@ test('plugins does not offer the control API where Slack denies first', async ()
 
   assert.match(output.stdout, /no approvers are configured, so every gated call is denied on arrival/);
   assert.doesNotMatch(output.stdout, /the control API is the only way to answer it/);
+});
+
+test('plugins reads the approval timeout with no channel and no control API', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // The timeout fix reached the control-API verdict and the unreachable
+  // clause, but this branch went through describeApprovers, which promises
+  // a denial in a string of its own. With no timer armed there is no
+  // denial to promise.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', timeoutMs: 0 },
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({
+    argv: ['plugins'],
+    streams,
+    env: {
+      cwd,
+      homeDir: home,
+      processEnv: {},
+      packageResolver: (specifier: string) => specifier !== '@stratusagent/control-api',
+    },
+  });
+
+  assert.match(output.stdout, /approval timeout is 0, so it parks indefinitely/);
+  assert.doesNotMatch(output.stdout, /wait out the approval timeout and then be denied/);
 });
 
 test('plugins says a call parks indefinitely when the approval timeout is zero', async () => {

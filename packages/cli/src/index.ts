@@ -7354,18 +7354,31 @@ const describeUnattendedReach = async (
   // alarming outcome to leave unsaid.
   const expires = approvals.timeoutMs !== 0;
   const unanswered = expires ? 'before the timeout denies it' : 'and nothing else will — this daemon\'s approval timeout is 0, so it parks indefinitely';
-  const parts = [
-    // The control API is offered only where Slack leaves a request parked.
-    // The Slack adapter handles the same event synchronously and *denies*
-    // when an agent has no approvers or no conversation to ask in, so for
-    // an agent it covers there is nothing left for an API client to
-    // answer. That is only true of agents it covers: one with no tokens at
-    // all reaches no adapter, and its request stays parked — which is the
-    // unreachable clause below, where the API belongs.
-    apiReachable && askable.length === 0
-      ? `remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it ${unanswered}`
-      : `remote — an uncovered gated call parks and asks in Slack, ${slack}`,
-  ];
+  // Three verdicts, selected by what can actually receive the request.
+  //
+  // With nobody askable there is no Slack adapter in the picture at all,
+  // so neither of the first two may say the call "asks in Slack" —
+  // appending `describeApprovers` to that phrasing produced a sentence
+  // that asked Slack and then said no Slack was running.
+  //
+  // The control API is offered only where Slack leaves a request parked.
+  // The Slack adapter handles the same event synchronously and *denies*
+  // when an agent has no approvers or no conversation to ask in, so for an
+  // agent it covers there is nothing left for an API client to answer.
+  // That is only true of agents it covers: one with no tokens at all
+  // reaches no adapter, and its request stays parked.
+  const verdict = (): string => {
+    if (askable.length === 0) {
+      return apiReachable
+        ? `remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it ${unanswered}`
+        : 'remote — an uncovered gated call parks with no channel to ask through and no control API to answer it, so it '
+          + (expires
+            ? 'waits out the approval timeout and is denied'
+            : 'is never answered: this daemon\'s approval timeout is 0, so it parks indefinitely');
+    }
+    return `remote — an uncovered gated call parks and asks in Slack, ${slack}`;
+  };
+  const parts = [verdict()];
   // The reverse of a stale token, and the failure that actually bites: an
   // agent the daemon serves that no channel can ask for parks its gated
   // calls until the timeout denies them. `runServe` warns about exactly
