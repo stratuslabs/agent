@@ -6162,6 +6162,82 @@ test('setup enables a plugin whose roots are configured per agent', async () => 
   });
 });
 
+test('setup counts a soul whose explicit tools list already names the plugin', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // An explicit allowlist that already grants the plugin. Reading only
+  // "has no `tools:` key" as allowlisted reported that nobody could call it
+  // and advised adding a tool this soul had already been granted.
+  await writeFile(
+    path.join(agentsDir, 'ava.md'),
+    '---\nname: Ava\ntools: [fs.read]\n---\n\nYou are Ava.\n',
+  );
+  // The built-in `stratus` agent is seeded into every roster with no
+  // `tools:` list, so it is allowlisted too — but only Ava has roots, which
+  // keeps the two halves of this test distinct.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/tool-fs': { enabled: false, agents: { ava: { roots: ['~/work/ava'] } } },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Ava \(ava\) already names what it contributes in `tools:`/);
+  // The claim this replaces: with every non-built-in soul carrying a list,
+  // the old reading fell through to advising a grant Ava already had.
+  assert.doesNotMatch(output.stdout, /a soul grants tools by naming them/);
+});
+
+test('setup refuses a configured package that is not a plugin at all', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A real, resolvable package with no plugin manifest. `readPluginManifest`
+  // raises `PluginManifestError` rather than `PluginConfigError`, and a
+  // check that caught only the latter read that as "no problem" and enabled
+  // it. This is the manifest half of the preflight, through the CLI.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/dashboard': { enabled: false } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → the config's own key (6) → Enable it (1) → Back (7)
+      // → Save (9)
+      setupInput: Readable.from(['4\n', '6\n', '1\n', '7\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /was not enabled — a daemon would refuse these settings: .*is not a Stratus plugin/);
+  assert.doesNotMatch(output.stdout, /is enabled/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins['@stratusagent/dashboard'].enabled, false);
+});
+
 test('setup does not call a plugin callable by an agent its required setting misses', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const agentsDir = path.join(home, '.stratus', 'agents');

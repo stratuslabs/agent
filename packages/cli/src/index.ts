@@ -470,6 +470,33 @@ export const menuPrefixWidth = (optionCount: number): number => `  ${optionCount
  * one names a plugin that is permanently absent however many times it is
  * installed.
  */
+/**
+ * Whether one soul's allowlist reaches a tool a plugin contributes.
+ *
+ * The second gate, in the form both surfaces need it: `stratus plugins`
+ * asks it per tool to build the who-can-call-what table, and the setup
+ * menu asks it per agent to say what enabling just granted. An omitted
+ * list is every registered tool; a *declared namespace* is matched by
+ * overlap rather than by prefix, since `mcp.linear.*` sits under a granted
+ * `mcp.*` and neither is the other's prefix.
+ *
+ * Shared rather than written twice, and this is the fifth time on this
+ * change that mattered: a menu that answers "who can call it" differently
+ * from the command that reports it is two answers to one question.
+ */
+const soulGrantsTool = (
+  tools: readonly string[] | undefined,
+  name: string,
+  discovered: boolean,
+): boolean => {
+  if (tools === undefined) {
+    return true;
+  }
+  return discovered
+    ? tools.some((granted) => toolScopesOverlap(granted, name))
+    : matchesToolAllowlist(name, tools);
+};
+
 export const isPackageName = (name: string): boolean =>
   name.length <= 214 && /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name);
 
@@ -4778,6 +4805,54 @@ export const runSetup = async (
   };
 
   /**
+   * What setup did not check about this plugin, or `undefined` if there is
+   * nothing left unchecked.
+   *
+   * One concept, because the two cases print the same kind of sentence and
+   * the verdict below has to be qualified for both. `preflightPlugin` never
+   * imports the package — that is what lets it answer without starting
+   * anything — so a plugin can pass every check here and still be refused
+   * by `loadPlugins` for not exporting `createPlugin(config)`, returning
+   * something that is not a plugin, or failing `setup()`. For the packages
+   * this file knows, that is not a real risk and only the declared caveat
+   * applies; for one it does not know, it is exactly the risk, and reading
+   * an absent `PLUGIN_SETUP` entry as "nothing to declare" claimed a
+   * readiness setup had no way to establish.
+   */
+  const uncheckedReason = (name: string): string | undefined => {
+    const setup = PLUGIN_SETUP[name];
+    if (setup === undefined) {
+      return `Setup read ${name}'s manifest and no more — it never loads a package, so whether it exports createPlugin(config) `
+        + 'is something only a daemon start will tell you. If it does not, the daemon says "plugin '
+        + `${name} did not load" and registers nothing.`;
+    }
+    return setup.note;
+  };
+
+  /**
+   * The tool names a plugin contributes, read from its manifest.
+   *
+   * The manifest rather than `PLUGIN_SETUP.grants`, which is display text
+   * and exists only for the packages this file knows: a third-party plugin
+   * has real names too, and they are what decides whether a soul's
+   * `tools:` list already reaches it. `undefined` where no manifest can be
+   * read — a question setup declines rather than answers wrongly.
+   */
+  const pluginContributions = async (name: string): Promise<{ tools: string[]; namespaces: string[] } | undefined> => {
+    try {
+      const { manifest } = await readPluginManifest(name, {
+        resolve: (target) => import.meta.resolve(target),
+      });
+      return {
+        tools: manifest.contributes.tools.map((tool) => tool.name),
+        namespaces: manifest.contributes.toolsDiscovered.map((entry) => entry.namespace),
+      };
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
    * Whether the setting a plugin is useless without resolves to something
    * for one agent, given the block that would be written.
    *
@@ -4845,19 +4920,38 @@ export const runSetup = async (
       writeLine(streams.stdout, `${name} is enabled. Who can call it is unknown until the roster loads — fix the error above, then run \`stratus plugins\`.`);
       return;
     }
-    const permissive = entries.filter((entry) => entry.soul.agent.tools === undefined);
+    // Allowlisted covers two shapes, and reading only the first told an
+    // operator whose souls all use explicit lists that nothing could call
+    // the plugin, then advised adding a tool they had already granted. An
+    // omitted `tools:` key is every registered tool — the built-in
+    // `stratus` agent has none, so a fresh install always has one — and a
+    // list that names what the plugin contributes reaches it just as well.
+    // `soulGrantsTool` is the same rule `stratus plugins` reports from.
+    const contributed = await pluginContributions(name);
+    const allowlisted = entries.filter((entry) => {
+      const tools = entry.soul.agent.tools;
+      if (tools === undefined) {
+        return true;
+      }
+      // No manifest, no names to test — so no claim either way about a
+      // soul that named something specific.
+      return contributed !== undefined
+        && (contributed.tools.some((tool) => soulGrantsTool(tools, tool, false))
+          || contributed.namespaces.some((namespace) => soulGrantsTool(tools, namespace, true)));
+    });
     // Allowlisted is not the same as able to call it. `tool-fs` enabled
-    // from a per-agent `roots` block leaves every *other* permissive soul
-    // — the built-in `stratus` agent among them, and a fresh install
-    // always has one — holding tools that throw "No filesystem roots are
-    // configured" on the first call. Naming it as an agent that can call
-    // them would report the installed-enabled-and-useless state this menu
-    // exists to prevent as the success case.
+    // from a per-agent `roots` block leaves every *other* allowlisted soul
+    // holding tools that throw "No filesystem roots are configured" on the
+    // first call. Naming it as an agent that can call them would report the
+    // installed-enabled-and-useless state this menu exists to prevent as
+    // the success case.
     const needsKey = PLUGIN_SETUP[name]?.needs?.key;
     const callable = needsKey === undefined
-      ? permissive
-      : permissive.filter((entry) => pluginSettingReaches(state.plugins?.[name], needsKey, entry.soul.agent.id));
-    const unset = permissive.filter((entry) => !callable.includes(entry));
+      ? allowlisted
+      : allowlisted.filter((entry) => pluginSettingReaches(state.plugins?.[name], needsKey, entry.soul.agent.id));
+    const unset = allowlisted.filter((entry) => !callable.includes(entry));
+    const explicit = callable.filter((entry) => entry.soul.agent.tools !== undefined);
+    const permissiveCallable = callable.filter((entry) => entry.soul.agent.tools === undefined);
     const label = (list: ChannelRosterEntry[]): string =>
       list.map((entry) => `${entry.soul.agent.name} (${entry.soul.agent.id})`).join(', ');
     // The key travels with the agents rather than beside them, so the two
@@ -4867,21 +4961,27 @@ export const runSetup = async (
       : undefined;
 
     if (callable.length > 0) {
-      writeLine(streams.stdout, `${name} is enabled — and ${label(callable)} ${callable.length === 1 ? 'has' : 'have'} no \`tools:\` list, which means every registered tool.`);
+      if (permissiveCallable.length > 0) {
+        writeLine(streams.stdout, `${name} is enabled — and ${label(permissiveCallable)} ${permissiveCallable.length === 1 ? 'has' : 'have'} no \`tools:\` list, which means every registered tool.`);
+      }
+      if (explicit.length > 0) {
+        writeLine(streams.stdout, `${name} is enabled — and ${label(explicit)} already ${explicit.length === 1 ? 'names' : 'name'} what it contributes in \`tools:\`.`);
+      }
       // "callable the next time the daemon starts" is a prediction, and
-      // for a plugin carrying a `note` it is one setup has just said it
-      // could not make: the browser may not exist, the servers block may
-      // hold an entry the bridge refuses. Printing the caveat and then the
-      // categorical claim leaves the operator to decide which of the two
-      // sentences to believe.
-      const unchecked = PLUGIN_SETUP[name]?.note !== undefined;
-      writeLine(streams.stdout, unchecked
+      // for a plugin setup could not check it is one it has just said it
+      // cannot make: the browser may not exist, the servers block may hold
+      // an entry the bridge refuses, an unknown package may not export
+      // `createPlugin` at all. Printing the caveat and then the categorical
+      // claim leaves the operator to decide which of the two to believe.
+      writeLine(streams.stdout, uncheckedReason(name) !== undefined
         ? `So ${grants ?? 'what it contributes'} ${callable.length === 1 ? 'is' : 'are'} what ${callable.length === 1 ? 'that agent' : 'those agents'} would gain at the next daemon start — subject to the caveat above, which setup did not check.`
         : `So ${grants ?? 'what it contributes'} ${callable.length === 1 ? 'is' : 'are'} callable by ${callable.length === 1 ? 'that agent' : 'those agents'} the next time the daemon starts.`);
       if (shortfall !== undefined) {
         writeLine(streams.stdout, `${label(shortfall.agents)} ${shortfall.one ? 'is' : 'are'} allowlisted too, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} — every call would fail until it is, under plugins["${name}"].agents.`);
       }
-      writeLine(streams.stdout, 'Give a soul a `tools:` list to narrow that. `stratus plugins` shows who can call what.');
+      if (permissiveCallable.length > 0) {
+        writeLine(streams.stdout, 'Give a soul a `tools:` list to narrow that. `stratus plugins` shows who can call what.');
+      }
       return;
     }
 
@@ -4890,7 +4990,7 @@ export const runSetup = async (
       // "callable by" line above nor the "every soul has a `tools:` list"
       // one below is true, and each would send the operator to fix the
       // wrong gate.
-      writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — ${label(shortfall.agents)} ${shortfall.one ? 'has' : 'have'} no \`tools:\` list, so ${shortfall.one ? 'it is' : 'they are'} allowlisted for every registered tool, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} and every call would fail.`);
+      writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — ${label(shortfall.agents)} ${shortfall.one ? 'is' : 'are'} allowlisted for it, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} and every call would fail.`);
       writeLine(streams.stdout, `Set ${shortfall.key} for ${shortfall.one ? 'it' : 'them'} under plugins["${name}"].agents, then run \`stratus plugins\` to see the whole chain.`);
       return;
     }
@@ -5182,8 +5282,9 @@ export const runSetup = async (
     }
 
     state.plugins = { ...(state.plugins ?? {}), [name]: block };
-    if (setup?.note) {
-      writeLine(streams.stdout, setup.note);
+    const unchecked = uncheckedReason(name);
+    if (unchecked !== undefined) {
+      writeLine(streams.stdout, unchecked);
     }
     await printSoulGrantLine(name);
   };
@@ -8568,15 +8669,7 @@ export const collectPluginsReport = async (
    * report the most permissive agents as the least.
    */
   const grantedTo = (name: string, discovered: boolean): string[] => roster
-    .filter((entry) => {
-      const allowlist = entry.soul.agent.tools;
-      if (allowlist === undefined) {
-        return true;
-      }
-      return discovered
-        ? allowlist.some((granted) => toolScopesOverlap(granted, name))
-        : matchesToolAllowlist(name, allowlist);
-    })
+    .filter((entry) => soulGrantsTool(entry.soul.agent.tools, name, discovered))
     .map((entry) => entry.soul.agent.id);
 
   // Configured first, in the operator's own order, then the first-party

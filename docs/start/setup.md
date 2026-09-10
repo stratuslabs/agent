@@ -99,8 +99,14 @@ digits to jump, Esc to go back.
   setup says exactly that, naming the agents — except where it has just
   said it did not check something the plugin needs, as for `tool-browser`
   and MCP, and then the same line is qualified rather than promising an
-  outcome the caveat above it contradicts. Where every soul has a list,
-  it prints the line to paste instead. An agent is only named as one that
+  outcome the caveat above it contradicts. A package setup has no built-in
+  entry for is qualified too: the preflight reads a manifest and never
+  loads the package, so whether it exports `createPlugin(config)` is a
+  question only a daemon start answers. Where every soul has a list, it
+  prints the line to paste instead — unless one of those lists already
+  names what the plugin contributes, which setup checks against the
+  manifest and reports as granted, using the rule `stratus plugins` reports
+  from. An agent is only named as one that
   can call the plugin if the setting the plugin needs resolves for it:
   `tool-fs` enabled from a per-agent `roots` block leaves the other
   permissive souls allowlisted for tools that fail on the first call, and
