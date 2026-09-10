@@ -4954,13 +4954,22 @@ export const runSetup = async (
   };
 
   /**
-   * Trim a top-level menu row to one physical terminal row.
+   * Trim a menu option to one physical terminal row.
    *
    * `selectInteractive` moves the cursor up by the number of options to
    * redraw, so an option that wraps leaves the rewind short and every
-   * later redraw overwrites the wrong lines. Only a TTY has a width to fit
-   * into; piped output keeps the full text, which is what tests and
-   * scripts read, and where nothing is redrawn anyway.
+   * later redraw overwrites the wrong lines. `reserved` is what the
+   * caller's own prefix costs before the text starts.
+   *
+   * Only a TTY has a width to fit into, and piped output keeps the full
+   * text — which is where nothing is redrawn, and also why none of this is
+   * covered by a test: `prompter.isInteractive()` is false whenever
+   * `setupInput` is set, which is every one of them.
+   *
+   * Every option in every menu has this constraint. Fitted here are the
+   * ones this change lengthened or added; a long soul path in the Agent
+   * row can still wrap, and the real fix for that is teaching
+   * `selectInteractive` to count rendered rows.
    */
   const fitMenuRow = (text: string, reserved = 27): string => {
     // `process.stdout` rather than the injected stream, which is typed to
