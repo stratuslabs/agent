@@ -19,9 +19,12 @@ Precedence, highest first:
 use right now and which file or env var decided each setting.
 
 Setup writes only the keys its own menus set, and carries every other key
-it finds through unchanged — the `plugins`, `approvals`, `api`, and
-`principals` blocks, and the `vision`, `promptCache`, and `promptCacheTtl`
-preferences. See [Setup](../start/setup.md#where-everything-lands).
+it finds through unchanged — the `api` and `principals` blocks, and the
+`vision`, `promptCache`, and `promptCacheTtl` preferences. The `plugins` and
+`approvals` blocks have menus, and those menus edit what they read: a plugin
+switched off keeps its settings under `enabled: false`, and per-agent
+`agents` overrides and `toolRisks` entries setup never asks about survive
+every pass. See [Setup](../start/setup.md#where-everything-lands).
 
 ## Every key the config file accepts
 

@@ -174,6 +174,7 @@ import {
   type ChannelCredentials,
   type CredentialProviderName,
   type CredentialsFile,
+  type PluginConfigBlock,
   type PluginsConfig,
   type RosterEntry,
   type RuntimeSelection,
@@ -873,8 +874,10 @@ Usage:
 
 Commands:
   setup            Menu-driven onboarding: pick a provider, sign in (Claude
-                   subscription or API key), create your agent, connect it to
-                   Slack, and test it — settings go to ~/.stratus/config.json,
+                   subscription or API key), create your agent, enable the
+                   plugins it may use, connect it to Slack, choose who
+                   approves gated calls unattended, and test it — settings
+                   go to ~/.stratus/config.json,
                    sign-ins and channel tokens to ~/.stratus/credentials.json
                    (0600). Save & finish offers to install any optional
                    package your answers imply (the Slack channel, the control
@@ -4545,6 +4548,318 @@ export const runSetup = async (
     };
   };
 
+  /**
+   * What a plugin's block should say when setup writes it, beyond
+   * `enabled`. Only settings without which the plugin is installed,
+   * enabled, and still useless — the failure this menu exists to stop
+   * anyone reaching by accident:
+   *
+   * - `tool-fs` roots are the whole boundary. With none, the plugin loads
+   *   and every call fails "No filesystem roots are configured", which
+   *   reads to an agent as a broken tool rather than an unset one.
+   * - `plugin-mcp` requires `servers`, and its value is a set of endpoints
+   *   only the operator knows. A block written without it is refused at
+   *   load, so this menu offers no one-key enable for it.
+   *
+   * `tool-shell`, `tool-web` and `tool-browser` work from `{ enabled:
+   * true }` — their settings narrow what is already permitted, and the
+   * plugin without them is restrictive rather than broken.
+   */
+  const PLUGIN_SETUP: Record<string, {
+    label: string;
+    grants: string;
+    /** Asked for on enable; the block is not written without an answer. */
+    needs?: { key: string; question: string; placeholder: string; list: boolean };
+    /** Configured by hand only, with the reason. */
+    byHand?: string;
+  }> = {
+    '@stratusagent/tool-fs': {
+      label: 'Files',
+      grants: 'fs.read, fs.list, fs.search, fs.write',
+      needs: {
+        key: 'roots',
+        question: 'Which directories may agents read and write? (comma-separated, e.g. ~/notes): ',
+        placeholder: '~/notes',
+        list: true,
+      },
+    },
+    '@stratusagent/tool-shell': { label: 'Shell', grants: 'shell.run' },
+    '@stratusagent/tool-web': { label: 'Web', grants: 'web.fetch' },
+    '@stratusagent/tool-browser': {
+      label: 'Browser',
+      grants: 'browser.goto, browser.read, browser.screenshot, browser.act',
+    },
+    '@stratusagent/plugin-mcp': {
+      label: 'MCP bridge',
+      grants: 'mcp.<server>.<tool>, discovered at connect',
+      byHand: 'it needs a servers block naming each MCP server — see docs/reference/config.md',
+    },
+  };
+
+  /** Every package this menu lists: the first-party set, plus whatever is already configured. */
+  const pluginPackages = (): string[] => [
+    ...FIRST_PARTY_CAPABILITY_PACKAGES,
+    ...Object.keys(state.plugins ?? {}).filter((name) => !FIRST_PARTY_CAPABILITY_PACKAGES.includes(name)),
+  ];
+
+  const pluginEnabled = (name: string): boolean => {
+    const block = state.plugins?.[name];
+    return block !== undefined && block.enabled !== false;
+  };
+
+  const pluginsSummary = (): string => {
+    const enabled = pluginPackages().filter((name) => pluginEnabled(name));
+    if (enabled.length === 0) {
+      return 'none — agents have no tools beyond the built-ins';
+    }
+    return enabled.map((name) => name.replace('@stratusagent/', '')).join(', ');
+  };
+
+  /**
+   * Enabling is only the second of two gates, and this menu owns just that
+   * one. The soul's `tools:` list is the other, and setup does not edit
+   * souls — so the line to paste is printed rather than applied, which is
+   * also the honest thing: which agent gets a tool is not a decision this
+   * menu has the standing to make.
+   */
+  const printSoulGrantLine = (name: string): void => {
+    const first = PLUGIN_SETUP[name]?.grants.split(',')[0]?.trim();
+    writeLine(streams.stdout);
+    writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — a soul grants tools by naming them:`);
+    if (first !== undefined) {
+      writeLine(streams.stdout, `  tools: [${first}]`);
+    } else {
+      // A package this menu has no entry for: its tool names are in its
+      // manifest, which `stratus plugins` reads and this menu does not.
+      // Naming the command beats printing a guess at the namespace.
+      writeLine(streams.stdout, '  tools: [<the tools it contributes>]');
+    }
+    writeLine(streams.stdout, `Add it to the \`tools:\` list in ${state.soulPath ?? 'your agent\'s soul file'}, then run \`stratus plugins\` to see the whole chain and what it contributes.`);
+  };
+
+  const choosePlugins = async (): Promise<void> => {
+    while (true) {
+      const packages = pluginPackages();
+      const options = packages.map((name) => {
+        const short = name.replace('@stratusagent/', '');
+        const installed = packageInstalled(name, env);
+        const status = !installed
+          ? '— not installed'
+          : pluginEnabled(name)
+            ? '✓ enabled'
+            : 'installed, not enabled';
+        return short.padEnd(18) + status;
+      });
+      options.push('Back');
+
+      const choice = await prompter.select(
+        'Plugins — what your agents can do (installing one grants nothing on its own)',
+        options,
+        { footnote: `More plugins — ${PLUGIN_MARKETPLACE_URL}` },
+      );
+      if (choice.kind !== 'index' || choice.index === options.length - 1) {
+        return;
+      }
+      const name = packages[choice.index];
+      if (!name) {
+        return;
+      }
+      await choosePlugin(name);
+    }
+  };
+
+  const choosePlugin = async (name: string): Promise<void> => {
+    const setup = PLUGIN_SETUP[name];
+    const installed = packageInstalled(name, env);
+    const enabled = pluginEnabled(name);
+
+    if (setup?.byHand && !enabled) {
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, `${name} contributes ${setup.grants}.`);
+      writeLine(streams.stdout, `Setup does not enable it: ${setup.byHand}.`);
+      if (!installed) {
+        writeLine(streams.stdout, `Install it with: npm install -g ${name}`);
+      }
+      await prompter.ask('Press Enter to return to the menu… ');
+      return;
+    }
+
+    if (!installed) {
+      const answer = await prompter.select(
+        `${name} is not installed. It contributes ${setup?.grants ?? 'its own tools'}.`,
+        [`Install it with npm install -g, then enable it`, 'Back'],
+      );
+      if (answer.kind !== 'index' || answer.index === 1) {
+        return;
+      }
+      writeLine(streams.stdout, `Running: npm install -g ${name}`);
+      const result = await (env.packageInstaller ?? defaultPackageInstaller)([name])
+        .catch((error: unknown) => ({
+          ok: false,
+          message: error instanceof Error ? error.message : String(error),
+        }));
+      if (!result.ok) {
+        writeLine(streams.stderr, `Could not install: ${result.message}`);
+        writeLine(streams.stderr, `Run \`npm install -g ${name}\` yourself, then re-run setup to enable it.`);
+        return;
+      }
+      writeLine(streams.stdout, `Installed ${name}.`);
+      // Enabling proceeds on npm's exit code, not a second resolve: a
+      // package written into the global prefix a moment ago need not be
+      // resolvable from THIS process, whose module resolution was fixed
+      // when it started. The same reasoning the optional-package step
+      // already uses for the dashboard.
+      await enablePlugin(name);
+      return;
+    }
+
+    if (!enabled) {
+      const answer = await prompter.select(
+        `${name} is installed but not enabled. It contributes ${setup?.grants ?? 'its own tools'}.`,
+        ['Enable it', 'Back'],
+      );
+      if (answer.kind !== 'index' || answer.index === 1) {
+        return;
+      }
+      await enablePlugin(name);
+      return;
+    }
+
+    const current = state.plugins?.[name] ?? {};
+    const actions = setup?.needs
+      ? [`Change ${setup.needs.key}`, 'Disable it', 'Back']
+      : ['Disable it', 'Back'];
+    const answer = await prompter.select(
+      `${name} is enabled.${setup?.needs && Array.isArray(current[setup.needs.key])
+        ? ` ${setup.needs.key}: ${(current[setup.needs.key] as string[]).join(', ')}`
+        : ''}`,
+      actions,
+    );
+    if (answer.kind !== 'index' || answer.index === actions.length - 1) {
+      return;
+    }
+    if (setup?.needs && answer.index === 0) {
+      await enablePlugin(name);
+      return;
+    }
+    // Switched off, never deleted. The loader treats `enabled: false` and an
+    // absent key the same, but the operator does not: a block carries
+    // `agents` overrides and `toolRisks` that setup never asked about, and
+    // dropping them would be #161 again — a menu deleting config it does
+    // not own, one plugin at a time instead of all four blocks at once.
+    state.plugins = {
+      ...(state.plugins ?? {}),
+      [name]: { ...(state.plugins?.[name] ?? {}), enabled: false },
+    };
+    writeLine(streams.stdout, `${name} is switched off. The package is still installed, and its settings are kept for when you turn it back on.`);
+  };
+
+  const enablePlugin = async (name: string): Promise<void> => {
+    const setup = PLUGIN_SETUP[name];
+    const existing = state.plugins?.[name] ?? {};
+    const block: PluginConfigBlock = { ...existing, enabled: true };
+
+    if (setup?.needs) {
+      const prior = existing[setup.needs.key];
+      const prefill = Array.isArray(prior) ? (prior as string[]).join(', ') : undefined;
+      const answer = (await prompter.ask(
+        setup.needs.question,
+        ...(prefill !== undefined ? [{ prefill }] : []),
+      )).trim();
+      const values = answer.split(',').map((value) => value.trim()).filter((value) => value.length > 0);
+      if (values.length === 0) {
+        // Not written at all rather than written empty: an enabled block
+        // with no roots is the exact "installed, enabled, and useless"
+        // state this menu exists to prevent somebody reaching by accident.
+        writeLine(streams.stdout, `Nothing entered, so ${name} was left as it was — it grants nothing without ${setup.needs.key}.`);
+        return;
+      }
+      block[setup.needs.key] = values;
+    }
+
+    state.plugins = { ...(state.plugins ?? {}), [name]: block };
+    printSoulGrantLine(name);
+  };
+
+  /**
+   * Who may answer a gated call while nobody is watching. The two halves
+   * are one decision: `remote` with nobody to ask behaves exactly like
+   * `headless` — the call parks and the timeout denies it — so the mode
+   * and the approvers are set on the same screen rather than in two places
+   * that can disagree.
+   */
+  const approvalsSummary = (): string => {
+    const mode = state.approvals?.mode ?? 'headless';
+    if (mode === 'headless') {
+      return 'headless — gated calls are refused while unattended';
+    }
+    const named = Object.values(state.approvals?.agents ?? {})
+      .filter((agent) => (agent.slackApprovers ?? []).length > 0).length;
+    const global = (state.approvals?.slackApprovers ?? []).length > 0;
+    if (named === 0 && !global) {
+      return 'remote — but no approvers yet, so gated calls still get denied';
+    }
+    return `remote — asks in Slack${global ? ' (all agents)' : `, approvers for ${named} agent${named === 1 ? '' : 's'}`}`;
+  };
+
+  const chooseApprovals = async (): Promise<void> => {
+    while (true) {
+      const mode = state.approvals?.mode ?? 'headless';
+      const connected = Object.keys(state.channels.slack ?? {});
+      const options = [
+        `Headless${mode === 'headless' ? ' (current)' : ''}          refuse gated calls when nobody is watching`,
+        `Ask in Slack${mode === 'remote' ? ' (current)' : ''}       park the turn and ask an approver`,
+      ];
+      if (mode === 'remote') {
+        for (const agentId of connected) {
+          const approvers = state.approvals?.agents?.[agentId]?.slackApprovers ?? [];
+          options.push(`  approvers for ${agentId}`.padEnd(26)
+            + (approvers.length > 0 ? approvers.join(', ') : '— nobody, so its calls are denied'));
+        }
+      }
+      options.push('Back');
+
+      const footnote = mode === 'remote' && connected.length === 0
+        // The failure `stratus plugins` reports, said before it can happen
+        // rather than after: remote mode with no Slack app is not a
+        // waiting daemon, it is a denying one.
+        ? 'No agent is connected to Slack, so there is nobody to ask — connect one under Channels first.'
+        : 'A gated call already covered by a standing grant runs without asking, in either mode.';
+      const choice = await prompter.select(
+        'Approvals — what happens to a gated call with nobody watching',
+        options,
+        { footnote },
+      );
+      if (choice.kind !== 'index' || choice.index === options.length - 1) {
+        return;
+      }
+      if (choice.index === 0) {
+        state.approvals = { ...(state.approvals ?? {}), mode: 'headless' };
+        continue;
+      }
+      if (choice.index === 1) {
+        state.approvals = { ...(state.approvals ?? {}), mode: 'remote' };
+        continue;
+      }
+      const agentId = connected[choice.index - 2];
+      if (!agentId) {
+        continue;
+      }
+      const current = state.approvals?.agents?.[agentId]?.slackApprovers ?? [];
+      const answer = (await prompter.ask(
+        `Slack user ids who may approve for ${agentId} (comma-separated, e.g. U01ABCDEF): `,
+        ...(current.length > 0 ? [{ prefill: current.join(', ') }] : []),
+      )).trim();
+      const approvers = answer.split(',').map((value) => value.trim()).filter((value) => value.length > 0);
+      const agents = { ...(state.approvals?.agents ?? {}) };
+      // An explicit empty array, not a deleted key: the config distinguishes
+      // them, and "nobody may approve for this agent" is a different
+      // statement from "inherit whoever is listed globally".
+      agents[agentId] = { ...(agents[agentId] ?? {}), slackApprovers: approvers };
+      state.approvals = { ...(state.approvals ?? {}), mode: 'remote', agents };
+    }
+  };
+
   const chooseChannels = async (): Promise<void> => {
     while (true) {
       const { entries: roster, loaded: rosterLoaded } = await channelRoster();
@@ -4879,8 +5194,10 @@ export const runSetup = async (
     if (state.promptCacheTtl !== undefined) {
       config.promptCacheTtl = state.promptCacheTtl;
     }
-    // Written back exactly as they were read — no menu above sets any of
-    // them, so there is nothing here to merge, only to not lose.
+    // `plugins` and `approvals` have menus above; `api` and `principals`
+    // do not and are written back exactly as they were read. Both cases
+    // land here the same way, because the menus edit this state rather
+    // than the file — so there is nothing to merge, only to not lose.
     if (state.plugins !== undefined) {
       config.plugins = state.plugins;
     }
@@ -5059,14 +5376,16 @@ export const runSetup = async (
         `Providers            ${providersSummary()}`,
         `Models               ${modelsSummary()}`,
         `Agent                ${agentSummary()}`,
+        `Plugins              ${pluginsSummary()}`,
         `Channels             ${channelsSummary()}`,
+        `Approvals            ${approvalsSummary()}`,
         `Always on            ${serviceSummary()}`,
         'Test run             say hello with the current settings',
         'Save & finish',
       ]);
 
       // Backing out of the top level (Esc, or the input ending) saves.
-      if (choice.kind !== 'index' || choice.index === 6) {
+      if (choice.kind !== 'index' || choice.index === 8) {
         break;
       }
 
@@ -5077,10 +5396,14 @@ export const runSetup = async (
       } else if (choice.index === 2) {
         await chooseAgent();
       } else if (choice.index === 3) {
-        await chooseChannels();
+        await choosePlugins();
       } else if (choice.index === 4) {
-        await chooseService();
+        await chooseChannels();
       } else if (choice.index === 5) {
+        await chooseApprovals();
+      } else if (choice.index === 6) {
+        await chooseService();
+      } else if (choice.index === 7) {
         await testRun();
       }
     }

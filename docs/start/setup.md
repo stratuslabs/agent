@@ -6,10 +6,12 @@
   1) Providers            anthropic — signed in with your Claude subscription
   2) Models               default claude-opus-5 · fallback gpt-4.1-mini
   3) Agent                ~/.stratus/agents/ava.md
-  4) Channels             Slack: 1 agent connected
-  5) Always on            stratusd runs after setup, and at every login
-  6) Test run             say hello with the current settings
-  7) Save & finish
+  4) Plugins              tool-fs, tool-web
+  5) Channels             Slack: 1 agent connected
+  6) Approvals            remote — asks in Slack, approvers for 1 agent
+  7) Always on            stratusd runs after setup, and at every login
+  8) Test run             say hello with the current settings
+  9) Save & finish
 ```
 
 Menus are keyboard-driven — arrow keys (or `j`/`k`) to move, Enter to pick,
@@ -39,12 +41,37 @@ digits to jump, Esc to go back.
 - **Agent** — name your agent (or accept a generated identity), describe
   their personality, and their soul file lands in `~/.stratus/agents/`, ready
   to edit. See [Agents](../concepts/agents.md) for what a soul is.
+- **Plugins** — what your agents *can* do. The list shows each first-party
+  package as installed, enabled, or neither; picking one installs it with
+  `npm install -g` and enables it in the same step, writing the `plugins`
+  block for you. Two things it deliberately will not do:
+  - **Enable a plugin without the setting it is useless without.** `tool-fs`
+    with no `roots` loads and then fails every call, so setup asks for them
+    and writes nothing if you leave the answer blank.
+  - **Enable `plugin-mcp`.** It requires a `servers` block naming endpoints
+    only you know, and a block written without one is refused at load. Setup
+    says so and points at [Config](../reference/config.md).
+
+  Enabling is only the second of the two gates — the soul's `tools:` list is
+  the other, and setup does not edit souls. It prints the line to paste and
+  points at `stratus plugins`, which shows where the chain is broken. See
+  [Tools](../guides/tools.md), and
+  [github.com/stratuslabs/plugins](https://github.com/stratuslabs/plugins)
+  for what else exists.
 - **Channels** — put an agent on Slack without opening a file. Pick the
   agent, and setup prints the app manifest with their name already filled in,
   walks you through the two tokens (input hidden), verifies each against
   Slack before accepting it, and stores them where `stratus serve` looks. The
   list marks who is connected; picking a connected agent offers to replace
   their tokens or disconnect. See [Slack](../guides/slack.md).
+- **Approvals** — what happens to a gated call with nobody watching.
+  `headless` refuses it; **ask in Slack** parks the turn and asks an
+  approver. Both halves are set on one screen because they are one decision:
+  `remote` with nobody listed behaves exactly like `headless` — the call
+  parks and the timeout denies it — so setup says that on the screen rather
+  than leaving it to be discovered from a denied call. The agents offered are
+  the ones **Channels** connected, since an agent Slack cannot reach is not
+  one approvers can be named for. See [Approvals](../guides/approvals.md).
 - **Always on** — whether the roster keeps answering once you close the
   terminal. On by default, because an agent you have to remember to start is
   not always-on, and every Slack app you connected above stays silent until
@@ -110,9 +137,14 @@ project-local `stratus.config.json` still wins when present, and env vars
 outrank both — see [Configuration](../reference/config.md).
 
 Re-running setup **edits** that file rather than rewriting it. The keys it
-has no menu for are read in and written back untouched — the `plugins`,
-`approvals`, `api`, and `principals` blocks, plus the `vision`,
-`promptCache`, and `promptCacheTtl` preferences — so a capability you
-granted an agent by hand survives the next time you change a model. It did
-not always: setup rebuilt the file from its own menus, and everything it
-had no menu for was deleted by a run that never mentioned it.
+has no menu for are read in and written back untouched — the `api` and
+`principals` blocks, plus the `vision`, `promptCache`, and `promptCacheTtl`
+preferences — so a capability you granted an agent by hand survives the next
+time you change a model. It did not always: setup rebuilt the file from its
+own menus, and everything it had no menu for was deleted by a run that never
+mentioned it.
+
+The `plugins` and `approvals` blocks now have menus, and those menus edit
+what was read rather than replacing it: settings you wrote by hand under a
+plugin setup did not ask about — `agents` overrides, `toolRisks`, a
+`timeoutMs` — are still there after enabling or disabling something.

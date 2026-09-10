@@ -7,7 +7,7 @@ links to.
 ## Commands
 
 ```bash
-stratus setup                          # onboarding menu: providers, models, agent, channels
+stratus setup                          # onboarding menu: providers, models, agent, plugins, channels, approvals
 stratus chat                           # talk — the conversation persists
 stratus chat --soul ./ava.md
 stratus run "say hello"

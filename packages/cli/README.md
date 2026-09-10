@@ -24,16 +24,16 @@ says so plainly if yours is too old. Details:
 
 `stratus setup` is the whole onboarding, as one small menu: sign in (Claude
 Pro/Max subscription or API key, ChatGPT/Codex, or any OpenAI-compatible
-service), pick default and fallback models, create your first agent,
-connect Slack, and
-install the always-on service — no config files to edit, no env vars to
-export. Walkthrough:
+service), pick default and fallback models, create your first agent, enable
+the plugins it may use, connect Slack, choose who approves gated calls while
+nobody is watching, and install the always-on service — no config files to
+edit, no env vars to export. Walkthrough:
 [Setup](https://github.com/stratuslabs/agent/blob/main/docs/start/setup.md).
 
 ## Commands
 
 ```bash
-stratus setup                          # onboarding menu: providers, models, agent, channels
+stratus setup                          # onboarding menu: providers, models, agent, plugins, channels, approvals
 stratus chat                           # talk — the conversation persists
 stratus run "say hello"                # one-shot run (works offline on the demo provider)
 stratus serve                          # stratusd: the whole roster, always on
