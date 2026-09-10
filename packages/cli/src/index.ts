@@ -4582,7 +4582,18 @@ export const runSetup = async (
      * the setting being absent, never about the package: a block that
      * already has it is enabled and disabled like any other.
      */
-    byHand?: { key: string; reason: string };
+    byHand?: {
+      key: string;
+      reason: string;
+      /**
+       * Whether the value already in the config is the shape the plugin
+       * requires. Presence alone is not the question: the config loader
+       * accepts any plugin-owned value, so `servers: "invalid"` parses and
+       * reads as configured, and enabling on that basis writes a block the
+       * daemon then refuses to load while this menu reports it enabled.
+       */
+      configured: (value: unknown) => boolean;
+    };
   }> = {
     '@stratusagent/tool-fs': {
       label: 'Files',
@@ -4614,6 +4625,9 @@ export const runSetup = async (
       byHand: {
         key: 'servers',
         reason: 'it needs a servers block naming each MCP server — see docs/reference/config.md',
+        // The bridge throws `McpConfigError` on anything but an object,
+        // one entry per server, so nothing else is a config to re-enable.
+        configured: (value) => typeof value === 'object' && value !== null && !Array.isArray(value),
       },
     },
   };
@@ -4627,6 +4641,31 @@ export const runSetup = async (
   const pluginEnabled = (name: string): boolean => {
     const block = state.plugins?.[name];
     return block !== undefined && block.enabled !== false;
+  };
+
+  /**
+   * Whether the setting a plugin is useless without resolves to something
+   * for one agent, given the block that would be written.
+   *
+   * `resolvePluginAgentConfig` shallow-merges, so a per-agent value
+   * *replaces* the fleet-wide one rather than extending it. That is why
+   * `agents.<id>.roots: []` is how a config takes one agent out, and why a
+   * fleet-wide list says nothing about an agent that overrides it.
+   */
+  const pluginSettingReaches = (
+    block: PluginConfigBlock | undefined,
+    key: string,
+    agentId: string,
+  ): boolean => {
+    const agents = block?.agents;
+    const own = typeof agents === 'object' && agents !== null && !Array.isArray(agents)
+      ? (agents as Record<string, unknown>)[agentId]
+      : undefined;
+    const value = typeof own === 'object' && own !== null && !Array.isArray(own)
+      && key in (own as Record<string, unknown>)
+      ? (own as Record<string, unknown>)[key]
+      : block?.[key];
+    return Array.isArray(value) && value.length > 0;
   };
 
   const pluginsSummary = (): string => {
@@ -4666,14 +4705,44 @@ export const runSetup = async (
       writeLine(streams.stdout, `${name} is enabled. Who can call it is unknown until the roster loads — fix the error above, then run \`stratus plugins\`.`);
       return;
     }
-    const permissive = entries
-      .filter((entry) => entry.soul.agent.tools === undefined)
-      .map((entry) => `${entry.soul.agent.name} (${entry.soul.agent.id})`);
+    const permissive = entries.filter((entry) => entry.soul.agent.tools === undefined);
+    // Allowlisted is not the same as able to call it. `tool-fs` enabled
+    // from a per-agent `roots` block leaves every *other* permissive soul
+    // — the built-in `stratus` agent among them, and a fresh install
+    // always has one — holding tools that throw "No filesystem roots are
+    // configured" on the first call. Naming it as an agent that can call
+    // them would report the installed-enabled-and-useless state this menu
+    // exists to prevent as the success case.
+    const needsKey = PLUGIN_SETUP[name]?.needs?.key;
+    const callable = needsKey === undefined
+      ? permissive
+      : permissive.filter((entry) => pluginSettingReaches(state.plugins?.[name], needsKey, entry.soul.agent.id));
+    const unset = permissive.filter((entry) => !callable.includes(entry));
+    const label = (list: ChannelRosterEntry[]): string =>
+      list.map((entry) => `${entry.soul.agent.name} (${entry.soul.agent.id})`).join(', ');
+    // The key travels with the agents rather than beside them, so the two
+    // branches below cannot ask about one and read the other.
+    const shortfall = needsKey !== undefined && unset.length > 0
+      ? { key: needsKey, agents: unset, one: unset.length === 1 }
+      : undefined;
 
-    if (permissive.length > 0) {
-      writeLine(streams.stdout, `${name} is enabled — and ${permissive.join(', ')} ${permissive.length === 1 ? 'has' : 'have'} no \`tools:\` list, which means every registered tool.`);
-      writeLine(streams.stdout, `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} callable by ${permissive.length === 1 ? 'that agent' : 'those agents'} the next time the daemon starts.`);
+    if (callable.length > 0) {
+      writeLine(streams.stdout, `${name} is enabled — and ${label(callable)} ${callable.length === 1 ? 'has' : 'have'} no \`tools:\` list, which means every registered tool.`);
+      writeLine(streams.stdout, `So ${grants ?? 'what it contributes'} ${callable.length === 1 ? 'is' : 'are'} callable by ${callable.length === 1 ? 'that agent' : 'those agents'} the next time the daemon starts.`);
+      if (shortfall !== undefined) {
+        writeLine(streams.stdout, `${label(shortfall.agents)} ${shortfall.one ? 'is' : 'are'} allowlisted too, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} — every call would fail until it is, under plugins["${name}"].agents.`);
+      }
       writeLine(streams.stdout, 'Give a soul a `tools:` list to narrow that. `stratus plugins` shows who can call what.');
+      return;
+    }
+
+    if (shortfall !== undefined) {
+      // Permissive souls, every one of them short the setting: neither the
+      // "callable by" line above nor the "every soul has a `tools:` list"
+      // one below is true, and each would send the operator to fix the
+      // wrong gate.
+      writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — ${label(shortfall.agents)} ${shortfall.one ? 'has' : 'have'} no \`tools:\` list, so ${shortfall.one ? 'it is' : 'they are'} allowlisted for every registered tool, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} and every call would fail.`);
+      writeLine(streams.stdout, `Set ${shortfall.key} for ${shortfall.one ? 'it' : 'them'} under plugins["${name}"].agents, then run \`stratus plugins\` to see the whole chain.`);
       return;
     }
 
@@ -4729,12 +4798,18 @@ export const runSetup = async (
     // one switched off — by this menu, which promises its settings are kept
     // for turning it back on — must be able to come back, or the promise is
     // false and the switch is one-way.
-    const configuredByHand = setup?.byHand !== undefined
-      && state.plugins?.[name]?.[setup.byHand.key] !== undefined;
+    const byHandValue = setup?.byHand !== undefined ? state.plugins?.[name]?.[setup.byHand.key] : undefined;
+    const configuredByHand = setup?.byHand !== undefined && setup.byHand.configured(byHandValue);
     if (setup?.byHand && !enabled && !configuredByHand) {
       writeLine(streams.stdout);
       writeLine(streams.stdout, `${name} contributes ${setup.grants}.`);
       writeLine(streams.stdout, `Setup does not enable it: ${setup.byHand.reason}.`);
+      if (byHandValue !== undefined) {
+        // Present, and not what the plugin will accept. Without this the
+        // refusal reads as "you have not set it", which sends an operator
+        // who plainly has to look for a menu bug rather than at the value.
+        writeLine(streams.stdout, `The ${setup.byHand.key} already in your config is not that shape, so a daemon refuses to load the plugin until it is fixed.`);
+      }
       if (!installed) {
         writeLine(streams.stdout, `Install it with: npm install -g ${name}`);
       }
@@ -4839,7 +4914,8 @@ export const runSetup = async (
     const block: PluginConfigBlock = { ...existing, enabled: true };
 
     if (setup?.needs) {
-      const prior = existing[setup.needs.key];
+      const needsKey = setup.needs.key;
+      const prior = existing[needsKey];
       const prefill = Array.isArray(prior) ? (prior as string[]).join(', ') : undefined;
       const answer = (await prompter.ask(
         setup.needs.question,
@@ -4854,25 +4930,6 @@ export const runSetup = async (
         // value here would push an operator to widen access to get past a
         // menu.
         //
-        // Only for agents the roster actually serves. An override left
-        // behind by a deleted agent grants nobody anything: every served
-        // agent would resolve an empty list and every call would fail,
-        // while this menu reported the plugin enabled — the same
-        // "configured and useless" state the prompt exists to prevent,
-        // reached by the branch that was supposed to allow the narrow
-        // config. An unreadable roster cannot answer, so it does not
-        // qualify anything either.
-        const { entries, loaded } = await channelRoster();
-        const perAgent = existing.agents;
-        const coveredPerAgent = loaded
-          && typeof perAgent === 'object' && perAgent !== null && !Array.isArray(perAgent)
-          && Object.entries(perAgent as Record<string, unknown>).some(([agentId, agent]) => {
-            if (!entries.some((entry) => entry.soul.agent.id === agentId)) {
-              return false;
-            }
-            const value = (agent as Record<string, unknown> | null)?.[setup.needs?.key ?? ''];
-            return Array.isArray(value) && value.length > 0;
-          });
         // Deleted, not merely left unwritten: `block` is a copy of the
         // existing one, so keeping the key would leave every unoverridden
         // agent on the old fleet-wide roots while the line below says
@@ -4884,18 +4941,29 @@ export const runSetup = async (
         // for an empty line. So there is no test — `setupInput` forces the
         // non-interactive path, where an empty answer means "keep" and this
         // deletes a key that was never there.
-        delete block[setup.needs.key];
+        delete block[needsKey];
+        // Asked of the block as it now stands, and only of agents the
+        // roster actually serves. An override left behind by a deleted
+        // agent grants nobody anything: every served agent would resolve
+        // an empty list and every call would fail, while this menu
+        // reported the plugin enabled — the same "configured and useless"
+        // state the prompt exists to prevent, reached by the branch that
+        // was supposed to allow the narrow config. An unreadable roster
+        // cannot answer, so it does not qualify anything either.
+        const { entries, loaded } = await channelRoster();
+        const coveredPerAgent = loaded
+          && entries.some((entry) => pluginSettingReaches(block, needsKey, entry.soul.agent.id));
         if (!coveredPerAgent) {
           // Otherwise not written at all rather than written empty: an
           // enabled block with no roots anywhere is the exact "installed,
           // enabled, and useless" state this menu exists to keep anyone
           // from reaching by accident.
-          writeLine(streams.stdout, `Nothing entered, so ${name} was left as it was — it grants nothing without ${setup.needs.key}.`);
+          writeLine(streams.stdout, `Nothing entered, so ${name} was left as it was — it grants nothing without ${needsKey}.`);
           return;
         }
-        writeLine(streams.stdout, `Keeping the per-agent ${setup.needs.key} already configured for ${name}; nothing is granted fleet-wide.`);
+        writeLine(streams.stdout, `Keeping the per-agent ${needsKey} already configured for ${name}; nothing is granted fleet-wide.`);
       } else {
-        block[setup.needs.key] = values;
+        block[needsKey] = values;
       }
     }
 

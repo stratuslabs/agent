@@ -62,9 +62,12 @@ digits to jump, Esc to go back.
   - **Enable `plugin-mcp` from scratch.** It requires a `servers` block
     naming endpoints only you know, and a block written without one is
     refused at load. Setup says so and points at
-    [Config](../reference/config.md). A block that already has `servers` is
-    switched on and off like any other — the refusal is about the missing
-    setting, not the package.
+    [Config](../reference/config.md). A block that already has a `servers`
+    *object* is switched on and off like any other — the refusal is about
+    the missing setting, not the package. A `servers` of some other shape
+    is not a config to switch back on: the bridge refuses it at load, so
+    setup says the value is wrong rather than enabling on the strength of
+    the key being there.
 
   It also names a prerequisite it cannot install: `tool-browser` depends on
   `playwright-core`, which deliberately downloads no browser, so enabling it
@@ -78,8 +81,13 @@ digits to jump, Esc to go back.
   tool, and the built-in `stratus` agent has none, so on a fresh install
   enabling a plugin makes its tools callable at the next daemon start and
   setup says exactly that, naming the agents. Where every soul has a list,
-  it prints the line to paste instead. Either way `stratus plugins` shows
-  who can call what. See [Tools](../guides/tools.md), and
+  it prints the line to paste instead. An agent is only named as one that
+  can call the plugin if the setting the plugin needs resolves for it:
+  `tool-fs` enabled from a per-agent `roots` block leaves the other
+  permissive souls allowlisted for tools that fail on the first call, and
+  setup names them separately as the ones still to set `roots` for. Either
+  way `stratus plugins` shows who can call what. See
+  [Tools](../guides/tools.md), and
   [github.com/stratuslabs/plugins](https://github.com/stratuslabs/plugins)
   for what else exists.
 - **Channels** — put an agent on Slack without opening a file. Pick the
