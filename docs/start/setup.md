@@ -48,8 +48,10 @@ digits to jump, Esc to go back.
   - **Enable a plugin without the setting it is useless without.** `tool-fs`
     with no `roots` loads and then fails every call, so setup asks for them
     and writes nothing if you leave the answer blank — unless roots are
-    already set per agent under `agents.<id>`, which is a working config and
-    a narrower one than any fleet-wide answer, so that is kept as it is.
+    already set per agent under `agents.<id>` for an agent the roster still
+    serves, which is a working config and a narrower one than any fleet-wide
+    answer, so that is kept as it is. An override left behind by a deleted
+    agent does not count: it would grant nobody anything.
   - **Switch off a plugin whose package is gone.** A config copied from
     another machine, or an uninstall, leaves a block enabling a package that
     is not there; the row offers to clear it without installing first.

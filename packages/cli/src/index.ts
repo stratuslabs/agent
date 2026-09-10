@@ -4700,7 +4700,7 @@ export const runSetup = async (
           : pluginEnabled(name)
             ? '✓ enabled'
             : 'installed, not enabled';
-        return short.padEnd(18) + status;
+        return fitMenuRow(short.padEnd(18) + status, 6);
       });
       options.push('Back');
 
@@ -4853,9 +4853,23 @@ export const runSetup = async (
         // fleet-wide answer this prompt could take. Demanding a global
         // value here would push an operator to widen access to get past a
         // menu.
+        //
+        // Only for agents the roster actually serves. An override left
+        // behind by a deleted agent grants nobody anything: every served
+        // agent would resolve an empty list and every call would fail,
+        // while this menu reported the plugin enabled — the same
+        // "configured and useless" state the prompt exists to prevent,
+        // reached by the branch that was supposed to allow the narrow
+        // config. An unreadable roster cannot answer, so it does not
+        // qualify anything either.
+        const { entries, loaded } = await channelRoster();
         const perAgent = existing.agents;
-        const coveredPerAgent = typeof perAgent === 'object' && perAgent !== null && !Array.isArray(perAgent)
-          && Object.values(perAgent as Record<string, unknown>).some((agent) => {
+        const coveredPerAgent = loaded
+          && typeof perAgent === 'object' && perAgent !== null && !Array.isArray(perAgent)
+          && Object.entries(perAgent as Record<string, unknown>).some(([agentId, agent]) => {
+            if (!entries.some((entry) => entry.soul.agent.id === agentId)) {
+              return false;
+            }
             const value = (agent as Record<string, unknown> | null)?.[setup.needs?.key ?? ''];
             return Array.isArray(value) && value.length > 0;
           });
@@ -5151,9 +5165,16 @@ export const runSetup = async (
         // configure approvals for exactly the calls least likely to need
         // them. `stratus plugins` reports this state; better not to create
         // it here in the first place.
+        // "Enter to skip" is only true with nothing prefilled. `ask` returns
+        // the prefill for an empty line, so where a channel already resolves
+        // Enter *keeps* it — an operator told otherwise would believe they
+        // had removed a fallback that goes on receiving approval details.
+        // The same correction the approvers prompt above already carries.
+        const hasChannel = resolved.slackChannel !== undefined;
         const channelAnswer = (await prompter.ask(
-          `Which Slack channel should ${agentId} ask in when the turn did not start in Slack? (e.g. C0123456, Enter to skip): `,
-          ...(resolved.slackChannel !== undefined ? [{ prefill: resolved.slackChannel }] : []),
+          `Which Slack channel should ${agentId} ask in when the turn did not start in Slack? `
+          + (hasChannel ? '(Enter to keep it; clear the line to remove it): ' : '(e.g. C0123456, Enter to skip): '),
+          ...(hasChannel ? [{ prefill: resolved.slackChannel as string }] : []),
         )).trim();
         // The same inheritance trap as the approvers above, one field over:
         // the prompt is prefilled with the resolved value, so keeping an

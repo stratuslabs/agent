@@ -5872,6 +5872,43 @@ test('setup claims nothing about who can call a plugin when the roster will not 
   assert.doesNotMatch(output.stdout, /which means every registered tool/);
 });
 
+test('setup does not count a per-agent override for an agent that is gone', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // The only roots belong to `ghost`, which the roster no longer serves.
+  // Every served agent would resolve an empty list and every call fail —
+  // "configured and useless" reached through the branch that exists to
+  // allow the narrow config.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/tool-fs': { enabled: false, agents: { ghost: { roots: ['~/work/ghost'] } } },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /it grants nothing without roots/);
+  assert.doesNotMatch(output.stdout, /Keeping the per-agent roots/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins['@stratusagent/tool-fs'].enabled, false);
+});
+
 test('setup does not write an enabled plugin block without the setting that makes it work', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
@@ -6084,7 +6121,11 @@ test('setup says who cannot be asked when approvers have no fallback channel', a
 
 test('setup enables a plugin whose roots are configured per agent', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // The agent the override is for has to exist, or it grants nobody
+  // anything — see the test below.
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
   // Roots under `agents` and none at the top level is a working config —
   // tool-fs resolves per session — and a narrower one than any fleet-wide
   // answer this prompt could take.
