@@ -79,8 +79,10 @@ digits to jump, Esc to go back.
   `remote` with nobody listed behaves exactly like `headless` — the call
   parks and the timeout denies it — so setup says that on the screen rather
   than leaving it to be discovered from a denied call. The agents offered are
-  the ones **Channels** connected, since an agent Slack cannot reach is not
-  one approvers can be named for. Two details it gets right so you don't
+  the ones **Channels** connected *and* the roster still has — a token that
+  outlived its agent is skipped by the Slack adapter, so approvers named for
+  it would configure a route no call can take. (Those orphaned tokens are
+  shown under **Channels**, which is where they can be cleared.) Two details it gets right so you don't
   have to:
   - **A fallback channel, not just approvers.** A turn that arrived through
     Slack is answered in its own thread, but one started by a schedule, a

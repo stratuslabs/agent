@@ -5910,7 +5910,11 @@ test('setup does not offer to enable a plugin whose required settings it cannot 
 
 test('setup sets the approval mode and the approvers for a connected agent', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // A real roster entry: approvers are only offered for agents Slack can
+  // actually reach, so a token whose agent left the roster is not one.
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
   await writeFile(
     path.join(home, '.stratus', 'credentials.json'),
     JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
@@ -5944,7 +5948,9 @@ test('setup sets the approval mode and the approvers for a connected agent', asy
 
 test('setup does not revoke inherited approvers when the answer is left blank', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
   // A top-level list every agent inherits. `resolveAgentApprovals` reads
   // `agent ?? global`, and an empty array is not nullish — so writing `[]`
   // for this agent is the config's way of excluding it, not of leaving it
@@ -5984,7 +5990,11 @@ test('setup does not revoke inherited approvers when the answer is left blank', 
 
 test('setup says who cannot be asked when approvers have no fallback channel', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // A real roster entry: approvers are only offered for agents Slack can
+  // actually reach, so a token whose agent left the roster is not one.
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
   await writeFile(
     path.join(home, '.stratus', 'credentials.json'),
     JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
@@ -6091,7 +6101,9 @@ test('setup can re-enable a configured plugin it would not have enabled from scr
 
 test('setup does not freeze an inherited fallback channel onto one agent', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
     provider: 'anthropic',
     approvals: { mode: 'remote', slackApprovers: ['U0GLOBAL'], slackChannel: 'C0GLOBAL' },
@@ -6126,7 +6138,9 @@ test('setup does not freeze an inherited fallback channel onto one agent', async
 
 test('setup keeps an agent excluded from the top-level approvers', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
-  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
   // `[]` is how the config excludes an agent from a global list, and
   // `resolveAgentApprovals` reads `agent ?? global` — so deleting the key
   // would hand those approvers an agent deliberately kept from them.
@@ -6163,6 +6177,96 @@ test('setup keeps an agent excluded from the top-level approvers', async () => {
   assert.deepEqual(config.approvals.agents.ava.slackApprovers, []);
 });
 
+test('setup does not offer approvers for a Slack token whose agent has left the roster', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // `ghost` has tokens but no soul. The Slack adapter skips it entirely, so
+  // approvers named for it configure a route no call can ever take — and
+  // the Channels menu is the one place it should surface, to be cleared.
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({
+      channels: {
+        slack: {
+          ava: { appToken: 'xapp-t', botToken: 'xoxb-t' },
+          ghost: { appToken: 'xapp-g', botToken: 'xoxb-g' },
+        },
+      },
+    }),
+  );
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote' },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → Back (4: two modes, one agent, Back) → Save (9)
+      setupInput: Readable.from(['6\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /approvers for ava/);
+  assert.doesNotMatch(output.stdout, /approvers for ghost/);
+});
+
+test('setup does not claim every agent is covered when one is excluded', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(agentsDir, 'juno.md'), '---\nname: Juno\n---\n\nYou are Juno.\n');
+  // A global list, and one connected agent excluded from it. The summary
+  // read the top-level key alone and said "all agents", which the config
+  // contradicts for exactly the agent an operator singled out.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: {
+      mode: 'remote',
+      slackApprovers: ['U0GLOBAL'],
+      agents: { juno: { slackApprovers: [] } },
+    },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({
+      channels: {
+        slack: {
+          ava: { appToken: 'xapp-t', botToken: 'xoxb-t' },
+          juno: { appToken: 'xapp-j', botToken: 'xoxb-j' },
+        },
+      },
+    }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Approvals            remote — asks in Slack for 1 of 2 connected agents; the rest are denied/);
+  assert.doesNotMatch(output.stdout, /all agents/);
+});
+
 test('setup says remote approvals deny everything while no agent is connected to Slack', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
@@ -6185,7 +6289,7 @@ test('setup says remote approvals deny everything while no agent is connected to
   // `remote` with nobody to ask behaves exactly like `headless`. Said on
   // the screen that sets it, rather than discovered from a denied call.
   assert.match(output.stdout, /No agent is connected to Slack, so there is nobody to ask/);
-  assert.match(output.stdout, /remote — but no approvers yet, so gated calls still get denied/);
+  assert.match(output.stdout, /remote — but nothing is connected to Slack, so gated calls are still denied/);
 });
 
 test('setup installs the always-on service when it saves', async () => {

@@ -4851,24 +4851,55 @@ export const runSetup = async (
    * and the approvers are set on the same screen rather than in two places
    * that can disagree.
    */
-  const approvalsSummary = (): string => {
+  const approvalsSummary = async (): Promise<string> => {
     const mode = state.approvals?.mode ?? 'headless';
     if (mode === 'headless') {
       return 'headless — gated calls are refused while unattended';
     }
-    const named = Object.values(state.approvals?.agents ?? {})
-      .filter((agent) => (agent.slackApprovers ?? []).length > 0).length;
-    const global = (state.approvals?.slackApprovers ?? []).length > 0;
-    if (named === 0 && !global) {
+    const connected = await connectedSlackAgents();
+    if (connected.length === 0) {
+      return 'remote — but nothing is connected to Slack, so gated calls are still denied';
+    }
+    // Counted per connected agent through the daemon's own rule, never from
+    // the top-level list alone: an agent excluded with `slackApprovers: []`
+    // keeps that exclusion, so "all agents" was a claim the config could
+    // contradict for the very agent an operator had singled out.
+    const covered = connected
+      .filter((agentId) => (resolveAgentApprovals(state.approvals, agentId).slackApprovers ?? []).length > 0);
+    if (covered.length === 0) {
       return 'remote — but no approvers yet, so gated calls still get denied';
     }
-    return `remote — asks in Slack${global ? ' (all agents)' : `, approvers for ${named} agent${named === 1 ? '' : 's'}`}`;
+    return covered.length === connected.length
+      ? `remote — asks in Slack, approvers for ${connected.length === 1 ? 'the connected agent' : `all ${connected.length} connected agents`}`
+      : `remote — asks in Slack for ${covered.length} of ${connected.length} connected agents; the rest are denied`;
+  };
+
+  /**
+   * Agents that can actually be asked: stored Slack tokens intersected with
+   * the roster. A token that outlived its agent is offered nowhere — the
+   * Slack adapter skips it (`no roster agent with id …`), so approvers
+   * named for it configure a route no call can take. `stratus plugins`
+   * learned this the same way; the Channels menu shows such tokens as
+   * orphans and is the one place they are reachable, to be cleared.
+   *
+   * A roster that failed to load is not evidence of an orphan, so the raw
+   * list stands in that case — the same posture the Channels menu takes,
+   * for the same reason: acting on "no agent has this id" when the roster
+   * could not say who its agents are destroys working configuration.
+   */
+  const connectedSlackAgents = async (): Promise<string[]> => {
+    const stored = Object.keys(state.channels.slack ?? {});
+    const { entries, loaded } = await channelRoster();
+    if (!loaded) {
+      return stored;
+    }
+    return stored.filter((agentId) => entries.some((entry) => entry.soul.agent.id === agentId));
   };
 
   const chooseApprovals = async (): Promise<void> => {
     while (true) {
       const mode = state.approvals?.mode ?? 'headless';
-      const connected = Object.keys(state.channels.slack ?? {});
+      const connected = await connectedSlackAgents();
       const options = [
         `Headless${mode === 'headless' ? ' (current)' : ''}          refuse gated calls when nobody is watching`,
         `Ask in Slack${mode === 'remote' ? ' (current)' : ''}       park the turn and ask an approver`,
@@ -5526,13 +5557,16 @@ export const runSetup = async (
 
     while (true) {
       writeLine(streams.stdout);
+      // Awaited before the menu is drawn: the approvals summary reads the
+      // roster, to intersect stored Slack tokens with agents that exist.
+      const approvals = await approvalsSummary();
       const choice = await prompter.select('', [
         `Providers            ${providersSummary()}`,
         `Models               ${modelsSummary()}`,
         `Agent                ${agentSummary()}`,
         `Plugins              ${pluginsSummary()}`,
         `Channels             ${channelsSummary()}`,
-        `Approvals            ${approvalsSummary()}`,
+        `Approvals            ${approvals}`,
         `Always on            ${serviceSummary()}`,
         'Test run             say hello with the current settings',
         'Save & finish',
