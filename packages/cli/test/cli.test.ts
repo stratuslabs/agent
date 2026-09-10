@@ -20,6 +20,7 @@ import {
   withoutSqliteExperimentalWarning,
   CLI_VERSION,
   isInstallableSpecifier,
+  menuPrefixWidth,
   createLogWriter,
   createApprovalPolicy,
   currentLogPosition,
@@ -6447,6 +6448,24 @@ test('setup will not offer to install a plugins key npm could never install', as
   assert.equal(exitCode, 0);
   assert.match(output.stdout, /is not a package name npm can install/);
   assert.doesNotMatch(output.stdout, /Install it with npm install -g/);
+});
+
+test('a menu row reserves the widest prefix its own option count will render', () => {
+  // `selectInteractive` writes `  ${n}) ` before each option — two columns
+  // of selection marker, then the index. Fitting every row to the widest
+  // prefix any row will have is what keeps a ten-option menu from wrapping
+  // its tenth row, and a wrapped row corrupts the next redraw because the
+  // rewind counts options rather than rendered rows.
+  //
+  // Each is one more than the rendered prefix: `fitMenuRow` trims to
+  // exactly its budget, and a row filling the last column wraps on
+  // terminals that advance the cursor eagerly.
+  assert.equal('  1) '.length, 5);
+  assert.equal(menuPrefixWidth(9), 6);
+  assert.equal('  10) '.length, 6);
+  assert.equal(menuPrefixWidth(10), 7);
+  assert.equal('  100) '.length, 7);
+  assert.equal(menuPrefixWidth(100), 8);
 });
 
 test('npm specifiers that reach a shell are held to npm\'s own name grammar', () => {

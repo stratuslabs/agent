@@ -443,6 +443,22 @@ export const npmNeedsShell = (platform: NodeJS.Platform): boolean => platform ==
  * capability: `npm install -g 'pkg & whoami'` is not a thing that works
  * and quietly becomes a thing that runs.
  */
+/**
+ * The columns `selectInteractive` spends before an option's own text.
+ *
+ * Two for the selection marker, then `${n}) ` — so it grows with the option
+ * *count*, since every row is fitted to the widest prefix any row will
+ * have. A menu whose length a config decides therefore cannot reserve a
+ * constant: five first-party plugins plus five from a `plugins` block is
+ * ten rows, and `  10) ` is a column wider than `  1) `.
+ *
+ * The extra column is a deliberate spare. `fitMenuRow` trims to exactly its
+ * budget, and a row that fills the last column wraps on terminals that
+ * advance the cursor eagerly — which costs a whole redraw, since the rewind
+ * counts options rather than rendered rows.
+ */
+export const menuPrefixWidth = (optionCount: number): number => `  ${optionCount}) `.length + 1;
+
 export const isInstallableSpecifier = (specifier: string): boolean => {
   if (specifier.length > 214) {
     return false;
@@ -4870,6 +4886,8 @@ export const runSetup = async (
   const choosePlugins = async (): Promise<void> => {
     while (true) {
       const packages = pluginPackages();
+      // Every package plus Back — the count the widest prefix comes from.
+      const reserved = menuPrefixWidth(packages.length + 1);
       const options = packages.map((name) => {
         const short = name.replace('@stratusagent/', '');
         const installed = packageInstalled(name, env);
@@ -4878,7 +4896,7 @@ export const runSetup = async (
           : pluginEnabled(name)
             ? '✓ enabled'
             : 'installed, not enabled';
-        return fitMenuRow(short.padEnd(18) + status, 6);
+        return fitMenuRow(short.padEnd(18) + status, reserved);
       });
       options.push('Back');
 
@@ -5256,9 +5274,9 @@ export const runSetup = async (
     if (typeof columns !== 'number' || columns <= 0) {
       return text;
     }
-    // `  N) ` plus whatever the caller's own prefix costs, and one spare so
-    // a full-width row does not wrap on terminals that advance the cursor
-    // eagerly.
+    // The row's own prefix — `menuPrefixWidth`, plus whatever padding the
+    // caller adds — subtracted from the width, so what is left is what the
+    // text may occupy.
     const budget = columns - reserved;
     return text.length <= budget ? text : `${text.slice(0, Math.max(budget - 1, 0))}…`;
   };
@@ -5267,14 +5285,16 @@ export const runSetup = async (
     while (true) {
       const mode = state.approvals?.mode ?? 'headless';
       const connected = await configurableSlackAgents();
+      // Two modes, a row per connected agent when remote, and Back.
+      const reserved = menuPrefixWidth(2 + (mode === 'remote' ? connected.length : 0) + 1);
       // Static text, and still fitted: with `(current)` shown this row runs
       // to 76 columns including the selection prefix, so it clears an
       // 80-column terminal by four and wraps on anything narrower — and a
       // wrapped row corrupts every redraw, because the rewind counts
       // options rather than rendered rows. Being static is not being short.
       const options = [
-        fitMenuRow(`Headless${mode === 'headless' ? ' (current)' : ''}          refuse gated calls when nobody is watching`, 6),
-        fitMenuRow(`Ask in Slack${mode === 'remote' ? ' (current)' : ''}       park the turn and ask an approver`, 6),
+        fitMenuRow(`Headless${mode === 'headless' ? ' (current)' : ''}          refuse gated calls when nobody is watching`, reserved),
+        fitMenuRow(`Ask in Slack${mode === 'remote' ? ' (current)' : ''}       park the turn and ask an approver`, reserved),
       ];
       if (mode === 'remote') {
         for (const agentId of connected) {
@@ -5296,7 +5316,7 @@ export const runSetup = async (
           // option in every menu has this constraint; these are the ones
           // this PR adds.
           options.push(fitMenuRow(`  approvers for ${agentId}`.padEnd(26) + label
-            + (approvers.length > 0 && !resolved.slackChannel ? ' · no fallback channel' : ''), 6));
+            + (approvers.length > 0 && !resolved.slackChannel ? ' · no fallback channel' : ''), reserved));
         }
       }
       options.push('Back');
