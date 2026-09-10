@@ -9524,9 +9524,13 @@ test('plugins warns that a declared tool name is already registered elsewhere', 
   // condemn a plugin that loads fine because its tool is optional — these
   // fixtures being the case in point, since neither registers anything.
   assert.match(output.stdout, /db\.query/);
+  // Both sides are declarations — neither plugin is known to register the
+  // name — so the warning says "if both register it", not that the earlier
+  // one has it. Stating otherwise would send an operator to disable a pair
+  // that loads perfectly well.
   assert.match(
     output.stdout,
-    /warning: db\.query is already registered by stratus-plugin-alpha; if this plugin registers it too, a daemon keeps the first and refuses this one whole/,
+    /warning: db\.query is also declared by .*; if both register it, a daemon keeps whichever loads first and refuses the other whole/,
   );
   // And it stays enabled with its tools listed, because it may well load.
   assert.doesNotMatch(output.stdout, /a daemon would register nothing for it/);
@@ -9613,4 +9617,26 @@ test('plugins warns when a plugin declares a name the daemon itself registers', 
   await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
 
   assert.match(output.stdout, /warning: memory\.remember is already registered by the daemon itself/);
+});
+
+test('plugins warns about one package configured through two specifiers', async () => {
+  const { home, cwd } = await writePluginFixture();
+  // Same package, two config entries — its own name and the absolute path
+  // of its entry point. `loadPlugins` treats them as two plugins and its
+  // shared owners map rejects the second, so sharing a `packageName` is not
+  // grounds for exempting the pair.
+  const entry = await writeFixturePlugin('stratus-plugin-twice', {
+    pluginVersion: 1,
+    contributes: { tools: [{ name: 'twice.run', risk: 'gated' }] },
+  });
+  const alias = path.join(path.dirname(entry), 'index.js');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { [entry]: { enabled: true }, [`${alias}?second`]: { enabled: true } },
+  }));
+  const { streams, output } = createStreams();
+
+  await runCli({ argv: ['plugins'], streams, env: { cwd, homeDir: home, processEnv: {} } });
+
+  assert.match(output.stdout, /warning: twice\.run is also declared by/);
 });

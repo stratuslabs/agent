@@ -239,7 +239,11 @@ spawn every server you configured. Two consequences worth knowing:
   and skills together. A manifest declaring a name something else already
   registers is therefore reported as a `warning`, not a failure: whether it
   actually registers that name is `setup()`'s business, and an optional tool
-  may never claim it.
+  may never claim it. Between two plugins the warning says *if both register
+  it*, since neither side is known to; against the daemon's own tools it is
+  definite on one side, because those are already registered. One package
+  configured twice — through its name and a path, say — is two entries to
+  the loader, and warns like any other pair.
 - **Enabled and loadable are different questions.** A plugin whose settings
   its own schema rejects — `plugin-mcp` with no `servers`, a mistyped key
   under `tool-fs` — or which declares a skill file that is not there, is

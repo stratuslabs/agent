@@ -7443,8 +7443,11 @@ export const collectPluginsReport = async (
   //
   // Literal declarations only: the registry claims names as they register,
   // and a namespace has none until its server connects.
-  const claimedBy = new Map<string, string>(
-    KERNEL_TOOL_NAMES.map((name) => [name, 'the daemon itself']),
+  // The daemon's own tools are *registered*, unconditionally, before any
+  // plugin loads. A plugin's entry is only a declaration, which is why the
+  // two produce different warnings below.
+  const claimedBy = new Map<string, { owner: string; registered: boolean }>(
+    KERNEL_TOOL_NAMES.map((name) => [name, { owner: 'the daemon itself', registered: true }]),
   );
   for (const specifier of packages) {
     const block = pluginsConfig[specifier] ?? {};
@@ -7537,19 +7540,30 @@ export const collectPluginsReport = async (
       // go on to register it, which nothing here can know. Reporting it as
       // a load failure would condemn a plugin that loads perfectly well
       // because its tool is optional.
+      // Keyed by config entry, never by package name: the same package
+      // configured through two specifiers — its name and an absolute path —
+      // is two entries the loader treats as two plugins, and exempting them
+      // for sharing a `packageName` would hide the one collision an
+      // operator is most likely to create by accident.
       const collisions = manifest.contributes.tools
-        .map((tool) => ({ name: tool.name, owner: claimedBy.get(tool.name) }))
-        .filter((entry) => entry.owner !== undefined && entry.owner !== manifest.packageName);
-      for (const collision of collisions) {
+        .map((tool) => ({ name: tool.name, claim: claimedBy.get(tool.name) }))
+        .filter((entry) => entry.claim !== undefined);
+      for (const { name, claim } of collisions) {
         base.warnings = [
           ...(base.warnings ?? []),
-          `${collision.name} is already registered by ${collision.owner}; if this plugin registers it too, `
-          + 'a daemon keeps the first and refuses this one whole, tools and skills together',
+          claim?.registered === true
+            ? `${name} is already registered by ${claim.owner}; if this plugin registers it too, `
+              + 'a daemon keeps the first and refuses this one whole, tools and skills together'
+            // Neither side is known to register it: both are declarations,
+            // and `setup()` decides. Saying the other plugin *has* the name
+            // would send an operator to disable a pair that loads fine.
+            : `${name} is also declared by ${claim?.owner}; if both register it, a daemon keeps whichever `
+              + 'loads first and refuses the other whole, tools and skills together',
         ];
       }
       for (const tool of manifest.contributes.tools) {
         if (!claimedBy.has(tool.name)) {
-          claimedBy.set(tool.name, manifest.packageName);
+          claimedBy.set(tool.name, { owner: specifier, registered: false });
         }
       }
       base.tools = declared.map((tool) => {
