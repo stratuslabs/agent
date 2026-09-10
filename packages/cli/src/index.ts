@@ -4838,7 +4838,9 @@ export const runSetup = async (
    * `tools:` list already reaches it. `undefined` where no manifest can be
    * read — a question setup declines rather than answers wrongly.
    */
-  const pluginContributions = async (name: string): Promise<{ tools: string[]; namespaces: string[] } | undefined> => {
+  const pluginContributions = async (
+    name: string,
+  ): Promise<{ tools: string[]; namespaces: string[]; skills: string[] } | undefined> => {
     try {
       const { manifest } = await readPluginManifest(name, {
         resolve: (target) => import.meta.resolve(target),
@@ -4846,6 +4848,9 @@ export const runSetup = async (
       return {
         tools: manifest.contributes.tools.map((tool) => tool.name),
         namespaces: manifest.contributes.toolsDiscovered.map((entry) => entry.namespace),
+        // The qualified form the loader stages them under, which is what a
+        // `skills:` entry has to match.
+        skills: manifest.contributes.skills.map((skill) => `${manifest.packageName}:${skill.id}`),
       };
     } catch {
       return undefined;
@@ -4920,25 +4925,32 @@ export const runSetup = async (
       writeLine(streams.stdout, `${name} is enabled. Who can call it is unknown until the roster loads — fix the error above, then run \`stratus plugins\`.`);
       return;
     }
-    // Allowlisted covers two shapes, and reading only the first told an
-    // operator whose souls all use explicit lists that nothing could call
-    // the plugin, then advised adding a tool they had already granted. An
-    // omitted `tools:` key is every registered tool — the built-in
-    // `stratus` agent has none, so a fresh install always has one — and a
-    // list that names what the plugin contributes reaches it just as well.
-    // `soulGrantsTool` is the same rule `stratus plugins` reports from.
     const contributed = await pluginContributions(name);
-    const allowlisted = entries.filter((entry) => {
+    const label = (list: ChannelRosterEntry[]): string =>
+      list.map((entry) => `${entry.soul.agent.name} (${entry.soul.agent.id})`).join(', ');
+    // Every contributed tool name, concrete and discovered alike. A
+    // discovered namespace is matched by overlap rather than prefix, which
+    // `soulGrantsTool` handles; both are things a `tools:` entry can reach.
+    const everyTool = contributed === undefined ? [] : [...contributed.tools, ...contributed.namespaces];
+    // What one soul's allowlist actually reaches — the *names*, not a
+    // yes/no. `tools: [fs.read]` grants one of the four tool-fs
+    // contributes, and reporting the plugin as callable said all four were.
+    const reached = (entry: ChannelRosterEntry): string[] => {
       const tools = entry.soul.agent.tools;
       if (tools === undefined) {
-        return true;
+        return everyTool;
       }
-      // No manifest, no names to test — so no claim either way about a
-      // soul that named something specific.
-      return contributed !== undefined
-        && (contributed.tools.some((tool) => soulGrantsTool(tools, tool, false))
-          || contributed.namespaces.some((namespace) => soulGrantsTool(tools, namespace, true)));
-    });
+      if (contributed === undefined) {
+        // No manifest, no names to test — no claim either way about a soul
+        // that named something specific.
+        return [];
+      }
+      return [
+        ...contributed.tools.filter((tool) => soulGrantsTool(tools, tool, false)),
+        ...contributed.namespaces.filter((namespace) => soulGrantsTool(tools, namespace, true)),
+      ];
+    };
+
     // Allowlisted is not the same as able to call it. `tool-fs` enabled
     // from a per-agent `roots` block leaves every *other* allowlisted soul
     // holding tools that throw "No filesystem roots are configured" on the
@@ -4946,65 +4958,84 @@ export const runSetup = async (
     // installed-enabled-and-useless state this menu exists to prevent as
     // the success case.
     const needsKey = PLUGIN_SETUP[name]?.needs?.key;
-    const callable = needsKey === undefined
-      ? allowlisted
-      : allowlisted.filter((entry) => pluginSettingReaches(state.plugins?.[name], needsKey, entry.soul.agent.id));
-    const unset = allowlisted.filter((entry) => !callable.includes(entry));
+    const settingReaches = (entry: ChannelRosterEntry): boolean => needsKey === undefined
+      || pluginSettingReaches(state.plugins?.[name], needsKey, entry.soul.agent.id);
+    const allowlisted = entries.filter((entry) => reached(entry).length > 0);
+    const callable = allowlisted.filter(settingReaches);
+    const unset = allowlisted.filter((entry) => !settingReaches(entry));
+    const permissive = callable.filter((entry) => entry.soul.agent.tools === undefined);
     const explicit = callable.filter((entry) => entry.soul.agent.tools !== undefined);
-    const permissiveCallable = callable.filter((entry) => entry.soul.agent.tools === undefined);
-    const label = (list: ChannelRosterEntry[]): string =>
-      list.map((entry) => `${entry.soul.agent.name} (${entry.soul.agent.id})`).join(', ');
-    // The key travels with the agents rather than beside them, so the two
+    // The key travels with the agents rather than beside them, so the
     // branches below cannot ask about one and read the other.
     const shortfall = needsKey !== undefined && unset.length > 0
       ? { key: needsKey, agents: unset, one: unset.length === 1 }
       : undefined;
 
+    // Skills are the other half of what a plugin contributes and they are
+    // gated the other way round: an omitted `skills:` list is **none**,
+    // deliberately, because a skill silently changing how an agent behaves
+    // is worse than one it has to be told about. So no soul gains them by
+    // default, and a line about tools cannot speak for them.
+    const skillLine = (): void => {
+      if (contributed === undefined || contributed.skills.length === 0) {
+        return;
+      }
+      const first = contributed.skills[0] as string;
+      writeLine(streams.stdout, `It also contributes ${contributed.skills.length === 1 ? 'a skill' : 'skills'}: ${contributed.skills.join(', ')}.`);
+      writeLine(streams.stdout, `Those are not granted by \`tools:\` and no soul gets them by default — an omitted \`skills:\` list is none. Add \`skills: [${first}]\` to grant ${contributed.skills.length === 1 ? 'it' : 'them'}.`);
+    };
+
     if (callable.length > 0) {
-      if (permissiveCallable.length > 0) {
-        writeLine(streams.stdout, `${name} is enabled — and ${label(permissiveCallable)} ${permissiveCallable.length === 1 ? 'has' : 'have'} no \`tools:\` list, which means every registered tool.`);
+      if (permissive.length > 0) {
+        writeLine(streams.stdout, `${name} is enabled — and ${label(permissive)} ${permissive.length === 1 ? 'has' : 'have'} no \`tools:\` list, which means every registered tool.`);
+        writeLine(streams.stdout, uncheckedReason(name) !== undefined
+          ? `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} what ${permissive.length === 1 ? 'that agent' : 'those agents'} would gain at the next daemon start — subject to the caveat above, which setup did not check.`
+          : `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} callable by ${permissive.length === 1 ? 'that agent' : 'those agents'} the next time the daemon starts.`);
+        writeLine(streams.stdout, 'Give a soul a `tools:` list to narrow that. `stratus plugins` shows who can call what.');
       }
-      if (explicit.length > 0) {
-        writeLine(streams.stdout, `${name} is enabled — and ${label(explicit)} already ${explicit.length === 1 ? 'names' : 'name'} what it contributes in \`tools:\`.`);
+      for (const entry of explicit) {
+        // Per soul, and naming what its list *matched* — an allowlist can
+        // grant one of four tools, and saying the plugin is callable there
+        // reported the other three as available when the runtime denies
+        // them.
+        const names = reached(entry);
+        const rest = everyTool.filter((tool) => !names.includes(tool));
+        writeLine(streams.stdout, `${name} is enabled — and ${entry.soul.agent.name} (${entry.soul.agent.id}) already grants ${names.join(', ')} in \`tools:\`${rest.length > 0 ? `, but not ${rest.join(', ')}` : ''}.`);
       }
-      // "callable the next time the daemon starts" is a prediction, and
-      // for a plugin setup could not check it is one it has just said it
-      // cannot make: the browser may not exist, the servers block may hold
-      // an entry the bridge refuses, an unknown package may not export
-      // `createPlugin` at all. Printing the caveat and then the categorical
-      // claim leaves the operator to decide which of the two to believe.
-      writeLine(streams.stdout, uncheckedReason(name) !== undefined
-        ? `So ${grants ?? 'what it contributes'} ${callable.length === 1 ? 'is' : 'are'} what ${callable.length === 1 ? 'that agent' : 'those agents'} would gain at the next daemon start — subject to the caveat above, which setup did not check.`
-        : `So ${grants ?? 'what it contributes'} ${callable.length === 1 ? 'is' : 'are'} callable by ${callable.length === 1 ? 'that agent' : 'those agents'} the next time the daemon starts.`);
       if (shortfall !== undefined) {
         writeLine(streams.stdout, `${label(shortfall.agents)} ${shortfall.one ? 'is' : 'are'} allowlisted too, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} — every call would fail until it is, under plugins["${name}"].agents.`);
       }
-      if (permissiveCallable.length > 0) {
-        writeLine(streams.stdout, 'Give a soul a `tools:` list to narrow that. `stratus plugins` shows who can call what.');
-      }
+      skillLine();
       return;
     }
 
     if (shortfall !== undefined) {
-      // Permissive souls, every one of them short the setting: neither the
-      // "callable by" line above nor the "every soul has a `tools:` list"
-      // one below is true, and each would send the operator to fix the
-      // wrong gate.
+      // Allowlisted souls, every one of them short the setting: neither the
+      // "callable by" line above nor the "no soul names it" one below is
+      // true, and each would send the operator to fix the wrong gate.
       writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — ${label(shortfall.agents)} ${shortfall.one ? 'is' : 'are'} allowlisted for it, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} and every call would fail.`);
       writeLine(streams.stdout, `Set ${shortfall.key} for ${shortfall.one ? 'it' : 'them'} under plugins["${name}"].agents, then run \`stratus plugins\` to see the whole chain.`);
+      skillLine();
       return;
     }
 
-    writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — every soul in the roster has a \`tools:\` list, and a soul grants tools by naming them:`);
-    if (first !== undefined) {
-      writeLine(streams.stdout, `  tools: [${first}]`);
-    } else {
-      // A package this menu has no entry for: its tool names are in its
-      // manifest, which `stratus plugins` reads and this menu does not.
-      // Naming the command beats printing a guess at the namespace.
-      writeLine(streams.stdout, '  tools: [<the tools it contributes>]');
+    if (everyTool.length === 0) {
+      // A plugin that contributes no tools at all — skills only, which is a
+      // valid manifest. Sending the operator to edit `tools:` would name
+      // the wrong key entirely.
+      if (contributed !== undefined && contributed.skills.length > 0) {
+        writeLine(streams.stdout, `${name} is enabled. It contributes no tools, so there is nothing for a \`tools:\` list to name.`);
+        skillLine();
+        return;
+      }
+      writeLine(streams.stdout, `${name} is enabled. What it contributes is in its manifest — run \`stratus plugins\` to see it and who can reach it.`);
+      return;
     }
+
+    writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — every soul in the roster has a \`tools:\` list and none of them names what it contributes, and a soul grants tools by naming them:`);
+    writeLine(streams.stdout, `  tools: [${everyTool[0] as string}]`);
     writeLine(streams.stdout, `Add it to the \`tools:\` list in ${state.soulPath ?? 'your agent\'s soul file'}, then run \`stratus plugins\` to see the whole chain and what it contributes.`);
+    skillLine();
   };
 
   const choosePlugins = async (): Promise<void> => {
@@ -5273,8 +5304,21 @@ export const runSetup = async (
     const problem = await pluginConfigProblem(name, block);
     if (problem !== undefined) {
       writeLine(streams.stdout);
-      writeLine(streams.stdout, `${name} was not enabled — a daemon would refuse these settings: ${problem}`);
-      writeLine(streams.stdout, `Fix that in your config, then enable it here. \`stratus plugins\` reports the same check.`);
+      // "was not enabled" is only true where the block was not already
+      // enabled. Reached from the install action on a config that already
+      // says `enabled: true`, this returns before touching `state`, so the
+      // old block survives and Save writes it — a daemon then tries the
+      // package it just installed and refuses it, while setup had said it
+      // was not enabled. Report what is actually there, and name the way
+      // out; switching it off is the operator's call, not this branch's,
+      // for the same reason the roots prompt does not revoke on a blank
+      // line.
+      writeLine(streams.stdout, existing.enabled === false || existing.enabled === undefined
+        ? `${name} was not enabled — a daemon would refuse these settings: ${problem}`
+        : `${name} is still enabled in your config, and a daemon would refuse these settings: ${problem}`);
+      writeLine(streams.stdout, existing.enabled === false || existing.enabled === undefined
+        ? 'Fix that in your config, then enable it here. `stratus plugins` reports the same check.'
+        : 'Fix that in your config, or switch the plugin off here so a daemon stops trying to load it. `stratus plugins` reports the same check.');
       return;
     }
     if (keptPerAgent && setup?.needs) {

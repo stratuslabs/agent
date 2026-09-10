@@ -6198,7 +6198,10 @@ test('setup counts a soul whose explicit tools list already names the plugin', a
   });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /Ava \(ava\) already names what it contributes in `tools:`/);
+  // Named down to what the list actually matched. `tools: [fs.read]` grants
+  // one of the four tool-fs contributes, and reporting the plugin as
+  // callable said all four were.
+  assert.match(output.stdout, /Ava \(ava\) already grants fs\.read in `tools:`, but not fs\.list, fs\.search, fs\.write/);
   // The claim this replaces: with every non-built-in soul carrying a list,
   // the old reading fell through to advising a grant Ava already had.
   assert.doesNotMatch(output.stdout, /a soul grants tools by naming them/);
@@ -6344,6 +6347,45 @@ test('setup will not enable a plugin whose toolRisks override a daemon would ref
   assert.doesNotMatch(output.stdout, /is enabled/);
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
   assert.equal(config.plugins['@stratusagent/tool-shell'].enabled, false);
+});
+
+test('setup says an already-enabled block stays enabled when its settings fail preflight', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Enabled, and rejected by the manifest for a setting this menu does not
+  // edit. `Change roots` reaches `enablePlugin`, which returns before
+  // touching state — so the block survives and Save writes it unchanged,
+  // and a daemon refuses the plugin. Saying it "was not enabled" there is
+  // exactly backwards: it is enabled, and stays enabled.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/old'], maxBytes: 'big' } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Change roots (1) → new roots → Back (6)
+      // → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/work\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /is still enabled in your config, and a daemon would refuse these settings: .*maxBytes must be a integer/);
+  assert.match(output.stdout, /switch the plugin off here so a daemon stops trying to load it/);
+  // The sentence this replaces, which described the block as off while the
+  // saved config went on enabling it.
+  assert.doesNotMatch(output.stdout, /was not enabled/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins['@stratusagent/tool-fs'].enabled, true);
+  assert.deepEqual(config.plugins['@stratusagent/tool-fs'].roots, ['~/old']);
 });
 
 test('setup will not enable a plugin whose preserved settings fail its manifest', async () => {
