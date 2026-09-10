@@ -6503,6 +6503,48 @@ test('setup does not report a flat denial when the control API answers for anoth
   assert.match(output.stdout, /no Slack channel can ask for stratus, so their gated calls park until the control API answers them/);
 });
 
+test('setup puts the whole approval verdict on the screen that sets it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // Slack denies `ava` on arrival and the built-in `stratus` parks for the
+  // control API: the two-clause verdict the top-level row may have to trim
+  // on a narrow terminal. The Approvals screen draws its footnote once,
+  // outside the redraw loop, so it carries the whole thing.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote' },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → Back → Save (9)
+      setupInput: Readable.from(['6\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // Only the Approvals screen: the slice has to stop before the top-level
+  // menu is redrawn underneath it, or it matches that row instead of the
+  // footnote and passes whatever the footnote says.
+  const opened = output.stdout.slice(output.stdout.indexOf('Approvals — what happens'));
+  const screen = opened.slice(0, opened.indexOf('1) Providers'));
+  assert.match(screen, /reaches Slack and is denied on arrival/);
+  assert.match(screen, /no Slack channel can ask for stratus, so their gated calls park until the control API answers them/);
+});
+
 test('setup says remote approvals deny everything while no agent is connected to Slack', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });

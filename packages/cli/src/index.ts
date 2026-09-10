@@ -4953,6 +4953,29 @@ export const runSetup = async (
     return stored.filter((agentId) => entries.some((entry) => entry.soul.agent.id === agentId));
   };
 
+  /**
+   * Trim a top-level menu row to one physical terminal row.
+   *
+   * `selectInteractive` moves the cursor up by the number of options to
+   * redraw, so an option that wraps leaves the rewind short and every
+   * later redraw overwrites the wrong lines. Only a TTY has a width to fit
+   * into; piped output keeps the full text, which is what tests and
+   * scripts read, and where nothing is redrawn anyway.
+   */
+  const fitMenuRow = (text: string): string => {
+    // `process.stdout` rather than the injected stream, which is typed to
+    // `write` alone — the same place `selectInteractive` reads `isTTY`
+    // from, and only consulted when it is actually driving a terminal.
+    const columns = prompter.isInteractive() ? process.stdout.columns : undefined;
+    if (typeof columns !== 'number' || columns <= 0) {
+      return text;
+    }
+    // `  N) ` plus the 21-column label, and one spare so a full-width row
+    // does not wrap on terminals that advance the cursor eagerly.
+    const budget = columns - 27;
+    return text.length <= budget ? text : `${text.slice(0, Math.max(budget - 1, 0))}…`;
+  };
+
   const chooseApprovals = async (): Promise<void> => {
     while (true) {
       const mode = state.approvals?.mode ?? 'headless';
@@ -4986,14 +5009,18 @@ export const runSetup = async (
       // rows are editable regardless — the alternative was a first install
       // with nothing to configure.
       const adapterPending = connected.length > 0 && !packageInstalled('@stratusagent/channel-slack', env);
+      // The whole verdict, never trimmed: a footnote is drawn once, outside
+      // the redraw loop, so wrapping costs nothing here — and this is the
+      // screen where the trimmed row's remainder belongs.
+      const verdict = (await approvalsSummary()).join('; ');
       const footnote = adapterPending
-        ? `@stratusagent/channel-slack is not installed yet — Save & finish offers it, and these approvers apply once it is. ${serveCommand()} brings them online.`
+        ? `${verdict}. @stratusagent/channel-slack is not installed yet — Save & finish offers it, and these approvers apply once it is. ${serveCommand()} brings them online.`
         : mode === 'remote' && connected.length === 0
         // The failure `stratus plugins` reports, said before it can happen
         // rather than after: remote mode with no Slack app is not a
         // waiting daemon, it is a denying one.
         ? 'No agent is connected to Slack, so there is nobody to ask — connect one under Channels first.'
-          : 'A gated call already covered by a standing grant runs without asking, in either mode.';
+          : verdict;
       const choice = await prompter.select(
         'Approvals — what happens to a gated call with nobody watching',
         options,
@@ -5633,11 +5660,18 @@ export const runSetup = async (
       // Awaited before the menu is drawn: the approvals summary reads the
       // roster, to intersect stored Slack tokens with agents that exist.
       // Every clause, not the first: a prefix of this sentence has been
-      // wrong twice now — the mixed roster where Slack denies one agent and
-      // the control API answers for another reads as a flat denial without
-      // the clause that follows. There is no safe prefix to pick, so the
-      // row carries what `stratus plugins` prints and wraps if it must.
-      const approvals = (await approvalsSummary()).join('; ');
+      // wrong twice — the mixed roster where Slack denies one agent and the
+      // control API answers for another reads as a flat denial without the
+      // clause that follows. So the row carries what `stratus plugins`
+      // prints, and where it cannot fit it is *visibly* cut rather than
+      // silently shortened: an ellipsis says there is more, which a chosen
+      // prefix never did. The Approvals screen has the whole thing.
+      //
+      // Cut at all only because `selectInteractive` rewinds the cursor by
+      // `options.length`, one physical row per option — a wrapped row
+      // corrupts every redraw after the first arrow key. Wrapping is not
+      // the cosmetic cost I took it for when I let this line grow.
+      const approvals = fitMenuRow((await approvalsSummary()).join('; '));
       const choice = await prompter.select('', [
         `Providers            ${providersSummary()}`,
         `Models               ${modelsSummary()}`,
