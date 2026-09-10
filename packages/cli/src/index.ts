@@ -55,6 +55,7 @@ import {
   readPluginManifest,
   riskFloorFor,
   PluginConfigError,
+  PluginManifestError,
   type LoadedPlugin,
 } from '@stratusagent/plugins';
 import {
@@ -4720,9 +4721,16 @@ export const runSetup = async (
       await preflightPlugin(manifest, directory, block as JsonObject, workspacesDirPath(env));
       return undefined;
     } catch (error) {
-      // A package that is absent or unreadable is not a verdict about the
-      // config. Only a rejection of the settings themselves is.
-      if (error instanceof PluginConfigError) {
+      // A package that will not *resolve* is not a verdict about the block —
+      // `host.resolve` throws a plain Error for that, and setup has always
+      // answered "nothing known" there. Everything the loader itself
+      // refuses is: a schema mismatch and a bad `toolRisks` override raise
+      // `PluginConfigError`, while an unparseable manifest and a skill file
+      // that is missing, unreadable or outside the package raise
+      // `PluginManifestError`. Catching only the first read the second as
+      // "no problem" and enabled a plugin the daemon rejects before it
+      // registers anything.
+      if (error instanceof PluginConfigError || error instanceof PluginManifestError) {
         return error.message;
       }
       return undefined;
@@ -5030,21 +5038,12 @@ export const runSetup = async (
   const enablePlugin = async (name: string): Promise<void> => {
     const setup = PLUGIN_SETUP[name];
     const existing = state.plugins?.[name] ?? {};
-    // Before anything is asked, because the settings under review are ones
-    // an operator hand-wrote and setup is about to switch on. Enabling a
-    // block the loader rejects writes `enabled: true` on a plugin that
-    // registers nothing, and the grant line then names agents that can call
-    // it — the "configured and useless" state, arrived at through the menu
-    // meant to prevent it. What setup itself writes below is valid by
-    // construction, so this is the only place the question arises.
-    const problem = await pluginConfigProblem(name, existing);
-    if (problem !== undefined) {
-      writeLine(streams.stdout);
-      writeLine(streams.stdout, `${name} was not enabled — a daemon would refuse these settings: ${problem}`);
-      writeLine(streams.stdout, `Fix that in your config, then enable it here. \`stratus plugins\` reports the same check.`);
-      return;
-    }
     const block: PluginConfigBlock = { ...existing, enabled: true };
+    // Whether the prompt below kept a per-agent value rather than writing a
+    // fleet-wide one. Said after the block is checked, not before: the
+    // alternative printed "keeping your per-agent roots" and then refused
+    // to enable, which is two answers to one question.
+    let keptPerAgent = false;
 
     if (setup?.needs) {
       const needsKey = setup.needs.key;
@@ -5109,10 +5108,28 @@ export const runSetup = async (
             : `Nothing entered, so ${name} was left as it was — it grants nothing without ${needsKey}.`);
           return;
         }
-        writeLine(streams.stdout, `Keeping the per-agent ${needsKey} already configured for ${name}; nothing is granted fleet-wide.`);
+        keptPerAgent = true;
       } else {
         block[needsKey] = values;
       }
+    }
+
+    // The block that would be *written*, not the one that was there. Asking
+    // before the prompt meant `Change roots` — the action offered precisely
+    // to repair a bad value — refused on the value it exists to replace,
+    // and an operator had no way through this menu to fix a setting this
+    // menu owns. Settings it does not own are still caught here: the
+    // replacement is folded in first, and whatever remains wrong is wrong
+    // in the block a daemon would be handed.
+    const problem = await pluginConfigProblem(name, block);
+    if (problem !== undefined) {
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, `${name} was not enabled — a daemon would refuse these settings: ${problem}`);
+      writeLine(streams.stdout, `Fix that in your config, then enable it here. \`stratus plugins\` reports the same check.`);
+      return;
+    }
+    if (keptPerAgent && setup?.needs) {
+      writeLine(streams.stdout, `Keeping the per-agent ${setup.needs.key} already configured for ${name}; nothing is granted fleet-wide.`);
     }
 
     state.plugins = { ...(state.plugins ?? {}), [name]: block };

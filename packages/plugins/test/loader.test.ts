@@ -20,6 +20,7 @@ import {
   loadPlugins,
   parsePluginManifest,
   preflightPlugin,
+  PluginManifestError,
   type OptionalModuleHost,
 } from '../src/index.ts';
 
@@ -629,9 +630,10 @@ test('a plugin that declares no credentials can resolve none, however the host i
 
 /**
  * The preflight `loadPlugins` runs before it imports anything, which is now
- * also what `stratus plugins` asks to decide whether a plugin would load.
- * Both halves matter: either one failing rejects the whole plugin, so a
- * caller running only one reports a plugin ready that the daemon refuses.
+ * also what `stratus plugins` and `stratus setup` ask to decide whether a
+ * plugin would load. Every part matters: any one failing rejects the whole
+ * plugin, so a caller running a subset reports a plugin ready that the
+ * daemon refuses.
  */
 const preflightManifest = (stratus: unknown) =>
   parsePluginManifest({ name: 'stratus-plugin-example', stratus }, 'stratus-plugin-example');
@@ -651,6 +653,24 @@ test('the preflight refuses settings the manifest schema rejects', async () => {
   await preflightPlugin(manifest, directory, { org: 'stratuslabs' }, undefined);
 });
 
+test('the preflight refuses a toolRisks override the loader would refuse', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'stratus-preflight-'));
+  const manifest = preflightManifest({
+    pluginVersion: 1,
+    contributes: { tools: [{ name: 'example.read', risk: 'safe' }] },
+  });
+
+  // The third of the loader's pre-import checks, and the one this function
+  // was missing while its own doc said anything added there belongs in
+  // both. `validatePluginConfig` cannot catch it: `toolRisks` is a
+  // host-owned key, stripped before the schema is applied.
+  await assert.rejects(
+    () => preflightPlugin(manifest, directory, { toolRisks: { 'example.write': 'safe' } }, undefined),
+    /toolRisks/,
+  );
+  await preflightPlugin(manifest, directory, { toolRisks: { 'example.read': 'gated' } }, undefined);
+});
+
 test('the preflight refuses a declared skill file that is not there', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'stratus-preflight-'));
   const manifest = preflightManifest({
@@ -664,7 +684,15 @@ test('the preflight refuses a declared skill file that is not there', async () =
   // Settings are fine; the skill file is missing. The daemon rejects the
   // whole plugin here — tools included — so a report that validated only
   // the config would call this one ready.
-  await assert.rejects(() => preflightPlugin(manifest, directory, {}, undefined));
+  //
+  // The error *type* is asserted because callers switch on it: a caller
+  // that catches only `PluginConfigError` reads this as no problem, which
+  // is how `stratus setup` briefly offered to enable a plugin whose skill
+  // files were not there.
+  await assert.rejects(
+    () => preflightPlugin(manifest, directory, {}, undefined),
+    PluginManifestError,
+  );
 
   await mkdir(path.join(directory, 'skills', 'pr-review'), { recursive: true });
   await writeFile(

@@ -342,23 +342,27 @@ const stageManifestSkills = async (
 
 /**
  * Everything `loadPlugins` checks before it imports a package: that the
- * settings match the manifest's own schema, and that every skill file the
- * manifest names is present, inside the package, and readable.
+ * settings match the manifest's own schema, that any `toolRisks` overrides
+ * name tools the manifest declares and risks it permits, and that every
+ * skill file the manifest names is present, inside the package, and
+ * readable.
  *
- * One function because either failing rejects the *whole* plugin — it
- * registers no tools and no skills — so a caller that ran only one of them
- * would report a plugin ready that the daemon refuses. `stratus plugins`
- * is that caller, and it got exactly half of this right the first time.
+ * One function because any of them failing rejects the *whole* plugin — it
+ * registers no tools and no skills — so a caller that ran a subset would
+ * report a plugin ready that the daemon refuses. `stratus plugins` is that
+ * caller, and it got exactly half of this right the first time; the
+ * `toolRisks` parse was the third check, missing here while the doc below
+ * said it should not be, until setup started asking this question too.
  *
  * Nothing here imports the package, which is what lets a diagnostic ask the
  * question without starting anything.
  *
- * `loadPlugins` calls the same two checks rather than this composition of
- * them, because it needs what the staging *returns* and stages only when it
- * has a registry to put skills in. The checks themselves are shared, so
- * there is no second reading of a schema or a skill path here — only a
- * second caller of each. Anything added to the loader's preflight belongs
- * in both.
+ * `loadPlugins` calls the same three checks rather than this composition of
+ * them, because it needs what the staging and the parse *return* and stages
+ * only when it has a registry to put skills in. The checks themselves are
+ * shared, so there is no second reading of a schema, an override or a skill
+ * path here — only a second caller of each. Anything added to the loader's
+ * preflight belongs in both.
  */
 export const preflightPlugin = async (
   manifest: PluginManifest,
@@ -366,7 +370,11 @@ export const preflightPlugin = async (
   block: JsonObject,
   workspaceRoot: string | undefined,
 ): Promise<void> => {
+  // The loader's order, kept: a block whose settings are wrong should say
+  // so before its overrides are read, since the overrides are the narrower
+  // mistake and the schema error is the one more likely to explain it.
   validatePluginConfig(manifest, pluginConfigWithHostDefaults(block, manifest, workspaceRoot));
+  parseToolRiskOverrides(manifest, block);
   await stageManifestSkills(manifest, directory);
 };
 

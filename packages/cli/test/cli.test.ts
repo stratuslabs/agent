@@ -6198,6 +6198,76 @@ test('setup does not call a plugin callable by an agent its required setting mis
   assert.doesNotMatch(output.stdout, /Ava \(ava\), Stratus \(stratus\) have no `tools:` list/);
 });
 
+test('setup enables a plugin after the roots prompt repairs the value that was wrong', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // Fleet-wide roots the manifest rejects. `Change roots` is the action
+  // offered to fix exactly this, so checking the block before the prompt
+  // refused on the value the prompt exists to replace — no way through this
+  // menu to repair a setting this menu owns.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-fs': { enabled: false, roots: [123] } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → type real roots → Back
+      // (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/work\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.doesNotMatch(output.stdout, /was not enabled/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.plugins['@stratusagent/tool-fs'], { enabled: true, roots: ['~/work'] });
+});
+
+test('setup will not enable a plugin whose toolRisks override a daemon would refuse', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // `toolRisks` is host-owned, so the manifest schema never sees it — it is
+  // stripped before validation, and the loader parses it in a separate step
+  // that rejects the plugin on its own. A gate built from the schema alone
+  // reads this block as fine.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/tool-shell': { enabled: false, toolRisks: { 'shell.nosuch': 'safe' } },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-shell (2) → Enable it (1) → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '2\n', '1\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /a daemon would refuse these settings: .*toolRisks/);
+  assert.doesNotMatch(output.stdout, /is enabled/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins['@stratusagent/tool-shell'].enabled, false);
+});
+
 test('setup will not enable a plugin whose preserved settings fail its manifest', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });

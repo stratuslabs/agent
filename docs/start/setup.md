@@ -53,12 +53,15 @@ digits to jump, Esc to go back.
     serves, which is a working config and a narrower one than any fleet-wide
     answer, so that is kept as it is. An override left behind by a deleted
     agent does not count: it would grant nobody anything.
-  - **Enable a block a daemon would refuse.** Settings you wrote by hand are
-    checked before the switch goes on — through `preflightPlugin`, the same
-    function the loader runs and `stratus plugins` reports from, so the
-    three surfaces cannot disagree. A `timeoutMs` that is not an integer, or
-    a `roots` entry that is not a string, is named where it is and the
-    plugin is left off rather than switched on to register nothing.
+  - **Enable a block a daemon would refuse.** The block that would be saved
+    is checked before the switch goes on — through `preflightPlugin`, the
+    same pre-import checks the loader runs and `stratus plugins` reports
+    from, so the three surfaces cannot disagree. A `timeoutMs` that is not
+    an integer, a `roots` entry that is not a string, a `toolRisks` entry
+    naming a tool the manifest does not declare, a skill file the package is
+    missing: each is named where it is, and the plugin is left off rather
+    than switched on to register nothing. It is the block *after* your
+    answers, so the roots prompt can repair the very value that was wrong.
   - **Switch off a plugin whose package is gone.** A config copied from
     another machine, or an uninstall, leaves a block enabling a package that
     is not there; the row offers to clear it without installing first. A key
