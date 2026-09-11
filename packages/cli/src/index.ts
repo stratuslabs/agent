@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { appendFile, chmod, copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, copyFile, cp, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
@@ -6410,6 +6410,16 @@ interface TemplatePlan {
   /** Packages of those that this install would have to fetch. */
   missing: string[];
   config: JsonObject;
+  /** Every value the fragment sets, so the review can show them. */
+  configChanges: TemplateConfigChange[];
+}
+
+interface TemplateConfigChange {
+  /** A dotted path into the config, e.g. `plugins.@stratusagent/tool-fs.roots`. */
+  path: string;
+  value: JsonValue;
+  /** What that path says today, when the fragment replaces something. */
+  was?: JsonValue;
 }
 
 const isPlainObject = (value: unknown): value is JsonObject =>
@@ -6457,6 +6467,52 @@ const mergedTemplateConfig = (
       `This template's ${TEMPLATE_CONFIG_FILENAME} would make ${configPath} unreadable: `
       + `${error instanceof Error ? error.message : String(error)}`,
     );
+  }
+};
+
+/**
+ * Every value a config fragment actually sets, as a dotted path.
+ *
+ * The review used to print the top-level keys — `config plugins` — which
+ * says nothing about what changed. A fragment's capability lives in its
+ * leaves: `plugins.@stratusagent/tool-fs.roots` is the difference between
+ * reading `~/notes` and reading `/`, and a review that hides it is a
+ * review that can be used to smuggle one past an operator.
+ *
+ * An empty object is a leaf in its own right: `{ plugins: { pkg: {} } }`
+ * adds a block, and printing nothing for it would lose that too.
+ */
+const configLeaves = (
+  value: JsonValue,
+  current: JsonValue | undefined,
+  prefix: readonly string[] = [],
+): TemplateConfigChange[] => {
+  if (!isPlainObject(value) || Object.keys(value).length === 0) {
+    const replaced = current !== undefined && JSON.stringify(current) !== JSON.stringify(value);
+    return [{ path: prefix.join('.'), value, ...(replaced ? { was: current } : {}) }];
+  }
+  // The current value is walked alongside rather than looked up by the
+  // dotted path afterwards: npm names may contain dots, so `plugins` plus
+  // a key like `a.b` renders a path that does not parse back to the key it
+  // came from — and a "replaces" note naming the wrong value would be
+  // worse than none.
+  return Object.entries(value).flatMap(([key, child]) => configLeaves(
+    child as JsonValue,
+    isPlainObject(current) ? current[key] : undefined,
+    [...prefix, key],
+  ));
+};
+
+/**
+ * Whether the soul already at `destination` is itself the holder of `id`.
+ * A match is the ordinary `--force` replacement rather than a collision with
+ * somebody else's agent; an unreadable or absent file is not holding it.
+ */
+const destinationHoldsId = async (destination: string, id: string): Promise<boolean> => {
+  try {
+    return (await loadSoulFile(destination)).agent.id === id;
+  } catch {
+    return false;
   }
 };
 
@@ -6567,17 +6623,13 @@ const planTemplateInstall = async (
     const contents = await readFile(soulPath, 'utf8');
     const destination = path.join(agentsDirPath(env), file);
     let taken = false;
-    let replacesOwnId = false;
     try {
       await stat(destination);
       taken = true;
-      // The id at the destination is the one this file would replace, so a
-      // match there is the ordinary `--force` case rather than a clash.
-      replacesOwnId = (await loadSoulFile(destination)).agent.id === soul.agent.id;
     } catch {
-      // Not installed under this name, or unreadable: either way this file
-      // is not the one already holding the id.
+      // Not installed under this name.
     }
+    const replacesOwnId = taken && await destinationHoldsId(destination, soul.agent.id);
     const alsoHere = claimedHere.get(soul.agent.id);
     const blocked = alsoHere !== undefined
       ? `${alsoHere} in this template already claims the id ${soul.agent.id}`
@@ -6609,6 +6661,7 @@ const planTemplateInstall = async (
   // Validated against the config as it stands, so a fragment the loader
   // would reject refuses the whole command before a single file is copied.
   // Checked again under the write below, in case the file moved underneath.
+  const configChanges: TemplateConfigChange[] = [];
   if (Object.keys(config).length > 0) {
     let current: CliConfigFile = {};
     try {
@@ -6619,9 +6672,10 @@ const planTemplateInstall = async (
       }
     }
     mergedTemplateConfig(current, config, globalConfigPath(env));
+    configChanges.push(...configLeaves(config, current as JsonValue));
   }
 
-  return { name, description, directory, agents, skills, packages, missing, config };
+  return { name, description, directory, agents, skills, packages, missing, config, configChanges };
 };
 
 /** What the operator says yes to: every file this would add, and every package. */
@@ -6647,9 +6701,12 @@ const writeTemplatePlan = (streams: CliStreams, plan: TemplatePlan, env: CliEnvi
     const note = plan.missing.includes(specifier) ? 'npm install -g' : 'already installed';
     writeLine(streams.stdout, `  plugin   ${specifier} (${note})`);
   }
-  const configKeys = Object.keys(plan.config);
-  if (configKeys.length > 0) {
-    writeLine(streams.stdout, `  config   ${configKeys.join(', ')} → ${globalConfigPath(env)}`);
+  if (plan.configChanges.length > 0) {
+    writeLine(streams.stdout, `  config   ${globalConfigPath(env)}`);
+    for (const change of plan.configChanges) {
+      const replaces = change.was !== undefined ? `  (replaces ${JSON.stringify(change.was)})` : '';
+      writeLine(streams.stdout, `           ${change.path}: ${JSON.stringify(change.value)}${replaces}`);
+    }
   }
   writeLine(streams.stdout);
 };
@@ -6677,21 +6734,24 @@ export const runTemplateAdd = async (
   env: CliEnvironment = {},
 ): Promise<number> => {
   const resolved = await resolveSource(command.source, env, 'template');
-  let directory: string;
-  let cleanup: (() => Promise<void>) | undefined;
-  if (resolved.kind === 'local') {
-    directory = resolved.directory;
-  } else {
-    const scratch = await mkdtemp(path.join(os.tmpdir(), 'stratus-template-add-'));
-    cleanup = () => rm(scratch, { recursive: true, force: true });
-    writeLine(streams.stdout, `Fetching ${redactedSourceUrl(resolved.url)} …`);
-    try {
+  // Everything is read from a directory nothing else can write, so what the
+  // review described is what installs. A clone is already private; a local
+  // path is not — it is a working copy somebody may be editing, and the gap
+  // between printing the review and copying is however long the operator
+  // takes to answer plus however long `npm install -g` runs.
+  const scratch = await mkdtemp(path.join(os.tmpdir(), 'stratus-template-add-'));
+  const cleanup = (): Promise<void> => rm(scratch, { recursive: true, force: true });
+  const directory = scratch;
+  try {
+    if (resolved.kind === 'local') {
+      await cp(resolved.directory, scratch, { recursive: true });
+    } else {
+      writeLine(streams.stdout, `Fetching ${redactedSourceUrl(resolved.url)} …`);
       await cloneSource(resolved.url, scratch);
-    } catch (error) {
-      await cleanup();
-      throw error;
     }
-    directory = scratch;
+  } catch (error) {
+    await cleanup();
+    throw error;
   }
 
   try {
@@ -6717,6 +6777,17 @@ export const runTemplateAdd = async (
     }
 
     await mkdir(agentsDirPath(env), { recursive: true });
+    // Re-read the claimed ids rather than trusting the plan's snapshot. The
+    // exclusive write below only catches a collision on the same *path*, and
+    // an id is claimed by content: another `template add`, an `agent new`, or
+    // a hand-edited soul can take one under a different filename while the
+    // review sits at its prompt. Two files with one id is what
+    // `loadRosterSouls` refuses, and it refuses the whole roster. This
+    // narrows the window rather than closing it — the same gap between the
+    // read and the write that `stratus agent new` has.
+    const claimedNow = plan.agents.length > 0
+      ? await declaredAgentIds(env)
+      : { ids: new Set<string>() };
     const installedAgents: string[] = [];
     const enabledPackages: Array<{ specifier: string; on: boolean }> = [];
     const refusedAgents: string[] = [];
@@ -6729,17 +6800,36 @@ export const runTemplateAdd = async (
         blockedAgents.push(`${agent.file} — ${agent.blocked}`);
         continue;
       }
+      if (claimedNow.ids.has(agent.id) && !await destinationHoldsId(destination, agent.id)) {
+        blockedAgents.push(`${agent.file} — something already claims the id ${agent.id}`);
+        continue;
+      }
       if (agent.taken && !command.force) {
         refusedAgents.push(agent.file);
         continue;
       }
       try {
-        // `wx` unless replacing on purpose: the destination was checked
-        // while planning, and another `template add`, a setup flow, or an
-        // editor can create it in the meantime. Without the exclusive flag
-        // the documented "refused without --force" quietly becomes an
-        // overwrite of somebody's newer file.
-        await writeFile(destination, agent.contents, command.force ? undefined : { flag: 'wx' });
+        // `--force` removes the entry first rather than writing over it: a
+        // roster entry can be a symlink, and writing through one truncates
+        // whatever it points at — a file outside the agents directory that
+        // this command was never asked to touch. `unlink` removes the link
+        // itself, so a dangling one is replaced too.
+        if (command.force) {
+          try {
+            await unlink(destination);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+              throw error;
+            }
+          }
+        }
+        // Always exclusive, both paths: the destination was checked while
+        // planning, and another `template add`, a setup flow, or an editor
+        // can create it in the meantime. Without the flag the documented
+        // "refused without --force" quietly becomes an overwrite of
+        // somebody's newer file, and a forced write lands on a file created
+        // after the unlink.
+        await writeFile(destination, agent.contents, { flag: 'wx' });
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
           throw error;
@@ -6802,7 +6892,9 @@ export const runTemplateAdd = async (
     // the record of what landed. Only a template that added nothing at all
     // is an error.
     for (const file of refusedAgents) {
-      writeLine(streams.stderr, `Warning: skipped ${file} — an agent of that name is already in your roster (--force replaces it).`);
+      writeLine(streams.stderr, command.force
+        ? `Warning: skipped ${file} — something created it while this was installing. Run the same command again to replace it.`
+        : `Warning: skipped ${file} — an agent of that name is already in your roster (--force replaces it).`);
     }
     for (const blocked of blockedAgents) {
       writeLine(streams.stderr, `Warning: skipped ${blocked}. Ids key sessions, memory, and credentials, so one of them has to change.`);
@@ -6831,7 +6923,7 @@ export const runTemplateAdd = async (
     writeLine(streams.stdout, '  stratus restart          # picks up new agents, skills, and plugins');
     return 0;
   } finally {
-    await cleanup?.();
+    await cleanup();
   }
 };
 

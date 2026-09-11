@@ -21,7 +21,9 @@ Example — The layout a template uses. Copy this directory to start your own.
   agent    Scribe (scribe) — fs.read, fs.list, memory.remember, memory.recall
   skill    meeting-notes
   plugin   @stratusagent/tool-fs (npm install -g)
-  config   plugins → /home/you/.stratus/config.json
+  config   /home/you/.stratus/config.json
+           plugins.@stratusagent/tool-fs.enabled: true
+           plugins.@stratusagent/tool-fs.roots: ["~/notes"]
 
 Install this? [y/N]
 ```
@@ -34,7 +36,9 @@ here, for the same reason.
 - `--yes` installs without asking. For scripts, and for the desktop and web
   UIs, which show the same list in their own window.
 - `--force` replaces an agent or skill already installed under that name.
-  Without it those are skipped and everything else still installs.
+  Without it those are skipped and everything else still installs. It
+  replaces the roster entry itself — if that entry is a symlink, the link
+  goes and the file it pointed at is left alone.
 
 A running daemon holds its roster and its plugins in memory, so anything a
 template adds needs `stratus restart` before it is served — a new agent as
@@ -55,9 +59,12 @@ with `template.json` and `agents/` in it.
 
 The config merge is additive where it can be: objects merge key by key, so a
 template naming one plugin never takes away the plugins you already had.
-Scalars and arrays replace. The merged document is checked the way
-`stratus run` would read it, so a template whose `config.json` would leave
-your config unreadable is refused before anything is copied.
+Scalars and arrays replace — and the review prints each value it would set,
+with the one it replaces beside it, because a key you already have set to
+something narrow is exactly where a widening goes unnoticed. The merged
+document is checked the way `stratus run` would read it, so a template whose
+`config.json` would leave your config unreadable is refused before anything
+is copied.
 
 **Read the tool list.** A soul with no `tools:` line may call *every*
 registered tool, and the review says so in those words. An empty list and a
@@ -91,11 +98,13 @@ on disk, which is what makes reading the folder a real review.
   lives outside `~/.stratus/agents`, and the built-in `stratus`. `--force`
   does not override it: `--force` replaces the file of the same name, which
   is a different thing.
-- **What you reviewed is what installs.** The soul files are read while the
-  review is printed and written from that, so a template directory edited
-  while you are deciding cannot slip in a wider tool list. An agent that
-  appears at the destination in the meantime is skipped rather than
-  overwritten, `--force` aside.
+- **What you reviewed is what installs.** The template is copied to a
+  private directory before the review is printed, and everything — souls,
+  skills, `config.json` — installs from that copy, so a folder edited while
+  you are deciding cannot slip in a wider tool list. An agent that appears
+  at the destination in the meantime is skipped rather than overwritten,
+  `--force` aside, and an id claimed in the meantime is re-checked against
+  your roster just before the write.
 - **It does not create schedules.** A schedule is a decision about cadence
   and destination — ask the agent for one and approve it, see
   [Schedules](./schedules.md).
