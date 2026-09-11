@@ -6249,6 +6249,81 @@ test('setup counts a soul whose explicit tools list already names the plugin', a
   assert.doesNotMatch(output.stdout, /a soul grants tools by naming them/);
 });
 
+test('setup names every skill a plugin contributes, and no tools: advice', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // `stratus-plugin-fixture` contributes two skills and no tools — the shape
+  // no package under `packages/` has, and the one three review findings
+  // landed on. Skills are gated the opposite way to tools (an omitted
+  // `skills:` list is none), so none of this is reachable from a plugin that
+  // contributes tools.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { 'stratus-plugin-fixture': { enabled: false } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → the config's own key (6) → Enable it (1) → Back (7)
+      // → Save (9)
+      setupInput: Readable.from(['4\n', '6\n', '1\n', '7\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // No tools to name, so the `tools:` advice would point at the wrong key.
+  assert.match(output.stdout, /It contributes no tools, so there is nothing for a `tools:` list to name/);
+  assert.doesNotMatch(output.stdout, /a soul grants tools by naming them/);
+  // Both ids, not the first: a one-item list from a plural sentence grants
+  // one skill and silently leaves the rest off.
+  assert.match(output.stdout, /It also contributes skills: stratus-plugin-fixture:greet, stratus-plugin-fixture:summarize\./);
+  assert.match(output.stdout, /skills: \[stratus-plugin-fixture:greet, stratus-plugin-fixture:summarize\]/);
+  // A package with no PLUGIN_SETUP entry is the one setup knows least about,
+  // and the preflight never imports it.
+  assert.match(output.stdout, /Setup read stratus-plugin-fixture's manifest and no more/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins['stratus-plugin-fixture'].enabled, true);
+});
+
+test('setup spells the skill wildcard from the manifest, not the config key', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // `stratus-plugin-aliased` resolves to the same package, whose manifest
+  // names it `stratus-plugin-fixture`. The loader qualifies skills with the
+  // manifest's name, so a wildcard spelled from the config key would grant
+  // nothing while the exact ids printed beside it worked.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { 'stratus-plugin-aliased': { enabled: false } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → the config's own key (6) → Enable it (1) → Back (7)
+      // → Save (9)
+      setupInput: Readable.from(['4\n', '6\n', '1\n', '7\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /skills: \[stratus-plugin-fixture:\*\]/);
+  assert.doesNotMatch(output.stdout, /stratus-plugin-aliased:\*/);
+});
+
 test('setup refuses a configured package that is not a plugin at all', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });

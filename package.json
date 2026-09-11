@@ -14,5 +14,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stratuslabs/agent.git"
+  },
+  "devDependencies": {
+    "stratus-plugin-aliased": "workspace:stratus-plugin-fixture@*",
+    "stratus-plugin-fixture": "workspace:*"
   }
 }

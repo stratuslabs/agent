@@ -1,2 +1,5 @@
 packages:
   - packages/*
+  # Plugin manifests that exist only so tests have something to resolve.
+  # Outside `packages/` because everything there ships; these are private.
+  - fixtures/*

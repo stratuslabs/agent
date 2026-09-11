@@ -6,7 +6,16 @@ settings:
 
 importers:
 
-  .: {}
+  .:
+    devDependencies:
+      stratus-plugin-aliased:
+        specifier: workspace:stratus-plugin-fixture@*
+        version: link:fixtures/stratus-plugin-fixture
+      stratus-plugin-fixture:
+        specifier: workspace:*
+        version: link:fixtures/stratus-plugin-fixture
+
+  fixtures/stratus-plugin-fixture: {}
 
   packages/agents:
     dependencies:
