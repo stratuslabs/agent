@@ -23,7 +23,7 @@ lives.
 
 ```bash
 npm install -g @stratusagent/cli
-stratus setup     # sign in, create your first agent, connect Slack — one menu
+stratus setup     # sign in, create an agent, give it tools, connect Slack — one menu
 stratus chat      # talk; the conversation persists
 ```
 

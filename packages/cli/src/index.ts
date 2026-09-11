@@ -54,6 +54,8 @@ import {
   preflightPlugin,
   readPluginManifest,
   riskFloorFor,
+  PluginConfigError,
+  PluginManifestError,
   type LoadedPlugin,
 } from '@stratusagent/plugins';
 import {
@@ -174,6 +176,7 @@ import {
   type ChannelCredentials,
   type CredentialProviderName,
   type CredentialsFile,
+  type PluginConfigBlock,
   type PluginsConfig,
   type RosterEntry,
   type RuntimeSelection,
@@ -409,13 +412,133 @@ export const compareVersions = (a: string, b: string): number => {
  * both land in the caller's error handler, so a Windows setup would report
  * that it could not install and leave Slack and the dashboard missing.
  *
- * Every package name reaching the shell is a constant in this file, so
- * there is nothing user-supplied here for it to re-parse.
+ * `shell: true` concatenates the arguments without escaping — Node 24
+ * deprecates the pattern as DEP0190 for exactly that reason — so what may
+ * reach it is fenced by `isInstallablePackageName` below rather than by an
+ * argument about where the names come from. That argument used to be
+ * "every name here is a constant in this file", and it stopped being true
+ * the moment the Plugins menu started listing package names read from a
+ * config.
  */
 export const npmNeedsShell = (platform: NodeJS.Platform): boolean => platform === 'win32';
 
+/**
+ * Whether a string is a specifier npm would install — and therefore one
+ * safe to hand a shell.
+ *
+ * npm's own name grammar, which is far narrower than anything a shell
+ * treats as special: an optional `@scope/`, then lowercase alphanumerics
+ * with `-`, `_` and `.`, no leading `.` or `_`, 214 characters at most,
+ * and an optional `@version` of the same restricted alphabet. Nothing that
+ * matches contains a space, a quote, or a metacharacter — not `&`, not
+ * `|`, not `` ` ``, and not cmd.exe's `^` — so the fence and the
+ * correctness check are one check.
+ *
+ * The version half is deliberately not npm's full range syntax: `^1.0.0`
+ * is a valid range and `^` is cmd.exe's escape character. Only the plain
+ * forms this CLI actually passes are accepted, and a range that needs more
+ * is a thing to install by hand.
+ *
+ * A config key that fails this was never installable, so refusing costs no
+ * capability: `npm install -g 'pkg & whoami'` is not a thing that works
+ * and quietly becomes a thing that runs.
+ */
+/**
+ * The columns `selectInteractive` spends before an option's own text.
+ *
+ * Two for the selection marker, then `${n}) ` — so it grows with the option
+ * *count*, since every row is fitted to the widest prefix any row will
+ * have. A menu whose length a config decides therefore cannot reserve a
+ * constant: five first-party plugins plus five from a `plugins` block is
+ * ten rows, and `  10) ` is a column wider than `  1) `.
+ *
+ * The extra column is a deliberate spare. `fitMenuRow` trims to exactly its
+ * budget, and a row that fills the last column wraps on terminals that
+ * advance the cursor eagerly — which costs a whole redraw, since the rewind
+ * counts options rather than rendered rows.
+ */
+export const menuPrefixWidth = (optionCount: number): number => `  ${optionCount}) `.length + 1;
+
+/**
+ * npm's package-name grammar, and nothing else: an optional `@scope/`, then
+ * lowercase alphanumerics with `-`, `_` and `.`, no leading `.` or `_`, 214
+ * characters at most.
+ *
+ * This is what a `plugins` config key has to be, because that key is *also*
+ * the module specifier the loader hands `import.meta.resolve`. A version
+ * suffix is a thing npm installs and Node cannot resolve, so a key carrying
+ * one names a plugin that is permanently absent however many times it is
+ * installed.
+ */
+/**
+ * Whether one soul's allowlist reaches a tool a plugin contributes.
+ *
+ * The second gate, in the form both surfaces need it: `stratus plugins`
+ * asks it per tool to build the who-can-call-what table, and the setup
+ * menu asks it per agent to say what enabling just granted. An omitted
+ * list is every registered tool; a *declared namespace* is matched by
+ * overlap rather than by prefix, since `mcp.linear.*` sits under a granted
+ * `mcp.*` and neither is the other's prefix.
+ *
+ * Shared rather than written twice, and this is the fifth time on this
+ * change that mattered: a menu that answers "who can call it" differently
+ * from the command that reports it is two answers to one question.
+ */
+const soulGrantsTool = (
+  tools: readonly string[] | undefined,
+  name: string,
+  discovered: boolean,
+): boolean => {
+  if (tools === undefined) {
+    return true;
+  }
+  return discovered
+    ? tools.some((granted) => toolScopesOverlap(granted, name))
+    : matchesToolAllowlist(name, tools);
+};
+
+export const isPackageName = (name: string): boolean =>
+  name.length <= 214 && /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name);
+
+/**
+ * A package name, optionally with a plain version — what npm may be handed.
+ *
+ * A wider question than `isPackageName` and a different one: the updater
+ * installs `@stratusagent/cli@latest`, which is a valid thing to install and
+ * an invalid thing to import. Using one predicate for both let a versioned
+ * `plugins` key through the menu's install offer.
+ *
+ * The version half is deliberately not npm's full range syntax: `^1.0.0` is
+ * a valid range and `^` is cmd.exe's escape character. Only the plain forms
+ * this CLI actually passes are accepted, and a range that needs more is a
+ * thing to install by hand.
+ */
+export const isInstallableSpecifier = (specifier: string): boolean => {
+  const scoped = specifier.startsWith('@');
+  // Split on the `@` that introduces a version, never the one that opens a
+  // scope — `@scope/pkg` has both and only the first is part of the name.
+  const at = specifier.indexOf('@', scoped ? 1 : 0);
+  const name = at === -1 ? specifier : specifier.slice(0, at);
+  const version = at === -1 ? undefined : specifier.slice(at + 1);
+  if (!isPackageName(name)) {
+    return false;
+  }
+  return version === undefined || /^[a-z0-9][a-z0-9.-]*$/.test(version);
+};
+
 const defaultPackageInstaller: PackageInstaller = async (packages) => {
   const { spawn } = await import('node:child_process');
+  // The fence, at the one place that touches a shell, so every caller is
+  // behind it — including ones added later, which is how the old invariant
+  // was lost.
+  const rejected = packages.filter((entry) => !isInstallableSpecifier(entry));
+  if (rejected.length > 0) {
+    return {
+      ok: false,
+      message: `${rejected.join(', ')} ${rejected.length === 1 ? 'is not a package name' : 'are not package names'} npm can install. `
+        + 'Fix the key in your config, or install it yourself.',
+    };
+  }
   return new Promise<PackageInstallResult>((resolve) => {
     // npm's own output is inherited rather than captured: a global install
     // runs for tens of seconds, and a silent one is indistinguishable from
@@ -873,8 +996,10 @@ Usage:
 
 Commands:
   setup            Menu-driven onboarding: pick a provider, sign in (Claude
-                   subscription or API key), create your agent, connect it to
-                   Slack, and test it — settings go to ~/.stratus/config.json,
+                   subscription or API key), create your agent, enable the
+                   plugins it may use, connect it to Slack, choose who
+                   approves gated calls unattended, and test it — settings
+                   go to ~/.stratus/config.json,
                    sign-ins and channel tokens to ~/.stratus/credentials.json
                    (0600). Save & finish offers to install any optional
                    package your answers imply (the Slack channel, the control
@@ -4545,6 +4670,1032 @@ export const runSetup = async (
     };
   };
 
+  /**
+   * What a plugin's block should say when setup writes it, beyond
+   * `enabled`. Only settings without which the plugin is installed,
+   * enabled, and still useless — the failure this menu exists to stop
+   * anyone reaching by accident:
+   *
+   * - `tool-fs` roots are the whole boundary. With none, the plugin loads
+   *   and every call fails "No filesystem roots are configured", which
+   *   reads to an agent as a broken tool rather than an unset one.
+   * - `plugin-mcp` requires `servers`, and its value is a set of endpoints
+   *   only the operator knows. A block written without it is refused at
+   *   load, so this menu offers no one-key enable for it.
+   *
+   * `tool-shell`, `tool-web` and `tool-browser` work from `{ enabled:
+   * true }` — their settings narrow what is already permitted, and the
+   * plugin without them is restrictive rather than broken.
+   */
+  const PLUGIN_SETUP: Record<string, {
+    label: string;
+    grants: string;
+    /** Asked for on enable; the block is not written without an answer. */
+    needs?: { key: string; question: string; placeholder: string; list: boolean };
+    /**
+     * Something setup can neither supply nor check without importing the
+     * plugin — which this menu never does. Printed on enable rather than
+     * blocking, because unlike a missing `roots` it is usually already
+     * satisfied and setup cannot tell which.
+     */
+    note?: string;
+    /**
+     * A setting setup cannot invent, and the reason. The refusal is about
+     * the setting being absent, never about the package: a block that
+     * already has it is enabled and disabled like any other.
+     */
+    byHand?: { key: string; reason: string };
+  }> = {
+    '@stratusagent/tool-fs': {
+      label: 'Files',
+      grants: 'fs.read, fs.list, fs.search, fs.write',
+      needs: {
+        key: 'roots',
+        question: 'Which directories may agents read and write? (comma-separated, e.g. ~/notes): ',
+        placeholder: '~/notes',
+        list: true,
+      },
+    },
+    '@stratusagent/tool-shell': { label: 'Shell', grants: 'shell.run' },
+    '@stratusagent/tool-web': { label: 'Web', grants: 'web.fetch' },
+    '@stratusagent/tool-browser': {
+      label: 'Browser',
+      grants: 'browser.goto, browser.read, browser.screenshot, browser.act',
+      // The package depends on `playwright-core`, which downloads no
+      // browser on purpose — a few megabytes rather than 150. So the
+      // browser is one you already have or one you fetch, and without
+      // either every call fails: enabled and unusable, the state this menu
+      // exists to prevent. Setup cannot check for it without importing the
+      // plugin, so it says so instead.
+      note: 'It drives a browser you already have. If none is found, run `npx playwright install chromium`, '
+        + 'or point it at yours with `channel` or `executablePath` under plugins["@stratusagent/tool-browser"].',
+    },
+    '@stratusagent/plugin-mcp': {
+      label: 'MCP bridge',
+      grants: 'mcp.<server>.<tool>, discovered at connect',
+      // Setup checks that `servers` is an object and stops there. What
+      // each entry needs — exactly one of `command` or `url`, and the
+      // rest of `resolveServerSpec` — is the plugin's rule, and both ways
+      // to apply it here are worse than not applying it: a copy in this
+      // file drifts from the plugin the first time it gains a transport,
+      // and importing the package to ask means calling `createPlugin`,
+      // which the loader's own comment says may open a socket. So the
+      // menu says what it did not check instead of implying it did. The
+      // claim that needs qualifying is the grant line's "the next time
+      // the daemon starts", which is a prediction about a block setup
+      // never wrote.
+      note: 'Setup checked that servers is a block and no further — reading what is inside it means loading the plugin, '
+        + 'which setup never does. If the bridge refuses an entry, the daemon says "plugin @stratusagent/plugin-mcp did not load" '
+        + 'at startup, and `stratus serve` shows that directly.',
+      byHand: {
+        key: 'servers',
+        reason: 'it needs a servers block naming each MCP server — see docs/reference/config.md',
+      },
+    },
+  };
+
+  /** Every package this menu lists: the first-party set, plus whatever is already configured. */
+  const pluginPackages = (): string[] => [
+    ...FIRST_PARTY_CAPABILITY_PACKAGES,
+    ...Object.keys(state.plugins ?? {}).filter((name) => !FIRST_PARTY_CAPABILITY_PACKAGES.includes(name)),
+  ];
+
+  const pluginEnabled = (name: string): boolean => {
+    const block = state.plugins?.[name];
+    return block !== undefined && block.enabled !== false;
+  };
+
+  /**
+   * What the daemon would refuse about a block, or `undefined` if it would
+   * take it — the loader's own preflight, not a third opinion.
+   *
+   * `stratus plugins` already runs `preflightPlugin` to answer exactly this
+   * about an enabled plugin, and the menu asking it a different way was how
+   * three rounds of review found a different hand-rolled check short of the
+   * real rule: a `servers` that is a string, `roots` that are numbers, a
+   * `timeoutMs` that is not an integer. The manifest's schema knows all
+   * three, so the fix is to ask it rather than to keep guessing at it.
+   *
+   * A package that will not resolve has no manifest to ask, and that is
+   * `undefined` too: setup cannot preflight what is not installed, and
+   * saying nothing is wrong is the same answer it has always given there.
+   */
+  const pluginConfigProblem = async (name: string, block: PluginConfigBlock): Promise<string | undefined> => {
+    try {
+      const { manifest, directory } = await readPluginManifest(name, {
+        resolve: (target) => import.meta.resolve(target),
+      });
+      await preflightPlugin(manifest, directory, block as JsonObject, workspacesDirPath(env));
+      return undefined;
+    } catch (error) {
+      // A package that will not *resolve* is not a verdict about the block —
+      // `host.resolve` throws a plain Error for that, and setup has always
+      // answered "nothing known" there. Everything the loader itself
+      // refuses is: a schema mismatch and a bad `toolRisks` override raise
+      // `PluginConfigError`, while an unparseable manifest and a skill file
+      // that is missing, unreadable or outside the package raise
+      // `PluginManifestError`. Catching only the first read the second as
+      // "no problem" and enabled a plugin the daemon rejects before it
+      // registers anything.
+      if (error instanceof PluginConfigError || error instanceof PluginManifestError) {
+        return error.message;
+      }
+      return undefined;
+    }
+  };
+
+  /**
+   * What setup did not check about this plugin, or `undefined` if there is
+   * nothing left unchecked.
+   *
+   * One concept, because the two cases print the same kind of sentence and
+   * the verdict below has to be qualified for both. `preflightPlugin` never
+   * imports the package — that is what lets it answer without starting
+   * anything — so a plugin can pass every check here and still be refused
+   * by `loadPlugins` for not exporting `createPlugin(config)`, returning
+   * something that is not a plugin, or failing `setup()`. For the packages
+   * this file knows, that is not a real risk and only the declared caveat
+   * applies; for one it does not know, it is exactly the risk, and reading
+   * an absent `PLUGIN_SETUP` entry as "nothing to declare" claimed a
+   * readiness setup had no way to establish.
+   */
+  const uncheckedReason = (name: string): string | undefined => {
+    const setup = PLUGIN_SETUP[name];
+    if (setup === undefined) {
+      return `Setup read ${name}'s manifest and no more — it never loads a package, so whether it exports createPlugin(config) `
+        + 'is something only a daemon start will tell you. If it does not, the daemon says "plugin '
+        + `${name} did not load" and registers nothing.`;
+    }
+    return setup.note;
+  };
+
+  /**
+   * The tool names a plugin contributes, read from its manifest.
+   *
+   * The manifest rather than `PLUGIN_SETUP.grants`, which is display text
+   * and exists only for the packages this file knows: a third-party plugin
+   * has real names too, and they are what decides whether a soul's
+   * `tools:` list already reaches it. `undefined` where no manifest can be
+   * read — a question setup declines rather than answers wrongly.
+   */
+  const pluginContributions = async (
+    name: string,
+  ): Promise<{ packageName: string; tools: string[]; namespaces: string[]; skills: string[] } | undefined> => {
+    try {
+      const { manifest } = await readPluginManifest(name, {
+        resolve: (target) => import.meta.resolve(target),
+      });
+      return {
+        // The manifest's own name, which is *not* the config key: the same
+        // package reached through an alias or a subpath specifier is a
+        // different key and the same `packageName`, and the loader
+        // qualifies skills with this one. Carried out of here so callers
+        // cannot reach for the specifier by accident.
+        packageName: manifest.packageName,
+        tools: manifest.contributes.tools.map((tool) => tool.name),
+        namespaces: manifest.contributes.toolsDiscovered.map((entry) => entry.namespace),
+        // The qualified form the loader stages them under, which is what a
+        // `skills:` entry has to match.
+        skills: manifest.contributes.skills.map((skill) => `${manifest.packageName}:${skill.id}`),
+      };
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
+   * Whether the setting a plugin is useless without resolves to something
+   * for one agent, given the block that would be written.
+   *
+   * `resolvePluginAgentConfig` shallow-merges, so a per-agent value
+   * *replaces* the fleet-wide one rather than extending it. That is why
+   * `agents.<id>.roots: []` is how a config takes one agent out, and why a
+   * fleet-wide list says nothing about an agent that overrides it.
+   */
+  const pluginSettingReaches = (
+    block: PluginConfigBlock | undefined,
+    key: string,
+    agentId: string,
+  ): boolean => {
+    const agents = block?.agents;
+    const own = typeof agents === 'object' && agents !== null && !Array.isArray(agents)
+      ? (agents as Record<string, unknown>)[agentId]
+      : undefined;
+    const value = typeof own === 'object' && own !== null && !Array.isArray(own)
+      && key in (own as Record<string, unknown>)
+      ? (own as Record<string, unknown>)[key]
+      : block?.[key];
+    // Nonempty is this menu's own question — "would an agent get anything"
+    // — and the only part of it the manifest does not answer, since a
+    // schema that permits `roots: []` is right to. Whether the entries are
+    // the right *type* is the manifest's, checked by `pluginConfigProblem`
+    // before enabling, so a second test for it here would be the copy this
+    // file keeps growing.
+    return Array.isArray(value) && value.length > 0;
+  };
+
+  const pluginsSummary = (): string => {
+    const enabled = pluginPackages().filter((name) => pluginEnabled(name));
+    if (enabled.length === 0) {
+      return 'none — agents have no tools beyond the built-ins';
+    }
+    return enabled.map((name) => name.replace('@stratusagent/', '')).join(', ');
+  };
+
+  /**
+   * Enabling is only the second of two gates, and this menu owns just that
+   * one. The soul's `tools:` list is the other, and setup does not edit
+   * souls — so the line to paste is printed rather than applied, which is
+   * also the honest thing: which agent gets a tool is not a decision this
+   * menu has the standing to make.
+   */
+  const printSoulGrantLine = async (name: string): Promise<void> => {
+    const grants = PLUGIN_SETUP[name]?.grants;
+    const first = grants?.split(',')[0]?.trim();
+    writeLine(streams.stdout);
+
+    // A soul with no `tools:` key is allowlisted for *every* registered
+    // tool — `matchesToolAllowlist` treats an omitted list as permissive,
+    // and the built-in `stratus` agent has none, so a fresh install always
+    // has one. Enabling a plugin therefore can grant capability
+    // immediately, and saying "no agent can call it yet" would understate
+    // what just happened in the most common configuration there is. Read
+    // the roster and say which of the two it was.
+    const { entries, loaded } = await channelRoster();
+    if (!loaded) {
+      // The roster refused to load, so `entries` is empty — which is not
+      // evidence that every soul has a `tools:` list. Claiming nothing can
+      // call the plugin would be a statement about a file this command
+      // could not read, and false the moment the collision is fixed if any
+      // soul omits its allowlist. Same posture as the Channels menu.
+      writeLine(streams.stdout, `${name} is enabled. Who can call it is unknown until the roster loads — fix the error above, then run \`stratus plugins\`.`);
+      return;
+    }
+    const contributed = await pluginContributions(name);
+    const label = (list: ChannelRosterEntry[]): string =>
+      list.map((entry) => `${entry.soul.agent.name} (${entry.soul.agent.id})`).join(', ');
+    // Every contributed tool name, concrete and discovered alike. A
+    // discovered namespace is matched by overlap rather than prefix, which
+    // `soulGrantsTool` handles; both are things a `tools:` entry can reach.
+    const everyTool = contributed === undefined ? [] : [...contributed.tools, ...contributed.namespaces];
+    // What one soul's allowlist actually reaches — the *names*, not a
+    // yes/no. `tools: [fs.read]` grants one of the four tool-fs
+    // contributes, and reporting the plugin as callable said all four were.
+    //
+    // Reported as the soul's own **entries**, never as the plugin's
+    // declarations, because `toolScopesOverlap` is overlap and not
+    // containment: a soul granting `mcp.linear.get_issue` overlaps a
+    // declared `mcp.*` — which is the right test for "does this soul reach
+    // the plugin" and the wrong thing to print, since it read back as the
+    // soul granting the whole namespace. An entry says exactly what it
+    // says, and a discovered namespace has no tool names to enumerate
+    // until the bridge connects.
+    const reached = (entry: ChannelRosterEntry): string[] => {
+      const tools = entry.soul.agent.tools;
+      if (tools === undefined) {
+        return everyTool;
+      }
+      if (contributed === undefined) {
+        // No manifest, no names to test — no claim either way about a soul
+        // that named something specific.
+        return [];
+      }
+      return tools.filter((granted) =>
+        contributed.tools.some((tool) => soulGrantsTool([granted], tool, false))
+        || contributed.namespaces.some((namespace) => soulGrantsTool([granted], namespace, true)));
+    };
+    /** Concrete contributed tools no entry of this soul's reaches. */
+    const missedTools = (entry: ChannelRosterEntry): string[] => {
+      const tools = entry.soul.agent.tools;
+      if (tools === undefined || contributed === undefined) {
+        return [];
+      }
+      // Only the concrete ones: a declared namespace registers its tools at
+      // connect time, so setup cannot say which of them an entry misses.
+      return contributed.tools.filter((tool) => !soulGrantsTool(tools, tool, false));
+    };
+
+    // Allowlisted is not the same as able to call it. `tool-fs` enabled
+    // from a per-agent `roots` block leaves every *other* allowlisted soul
+    // holding tools that throw "No filesystem roots are configured" on the
+    // first call. Naming it as an agent that can call them would report the
+    // installed-enabled-and-useless state this menu exists to prevent as
+    // the success case.
+    const needsKey = PLUGIN_SETUP[name]?.needs?.key;
+    const settingReaches = (entry: ChannelRosterEntry): boolean => needsKey === undefined
+      || pluginSettingReaches(state.plugins?.[name], needsKey, entry.soul.agent.id);
+    const allowlisted = entries.filter((entry) => reached(entry).length > 0);
+    const callable = allowlisted.filter(settingReaches);
+    const unset = allowlisted.filter((entry) => !settingReaches(entry));
+    const permissive = callable.filter((entry) => entry.soul.agent.tools === undefined);
+    const explicit = callable.filter((entry) => entry.soul.agent.tools !== undefined);
+    // The key travels with the agents rather than beside them, so the
+    // branches below cannot ask about one and read the other.
+    const shortfall = needsKey !== undefined && unset.length > 0
+      ? { key: needsKey, agents: unset, one: unset.length === 1 }
+      : undefined;
+
+    // Skills are the other half of what a plugin contributes and they are
+    // gated the other way round: an omitted `skills:` list is **none**,
+    // deliberately, because a skill silently changing how an agent behaves
+    // is worse than one it has to be told about. So no soul gains them by
+    // default, and a line about tools cannot speak for them.
+    const skillLine = (): void => {
+      if (contributed === undefined || contributed.skills.length === 0) {
+        return;
+      }
+      const one = contributed.skills.length === 1;
+      writeLine(streams.stdout, `It also contributes ${one ? 'a skill' : 'skills'}: ${contributed.skills.join(', ')}.`);
+      // Every id, not the first: `matchesSkillAllowlist` selects an exact id
+      // or a package wildcard, so a one-item list from a plural sentence
+      // grants one skill and silently leaves the rest off.
+      //
+      // The wildcard is built from the *manifest's* package name, never the
+      // config key this menu was called with. They are the same for every
+      // ordinary install and differ for an alias or a subpath specifier,
+      // and the loader qualifies skills with the manifest's — so a wildcard
+      // spelled from the key would grant nothing while the exact ids beside
+      // it worked, which is the worst way for two halves of one sentence to
+      // disagree.
+      writeLine(streams.stdout, `Those are not granted by \`tools:\` and no soul gets them by default — an omitted \`skills:\` list is none. Add \`skills: [${contributed.skills.join(', ')}]\` to grant ${one ? 'it' : 'them'}${one ? '' : `, or \`skills: [${contributed.packageName}:*]\` for every skill this package contributes`}.`);
+    };
+
+    if (callable.length > 0) {
+      if (permissive.length > 0) {
+        writeLine(streams.stdout, `${name} is enabled — and ${label(permissive)} ${permissive.length === 1 ? 'has' : 'have'} no \`tools:\` list, which means every registered tool.`);
+        writeLine(streams.stdout, uncheckedReason(name) !== undefined
+          ? `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} what ${permissive.length === 1 ? 'that agent' : 'those agents'} would gain at the next daemon start — subject to the caveat above, which setup did not check.`
+          : `So ${grants ?? 'what it contributes'} ${permissive.length === 1 ? 'is' : 'are'} callable by ${permissive.length === 1 ? 'that agent' : 'those agents'} the next time the daemon starts.`);
+        writeLine(streams.stdout, 'Give a soul a `tools:` list to narrow that. `stratus plugins` shows who can call what.');
+      }
+      for (const entry of explicit) {
+        // Per soul, and naming what its list *matched* — an allowlist can
+        // grant one of four tools, and saying the plugin is callable there
+        // reported the other three as available when the runtime denies
+        // them.
+        const names = reached(entry);
+        const rest = missedTools(entry);
+        writeLine(streams.stdout, `${name} is enabled — and ${entry.soul.agent.name} (${entry.soul.agent.id}) already grants ${names.join(', ')} in \`tools:\`${rest.length > 0 ? `, but not ${rest.join(', ')}` : ''}.`);
+      }
+      if (shortfall !== undefined) {
+        writeLine(streams.stdout, `${label(shortfall.agents)} ${shortfall.one ? 'is' : 'are'} allowlisted too, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} — every call would fail until it is, under plugins["${name}"].agents.`);
+      }
+      skillLine();
+      return;
+    }
+
+    if (shortfall !== undefined) {
+      // Allowlisted souls, every one of them short the setting: neither the
+      // "callable by" line above nor the "no soul names it" one below is
+      // true, and each would send the operator to fix the wrong gate.
+      writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — ${label(shortfall.agents)} ${shortfall.one ? 'is' : 'are'} allowlisted for it, but ${shortfall.key} is not set for ${shortfall.one ? 'it' : 'them'} and every call would fail.`);
+      writeLine(streams.stdout, `Set ${shortfall.key} for ${shortfall.one ? 'it' : 'them'} under plugins["${name}"].agents, then run \`stratus plugins\` to see the whole chain.`);
+      skillLine();
+      return;
+    }
+
+    if (everyTool.length === 0) {
+      // A plugin that contributes no tools at all — skills only, which is a
+      // valid manifest. Sending the operator to edit `tools:` would name
+      // the wrong key entirely.
+      if (contributed !== undefined && contributed.skills.length > 0) {
+        writeLine(streams.stdout, `${name} is enabled. It contributes no tools, so there is nothing for a \`tools:\` list to name.`);
+        skillLine();
+        return;
+      }
+      writeLine(streams.stdout, `${name} is enabled. What it contributes is in its manifest — run \`stratus plugins\` to see it and who can reach it.`);
+      return;
+    }
+
+    writeLine(streams.stdout, `${name} is enabled. No agent can call it yet — every soul in the roster has a \`tools:\` list and none of them names what it contributes, and a soul grants tools by naming them:`);
+    writeLine(streams.stdout, `  tools: [${everyTool[0] as string}]`);
+    writeLine(streams.stdout, `Add it to the \`tools:\` list in ${state.soulPath ?? 'your agent\'s soul file'}, then run \`stratus plugins\` to see the whole chain and what it contributes.`);
+    skillLine();
+  };
+
+  const choosePlugins = async (): Promise<void> => {
+    while (true) {
+      const packages = pluginPackages();
+      // Every package plus Back — the count the widest prefix comes from.
+      const reserved = menuPrefixWidth(packages.length + 1);
+      const options = packages.map((name) => {
+        const short = name.replace('@stratusagent/', '');
+        const installed = packageInstalled(name, env);
+        const status = !installed
+          ? '— not installed'
+          : pluginEnabled(name)
+            ? '✓ enabled'
+            : 'installed, not enabled';
+        return fitMenuRow(short.padEnd(18) + status, reserved);
+      });
+      options.push('Back');
+
+      const choice = await prompter.select(
+        'Plugins — what your agents can do (installing one grants nothing on its own)',
+        options,
+        { footnote: `More plugins — ${PLUGIN_MARKETPLACE_URL}` },
+      );
+      if (choice.kind !== 'index' || choice.index === options.length - 1) {
+        return;
+      }
+      const name = packages[choice.index];
+      if (!name) {
+        return;
+      }
+      await choosePlugin(name);
+    }
+  };
+
+  const choosePlugin = async (name: string): Promise<void> => {
+    const setup = PLUGIN_SETUP[name];
+    const installed = packageInstalled(name, env);
+    const enabled = pluginEnabled(name);
+
+    // Only a block still *missing* that setting is refused. A configured
+    // one switched off — by this menu, which promises its settings are kept
+    // for turning it back on — must be able to come back, or the promise is
+    // false and the switch is one-way.
+    const byHandValue = setup?.byHand !== undefined ? state.plugins?.[name]?.[setup.byHand.key] : undefined;
+    // Present *and* something the loader would take. Presence alone read
+    // `servers: "invalid"` as a config to switch back on; asking the
+    // manifest instead of inventing a shape test here is the same move the
+    // enable path makes, and there is one rule between them.
+    const byHandProblem = setup?.byHand !== undefined && byHandValue !== undefined
+      ? await pluginConfigProblem(name, state.plugins?.[name] ?? {})
+      : undefined;
+    const configuredByHand = byHandValue !== undefined && byHandProblem === undefined;
+    if (setup?.byHand && !enabled && !configuredByHand) {
+      writeLine(streams.stdout);
+      writeLine(streams.stdout, `${name} contributes ${setup.grants}.`);
+      writeLine(streams.stdout, `Setup does not enable it: ${setup.byHand.reason}.`);
+      if (byHandProblem !== undefined) {
+        // Present, and not what the loader will take. Without this the
+        // refusal reads as "you have not set it", which sends an operator
+        // who plainly has to look for a menu bug rather than at the value.
+        writeLine(streams.stdout, `A daemon would refuse the block you have: ${byHandProblem}`);
+      }
+      if (!installed) {
+        writeLine(streams.stdout, `Install it with: npm install -g ${name}`);
+      }
+      await prompter.ask('Press Enter to return to the menu… ');
+      return;
+    }
+
+    if (!installed) {
+      // Enabled with the package gone — an uninstall, or a config copied
+      // from another machine. The block is exactly what an operator would
+      // want to clear, and reaching it used to require installing the
+      // package first in order to switch it off.
+      //
+      // A key that could never end up loaded is offered no install: the row
+      // comes from `Object.keys(state.plugins)`, so a typo, a stray
+      // character or a copied `pkg@1.2.3` arrives here as a package name.
+      //
+      // The bare-name rule, not the installable-specifier one: this key is
+      // what the loader hands `import.meta.resolve`, and Node does not
+      // resolve a version suffix — so `npm install -g @scope/foo@latest`
+      // succeeds and the plugin stays "not installed" forever. Switching it
+      // off stays available either way; a block keyed by something that can
+      // never load is exactly one to clear.
+      const installable = isPackageName(name);
+      const actions = enabled
+        ? [...(installable ? ['Install it with npm install -g'] : []), 'Switch it off in the config', 'Back']
+        : [...(installable ? ['Install it with npm install -g, then enable it'] : []), 'Back'];
+      if (!installable) {
+        writeLine(streams.stdout);
+        writeLine(streams.stdout, isInstallableSpecifier(name)
+          ? `${name} carries a version, and a plugins key is also the module specifier a daemon imports — Node does not resolve one, so installing it would leave the plugin absent. Key the block by the package name alone.`
+          : `${name} is not a package name npm can install — check the key in your plugins config.`);
+      }
+      const answer = await prompter.select(
+        enabled
+          ? `${name} is enabled in your config but not installed, so a daemon registers nothing for it.`
+          : `${name} is not installed. It contributes ${setup?.grants ?? 'its own tools'}.`,
+        actions,
+      );
+      if (answer.kind !== 'index' || answer.index === actions.length - 1) {
+        return;
+      }
+      if (enabled && answer.index === actions.length - 2) {
+        disablePlugin(name);
+        return;
+      }
+      writeLine(streams.stdout, `Running: npm install -g ${name}`);
+      const result = await (env.packageInstaller ?? defaultPackageInstaller)([name])
+        .catch((error: unknown) => ({
+          ok: false,
+          message: error instanceof Error ? error.message : String(error),
+        }));
+      if (!result.ok) {
+        writeLine(streams.stderr, `Could not install: ${result.message}`);
+        writeLine(streams.stderr, `Run \`npm install -g ${name}\` yourself, then re-run setup to enable it.`);
+        return;
+      }
+      writeLine(streams.stdout, `Installed ${name}.`);
+      // Enabling proceeds on npm's exit code, not a second resolve: a
+      // package written into the global prefix a moment ago need not be
+      // resolvable from THIS process, whose module resolution was fixed
+      // when it started. The same reasoning the optional-package step
+      // already uses for the dashboard.
+      await enablePlugin(name);
+      return;
+    }
+
+    if (!enabled) {
+      const answer = await prompter.select(
+        `${name} is installed but not enabled. It contributes ${setup?.grants ?? 'its own tools'}.`,
+        ['Enable it', 'Back'],
+      );
+      if (answer.kind !== 'index' || answer.index === 1) {
+        return;
+      }
+      await enablePlugin(name);
+      return;
+    }
+
+    const current = state.plugins?.[name] ?? {};
+    const actions = setup?.needs
+      ? [`Change ${setup.needs.key}`, 'Disable it', 'Back']
+      : ['Disable it', 'Back'];
+    const answer = await prompter.select(
+      `${name} is enabled.${setup?.needs && Array.isArray(current[setup.needs.key])
+        ? ` ${setup.needs.key}: ${(current[setup.needs.key] as string[]).join(', ')}`
+        : ''}`,
+      actions,
+    );
+    if (answer.kind !== 'index' || answer.index === actions.length - 1) {
+      return;
+    }
+    if (setup?.needs && answer.index === 0) {
+      await enablePlugin(name);
+      return;
+    }
+    disablePlugin(name);
+  };
+
+  /**
+   * Switched off, never deleted. The loader treats `enabled: false` and an
+   * absent key the same, but the operator does not: a block carries
+   * `agents` overrides and `toolRisks` that setup never asked about, and
+   * dropping them would be #161 again — a menu deleting config it does not
+   * own, one plugin at a time instead of all four blocks at once.
+   */
+  const disablePlugin = (name: string): void => {
+    state.plugins = {
+      ...(state.plugins ?? {}),
+      [name]: { ...(state.plugins?.[name] ?? {}), enabled: false },
+    };
+    writeLine(streams.stdout, packageInstalled(name, env)
+      ? `${name} is switched off. The package is still installed, and its settings are kept for when you turn it back on.`
+      : `${name} is switched off, so a daemon stops trying to load it. Its settings are kept for when you install it again.`);
+  };
+
+  const enablePlugin = async (name: string): Promise<void> => {
+    const setup = PLUGIN_SETUP[name];
+    const existing = state.plugins?.[name] ?? {};
+    const block: PluginConfigBlock = { ...existing, enabled: true };
+    // Whether the prompt below kept a per-agent value rather than writing a
+    // fleet-wide one. Said after the block is checked, not before: the
+    // alternative printed "keeping your per-agent roots" and then refused
+    // to enable, which is two answers to one question.
+    let keptPerAgent = false;
+
+    if (setup?.needs) {
+      const needsKey = setup.needs.key;
+      const prior = existing[needsKey];
+      const prefill = Array.isArray(prior) ? (prior as string[]).join(', ') : undefined;
+      const answer = (await prompter.ask(
+        setup.needs.question,
+        ...(prefill !== undefined ? [{ prefill }] : []),
+      )).trim();
+      const values = answer.split(',').map((value) => value.trim()).filter((value) => value.length > 0);
+      if (values.length === 0) {
+        // A per-agent block satisfies this on its own: the plugin resolves
+        // its settings per session, so `agents.<id>.roots` with nothing at
+        // the top level is a working config — and a narrower one than any
+        // fleet-wide answer this prompt could take. Demanding a global
+        // value here would push an operator to widen access to get past a
+        // menu.
+        //
+        // Deleted, not merely left unwritten: `block` is a copy of the
+        // existing one, so keeping the key would leave every unoverridden
+        // agent on the old fleet-wide roots while the line below says
+        // nothing is granted fleet-wide. Saying access narrowed while it
+        // did not is the worst way for this menu to be wrong.
+        //
+        // Only an interactive run reaches this with a key to delete: the
+        // prefill is editable on a TTY, while the piped prompter returns it
+        // for an empty line. So there is no test — `setupInput` forces the
+        // non-interactive path, where an empty answer means "keep" and this
+        // deletes a key that was never there.
+        delete block[needsKey];
+        // Asked of the block as it now stands, and only of agents the
+        // roster actually serves. An override left behind by a deleted
+        // agent grants nobody anything: every served agent would resolve
+        // an empty list and every call would fail, while this menu
+        // reported the plugin enabled — the same "configured and useless"
+        // state the prompt exists to prevent, reached by the branch that
+        // was supposed to allow the narrow config. An unreadable roster
+        // cannot answer, so it does not qualify anything either.
+        const { entries, loaded } = await channelRoster();
+        const coveredPerAgent = loaded
+          && entries.some((entry) => pluginSettingReaches(block, needsKey, entry.soul.agent.id));
+        if (!coveredPerAgent) {
+          // Otherwise not written at all rather than written empty: an
+          // enabled block with no roots anywhere is the exact "installed,
+          // enabled, and useless" state this menu exists to keep anyone
+          // from reaching by accident.
+          //
+          // "Left as it was" is the whole outcome, and what that means
+          // differs by where the operator came from. Reaching this by
+          // erasing an existing value — Change roots, prefill deleted —
+          // leaves the old value in the saved config, because the return
+          // is before `state.plugins` is written. Saying "it grants
+          // nothing without roots" there describes a block that still has
+          // roots, and an operator who meant to take access away would
+          // read it as confirmation. Setup names what it kept instead, and
+          // how to actually drop it, rather than dropping it on a guess:
+          // an empty answer is not an unambiguous "revoke", and this menu
+          // does not widen or narrow a boundary the operator did not.
+          const kept = existing[needsKey];
+          writeLine(streams.stdout, Array.isArray(kept) && kept.length > 0
+            ? `Nothing entered, so ${name} kept the ${needsKey} it already had (${kept.join(', ')}) — setup did not remove them. Edit plugins["${name}"].${needsKey} to change what is reachable.`
+            : `Nothing entered, so ${name} was left as it was — it grants nothing without ${needsKey}.`);
+          return;
+        }
+        keptPerAgent = true;
+      } else {
+        block[needsKey] = values;
+      }
+    }
+
+    // The block that would be *written*, not the one that was there. Asking
+    // before the prompt meant `Change roots` — the action offered precisely
+    // to repair a bad value — refused on the value it exists to replace,
+    // and an operator had no way through this menu to fix a setting this
+    // menu owns. Settings it does not own are still caught here: the
+    // replacement is folded in first, and whatever remains wrong is wrong
+    // in the block a daemon would be handed.
+    const problem = await pluginConfigProblem(name, block);
+    if (problem !== undefined) {
+      writeLine(streams.stdout);
+      // "was not enabled" is only true where the block was not already
+      // enabled. Reached from the install action on a config that already
+      // says `enabled: true`, this returns before touching `state`, so the
+      // old block survives and Save writes it — a daemon then tries the
+      // package it just installed and refuses it, while setup had said it
+      // was not enabled. Report what is actually there, and name the way
+      // out; switching it off is the operator's call, not this branch's,
+      // for the same reason the roots prompt does not revoke on a blank
+      // line.
+      writeLine(streams.stdout, existing.enabled === false || existing.enabled === undefined
+        ? `${name} was not enabled — a daemon would refuse these settings: ${problem}`
+        : `${name} is still enabled in your config, and a daemon would refuse these settings: ${problem}`);
+      writeLine(streams.stdout, existing.enabled === false || existing.enabled === undefined
+        ? 'Fix that in your config, then enable it here. `stratus plugins` reports the same check.'
+        : 'Fix that in your config, or switch the plugin off here so a daemon stops trying to load it. `stratus plugins` reports the same check.');
+      return;
+    }
+    if (keptPerAgent && setup?.needs) {
+      writeLine(streams.stdout, `Keeping the per-agent ${setup.needs.key} already configured for ${name}; nothing is granted fleet-wide.`);
+    }
+
+    state.plugins = { ...(state.plugins ?? {}), [name]: block };
+    const unchecked = uncheckedReason(name);
+    if (unchecked !== undefined) {
+      writeLine(streams.stdout, unchecked);
+    }
+    await printSoulGrantLine(name);
+  };
+
+  /**
+   * Who may answer a gated call while nobody is watching. The two halves
+   * are one decision: `remote` with nobody to ask behaves exactly like
+   * `headless` — the call parks and the timeout denies it — so the mode
+   * and the approvers are set on the same screen rather than in two places
+   * that can disagree.
+   */
+  /**
+   * The daemon's own verdict, not a second version of it. Every round of
+   * review on this row found the hand-written summary short a clause the
+   * engine applies — headless still runs already-authorized calls, an
+   * explicit `timeoutMs: 0` parks instead of denying, the control API can
+   * answer for an agent Slack cannot reach. The row now takes the first
+   * clause `stratus plugins` prints and the submenu carries the rest, so
+   * the two can differ in length and never in fact.
+   */
+  const approvalsSummary = async (): Promise<string[]> => {
+    const mode = state.approvals?.mode ?? 'headless';
+    const { entries, loaded } = await channelRoster();
+    // `headless` is a statement about the policy, not the roster, so it
+    // survives a roster that will not load. Everything else here depends on
+    // who is served: passing `undefined` would make `classifyApprovalReach`
+    // skip the intersection and read every stored token as askable, so the
+    // row would promise Slack asks for a fleet whose gateway refuses to
+    // start. Same rule as the grant line and the Channels menu — an
+    // unreadable roster is not evidence in either direction.
+    if (mode === 'remote' && !loaded) {
+      return ['remote — who can be asked is unknown until the roster loads; fix the error above, then `stratus plugins`'];
+    }
+    return unattendedReachParts(
+      mode,
+      state.approvals ?? {},
+      state.channels,
+      entries.map((entry) => entry.soul.agent.id),
+      apiApprovalsReachable(),
+      env,
+    );
+  };
+
+  /** Whether a parked call could be settled through `POST /api/v1/approvals`. */
+  const apiApprovalsReachable = (): boolean =>
+    packageInstalled('@stratusagent/control-api', env) && state.api?.enabled !== false;
+
+  const approvalReach = async (): Promise<ApprovalReach> => {
+    const { entries, loaded } = await channelRoster();
+    return classifyApprovalReach(
+      state.approvals ?? {},
+      state.channels,
+      loaded ? entries.map((entry) => entry.soul.agent.id) : undefined,
+      env,
+    );
+  };
+
+  /**
+   * Agents that can actually be asked: stored Slack tokens intersected with
+   * the roster. A token that outlived its agent is offered nowhere — the
+   * Slack adapter skips it (`no roster agent with id …`), so approvers
+   * named for it configure a route no call can take. `stratus plugins`
+   * learned this the same way; the Channels menu shows such tokens as
+   * orphans and is the one place they are reachable, to be cleared.
+   *
+   * A roster that failed to load is not evidence of an orphan, so the raw
+   * list stands in that case — the same posture the Channels menu takes,
+   * for the same reason: acting on "no agent has this id" when the roster
+   * could not say who its agents are destroys working configuration.
+   */
+  /**
+   * Agents whose approvers this screen may edit: stored tokens intersected
+   * with the roster, and deliberately *not* gated on the adapter being
+   * installed.
+   *
+   * Reachability and editability are different questions here, and only on
+   * this screen. `offerOptionalPackages()` runs inside `save()`, after the
+   * menu — so on a first install the operator connects Slack under
+   * Channels, opens Approvals, and the package that will be installed
+   * moments later is still absent. Gating the rows on it left the fresh
+   * install with nothing to configure and no way back into the menu,
+   * which is the one path this whole PR exists to make work.
+   *
+   * The *verdict* keeps the package gate, because that is a claim about
+   * what a daemon would do rather than about what may be written now.
+   */
+  const configurableSlackAgents = async (): Promise<string[]> => {
+    const stored = Object.keys(state.channels.slack ?? {});
+    const { entries, loaded } = await channelRoster();
+    if (!loaded) {
+      return stored;
+    }
+    return stored.filter((agentId) => entries.some((entry) => entry.soul.agent.id === agentId));
+  };
+
+  /**
+   * Trim a menu option to one physical terminal row.
+   *
+   * `selectInteractive` moves the cursor up by the number of options to
+   * redraw, so an option that wraps leaves the rewind short and every
+   * later redraw overwrites the wrong lines. `reserved` is what the
+   * caller's own prefix costs before the text starts.
+   *
+   * Only a TTY has a width to fit into, and piped output keeps the full
+   * text — which is where nothing is redrawn, and also why none of this is
+   * covered by a test: `prompter.isInteractive()` is false whenever
+   * `setupInput` is set, which is every one of them.
+   *
+   * Every option in every menu has this constraint. Fitted here are the
+   * ones this change lengthened or added; a long soul path in the Agent
+   * row can still wrap, and the real fix for that is teaching
+   * `selectInteractive` to count rendered rows.
+   */
+  const fitMenuRow = (text: string, reserved = 27): string => {
+    // `process.stdout` rather than the injected stream, which is typed to
+    // `write` alone — the same place `selectInteractive` reads `isTTY`
+    // from, and only consulted when it is actually driving a terminal.
+    const columns = prompter.isInteractive() ? process.stdout.columns : undefined;
+    if (typeof columns !== 'number' || columns <= 0) {
+      return text;
+    }
+    // The row's own prefix — `menuPrefixWidth`, plus whatever padding the
+    // caller adds — subtracted from the width, so what is left is what the
+    // text may occupy.
+    const budget = columns - reserved;
+    return text.length <= budget ? text : `${text.slice(0, Math.max(budget - 1, 0))}…`;
+  };
+
+  const chooseApprovals = async (): Promise<void> => {
+    while (true) {
+      const mode = state.approvals?.mode ?? 'headless';
+      const connected = await configurableSlackAgents();
+      // Two modes, a row per connected agent when remote, and Back.
+      const reserved = menuPrefixWidth(2 + (mode === 'remote' ? connected.length : 0) + 1);
+      // Static text, and still fitted: with `(current)` shown this row runs
+      // to 76 columns including the selection prefix, so it clears an
+      // 80-column terminal by four and wraps on anything narrower — and a
+      // wrapped row corrupts every redraw, because the rewind counts
+      // options rather than rendered rows. Being static is not being short.
+      const options = [
+        fitMenuRow(`Headless${mode === 'headless' ? ' (current)' : ''}          refuse gated calls when nobody is watching`, reserved),
+        fitMenuRow(`Ask in Slack${mode === 'remote' ? ' (current)' : ''}       park the turn and ask an approver`, reserved),
+      ];
+      if (mode === 'remote') {
+        for (const agentId of connected) {
+          // The *resolved* answer, through the rule the daemon uses: an
+          // agent with no override of its own inherits the top-level list,
+          // and reading the override alone would report "nobody" for an
+          // agent a global list already covers.
+          const resolved = resolveAgentApprovals(state.approvals, agentId);
+          const own = state.approvals?.agents?.[agentId]?.slackApprovers;
+          const approvers = resolved.slackApprovers ?? [];
+          const label = approvers.length === 0
+            ? '— nobody, so its calls are denied'
+            : own === undefined
+              ? `${approvers.join(', ')} (inherited)`
+              : approvers.join(', ');
+          // Fitted like the top-level row, and for the same reason: several
+          // approvers, or one long agent id, is enough to wrap — and the
+          // redraw rewinds by option count, not by rendered rows. Every
+          // option in every menu has this constraint; these are the ones
+          // this PR adds.
+          options.push(fitMenuRow(`  approvers for ${agentId}`.padEnd(26) + label
+            + (approvers.length > 0 && !resolved.slackChannel ? ' · no fallback channel' : ''), reserved));
+        }
+      }
+      options.push('Back');
+
+      // Said here because it is only true here: tokens are stored, the
+      // adapter is not installed yet, and Save is about to offer it. The
+      // rows are editable regardless — the alternative was a first install
+      // with nothing to configure.
+      const adapterPending = connected.length > 0 && !packageInstalled('@stratusagent/channel-slack', env);
+      // The whole verdict, never trimmed: a footnote is drawn once, outside
+      // the redraw loop, so wrapping costs nothing here — and this is the
+      // screen where the trimmed row's remainder belongs.
+      const verdict = (await approvalsSummary()).join('; ');
+      const footnote = adapterPending
+        ? `${verdict}. @stratusagent/channel-slack is not installed yet — Save & finish offers it, and these approvers apply once it is. ${serveCommand()} brings them online.`
+        : mode === 'remote' && connected.length === 0
+          // The advice comes *after* the verdict, never instead of it: with
+          // the control API up a parked call is already answerable, and
+          // replacing the verdict here told the operator to go connect
+          // Slack while the row above said the API had it. The screen that
+          // changes the mode must not answer differently from the row.
+          ? `${verdict}. No agent is connected to Slack, so connect one under Channels to be asked there.`
+          : verdict;
+      const choice = await prompter.select(
+        'Approvals — what happens to a gated call with nobody watching',
+        options,
+        { footnote },
+      );
+      if (choice.kind !== 'index' || choice.index === options.length - 1) {
+        return;
+      }
+      if (choice.index === 0) {
+        state.approvals = { ...(state.approvals ?? {}), mode: 'headless' };
+        continue;
+      }
+      if (choice.index === 1) {
+        state.approvals = { ...(state.approvals ?? {}), mode: 'remote' };
+        continue;
+      }
+      const agentId = connected[choice.index - 2];
+      if (!agentId) {
+        continue;
+      }
+      const resolved = resolveAgentApprovals(state.approvals, agentId);
+      const current = resolved.slackApprovers ?? [];
+      // Prefilled with the resolved list, and `ask` returns the prefill for
+      // an empty line — so Enter keeps what is on screen and can never
+      // revoke anything. That matters here more than elsewhere:
+      // `resolveAgentApprovals` reads `agent ?? global` and an empty array
+      // is not nullish, so a written `[]` is the config's way of *excluding*
+      // an agent from the global list, not of leaving it alone.
+      const answer = (await prompter.ask(
+        `Slack user ids who may approve for ${agentId} (comma-separated, e.g. U01ABCDEF; Enter to keep): `,
+        ...(current.length > 0 ? [{ prefill: current.join(', ') }] : []),
+      )).trim();
+      const approvers = answer.split(',').map((value) => value.trim()).filter((value) => value.length > 0);
+      const agents = { ...(state.approvals?.agents ?? {}) };
+      const entry = { ...(agents[agentId] ?? {}) };
+      const inheriting = state.approvals?.agents?.[agentId]?.slackApprovers === undefined;
+      const unchanged = approvers.length === current.length
+        && approvers.every((id, index) => id === current[index]);
+      if (approvers.length === 0) {
+        // An empty answer must never *widen*. With a top-level list in play
+        // this writes the explicit `[]` the config reserves for excluding
+        // an agent from it, because deleting the key would hand those
+        // approvers an agent that had been kept from them — either one the
+        // operator excluded on purpose, or one whose narrower list they
+        // just erased. `[]` and an absent key differ here in exactly the
+        // direction that matters, and the previous round fixed the other
+        // half of this: never write `[]` over a list nobody touched.
+        const globalApprovers = state.approvals?.slackApprovers ?? [];
+        const hadOwn = state.approvals?.agents?.[agentId]?.slackApprovers !== undefined;
+        if (globalApprovers.length > 0 || hadOwn) {
+          // `[]` outlives the list it excludes from. With no top-level
+          // approvers today the two look identical, but deleting the key
+          // means the agent silently joins whatever list is added tomorrow
+          // — so an exclusion already on disk is preserved, not tidied
+          // away because it happens to be inert right now.
+          entry.slackApprovers = [];
+          writeLine(streams.stdout, globalApprovers.length > 0
+            ? `${agentId} is excluded from the top-level approvers (${globalApprovers.join(', ')}), so nobody may approve for it and its gated calls are denied.`
+            : `${agentId} has no approvers, so its gated calls are denied — and it stays excluded if a top-level list is added later.`);
+        } else {
+          // Never had one and nothing to inherit: an absent key is what
+          // "unset" looks like, and writing `[]` would invent an exclusion
+          // the operator never asked for.
+          delete entry.slackApprovers;
+        }
+      } else if (inheriting && unchanged) {
+        // Keeping an inherited list must not freeze it: writing the same ids
+        // as this agent's own override would look identical today and stop
+        // tracking the top-level list the operator edits tomorrow.
+        writeLine(streams.stdout, `${agentId} still inherits the top-level approvers (${current.join(', ')}).`);
+      } else {
+        entry.slackApprovers = approvers;
+      }
+
+      if (entry.slackApprovers !== undefined || resolved.slackApprovers !== undefined) {
+        // The other half of a working route, and the half a fresh install
+        // has no way to guess it needs. A turn that arrived through Slack
+        // is answered in its own thread, but one from a schedule, a
+        // delegation or the control API reaches the adapter with no
+        // destination and is denied undeliverable — so approvers alone
+        // configure approvals for exactly the calls least likely to need
+        // them. `stratus plugins` reports this state; better not to create
+        // it here in the first place.
+        // "Enter to skip" is only true with nothing prefilled. `ask` returns
+        // the prefill for an empty line, so where a channel already resolves
+        // Enter *keeps* it — an operator told otherwise would believe they
+        // had removed a fallback that goes on receiving approval details.
+        // The same correction the approvers prompt above already carries.
+        //
+        // What clearing the line does, though, is decided by whether this
+        // agent *owns* the channel, not by whether one resolves: clearing
+        // an inherited one deletes a key that was never there and the
+        // global goes on resolving. Reading the offer off the resolved
+        // value promised a removal the branch below then refuses — the
+        // prompt and its own outcome disagreeing about the same keypress.
+        const ownChannel = state.approvals?.agents?.[agentId]?.slackChannel;
+        const globalChannel = state.approvals?.slackChannel;
+        const hasChannel = resolved.slackChannel !== undefined;
+        const channelOffer = ownChannel !== undefined
+          ? (globalChannel !== undefined
+            ? `(Enter to keep it; clear the line to fall back to the top-level ${globalChannel}): `
+            : '(Enter to keep it; clear the line to remove it): ')
+          : hasChannel
+            ? '(Enter to go on inheriting it; type another to give this agent its own): '
+            : '(e.g. C0123456, Enter to skip): ';
+        const channelAnswer = (await prompter.ask(
+          `Which Slack channel should ${agentId} ask in when the turn did not start in Slack? ${channelOffer}`,
+          ...(hasChannel ? [{ prefill: resolved.slackChannel as string }] : []),
+        )).trim();
+        // The same inheritance trap as the approvers above, one field over:
+        // the prompt is prefilled with the resolved value, so keeping an
+        // inherited channel would write it as this agent's own and stop it
+        // tracking the top-level one. Both fields need the guard; fixing
+        // only the one under review is how this arrived here twice.
+        const inheritsChannel = ownChannel === undefined;
+        if (channelAnswer.length > 0 && inheritsChannel && channelAnswer === resolved.slackChannel) {
+          writeLine(streams.stdout, `${agentId} still inherits the top-level fallback channel (${channelAnswer}).`);
+        } else if (channelAnswer.length > 0) {
+          entry.slackChannel = channelAnswer;
+        } else if (resolved.slackChannel !== undefined) {
+          // Blanked deliberately: an editable prefill makes this reachable.
+          // What it can mean depends on whether a top-level channel exists,
+          // and only one of the two is "no fallback" — clearing the
+          // override otherwise moves the agent onto the global channel,
+          // which is a different, possibly wider place to post approval
+          // details. Setup says which happened rather than assuming.
+          //
+          // Untested for the same reason the roots deletion above is: an
+          // empty answer where a prefill exists is a TTY-only path, since
+          // the piped prompter returns `line || prefill` and `setupInput`
+          // forces it.
+          delete entry.slackChannel;
+          writeLine(streams.stdout, globalChannel !== undefined
+            ? `${agentId} ${inheritsChannel ? 'still uses' : 'now uses'} the top-level fallback channel (${globalChannel})${inheritsChannel ? '' : ' instead of its own'}. Setup cannot turn the fallback off for one agent — remove approvals.slackChannel to drop it for everyone.`
+            : `${agentId} has no fallback channel now: only turns already in Slack can be asked.`);
+        } else {
+          writeLine(streams.stdout, `No fallback channel for ${agentId}: only turns already in Slack can be asked, and a scheduled or API-started call is denied undeliverable.`);
+        }
+      }
+
+      agents[agentId] = entry;
+      state.approvals = { ...(state.approvals ?? {}), mode: 'remote', agents };
+    }
+  };
+
   const chooseChannels = async (): Promise<void> => {
     while (true) {
       const { entries: roster, loaded: rosterLoaded } = await channelRoster();
@@ -4879,8 +6030,10 @@ export const runSetup = async (
     if (state.promptCacheTtl !== undefined) {
       config.promptCacheTtl = state.promptCacheTtl;
     }
-    // Written back exactly as they were read — no menu above sets any of
-    // them, so there is nothing here to merge, only to not lose.
+    // `plugins` and `approvals` have menus above; `api` and `principals`
+    // do not and are written back exactly as they were read. Both cases
+    // land here the same way, because the menus edit this state rather
+    // than the file — so there is nothing to merge, only to not lose.
     if (state.plugins !== undefined) {
       config.plugins = state.plugins;
     }
@@ -5055,18 +6208,35 @@ export const runSetup = async (
 
     while (true) {
       writeLine(streams.stdout);
+      // Awaited before the menu is drawn: the approvals summary reads the
+      // roster, to intersect stored Slack tokens with agents that exist.
+      // Every clause, not the first: a prefix of this sentence has been
+      // wrong twice — the mixed roster where Slack denies one agent and the
+      // control API answers for another reads as a flat denial without the
+      // clause that follows. So the row carries what `stratus plugins`
+      // prints, and where it cannot fit it is *visibly* cut rather than
+      // silently shortened: an ellipsis says there is more, which a chosen
+      // prefix never did. The Approvals screen has the whole thing.
+      //
+      // Cut at all only because `selectInteractive` rewinds the cursor by
+      // `options.length`, one physical row per option — a wrapped row
+      // corrupts every redraw after the first arrow key. Wrapping is not
+      // the cosmetic cost I took it for when I let this line grow.
+      const approvals = fitMenuRow((await approvalsSummary()).join('; '));
       const choice = await prompter.select('', [
         `Providers            ${providersSummary()}`,
         `Models               ${modelsSummary()}`,
         `Agent                ${agentSummary()}`,
+        `Plugins              ${fitMenuRow(pluginsSummary())}`,
         `Channels             ${channelsSummary()}`,
+        `Approvals            ${approvals}`,
         `Always on            ${serviceSummary()}`,
         'Test run             say hello with the current settings',
         'Save & finish',
       ]);
 
       // Backing out of the top level (Esc, or the input ending) saves.
-      if (choice.kind !== 'index' || choice.index === 6) {
+      if (choice.kind !== 'index' || choice.index === 8) {
         break;
       }
 
@@ -5077,10 +6247,14 @@ export const runSetup = async (
       } else if (choice.index === 2) {
         await chooseAgent();
       } else if (choice.index === 3) {
-        await chooseChannels();
+        await choosePlugins();
       } else if (choice.index === 4) {
-        await chooseService();
+        await chooseChannels();
       } else if (choice.index === 5) {
+        await chooseApprovals();
+      } else if (choice.index === 6) {
+        await chooseService();
+      } else if (choice.index === 7) {
         await testRun();
       }
     }
@@ -7312,6 +8486,45 @@ const ALREADY_AUTHORIZED = 'standing grants, approved command scopes and sites (
  * Slack" would be wrong in exactly the configurations an operator runs this
  * command to understand.
  */
+/**
+ * Who can actually be asked, and what is missing for the rest. Split out of
+ * the sentence below because two surfaces need the *answer*: `stratus
+ * plugins` renders it as a paragraph, setup's Approvals row as a menu
+ * summary, and a second hand-rolled copy of "who is askable" drifted from
+ * this one within three PRs — stored tokens read as reachable agents when
+ * the package was absent, when the agent had left the roster, and when the
+ * only route left was the control API.
+ */
+interface ApprovalReach {
+  /** Tokens stored, package installed, agent still served. */
+  askable: string[];
+  /** Of those, the ones an approver is named for — the rest are denied on arrival. */
+  covered: string[];
+  /** Of those, the ones with no conversation to ask in for a turn that did not start in Slack. */
+  noFallback: string[];
+}
+
+const classifyApprovalReach = (
+  approvals: ApprovalsConfig,
+  channels: ChannelCredentials,
+  servedAgentIds: readonly string[] | undefined,
+  env: CliEnvironment,
+): ApprovalReach => {
+  // An adapter that is not installed renders nothing, so its stored tokens
+  // are not a route — `runServe` starts without the Slack channel and says
+  // so. Undefined served ids means the roster did not load, which is not
+  // evidence that any token is orphaned.
+  const stored = packageInstalled('@stratusagent/channel-slack', env)
+    ? Object.keys(channels.slack ?? {})
+    : [];
+  const askable = servedAgentIds === undefined
+    ? stored
+    : stored.filter((agentId) => servedAgentIds.includes(agentId));
+  const { covered } = classifyApprovers(approvals, askable);
+  const noFallback = covered.filter((agentId) => resolveAgentApprovals(approvals, agentId).slackChannel === undefined);
+  return { askable, covered, noFallback };
+};
+
 const describeUnattendedReach = async (
   mode: 'headless' | 'remote',
   approvals: ApprovalsConfig,
@@ -7336,19 +8549,37 @@ const describeUnattendedReach = async (
    */
   apiReachable: boolean,
 ): Promise<string> => {
+  const channels = await loadChannelCredentials(env);
+  return unattendedReachParts(mode, approvals, channels, servedAgentIds, apiReachable, env).join('; ');
+};
+
+/**
+ * The clauses above, unjoined and without reading the filesystem, so a
+ * caller holding unsaved state can render the same verdict. The first
+ * element is always the verdict itself; the rest qualify it.
+ *
+ * Split out because setup's Approvals row wrote its own version of this
+ * sentence, and every review round found it short a different clause the
+ * daemon actually applies — the headless exceptions, an explicit
+ * `timeoutMs: 0`, the control API on a mixed roster. There is one renderer
+ * now; a menu that wants a shorter line takes fewer clauses, never
+ * different words.
+ */
+const unattendedReachParts = (
+  mode: 'headless' | 'remote',
+  approvals: ApprovalsConfig,
+  channels: ChannelCredentials,
+  servedAgentIds: readonly string[] | undefined,
+  apiReachable: boolean,
+  env: CliEnvironment,
+): string[] => {
   if (mode === 'headless') {
-    return `headless — an uncovered gated call is refused. Already-authorized ones still run: ${ALREADY_AUTHORIZED}`;
+    return [`headless — an uncovered gated call is refused. Already-authorized ones still run: ${ALREADY_AUTHORIZED}`];
   }
   // The same condition `runServe` reports at startup, through the same
   // helper: an agent is askable when its tokens are stored and something is
   // installed to render the request.
-  const channels = await loadChannelCredentials(env);
-  const stored = packageInstalled('@stratusagent/channel-slack', env)
-    ? Object.keys(channels.slack ?? {})
-    : [];
-  const askable = servedAgentIds === undefined
-    ? stored
-    : stored.filter((agentId) => servedAgentIds.includes(agentId));
+  const { askable, covered, noFallback } = classifyApprovalReach(approvals, channels, servedAgentIds, env);
   // Qualified the same way the headless line is: the engine allows an
   // already-authorized call before it asks anyone, so an unqualified "asks
   // in Slack" hides unattended capability in precisely the configuration
@@ -7361,7 +8592,6 @@ const describeUnattendedReach = async (
   // false wherever `POST /api/v1/approvals` can settle the call. Appending
   // the API as a later clause left the two halves contradicting each other.
   const slack = describeApprovers(approvals, askable);
-  const { covered } = classifyApprovers(approvals, askable);
   // An explicit `timeoutMs: 0` is documented as "wait indefinitely", and
   // the gateway arms no timer for it — so a call nobody answers is not
   // eventually denied, it is parked for the life of the daemon. Promising
@@ -7443,10 +8673,6 @@ const describeUnattendedReach = async (
   // that did not start in Slack — the API, the dashboard, a delegation —
   // reaches the adapter with no destination and is denied undeliverable,
   // so "approvers set" is only half an answer without a fallback channel.
-  const noFallback = askable.filter((agentId) => {
-    const resolved = resolveAgentApprovals(approvals, agentId);
-    return (resolved.slackApprovers ?? []).length > 0 && !resolved.slackChannel;
-  });
   if (noFallback.length > 0) {
     parts.push(`${noFallback.join(', ')} ${noFallback.length === 1 ? 'has' : 'have'} no slackChannel, `
       + 'so only turns already in Slack can be asked');
@@ -7464,7 +8690,7 @@ const describeUnattendedReach = async (
   parts.push('an "always allow" answer persists — a standing grant for an unscoped tool, a command scope, '
     + 'or a site, all until revoked; only a call scoped by destination, such as message.send, '
     + 'lasts just the session');
-  return parts.join('; ');
+  return parts;
 };
 
 /**
@@ -7522,15 +8748,7 @@ export const collectPluginsReport = async (
    * report the most permissive agents as the least.
    */
   const grantedTo = (name: string, discovered: boolean): string[] => roster
-    .filter((entry) => {
-      const allowlist = entry.soul.agent.tools;
-      if (allowlist === undefined) {
-        return true;
-      }
-      return discovered
-        ? allowlist.some((granted) => toolScopesOverlap(granted, name))
-        : matchesToolAllowlist(name, allowlist);
-    })
+    .filter((entry) => soulGrantsTool(entry.soul.agent.tools, name, discovered))
     .map((entry) => entry.soul.agent.id);
 
   // Configured first, in the operator's own order, then the first-party

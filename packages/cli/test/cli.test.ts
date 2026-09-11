@@ -19,6 +19,9 @@ import {
   filterSqliteExperimentalWarning,
   withoutSqliteExperimentalWarning,
   CLI_VERSION,
+  isInstallableSpecifier,
+  isPackageName,
+  menuPrefixWidth,
   createLogWriter,
   createApprovalPolicy,
   currentLogPosition,
@@ -2036,7 +2039,7 @@ test('setup signs into Claude with a pasted API key, verifies it, and saves cred
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-test-key\n', '7\n']),
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-test-key\n', '9\n']),
       fetch: (async (url: any, init?: any) => {
         const headers: Record<string, string> = {};
         new Headers(init?.headers ?? {}).forEach((value, key) => {
@@ -2079,7 +2082,7 @@ test('setup stores a Claude subscription setup token', async () => {
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '1\n', '1\n', 'sk-ant-oat-123\n', '7\n']),
+      setupInput: Readable.from(['1\n', '1\n', '1\n', 'sk-ant-oat-123\n', '9\n']),
     },
   });
 
@@ -2104,7 +2107,7 @@ test('setup refuses a rejected API key and saves nothing', async () => {
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '1\n', '2\n', 'bad-key\n', '7\n']),
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'bad-key\n', '9\n']),
       fetch: (async () => new Response('{}', { status: 401 })) as typeof fetch,
     },
   });
@@ -2127,7 +2130,7 @@ test('setup creates an agent whose soul lives in ~/.stratus/agents', async () =>
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '7\n']),
+      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '9\n']),
     },
   });
 
@@ -2170,7 +2173,7 @@ test('setup demo path can test run inline before saving', async () => {
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '4\n', '6\n', '7\n']),
+      setupInput: Readable.from(['1\n', '4\n', '8\n', '9\n']),
     },
   });
 
@@ -2195,7 +2198,7 @@ test('setup warns when exported env vars override the saved config', async () =>
       homeDir: home,
       processEnv: { STRATUS_PROVIDER: 'openai' },
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '4\n', '7\n']),
+      setupInput: Readable.from(['1\n', '4\n', '9\n']),
     },
   });
 
@@ -2241,7 +2244,7 @@ test('setup offers the optional packages its own choices imply', async () => {
         return { ok: true, message: '' };
       },
       // Save & finish, then "install all of them".
-      setupInput: Readable.from(['7\n', '1\n']),
+      setupInput: Readable.from(['9\n', '1\n']),
     },
   });
 
@@ -2270,7 +2273,7 @@ test('setup does not suggest the dashboard it could not install', async () => {
       packageResolver: () => false,
       packageInstaller: async () => ({ ok: false, message: 'npm exited with code 243' }),
       // Save & finish, then accept the one offer (no Slack tokens stored).
-      setupInput: Readable.from(['7\n', '1\n']),
+      setupInput: Readable.from(['9\n', '1\n']),
     },
   });
 
@@ -2302,7 +2305,7 @@ test('setup exits non-zero when the always-on install it ran failed', async () =
         serviceRunner,
         packageResolver: () => true,
         // Save & finish.
-        setupInput: Readable.from(['7\n']),
+        setupInput: Readable.from(['9\n']),
       },
     });
     return { code, stderr: output.stderr, stdout: output.stdout };
@@ -2339,7 +2342,7 @@ test('setup skips the offer for packages that are already installed', async () =
       packageInstaller: async () => {
         throw new Error('nothing was missing, so nothing should have been installed');
       },
-      setupInput: Readable.from(['7\n']),
+      setupInput: Readable.from(['9\n']),
     },
   });
 
@@ -2365,7 +2368,7 @@ test('declining the offer prints the command instead of running it', async () =>
         throw new Error('the offer was declined, so npm should not have run');
       },
       // Save & finish, then "Skip".
-      setupInput: Readable.from(['7\n', '2\n']),
+      setupInput: Readable.from(['9\n', '2\n']),
     },
   });
 
@@ -2399,7 +2402,7 @@ test('a partial install still names the group it left behind', async () => {
         return { ok: true, message: '' };
       },
       // Save & finish, then option 3 of 4: "Install the Web dashboard only".
-      setupInput: Readable.from(['7\n', '3\n']),
+      setupInput: Readable.from(['9\n', '3\n']),
     },
   });
 
@@ -2427,7 +2430,7 @@ test('setup honors STRATUS_CONFIG and --config for the write target', async () =
       homeDir: home,
       processEnv: { STRATUS_CONFIG: envConfigPath },
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['7\n']),
+      setupInput: Readable.from(['9\n']),
     },
   });
   assert.match(viaEnv.output.stdout, /STRATUS_CONFIG is set, so the config will be written to/);
@@ -2443,7 +2446,7 @@ test('setup honors STRATUS_CONFIG and --config for the write target', async () =
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '4\n', '7\n']),
+      setupInput: Readable.from(['1\n', '4\n', '9\n']),
     },
   });
   assert.match(viaFlag.output.stdout, /stratus run --config \.\/custom\.json "say hello"/);
@@ -2484,7 +2487,7 @@ test('setup carries the blocks it has no menu for through a save', async () => {
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['7\n']),
+      setupInput: Readable.from(['9\n']),
     },
   });
 
@@ -2573,7 +2576,7 @@ test('setup Models menu picks default and fallback from live available models', 
         '1\n', '2\n', 'https://local.test/v1\n', 'sk-openai-key\n', // Providers → OpenAI → custom base URL → key
         '2\n', '1\n', '2\n',                      // Models → default → claude-sonnet-5
         '2\n', '2\n', '3\n',                      // Models → fallback → gpt-4.1-mini
-        '6\n',
+        '8\n',
       ]),
     },
   });
@@ -2702,7 +2705,7 @@ test('switching the default provider clears settings chosen for the old one', as
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-key\n', '7\n']),
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-ant-key\n', '9\n']),
       fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
     },
   });
@@ -2738,7 +2741,7 @@ test('creating an agent never claims an id another soul already declares', async
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '7\n']),
+      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '9\n']),
     },
   });
 
@@ -2781,7 +2784,7 @@ test('creating an agent never claims the configured soul\'s id', async () => {
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '7\n']),
+      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '9\n']),
     },
   });
 
@@ -2820,7 +2823,7 @@ test('a broken configured soul does not discard the roster\'s claims', async () 
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '7\n']),
+      setupInput: Readable.from(['3\n', '1\n', 'Ava\n', 'Be kind and brief.\n', '9\n']),
     },
   });
 
@@ -2845,7 +2848,7 @@ test('creating an agent never claims the reserved built-in id', async () => {
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['3\n', '1\n', 'Stratus\n', 'Be kind and brief.\n', '7\n']),
+      setupInput: Readable.from(['3\n', '1\n', 'Stratus\n', 'Be kind and brief.\n', '9\n']),
     },
   });
 
@@ -2883,7 +2886,7 @@ Be warm.
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '4\n', '7\n']),
+      setupInput: Readable.from(['1\n', '4\n', '9\n']),
     },
   });
 
@@ -2902,7 +2905,7 @@ test('setup saves a key when the endpoint has no /models to verify against', asy
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '2\n', 'https://local.test/v1\n', 'sk-local\n', '7\n']),
+      setupInput: Readable.from(['1\n', '2\n', 'https://local.test/v1\n', 'sk-local\n', '9\n']),
       fetch: (async () => new Response('not found', { status: 404 })) as typeof fetch,
     },
   });
@@ -2936,7 +2939,7 @@ test('the inline test run uses the same env-over-stored key precedence as real r
       homeDir: home,
       processEnv: { ANTHROPIC_API_KEY: 'env-key' },
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['6\n', '7\n']),
+      setupInput: Readable.from(['8\n', '9\n']),
       fetch: (async (_url: any, init?: any) => {
         const headers: Record<string, string> = {};
         new Headers(init?.headers ?? {}).forEach((value, key) => {
@@ -2982,7 +2985,7 @@ test('a typed model id resolves to the provider that lists it', async () => {
         '1\n', '1\n', '2\n', 'sk-ant-key\n',
         '1\n', '2\n', '\n', 'sk-openai-key\n',
         '2\n', '2\n', 'gpt-4.1-mini\n',   // fallback typed by id — listed under openai
-        '6\n',
+        '8\n',
       ]),
     },
   });
@@ -3082,7 +3085,7 @@ Be warm.
         data: [{ id: 'claude-opus-5' }, { id: 'claude-sonnet-5' }],
       }), { status: 200 })) as typeof fetch,
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['2\n', '1\n', '2\n', '7\n']),
+      setupInput: Readable.from(['2\n', '1\n', '2\n', '9\n']),
     },
   });
 
@@ -3121,7 +3124,7 @@ test('model discovery uses the same credential a real run would use', async () =
         return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
       }) as typeof fetch,
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['2\n', '1\n', '1\n', '7\n']),
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '9\n']),
     },
   });
 
@@ -3203,7 +3206,7 @@ test('a secondary openai sign-in keeps its endpoint with the credential', async 
       setupInput: Readable.from([
         '1\n', '1\n', '2\n', 'sk-ant-key\n',
         '1\n', '2\n', 'https://local.test/v1\n', 'sk-local\n',
-        '6\n',
+        '8\n',
       ]),
     },
   });
@@ -3300,7 +3303,7 @@ test('signing into a second provider keeps a STRATUS_API_KEY-powered default', a
       processEnv: { STRATUS_API_KEY: 'generic-key' },
       fetch: (async () => new Response('{}', { status: 200 })) as typeof fetch,
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '2\n', '\n', 'sk-openai\n', '7\n']),
+      setupInput: Readable.from(['1\n', '2\n', '\n', 'sk-openai\n', '9\n']),
     },
   });
 
@@ -3339,7 +3342,7 @@ test('the inline test run fails over on the configured fallback', async () => {
         }), { status: 200, headers: { 'content-type': 'application/json' } });
       }) as typeof fetch,
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['6\n', '7\n']),
+      setupInput: Readable.from(['8\n', '9\n']),
     },
   });
 
@@ -3364,7 +3367,7 @@ test('setup warns when a project config shadows the global file it wrote', async
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '4\n', '7\n']),
+      setupInput: Readable.from(['1\n', '4\n', '9\n']),
     },
   });
 
@@ -3411,7 +3414,7 @@ test('model discovery keeps a bound stored key on its own endpoint', async () =>
         return new Response(JSON.stringify({ data: [{ id: 'local-llama' }] }), { status: 200 });
       }) as typeof fetch,
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['2\n', '1\n', '1\n', '7\n']),
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '9\n']),
     },
   });
 
@@ -3451,7 +3454,7 @@ test('discovery never sends the generic STRATUS_API_KEY to a secondary provider'
         return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
       }) as typeof fetch,
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['2\n', '1\n', '1\n', '7\n']),
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '9\n']),
     },
   });
 
@@ -3536,7 +3539,7 @@ test('anthropic discovery, fallback, and save all honor a configured endpoint', 
         return new Response(JSON.stringify({ data: [{ id: 'claude-opus-5' }] }), { status: 200 });
       }) as typeof fetch,
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['2\n', '1\n', '1\n', '7\n']),
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '9\n']),
     },
   });
   assert.equal(listUrls[0], 'https://ant-proxy.test/v1/models?limit=100');
@@ -3583,7 +3586,7 @@ test('the model picker hides non-chat models and leads with chat ones', async ()
       }), { status: 200 })) as typeof fetch,
       // Accept the advertised default (empty answer picks entry #1).
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['2\n', '1\n', '\n', '7\n']),
+      setupInput: Readable.from(['2\n', '1\n', '\n', '9\n']),
     },
   });
 
@@ -3628,7 +3631,7 @@ test('the inline test run keeps a bound stored key on its own endpoint', async (
         return new Response(JSON.stringify({ data: [] }), { status: 200 });
       }) as typeof fetch,
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['6\n', '7\n']),
+      setupInput: Readable.from(['8\n', '9\n']),
     },
   });
 
@@ -3659,7 +3662,7 @@ test('anthropic keys bind to the endpoint they were verified against', async () 
         return new Response('{}', { status: 200 });
       }) as typeof fetch,
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-proxy\n', '7\n']),
+      setupInput: Readable.from(['1\n', '1\n', '2\n', 'sk-proxy\n', '9\n']),
     },
   });
 
@@ -3709,7 +3712,7 @@ test('the inline test run honors the STRATUS_API_KEY_ENV selector', async () => 
       // real run would resolve it.
       processEnv: { STRATUS_API_KEY_ENV: 'MY_KEY', MY_KEY: 'selector-key' },
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['6\n', '7\n']),
+      setupInput: Readable.from(['8\n', '9\n']),
       fetch: (async (_url: any, init?: any) => {
         const headers: Record<string, string> = {};
         new Headers(init?.headers ?? {}).forEach((value, key) => {
@@ -3757,7 +3760,7 @@ test('a rejected replacement sign-in leaves the previous endpoint untouched', as
       // The replacement key for the new endpoint is rejected.
       fetch: (async () => new Response('{}', { status: 401 })) as typeof fetch,
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['1\n', '2\n', 'https://new.test/v1\n', 'bad-key\n', '7\n']),
+      setupInput: Readable.from(['1\n', '2\n', 'https://new.test/v1\n', 'bad-key\n', '9\n']),
     },
   });
 
@@ -3798,7 +3801,7 @@ test('discovery honors a secondary anthropic credential bound endpoint', async (
         return new Response(JSON.stringify({ data: [{ id: 'gpt-4.1-mini' }] }), { status: 200 });
       }) as typeof fetch,
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['2\n', '1\n', '1\n', '7\n']),
+      setupInput: Readable.from(['2\n', '1\n', '1\n', '9\n']),
     },
   });
 
@@ -4062,7 +4065,7 @@ test('setup connects an agent to Slack without touching any file by hand', async
       // Channels → Ava (2; the built-in Stratus agent is 1) → paste both
       // tokens → Back → Save & finish
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['4\n', '2\n', 'xapp-tok\n', 'xoxb-tok\n', '3\n', '7\n']),
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-tok\n', 'xoxb-tok\n', '3\n', '9\n']),
       fetch: (async (url: any, init?: any) => {
         slackCalls.push({
           url: String(url),
@@ -4105,7 +4108,7 @@ test('setup refuses to store Slack tokens the API rejects', async () => {
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['4\n', '2\n', 'xapp-tok\n', 'xoxb-bad\n', '3\n', '7\n']),
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-tok\n', 'xoxb-bad\n', '3\n', '9\n']),
       // Slack answers 200 with ok:false for a bad token.
       fetch: (async () => new Response(JSON.stringify({ ok: false, error: 'invalid_auth' }), { status: 200 })) as typeof fetch,
     },
@@ -4133,7 +4136,7 @@ test('setup rejects malformed Slack tokens before calling the API', async () => 
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['4\n', '2\n', 'xoxb-wrong-kind\n', '3\n', '7\n']),
+      setupInput: Readable.from(['5\n', '2\n', 'xoxb-wrong-kind\n', '3\n', '9\n']),
       fetch: (async () => { called += 1; return new Response('{}', { status: 200 }); }) as typeof fetch,
     },
   });
@@ -4166,7 +4169,7 @@ test('setup disconnects an agent from Slack', async () => {
       processEnv: {},
       // Channels → Ava (connected) → Disconnect → Back → Save & finish
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['4\n', '2\n', '2\n', '3\n', '7\n']),
+      setupInput: Readable.from(['5\n', '2\n', '2\n', '3\n', '9\n']),
     },
   });
 
@@ -4210,7 +4213,7 @@ test('the Channels menu offers a default soul that lives outside the roster', as
       processEnv: {},
       // Channels → Nova → tokens → Back → Save & finish
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['4\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '7\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B9', team: 'Acme', team_id: 'T9' }
@@ -4248,7 +4251,7 @@ test('a configured soul outranks a same-id roster file in the Channels menu', as
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['4\n', '3\n', '7\n']),
+      setupInput: Readable.from(['5\n', '3\n', '9\n']),
     },
   });
 
@@ -4273,7 +4276,7 @@ test('setup suggests serve with the same --config it was run with', async () => 
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['4\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '7\n']),
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '3\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
@@ -4307,7 +4310,7 @@ test('the Channels menu refuses a roster with a duplicate id instead of picking 
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['4\n', '3\n', '7\n']),
+      setupInput: Readable.from(['5\n', '3\n', '9\n']),
     },
   });
 
@@ -4342,7 +4345,7 @@ test('the Channels menu follows STRATUS_SOUL over the configured soul', async ()
       // `stratus serve` would resolve this soul, not the configured one.
       processEnv: { STRATUS_SOUL: overridden },
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['4\n', '3\n', '7\n']),
+      setupInput: Readable.from(['5\n', '3\n', '9\n']),
     },
   });
 
@@ -5534,7 +5537,7 @@ test('the Channels menu connects the built-in agent on a fresh install', async (
       // connectable here — otherwise Slack is unreachable until you
       // create an agent you may not want.
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['4\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '2\n', '7\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '2\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B7', team: 'Acme', team_id: 'T7' }
@@ -5568,7 +5571,7 @@ test('a roster file claiming the built-in id is skipped in the Channels menu', a
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['4\n', '2\n', '7\n']),
+      setupInput: Readable.from(['5\n', '2\n', '9\n']),
     },
   });
 
@@ -5603,7 +5606,7 @@ test('the Channels menu can clear orphaned tokens with no soul files present', a
       processEnv: {},
       // Channels → the orphan (2, after the built-in) → Remove → Back → Save
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['4\n', '2\n', '1\n', '3\n', '7\n']),
+      setupInput: Readable.from(['5\n', '2\n', '1\n', '3\n', '9\n']),
     },
   });
 
@@ -5745,6 +5748,1620 @@ test('uninstall tells the manager before removing the unit file', async () => {
   assert.equal(await readFile(unitPath, 'utf8').catch(() => undefined), undefined);
 });
 
+test('setup enables a plugin and writes the setting it is useless without', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes, ~/work\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.plugins, {
+    '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes', '~/work'] },
+  });
+  // No soul files, so the roster is the built-in `stratus` agent — which
+  // has no `tools:` key and is therefore allowlisted for every registered
+  // tool. Enabling granted capability here and now, and the line has to
+  // say so: this is the commonest configuration there is, and claiming
+  // "no agent can call it yet" would understate what just happened.
+  assert.match(output.stdout, /Stratus \(stratus\) has no `tools:` list, which means every registered tool/);
+  assert.match(output.stdout, /callable by that agent the next time the daemon starts/);
+  assert.doesNotMatch(output.stdout, /No agent can call it yet/);
+});
+
+test('setup says a plugin grants nothing yet when every soul has a tools list', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // Only a configured default soul may take the reserved `stratus` id over,
+  // so this is what it takes for the roster to hold no permissive agent.
+  const soul = path.join(agentsDir, 'ava.md');
+  await writeFile(soul, '---\nname: Ava\nid: stratus\ntools: [memory.remember]\n---\n\nYou are Ava.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ provider: 'anthropic', soul }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // The clause is the point, not the headline: the old line said "no agent
+  // can call it yet" unconditionally, so asserting that alone would pass
+  // with or without the roster check.
+  assert.match(output.stdout, /No agent can call it yet — every soul in the roster has a `tools:` list/);
+  assert.match(output.stdout, /tools: \[fs\.read\]/);
+});
+
+test('setup names the browser tool-browser needs but cannot install', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-browser (4) → Enable it (1) → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '4\n', '1\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // `playwright-core` downloads no browser, so enabling this without one
+  // is the same "enabled and unusable" state the roots prompt prevents.
+  // Setup cannot detect a browser without importing the plugin, which this
+  // menu never does — so it names the follow-up rather than blocking.
+  assert.match(output.stdout, /npx playwright install chromium/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.plugins['@stratusagent/tool-browser'], { enabled: true });
+});
+
+test('setup claims nothing about who can call a plugin when the roster will not load', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // Two souls claiming one id: `loadRosterSouls` refuses the whole roster,
+  // so there is no list of allowlists to reason from. "Every soul has a
+  // tools: list" would be a claim about a file setup could not read — and
+  // false the moment the collision is fixed, if any soul omits one.
+  await writeFile(path.join(agentsDir, 'a-first.md'), '---\nname: First\nid: twin\n---\n\nYou are First.\n');
+  await writeFile(path.join(agentsDir, 'b-second.md'), '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → roots → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/notes\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Who can call it is unknown until the roster loads/);
+  assert.doesNotMatch(output.stdout, /No agent can call it yet/);
+  assert.doesNotMatch(output.stdout, /which means every registered tool/);
+});
+
+test('setup does not count a per-agent override for an agent that is gone', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // The only roots belong to `ghost`, which the roster no longer serves.
+  // Every served agent would resolve an empty list and every call fail —
+  // "configured and useless" reached through the branch that exists to
+  // allow the narrow config.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/tool-fs': { enabled: false, agents: { ghost: { roots: ['~/work/ghost'] } } },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /it grants nothing without roots/);
+  assert.doesNotMatch(output.stdout, /Keeping the per-agent roots/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins['@stratusagent/tool-fs'].enabled, false);
+});
+
+test('setup does not write an enabled plugin block without the setting that makes it work', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Same path, but no roots typed. tool-fs loads fine with none and
+      // then fails every call — the "installed, enabled, and useless"
+      // state this menu exists to keep anyone from reaching by accident.
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /it grants nothing without roots/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins, undefined);
+});
+
+test('setup keeps the settings it never asked about when a plugin is switched off', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // `agents` and `toolRisks` are the operator's, written by hand. Deleting
+  // the block to disable it would be #161 again — setup dropping config it
+  // has no menu for — one plugin at a time instead of four blocks at once.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/tool-fs': {
+        enabled: true,
+        roots: ['~/notes'],
+        agents: { ava: { roots: ['~/work/ava'] } },
+        toolRisks: { 'fs.write': 'dangerous' },
+      },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Disable it (2) → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '2\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /its settings are kept for when you turn it back on/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.plugins['@stratusagent/tool-fs'], {
+    enabled: false,
+    roots: ['~/notes'],
+    agents: { ava: { roots: ['~/work/ava'] } },
+    toolRisks: { 'fs.write': 'dangerous' },
+  });
+});
+
+test('setup does not offer to enable a plugin whose required settings it cannot invent', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → plugin-mcp (5) → Enter → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '5\n', '\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // `servers` is a set of endpoints only the operator knows, and a block
+  // written without it is refused at load — so there is no one-key enable.
+  assert.match(output.stdout, /Setup does not enable it: it needs a servers block/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins, undefined);
+});
+
+test('setup sets the approval mode and the approvers for a connected agent', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // A real roster entry: approvers are only offered for agents Slack can
+  // actually reach, so a token whose agent left the roster is not one.
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → Ask in Slack (2) → approvers for ava (3) → ids →
+      // fallback channel → Back (4) → Save (9)
+      setupInput: Readable.from(['6\n', '2\n', '3\n', 'U01ABCDEF, U02GHIJKL\n', 'C0123456\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.approvals, {
+    mode: 'remote',
+    agents: { ava: { slackApprovers: ['U01ABCDEF', 'U02GHIJKL'], slackChannel: 'C0123456' } },
+  });
+  // The agent list comes from Channels: an agent with no Slack app is not
+  // one that approvers can be named for.
+  assert.match(output.stdout, /approvers for ava/);
+});
+
+test('setup does not revoke inherited approvers when the answer is left blank', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // A top-level list every agent inherits. `resolveAgentApprovals` reads
+  // `agent ?? global`, and an empty array is not nullish — so writing `[]`
+  // for this agent is the config's way of excluding it, not of leaving it
+  // alone. The menu must never do that for an empty answer.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', slackApprovers: ['U0GLOBAL'], slackChannel: 'C0GLOBAL' },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → approvers for ava (3) → blank → blank → Back (4) → Save (9)
+      setupInput: Readable.from(['6\n', '3\n', '\n', '\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // Shown as inherited rather than as nobody, and left inheriting: keeping
+  // the prefilled value must not freeze it as this agent's own override.
+  assert.match(output.stdout, /U0GLOBAL \(inherited\)/);
+  assert.match(output.stdout, /ava still inherits the top-level approvers \(U0GLOBAL\)/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.approvals.agents?.ava?.slackApprovers, undefined);
+  assert.deepEqual(config.approvals.slackApprovers, ['U0GLOBAL']);
+});
+
+test('setup says who cannot be asked when approvers have no fallback channel', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // A real roster entry: approvers are only offered for agents Slack can
+  // actually reach, so a token whose agent left the roster is not one.
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → Ask in Slack (2) → approvers (3) → ids → skip the
+      // channel → Back (4) → Save (9)
+      setupInput: Readable.from(['6\n', '2\n', '3\n', 'U01ABCDEF\n', '\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // Approvers alone leave a schedule- or API-started call denied
+  // undeliverable — the state `stratus plugins` reports, said here instead.
+  assert.match(output.stdout, /only turns already in Slack can be asked/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.approvals.agents.ava, { slackApprovers: ['U01ABCDEF'] });
+});
+
+test('setup enables a plugin whose roots are configured per agent', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // The agent the override is for has to exist, or it grants nobody
+  // anything — see the test below.
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // Roots under `agents` and none at the top level is a working config —
+  // tool-fs resolves per session — and a narrower one than any fleet-wide
+  // answer this prompt could take.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/tool-fs': { enabled: false, agents: { ava: { roots: ['~/work/ava'] } } },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Keeping the per-agent roots already configured/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.plugins['@stratusagent/tool-fs'], {
+    enabled: true,
+    agents: { ava: { roots: ['~/work/ava'] } },
+  });
+});
+
+test('setup reports the entry a soul granted, not the namespace it overlaps', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // plugin-mcp declares the discovered namespace `mcp.*`, and Ava grants one
+  // concrete tool under it. `toolScopesOverlap` is overlap, not containment,
+  // so testing the declaration against her list is right for "does she reach
+  // the plugin" and wrong to print: it read back as her granting `mcp.*`.
+  await writeFile(
+    path.join(agentsDir, 'ava.md'),
+    '---\nname: Ava\ntools: [mcp.linear.get_issue]\n---\n\nYou are Ava.\n',
+  );
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/plugin-mcp': {
+        enabled: false,
+        servers: { linear: { url: 'https://mcp.example.com/mcp' } },
+      },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → plugin-mcp (5) → Enable it (1) → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '5\n', '1\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Ava \(ava\) already grants mcp\.linear\.get_issue in `tools:`/);
+  // The claim this replaces: the whole namespace, which the runtime denies.
+  assert.doesNotMatch(output.stdout, /already grants mcp\.\* in `tools:`/);
+});
+
+test('setup counts a soul whose explicit tools list already names the plugin', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // An explicit allowlist that already grants the plugin. Reading only
+  // "has no `tools:` key" as allowlisted reported that nobody could call it
+  // and advised adding a tool this soul had already been granted.
+  await writeFile(
+    path.join(agentsDir, 'ava.md'),
+    '---\nname: Ava\ntools: [fs.read]\n---\n\nYou are Ava.\n',
+  );
+  // The built-in `stratus` agent is seeded into every roster with no
+  // `tools:` list, so it is allowlisted too — but only Ava has roots, which
+  // keeps the two halves of this test distinct.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/tool-fs': { enabled: false, agents: { ava: { roots: ['~/work/ava'] } } },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // Named down to what the list actually matched. `tools: [fs.read]` grants
+  // one of the four tool-fs contributes, and reporting the plugin as
+  // callable said all four were.
+  assert.match(output.stdout, /Ava \(ava\) already grants fs\.read in `tools:`, but not fs\.list, fs\.search, fs\.write/);
+  // The claim this replaces: with every non-built-in soul carrying a list,
+  // the old reading fell through to advising a grant Ava already had.
+  assert.doesNotMatch(output.stdout, /a soul grants tools by naming them/);
+});
+
+test('setup refuses a configured package that is not a plugin at all', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A real, resolvable package with no plugin manifest. `readPluginManifest`
+  // raises `PluginManifestError` rather than `PluginConfigError`, and a
+  // check that caught only the latter read that as "no problem" and enabled
+  // it. This is the manifest half of the preflight, through the CLI.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/dashboard': { enabled: false } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → the config's own key (6) → Enable it (1) → Back (7)
+      // → Save (9)
+      setupInput: Readable.from(['4\n', '6\n', '1\n', '7\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /was not enabled — a daemon would refuse these settings: .*is not a Stratus plugin/);
+  assert.doesNotMatch(output.stdout, /is enabled/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins['@stratusagent/dashboard'].enabled, false);
+});
+
+test('setup does not call a plugin callable by an agent its required setting misses', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // Ava has the roots; the built-in `stratus` agent is seeded into every
+  // roster and has neither a `tools:` list nor an override. Being
+  // allowlisted for every registered tool buys it nothing here — tool-fs
+  // resolves an empty roots list for it and throws on the first call.
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/tool-fs': { enabled: false, agents: { ava: { roots: ['~/work/ava'] } } },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Ava \(ava\) has no `tools:` list/);
+  assert.match(output.stdout, /Stratus \(stratus\) is allowlisted too, but roots is not set for it/);
+  // The claim the caveat replaces: naming stratus alongside ava as an
+  // agent the filesystem tools are callable by.
+  assert.doesNotMatch(output.stdout, /Ava \(ava\), Stratus \(stratus\) have no `tools:` list/);
+});
+
+test('setup enables a plugin after the roots prompt repairs the value that was wrong', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // Fleet-wide roots the manifest rejects. `Change roots` is the action
+  // offered to fix exactly this, so checking the block before the prompt
+  // refused on the value the prompt exists to replace — no way through this
+  // menu to repair a setting this menu owns.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-fs': { enabled: false, roots: [123] } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → type real roots → Back
+      // (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/work\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.doesNotMatch(output.stdout, /was not enabled/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.plugins['@stratusagent/tool-fs'], { enabled: true, roots: ['~/work'] });
+});
+
+test('setup will not enable a plugin whose toolRisks override a daemon would refuse', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // `toolRisks` is host-owned, so the manifest schema never sees it — it is
+  // stripped before validation, and the loader parses it in a separate step
+  // that rejects the plugin on its own. A gate built from the schema alone
+  // reads this block as fine.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/tool-shell': { enabled: false, toolRisks: { 'shell.nosuch': 'safe' } },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-shell (2) → Enable it (1) → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '2\n', '1\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /a daemon would refuse these settings: .*toolRisks/);
+  assert.doesNotMatch(output.stdout, /is enabled/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins['@stratusagent/tool-shell'].enabled, false);
+});
+
+test('setup says an already-enabled block stays enabled when its settings fail preflight', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Enabled, and rejected by the manifest for a setting this menu does not
+  // edit. `Change roots` reaches `enablePlugin`, which returns before
+  // touching state — so the block survives and Save writes it unchanged,
+  // and a daemon refuses the plugin. Saying it "was not enabled" there is
+  // exactly backwards: it is enabled, and stays enabled.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/old'], maxBytes: 'big' } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Change roots (1) → new roots → Back (6)
+      // → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '~/work\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /is still enabled in your config, and a daemon would refuse these settings: .*maxBytes must be a integer/);
+  assert.match(output.stdout, /switch the plugin off here so a daemon stops trying to load it/);
+  // The sentence this replaces, which described the block as off while the
+  // saved config went on enabling it.
+  assert.doesNotMatch(output.stdout, /was not enabled/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins['@stratusagent/tool-fs'].enabled, true);
+  assert.deepEqual(config.plugins['@stratusagent/tool-fs'].roots, ['~/old']);
+});
+
+test('setup will not enable a plugin whose preserved settings fail its manifest', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // tool-shell needs no setting to be useful, so nothing in this menu had
+  // ever looked at its block — it has no `needs` and no `byHand`. The
+  // manifest wants an integer, the config loader takes any plugin-owned
+  // value, and preflight rejects the whole plugin. Switching it on and then
+  // naming the agents that can call `shell.run` is the state this menu
+  // exists to prevent, reached through the menu.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-shell': { enabled: false, timeoutMs: 'bad' } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-shell (2) → Enable it (1) → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '2\n', '1\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /a daemon would refuse these settings: plugins\["@stratusagent\/tool-shell"\]\.timeoutMs must be a integer/);
+  // The claim the refusal replaces — the plugin is not enabled, so nothing
+  // is callable and the grant line must not have run.
+  assert.doesNotMatch(output.stdout, /is enabled/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins['@stratusagent/tool-shell'].enabled, false);
+});
+
+test('setup refuses to enable a plugin whose preserved settings a daemon would reject', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The config loader takes any plugin-owned value, so this parses. The
+  // MCP bridge does not: `servers` has to be an object, one entry per
+  // server, and it throws on anything else. Reading the key's presence as
+  // "already configured" would enable a block the daemon then refuses to
+  // load, which is the state this menu exists to keep anyone from reaching.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/plugin-mcp': { enabled: false, servers: 'invalid' } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → plugin-mcp (5) → Enter to return → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '5\n', '\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Setup does not enable it: it needs a servers block/);
+  // The loader's own words, not a shape test written here: `stratus plugins`
+  // reports this same sentence about this same block.
+  assert.match(output.stdout, /A daemon would refuse the block you have: plugins\["@stratusagent\/plugin-mcp"\]\.servers must be a object/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.plugins['@stratusagent/plugin-mcp'], { enabled: false, servers: 'invalid' });
+});
+
+test('setup says what it did not check when enabling a plugin it could not have configured', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Object-shaped, so setup offers Enable — and the entry is still one the
+  // bridge refuses, because a server needs exactly one of `command` or
+  // `url`. Applying that rule here would either copy `resolveServerSpec`
+  // into the CLI or import the package to ask it; the menu does neither,
+  // so it must not imply the daemon will load what it just enabled.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/plugin-mcp': { enabled: false, servers: { linear: {} } } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → plugin-mcp (5) → Enable it (1) → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '5\n', '1\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Setup checked that servers is a block and no further/);
+  assert.match(output.stdout, /did not load/);
+  // The caveat is only half of saying what it did not check: the verdict
+  // below it used to promise the tools were callable at the next daemon
+  // start regardless, leaving two sentences that contradict each other.
+  assert.match(output.stdout, /subject to the caveat above, which setup did not check/);
+  assert.doesNotMatch(output.stdout, /callable by that agent the next time the daemon starts/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins['@stratusagent/plugin-mcp'].enabled, true);
+});
+
+test('setup does not offer to remove a fallback channel an agent only inherits', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // Ava owns no `slackChannel`; the top-level one resolves for her. Clearing
+  // the line would delete a key that was never there and leave the global
+  // resolving — which the branch that handles it already says. The prompt
+  // has to agree with its own outcome.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', slackApprovers: ['U0GLOBAL'], slackChannel: 'C0GLOBAL' },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → Ask in Slack (2) → approvers (3) → ava → keep → keep
+      // → Back (4) → Save (9)
+      setupInput: Readable.from(['6\n', '2\n', '3\n', '\n', '\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Enter to go on inheriting it; type another to give this agent its own/);
+  assert.doesNotMatch(output.stdout, /clear the line to remove it/);
+});
+
+test('setup will not offer to install a plugins key that carries a version', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // npm would install this happily — it is a valid package spec. The loader
+  // hands the same string to `import.meta.resolve`, which does not take a
+  // version, so the plugin would stay "not installed" however many times it
+  // is installed.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-fs@latest': { enabled: false } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → the config's own key (6) → Back (1, the only action)
+      // → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '6\n', '1\n', '7\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /carries a version, and a plugins key is also the module specifier/);
+  assert.doesNotMatch(output.stdout, /Install it with npm install -g/);
+});
+
+test('setup will not offer to install a plugins key npm could never install', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // The row is built from `Object.keys(state.plugins)`, so whatever is in
+  // the config arrives here as a package name. `npm install -g` on this one
+  // cannot succeed however it is spawned, and on Windows npm needs a shell.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { 'pkg & whoami': { enabled: false } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → the config's own key (6) → Back (1, the only action)
+      // → Back (7) → Save (9)
+      setupInput: Readable.from(['4\n', '6\n', '1\n', '7\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /is not a package name npm can install/);
+  assert.doesNotMatch(output.stdout, /Install it with npm install -g/);
+});
+
+test('a menu row reserves the widest prefix its own option count will render', () => {
+  // `selectInteractive` writes `  ${n}) ` before each option — two columns
+  // of selection marker, then the index. Fitting every row to the widest
+  // prefix any row will have is what keeps a ten-option menu from wrapping
+  // its tenth row, and a wrapped row corrupts the next redraw because the
+  // rewind counts options rather than rendered rows.
+  //
+  // Each is one more than the rendered prefix: `fitMenuRow` trims to
+  // exactly its budget, and a row filling the last column wraps on
+  // terminals that advance the cursor eagerly.
+  assert.equal('  1) '.length, 5);
+  assert.equal(menuPrefixWidth(9), 6);
+  assert.equal('  10) '.length, 6);
+  assert.equal(menuPrefixWidth(10), 7);
+  assert.equal('  100) '.length, 7);
+  assert.equal(menuPrefixWidth(100), 8);
+});
+
+test('npm specifiers that reach a shell are held to npm\'s own name grammar', () => {
+  // The fence is at the spawn, so it covers callers added later — which is
+  // how the "every name here is a constant" invariant was lost in the first
+  // place. Versions are deliberately narrower than npm's range syntax:
+  // `^1.0.0` is a valid range and `^` is cmd.exe's escape character.
+  assert.equal(isInstallableSpecifier('@stratusagent/tool-fs'), true);
+  assert.equal(isInstallableSpecifier('@stratusagent/cli@latest'), true);
+  assert.equal(isInstallableSpecifier('npm'), true);
+  assert.equal(isInstallableSpecifier('pkg & whoami'), false);
+  assert.equal(isInstallableSpecifier('pkg^1.0.0'), false);
+  assert.equal(isInstallableSpecifier('`id`'), false);
+  assert.equal(isInstallableSpecifier('a;b'), false);
+  assert.equal(isInstallableSpecifier(''), false);
+
+  // A narrower question, and a different one. A `plugins` key is also the
+  // specifier the loader hands `import.meta.resolve`, which does not take a
+  // version — so what npm will install and what a daemon can load are not
+  // the same set, and one predicate for both offered to install a key that
+  // could never be loaded.
+  assert.equal(isPackageName('@stratusagent/tool-fs'), true);
+  assert.equal(isPackageName('@stratusagent/cli@latest'), false);
+  assert.equal(isPackageName('tool-fs@1.2.3'), false);
+  assert.equal(isPackageName('pkg & whoami'), false);
+});
+
+test('setup does not treat per-agent roots of the wrong type as configured', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // The config loader takes any plugin-owned value, so this parses; tool-fs
+  // requires every root to be a string and preflight rejects the whole
+  // plugin. Counting it as the per-agent config that justifies enabling
+  // would write `enabled: true` on a block the daemon refuses.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/tool-fs': { enabled: false, agents: { ava: { roots: [123] } } },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → tool-fs (1) → Enable it (1) → blank → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '1\n', '\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // Named down to the offending element, because the check is the manifest's
+  // rather than a type test rewritten in the menu.
+  assert.match(output.stdout, /a daemon would refuse these settings: plugins\["@stratusagent\/tool-fs"\]\.agents\.ava\.roots\[0\] must be a string/);
+  assert.doesNotMatch(output.stdout, /Keeping the per-agent roots/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.plugins['@stratusagent/tool-fs'].enabled, false);
+});
+
+test('setup can re-enable a configured plugin it would not have enabled from scratch', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A `servers` block setup could never have written, switched off. The
+  // refusal is about the setting being absent, not about the package — and
+  // this menu promises the settings are kept for turning it back on, which
+  // is false if the switch is one-way.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: {
+      '@stratusagent/plugin-mcp': {
+        enabled: false,
+        servers: { linear: { url: 'https://mcp.example.com/mcp' } },
+      },
+    },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Plugins (4) → plugin-mcp (5) → Enable it (1) → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '5\n', '1\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.doesNotMatch(output.stdout, /Setup does not enable it/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.plugins['@stratusagent/plugin-mcp'], {
+    enabled: true,
+    servers: { linear: { url: 'https://mcp.example.com/mcp' } },
+  });
+});
+
+test('setup does not freeze an inherited fallback channel onto one agent', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', slackApprovers: ['U0GLOBAL'], slackChannel: 'C0GLOBAL' },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → approvers for ava (3) → keep both prefills → Back (4) → Save (9)
+      setupInput: Readable.from(['6\n', '3\n', '\n', '\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // The same trap as the approvers, one field over: keeping the displayed
+  // value must not write it as this agent's own.
+  assert.match(output.stdout, /ava still inherits the top-level fallback channel \(C0GLOBAL\)/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.equal(config.approvals.agents?.ava?.slackChannel, undefined);
+  assert.equal(config.approvals.slackChannel, 'C0GLOBAL');
+});
+
+test('setup keeps an agent excluded from the top-level approvers', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // `[]` is how the config excludes an agent from a global list, and
+  // `resolveAgentApprovals` reads `agent ?? global` — so deleting the key
+  // would hand those approvers an agent deliberately kept from them.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: {
+      mode: 'remote',
+      slackApprovers: ['U0GLOBAL'],
+      agents: { ava: { slackApprovers: [] } },
+    },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → approvers for ava (3) → blank → blank → Back (4) → Save (9)
+      setupInput: Readable.from(['6\n', '3\n', '\n', '\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /ava is excluded from the top-level approvers \(U0GLOBAL\)/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.approvals.agents.ava.slackApprovers, []);
+});
+
+test('setup does not offer approvers for a Slack token whose agent has left the roster', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // `ghost` has tokens but no soul. The Slack adapter skips it entirely, so
+  // approvers named for it configure a route no call can ever take — and
+  // the Channels menu is the one place it should surface, to be cleared.
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({
+      channels: {
+        slack: {
+          ava: { appToken: 'xapp-t', botToken: 'xoxb-t' },
+          ghost: { appToken: 'xapp-g', botToken: 'xoxb-g' },
+        },
+      },
+    }),
+  );
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote' },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → Back (4: two modes, one agent, Back) → Save (9)
+      setupInput: Readable.from(['6\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /approvers for ava/);
+  assert.doesNotMatch(output.stdout, /approvers for ghost/);
+});
+
+test('setup does not claim every agent is covered when one is excluded', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(agentsDir, 'juno.md'), '---\nname: Juno\n---\n\nYou are Juno.\n');
+  // A global list, and one connected agent excluded from it. The summary
+  // read the top-level key alone and said "all agents", which the config
+  // contradicts for exactly the agent an operator singled out.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: {
+      mode: 'remote',
+      slackApprovers: ['U0GLOBAL'],
+      agents: { juno: { slackApprovers: [] } },
+    },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({
+      channels: {
+        slack: {
+          ava: { appToken: 'xapp-t', botToken: 'xoxb-t' },
+          juno: { appToken: 'xapp-j', botToken: 'xoxb-j' },
+        },
+      },
+    }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // The daemon's own verdict, which names the excluded agent rather than
+  // counting it as covered.
+  assert.match(output.stdout, /Approvals            remote — an uncovered gated call parks and asks in Slack, approvers set for ava; none for juno, whose calls are denied on arrival/);
+  assert.doesNotMatch(output.stdout, /all agents/);
+});
+
+test('setup keeps an exclusion that no top-level list makes visible yet', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // An exclusion with no top-level list to exclude from. Inert today and
+  // identical to an absent key — but deleting it means the agent silently
+  // joins whatever list is added tomorrow.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', agents: { ava: { slackApprovers: [] } } },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → approvers for ava (3) → blank → blank → Back (4) → Save (9)
+      setupInput: Readable.from(['6\n', '3\n', '\n', '\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /it stays excluded if a top-level list is added later/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.approvals.agents.ava.slackApprovers, []);
+});
+
+test('setup does not say headless refuses a call an existing grant already covers', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'headless' },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // The engine allows a standing grant, an approved command scope, a site,
+  // and a schedule's destination *before* it reaches the headless refusal.
+  // A flat "refused while unattended" would tell an operator that switching
+  // to headless disabled unattended access that is still live.
+  assert.match(output.stdout, /headless — an uncovered gated call is refused\. Already-authorized ones still run/);
+  assert.match(output.stdout, /stratus grants/);
+});
+
+test('setup says a gated call parks for good when the approval timeout is zero', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // Nothing to ask and no API — but an explicit 0 arms no timer, so the
+  // call is not denied, it is held for the life of the daemon.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', timeoutMs: 0 },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: (specifier: string) => specifier !== '@stratusagent/control-api',
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /approval timeout is 0, so it parks indefinitely/);
+  assert.doesNotMatch(output.stdout, /waits out the approval timeout and is denied/);
+});
+
+test('setup can set approvers before the Slack adapter is installed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // The fresh-install order: Channels stores and verifies tokens through
+  // the Slack API, and `offerOptionalPackages()` installs the adapter
+  // inside `save()` — after this menu. Gating the rows on the package left
+  // a first-time operator with nothing to configure and no way back.
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote' },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: (specifier: string) => specifier !== '@stratusagent/channel-slack',
+      // Approvals (6) → approvers for ava (3) → ids → channel → Back (4) → Save (9)
+      setupInput: Readable.from(['6\n', '3\n', 'U01ABCDEF\n', 'C0123456\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /@stratusagent\/channel-slack is not installed yet — Save & finish offers it/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  assert.deepEqual(config.approvals.agents.ava, {
+    slackApprovers: ['U01ABCDEF'],
+    slackChannel: 'C0123456',
+  });
+});
+
+test('setup does not report a flat denial when the control API answers for another agent', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // `ava` has tokens but no approvers, so Slack denies on arrival. The
+  // built-in `stratus` agent is served with no tokens at all, so its calls
+  // park and the control API can settle them. The verdict's first clause
+  // alone says only the first half.
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote' },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /reaches Slack and is denied on arrival/);
+  // The clause a prefix would have dropped.
+  assert.match(output.stdout, /no Slack channel can ask for stratus, so their gated calls park until the control API answers them/);
+});
+
+test('setup puts the whole approval verdict on the screen that sets it', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // Slack denies `ava` on arrival and the built-in `stratus` parks for the
+  // control API: the two-clause verdict the top-level row may have to trim
+  // on a narrow terminal. The Approvals screen draws its footnote once,
+  // outside the redraw loop, so it carries the whole thing.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote' },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → Back → Save (9)
+      setupInput: Readable.from(['6\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // Only the Approvals screen: the slice has to stop before the top-level
+  // menu is redrawn underneath it, or it matches that row instead of the
+  // footnote and passes whatever the footnote says.
+  const opened = output.stdout.slice(output.stdout.indexOf('Approvals — what happens'));
+  const screen = opened.slice(0, opened.indexOf('1) Providers'));
+  assert.match(screen, /reaches Slack and is denied on arrival/);
+  assert.match(screen, /no Slack channel can ask for stratus, so their gated calls park until the control API answers them/);
+});
+
+test('setup withholds the approval verdict when the roster will not load', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  // Two souls claiming one id: the gateway refuses to start with this
+  // roster. Without the intersection every stored token reads as askable,
+  // so the row would promise Slack asks for a fleet that cannot run.
+  await writeFile(path.join(agentsDir, 'a-first.md'), '---\nname: First\nid: twin\n---\n\nYou are First.\n');
+  await writeFile(path.join(agentsDir, 'b-second.md'), '---\nname: Second\nid: twin\n---\n\nYou are Second.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', agents: { ava: { slackApprovers: ['U01ABCDEF'] } } },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /remote — who can be asked is unknown until the roster loads/);
+  assert.doesNotMatch(output.stdout, /parks and asks in Slack/);
+});
+
+test('setup can switch off a plugin whose package is no longer installed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  // A config copied from another machine, or an uninstall: the block still
+  // enables a package that is gone, so a daemon registers nothing for it.
+  // Clearing it used to require installing the package first.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    plugins: { '@stratusagent/tool-fs': { enabled: true, roots: ['~/notes'] } },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      packageResolver: (specifier: string) => specifier !== '@stratusagent/tool-fs',
+      // Plugins (4) → tool-fs (1) → Switch it off (2) → Back (6) → Save (9)
+      setupInput: Readable.from(['4\n', '1\n', '2\n', '6\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /is enabled in your config but not installed, so a daemon registers nothing for it/);
+  assert.match(output.stdout, /switched off, so a daemon stops trying to load it/);
+  const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
+  // Switched off, not deleted: the roots are still the operator's.
+  assert.deepEqual(config.plugins['@stratusagent/tool-fs'], { enabled: false, roots: ['~/notes'] });
+});
+
+test('setup says remote approvals deny everything while no agent is connected to Slack', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → Ask in Slack (2) → Back (3) → Save (9)
+      setupInput: Readable.from(['6\n', '2\n', '3\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // `remote` with nobody to ask does not behave like `headless` while the
+  // control API is installed: `POST /api/v1/approvals` can still settle a
+  // parked call, so the summary says that rather than promising a denial.
+  // The advice follows the verdict rather than replacing it: with the
+  // control API installed a parked call is already answerable, and telling
+  // the operator to connect Slack *instead* contradicted the row above.
+  assert.match(output.stdout, /remote — an uncovered gated call parks with no Slack channel to ask through, so the control API is the only way to answer it[^\n]*No agent is connected to Slack, so connect one under Channels to be asked there/);
+});
+
+test('setup says remote approvals are denied when nothing can answer them at all', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote' },
+  }));
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // No Slack app and no control API: now the denial really is the end
+      // of it, and only now may the summary say so.
+      //
+      // A negative control, not evidence: the old code printed this line
+      // unconditionally, so it passes with or without the API branch. What
+      // pins that branch is the test above, which asserts the API wording
+      // where the package resolves. This one guards the reverse — claiming
+      // an API route where there is none.
+      packageResolver: (specifier: string) => specifier !== '@stratusagent/control-api',
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /remote — an uncovered gated call parks with no channel to ask through and no control API to answer it, so it waits out the approval timeout and is denied/);
+  // The verdict names the absent API ("no control API to answer it"), so
+  // the assertion is that no route is offered, not that the words are gone.
+  assert.doesNotMatch(output.stdout, /the control API is the only way/);
+});
+
+test('setup does not count an agent with no fallback channel as fully covered', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  // Approvers but no channel: a turn that started in Slack is answered in
+  // its own thread, and a scheduled or API-started one is denied
+  // undeliverable. The submenu labels that row; the summary counted it as
+  // covered and said the route works.
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', agents: { ava: { slackApprovers: ['U01ABCDEF'] } } },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Approvals (6) → Back (4) → Save (9): the per-agent rows only exist
+      // on the screen that sets them.
+      setupInput: Readable.from(['6\n', '4\n', '9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  // The row carries the verdict and the screen that sets it carries the
+  // qualifiers — the same split `stratus plugins` prints as one paragraph.
+  assert.match(output.stdout, /Approvals            remote — an uncovered gated call parks and asks in Slack, approvers set for ava/);
+  assert.match(output.stdout, /approvers for ava\s+U01ABCDEF · no fallback channel/);
+});
+
+test('setup does not offer approvers when the Slack channel package is not installed', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'anthropic',
+    approvals: { mode: 'remote', agents: { ava: { slackApprovers: ['U01ABCDEF'] } } },
+  }));
+  await writeFile(
+    path.join(home, '.stratus', 'credentials.json'),
+    JSON.stringify({ channels: { slack: { ava: { appToken: 'xapp-t', botToken: 'xoxb-t' } } } }),
+  );
+  const { streams, output } = createStreams();
+
+  const exitCode = await runCli({
+    argv: ['setup'],
+    streams,
+    env: {
+      cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
+      homeDir: home,
+      processEnv: {},
+      serviceRunner: stubServiceRunner,
+      // Stored tokens with nothing to render them: `runServe` starts
+      // without the Slack channel, so these are not a route.
+      packageResolver: (specifier: string) => specifier !== '@stratusagent/channel-slack',
+      setupInput: Readable.from(['9\n']),
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.match(output.stdout, /Approvals            remote — an uncovered gated call parks with no Slack channel to ask through/);
+  assert.doesNotMatch(output.stdout, /approvers set for ava/);
+});
+
 test('setup installs the always-on service when it saves', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
@@ -5767,7 +7384,7 @@ test('setup installs the always-on service when it saves', async () => {
       serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
       // Straight to Save & finish: the service is on by default, because a
       // runtime you have to remember to start is not always-on.
-      setupInput: Readable.from(['7\n']),
+      setupInput: Readable.from(['9\n']),
     },
   });
 
@@ -5790,7 +7407,7 @@ test('setup can be told not to run the service', async () => {
       processEnv: {},
       serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
       // Always on → "Do not run it for me" → Save & finish.
-      setupInput: Readable.from(['5\n', '3\n', '7\n']),
+      setupInput: Readable.from(['7\n', '3\n', '9\n']),
     },
   });
 
@@ -5824,7 +7441,7 @@ test('the managed daemon is pinned to the config setup wrote', async () => {
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['7\n']),
+      setupInput: Readable.from(['9\n']),
     },
   });
 
@@ -6030,7 +7647,7 @@ test('a stored sign-in installs the service as usual', async () => {
       homeDir: home,
       processEnv: {},
       serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
-      setupInput: Readable.from(['7\n']),
+      setupInput: Readable.from(['9\n']),
     },
   });
 
@@ -6054,7 +7671,7 @@ test('opting out in setup removes a service an earlier run installed', async () 
       processEnv: {},
       serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
       // Always on → "Do not run it for me" → Save & finish.
-      setupInput: Readable.from(['5\n', '3\n', '7\n']),
+      setupInput: Readable.from(['7\n', '3\n', '9\n']),
     },
   });
 
@@ -6163,7 +7780,7 @@ test('rerunning setup keeps an existing --no-login install as it was', async () 
           : { code: 0, stdout: '', stderr: '' };
       },
       // Straight to Save & finish, without visiting Always on.
-      setupInput: Readable.from(['7\n']),
+      setupInput: Readable.from(['9\n']),
     },
   });
 
@@ -6244,7 +7861,7 @@ test('a transient status failure does not disable a service on the next save', a
           ? { code: 1, stdout: '', stderr: 'Failed to connect to bus' }
           : { code: 0, stdout: '', stderr: '' };
       },
-      setupInput: Readable.from(['7\n']),
+      setupInput: Readable.from(['9\n']),
     },
   });
 
@@ -6449,7 +8066,7 @@ test('a service install that throws is reported, not crashed through, and setup 
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['7\n']),
+      setupInput: Readable.from(['9\n']),
     },
   });
 
@@ -6505,7 +8122,7 @@ test('a failed removal is reported, not crashed through, and setup still saves',
       processEnv: {},
       serviceRunner: stubServiceRunner,
       // Always on → "Do not run it for me" → Save & finish.
-      setupInput: Readable.from(['5\n', '3\n', '7\n']),
+      setupInput: Readable.from(['7\n', '3\n', '9\n']),
     },
   });
 
@@ -6798,7 +8415,7 @@ test('a roster that will not load never offers to delete Slack tokens', async ()
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['4\n', '2\n', '7\n']),
+      setupInput: Readable.from(['5\n', '2\n', '9\n']),
     },
   });
 
@@ -6841,7 +8458,7 @@ test('a configured soul from a colliding pair is not offered a Slack app', async
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['4\n', '1\n', '7\n']),
+      setupInput: Readable.from(['5\n', '1\n', '9\n']),
     },
   });
 
@@ -9021,7 +10638,7 @@ test('re-running setup carries a configured vision switch through the save', asy
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner,
-      setupInput: Readable.from(['6\n']),
+      setupInput: Readable.from(['8\n']),
     },
   });
 

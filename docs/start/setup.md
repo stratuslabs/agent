@@ -6,10 +6,12 @@
   1) Providers            anthropic — signed in with your Claude subscription
   2) Models               default claude-opus-5 · fallback gpt-4.1-mini
   3) Agent                ~/.stratus/agents/ava.md
-  4) Channels             Slack: 1 agent connected
-  5) Always on            stratusd runs after setup, and at every login
-  6) Test run             say hello with the current settings
-  7) Save & finish
+  4) Plugins              tool-fs, tool-web
+  5) Channels             Slack: 1 agent connected
+  6) Approvals            remote — asks in Slack, approvers for 1 agent
+  7) Always on            stratusd runs after setup, and at every login
+  8) Test run             say hello with the current settings
+  9) Save & finish
 ```
 
 Menus are keyboard-driven — arrow keys (or `j`/`k`) to move, Enter to pick,
@@ -39,12 +41,140 @@ digits to jump, Esc to go back.
 - **Agent** — name your agent (or accept a generated identity), describe
   their personality, and their soul file lands in `~/.stratus/agents/`, ready
   to edit. See [Agents](../concepts/agents.md) for what a soul is.
+- **Plugins** — what your agents *can* do. The list shows each first-party
+  package as installed, enabled, or neither; picking one installs it with
+  `npm install -g` and enables it in the same step, writing the `plugins`
+  block for you. What it deliberately will not do, in each case because the
+  alternative is a config that looks configured and is not:
+  - **Enable a plugin without the setting it is useless without.** `tool-fs`
+    with no `roots` loads and then fails every call, so setup asks for them
+    and writes nothing if you leave the answer blank — unless roots are
+    already set per agent under `agents.<id>` for an agent the roster still
+    serves, which is a working config and a narrower one than any fleet-wide
+    answer, so that is kept as it is. An override left behind by a deleted
+    agent does not count: it would grant nobody anything.
+  - **Enable a block a daemon would refuse.** The block that would be saved
+    is checked before the switch goes on — through `preflightPlugin`, the
+    same pre-import checks the loader runs and `stratus plugins` reports
+    from, so the three surfaces cannot disagree. A `timeoutMs` that is not
+    an integer, a `roots` entry that is not a string, a `toolRisks` entry
+    naming a tool the manifest does not declare, a skill file the package is
+    missing: each is named where it is, and the plugin is left off rather
+    than switched on to register nothing. It is the block *after* your
+    answers, so the roots prompt can repair the very value that was wrong.
+  - **Switch off a plugin whose package is gone.** A config copied from
+    another machine, or an uninstall, leaves a block enabling a package that
+    is not there; the row offers to clear it without installing first. A key
+    that could never end up loaded is offered no install at all, only the
+    switch-off, since the row is built from whatever keys your `plugins`
+    block has. That covers a typo or a stray character, and also a key like
+    `@scope/foo@latest`: npm installs that happily, but the key is *also*
+    the specifier a daemon imports, and Node does not resolve a version — so
+    the plugin would stay absent however often it is installed.
+  - **Say nothing about who can call it when the roster will not load.** A
+    roster that refuses (two souls claiming one id, say) tells you nothing
+    about anyone's `tools:` list, so setup says the answer is unknown until
+    you fix it rather than guessing either way.
+  - **Enable `plugin-mcp` from scratch.** It requires a `servers` block
+    naming endpoints only you know, and a block written without one is
+    refused at load. Setup says so and points at
+    [Config](../reference/config.md). A block that already has one is
+    switched on and off like any other — the refusal is about the missing
+    setting, not the package. Whether each entry inside `servers` is one the
+    bridge accepts is past what any manifest states, and reading it means
+    loading the plugin, which setup never does — so enabling says so, and
+    points at the `plugin … did not load` the daemon prints.
+
+  It also names a prerequisite it cannot install: `tool-browser` depends on
+  `playwright-core`, which deliberately downloads no browser, so enabling it
+  prints how to point it at one you have or fetch a dedicated Chromium.
+  Setup cannot check for a browser without importing the plugin, which it
+  never does — so it tells you instead of blocking.
+
+  Enabling is only the second of the two gates — the soul's `tools:` list is
+  the other, and setup does not edit souls. What it prints depends on which
+  it is: a soul with **no** `tools:` list is allowlisted for every registered
+  tool, and the built-in `stratus` agent has none, so on a fresh install
+  enabling a plugin makes its tools callable at the next daemon start and
+  setup says exactly that, naming the agents — except where it has just
+  said it did not check something the plugin needs, as for `tool-browser`
+  and MCP, and then the same line is qualified rather than promising an
+  outcome the caveat above it contradicts. A package setup has no built-in
+  entry for is qualified too: the preflight reads a manifest and never
+  loads the package, so whether it exports `createPlugin(config)` is a
+  question only a daemon start answers. Where every soul has a list, it
+  prints the line to paste instead — unless one of those lists already
+  names what the plugin contributes, which setup checks against the
+  manifest and reports as granted — naming the soul's own entries and the
+  contributed tools they miss, using the rule `stratus plugins` reports
+  from. Its own entries rather than the plugin's declarations, because a
+  soul granting one tool under a discovered namespace like `mcp.*` reaches
+  the plugin without being granted the namespace. **Skills are said separately**, because they are gated the
+  other way round: an omitted `skills:` list is *none*, so no soul gains a
+  plugin's skills by default and a `tools:` entry never grants one. An
+  agent is only named as one that
+  can call the plugin if the setting the plugin needs resolves for it:
+  `tool-fs` enabled from a per-agent `roots` block leaves the other
+  permissive souls allowlisted for tools that fail on the first call, and
+  setup names them separately as the ones still to set `roots` for. Either
+  way `stratus plugins` shows who can call what. See
+  [Tools](../guides/tools.md), and
+  [github.com/stratuslabs/plugins](https://github.com/stratuslabs/plugins)
+  for what else exists.
 - **Channels** — put an agent on Slack without opening a file. Pick the
   agent, and setup prints the app manifest with their name already filled in,
   walks you through the two tokens (input hidden), verifies each against
   Slack before accepting it, and stores them where `stratus serve` looks. The
   list marks who is connected; picking a connected agent offers to replace
   their tokens or disconnect. See [Slack](../guides/slack.md).
+- **Approvals** — what happens to a gated call with nobody watching.
+  `headless` refuses it; **ask in Slack** parks the turn and asks an
+  approver. Both halves are set on one screen because they are one decision:
+  `remote` with nobody listed ends in a denial too, and setup says which
+  kind on the screen rather than leaving it to be discovered from a refused
+  call: an agent Slack *covers* but has no approvers for is denied **on
+  arrival**, because the adapter answers the request itself; an agent no
+  channel reaches at all parks until the timeout, or for the life of the
+  daemon when `approvals.timeoutMs` is `0`. The agents offered are
+  the ones **Channels** connected *and* the roster still has — a token that
+  outlived its agent is skipped by the Slack adapter, so approvers named for
+  it would configure a route no call can take. (Those orphaned tokens are
+  shown under **Channels**, which is where they can be cleared.) The rows
+  stay editable before `@stratusagent/channel-slack` is installed, since Save
+  is what offers it: on a first run you connect Slack and name its approvers
+  in one pass, and the screen says the adapter is still coming. Some details
+  it gets right so you don't have to:
+  - **A fallback channel, not just approvers.** A turn that arrived through
+    Slack is answered in its own thread, but one started by a schedule, a
+    delegation, or the control API reaches the adapter with no destination
+    and is denied undeliverable. Setup asks for the channel to use for those,
+    and says plainly what you lose if you skip it.
+  - **Inherited values stay inherited.** An agent with no list of its own
+    uses the top-level `approvals.slackApprovers`, and the same goes for
+    `slackChannel`; the row marks those as *(inherited)*, and keeping a
+    value leaves it inheriting rather than freezing today's setting as that
+    agent's own override. The channel prompt offers what the agent actually
+    owns: an override can be cleared, an inherited channel cannot — there
+    is no per-agent key to delete, so it offers to replace it instead.
+  - **The row is the same verdict `stratus plugins` prints.** Not a summary
+    of it — the same clauses, from one renderer, so the two cannot disagree
+    about whether your approvals work. That is what carries the details a
+    shorter sentence kept losing: `headless` refuses an *uncovered* call and
+    says so, because a standing grant or an approved scope still runs
+    unattended; an `approvals.timeoutMs` of `0` parks a call for the
+    daemon's life rather than denying it; and the control API counts as a
+    way to answer. On a terminal too narrow for the whole line the row ends
+    in `…` — visibly cut rather than quietly shortened, since a chosen
+    prefix reads as the whole verdict and was wrong twice — and the
+    Approvals screen carries all of it.
+  - **Clearing a list never widens one.** With a top-level list in play,
+    emptying an agent's approvers writes the explicit `[]` that *excludes*
+    it, rather than deleting the key and handing it the global list. The
+    fallback channel has no such per-agent opt-out: clearing it moves the
+    agent onto the top-level channel, and setup says so and names it
+    instead of claiming the agent has no fallback.
+
+  See [Approvals](../guides/approvals.md).
 - **Always on** — whether the roster keeps answering once you close the
   terminal. On by default, because an agent you have to remember to start is
   not always-on, and every Slack app you connected above stays silent until
@@ -110,9 +240,14 @@ project-local `stratus.config.json` still wins when present, and env vars
 outrank both — see [Configuration](../reference/config.md).
 
 Re-running setup **edits** that file rather than rewriting it. The keys it
-has no menu for are read in and written back untouched — the `plugins`,
-`approvals`, `api`, and `principals` blocks, plus the `vision`,
-`promptCache`, and `promptCacheTtl` preferences — so a capability you
-granted an agent by hand survives the next time you change a model. It did
-not always: setup rebuilt the file from its own menus, and everything it
-had no menu for was deleted by a run that never mentioned it.
+has no menu for are read in and written back untouched — the `api` and
+`principals` blocks, plus the `vision`, `promptCache`, and `promptCacheTtl`
+preferences — so a capability you granted an agent by hand survives the next
+time you change a model. It did not always: setup rebuilt the file from its
+own menus, and everything it had no menu for was deleted by a run that never
+mentioned it.
+
+The `plugins` and `approvals` blocks now have menus, and those menus edit
+what was read rather than replacing it: settings you wrote by hand under a
+plugin setup did not ask about — `agents` overrides, `toolRisks`, a
+`timeoutMs` — are still there after enabling or disabling something.
