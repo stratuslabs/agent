@@ -1181,6 +1181,19 @@ test('a turn nobody asked for ends on the note, after its newest message only, o
   await assert.rejects(() => filtered.generate(requestWith(thread)), /empty response \(finish_reason: content_filter\)/);
   finishReason = 'stop';
   assert.deepEqual(await filtered.generate(requestWith(thread)), { parts: [] });
+  // A structured refusal — `content: null`, `finish_reason: stop`, and the
+  // reason in `refusal` — is the model's own outcome, not silence.
+  const refusing = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    baseUrl: 'https://example.test/v1',
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ choices: [{ message: { content: null, refusal: 'I cannot help with that.' }, finish_reason: 'stop' }] }),
+    } as Response),
+  });
+  await assert.rejects(() => refusing.generate(requestWith(thread)), /refused the request: I cannot help with that\./);
   // And no completion at all — an empty body — is not silence either.
   const bodiless = createOpenAICompatibleProvider({
     model: 'gpt-4.1-mini',

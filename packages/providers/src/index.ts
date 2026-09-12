@@ -150,6 +150,8 @@ interface OpenAICompatibleResponse {
     message?: {
       content?: string | Array<{ type?: string; text?: string }> | null;
       tool_calls?: OpenAICompatibleToolCall[];
+      /** A structured refusal: the model declined, with `content` null and an ordinary `finish_reason`. */
+      refusal?: string | null;
     };
     /** Why the model stopped — `stop`, `length`, `content_filter`, `tool_calls` — where the endpoint says. */
     finish_reason?: string | null;
@@ -489,6 +491,13 @@ export const createOpenAICompatibleProvider = ({
         // and recording it as a decision would hide it. An endpoint that
         // reports no finish reason at all is taken at its word.
         const choice = payload.choices?.[0];
+        // A refusal is the model's own outcome, not silence: it arrives with
+        // `content: null` and a `finish_reason` of `stop`, and only this
+        // field says so.
+        const refusal = choice?.message?.refusal;
+        if (typeof refusal === 'string' && refusal.length > 0) {
+          throw new Error(`Provider refused the request: ${refusal}`);
+        }
         const finishReason = choice?.finish_reason ?? undefined;
         // A choice with a message has to exist: a 200 with an empty body,
         // `{}`, or no choices is no completion at all, and a missing
