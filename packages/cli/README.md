@@ -44,6 +44,7 @@ stratus doctor                         # what a run would use right now, and why
 stratus update                         # stop → upgrade → migrate → repair unit → restart
 stratus agent new                      # create an agent (guided on a terminal)
 stratus agents                         # who's on the team: souls, models, memory
+stratus template add owner/repo        # install an agent, its skills, and the plugins behind them — prints what it will add, then asks
 stratus skill add owner/repo           # install skills from GitHub (validated against the Agent Skills spec) — a running daemon picks them up, no restart
 stratus skill validate ./my-skill      # check a skill against the spec without installing it
 stratus plugins                        # installed → enabled → granted → what approvals does with it
