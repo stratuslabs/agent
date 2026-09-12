@@ -2543,6 +2543,53 @@ export const resolveEnvApiKey = (
   return undefined;
 };
 
+/**
+ * What an untrusted config asked for and did not get: `soul` and
+ * `systemPrompt`, minus a key the selection or the environment outranked,
+ * which is beaten rather than refused. One rule with three readers —
+ * {@link resolveRuntimeConfig} records it on every run, `stratus doctor`
+ * applies it when no run could resolve, and `stratus serve` says it at
+ * startup from {@link discoverIgnoredUntrustedConfig}, because the served
+ * runtime that fails to resolve (a real provider with no usable credential)
+ * is exactly the one whose record the daemon never sees.
+ */
+export const ignoredUntrustedConfigKeys = (
+  selection: Pick<RuntimeSelection, 'soul'>,
+  fileConfig: StratusConfigFile,
+  location: Pick<ResolvedConfigLocation, 'path' | 'trusted'> | undefined,
+  env: StateEnvironment = {},
+): IgnoredUntrustedConfig | undefined => {
+  if (location === undefined || location.trusted) {
+    return undefined;
+  }
+  const processEnv = readProcessEnv(env);
+  const keys: IgnoredUntrustedConfig['keys'] = [];
+  if (selection.soul === undefined && readNonEmptyString(processEnv.STRATUS_SOUL) === undefined && fileConfig.soul) {
+    keys.push('soul');
+  }
+  if (readNonEmptyString(processEnv.STRATUS_SYSTEM_PROMPT) === undefined && fileConfig.systemPrompt) {
+    keys.push('systemPrompt');
+  }
+  return keys.length > 0 ? { path: location.path, keys } : undefined;
+};
+
+/**
+ * {@link ignoredUntrustedConfigKeys} for the config a run started here
+ * would discover, without resolving a run: a file that cannot be read is
+ * answered as nothing ignored, because its own error is the run's to report.
+ */
+export const discoverIgnoredUntrustedConfig = async (
+  selection: Pick<RuntimeSelection, 'configPath'>,
+  env: StateEnvironment = {},
+): Promise<IgnoredUntrustedConfig | undefined> => {
+  const location = await resolveConfigLocation(selection, env).catch(() => undefined);
+  if (location === undefined || location.trusted) {
+    return undefined;
+  }
+  const fileConfig = await loadConfigFile(location.path).catch(() => undefined);
+  return fileConfig === undefined ? undefined : ignoredUntrustedConfigKeys({}, fileConfig, location, env);
+};
+
 export const resolveRuntimeConfig = async (
   selection: RuntimeSelection,
   env: StateEnvironment = {},
@@ -2570,18 +2617,12 @@ export const resolveRuntimeConfig = async (
   // the agent ignoring its instructions rather than as a trust decision.
   // Computed before the demo return: a persona shipped in a clone is
   // exactly what the demo run in that clone would otherwise pick up.
-  const ignoredKeys: IgnoredUntrustedConfig['keys'] = [];
-  if (configTrusted === false) {
-    if (selection.soul === undefined && readNonEmptyString(processEnv.STRATUS_SOUL) === undefined && fileConfig.soul) {
-      ignoredKeys.push('soul');
-    }
-    if (readNonEmptyString(processEnv.STRATUS_SYSTEM_PROMPT) === undefined && fileConfig.systemPrompt) {
-      ignoredKeys.push('systemPrompt');
-    }
-  }
-  const ignoredFromUntrustedConfig: IgnoredUntrustedConfig | undefined = ignoredKeys.length > 0 && configPathShown !== undefined
-    ? { path: configPathShown, keys: ignoredKeys }
-    : undefined;
+  const ignoredFromUntrustedConfig = ignoredUntrustedConfigKeys(
+    selection,
+    fileConfig,
+    configPathShown !== undefined && configTrusted !== undefined ? { path: configPathShown, trusted: configTrusted } : undefined,
+    env,
+  );
 
   if (provider === 'demo') {
     return {

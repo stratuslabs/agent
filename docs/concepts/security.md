@@ -52,7 +52,9 @@ taking effect the moment you run `stratus run` in that directory — with
 whatever tools and approvals that run has. `--soul`, `STRATUS_SOUL`, and
 `STRATUS_SYSTEM_PROMPT` still name one, because the flag and the
 environment are yours; the run says on stderr what the file asked for and
-did not get, and names `--config <file>` as the way to trust it.
+did not get, and names `--config <file>` as the way to trust it. The
+daemon says the same once at startup — even when its runtime cannot
+resolve, since that daemon starts too.
 
 Nor does a clone get to decide **where your key goes, or which key it is**:
 

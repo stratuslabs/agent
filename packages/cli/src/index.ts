@@ -185,6 +185,9 @@ import {
   type StoredCredential,
   type StratusConfigFile,
   type StratusProviderName,
+  discoverIgnoredUntrustedConfig,
+  ignoredUntrustedConfigKeys,
+  type IgnoredUntrustedConfig,
 } from '@stratusagent/state';
 
 import {
@@ -2442,7 +2445,10 @@ export const resolveRuntimeConfig = (
  * decision it is.
  */
 export const warnOnUntrustedConfig = (runtime: RuntimeConfig, streams: CliStreams): void => {
-  const ignored = runtime.ignoredFromUntrustedConfig;
+  warnOnIgnoredConfig(runtime.ignoredFromUntrustedConfig, streams);
+};
+
+export const warnOnIgnoredConfig = (ignored: IgnoredUntrustedConfig | undefined, streams: CliStreams): void => {
   if (!ignored) {
     return;
   }
@@ -6588,15 +6594,7 @@ export const collectDoctorReport = async (
   // and only when no run could resolve at all is the same rule applied
   // here, so the finding still appears beside the failure that hid it.
   const refusedByTrust = resolved?.ignoredFromUntrustedConfig
-    ?? (winner?.label === 'project'
-      ? (() => {
-          const keys = (['soul', 'systemPrompt'] as const).filter((key) =>
-            typeof fileConfig[key] === 'string'
-            && fileConfig[key].length > 0
-            && envPick(key === 'soul' ? 'STRATUS_SOUL' : 'STRATUS_SYSTEM_PROMPT') === undefined);
-          return keys.length > 0 ? { path: winner.path, keys } : undefined;
-        })()
-      : undefined);
+    ?? ignoredUntrustedConfigKeys({}, fileConfig, winner ? { path: winner.path, trusted: winner.label !== 'project' } : undefined, env);
   if (refusedByTrust) {
     problems.push(
       `${refusedByTrust.path} sets ${refusedByTrust.keys.join(' and ')}, which an auto-discovered config does not get to choose — `
@@ -10216,13 +10214,17 @@ const serveHeldHome = async (
       stdout: { write: () => true },
       stderr: { write: (chunk: string) => { collect(chunk.replace(/\n$/, '')); return true; } },
     };
+    // The same notice `run` and `chat` give, from config discovery rather
+    // than from a resolved runtime: servedRuntimes drops a pass that fails
+    // to resolve — a real provider with no usable credential — and that
+    // daemon still starts, with nothing saying why the clone's persona is
+    // not in force. The per-runtime record below repeats it for a pass
+    // that did resolve; the dedupe above collapses the two to one line.
+    warnOnIgnoredConfig(await discoverIgnoredUntrustedConfig(command.configPath ? { configPath: command.configPath } : {}, env), captured);
     // A pinned soul does not merely add a provider — the gateway DEMOTES
     // the daemon-wide defaults it outranks, including STRATUS_PROVIDER, so
     // each served runtime is resolved the way a dispatch resolves it.
     for (const served of await servedRuntimes(env, command.configPath)) {
-      // The same notice `run` and `chat` give, collapsed to one line by the
-      // dedupe above: a daemon started in a cloned repo would otherwise
-      // switch to the built-in identity with nothing saying why.
       warnOnUntrustedConfig(served.runtime, captured);
       await warnOnCredentialOverride(served.runtime, captured, served.env);
     }
