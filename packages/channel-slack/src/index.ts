@@ -1998,7 +1998,11 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * the thread is not attentive: it was mentioned and its first turn has
    * not answered yet, or answered with nothing. Measured against the
    * message's own timestamp, not the clock, so a delivery that ran late is
-   * judged as of when it was said.
+   * judged as of when it was said. Bounded below as well as above: a
+   * message said before the answer the window starts from is outside it
+   * — Slack redelivers events a restarted daemon has no memory of, and a
+   * negative age would otherwise pass the minutes bound however old the
+   * message, on a turn the agent's answer already came after.
    */
   const attentive = (routing: SessionRouting, messageTs: string, pending: number): boolean => {
     if (routing.lastAnsweredAt === undefined) {
@@ -2006,7 +2010,7 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     const answeredAt = Date.parse(routing.lastAnsweredAt);
     const saidAt = Number(messageTs) * 1000;
-    if (Number.isNaN(answeredAt) || Number.isNaN(saidAt) || saidAt - answeredAt > ATTENTION_MS) {
+    if (Number.isNaN(answeredAt) || Number.isNaN(saidAt) || saidAt < answeredAt || saidAt - answeredAt > ATTENTION_MS) {
       return false;
     }
     return (routing.heardSinceAnswered ?? 0) + pending < ATTENTION_MESSAGES;

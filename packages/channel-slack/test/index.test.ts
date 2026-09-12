@@ -1617,6 +1617,36 @@ test('an agent that judges takes a turn nobody asked for while attentive, hears 
   assert.deepEqual(web.updates.map((update) => update.text), ['hi there', '(no reply)']);
 });
 
+test('a message said before the answer the window starts from is heard, not judged', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, ''));
+  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }];
+  // Ava answered a mention at 1000s; Slack redelivers, after a restart,
+  // a message typed at 999.5s that her answer already came after.
+  gateway.sessionRouting = async () => ({
+    agentId: 'ava',
+    metadata: {},
+    lastSpokeAt: new Date(1000 * 1000).toISOString(),
+    lastAnsweredAt: new Date(1000 * 1000).toISOString(),
+    heardSinceAnswered: 0,
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+  });
+  await adapter.start(gateway);
+
+  await socket.deliver('message', channelMessage({ text: 'before the answer', ts: '999.5', thread: '990.0' }));
+  await socket.deliver('message', channelMessage({ text: 'after it', ts: '1000.5', thread: '990.0' }));
+  await adapter.stop();
+
+  assert.deepEqual(gateway.observes.map((observe) => observe.message), ['Dylan: before the answer']);
+  assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.addressed]), [['Dylan: after it', false]]);
+});
+
 test('a turn nobody asked for opens its placeholder on its first text, never on a tool line, and a failed one says nothing', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
