@@ -1842,6 +1842,73 @@ test('a turn nobody asked for whose abandoned attempt opened the placeholder tak
   assert.deepEqual(last.map((dispatch) => [dispatch.agentId, dispatch.addressed]), [['ava', false]]);
 });
 
+test('a turn nobody asked for whose placeholder opened but took no edit takes it back, and holds the thread only if Slack refuses', async () => {
+  const socket = createFakeSocket();
+  const webAva = createFakeWeb('B-AVA', 'T1');
+  const webBea = createFakeWeb('B-BEA', 'T1');
+  const warnings: string[] = [];
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+  const clock = stampsAfter();
+  webAva.stamp = clock.stamp;
+  webBea.stamp = clock.stamp;
+  // The placeholder posts; nothing Ava says ever lands in it.
+  webAva.chat.update = async () => {
+    throw new Error('ratelimited');
+  };
+  const gateway = createStubGateway(async ({ sessionId }) => {
+    if (sessionId.includes(':bea:')) {
+      return sessionWithReply(sessionId, 'ok');
+    }
+    await gateway.bus.emit({ type: 'provider.delta', sessionId, delta: { type: 'text', text: 'Thinking' } });
+    await tick();
+    return sessionWithReply(sessionId, 'Done');
+  });
+  gateway.agents = () => [{ id: 'ava', name: 'Ava', listens: 'judge' }, { id: 'bea', name: 'Bea' }];
+  gateway.sessionRouting = async (sessionId) => ({
+    agentId: sessionId.includes(':ava:') ? 'ava' : 'bea',
+    metadata: {},
+    lastSpokeAt: new Date((sessionId.includes(':ava:') ? 1120 : 1121) * 1000).toISOString(),
+    lastAnsweredAt: new Date(1120 * 1000).toISOString(),
+    heardSinceAnswered: 0,
+  });
+  const adapter = createSlackChannelAdapter({
+    agents: [
+      { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' },
+      { agentId: 'bea', appToken: 'xapp-2', botToken: 'xoxb-2' },
+    ],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: (botToken) => (botToken === 'xoxb-1' ? webAva : webBea),
+    warn: (line) => {
+      warnings.push(line);
+    },
+  });
+  await adapter.start(gateway);
+
+  clock.at('1122.1');
+  await socket.deliver('message', channelMessage({ text: 'so?', ts: '1122.1', thread: '1120.0' }));
+  // The stranded placeholder is gone, and Ava did not speak: the thread
+  // is still Bea's, and Ava judges the next message beside her.
+  assert.equal(webAva.deletes.length, 1, warnings.join('\n'));
+  clock.at('1122.2');
+  await socket.deliver('message', channelMessage({ text: 'next', ts: '1122.2', thread: '1120.0' }));
+  const next = gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('next'));
+  assert.deepEqual(next.map((dispatch) => [dispatch.agentId, dispatch.addressed ?? true]).sort(), [['ava', false], ['bea', true]]);
+
+  // Slack refusing the delete leaves the `…` standing under Ava's name,
+  // and a standing message is the last thing said: the thread is hers.
+  webAva.chat.delete = async () => {
+    throw new Error('cant_delete_message');
+  };
+  clock.at('1122.3');
+  await socket.deliver('message', channelMessage({ text: 'again', ts: '1122.3', thread: '1120.0' }));
+  clock.at('1122.4');
+  await socket.deliver('message', channelMessage({ text: 'more', ts: '1122.4', thread: '1120.0' }));
+  await adapter.stop();
+  const more = gateway.dispatches.filter((dispatch) => dispatch.userMessage.includes('more'));
+  assert.deepEqual(more.map((dispatch) => [dispatch.agentId, dispatch.addressed ?? true]), [['ava', false]]);
+});
+
 test('text streamed to a turn nobody asked for before it begins does not open its placeholder', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

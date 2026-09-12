@@ -825,7 +825,20 @@ class ReplyRenderer {
         this.warn(`chat.postMessage failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    return this.outcome(published, landed || this.edited || this.uploaded);
+    // A placeholder that opened for a turn nobody asked for and never
+    // took a word of it — every edit refused — is a `…` standing alone
+    // under the agent's name, the interruption a judged turn exists to
+    // avoid, so it is taken back like an abandoned attempt's. One Slack
+    // will not let go stands, and a message the thread can see is the
+    // last thing said whatever it says.
+    let stranded = false;
+    if (this.lazy && this.ref !== undefined && !landed && !this.edited) {
+      stranded = !(await this.retract());
+      if (stranded) {
+        this.placeText(this.ref?.ts);
+      }
+    }
+    return this.outcome(published, landed || this.edited || this.uploaded || stranded);
   }
 
   private placeText(ts: string | undefined): void {
