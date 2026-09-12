@@ -77,9 +77,11 @@ listens: judge
   message runs a turn that is told nobody asked it anything and that it may
   say nothing, and a turn that says nothing leaves the thread untouched — no
   `…`, no `(no reply)`. That "while" is its attention: eight messages or
-  fifteen minutes after it last spoke, whichever ends first; past that a
-  message is heard for free with no model call, and mentioning it starts the
-  window again. So "thanks Ava, we've got it from here" works because it is a
+  fifteen minutes after it last answered a message that named it, whichever
+  ends first; past that a message is heard for free with no model call, and
+  mentioning it starts the window again. Speaking up on its own does not —
+  an agent cannot extend its own attention, or a talkative one would never
+  drift out. So "thanks Ava, we've got it from here" works because it is a
   sentence the agent read, and a mention is still the way to be sure.
 
 Judging costs a model call per message inside the window, which is why the

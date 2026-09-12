@@ -75,8 +75,9 @@ const MAX_UNRENDERED_FILES = 20;
 const PLACEHOLDER_TEXT = '…';
 
 /**
- * How long an agent that judges stays attentive after it last spoke: this
- * many messages, or this many minutes, whichever ends first. Judging costs
+ * How long an agent that judges stays attentive after it last answered a
+ * message that addressed it: this many messages, or this many minutes,
+ * whichever ends first. Judging costs
  * a model call per message, and two people talking for an hour is a
  * hundred of them for one "no" — so attention decays the way a person's
  * does. Outside the window a message is overheard for free, and a mention
@@ -1958,24 +1959,28 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
 
   /**
    * Whether an agent that judges is still paying attention to a thread:
-   * within `ATTENTION_MESSAGES` and `ATTENTION_MS` of when it last spoke
-   * there, both read from the session rather than remembered here, so a
-   * restart forgets nothing. An agent that has never spoken in the thread
-   * is not attentive: it was mentioned and its first turn has not
-   * answered yet, or answered with nothing, and either way nothing has
-   * re-armed it. Measured against the message's own timestamp, not the
-   * clock, so a delivery that ran late is judged as of when it was said.
+   * within `ATTENTION_MESSAGES` and `ATTENTION_MS` of when it last
+   * answered a message that addressed it, both read from the session
+   * rather than remembered here, so a restart forgets nothing. Anchored
+   * to an addressed answer and not to any reply: a reply the agent chose
+   * to give on a turn nobody asked for does not re-arm it, or a talkative
+   * judge would keep itself attentive for good and cost a call per message
+   * — the self-extension the spec declined. An agent never addressed in
+   * the thread is not attentive: it was mentioned and its first turn has
+   * not answered yet, or answered with nothing. Measured against the
+   * message's own timestamp, not the clock, so a delivery that ran late is
+   * judged as of when it was said.
    */
   const attentive = (routing: SessionRouting, messageTs: string, pending: number): boolean => {
-    if (routing.lastSpokeAt === undefined) {
+    if (routing.lastAnsweredAt === undefined) {
       return false;
     }
-    const spokeAt = Date.parse(routing.lastSpokeAt);
+    const answeredAt = Date.parse(routing.lastAnsweredAt);
     const saidAt = Number(messageTs) * 1000;
-    if (Number.isNaN(spokeAt) || Number.isNaN(saidAt) || saidAt - spokeAt > ATTENTION_MS) {
+    if (Number.isNaN(answeredAt) || Number.isNaN(saidAt) || saidAt - answeredAt > ATTENTION_MS) {
       return false;
     }
-    return (routing.heardSinceSpoke ?? 0) + pending < ATTENTION_MESSAGES;
+    return (routing.heardSinceAnswered ?? 0) + pending < ATTENTION_MESSAGES;
   };
 
   /**

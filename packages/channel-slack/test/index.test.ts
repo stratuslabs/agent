@@ -1526,7 +1526,7 @@ test('an agent that judges takes a turn nobody asked for while attentive, hears 
   web.knownConversations.set('C1', { is_member: true });
   // The session as the gateway would report it: when Ava last spoke in the
   // thread, and how many messages she has heard since.
-  const attention: { lastSpokeAt?: string; heard: number } = { heard: 0 };
+  const attention: { lastAnsweredAt?: string; heard: number } = { heard: 0 };
   const spokeAt = (ts: string): string => new Date(Number(ts) * 1000).toISOString();
   const gateway = createStubGateway(({ sessionId, userMessage }) => {
     if (userMessage.includes('help')) {
@@ -1539,8 +1539,8 @@ test('an agent that judges takes a turn nobody asked for while attentive, hears 
     ? {
       agentId: 'ava',
       metadata: {},
-      heardSinceSpoke: attention.heard,
-      ...(attention.lastSpokeAt !== undefined ? { lastSpokeAt: attention.lastSpokeAt } : {}),
+      heardSinceAnswered: attention.heard,
+      ...(attention.lastAnsweredAt !== undefined ? { lastSpokeAt: attention.lastAnsweredAt, lastAnsweredAt: attention.lastAnsweredAt } : {}),
     }
     : undefined);
   const adapter = createSlackChannelAdapter({
@@ -1555,30 +1555,33 @@ test('an agent that judges takes a turn nobody asked for while attentive, hears 
   await socket.deliver('message', channelMessage({ text: 'kicking off', ts: '980.1', thread: '980.0' }));
   attention.heard += 1;
   // A mention runs a turn somebody asked for — placeholder and all — and
-  // her answer re-arms attention.
+  // her answer to it arms attention.
   await socket.deliver('message', channelMessage({ text: '<@B-AVA> hi', ts: '980.2', thread: '980.0' }));
-  attention.lastSpokeAt = spokeAt('980.2');
+  attention.lastAnsweredAt = spokeAt('980.2');
   attention.heard = 0;
   // Attentive: a turn nobody asked for. It says nothing, and nothing is
   // posted — no placeholder, no `(no reply)`.
   await socket.deliver('message', channelMessage({ text: 'and then', ts: '980.3', thread: '980.0' }));
   attention.heard += 1;
   // Attentive, and this time it has something to add: posted, with no
-  // placeholder having been shown while it decided.
+  // placeholder having been shown while it decided. Speaking on a turn
+  // nobody asked for does not re-arm attention — the anchor stays at the
+  // mention, and this message counts against the window like any other.
   await socket.deliver('message', channelMessage({ text: 'help me', ts: '980.4', thread: '980.0' }));
-  attention.lastSpokeAt = spokeAt('980.4');
-  attention.heard = 0;
-  // Eight messages heard since she spoke: attention has run out. Heard, no
-  // turn — and the provider is never called.
+  attention.heard += 1;
+  // Eight messages heard since she was asked: attention has run out.
+  // Heard, no turn — and the provider is never called.
   attention.heard = 8;
   await socket.deliver('message', channelMessage({ text: 'still there?', ts: '980.5', thread: '980.0' }));
-  // Fifteen minutes since she spoke, whatever the count: the same.
+  // Fifteen minutes since she was asked, whatever the count: the same.
   attention.heard = 0;
   await socket.deliver('message', channelMessage({ text: 'much later', ts: '2000.0', thread: '980.0' }));
-  // Attentive again, and the message carries a screenshot: a turn nobody
-  // asked for takes no images — the kernel refuses them — so it is named
-  // the way an overheard message's attachment is.
-  attention.lastSpokeAt = spokeAt('2000.0');
+  // A mention re-arms it. Then a message carrying a screenshot: a turn
+  // nobody asked for takes no images — the kernel refuses them — so it is
+  // named the way an overheard message's attachment is.
+  await socket.deliver('message', channelMessage({ text: '<@B-AVA> back?', ts: '2000.05', thread: '980.0' }));
+  attention.lastAnsweredAt = spokeAt('2000.05');
+  attention.heard = 0;
   const withShot = channelMessage({ text: 'what about this', ts: '2000.1', thread: '980.0' });
   await socket.deliver('message', {
     ...withShot,
@@ -1587,11 +1590,12 @@ test('an agent that judges takes a turn nobody asked for while attentive, hears 
   await adapter.stop();
 
   // Cost, stated: one call per mention plus one per message judged inside
-  // the window — four here, of seven messages.
+  // the window — five here, of eight messages.
   assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.addressed, dispatch.images]), [
     ['Dylan: hi', undefined, undefined],
     ['Dylan: and then', false, undefined],
     ['Dylan: help me', false, undefined],
+    ['Dylan: back?', undefined, undefined],
     ['Dylan: what about this\n[Attached: shot.png. Attachment contents cannot be read here — say so rather than guessing at them.]', false, undefined],
   ]);
   assert.deepEqual(gateway.observes.map((observed) => observed.message), [
@@ -1599,11 +1603,12 @@ test('an agent that judges takes a turn nobody asked for while attentive, hears 
     'Dylan: still there?',
     'Dylan: much later',
   ]);
-  // The thread saw exactly two things from Ava: the answer she was asked
-  // for, in its placeholder, and the one she chose to give, as a message
-  // of its own — and no `…` or `(no reply)` for the turn that said nothing.
-  assert.deepEqual(web.posts.map((post) => post.text), ['…', 'Here is help']);
-  assert.deepEqual(web.updates.map((update) => update.text), ['hi there']);
+  // The thread saw exactly three things from Ava: the two answers she was
+  // asked for, in their placeholders, and the one she chose to give, as a
+  // message of its own — and no `…` or `(no reply)` for the turns that
+  // said nothing.
+  assert.deepEqual(web.posts.map((post) => post.text), ['…', 'Here is help', '…']);
+  assert.deepEqual(web.updates.map((update) => update.text), ['hi there', '(no reply)']);
 });
 
 test('a turn nobody asked for opens its placeholder on its first text, never on a tool line, and a failed one says nothing', async () => {
@@ -1633,7 +1638,8 @@ test('a turn nobody asked for opens its placeholder on its first text, never on 
     agentId: 'ava',
     metadata: {},
     lastSpokeAt: new Date(990 * 1000).toISOString(),
-    heardSinceSpoke: 0,
+    lastAnsweredAt: new Date(990 * 1000).toISOString(),
+    heardSinceAnswered: 0,
   });
   const adapter = createSlackChannelAdapter({
     agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
@@ -1673,7 +1679,8 @@ test('text streamed to a turn nobody asked for before it begins does not open it
     agentId: 'ava',
     metadata: {},
     lastSpokeAt: new Date(995 * 1000).toISOString(),
-    heardSinceSpoke: 0,
+    lastAnsweredAt: new Date(995 * 1000).toISOString(),
+    heardSinceAnswered: 0,
   });
   // The turn is queued behind something — a recovery — and has not begun:
   // the session has not reported `running` for it.
@@ -1726,7 +1733,8 @@ test('a burst of messages typed inside one turn is judged only up to the window'
     agentId: 'ava',
     metadata: {},
     lastSpokeAt: new Date(1000 * 1000).toISOString(),
-    heardSinceSpoke: 0,
+    lastAnsweredAt: new Date(1000 * 1000).toISOString(),
+    heardSinceAnswered: 0,
   });
   const adapter = createSlackChannelAdapter({
     agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
@@ -1785,7 +1793,8 @@ test('a turn nobody asked for that ends while its placeholder is still opening f
     agentId: 'ava',
     metadata: {},
     lastSpokeAt: new Date(1010 * 1000).toISOString(),
-    heardSinceSpoke: 0,
+    lastAnsweredAt: new Date(1010 * 1000).toISOString(),
+    heardSinceAnswered: 0,
   });
   const adapter = createSlackChannelAdapter({
     agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
@@ -1828,7 +1837,8 @@ test('a turn nobody asked for that fails while its placeholder is still opening 
     agentId: 'ava',
     metadata: {},
     lastSpokeAt: new Date(1015 * 1000).toISOString(),
-    heardSinceSpoke: 0,
+    lastAnsweredAt: new Date(1015 * 1000).toISOString(),
+    heardSinceAnswered: 0,
   });
   const adapter = createSlackChannelAdapter({
     agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
@@ -1855,7 +1865,8 @@ test('an attachment with nothing said does not spend a judging slot', async () =
     agentId: 'ava',
     metadata: {},
     lastSpokeAt: new Date(1020 * 1000).toISOString(),
-    heardSinceSpoke: 0,
+    lastAnsweredAt: new Date(1020 * 1000).toISOString(),
+    heardSinceAnswered: 0,
   });
   const adapter = createSlackChannelAdapter({
     agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
@@ -1899,7 +1910,8 @@ test('a judged turn already running is counted by the store, not twice', async (
     agentId: 'ava',
     metadata: {},
     lastSpokeAt: new Date(1030 * 1000).toISOString(),
-    heardSinceSpoke: heard,
+    lastAnsweredAt: new Date(1030 * 1000).toISOString(),
+    heardSinceAnswered: heard,
   });
   const adapter = createSlackChannelAdapter({
     agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
@@ -1935,7 +1947,8 @@ test('a turn nobody asked for that fails right after its first text still report
     agentId: 'ava',
     metadata: {},
     lastSpokeAt: new Date(1050 * 1000).toISOString(),
-    heardSinceSpoke: 0,
+    lastAnsweredAt: new Date(1050 * 1000).toISOString(),
+    heardSinceAnswered: 0,
   });
   const adapter = createSlackChannelAdapter({
     agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
@@ -1973,10 +1986,10 @@ test('a judging agent that speaks becomes the voice a thread-rule colleague stan
   // Both in the thread; Bea spoke last, and Ava is attentive.
   gateway.sessionRouting = async (sessionId) => {
     if (sessionId === 'slack:ava:T1:C1:1060.0') {
-      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1060 * 1000).toISOString(), heardSinceSpoke: 0 };
+      return { agentId: 'ava', metadata: {}, lastSpokeAt: new Date(1060 * 1000).toISOString(), lastAnsweredAt: new Date(1060 * 1000).toISOString(), heardSinceAnswered: 0 };
     }
     if (sessionId === 'slack:bea:T1:C1:1060.0') {
-      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1060.05 * 1000).toISOString(), heardSinceSpoke: 0 };
+      return { agentId: 'bea', metadata: {}, lastSpokeAt: new Date(1060.05 * 1000).toISOString(), heardSinceAnswered: 0 };
     }
     return undefined;
   };

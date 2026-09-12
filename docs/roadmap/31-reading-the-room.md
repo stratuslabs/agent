@@ -14,15 +14,18 @@ than as a broken endpoint, and the Slack renderer posts nothing for it —
 its placeholder opens on the turn's first text, if any. Piece 3 —
 `listens: mentions | thread | judge` in the soul (and by field on
 `PUT /agents/:id`), attention read from the session (`lastSpokeAt` and
-`heardSinceSpoke` on the routing: eight messages or fifteen minutes after
-the agent last spoke, whichever ends first, a mention re-arming it), and
+`heardSinceAnswered` on the routing: eight messages or fifteen minutes
+after the agent last answered a message that addressed it, whichever ends
+first, a mention re-arming it and a reply of its own choosing not), and
 the eval under `packages/cli/eval/reading-the-room` — a labelled corpus
 and a runner scoring false speech at three times false silence, run on
 demand against the configured model with `pnpm eval:room`.
 
 What is answered of the open questions below: the default is `thread`,
 with `judge` opt-in; judgement is a full turn, not a pre-pass; the window
-is both messages and minutes, and an agent cannot extend its own; an
+is both messages and minutes, and an agent cannot extend its own — not by
+asking, and not by speaking up, which is why the anchor is its last
+*addressed* answer rather than its last reply; an
 overhear still costs a session write; `observe` stays with channels; and
 an agent's own turn in flight is ordered by the chain, as suspected. Still
 open: the addressed half of the failed-harness-batch double send, and one

@@ -416,8 +416,10 @@ export interface SessionRouting {
    * time, which a mid-turn save moves; see `@stratusagent/channels`.
    */
   lastSpokeAt?: string;
-  /** User messages after the agent last spoke — see `SessionRouting.heardSinceSpoke` in `@stratusagent/channels`. */
-  heardSinceSpoke?: number;
+  /** When the agent last answered a message that addressed it — see `@stratusagent/channels`. */
+  lastAnsweredAt?: string;
+  /** User messages after that answer — see `SessionRouting.heardSinceAnswered` in `@stratusagent/channels`. */
+  heardSinceAnswered?: number;
   /** The latest turn's text (`latestTurnReply`), when it produced any — see `@stratusagent/channels`. */
   reply?: string;
 }
@@ -3062,16 +3064,35 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         (message) => message.role === 'assistant' && message.content.trim().length > 0,
       );
       const lastSpokeAt = spokeIndex >= 0 ? session.messages[spokeIndex]?.createdAt : undefined;
-      // The messages after that: what it has heard, or been asked and not
-      // answered, since — the other half of an attention window.
-      const heardSinceSpoke = session.messages
-        .slice(spokeIndex + 1)
+      // The attention anchor is narrower than the thread rule's: the newest
+      // reply to a turn somebody ASKED for — one whose message was not
+      // overheard. A reply the agent chose to give on a turn nobody asked
+      // for is speaking, for the thread rule, and not an anchor, or a
+      // judge that likes the sound of its own voice would never drift out.
+      // The trigger of a reply is the nearest user message before it.
+      let answeredIndex = -1;
+      for (let index = session.messages.length - 1; index >= 0 && answeredIndex < 0; index -= 1) {
+        const message = session.messages[index];
+        if (!message || message.role !== 'assistant' || message.content.trim().length === 0) {
+          continue;
+        }
+        const trigger = session.messages.slice(0, index).findLast((earlier) => earlier.role === 'user');
+        if (trigger !== undefined && trigger.overheard !== true) {
+          answeredIndex = index;
+        }
+      }
+      const lastAnsweredAt = answeredIndex >= 0 ? session.messages[answeredIndex]?.createdAt : undefined;
+      // The messages after that answer: what it has heard, judged, or been
+      // asked and not answered since — the other half of the window.
+      const heardSinceAnswered = session.messages
+        .slice(answeredIndex + 1)
         .filter((message) => message.role === 'user').length;
       return {
         agentId: session.agent.id,
         metadata: session.metadata ?? {},
         ...(lastSpokeAt !== undefined ? { lastSpokeAt } : {}),
-        heardSinceSpoke,
+        ...(lastAnsweredAt !== undefined ? { lastAnsweredAt } : {}),
+        heardSinceAnswered,
         ...(reply !== undefined ? { reply } : {}),
       };
     },

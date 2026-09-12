@@ -48,10 +48,12 @@ they are the whole model:
    `thread` mode, the default. A soul with `listens: mentions` takes only
    messages that name it, and hears the rest. One with `listens: judge`
    hears everything and, while attentive — eight messages or fifteen
-   minutes after it last spoke, whichever ends first — runs a turn nobody
-   asked for on each untagged message, told it may answer with nothing;
-   past the window a message is heard with no turn at all, and a mention
-   re-arms it. A turn that decides on silence posts nothing: its
+   minutes after it last answered a message that named it, whichever ends
+   first — runs a turn nobody asked for on each untagged message, told it
+   may answer with nothing; past the window a message is heard with no
+   turn at all, and a mention re-arms it. A reply it chose to give on its
+   own does not: it takes the thread for the thread rule, and counts
+   against its own window like any other message. A turn that decides on silence posts nothing: its
    placeholder is opened only on the first text it streams, never on a
    tool line, and a failed one posts no error note. Neither mode takes
    part in the holder rule — that rule answers whose an untagged reply is,
