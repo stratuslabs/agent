@@ -1181,6 +1181,14 @@ test('a turn nobody asked for ends on the note, after its newest message only, o
   await assert.rejects(() => filtered.generate(requestWith(thread)), /empty response \(finish_reason: content_filter\)/);
   finishReason = 'stop';
   assert.deepEqual(await filtered.generate(requestWith(thread)), { parts: [] });
+  // And no completion at all — an empty body — is not silence either.
+  const bodiless = createOpenAICompatibleProvider({
+    model: 'gpt-4.1-mini',
+    apiKey: 'test-key',
+    baseUrl: 'https://example.test/v1',
+    fetch: async () => ({ ok: true, status: 200, text: async () => '' } as Response),
+  });
+  await assert.rejects(() => bodiless.generate(requestWith(thread)), /empty response/);
 
   // The silent turn's empty assistant message is not on the wire, where
   // some endpoints refuse it.

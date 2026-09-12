@@ -5,6 +5,7 @@ import {
   AgentRunner,
   EventBus,
   InMemorySessionStore,
+  RunAbortedError,
   UNADDRESSED_TURN_NOTE,
   latestTurnReply,
   markPromptDelivered,
@@ -152,4 +153,25 @@ test('a turn nobody asked for whose prompt the harness took before failing leave
     /stream disconnected/,
   );
   assert.deepEqual((await store.get('s'))?.messages.map((message) => message.role), ['user', 'assistant', 'user', 'user']);
+});
+
+test('a cancelled turn nobody asked for keeps its delivered mark through the abort', async () => {
+  const controller = new AbortController();
+  const provider: ModelProvider = {
+    name: 'cancelled',
+    async generate(): Promise<ProviderResponse> {
+      // The watchdog aborts a harness that has the prompt; the provider's
+      // error carries the mark, and the runner replaces it with its own
+      // abort error.
+      controller.abort();
+      throw markPromptDelivered(new Error('query aborted'));
+    },
+  };
+  const store = new InMemorySessionStore();
+  const runner = new AgentRunner({ provider, bus: new EventBus(), store });
+  await assert.rejects(
+    () => runner.run({ sessionId: 's', agent: AGENT, userMessage: 'Dylan: Bea?', addressed: false, signal: controller.signal }),
+    (error: unknown) => error instanceof RunAbortedError,
+  );
+  assert.deepEqual((await store.get('s'))?.messages.map((message) => message.role), ['user', 'assistant']);
 });

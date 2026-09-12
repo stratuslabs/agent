@@ -3682,7 +3682,11 @@ export class AgentRunner {
             : caught)
         : caught;
       const lastError = error instanceof Error ? error.message : String(error);
-      if (promptWasDelivered(error) && isUnaddressedTurn(session)) {
+      // Read off what the provider threw, not the normalized error: an
+      // abort replaces it with a fresh `RunAbortedError`, and a harness
+      // cancelled mid-turn — the watchdog's doing, most often — has the
+      // prompt just the same.
+      if (promptWasDelivered(caught) && isUnaddressedTurn(session)) {
         // A turn nobody asked for whose prompt the harness took before it
         // failed: the boundary goes in as if it had ended in silence, or
         // `latestUserMessagePrompt` would send the harness this message

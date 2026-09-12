@@ -488,8 +488,12 @@ export const createOpenAICompatibleProvider = ({
         // tool call with no usable name is a failure reduced to no parts,
         // and recording it as a decision would hide it. An endpoint that
         // reports no finish reason at all is taken at its word.
-        const finishReason = payload.choices?.[0]?.finish_reason ?? undefined;
-        const stoppedNormally = finishReason === undefined || finishReason === 'stop';
+        const choice = payload.choices?.[0];
+        const finishReason = choice?.finish_reason ?? undefined;
+        // A choice with a message has to exist: a 200 with an empty body,
+        // `{}`, or no choices is no completion at all, and a missing
+        // finish reason is tolerated only on one that is.
+        const stoppedNormally = choice?.message !== undefined && (finishReason === undefined || finishReason === 'stop');
         if (!isUnaddressedTurn(request.session) || !stoppedNormally) {
           throw new Error(
             finishReason !== undefined && finishReason !== 'stop'
