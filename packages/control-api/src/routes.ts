@@ -10,6 +10,7 @@ import {
   MAX_SESSION_ID_LENGTH,
   parseSoul,
   type ParsedSoul,
+  isValidDelegateEntry,
 } from '@stratusagent/agents';
 import type { JsonObject } from '@stratusagent/core';
 import { LISTENS_MODES, isListensMode } from '@stratusagent/core';
@@ -308,6 +309,24 @@ const allowlist = (value: unknown, field: string): string[] => {
     throw new ApiError(400, 'invalid_allowlist', `"${field}" must be an array of strings.`);
   }
   return value as string[];
+};
+
+/**
+ * A `delegates` edit, checked here rather than left to the soul round-trip:
+ * an entry that is not an agent id or `*` is the client's error, and the
+ * round-trip's failure would answer it as the server's.
+ */
+const delegatesAllowlist = (value: unknown): string[] => {
+  const entries = allowlist(value, 'delegates');
+  const bad = entries.find((entry) => !isValidDelegateEntry(entry));
+  if (bad !== undefined) {
+    throw new ApiError(
+      400,
+      'invalid_delegates',
+      `"delegates" entry ${JSON.stringify(bad)} is not an agent id or *. Each entry names an agent on the roster, or * for any of them.`,
+    );
+  }
+  return entries;
 };
 
 const parseProviderParam = (value: string): CredentialProviderName => {
@@ -631,6 +650,7 @@ export const routes: Route[] = [
             ...(body.tools !== undefined ? { tools: allowlist(body.tools, 'tools') } : {}),
             ...(body.skills !== undefined ? { skills: allowlist(body.skills, 'skills') } : {}),
             ...(body.credentials !== undefined ? { credentials: allowlist(body.credentials, 'credentials') } : {}),
+            ...(body.delegates !== undefined ? { delegates: delegatesAllowlist(body.delegates) } : {}),
             ...(isListensMode(listens) ? { listens } : {}),
           },
           // An empty string clears a pin; an absent key leaves it alone.

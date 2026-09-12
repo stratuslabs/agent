@@ -182,7 +182,21 @@ const isAddressableId = (id: string): boolean =>
  * Rejected, never sanitized: rewriting `../../escape` into `escape` hands
  * back an agent nobody asked for, keyed to resources nobody named.
  */
-export const isValidAgentId = (id: string): boolean => isAddressableId(id);
+// `*` is the delegate wildcard (`delegates: ['*']`), so an agent with that
+// id could never be delegated to alone — reserved rather than ambiguous.
+// Agent ids only: a session id is a broader address, and the wildcard means
+// nothing there.
+export const isValidAgentId = (id: string): boolean => isAddressableId(id) && id !== '*';
+
+/**
+ * Whether a `delegates` entry is one the soul can hold: any agent id, or
+ * the wildcard — the same rule as {@link isValidAgentId}, so every agent a
+ * roster can hold can be named as a target. Exported so the control API
+ * refuses a bad entry as the client's error rather than discovering it in
+ * the soul round-trip.
+ */
+export const isValidDelegateEntry = (entry: string): boolean =>
+  entry === '*' || isValidAgentId(entry);
 
 /**
  * How much of a new session id is the *client's* to spend, on top of the
@@ -285,6 +299,7 @@ export interface DefineAgentInput {
   tools?: string[];
   skills?: string[];
   credentials?: string[];
+  delegates?: string[];
   /** See `AgentDefinition.listens`. */
   listens?: ListensMode;
   avatar?: AvatarTheme;
@@ -312,12 +327,35 @@ export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
   const name = input.name ?? generateAgentName(input.seed);
   // Only an explicit id is checked: a derived one comes out of slugify,
   // which cannot produce anything unsafe.
+  if (input.id === '*') {
+    // The wildcard was an accepted id until `delegates` gave it a meaning,
+    // so a soul written before then can still carry it. The path-safety
+    // message would be wrong for it — `*` breaks none of those rules — and
+    // the roster reports this error with the file's path, so name the real
+    // reason and the fix rather than leaving the operator to guess why an
+    // agent that loaded yesterday is skipped today.
+    throw new Error(
+      'Invalid agent id: "*". * is the delegates wildcard (delegates: [\'*\'] means any agent on the roster), '
+      + 'so no agent may have it as an id — give this agent another id. Its sessions, memory, and credentials '
+      + 'are keyed by the old id and stay on disk.',
+    );
+  }
   if (input.id !== undefined && !isValidAgentId(input.id)) {
     throw new Error(
       `Invalid agent id: ${JSON.stringify(input.id)}. An id becomes a path segment, so it may not start with `
       + 'a dot or contain a slash, a backslash, a control character, or leading or trailing whitespace — '
       + 'it keys files and credentials, not just labels.',
     );
+  }
+  // Each entry is an id or the wildcard. Refused here, not in the tool: a
+  // list holding a value no agent can have would be a grant to nobody
+  // that read as a grant.
+  for (const entry of input.delegates ?? []) {
+    if (!isValidDelegateEntry(entry)) {
+      throw new Error(
+        `Invalid delegates entry: ${JSON.stringify(entry)}. Each entry is an agent id, or * for any agent on the roster.`,
+      );
+    }
   }
   // A chosen name's slug is used whole. It is not this function's to
   // shorten: the same name has resolved to the same id in every release,
@@ -343,9 +381,18 @@ export const defineAgent = (input: DefineAgentInput = {}): AgentDefinition => {
     ...(input.tools ? { tools: input.tools } : {}),
     ...(input.skills ? { skills: input.skills } : {}),
     ...(input.credentials ? { credentials: input.credentials } : {}),
+    ...(input.delegates ? { delegates: input.delegates } : {}),
     ...(input.listens ? { listens: input.listens } : {}),
   };
 };
+
+/**
+ * Whether `agent` may delegate to the agent with id `targetId`. Exact ids
+ * or `*`; no namespace globs, because agent ids have no namespaces. Omitted
+ * is nobody — see `AgentDefinition.delegates`.
+ */
+export const isDelegateAllowed = (agent: Pick<AgentDefinition, 'delegates'>, targetId: string): boolean =>
+  (agent.delegates ?? []).some((entry) => entry === '*' || entry === targetId);
 
 /**
  * A parsed soul file: the agent it defines plus optional runtime hints.
@@ -367,7 +414,68 @@ export interface ParseSoulOptions {
 }
 
 const SOUL_SCALAR_KEYS = ['name', 'id', 'provider', 'model', 'listens'] as const;
-const SOUL_LIST_KEYS = ['tools', 'skills', 'credentials'] as const;
+const SOUL_LIST_KEYS = ['tools', 'skills', 'credentials', 'delegates'] as const;
+
+/**
+ * The entries of an inline list, `[a, 'b,c', "d"]`, split on the commas
+ * that are outside quotes. Splitting on every comma and unquoting after
+ * turned `['foo,bar']` into the two entries `'foo` and `bar'` — for a
+ * `delegates` list, a grant to two agents nobody meant and none to the
+ * one they did, from a soul that loaded without complaint.
+ */
+const splitInlineList = (inline: string): string[] | undefined => {
+  const entries: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | undefined;
+  for (const character of inline) {
+    // A quote opens an entry only at the entry's start (after any leading
+    // space): an apostrophe inside an unquoted id — o'brien — is part of
+    // the id, and reading it as an opening quote would swallow every comma
+    // after it into one entry no agent has.
+    if (quote === undefined && (character === '"' || character === "'") && current.trim().length === 0) {
+      quote = character;
+    } else if (character === quote) {
+      quote = undefined;
+    } else if (character === ',' && quote === undefined) {
+      entries.push(current);
+      current = '';
+      continue;
+    }
+    current += character;
+  }
+  // A quote left open would have swallowed every comma after it into one
+  // entry no agent has — for a delegates list, a typo that changes who is
+  // authorized while the soul loads without complaint. Refused instead.
+  if (quote !== undefined) {
+    return undefined;
+  }
+  entries.push(current);
+  return entries;
+};
+
+/**
+ * The soul edit that grants one delegate, as the refusal suggests it. The
+ * inline form, `delegates: [a, "b, c"]`, quoted when the inline parser
+ * would otherwise split or unquote the id, in whichever quote it does not
+ * contain — and the block form when the id holds both quotes, since no
+ * inline spelling of `a"',b` reads back as one entry, while a block line
+ * is never split and is unquoted only for matching outer quotes, which
+ * {@link writeScalar} guards. Rendered this carefully because
+ * `delegates: [foo,bar]` is a grant to two agents and a refusal of the
+ * one the message was about.
+ */
+const suggestedDelegatesEdit = (value: string): string => {
+  if (!/[,"'\s]/.test(value) && unquote(value) === value) {
+    return `delegates: [${value}]`;
+  }
+  if (!value.includes('"')) {
+    return `delegates: ["${value}"]`;
+  }
+  if (!value.includes("'")) {
+    return `delegates: ['${value}']`;
+  }
+  return `a delegates: list with the line "- ${writeScalar(value)}"`;
+};
 
 const unquote = (value: string): string => {
   const trimmed = value.trim();
@@ -547,7 +655,11 @@ const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): Parsed
         if (!match) {
           throw new Error(`${capitalize(shape.kind)} frontmatter list "${key}" must be a block list or [a, b]: "${inline}"`);
         }
-        for (const item of (match[1] ?? '').split(',')) {
+        const items = splitInlineList(match[1] ?? '');
+        if (items === undefined) {
+          throw new Error(`${capitalize(shape.kind)} frontmatter list "${key}" has an unterminated quote: "${inline}"`);
+        }
+        for (const item of items) {
           const cleaned = unquote(item);
           if (cleaned.length > 0) {
             list.push(cleaned);
@@ -667,6 +779,7 @@ export const parseSoul = (source: string, options: ParseSoulOptions = {}): Parse
     ...(lists.tools ? { tools: lists.tools } : {}),
     ...(lists.skills ? { skills: lists.skills } : {}),
     ...(lists.credentials ? { credentials: lists.credentials } : {}),
+    ...(lists.delegates ? { delegates: lists.delegates } : {}),
     ...(isListensMode(scalars.listens) ? { listens: scalars.listens } : {}),
     ...(options.seed !== undefined ? { seed: options.seed } : {}),
   });
@@ -682,8 +795,21 @@ export const parseSoul = (source: string, options: ParseSoulOptions = {}): Parse
  * Render an agent definition as a soul file, ready to save and edit. The
  * inverse of parseSoul for round-tripping `stratus agent new` output.
  */
+/**
+ * A scalar or list entry as the soul writer emits it. The parser strips
+ * one layer of matching quotes from every value, so a value that begins
+ * and ends with the same quote — an agent id like `'bea'`, which
+ * {@link isValidAgentId} allows — would come back as `bea`: for a
+ * `delegates` entry that is a permission changed by an unrelated edit,
+ * since the control API renders a soul through here on every field edit.
+ * Such a value is wrapped in the other quote, which the parser strips
+ * back off; so is one the parser's trim would alter.
+ */
+const writeScalar = (value: string): string =>
+  unquote(value) === value ? value : (value.startsWith('"') ? `'${value}'` : `"${value}"`);
+
 export const formatSoul = (soul: ParsedSoul): string => {
-  const lines: string[] = ['---', `name: ${soul.agent.name}`, `id: ${soul.agent.id}`];
+  const lines: string[] = ['---', `name: ${writeScalar(soul.agent.name)}`, `id: ${writeScalar(soul.agent.id)}`];
 
   if (soul.provider) {
     lines.push(`provider: ${soul.provider}`);
@@ -698,11 +824,12 @@ export const formatSoul = (soul: ParsedSoul): string => {
     ['tools', soul.agent.tools],
     ['skills', soul.agent.skills],
     ['credentials', soul.agent.credentials],
+    ['delegates', soul.agent.delegates],
   ] as const) {
     if (values && values.length > 0) {
       lines.push(`${key}:`);
       for (const value of values) {
-        lines.push(`  - ${value}`);
+        lines.push(`  - ${writeScalar(value)}`);
       }
     }
   }
@@ -1307,6 +1434,17 @@ export const createDelegateTool = ({
     }
     if (target.id === session.agent.id) {
       throw new Error('An agent cannot delegate to itself.');
+    }
+    // Judged on the session's frozen copy of the agent, as the tool
+    // allowlist is: the target is model-chosen input, and without this
+    // list any agent holding this tool could run a turn as any other —
+    // under the other's tools, credentials, and memory — which is the
+    // lateral move a prompt-injected agent would take.
+    if (!isDelegateAllowed(session.agent, target.id)) {
+      throw new Error(
+        `Agent ${session.agent.id} may not delegate to ${target.id}. `
+        + `Add ${suggestedDelegatesEdit(target.id)} to its soul, or delegates: ['*'] for any agent on the roster.`,
+      );
     }
 
     delegationCount += 1;

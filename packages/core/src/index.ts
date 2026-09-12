@@ -341,6 +341,16 @@ export interface AgentDefinition extends AgentDescriptor {
   /** Credential names this agent may resolve. Omitted = none. */
   credentials?: string[];
   /**
+   * Agent ids this agent may delegate to through `agent.delegate`, or `*`
+   * for any agent on the roster. Omitted = none, matching `credentials`
+   * rather than `tools`: delegation runs a turn as another agent, under
+   * that agent's tools, credentials, and memory, so it is the lateral
+   * move a prompt-injected agent would take — and `agent.delegate` is
+   * `safe`, so nothing else asks. Checked by the delegate tool against the
+   * session's agent, the way the tool allowlist is.
+   */
+  delegates?: string[];
+  /**
    * How this agent listens in a conversation it shares with people talking
    * to each other — see `ListensMode`. Omitted = `thread`. Part of what an
    * agent is rather than how a daemon is deployed, which is why it sits
@@ -372,7 +382,21 @@ export const isListensMode = (value: unknown): value is ListensMode =>
 export class AgentRegistry {
   private agents = new Map<string, AgentDefinition>();
 
+  /**
+   * `*` in a `delegates` list means any agent on the roster, so an agent
+   * with that id could never be granted alone — `delegates: ['*']` would
+   * open the whole roster to reach it. The soul loader refuses the id;
+   * this refuses it for a definition built in code, since the wildcard's
+   * meaning is decided here, where the roster lives, and not by which
+   * path put the agent on it.
+   */
   register(agent: AgentDefinition): AgentDefinition {
+    if (agent.id === '*') {
+      throw new Error(
+        'Invalid agent id: "*". * is the delegates wildcard (delegates: [\'*\'] means any agent on the roster), '
+        + 'so no agent may have it as an id — give this agent another id.',
+      );
+    }
     this.agents.set(agent.id, agent);
     return agent;
   }

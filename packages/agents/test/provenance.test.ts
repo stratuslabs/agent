@@ -30,7 +30,7 @@ import {
   RECALL_TOOL_NAME,
 } from '../src/index.ts';
 
-const AVA = { id: 'ava', name: 'Ava' };
+const AVA = { id: 'ava', name: 'Ava', delegates: ['bea'] };
 const BEA = { id: 'bea', name: 'Bea' };
 
 const sessionAt = (trust: TrustLevel | undefined, taintedBy?: string): Session => ({

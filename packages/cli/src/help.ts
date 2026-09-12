@@ -251,10 +251,12 @@ Plugins (tools):
   Installing one grants no agent anything — each soul lists what it may call.
 
 Soul files:
-  A soul file is markdown with frontmatter (name, provider, model, tools, skills, credentials)
+  A soul file is markdown with frontmatter (name, provider, model, tools, skills, credentials, delegates)
   followed by the agent's persona in prose. See examples/souls/ava.md.
   "tools" takes exact names or a whole toolset: tools: [fs.read, fs.search] or
   tools: [fs.*]. Omitted means every registered tool.
+  "delegates" lists the agent ids this agent may hand work to with agent.delegate,
+  or ['*'] for anyone on the roster; omitted means nobody.
   "skills" is the same allowlist shape over installed skills (see stratus
   skills), except omitted means none — a skill is enabled per agent, never
   by being installed.

@@ -5,6 +5,7 @@ import {
   AgentRunner,
   InMemoryAgentMemoryStore,
   ToolRegistry,
+  type AgentDefinition,
   type ModelProvider,
   type Session,
 } from '@stratusagent/core';
@@ -21,6 +22,8 @@ import {
   agentIdWithSuffix,
   AGENT_ID_PATTERN,
   isValidAgentId,
+  isValidDelegateEntry,
+  isDelegateAllowed,
   isValidSessionId,
   MAX_SESSION_ID_LENGTH,
   MAX_AGENT_ID_LENGTH,
@@ -135,6 +138,7 @@ test('orchestrators delegate to other agents and get their reply back', async ()
   const orchestrator = defineAgent({
     name: 'August North',
     tools: ['agent.delegate'],
+    delegates: ['priya-salinger'],
   });
   const specialist = defineAgent({
     name: 'Priya Salinger',
@@ -209,7 +213,7 @@ test('orchestrators delegate to other agents and get their reply back', async ()
 test('delegation by an ambiguous display name fails instead of picking an agent', async () => {
   const umaOne = defineAgent({ name: 'Uma', id: 'uma-one' });
   const umaTwo = defineAgent({ name: 'Uma', id: 'uma-two' });
-  const orchestrator = defineAgent({ name: 'Theo' });
+  const orchestrator = defineAgent({ name: 'Theo', delegates: ['*'] });
   const registry = createAgentTeam([umaOne, umaTwo, orchestrator]);
 
   const provider: ModelProvider = {
@@ -243,7 +247,7 @@ test('delegation by an ambiguous display name fails instead of picking an agent'
 });
 
 test('delegate tool rejects self-delegation, unknown agents, and depth overruns', async () => {
-  const orchestrator = defineAgent({ name: 'Kai Ibarra' });
+  const orchestrator = defineAgent({ name: 'Kai Ibarra', delegates: ['*'] });
   const registry = createAgentTeam([orchestrator]);
   const provider: ModelProvider = {
     name: 'noop',
@@ -276,6 +280,149 @@ test('delegate tool rejects self-delegation, unknown agents, and depth overruns'
     () => tool.execute({ agent: 'anyone', prompt: 'hi' }, sessionFor({ delegationDepth: 2 })),
     /Delegation depth limit reached \(2\)/,
   );
+});
+
+test('an agent delegates only to the agents its soul lists, and omitted means nobody', async () => {
+  const closed = defineAgent({ name: 'Kai Ibarra', tools: ['agent.delegate'] });
+  const narrow = defineAgent({ name: 'Lena Voss', tools: ['agent.delegate'], delegates: ['nia-park'] });
+  const open = defineAgent({ name: 'Omar Reyes', tools: ['agent.delegate'], delegates: ['*'] });
+  const nia = defineAgent({ name: 'Nia Park' });
+  const bea = defineAgent({ name: 'Bea Lund' });
+  const registry = createAgentTeam([closed, narrow, open, nia, bea]);
+  const provider: ModelProvider = {
+    name: 'noop',
+    async generate() {
+      return { parts: [{ type: 'text', text: 'ok' }] };
+    },
+  };
+  const runner = new AgentRunner({ provider, agents: registry });
+  const tool = createDelegateTool({ registry, runner });
+  const sessionAs = (agent: AgentDefinition): Session => ({
+    id: `s-${agent.id}`,
+    agent,
+    status: 'running',
+    messages: [],
+    createdAt: '',
+    updatedAt: '',
+  });
+
+  // The target is model-chosen input; the list is the operator's. Without
+  // one, the tool being in `tools:` grants nothing — the way a credential
+  // the soul never named cannot be resolved — and the refusal names the
+  // fix.
+  await assert.rejects(
+    () => tool.execute({ agent: 'Nia Park', prompt: 'hi' }, sessionAs(closed)),
+    /Agent kai-ibarra may not delegate to nia-park\. Add delegates: \[nia-park\] to its soul, or delegates: \['\*'\] for any agent/,
+  );
+  // Listed by id: allowed, and matched by id even when named by display name.
+  const toNia = (await tool.execute({ agent: 'Nia Park', prompt: 'hi' }, sessionAs(narrow))) as { reply: string };
+  assert.equal(toNia.reply, 'ok');
+  await assert.rejects(
+    () => tool.execute({ agent: 'bea-lund', prompt: 'hi' }, sessionAs(narrow)),
+    /may not delegate to bea-lund/,
+  );
+  // The suggested edit names the id the way the inline parser reads it
+  // back: `delegates: [foo,bar]` would be a grant to two other agents.
+  const comma = defineAgent({ name: 'Comma', id: 'foo,bar' });
+  const registryWithComma = createAgentTeam([narrow, comma]);
+  const toolWithComma = createDelegateTool({ registry: registryWithComma, runner: new AgentRunner({ provider, agents: registryWithComma }) });
+  await assert.rejects(
+    () => toolWithComma.execute({ agent: 'foo,bar', prompt: 'hi' }, sessionAs(narrow)),
+    /Add delegates: \["foo,bar"\] to its soul/,
+  );
+  // Both quotes in the id: no inline spelling reads back as one entry, so
+  // the suggestion is the block form, which is never split.
+  const mixed = defineAgent({ name: 'Mixed', id: `a"',b` });
+  const registryWithMixed = createAgentTeam([narrow, mixed]);
+  const toolWithMixed = createDelegateTool({ registry: registryWithMixed, runner: new AgentRunner({ provider, agents: registryWithMixed }) });
+  await assert.rejects(
+    () => toolWithMixed.execute({ agent: `a"',b`, prompt: 'hi' }, sessionAs(narrow)),
+    /Add a delegates: list with the line "- a"',b" to its soul/,
+  );
+  assert.deepEqual(parseSoul(`---\nname: Lena\ndelegates:\n  - a"',b\n---\n\nHi.\n`).agent.delegates, [`a"',b`]);
+  // `*` is anyone on the roster.
+  const toBea = (await tool.execute({ agent: 'bea-lund', prompt: 'hi' }, sessionAs(open))) as { reply: string };
+  assert.equal(toBea.reply, 'ok');
+});
+
+test('the delegate wildcard is not an agent id, and a delegates entry is an id or the wildcard, never quoted', () => {
+  // `delegates: ['*']` means anyone; an agent whose id was `*` could never
+  // be delegated to alone, so the id is reserved.
+  assert.equal(isValidAgentId('*'), false);
+  // The wildcard was a valid id before `delegates` existed, so a soul on
+  // disk can still declare it, and the roster skips such a soul with this
+  // message and the file's path. The path-safety wording would be wrong
+  // for it: the error names the delegate wildcard and the fix instead.
+  assert.throws(
+    () => defineAgent({ name: 'Star', id: '*' }),
+    /Invalid agent id: "\*"\. \* is the delegates wildcard .* give this agent another id\. Its sessions, memory, and credentials are keyed by the old id and stay on disk\./,
+  );
+  assert.throws(
+    () => parseSoul('---\nname: Star\nid: "*"\n---\nHi'),
+    /Invalid agent id: "\*"\. \* is the delegates wildcard/,
+  );
+  // A definition built in code never passes through defineAgent, so the
+  // registry itself refuses the id: a roster holding `*` would make
+  // `delegates: ['*']` the only way to reach one agent.
+  assert.throws(
+    () => createAgentTeam([{ id: '*', name: 'Star' }]),
+    /Invalid agent id: "\*"\. \* is the delegates wildcard .* give this agent another id\./,
+  );
+  // A session id is a broader address, and the wildcard means nothing there.
+  assert.equal(isValidSessionId('*'), true);
+  assert.equal(isValidDelegateEntry('*'), true);
+  assert.equal(isValidDelegateEntry('bea'), true);
+  // Every id a roster can hold can be named as a target, quotes included.
+  assert.equal(isValidDelegateEntry("'bea'"), isValidAgentId("'bea'"));
+  assert.equal(isValidDelegateEntry("'bea'"), true);
+
+  assert.throws(
+    () => defineAgent({ name: 'Kai', delegates: ['a/b'] }),
+    /Invalid delegates entry: "a\/b"\. Each entry is an agent id, or \* for any agent on the roster\./,
+  );
+  assert.deepEqual(defineAgent({ name: 'Kai', delegates: ['*', 'bea'] }).delegates, ['*', 'bea']);
+});
+
+test('an inline list splits on the commas outside quotes, so a quoted id keeps its comma', () => {
+  // `['foo,bar']` used to become the two entries 'foo and bar' — for a
+  // delegates list, a grant to two agents nobody meant and none to the
+  // one they did, from a soul that loaded without complaint.
+  const soul = parseSoul('---\nname: Kai\ntools: [agent.delegate, "memory.recall"]\ndelegates: [\'foo,bar\', "a, b", baz, \'\', o\'brien, "x"y]\n---\n\nHi.\n');
+  assert.deepEqual(soul.agent.tools, ['agent.delegate', 'memory.recall']);
+  // A quote opens an entry only at its start: o'brien is one id with an
+  // apostrophe in it, not the start of a quoted run that eats the list.
+  assert.deepEqual(soul.agent.delegates, ['foo,bar', 'a, b', 'baz', "o'brien", '"x"y']);
+  assert.equal(isDelegateAllowed(soul.agent, 'foo,bar'), true);
+  assert.equal(isDelegateAllowed(soul.agent, "'foo"), false);
+  // A quote left open is refused, not read as one long id: a typo that
+  // changed who is authorized while the soul loaded would be worse.
+  assert.throws(
+    () => parseSoul("---\nname: Kai\ndelegates: ['bea, cy]\n---\n\nHi.\n"),
+    /Soul frontmatter list "delegates" has an unterminated quote: "\['bea, cy\]"/,
+  );
+});
+
+test('the soul writer round-trips a value the parser would otherwise unquote', () => {
+  // The parser strips one layer of matching quotes from every value, so an
+  // id like 'bea' written raw would come back as bea — for a delegates
+  // entry, a permission changed by an unrelated edit through the control
+  // API's field editor, which renders the soul on every edit. The writer
+  // wraps such a value in the other quote, and the parser strips that.
+  const agent = defineAgent({
+    name: '"Kai"',
+    id: "'kai'",
+    instructions: 'Hi.',
+    tools: ['"demo.echo"'],
+    delegates: ["'bea'", '"cy"', 'dee'],
+  });
+  const reparsed = parseSoul(formatSoul({ agent }));
+  assert.equal(reparsed.agent.name, '"Kai"');
+  assert.equal(reparsed.agent.id, "'kai'");
+  assert.deepEqual(reparsed.agent.tools, ['"demo.echo"']);
+  assert.deepEqual(reparsed.agent.delegates, ["'bea'", '"cy"', 'dee']);
+  // And a grant to the quoted id is a grant to that agent alone.
+  assert.equal(isDelegateAllowed(reparsed.agent, "'bea'"), true);
+  assert.equal(isDelegateAllowed(reparsed.agent, 'bea'), false);
 });
 
 test('per-agent tool allowlists stop agents using tools they were not given', async () => {
@@ -358,6 +505,8 @@ tools:
   - memory.remember
 credentials:
   - ANTHROPIC_API_KEY
+delegates:
+  - bea
 ---
 
 You are warm and precise. You keep replies short and never use jargon.
@@ -369,6 +518,7 @@ You are warm and precise. You keep replies short and never use jargon.
   assert.equal(soul.model, 'claude-opus-5');
   assert.deepEqual(soul.agent.tools, ['demo.echo', 'memory.remember']);
   assert.deepEqual(soul.agent.credentials, ['ANTHROPIC_API_KEY']);
+  assert.deepEqual(soul.agent.delegates, ['bea']);
   assert.equal(
     soul.agent.instructions,
     'You are warm and precise. You keep replies short and never use jargon.',
@@ -436,7 +586,7 @@ Curious, a little playful, always cites sources.`);
 });
 
 test('delegation forwards the parent turn abort signal into the dispatcher', async () => {
-  const orchestrator = defineAgent({ name: 'Orchestrator', instructions: 'You orchestrate.' });
+  const orchestrator = defineAgent({ name: 'Orchestrator', instructions: 'You orchestrate.', delegates: ['*'] });
   const target = defineAgent({ name: 'Target', instructions: 'You help.' });
   const registry = createAgentTeam([orchestrator, target]);
 
