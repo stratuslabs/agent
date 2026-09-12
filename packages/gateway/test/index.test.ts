@@ -255,6 +255,25 @@ test('observe puts a message into a session with no turn, on the session\'s chai
     const opened = await gateway.dispatch({ sessionId: 'thread-unasked', userMessage: 'Dylan: Bea?', addressed: false });
     assert.equal(opened.messages[0]?.overheard, true);
 
+    // A file is speaking: a turn whose tool result carried one put
+    // something in the thread, and the durable answer says so — as the
+    // adapter's in-process record already does — so a restart does not
+    // hand the thread back to whoever spoke in words last.
+    const filed = await gateway.store.get('thread-o');
+    assert.ok(filed);
+    const at = '2026-09-12T12:00:00.000Z';
+    filed.messages.push(
+      { id: 'thread-o:user:f1', role: 'user', content: 'Sam: chart?', createdAt: at, overheard: true },
+      { id: 'thread-o:assistant:f2', role: 'assistant', content: '', createdAt: at, toolCalls: [{ id: 'c1', toolName: 'chart.render', input: {} }] },
+      { id: 'thread-o:tool:c1', role: 'tool', name: 'chart.render', content: '{}', createdAt: at, toolResult: { callId: 'c1', toolName: 'chart.render', ok: true, output: { file: '/tmp/chart.png' } } },
+    );
+    await gateway.store.save(filed);
+    const withFile = await gateway.sessionRouting('thread-o');
+    assert.equal(withFile?.lastSpokeAt, at);
+    // Though a turn nobody asked for, so not an answer: the anchor stays.
+    assert.equal(withFile?.lastAnsweredAt, answered);
+    assert.equal(withFile?.heardSinceAnswered, 2);
+
     // An agent hears only conversations it is already in: nothing is
     // created on its behalf, and "not in that one" is an answer rather
     // than a refusal — a channel asks this for every thread its app can

@@ -511,6 +511,38 @@ export const leastTrusted = (...levels: readonly TrustLevel[]): TrustLevel => {
   return lowest;
 };
 
+/**
+ * The paths a tool result refers to as files for a channel to deliver: an
+ * ok result whose object output carries `file: string` or `files:
+ * string[]`. The one reading of that convention, shared by the channel
+ * that uploads them and the gateway that counts a turn which produced one
+ * as having said something — a chart in the thread is the last thing said
+ * as surely as a sentence is.
+ */
+export const filePathsOf = (result: Pick<ToolResult, 'ok' | 'output'>): string[] => {
+  if (!result.ok) {
+    return [];
+  }
+  const output = result.output;
+  if (typeof output !== 'object' || output === null || Array.isArray(output)) {
+    return [];
+  }
+  const paths: string[] = [];
+  const single = (output as { file?: unknown }).file;
+  if (typeof single === 'string' && single.length > 0) {
+    paths.push(single);
+  }
+  const many = (output as { files?: unknown }).files;
+  if (Array.isArray(many)) {
+    for (const entry of many) {
+      if (typeof entry === 'string' && entry.length > 0) {
+        paths.push(entry);
+      }
+    }
+  }
+  return paths;
+};
+
 export interface ToolResult {
   callId: string;
   toolName: string;

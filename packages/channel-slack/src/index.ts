@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 
 import {
+  filePathsOf,
   latestTurnReply,
   SENDER_TRUST_METADATA_KEY,
   sessionWriteTrust,
@@ -862,29 +863,10 @@ class ReplyRenderer {
   }
 }
 
-// The adapter-level convention for file-bearing tool results: an ok result
-// whose object output carries `file: string` or `files: string[]` refers to
-// local paths the channel should deliver as attachments.
-const collectFilePaths = (result: ToolResult): string[] => {
-  const output = result.output;
-  if (typeof output !== 'object' || output === null || Array.isArray(output)) {
-    return [];
-  }
-  const paths: string[] = [];
-  const single = (output as { file?: unknown }).file;
-  if (typeof single === 'string' && single.length > 0) {
-    paths.push(single);
-  }
-  const many = (output as { files?: unknown }).files;
-  if (Array.isArray(many)) {
-    for (const entry of many) {
-      if (typeof entry === 'string' && entry.length > 0) {
-        paths.push(entry);
-      }
-    }
-  }
-  return paths;
-};
+// The file-bearing result convention is the kernel's (`filePathsOf`), so
+// the gateway counts a turn that produced a file as having spoken by the
+// same rule this adapter uploads it by.
+const collectFilePaths = (result: ToolResult): string[] => filePathsOf(result);
 
 // A hard cut must never land between the halves of a UTF-16 surrogate
 // pair — an emoji on the boundary would reach Slack as two replacement

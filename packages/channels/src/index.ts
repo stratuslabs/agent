@@ -88,6 +88,10 @@ export interface SessionRouting {
    * agent had actually answered, and the Slack adapter orders the agents
    * sharing a thread by this to decide whose an untagged follow-up is.
    *
+   * A file counts: a turn whose tool result carried one (`filePathsOf` in
+   * `@stratusagent/core`) put something in the thread, whether or not it
+   * said a word beside it.
+   *
    * Still routing, not transcript: it says *when* an agent spoke, never
    * what was said. Optional because a host may not track it; a caller that
    * needs to order two sessions checks for it rather than assuming, and

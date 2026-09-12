@@ -4,6 +4,8 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  type Message,
+  filePathsOf,
   abortErrorFor,
   AgentRegistry,
   AgentRunner,
@@ -3060,9 +3062,16 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       // checkpoints, and a recovery resuming, all without having said
       // anything. A channel ordering two agents by "who spoke last" has to
       // read the speaking.
-      const spokeIndex = session.messages.findLastIndex(
-        (message) => message.role === 'assistant' && message.content.trim().length > 0,
-      );
+      // Speaking is text, or a file: a tool result carrying one is posted
+      // into the thread by the channel (`filePathsOf`, the kernel's one
+      // reading of that convention), and a chart with no words is the last
+      // thing said as surely as a sentence — the in-process handover record
+      // already treats it so, and the durable answer must agree with it
+      // across a restart.
+      const spoken = (message: Message): boolean =>
+        (message.role === 'assistant' && message.content.trim().length > 0)
+        || (message.role === 'tool' && message.toolResult !== undefined && filePathsOf(message.toolResult).length > 0);
+      const spokeIndex = session.messages.findLastIndex(spoken);
       const lastSpokeAt = spokeIndex >= 0 ? session.messages[spokeIndex]?.createdAt : undefined;
       // The attention anchor is narrower than the thread rule's: the newest
       // reply to a turn somebody ASKED for — one whose message was not
@@ -3073,7 +3082,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       let answeredIndex = -1;
       for (let index = session.messages.length - 1; index >= 0 && answeredIndex < 0; index -= 1) {
         const message = session.messages[index];
-        if (!message || message.role !== 'assistant' || message.content.trim().length === 0) {
+        if (!message || !spoken(message)) {
           continue;
         }
         const trigger = session.messages.slice(0, index).findLast((earlier) => earlier.role === 'user');
