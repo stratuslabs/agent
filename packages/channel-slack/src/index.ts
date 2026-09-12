@@ -1834,10 +1834,12 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * way memory entries are, so a strange name still reads as strange.
    */
   const boundedDisplayName = (name: string): string => {
-    const oneLine = escapeControlCharacters(name).trim();
-    return oneLine.length > MAX_DISPLAY_NAME_LENGTH
-      ? `${oneLine.slice(0, MAX_DISPLAY_NAME_LENGTH - 1)}…`
-      : oneLine;
+    // Code points, not UTF-16 units: an emoji is one character of a name,
+    // and a cut inside a surrogate pair is a malformed speaker.
+    const characters = Array.from(escapeControlCharacters(name).trim());
+    return characters.length > MAX_DISPLAY_NAME_LENGTH
+      ? `${characters.slice(0, MAX_DISPLAY_NAME_LENGTH - 1).join('')}…`
+      : characters.join('');
   };
 
   /**

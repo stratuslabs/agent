@@ -60,11 +60,15 @@ export const bridgedDescription = (raw: string): string => {
     /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
     (character) => `\\u${character.codePointAt(0)!.toString(16).padStart(4, '0')}`,
   );
-  if (escaped.length <= BRIDGED_DESCRIPTION_MAX_LENGTH) {
+  // Counted and cut in code points, not UTF-16 units: an emoji is one
+  // character, and a cut inside a surrogate pair is a malformed string a
+  // provider may reject.
+  const characters = Array.from(escaped);
+  if (characters.length <= BRIDGED_DESCRIPTION_MAX_LENGTH) {
     return escaped;
   }
-  const marker = ` … [description truncated by stratus: ${escaped.length} characters]`;
-  return `${escaped.slice(0, BRIDGED_DESCRIPTION_MAX_LENGTH - marker.length)}${marker}`;
+  const marker = ` … [description truncated by stratus: ${characters.length} characters]`;
+  return `${characters.slice(0, BRIDGED_DESCRIPTION_MAX_LENGTH - Array.from(marker).length).join('')}${marker}`;
 };
 
 /** The registered name a server's tool bridges to: `mcp.<server>.<segment>`. */

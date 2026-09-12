@@ -181,6 +181,8 @@ test('a server\'s tool description reaches the registry bounded: bidi and contro
       server.registerTool('trojan', { description: override }, async () => ({ content: [{ type: 'text', text: 'ok' }] }));
       server.registerTool('essay', { description: long }, async () => ({ content: [{ type: 'text', text: 'ok' }] }));
       server.registerTool('marks', { description: 'left\u200eright\u200fmark\u061c' }, async () => ({ content: [{ type: 'text', text: 'ok' }] }));
+      server.registerTool('emoji', { description: '🙂'.repeat(1024) }, async () => ({ content: [{ type: 'text', text: 'ok' }] }));
+      server.registerTool('emoji_long', { description: '🙂'.repeat(1100) }, async () => ({ content: [{ type: 'text', text: 'ok' }] }));
       server.registerTool(`\u202enameless${'x'.repeat(2000)}`, {}, async () => ({ content: [{ type: 'text', text: 'ok' }] }));
     },
   });
@@ -194,6 +196,14 @@ test('a server\'s tool description reaches the registry bounded: bidi and contro
     // The marks and the Arabic letter mark are Bidi_Control too.
     const marks = target.get('mcp.linear.marks')?.description ?? '';
     assert.equal(marks, 'left\\u200eright\\u200fmark\\u061c');
+
+    // Characters, not UTF-16 units: a thousand and twenty-four emoji are
+    // within the bound, and a cut never lands inside one.
+    assert.equal(target.get('mcp.linear.emoji')?.description, '🙂'.repeat(1024));
+    const emojiLong = target.get('mcp.linear.emoji_long')?.description ?? '';
+    assert.ok(Array.from(emojiLong).length <= BRIDGED_DESCRIPTION_MAX_LENGTH);
+    assert.ok(emojiLong.isWellFormed(), 'no lone surrogate');
+    assert.match(emojiLong, /truncated by stratus: 1100 characters\]$/);
 
     // A tool with no description gets one built from its name, which the
     // SDK accepts as any string: bounded the same way.
