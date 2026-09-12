@@ -50,12 +50,14 @@ export const BRIDGED_DESCRIPTION_MAX_LENGTH = 1024;
  * Unicode bidi controls are spelled out the way memory entries are (a
  * right-to-left override in a description is a description that reads
  * differently to a person than to the model — escaped, it reads as what it
- * is), and the length is capped with the cut announced. Newlines and tabs
- * stay: a description is allowed to be several lines.
+ * is; the set is Unicode's `Bidi_Control` property, marks and the Arabic
+ * letter mark included, not only the overrides and isolates), and the
+ * length is capped with the cut announced. Newlines and tabs stay: a
+ * description is allowed to be several lines.
  */
 export const bridgedDescription = (raw: string): string => {
   const escaped = raw.replace(
-    /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
+    /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
     (character) => `\\u${character.codePointAt(0)!.toString(16).padStart(4, '0')}`,
   );
   if (escaped.length <= BRIDGED_DESCRIPTION_MAX_LENGTH) {

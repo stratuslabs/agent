@@ -751,7 +751,10 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
 
   const proxyTool = (state: ServerState, registeredName: string, info: DiscoveredTool): Tool => ({
     name: registeredName,
-    description: info.description ?? `Tool ${info.mcpName} on the MCP server ${state.spec.name}.`,
+    // The fallback is built from the server's tool name, which the SDK
+    // accepts as any string — bounded the same way, or a nameless tool's
+    // name is the description a server writes.
+    description: info.description ?? bridgedDescription(`Tool ${info.mcpName} on the MCP server ${state.spec.name}.`),
     ...(info.parameters ? { parameters: info.parameters } : {}),
     // No risk claim, deliberately: what a bridged tool registers at is the
     // namespace's declared risk (and any operator override), applied by

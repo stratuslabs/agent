@@ -1846,11 +1846,13 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * a principals list in force everyone else is their stable id, as a
    * mention of them already is: named, not quoted. With no list at all
    * there is nobody to prefer, so every author keeps their name — the turn
-   * is labelled `unknown` either way.
+   * is labelled `unknown` either way. "No list" is the key being absent:
+   * an explicit empty list is how an agent is excluded from a shared one,
+   * and it means nobody is preferred, not that nobody has been named.
    */
   const authorFor = async (connection: AgentConnection, userId: string): Promise<string> => {
-    const principals = connection.config.principals ?? [];
-    if (principals.length > 0 && !principals.includes(userId)) {
+    const principals = connection.config.principals;
+    if (principals !== undefined && !principals.includes(userId)) {
       return userId;
     }
     return boundedDisplayName(await displayNameFor(connection, userId));

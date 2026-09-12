@@ -285,7 +285,9 @@ their profile is trusted the way their messages are. With a list in force,
 everyone else is their user id, exactly as an `@mention` of them already
 is: a display name is text its owner typed, and the speaker position of a
 user turn is not a place a stranger gets to put a sentence. With no list
-at all there is nobody to prefer, so every author keeps their name.
+at all there is nobody to prefer, so every author keeps their name — and
+"no list" is the key being absent; `"slackUsers": []` is a list that
+prefers nobody, so under it every author is an id.
 
 The sender is judged on **every message**, not once per thread. A thread
 keys one session for everyone in it, so an authorized member can open one
