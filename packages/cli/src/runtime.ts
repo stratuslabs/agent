@@ -69,19 +69,33 @@ export const resolveRuntimeConfig = (
  * read as the agent ignoring its instructions rather than as the trust
  * decision it is.
  */
-export const warnOnUntrustedConfig = (runtime: RuntimeConfig, streams: CliStreams): void => {
-  warnOnIgnoredConfig(runtime.ignoredFromUntrustedConfig, streams);
+export const warnOnUntrustedConfig = (runtime: RuntimeConfig, streams: CliStreams, soulFlag = true): void => {
+  warnOnIgnoredConfig(runtime.ignoredFromUntrustedConfig, streams, soulFlag);
 };
 
-export const warnOnIgnoredConfig = (ignored: IgnoredUntrustedConfig | undefined, streams: CliStreams): void => {
+/**
+ * `soulFlag` is whether the command printing this takes `--soul`: `run`
+ * and `chat` do, `serve` does not, and a notice that sends the operator to
+ * a flag the daemon refuses to start with is a notice that cost them a
+ * restart. The daemon's other way is the global config, where a soul key
+ * is the operator's own.
+ */
+export const warnOnIgnoredConfig = (
+  ignored: IgnoredUntrustedConfig | undefined,
+  streams: CliStreams,
+  soulFlag = true,
+): void => {
   if (!ignored) {
     return;
   }
   const keys = ignored.keys.join(' and ');
+  const otherWay = soulFlag && ignored.keys.includes('soul')
+    ? ', or pass --soul <path>'
+    : `, or move the ${ignored.keys.length === 1 ? 'key' : 'keys'} to ~/.stratus/config.json`;
   writeLine(
     streams.stderr,
     `ignoring ${keys} in ${ignored.path}: what an agent is told is not a decision an auto-discovered config gets to make. `
-    + `Run with --config ${quoteShellArg(ignored.path)} to trust that file${ignored.keys.includes('soul') ? ', or pass --soul <path>' : ''}.`,
+    + `Run with --config ${quoteShellArg(ignored.path)} to trust that file${otherWay}.`,
   );
 };
 

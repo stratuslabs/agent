@@ -311,12 +311,13 @@ const serveHeldHome = async (
     // daemon still starts, with nothing saying why the clone's persona is
     // not in force. The per-runtime record below repeats it for a pass
     // that did resolve; the dedupe above collapses the two to one line.
-    warnOnIgnoredConfig(await discoverIgnoredUntrustedConfig(command.configPath ? { configPath: command.configPath } : {}, env), captured);
+    // `serve` takes no --soul, so the notice names the global config instead.
+    warnOnIgnoredConfig(await discoverIgnoredUntrustedConfig(command.configPath ? { configPath: command.configPath } : {}, env), captured, false);
     // A pinned soul does not merely add a provider — the gateway DEMOTES
     // the daemon-wide defaults it outranks, including STRATUS_PROVIDER, so
     // each served runtime is resolved the way a dispatch resolves it.
     for (const served of await servedRuntimes(env, command.configPath)) {
-      warnOnUntrustedConfig(served.runtime, captured);
+      warnOnUntrustedConfig(served.runtime, captured, false);
       await warnOnCredentialOverride(served.runtime, captured, served.env);
     }
   }

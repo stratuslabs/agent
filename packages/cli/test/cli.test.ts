@@ -12311,6 +12311,10 @@ test('serve says once what an auto-discovered project config asked for and did n
   // Once, however many agents the roster resolves: the daemon's default
   // identity stayed the built-in, and the log says why.
   assert.equal((output.stderr.match(/ignoring soul and systemPrompt in .*stratus\.config\.json/g) ?? []).length, 1);
+  // The way out it names is one the daemon takes: `serve` has no --soul,
+  // and a notice pointing at a flag the daemon refuses would cost a restart.
+  assert.doesNotMatch(output.stderr, /--soul/);
+  assert.match(output.stderr, /to trust that file, or move the keys to ~\/\.stratus\/config\.json\./);
   assert.doesNotMatch(output.stdout, /Mallory/);
 });
 
