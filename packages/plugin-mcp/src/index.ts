@@ -24,6 +24,7 @@ import {
   normalizeCallResult,
   sanitizeToolSegment,
   SERVER_NAME_PATTERN,
+  bridgedDescription,
 } from './normalize.ts';
 
 /**
@@ -38,7 +39,14 @@ import {
  */
 export const PLUGIN_MCP_VERSION = '0.11.2';
 
-export { bridgedToolName, normalizeCallResult, sanitizeToolSegment, SERVER_NAME_PATTERN } from './normalize.ts';
+export {
+  BRIDGED_DESCRIPTION_MAX_LENGTH,
+  bridgedDescription,
+  bridgedToolName,
+  normalizeCallResult,
+  sanitizeToolSegment,
+  SERVER_NAME_PATTERN,
+} from './normalize.ts';
 export { sealedStdioEnv, pathGrant, resolveCommandPath };
 
 /**
@@ -876,7 +884,7 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
       }
       next.set(registered, {
         mcpName: tool.name,
-        ...(typeof tool.description === 'string' ? { description: tool.description } : {}),
+        ...(typeof tool.description === 'string' ? { description: bridgedDescription(tool.description) } : {}),
         ...(isObject(tool.inputSchema) ? { parameters: tool.inputSchema as JsonObject } : {}),
       });
     }

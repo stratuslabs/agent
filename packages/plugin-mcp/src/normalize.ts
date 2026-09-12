@@ -32,6 +32,39 @@ export const sanitizeToolSegment = (raw: string): string | undefined => {
 /** Server keys are operator-chosen and become a name segment; held to the segment shape outright. */
 export const SERVER_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 
+/**
+ * The longest tool description a server gets to put in front of the model.
+ * The same bound a skill's description has (`SKILL_DESCRIPTION_MAX_LENGTH`
+ * in `@stratusagent/agents`), for the same reason: a description is prose
+ * the model reads on every turn, written by a party the operator did not
+ * author, and a paragraph is a description while a page is instructions.
+ */
+export const BRIDGED_DESCRIPTION_MAX_LENGTH = 1024;
+
+/**
+ * A server's tool description as it reaches the registry — and, through
+ * it, every provider's tool block on every turn. The text is the server's,
+ * re-read on every reconnect, and `tools/list` is the one channel a
+ * server has that arrives looking like part of the harness rather than
+ * like a result. Two bounds, neither a filter: control characters and the
+ * Unicode bidi controls are spelled out the way memory entries are (a
+ * right-to-left override in a description is a description that reads
+ * differently to a person than to the model — escaped, it reads as what it
+ * is), and the length is capped with the cut announced. Newlines and tabs
+ * stay: a description is allowed to be several lines.
+ */
+export const bridgedDescription = (raw: string): string => {
+  const escaped = raw.replace(
+    /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
+    (character) => `\\u${character.codePointAt(0)!.toString(16).padStart(4, '0')}`,
+  );
+  if (escaped.length <= BRIDGED_DESCRIPTION_MAX_LENGTH) {
+    return escaped;
+  }
+  const marker = ` … [description truncated by stratus: ${escaped.length} characters]`;
+  return `${escaped.slice(0, BRIDGED_DESCRIPTION_MAX_LENGTH - marker.length)}${marker}`;
+};
+
 /** The registered name a server's tool bridges to: `mcp.<server>.<segment>`. */
 export const bridgedToolName = (server: string, segment: string): string => `mcp.${server}.${segment}`;
 
