@@ -39,21 +39,69 @@ export const defaultPackageVersionFetcher: PackageVersionFetcher = async (packag
 };
 
 /**
- * Dotted-numeric comparison, enough for this package's own versions:
- * positive when `a` is newer than `b`. Anything unparseable in a segment
- * counts as zero rather than throwing — a weird registry answer must not
- * crash the update that would fix things.
+ * Dotted-numeric comparison with SemVer's prerelease precedence, enough for
+ * this package's own versions: positive when `a` is newer than `b`.
+ * Anything unparseable in a segment counts as zero rather than throwing — a
+ * weird registry answer must not crash the update that would fix things.
+ *
+ * The prerelease half is not decoration. Split on dots alone, `0.11.2-beta.1`
+ * parses as a *fourth* numeric segment and so reads as newer than the stable
+ * `0.11.2` that supersedes it — which left a prerelease companion behind and
+ * stopped a prerelease CLI from ever seeing the stable release as an upgrade.
+ * SemVer's rule is the opposite and is the one applied here: a version
+ * carrying a prerelease is lower than the same version without one, and two
+ * prereleases compare identifier by identifier, numeric ones numerically and
+ * below alphanumeric ones.
  */
 export const compareVersions = (a: string, b: string): number => {
-  const parse = (value: string): number[] =>
-    value.trim().replace(/^v/, '').split('.').map((part) => {
-      const numeric = Number.parseInt(part, 10);
-      return Number.isInteger(numeric) ? numeric : 0;
-    });
-  const left = parse(a);
-  const right = parse(b);
-  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
-    const difference = (left[index] ?? 0) - (right[index] ?? 0);
+  const numeric = (part: string): number => {
+    const value = Number.parseInt(part, 10);
+    return Number.isInteger(value) ? value : 0;
+  };
+  const split = (value: string): { core: number[]; pre: string[] } => {
+    // Build metadata never affects precedence, and is dropped before the
+    // prerelease is found so a `+` cannot be mistaken for part of one.
+    const plain = (value.trim().replace(/^v/, '').split('+', 1)[0] ?? '');
+    const dash = plain.indexOf('-');
+    return {
+      core: (dash === -1 ? plain : plain.slice(0, dash)).split('.').map(numeric),
+      pre: dash === -1 ? [] : plain.slice(dash + 1).split('.').filter((part) => part.length > 0),
+    };
+  };
+  const left = split(a);
+  const right = split(b);
+  for (let index = 0; index < Math.max(left.core.length, right.core.length); index += 1) {
+    const difference = (left.core[index] ?? 0) - (right.core[index] ?? 0);
+    if (difference !== 0) {
+      return difference;
+    }
+  }
+  // Same release: the one without a prerelease is the released one.
+  if (left.pre.length === 0 || right.pre.length === 0) {
+    return right.pre.length - left.pre.length;
+  }
+  for (let index = 0; index < Math.max(left.pre.length, right.pre.length); index += 1) {
+    const one = left.pre[index];
+    const other = right.pre[index];
+    // A prerelease that runs out of identifiers first is the lower one:
+    // `1.0.0-beta` precedes `1.0.0-beta.1`.
+    if (one === undefined || other === undefined) {
+      return (one === undefined ? 0 : 1) - (other === undefined ? 0 : 1);
+    }
+    const oneNumeric = /^\d+$/.test(one);
+    const otherNumeric = /^\d+$/.test(other);
+    if (oneNumeric && otherNumeric) {
+      const difference = numeric(one) - numeric(other);
+      if (difference !== 0) {
+        return difference;
+      }
+      continue;
+    }
+    // Numeric identifiers always rank below alphanumeric ones.
+    if (oneNumeric !== otherNumeric) {
+      return oneNumeric ? -1 : 1;
+    }
+    const difference = one < other ? -1 : one > other ? 1 : 0;
     if (difference !== 0) {
       return difference;
     }

@@ -768,3 +768,49 @@ test('a registry answer older than this build does not become the target its com
   // And the CLI itself is never downgraded to meet it.
   assert.doesNotMatch(output.stdout, /Upgrading @stratusagent\/cli/);
 });
+
+test('compareVersions gives a prerelease SemVer precedence, so the stable release supersedes it', () => {
+  // Split on dots alone, `0.11.2-beta.1` parses as a fourth numeric segment
+  // and reads as NEWER than the `0.11.2` that supersedes it — which left a
+  // prerelease companion behind and stopped a prerelease CLI from ever
+  // seeing the stable release as an upgrade.
+  assert.ok(compareVersions('0.11.2', '0.11.2-beta.1') > 0);
+  assert.ok(compareVersions('0.11.2-beta.1', '0.11.2') < 0);
+  // Two prereleases compare identifier by identifier, and one that runs out
+  // first is the lower.
+  assert.ok(compareVersions('0.11.2-beta.2', '0.11.2-beta.1') > 0);
+  assert.ok(compareVersions('1.0.0-beta', '1.0.0-beta.1') < 0);
+  assert.ok(compareVersions('1.0.0-alpha', '1.0.0-beta') < 0);
+  // Numeric identifiers rank below alphanumeric ones.
+  assert.ok(compareVersions('1.0.0-1', '1.0.0-alpha') < 0);
+  // A newer release still wins outright, prerelease or not.
+  assert.ok(compareVersions('0.12.0-beta.1', '0.11.2') > 0);
+  // Build metadata never affects precedence.
+  assert.equal(compareVersions('1.0.0+build.5', '1.0.0'), 0);
+});
+
+test('a prerelease companion is upgraded to the stable release that supersedes it', async () => {
+  const home = await freshHome();
+  await runStateMigrations({ homeDir: home, cwd: home, processEnv: {} });
+  const installs: string[][] = [];
+  const { streams, output } = createStreams();
+  const code = await runCli({
+    argv: ['update'],
+    streams,
+    env: {
+      homeDir: home,
+      cwd: home,
+      processEnv: {},
+      serviceRunner: runningServiceRunner,
+      packageVersionFetcher: async () => CLI_VERSION,
+      installedVersionReader: async (specifier) =>
+        specifier === '@stratusagent/channel-slack' ? `${CLI_VERSION}-beta.1` : undefined,
+      packageInstaller: async (packages) => {
+        installs.push(packages);
+        return { ok: true, message: '' };
+      },
+    },
+  });
+  assert.equal(code, 0, `${output.stdout}\n${output.stderr}`);
+  assert.deepEqual(installs, [['@stratusagent/channel-slack@latest']]);
+});
