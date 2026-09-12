@@ -2715,6 +2715,18 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (event.user === connection.botUserId) {
       return undefined;
     }
+    // Who may speak at all, judged before anything below remembers this
+    // message. The adapter's own checks establish nothing about who is
+    // typing; under `admit: 'principals'` the operator's list is the door,
+    // not a label, and a sender not on it gets neither a turn nor a place
+    // in a transcript the agent reads — nor a say in who holds the thread,
+    // which the handover below would otherwise record on their word.
+    // Logged rather than answered: a reply is a conversation with someone
+    // the operator chose not to have one with.
+    if (connection.config.admit === 'principals' && !(connection.config.principals ?? []).includes(event.user)) {
+      log(`slack: ${connection.config.agentId} refused a message from ${event.user}: not a listed principal, and admit is "principals"`);
+      return undefined;
+    }
 
     const isDm = event.channel_type === 'im';
     const team = args.body?.team_id ?? connection.teamId;
@@ -2862,18 +2874,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       return;
     }
     const { event, isDm, team, userId, thread, sessionId, threadKey } = admitted;
-
-    // Who may speak at all, judged before the message takes a place in the
-    // chain. The adapter's own checks establish nothing about who is
-    // typing; under `admit: 'principals'` the operator's list is the door,
-    // not a label, and a sender not on it gets neither a turn nor a place
-    // in a transcript the agent reads. Logged rather than answered: a
-    // reply is a conversation with someone the operator chose not to have
-    // one with.
-    if (connection.config.admit === 'principals' && !(connection.config.principals ?? []).includes(userId)) {
-      log(`slack: ${connection.config.agentId} refused a message from ${userId}: not a listed principal, and admit is "principals"`);
-      return;
-    }
 
     // Everything up to (and including) the dispatch call is serialized per
     // session in Slack receipt order: the user lookups and placeholder

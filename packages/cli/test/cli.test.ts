@@ -24,6 +24,7 @@ import {
   menuPrefixWidth,
   createLogWriter,
   createApprovalPolicy,
+  describePrincipals,
   currentLogPosition,
   describeApprovalCall,
   eventDetail,
@@ -11629,4 +11630,23 @@ test('plugins says a call parks indefinitely when the approval timeout is zero',
 
   assert.match(output.stdout, /approval timeout is 0, so it parks indefinitely/);
   assert.doesNotMatch(output.stdout, /before the timeout denies it/);
+});
+
+test('the startup provenance line says which agents refuse unlisted senders, even with nobody listed', () => {
+  assert.match(describePrincipals({}, ['ava', 'bea']), /^no principals configured, so every Slack sender is unknown/);
+  assert.match(
+    describePrincipals({ slackUsers: ['U1'] }, ['ava', 'bea']),
+    /^principals set for ava, bea; every agent still admits unlisted senders as unknown/,
+  );
+  assert.match(
+    describePrincipals({ slackUsers: ['U1'], admit: 'principals', agents: { bea: { admit: 'anyone' } } }, ['ava', 'bea']),
+    /unlisted senders are refused by ava and admitted as unknown by the rest$/,
+  );
+  // Closed with nobody listed is a valid configuration that refuses
+  // everyone — the opposite of "every sender is unknown", and the line
+  // must not claim the latter.
+  assert.match(
+    describePrincipals({ admit: 'principals' }, ['ava']),
+    /^no principals listed, so every Slack sender is unknown; unlisted senders are refused — nobody at all can talk to ava until principals\.slackUsers names someone$/,
+  );
 });

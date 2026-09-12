@@ -6981,20 +6981,25 @@ const loadServePrincipals = async (
 };
 
 /** One line saying whose messages arrive as the operator's, per Slack agent. */
-const describePrincipals = (principals: PrincipalsConfig, agentIds: string[]): string => {
+export const describePrincipals = (principals: PrincipalsConfig, agentIds: string[]): string => {
   const covered = agentIds.filter((agentId) => (resolveAgentPrincipals(principals, agentId).slackUsers ?? []).length > 0);
-  if (covered.length === 0) {
-    return 'no principals configured, so every Slack sender is unknown and every fact written in Slack carries that label — set principals.slackUsers in ~/.stratus/config.json';
-  }
-  const uncovered = agentIds.filter((agentId) => !covered.includes(agentId));
   // Which agents refuse the unlisted outright, so an operator reading the
-  // startup line knows whether the list is a label or a door.
+  // startup line knows whether the list is a label or a door. Worked out
+  // before the no-list case: a closed agent with nobody listed refuses
+  // everyone, which is a valid configuration and the opposite of "every
+  // sender is unknown".
   const closed = agentIds.filter((agentId) => resolveAgentPrincipals(principals, agentId).admit === 'principals');
   const door = closed.length === 0
     ? '; every agent still admits unlisted senders as unknown (principals.admit: "principals" refuses them)'
     : closed.length === agentIds.length
       ? '; unlisted senders are refused'
       : `; unlisted senders are refused by ${closed.join(', ')} and admitted as unknown by the rest`;
+  if (covered.length === 0) {
+    return closed.length === 0
+      ? 'no principals configured, so every Slack sender is unknown and every fact written in Slack carries that label — set principals.slackUsers in ~/.stratus/config.json'
+      : `no principals listed, so every Slack sender is unknown${door} — nobody at all can talk to ${closed.join(', ')} until principals.slackUsers names someone`;
+  }
+  const uncovered = agentIds.filter((agentId) => !covered.includes(agentId));
   return (uncovered.length === 0
     ? `principals set for ${covered.join(', ')}`
     : `principals set for ${covered.join(', ')}; none for ${uncovered.join(', ')}, whose Slack senders are all unknown`) + door;
