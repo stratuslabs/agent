@@ -689,6 +689,10 @@ export const createCodexProvider = ({
     // growing snapshots as suffixes. Wire tool names are translated back
     // to the kernel's own naming before consumers see them.
     const completedMessages: string[] = [];
+    // Whether Codex reported the turn finished: a stream that ends after
+    // `thread.started` with neither `turn.completed` nor `turn.failed` is a
+    // run that did not complete, and is never silence.
+    let turnCompleted = false;
     const emittedByItemId = new Map<string, number>();
     const wireToKernel = new Map<string, string>();
     for (const [kernelName, wireName] of bridgedToolNames(request.tools ?? [])) {
@@ -743,6 +747,7 @@ export const createCodexProvider = ({
         return;
       }
       if (event.type === 'turn.completed') {
+        turnCompleted = true;
         reportUsage(event.usage);
         return;
       }
@@ -878,12 +883,15 @@ export const createCodexProvider = ({
     const resultText = completedMessages.filter((text) => text.length > 0).join('\n\n');
     if (resultText.length === 0) {
       // Silence is the answer a turn nobody asked for may give — see
-      // `RunInput.addressed` in core; on a turn somebody asked for it is a
-      // harness that returned nothing.
-      if (isUnaddressedTurn(request.session)) {
+      // `RunInput.addressed` in core — when Codex said the turn finished
+      // with nothing to say. A stream that ended without `turn.completed`
+      // is a run that did not complete, and on any turn is an error.
+      if (turnCompleted && isUnaddressedTurn(request.session)) {
         return { parts: [] };
       }
-      throw markIfDelivered(markIfSideEffects(new Error('Codex returned an empty response.')));
+      throw markIfDelivered(markIfSideEffects(new Error(
+        turnCompleted ? 'Codex returned an empty response.' : 'Codex ended without completing the turn.',
+      )));
     }
 
     return { parts: [{ type: 'text' as const, text: resultText }] };

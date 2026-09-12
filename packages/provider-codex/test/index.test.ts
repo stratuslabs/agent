@@ -170,6 +170,12 @@ test('failed turns and empty responses surface as errors', async () => {
     overheard: true,
   });
   assert.deepEqual(await empty.generate({ session: unasked }), { parts: [] });
+  // A stream that ends after `thread.started` without `turn.completed` is a
+  // run that did not complete, not silence.
+  const cutOff = createCodexProvider({
+    runTurn: createFakeRunTurn([{ type: 'thread.started', thread_id: 't1' }]).runTurn,
+  });
+  await assert.rejects(() => cutOff.generate({ session: unasked }), /ended without completing the turn/);
 
   // A failure after Codex sent anything says the prompt was delivered —
   // the thread has it — and one before it does not.

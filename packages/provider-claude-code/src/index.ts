@@ -486,6 +486,10 @@ export const createClaudeCodeProvider = ({
     };
 
     let resultText: string | undefined;
+    // Whether the SDK reported the turn finished: a stream that closes
+    // without a `result` is a run that did not complete, whatever it
+    // yielded on the way, and is never silence.
+    let completed = false;
     // Tool input arrives as JSON fragments after the block's start event,
     // so the name has to be remembered from the start to label them.
     const toolNamesByIndex = new Map<number, string>();
@@ -595,6 +599,7 @@ export const createClaudeCodeProvider = ({
             attemptUsage = message.modelUsage;
           }
           if (message.subtype === 'success' && !message.is_error) {
+            completed = true;
             resultText = message.result;
             continue;
           }
@@ -668,12 +673,15 @@ export const createClaudeCodeProvider = ({
 
     if (resultText === undefined || resultText.length === 0) {
       // Silence is the answer a turn nobody asked for may give — see
-      // `RunInput.addressed` in core; on a turn somebody asked for it is a
-      // harness that returned nothing.
-      if (isUnaddressedTurn(request.session)) {
+      // `RunInput.addressed` in core — when the SDK said the turn finished
+      // with nothing to say. A stream that ended without a result is a run
+      // that did not complete, and on any turn is an error.
+      if (completed && isUnaddressedTurn(request.session)) {
         return { parts: [] };
       }
-      throw markIfDelivered(markIfSideEffects(new Error('Claude Code returned an empty response.')));
+      throw markIfDelivered(markIfSideEffects(new Error(
+        completed ? 'Claude Code returned an empty response.' : 'Claude Code ended without reporting a result.',
+      )));
     }
 
     return { parts: [{ type: 'text' as const, text: resultText }] };
