@@ -357,6 +357,17 @@ test('the delegate wildcard is not an agent id, and a delegates entry is an id o
   assert.deepEqual(defineAgent({ name: 'Kai', delegates: ['*', 'bea'] }).delegates, ['*', 'bea']);
 });
 
+test('an inline list splits on the commas outside quotes, so a quoted id keeps its comma', () => {
+  // `['foo,bar']` used to become the two entries 'foo and bar' — for a
+  // delegates list, a grant to two agents nobody meant and none to the
+  // one they did, from a soul that loaded without complaint.
+  const soul = parseSoul('---\nname: Kai\ntools: [agent.delegate, "memory.recall"]\ndelegates: [\'foo,bar\', "a, b", baz, \'\']\n---\n\nHi.\n');
+  assert.deepEqual(soul.agent.tools, ['agent.delegate', 'memory.recall']);
+  assert.deepEqual(soul.agent.delegates, ['foo,bar', 'a, b', 'baz']);
+  assert.equal(isDelegateAllowed(soul.agent, 'foo,bar'), true);
+  assert.equal(isDelegateAllowed(soul.agent, "'foo"), false);
+});
+
 test('the soul writer round-trips a value the parser would otherwise unquote', () => {
   // The parser strips one layer of matching quotes from every value, so an
   // id like 'bea' written raw would come back as bea — for a delegates

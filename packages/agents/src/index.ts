@@ -410,6 +410,33 @@ export interface ParseSoulOptions {
 const SOUL_SCALAR_KEYS = ['name', 'id', 'provider', 'model'] as const;
 const SOUL_LIST_KEYS = ['tools', 'skills', 'credentials', 'delegates'] as const;
 
+/**
+ * The entries of an inline list, `[a, 'b,c', "d"]`, split on the commas
+ * that are outside quotes. Splitting on every comma and unquoting after
+ * turned `['foo,bar']` into the two entries `'foo` and `bar'` — for a
+ * `delegates` list, a grant to two agents nobody meant and none to the
+ * one they did, from a soul that loaded without complaint.
+ */
+const splitInlineList = (inline: string): string[] => {
+  const entries: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | undefined;
+  for (const character of inline) {
+    if (quote === undefined && (character === '"' || character === "'")) {
+      quote = character;
+    } else if (character === quote) {
+      quote = undefined;
+    } else if (character === ',' && quote === undefined) {
+      entries.push(current);
+      current = '';
+      continue;
+    }
+    current += character;
+  }
+  entries.push(current);
+  return entries;
+};
+
 const unquote = (value: string): string => {
   const trimmed = value.trim();
   if (
@@ -588,7 +615,7 @@ const parseFrontmatterLines = (lines: string[], shape: FrontmatterShape): Parsed
         if (!match) {
           throw new Error(`${capitalize(shape.kind)} frontmatter list "${key}" must be a block list or [a, b]: "${inline}"`);
         }
-        for (const item of (match[1] ?? '').split(',')) {
+        for (const item of splitInlineList(match[1] ?? '')) {
           const cleaned = unquote(item);
           if (cleaned.length > 0) {
             list.push(cleaned);
