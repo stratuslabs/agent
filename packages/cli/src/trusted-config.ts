@@ -1,4 +1,5 @@
 import {
+  readGlobalConfigBlock,
   readTrustedConfigBlock,
   type ApiConfig,
   type ApprovalsConfig,
@@ -81,17 +82,29 @@ export const loadServePrincipals = async (
   configPath: string | undefined,
   warn: (line: string) => void,
 ): Promise<PrincipalsConfig> => {
-  const block = await readTrustedConfigBlock('principals', env, configPath);
+  let block = await readTrustedConfigBlock('principals', env, configPath);
   if (block.status === 'untrusted') {
+    // An auto-discovered project config shadows the global one in
+    // discovery, and a daemon started inside a cloned repository would
+    // otherwise run with no principals policy at all — a cloned repo that
+    // cannot define the policy must not be able to suppress it either. The
+    // global file is the trusted answer; it is read instead.
     warn(
       `ignoring the principals config in ${block.path}: a project-local config cannot decide whose messages `
-      + 'this daemon\'s agents treat as their operator\'s. Move it to ~/.stratus/config.json, or pass it with --config.',
+      + 'this daemon\'s agents treat as their operator\'s. Using ~/.stratus/config.json instead.',
     );
-    return {};
+    block = await readGlobalConfigBlock('principals', env);
   }
   if (block.status === 'unreadable') {
-    warn(`ignoring the principals config (${block.error instanceof Error ? block.error.message : String(block.error)}); every Slack sender is unknown`);
-    return {};
+    // Closed, not open: the one thing in this block that can fail to
+    // parse is `admit`, whose misspelling would otherwise mean `anyone` —
+    // the setting exists so that a typo does not open the door, and a
+    // warning that opens it anyway is the door with a note on it.
+    warn(
+      `the principals config could not be read (${block.error instanceof Error ? block.error.message : String(block.error)}); `
+      + 'refusing every Slack sender until it is fixed',
+    );
+    return { admit: 'principals' };
   }
   return block.status === 'present' ? block.value : {};
 };

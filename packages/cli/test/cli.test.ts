@@ -25,6 +25,8 @@ import {
   menuPrefixWidth,
   createLogWriter,
   createApprovalPolicy,
+  describePrincipals,
+  loadServePrincipals,
   currentLogPosition,
   describeApprovalCall,
   eventDetail,
@@ -12245,6 +12247,117 @@ test('plugins says a call parks indefinitely when the approval timeout is zero',
 
   assert.match(output.stdout, /approval timeout is 0, so it parks indefinitely/);
   assert.doesNotMatch(output.stdout, /before the timeout denies it/);
+});
+
+test('the startup provenance line says which agents refuse unlisted senders, even with nobody listed', () => {
+  assert.match(describePrincipals({}, ['ava', 'bea']), /^no principals configured, so every Slack sender is unknown/);
+  assert.match(
+    describePrincipals({ slackUsers: ['U1'] }, ['ava', 'bea']),
+    /^principals set for ava, bea; every agent still admits unlisted senders as unknown/,
+  );
+  assert.match(
+    describePrincipals({ slackUsers: ['U1'], admit: 'principals', agents: { bea: { admit: 'anyone' } } }, ['ava', 'bea']),
+    /unlisted senders are refused by ava and admitted as unknown by the rest$/,
+  );
+  // Closed with nobody listed is a valid configuration that refuses
+  // everyone — the opposite of "every sender is unknown", and the line
+  // must not claim the latter.
+  assert.match(
+    describePrincipals({ admit: 'principals' }, ['ava']),
+    /^no principals listed, so every Slack sender is unknown; unlisted senders are refused — nobody at all can talk to ava until principals\.slackUsers names someone$/,
+  );
+  // The same agent beside a covered one: excluded from the shared list and
+  // closed, Bea refuses everyone, and the line must not first call her
+  // senders "all unknown" and then "refused".
+  assert.match(
+    describePrincipals({ slackUsers: ['U1'], admit: 'principals', agents: { bea: { slackUsers: [] } } }, ['ava', 'bea']),
+    /^principals set for ava; none for bea, who refuse every sender until principals\.slackUsers names someone; unlisted senders are refused$/,
+  );
+  assert.match(
+    describePrincipals({ slackUsers: ['U1'], agents: { bea: { slackUsers: [] }, cy: { slackUsers: [], admit: 'principals' } } }, ['ava', 'bea', 'cy']),
+    /^principals set for ava; none for bea, whose Slack senders are all unknown; none for cy, who refuse every sender until principals\.slackUsers names someone; unlisted senders are refused by cy and admitted as unknown by the rest$/,
+  );
+});
+
+test('serve with an unreadable principals block refuses every Slack sender rather than admitting everyone', async () => {
+  const serveHome = await mkdtemp(path.join(os.tmpdir(), 'stratus-serve-principals-'));
+  await mkdir(path.join(serveHome, '.stratus'), { recursive: true });
+  // A typo in the one setting whose misspelling would open the door.
+  await writeFile(
+    path.join(serveHome, '.stratus', 'config.json'),
+    JSON.stringify({ principals: { slackUsers: ['U-DYLAN'], admit: 'principal' } }),
+  );
+  const { streams, output } = createStreams();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 150);
+
+  const code = await runCli({
+    argv: ['serve', '--no-events'],
+    streams,
+    env: { homeDir: serveHome, cwd: serveHome, processEnv: {}, shutdownSignal: controller.signal },
+  });
+
+  assert.equal(code, 0);
+  assert.match(output.stderr, /principals config could not be read \(.*Invalid principals\.admit .*received "principal"\.\); refusing every Slack sender until it is fixed/);
+  assert.doesNotMatch(output.stderr, /every Slack sender is unknown/);
+});
+
+test('a global config that cannot be read behind a project config closes the door rather than opening it', async () => {
+  // `~/.stratus` is a file: the global config exists as a path and cannot
+  // be read. That is the unreadable case, which refuses every sender —
+  // not the no-file case, which would have admitted everyone.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-unreadable-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-unreadable-project-'));
+  await writeFile(path.join(home, '.stratus'), 'not a directory');
+  const warnings: string[] = [];
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.deepEqual(
+    await loadServePrincipals({ homeDir: home, cwd: project, processEnv: {} }, undefined, (line) => warnings.push(line)),
+    { admit: 'principals' },
+  );
+  assert.match(warnings.at(-1) ?? '', /principals config could not be read \(.*ENOTDIR.*\); refusing every Slack sender until it is fixed/);
+  // The same when the clone carries a refused block of its own.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ principals: { admit: 'anyone' } }));
+  assert.deepEqual(
+    await loadServePrincipals({ homeDir: home, cwd: project, processEnv: {} }, undefined, () => {}),
+    { admit: 'principals' },
+  );
+});
+
+test('a project config that shadows the global one does not suppress the global principals policy', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-project-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(
+    path.join(home, '.stratus', 'config.json'),
+    JSON.stringify({ principals: { slackUsers: ['U-DYLAN'], admit: 'principals' } }),
+  );
+  // The clone's own block, and a clone with no block at all: neither may
+  // decide the policy, and neither may make it disappear.
+  const warnings: string[] = [];
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo', principals: { admit: 'anyone' } }));
+  assert.deepEqual(
+    await loadServePrincipals({ homeDir: home, cwd: project, processEnv: {} }, undefined, (line) => warnings.push(line)),
+    { slackUsers: ['U-DYLAN'], admit: 'principals' },
+  );
+  assert.match(warnings[0] ?? '', /ignoring the principals config in .*stratus\.config\.json.*Using ~\/\.stratus\/config\.json instead/);
+
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ provider: 'demo' }));
+  assert.deepEqual(
+    await loadServePrincipals({ homeDir: home, cwd: project, processEnv: {} }, undefined, () => {}),
+    { slackUsers: ['U-DYLAN'], admit: 'principals' },
+  );
+  // A clone whose block is malformed is refused, not unreadable — the
+  // global policy still applies rather than a door closed on everyone.
+  await writeFile(path.join(project, 'stratus.config.json'), JSON.stringify({ principals: { admit: 'principal' } }));
+  assert.deepEqual(
+    await loadServePrincipals({ homeDir: home, cwd: project, processEnv: {} }, undefined, () => {}),
+    { slackUsers: ['U-DYLAN'], admit: 'principals' },
+  );
+
+  // No global file at all is no policy, as it always was.
+  const bare = await mkdtemp(path.join(os.tmpdir(), 'stratus-principals-bare-'));
+  assert.deepEqual(await loadServePrincipals({ homeDir: bare, cwd: project, processEnv: {} }, undefined, () => {}), {});
 });
 
 /**

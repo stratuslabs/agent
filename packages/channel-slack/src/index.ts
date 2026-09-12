@@ -116,6 +116,14 @@ export interface SlackAgentConfig {
    * nobody is, and every sender is `unknown`.
    */
   principals?: string[];
+  /**
+   * Whether an unlisted sender gets a turn at all. `anyone` (the default)
+   * admits them as `unknown`; `principals` refuses them before a turn
+   * starts and does not let the agent overhear them either — the text
+   * would be in the transcript, which is what this mode exists to keep
+   * out. The label above is provenance; this is authorization.
+   */
+  admit?: 'anyone' | 'principals';
 }
 
 // The thin surfaces of the Slack SDKs the adapter touches — injectable so
@@ -1869,6 +1877,23 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
   const connectionFor = (agentId: string): AgentConnection | undefined =>
     connections.find((candidate) => candidate.config.agentId === agentId);
 
+  /** An agent's configuration, whether or not its socket came up. */
+  const agentConfigFor = (agentId: string): SlackAgentConfig | undefined =>
+    options.agents.find((candidate) => candidate.agentId === agentId);
+
+  /**
+   * Whether an agent takes a message from this sender at all — judged on
+   * its configuration, not on a live connection: an agent whose socket
+   * failed to start is still recognizable in a mention, and its door is
+   * still its own. An agent this adapter was never configured for is
+   * nobody's to refuse here, so it admits — the answer from before the
+   * door existed.
+   */
+  const admitsSender = (config: SlackAgentConfig | undefined, userId: string): boolean =>
+    config === undefined
+    || config.admit !== 'principals'
+    || (config.principals ?? []).includes(userId);
+
   /**
    * Run `work` after everything already queued for this session's intake,
    * and hold the next link until it settles. The link is claimed
@@ -2679,10 +2704,20 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * so is one whose `auth.test` itself failed, since its bot id was never
    * learned.
    */
-  const agentNamedIn = (text: string, team: string): string | undefined => {
+  const agentNamedIn = (
+    text: string,
+    team: string,
+    /**
+     * Whether a named agent would take this message at all. A message
+     * naming two agents hands the thread to one that admits the sender,
+     * not to the first one named: the agent that refuses will not answer,
+     * and a handover to it is a thread nobody holds.
+     */
+    admits: (agentId: string) => boolean = () => true,
+  ): string | undefined => {
     let offline: string | undefined;
     for (const [agentId, identity] of botIdentities) {
-      if (identity.teamId !== team || !mentions(text, identity.botUserId)) {
+      if (identity.teamId !== team || !mentions(text, identity.botUserId) || !admits(agentId)) {
         continue;
       }
       if (connections.some((live) => live.config.agentId === agentId)) {
@@ -2881,6 +2916,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     if (event.user === connection.botUserId) {
       return undefined;
     }
+    // Bound once the guard above has run: the closures below cannot see
+    // that narrowing.
+    const sender = event.user;
 
     const isDm = event.channel_type === 'im';
     const team = args.body?.team_id ?? connection.teamId;
@@ -2904,9 +2942,77 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // handover, Ava could take the next untagged reply while Bea's socket
     // was still behind, and answer a question that had just been handed
     // away. The message Ava must record is exactly the one Ava ignores.
-    const named = agentNamedIn(text, team);
-    if (threadKey && named) {
-      rememberAddressee(threadKey, named, event.ts);
+    // Who the message is for, judged on the named agents' own terms rather
+    // than this one's: agents may list different principals, and a sender
+    // Ava admits but Bea refuses must not be able to hand Bea the thread
+    // from Ava's socket — Bea's own socket refuses the same message, and
+    // the map is shared. A message naming Bea and Cy is Cy's, who will
+    // answer it and hold the thread. One naming only agents that refuse
+    // the sender is still theirs and not this agent's to answer — so the
+    // refusing agent stays `named`, and only the handover is withheld.
+    const handoverTo = agentNamedIn(text, team, (agentId) => admitsSender(agentConfigFor(agentId), sender));
+    const named = handoverTo ?? agentNamedIn(text, team);
+    // The key one Slack MESSAGE is known by, whichever delivery carried
+    // it; see the dedupe below for why it is not the event id.
+    const eventKey = `${connection.config.agentId}:${event.channel}:${event.ts}`;
+
+    // Recorded ahead of this agent's own refusal below, and on the named
+    // agent's admission rather than this one's: a sender Ava refuses and
+    // Bea admits has handed Bea the thread, and Ava's socket may be the
+    // one that hears it first. If Ava withheld the record, a fast untagged
+    // follow-up from someone Ava does admit would go to the old holder on
+    // Ava's socket and to Bea once Bea's socket caught up — two answers to
+    // one message. The refused message itself still takes no place in
+    // Ava's transcript; only the map learns who holds the thread.
+    if (threadKey && handoverTo) {
+      rememberAddressee(threadKey, handoverTo, event.ts);
+    }
+
+    // Who may speak at all, judged before anything below remembers this
+    // message. The adapter's own checks establish nothing about who is
+    // typing; under `admit: 'principals'` the operator's list is the door,
+    // not a label, and a sender not on it gets neither a turn nor a place
+    // in a transcript the agent reads — nor a say in who holds the thread
+    // beyond what the named agent's own admission above allowed.
+    // Logged rather than answered — a reply is a conversation with someone
+    // the operator chose not to have one with — and logged only for a
+    // message this agent would have taken up: a mention, or an untagged
+    // reply inside a thread this agent is known to hold. A channel
+    // subscribed for thread follow-through delivers every post and every
+    // reply in every thread, including the threads this agent was never
+    // part of, and a line per stranger per reply is a log with nothing
+    // left to read. Known from what this process has seen, as the
+    // admitted path below judges it; a thread nothing here remembers is
+    // one the sessions would have to be asked about, and a refused message
+    // does not get a place in that queue. Once per MESSAGE, on the same key
+    // the admitted path dedupes on: a mention arrives twice under both
+    // subscriptions, and a delivery Slack did not see acknowledged arrives
+    // again, and each copy would otherwise write its own line during
+    // exactly the traffic an operator reads the log to understand.
+    // Consuming the key here is safe because a refused message records
+    // nothing a later copy could be needed for.
+    if (!admitsSender(connection.config, sender)) {
+      const refusal = `slack: ${connection.config.agentId} refused a message from ${sender}: not a listed principal, and admit is "principals"`;
+      const held = threadKey !== undefined ? holderAt(threadKey, event.ts) : undefined;
+      if (addressed || held === connection.config.agentId) {
+        if (!alreadySeen(eventKey)) {
+          log(refusal);
+        }
+      } else if (held === undefined && event.thread_ts !== undefined && !alreadySeen(eventKey)) {
+        // Nothing in memory says whose thread this is — after a restart, or
+        // once the record was evicted — but the sessions may: the durable
+        // half of the question the admitted path asks, and the same
+        // verdict. Off the intake chain, because a refused message gets no
+        // place in that queue, and the line is an audit, not a turn; `track`
+        // holds it so `stop()` drains it like any other background work.
+        const thread = event.thread_ts;
+        track(followUpWinner({ team, conversation: event.channel, thread }, event.ts).then((winner) => {
+          if (winner === connection.config.agentId) {
+            log(refusal);
+          }
+        }));
+      }
+      return undefined;
     }
 
     if (!addressed) {
@@ -2930,7 +3036,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // the one a connection sees second. And before every stand-down below,
     // because standing down is no longer nothing: an agent that hears a
     // message it is not answering must hear it once.
-    const eventKey = `${connection.config.agentId}:${event.channel}:${event.ts}`;
     if (alreadySeen(eventKey)) {
       return undefined;
     }

@@ -291,6 +291,44 @@ and a stranger can mention the agent inside it afterwards — the stranger's
 turn lowers the session, and the authorized member's next turn does not
 raise it back.
 
+The list is a **label** by default: an unlisted sender still gets a turn,
+marked `unknown`. For an agent that holds tools that is not enough — a
+stranger's message is not merely uncertain, it is a prompt they chose, and
+`unknown` does not stop `shell.run` from running on it once a listed
+approver clicks. `admit` makes the list a **door**:
+
+```jsonc
+{
+  "principals": {
+    "slackUsers": ["U01DYLAN"],
+    "admit": "principals",
+    "agents": {
+      "bea": { "admit": "anyone" }
+    }
+  }
+}
+```
+
+Under `"admit": "principals"` a sender not in `slackUsers` gets no turn:
+the message is refused before it takes a place in the queue, the agent
+does not overhear it into a thread's transcript either, and nothing is
+posted back — a reply is a conversation the operator chose not to have.
+The refusal is one line in the daemon log naming the agent and the user
+id — one per message, however many times Slack delivers it, and only for a
+message the agent would have taken up: a mention, or a reply in a thread
+the agent holds, whether the daemon remembers that or its sessions do. A
+stranger's reply in a thread the agent was never part of is dropped
+without a line. `"anyone"` is
+the default and today's behavior; the key inherits per agent like
+`slackUsers`, so Bea above stays open while everyone else is closed. A value
+that is neither word is a config error, never `anyone`: this is the one
+setting here whose misspelling would open the door. So is a `slackUsers`
+that is not a list of user ids, and so is a block or a per-agent entry that
+is not an object: dropped for its shape, a per-agent list would fall back to
+the shared one, the broader list it existed to narrow, and the block itself
+would fall back to `anyone`.
+`stratus serve` says at startup which agents refuse unlisted senders.
+
 Like `approvals`, this block is read only from a config you chose —
 `--config`, `STRATUS_CONFIG`, or the global `~/.stratus/config.json`. A
 project-local `stratus.config.json` cannot appoint itself the principal.
