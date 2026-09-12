@@ -307,9 +307,9 @@ the message is refused before it takes a place in the queue, the agent
 does not overhear it into a thread's transcript either, and nothing is
 posted back — a reply is a conversation the operator chose not to have.
 The refusal is one line in the daemon log naming the agent and the user
-id. `"anyone"` is the default and today's behavior; the key inherits per
-agent like `slackUsers`, so Bea above stays open while everyone else is
-closed. A value that is neither word is a config error, never `anyone`:
+id — one per message, however many times Slack delivers it. `"anyone"` is
+the default and today's behavior; the key inherits per agent like
+`slackUsers`, so Bea above stays open while everyone else is closed. A value that is neither word is a config error, never `anyone`:
 this is the one setting here whose misspelling would open the door.
 `stratus serve` says at startup which agents refuse unlisted senders.
 

@@ -2778,6 +2778,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // refusing agent stays `named`, and only the handover is withheld.
     const handoverTo = agentNamedIn(text, team, (agentId) => admitsSender(agentConfigFor(agentId), sender));
     const named = handoverTo ?? agentNamedIn(text, team);
+    // The key one Slack MESSAGE is known by, whichever delivery carried
+    // it; see the dedupe below for why it is not the event id.
+    const eventKey = `${connection.config.agentId}:${event.channel}:${event.ts}`;
 
     // Who may speak at all, judged before anything below remembers this
     // message. The adapter's own checks establish nothing about who is
@@ -2789,9 +2792,15 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // the operator chose not to have one with — and logged only for a
     // message this agent would have taken up: a channel subscribed for
     // thread follow-through delivers every top-level post, and a line per
-    // stranger per post is a log with nothing left to read.
+    // stranger per post is a log with nothing left to read. Once per
+    // MESSAGE, on the same key the admitted path dedupes on below: a
+    // mention arrives twice under both subscriptions, and a delivery Slack
+    // did not see acknowledged arrives again, and each copy would otherwise
+    // write its own line during exactly the traffic an operator reads the
+    // log to understand. Consuming the key here is safe because a refused
+    // message records nothing a later copy could be needed for.
     if (!admitsSender(connection.config, sender)) {
-      if (addressed || event.thread_ts !== undefined) {
+      if ((addressed || event.thread_ts !== undefined) && !alreadySeen(eventKey)) {
         log(`slack: ${connection.config.agentId} refused a message from ${sender}: not a listed principal, and admit is "principals"`);
       }
       return undefined;
@@ -2821,7 +2830,6 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // the one a connection sees second. And before every stand-down below,
     // because standing down is no longer nothing: an agent that hears a
     // message it is not answering must hear it once.
-    const eventKey = `${connection.config.agentId}:${event.channel}:${event.ts}`;
     if (alreadySeen(eventKey)) {
       return undefined;
     }

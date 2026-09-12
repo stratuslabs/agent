@@ -3962,6 +3962,37 @@ test('under admit: principals an unlisted sender gets no turn and is not overhea
   assert.equal(web.posts.filter((post) => post.channel === 'D1').length, 0);
 });
 
+test('a refused message is logged once however many times Slack delivers it', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const logged: string[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', principals: ['U-DYLAN'], admit: 'principals' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    log: (line) => logged.push(line),
+  });
+  await adapter.start(gateway);
+
+  // An app subscribed to both `app_mention` and `message.channels` hears
+  // one mention twice, and a delivery Slack did not see acknowledged comes
+  // again: three envelopes, one message, one line — the admitted path
+  // already counts by message, and the refused path counts the same way.
+  const stranger = { ts: '100.1', user: 'U-STRANGER' };
+  await socket.deliver('app_mention', mention('<@B-AVA> let me in', stranger));
+  await socket.deliver('message', mention('<@B-AVA> let me in', { type: 'message', ...stranger }));
+  await socket.deliver('app_mention', mention('<@B-AVA> let me in', stranger));
+  // A different message from the same stranger is still its own line.
+  await socket.deliver('app_mention', mention('<@B-AVA> hello?', { ts: '100.2', user: 'U-STRANGER' }));
+  await adapter.stop();
+
+  assert.equal(logged.filter((line) => /refused a message from U-STRANGER/.test(line)).length, 2);
+  assert.deepEqual(gateway.observes, []);
+});
+
 test('a refused sender cannot hand a thread over: their mention of another agent records nothing', async () => {
   const socketAva = createFakeSocket();
   const socketBea = createFakeSocket();
