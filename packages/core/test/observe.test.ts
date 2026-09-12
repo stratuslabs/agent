@@ -26,7 +26,7 @@ const echoingProvider = (): ModelProvider & { calls: number } => {
       provider.calls += 1;
       const heard = request.session.messages
         .filter((message) => message.role === 'user')
-        .map(promptTextOf)
+        .map((message) => promptTextOf(message))
         .join(' | ');
       return { parts: [{ type: 'text', text: `heard: ${heard}` }] };
     },

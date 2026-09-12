@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { promptWasDelivered } from '@stratusagent/core';
 import { test } from 'node:test';
 import type {
   MemoryEntry,
@@ -138,7 +139,41 @@ test('error results and empty responses surface as errors', async () => {
   });
   await assert.rejects(
     () => empty.generate({ session: createSession() }),
-    /empty response/,
+    /ended without reporting a result/,
+  );
+
+  // On a turn nobody asked for — its newest user message overheard,
+  // dispatched with `addressed: false` — nothing said is the answer, when
+  // the SDK said the turn finished. A stream that closed without a result
+  // is a run that did not complete, and is not silence.
+  const unasked = createSession();
+  unasked.messages.push({
+    id: 'session-1:user:2',
+    role: 'user',
+    content: 'Dylan: Bea, thoughts?',
+    createdAt: new Date().toISOString(),
+    overheard: true,
+  });
+  await assert.rejects(() => empty.generate({ session: unasked }), /ended without reporting a result/);
+  const silent = createClaudeCodeProvider({
+    queryFn: createFakeQuery([{ type: 'result', subtype: 'success', is_error: false, result: '' }]).queryFn,
+  });
+  assert.deepEqual(await silent.generate({ session: unasked }), { parts: [] });
+
+  // A failure after the SDK yielded anything says the prompt was
+  // delivered — the harness has it — and one before it does not.
+  await assert.rejects(
+    () => failed.generate({ session: createSession() }),
+    (error: unknown) => promptWasDelivered(error),
+  );
+  const unstarted = createClaudeCodeProvider({
+    queryFn: () => {
+      throw new Error('spawn failed');
+    },
+  });
+  await assert.rejects(
+    () => unstarted.generate({ session: createSession() }),
+    (error: unknown) => !promptWasDelivered(error),
   );
 });
 
