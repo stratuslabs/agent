@@ -236,8 +236,10 @@ command that would exit with an error.
 Credentials are stored in `~/.stratus/credentials.json` (owner-read-only)
 and settings in `~/.stratus/config.json`, so `stratus run` works from any
 directory afterwards. No env vars to export, no config files to hand-edit. A
-project-local `stratus.config.json` still wins when present, and env vars
-outrank both — see [Configuration](../reference/config.md).
+project-local `stratus.config.json` still wins when present — for its
+provider and model, not for a `soul` or `systemPrompt`, which only a trusted
+config sets — and env vars outrank both — see
+[Configuration](../reference/config.md).
 
 Re-running setup **edits** that file rather than rewriting it. The keys it
 has no menu for are read in and written back untouched — the `api` and

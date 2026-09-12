@@ -1170,7 +1170,9 @@ Options:
 Config file:
   The CLI looks for ./stratus.config.json first, then a path from --config / STRATUS_CONFIG,
   then the global ~/.stratus/config.json written by \`stratus setup\`.
-  A "soul" key (or STRATUS_SOUL) points at a soul file so every run uses that agent.
+  A "soul" key (or STRATUS_SOUL) points at a soul file so every run uses that agent —
+  from ~/.stratus/config.json or a file named with --config; an auto-discovered
+  ./stratus.config.json does not get to choose a soul or a systemPrompt.
 
 Plugins (tools):
   Capability is optional: install a package, then list it under "plugins" in a
@@ -2432,6 +2434,26 @@ export const resolveRuntimeConfig = (
  * Detected from the resolved config: an apiKey where the stored credential
  * is a subscription token means the environment won.
  */
+/**
+ * Says, once the run is up, what an auto-discovered project config asked
+ * for and did not get. The resolver only records it — nothing is logging
+ * while a run resolves — and a persona that silently failed to apply would
+ * read as the agent ignoring its instructions rather than as the trust
+ * decision it is.
+ */
+export const warnOnUntrustedConfig = (runtime: RuntimeConfig, streams: CliStreams): void => {
+  const ignored = runtime.ignoredFromUntrustedConfig;
+  if (!ignored) {
+    return;
+  }
+  const keys = ignored.keys.join(' and ');
+  writeLine(
+    streams.stderr,
+    `ignoring ${keys} in ${ignored.path}: what an agent is told is not a decision an auto-discovered config gets to make. `
+    + `Run with --config ${ignored.path} to trust that file${ignored.keys.includes('soul') ? ', or pass --soul <path>' : ''}.`,
+  );
+};
+
 export const warnOnCredentialOverride = async (
   runtime: RuntimeConfig,
   streams: CliStreams,
@@ -2869,6 +2891,7 @@ export const runChat = async (
     ...(command.soul ? { soul: command.soul } : {}),
     ...(command.configPath ? { configPath: command.configPath } : {}),
   }, env);
+  warnOnUntrustedConfig(runtime, streams);
   await warnOnCredentialOverride(runtime, streams, env);
 
   // Interactive means the real terminal: an injected stdinStream is by
@@ -6527,7 +6550,9 @@ export const collectDoctorReport = async (
    * resolveRuntimeConfig actually returns or throws.
    */
   const envSoul = envPick('STRATUS_SOUL');
-  const soulValue = envSoul?.value ?? fileConfig.soul;
+  // The file's soul under the resolver's trust rule: a project-local file
+  // does not name one, so doctor must not attribute one to it.
+  const soulValue = envSoul?.value ?? (winner?.label === 'project' ? undefined : fileConfig.soul);
   const soulSource = envSoul ? envSoul.name : (winner ? winner.path : '');
   const soulPath = typeof soulValue === 'string' ? path.resolve(cwd, soulValue) : undefined;
   // Loaded here for ATTRIBUTION only — the soul's frontmatter is what
@@ -10724,6 +10749,7 @@ export const runCli = async ({ argv, streams = process, env = {} }: CliRunOption
     }
 
     const runtime = await resolveRuntimeConfig(command, resolvedEnv);
+    warnOnUntrustedConfig(runtime, streams);
     await warnOnCredentialOverride(runtime, streams, resolvedEnv);
 
     if (command.format === 'text') {

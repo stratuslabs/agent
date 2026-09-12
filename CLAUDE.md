@@ -287,9 +287,10 @@ These are deliberate. Changing one is a decision, not a refactor.
   attached by a browser on a page's behalf, so there is no ambient authority
   to forge and an origin check there would only reject honest clients.
 - **The `api` and `approvals` config blocks are read only from a trusted
-  config.** An auto-discovered project-local `stratus.config.json` ships in
-  any repository; which interface a daemon binds, and who may approve its
-  tool calls, are not decisions a cloned repo gets to make.
+  config, and so are `soul` and `systemPrompt`.** An auto-discovered
+  project-local `stratus.config.json` ships in any repository; which
+  interface a daemon binds, who may approve its tool calls, and what the
+  agent is told it is, are not decisions a cloned repo gets to make.
 - **No endpoint returns a secret.** Credential reads report presence, type,
   and bound endpoint. Session reads strip the Anthropic raw-turn cache
   (`redactAnthropicRawTurns`), which exists for replay and carries raw model

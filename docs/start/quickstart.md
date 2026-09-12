@@ -83,8 +83,14 @@ Then:
 
 ```bash
 export ANTHROPIC_API_KEY=your-key
-stratus run "say hello"
+stratus run --config stratus.config.json "say hello"
 ```
+
+`--config` is what makes the file trusted. Without it the CLI still finds
+`./stratus.config.json`, but takes only its provider and model: a `soul` or
+`systemPrompt` in a file that arrived with a `git clone` is a system prompt
+somebody else wrote, so an auto-discovered config does not get to set one
+(see [Security](../concepts/security.md#what-a-cloned-repo-cannot-decide)).
 
 ## What you'll see
 

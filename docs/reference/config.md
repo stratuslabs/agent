@@ -43,8 +43,8 @@ every pass. See [Setup](../start/setup.md#where-everything-lands).
 | `model` | Model for that provider |
 | `baseUrl` | Override the provider API base URL (local models, proxies) |
 | `apiKeyEnv` | Name of the environment variable holding the API key — trusted configs only, see below |
-| `systemPrompt` | System prompt for the run |
-| `soul` | Path to a soul file, resolved relative to the working directory |
+| `systemPrompt` | System prompt for the run — trusted configs only, see below |
+| `soul` | Path to a soul file, resolved relative to the working directory — trusted configs only, see below |
 | `fallbackModel` | Model to retry with when the default model errors mid-run |
 | `fallbackProvider` | Provider serving the fallback model — defaults to the main provider |
 | `fallbackBaseUrl` | Base URL for an OpenAI-compatible fallback (e.g. a local model) |
@@ -120,6 +120,7 @@ set.
 | `principals` | Whose messages an agent takes as its operator's; everyone else's arrive as `unknown` | [Slack](../../packages/channel-slack/README.md#who-counts-as-the-operator), [Memory](../concepts/memory.md#where-a-fact-came-from) |
 | `api` | Which interface and port a daemon binds | [Remote access](../guides/remote-access.md) |
 | `apiKeyEnv` | Which environment variable this process reads a secret out of | [Security](../concepts/security.md) |
+| `soul`, `systemPrompt` | What the agent is told it is and what it may do — a persona in a cloned repo is a system prompt written by whoever pushed it. `--soul` and `STRATUS_SOUL` still name one; the run says once, on stderr, what the file asked for and did not get | [Security](../concepts/security.md) |
 
 Each block's keys and shape are documented in its own guide. `approvals`,
 `principals`, and each plugin's entry also take a per-agent `agents`

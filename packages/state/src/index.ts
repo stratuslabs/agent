@@ -312,7 +312,17 @@ export interface FallbackRuntime {
   vision?: boolean;
 }
 
-export type RuntimeConfig =
+/**
+ * What an auto-discovered project-local config asked for and was refused.
+ * Recorded rather than warned about at resolution time, because nothing is
+ * logging yet when a run resolves; the CLI prints it once the run starts.
+ */
+export interface IgnoredUntrustedConfig {
+  path: string;
+  keys: Array<'soul' | 'systemPrompt'>;
+}
+
+type RuntimeConfigVariant =
   | { provider: 'demo'; soul?: ParsedSoul; soulPath?: string }
   | {
       provider: 'openai';
@@ -394,6 +404,10 @@ export type RuntimeConfig =
       apiKeyEnvVar?: string;
       fallback?: FallbackRuntime;
     };
+
+export type RuntimeConfig = RuntimeConfigVariant & {
+  ignoredFromUntrustedConfig?: IgnoredUntrustedConfig;
+};
 
 /**
  * A stored sign-in for a provider, kept in ~/.stratus/credentials.json.
@@ -1778,15 +1792,24 @@ export const readTrustedConfigBlock = async <K extends keyof StratusConfigFile>(
 
 // A soul travels with the run: an explicit soul path outranks STRATUS_SOUL,
 // which outranks the config file's "soul" key.
+//
+// **An untrusted config does not get to name the soul.** The soul is what
+// the model is told it is and what it may do, and an auto-discovered
+// `stratus.config.json` ships in any repository somebody clones — a
+// `soul: ./AGENT.md` in a cloned repo is not a persona setting, it is a
+// system prompt written by whoever pushed the repo, taking effect on
+// `stratus run` in that directory. `--soul` and `STRATUS_SOUL` still name
+// one, because the flag and the environment are the operator's own.
 export const resolveSoulPath = (
   selection: RuntimeSelection,
   env: StateEnvironment,
   fileConfig: StratusConfigFile,
+  configTrusted?: boolean,
 ): string | undefined => {
   const processEnv = readProcessEnv(env);
   const soulPath = selection.soul
     ?? readNonEmptyString(processEnv.STRATUS_SOUL)
-    ?? fileConfig.soul;
+    ?? (configTrusted === false ? undefined : fileConfig.soul);
 
   if (!soulPath) {
     return undefined;
@@ -1799,8 +1822,9 @@ export const resolveSoul = async (
   selection: RuntimeSelection,
   env: StateEnvironment,
   fileConfig: StratusConfigFile,
+  configTrusted?: boolean,
 ): Promise<ParsedSoul | undefined> => {
-  const resolvedPath = resolveSoulPath(selection, env, fileConfig);
+  const resolvedPath = resolveSoulPath(selection, env, fileConfig, configTrusted);
   if (!resolvedPath) {
     return undefined;
   }
@@ -1820,7 +1844,7 @@ export const resolveConfiguredSoul = async (
 ): Promise<{ soul: ParsedSoul; path: string } | undefined> => {
   const configLocation = await resolveConfigLocation(selection, env);
   const fileConfig = configLocation ? await loadConfigFile(configLocation.path) : {};
-  const soulPath = resolveSoulPath(selection, env, fileConfig);
+  const soulPath = resolveSoulPath(selection, env, fileConfig, configLocation?.trusted);
   if (!soulPath) {
     return undefined;
   }
@@ -2530,7 +2554,7 @@ export const resolveRuntimeConfig = async (
   // is preset, the discovered location otherwise.
   const configTrusted = selection.presetConfig !== undefined ? selection.presetConfig.trusted : configLocation?.trusted;
   const configPathShown = selection.presetConfig !== undefined ? selection.presetConfig.path : configLocation?.path;
-  const soulPath = selection.presetSoul !== undefined ? undefined : resolveSoulPath(selection, env, fileConfig);
+  const soulPath = selection.presetSoul !== undefined ? undefined : resolveSoulPath(selection, env, fileConfig, configTrusted);
   const soul = selection.presetSoul ?? (soulPath ? await loadSoulFile(soulPath) : undefined);
 
   // Explicit flags and env vars outrank the soul's own provider/model hints,
@@ -2541,8 +2565,31 @@ export const resolveRuntimeConfig = async (
     ?? fileConfig.provider
     ?? 'demo';
 
+  // What the untrusted file asked for and did not get, for the CLI to say
+  // once the run is up — a persona that silently failed to apply reads as
+  // the agent ignoring its instructions rather than as a trust decision.
+  // Computed before the demo return: a persona shipped in a clone is
+  // exactly what the demo run in that clone would otherwise pick up.
+  const ignoredKeys: IgnoredUntrustedConfig['keys'] = [];
+  if (configTrusted === false) {
+    if (selection.soul === undefined && readNonEmptyString(processEnv.STRATUS_SOUL) === undefined && fileConfig.soul) {
+      ignoredKeys.push('soul');
+    }
+    if (readNonEmptyString(processEnv.STRATUS_SYSTEM_PROMPT) === undefined && fileConfig.systemPrompt) {
+      ignoredKeys.push('systemPrompt');
+    }
+  }
+  const ignoredFromUntrustedConfig: IgnoredUntrustedConfig | undefined = ignoredKeys.length > 0 && configPathShown !== undefined
+    ? { path: configPathShown, keys: ignoredKeys }
+    : undefined;
+
   if (provider === 'demo') {
-    return { provider: 'demo', ...(soul ? { soul } : {}), ...(soulPath ? { soulPath } : {}) };
+    return {
+      provider: 'demo',
+      ...(soul ? { soul } : {}),
+      ...(soulPath ? { soulPath } : {}),
+      ...(ignoredFromUntrustedConfig ? { ignoredFromUntrustedConfig } : {}),
+    };
   }
 
   // A config file's model/baseUrl/apiKeyEnv were written for the provider
@@ -2736,11 +2783,17 @@ export const resolveRuntimeConfig = async (
           ...(envApiKeyEntry ? { apiKeyEnvVar: envApiKeyEntry.name } : {}),
         };
 
+  // The same rule as the soul: a preamble that sits above the persona in
+  // every prompt is not something a cloned repo gets to write.
   const systemPrompt = readNonEmptyString(processEnv.STRATUS_SYSTEM_PROMPT)
-    ?? fileConfig.systemPrompt;
+    ?? (configTrusted === false ? undefined : fileConfig.systemPrompt);
 
   if (systemPrompt) {
     resolved.systemPrompt = String(systemPrompt);
+  }
+
+  if (ignoredFromUntrustedConfig) {
+    resolved.ignoredFromUntrustedConfig = ignoredFromUntrustedConfig;
   }
 
   if (env.fetch) {
@@ -3825,8 +3878,10 @@ export const listAgentSummaries = async (
     return { provider, model };
   };
 
+  // The config's soul under the same trust rule `resolveSoulPath` applies:
+  // a project-local file's default is not the default a run would use.
   const defaultSoulPath = readNonEmptyString(processEnv.STRATUS_SOUL)
-    ?? activeConfig.soul;
+    ?? (activeConfigLocation?.trusted === false ? undefined : activeConfig.soul);
   const resolvedDefaultSoul = defaultSoulPath
     ? path.resolve(readWorkingDirectory(env), defaultSoulPath)
     : undefined;
