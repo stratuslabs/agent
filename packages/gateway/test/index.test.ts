@@ -241,6 +241,7 @@ test('observe puts a message into a session with no turn, on the session\'s chai
     // runner: the message is stored overheard, on a new session and an
     // existing one alike, and the turn is nobody's to answer.
     const answered = (await gateway.sessionRouting('thread-o'))?.lastAnsweredAt;
+    assert.equal((await gateway.sessionRouting('thread-o'))?.unaddressed, undefined);
     const unasked = await gateway.dispatch({ sessionId: 'thread-o', userMessage: 'Bea: on it', addressed: false });
     const unaskedMessage = unasked.messages.findLast((message) => message.role === 'user');
     assert.equal(unaskedMessage?.overheard, true);
@@ -252,6 +253,9 @@ test('observe puts a message into a session with no turn, on the session\'s chai
     assert.notEqual(afterUnasked?.lastSpokeAt, answered);
     assert.equal(afterUnasked?.lastAnsweredAt, answered);
     assert.equal(afterUnasked?.heardSinceAnswered, 1);
+    // And the routing says whose turn it is on: nobody's, so a channel
+    // that finds it failed after a restart knows to keep quiet for it.
+    assert.equal(afterUnasked?.unaddressed, true);
     const opened = await gateway.dispatch({ sessionId: 'thread-unasked', userMessage: 'Dylan: Bea?', addressed: false });
     assert.equal(opened.messages[0]?.overheard, true);
 

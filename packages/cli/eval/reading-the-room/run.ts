@@ -58,7 +58,9 @@ const main = async (): Promise<void> => {
   // name is addressed by that name, or the thread would name one agent and
   // run as another. Whole words only, so a colleague's name stays theirs.
   const corpusName = new RegExp(`\\b${corpus.agent.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
-  const retarget = (text: string): string => text.replace(corpusName, agent.name);
+  // As a callback, so a name with `$` in it is inserted as written rather
+  // than read as a replacement pattern.
+  const retarget = (text: string): string => text.replace(corpusName, () => agent.name);
 
   const total: Tally = { judged: 0, falseSpeech: 0, falseSilence: 0 };
   for (const thread of corpus.threads) {

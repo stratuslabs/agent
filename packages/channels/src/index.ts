@@ -127,6 +127,16 @@ export interface SessionRouting {
    * this, the approval survived the restart and the reply went nowhere.
    */
   reply?: string;
+  /**
+   * Whether the turn the session is on is one nobody asked for — its
+   * newest user message was dispatched `addressed: false`
+   * (`isUnaddressedTurn` in `@stratusagent/core`). Read for a turn the
+   * adapter did not render: a judged turn the daemon died inside is
+   * failed at the next start by a process with no renderer for it, and
+   * an error note posted for a turn nobody asked for, that said nothing,
+   * is the interruption the turn existed to avoid.
+   */
+  unaddressed?: boolean;
 }
 
 export interface GatewayLike {

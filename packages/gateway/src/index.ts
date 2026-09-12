@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   type Message,
   filePathsOf,
+  isUnaddressedTurn,
   abortErrorFor,
   AgentRegistry,
   AgentRunner,
@@ -424,6 +425,8 @@ export interface SessionRouting {
   heardSinceAnswered?: number;
   /** The latest turn's text (`latestTurnReply`), when it produced any — see `@stratusagent/channels`. */
   reply?: string;
+  /** Whether the turn the session is on is one nobody asked for (`isUnaddressedTurn`) — see `@stratusagent/channels`. */
+  unaddressed?: boolean;
 }
 
 /**
@@ -3108,6 +3111,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         ...(lastAnsweredAt !== undefined ? { lastAnsweredAt } : {}),
         heardSinceAnswered,
         ...(reply !== undefined ? { reply } : {}),
+        ...(isUnaddressedTurn(session) ? { unaddressed: true } : {}),
       };
     },
 

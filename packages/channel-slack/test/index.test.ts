@@ -1647,6 +1647,44 @@ test('a message said before the answer the window starts from is heard, not judg
   assert.deepEqual(gateway.dispatches.map((dispatch) => [dispatch.userMessage, dispatch.addressed]), [['Dylan: after it', false]]);
 });
 
+test('a turn nobody asked for that the daemon died inside is failed quietly after the restart', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const warnings: string[] = [];
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'unused'));
+  // Two of Ava's turns were running when the daemon died and are failed at
+  // the next start, with no renderer in this process for either: one was
+  // judged and had said nothing, the other was asked for.
+  gateway.sessionRouting = async (sessionId) => {
+    const metadata = { channel: 'slack', team: 'T1', slackChannel: 'C1', slackThread: '100.1', sessionTrust: 'user' };
+    if (sessionId === 'slack:ava:T1:C1:100.1') {
+      return { agentId: 'ava', metadata, unaddressed: true };
+    }
+    if (sessionId === 'slack:ava:T1:C1:200.1') {
+      return { agentId: 'ava', metadata: { ...metadata, slackThread: '200.1' } };
+    }
+    return undefined;
+  };
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    warn: (line) => {
+      warnings.push(line);
+    },
+  });
+  await adapter.start(gateway);
+  await gateway.bus.emit({ type: 'session.failed', sessionId: 'slack:ava:T1:C1:100.1', error: 'the daemon restarted' });
+  await gateway.bus.emit({ type: 'session.failed', sessionId: 'slack:ava:T1:C1:200.1', error: 'the daemon restarted' });
+  await adapter.stop();
+
+  // The judged turn posts nothing and says why in the log; the asked-for
+  // one reports its failure in its thread as before.
+  assert.deepEqual(web.posts.map((post) => [post.text, post.thread_ts]), [['Something went wrong: the daemon restarted', '200.1']]);
+  assert.equal(warnings.filter((line) => /a turn nobody asked for failed before saying anything: the daemon restarted/.test(line)).length, 1, warnings.join('\n'));
+});
+
 test('a turn nobody asked for opens its placeholder on its first text, never on a tool line, and a failed one says nothing', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');

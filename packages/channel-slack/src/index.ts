@@ -2622,6 +2622,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     }
     const channel = metadata.slackChannel;
     const thread = typeof metadata.slackThread === 'string' ? metadata.slackThread : undefined;
+    if (routing.unaddressed === true && routing.reply === undefined) {
+      // A turn nobody asked for that said nothing before it broke — the
+      // daemon died inside it, and the next start failed it with no
+      // renderer here to keep quiet for it. The same rule as the lazy
+      // renderer's: the failure is in the log, and the files it produced
+      // still land, since a file is not nothing to say.
+      warn(`slack: a turn nobody asked for failed before saying anything: ${event.error}`);
+      await uploadUnrenderedFiles(connection, channel, thread, files);
+      return;
+    }
     await postAheadOf(
       behind,
       connection,
