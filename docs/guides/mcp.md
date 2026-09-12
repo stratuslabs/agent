@@ -38,11 +38,12 @@ soul's allowlist — `tools: [mcp.linear.*]` grants one server:
   spelled out (`\u202e`) rather than rendered — so a description that
   reads one way to a person and another to the model reads as what it is.
   The same goes for the `description` and `title` of every property in a
-  tool's input schema, at any depth — and only those: a property name or
-  an enum value is what the model sends back in a call, so it reaches the
-  model as the server wrote it. A schema still longer than 16,384
-  characters after that is a page, not a parameter list: that one tool is
-  not bridged, the daemon log names it, and the server's other tools load.
+  tool's input schema, at any depth — and only those: a property name, an
+  enum value, a default or an example is what the model sends back in a
+  call, so it reaches the model as the server wrote it. A schema still
+  longer than 16,384 characters after that, or nested more than 64 levels
+  deep, is a page, not a parameter list: that one tool is not bridged, the
+  daemon log names it, and the server's other tools load.
 - **A stdio server's environment is replaced** the way
   [`tool-shell`'s](./tools.md) is: it gets what you granted and nothing
   else, not the daemon's own environment.

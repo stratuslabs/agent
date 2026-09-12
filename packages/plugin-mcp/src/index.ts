@@ -27,6 +27,7 @@ import {
   bridgedDescription,
   bridgedSchema,
   BRIDGED_SCHEMA_MAX_LENGTH,
+  BRIDGED_SCHEMA_MAX_DEPTH,
 } from './normalize.ts';
 
 /**
@@ -44,6 +45,7 @@ export const PLUGIN_MCP_VERSION = '0.11.2';
 export {
   BRIDGED_DESCRIPTION_MAX_LENGTH,
   BRIDGED_SCHEMA_MAX_LENGTH,
+  BRIDGED_SCHEMA_MAX_DEPTH,
   bridgedDescription,
   bridgedSchema,
   bridgedToolName,
@@ -899,8 +901,8 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
       if (isObject(tool.inputSchema) && parameters === undefined) {
         warn(
           `mcp server ${state.spec.name}: ${registered} was not bridged: its input schema is longer than `
-          + `${BRIDGED_SCHEMA_MAX_LENGTH} characters once its descriptions are bounded, and a schema that size is a page, `
-          + 'not a parameter list. Shorten it on the server.',
+          + `${BRIDGED_SCHEMA_MAX_LENGTH} characters once its descriptions are bounded, or nests deeper than `
+          + `${BRIDGED_SCHEMA_MAX_DEPTH} levels, and a schema like that is a page, not a parameter list. Shorten it on the server.`,
         );
         continue;
       }

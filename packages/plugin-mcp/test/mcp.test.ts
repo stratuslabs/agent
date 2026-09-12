@@ -296,6 +296,70 @@ test('a tool whose input schema is a page even once bounded is left unbridged by
   }
 });
 
+test('an annotation key inside a schema literal is data, and a bottomless schema is skipped rather than walked', async () => {
+  // A raw server, because the high-level one only speaks zod: the point is
+  // what arrives in tools/list as JSON, literal values and all.
+  let deep: Record<string, unknown> = { type: 'string' };
+  for (let level = 0; level < 5_000; level += 1) {
+    deep = { not: deep };
+  }
+  const transportFor = async (): Promise<Transport> => {
+    const server = new Server({ name: 'literal', version: '1.0.0' }, { capabilities: { tools: {} } });
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: [
+        {
+          name: 'pick',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              choice: {
+                description: '\u202ePick one.',
+                // An enum member with a `description` field is a value the
+                // model sends back, not prose: left exactly as the server wrote it.
+                enum: [{ description: '\u202eactual' }, 'plain'],
+                default: { title: '\u202edefault' },
+                examples: [{ description: '\u202eexample' }],
+              },
+            },
+          },
+        },
+        { name: 'abyss', inputSchema: { type: 'object' as const, properties: { depth: deep } } },
+      ],
+    }));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    return clientTransport;
+  };
+  const warnings: string[] = [];
+  const target = new ToolRegistry();
+  const plugin = createMcpPlugin(
+    { servers: { literal: { url: 'http://127.0.0.1:9/unused' } } },
+    { transportFor, warn: (message) => warnings.push(message), log: () => {}, reconnectDelayMs: () => 3_600_000 },
+  );
+  await loadThroughView(plugin, target);
+  try {
+    const parameters = target.get('mcp.literal.pick')?.parameters as {
+      properties?: Record<string, { description?: string; enum?: unknown[]; default?: unknown; examples?: unknown[] }>;
+    } | undefined;
+    const choice = parameters?.properties?.choice;
+    assert.equal(choice?.description, '\\u202ePick one.');
+    assert.deepEqual(choice?.enum, [{ description: '\u202eactual' }, 'plain']);
+    assert.deepEqual(choice?.default, { title: '\u202edefault' });
+    assert.deepEqual(choice?.examples, [{ description: '\u202eexample' }]);
+
+    // The bottomless one is one tool skipped and named, not a server that
+    // went unreachable in a stack overflow and reconnects forever.
+    assert.equal(target.get('mcp.literal.abyss'), undefined);
+    assert.ok(
+      warnings.some((message) => /mcp\.literal\.abyss was not bridged: .*nests deeper than 64 levels/.test(message)),
+      warnings.join(' | '),
+    );
+    assert.ok(!warnings.some((message) => /Maximum call stack|reconnect failed/.test(message)), warnings.join(' | '));
+  } finally {
+    await plugin.dispose?.();
+  }
+});
+
 test('a call round-trips: arguments over, text back as a plain string', async () => {
   const handle = fakeServer({ current: linearTools });
   const target = new ToolRegistry();

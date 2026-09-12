@@ -82,17 +82,48 @@ export const bridgedDescription = (raw: string): string => {
  */
 export const BRIDGED_SCHEMA_MAX_LENGTH = 16_384;
 
+/**
+ * How deep a schema may nest before the bridge stops walking it. Sixty-four
+ * levels is far past any parameter list a person wrote; a schema nested
+ * deeper is a stack-overflow attempt dressed as a tool, and a recursive
+ * walk that blew the stack during discovery would take the whole server
+ * down as unreachable, and again on every reconnect.
+ */
+export const BRIDGED_SCHEMA_MAX_DEPTH = 64;
+
 /** The schema keys whose values are prose the model reads, at any depth. */
 const SCHEMA_ANNOTATION_KEYS = new Set(['description', 'title']);
 
-const boundedSchemaValue = (value: unknown): unknown => {
+/**
+ * The schema keys whose values are data, not schema: a member named
+ * `description` inside an `enum` entry is a value the model will send
+ * back, not prose, and rewriting it would make the schema offer a value
+ * the server does not accept. These subtrees are copied through verbatim.
+ */
+const SCHEMA_LITERAL_KEYS = new Set(['enum', 'const', 'default', 'examples']);
+
+class SchemaTooDeepError extends Error {
+  constructor() {
+    super(`Schema nests deeper than ${BRIDGED_SCHEMA_MAX_DEPTH} levels.`);
+    this.name = 'SchemaTooDeepError';
+  }
+}
+
+const boundedSchemaValue = (value: unknown, depth: number): unknown => {
+  if (depth > BRIDGED_SCHEMA_MAX_DEPTH) {
+    throw new SchemaTooDeepError();
+  }
   if (Array.isArray(value)) {
-    return value.map(boundedSchemaValue);
+    return value.map((entry) => boundedSchemaValue(entry, depth + 1));
   }
   if (typeof value === 'object' && value !== null) {
     return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
       key,
-      SCHEMA_ANNOTATION_KEYS.has(key) && typeof entry === 'string' ? bridgedDescription(entry) : boundedSchemaValue(entry),
+      SCHEMA_LITERAL_KEYS.has(key)
+        ? entry
+        : SCHEMA_ANNOTATION_KEYS.has(key) && typeof entry === 'string'
+          ? bridgedDescription(entry)
+          : boundedSchemaValue(entry, depth + 1),
     ]));
   }
   return value;
@@ -109,13 +140,26 @@ const boundedSchemaValue = (value: unknown): unknown => {
  * sends back in a call, and the bridge forwards arguments to the server
  * as the model wrote them — a value spelled out here would arrive at the
  * server as a different value, and the schema would be a lie in the
- * direction that breaks calls. `undefined` when the bounded schema is
- * still longer than {@link BRIDGED_SCHEMA_MAX_LENGTH} characters: that
- * tool is not bridged, and the caller names it.
+ * direction that breaks calls. An annotation key *inside* a literal (an
+ * `enum` member with a `description` field) is data too, and is left
+ * alone. `undefined` when the bounded schema is still longer than
+ * {@link BRIDGED_SCHEMA_MAX_LENGTH} characters, or nests deeper than
+ * {@link BRIDGED_SCHEMA_MAX_DEPTH}: that tool is not bridged, and the
+ * caller names it.
  */
 export const bridgedSchema = (schema: Record<string, unknown>): Record<string, unknown> | undefined => {
-  const bounded = boundedSchemaValue(schema) as Record<string, unknown>;
-  return Array.from(JSON.stringify(bounded)).length <= BRIDGED_SCHEMA_MAX_LENGTH ? bounded : undefined;
+  try {
+    const bounded = boundedSchemaValue(schema, 0) as Record<string, unknown>;
+    // The literal subtrees were not walked, so the serialisation is the
+    // one place a bottomless `default` can still blow the stack — a
+    // RangeError there is the same answer as a schema too deep to walk.
+    return Array.from(JSON.stringify(bounded)).length <= BRIDGED_SCHEMA_MAX_LENGTH ? bounded : undefined;
+  } catch (error) {
+    if (error instanceof SchemaTooDeepError || error instanceof RangeError) {
+      return undefined;
+    }
+    throw error;
+  }
 };
 
 /** The registered name a server's tool bridges to: `mcp.<server>.<segment>`. */
