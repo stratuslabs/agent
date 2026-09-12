@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import {
   agentsDirPath,
+  declaredAgentIds,
   createFileMemoryStore,
   DuplicateAgentIdError,
   loadConfigFile,
@@ -1258,4 +1259,31 @@ test('vision: false reaches the openai runtime, and only it', async () => {
   assert.equal(openaiPrimary.vision, false);
   assert.equal(openaiPrimary.fallback?.provider, 'anthropic');
   assert.equal('vision' in (openaiPrimary.fallback ?? {}), false);
+});
+
+
+test('a config that is simply not there leaves the id check with nothing to report', async () => {
+  // `declaredAgentIds` pins the global config on purpose, and pinning is
+  // what turns "no file" into a rejection. On a machine where `stratus
+  // setup` has not run there is none — and `stratus template add` warned
+  // that ids went unchecked, naming a hazard that cannot exist, on the one
+  // path every new install takes.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-declared-'));
+  const configPath = path.join(home, '.stratus', 'config.json');
+
+  const absent = await declaredAgentIds({ homeDir: home, cwd: home, processEnv: {} }, configPath);
+  assert.deepEqual(absent.unread, []);
+  assert.ok(absent.ids.has('stratus'));
+
+  // A config that exists and will not parse is the other case, and stays
+  // reported: there the ids really are unchecked.
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(configPath, '{ not json');
+  const broken = await declaredAgentIds({ homeDir: home, cwd: home, processEnv: {} }, configPath);
+  assert.deepEqual(broken.unread, ['the configured default soul']);
+
+  // So is a config that reads but names a soul that is gone.
+  await writeFile(configPath, JSON.stringify({ soul: path.join(home, 'missing.md') }));
+  const dangling = await declaredAgentIds({ homeDir: home, cwd: home, processEnv: {} }, configPath);
+  assert.deepEqual(dangling.unread, ['the configured default soul']);
 });

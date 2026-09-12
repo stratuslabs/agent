@@ -47,6 +47,8 @@ export interface CliEnvironment {
   packageInstaller?: PackageInstaller;
   /** Looks up a package's latest published version. Injected so tests never ask npm. */
   packageVersionFetcher?: PackageVersionFetcher;
+  /** Reads the version an installed package declares. Injected so tests do not assert on their own node_modules. */
+  installedVersionReader?: InstalledVersionReader;
 }
 
 /**
@@ -104,6 +106,9 @@ export type PackageInstaller = (packages: string[]) => Promise<PackageInstallRes
 
 /** The latest published version of a package, or undefined when the registry did not answer. */
 export type PackageVersionFetcher = (packageName: string) => Promise<string | undefined>;
+
+/** The version an installed package declares, or undefined when it is not installed. */
+export type InstalledVersionReader = (specifier: string) => Promise<string | undefined>;
 
 export type CliConfigFile = StratusConfigFile;
 

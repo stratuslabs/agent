@@ -3627,6 +3627,22 @@ export const collectAvailableModels = async (
  * could have read. `unread` names what could not be answered, so the
  * caller can say which check did not run instead of implying none did.
  */
+/**
+ * A config that is not there at all, which is not a config that could not
+ * be read — the distinction `ConfigFileError.code` exists for.
+ *
+ * Callers here pin the global config deliberately, and pinning is what
+ * turns "no file" into a rejection: an unpinned resolve skips a candidate
+ * that is not there, while a pinned one reports the file it was told to
+ * use. On a machine where `stratus setup` has not run yet there is no
+ * `~/.stratus/config.json`, and the id check has nothing it could miss —
+ * so saying it was skipped named a hazard that does not exist, on the one
+ * path every new install takes. A config that exists and will not read is
+ * still reported: there the ids really are unchecked.
+ */
+const isAbsentConfig = (reason: unknown): boolean =>
+  reason instanceof ConfigFileError && reason.code === 'ENOENT';
+
 export const declaredAgentIds = async (
   env: StateEnvironment,
   configPath?: string,
@@ -3656,7 +3672,7 @@ export const declaredAgentIds = async (
     if (configured.value) {
       ids.add(configured.value.soul.agent.id);
     }
-  } else {
+  } else if (!isAbsentConfig(configured.reason)) {
     unread.push('the configured default soul');
   }
   return { ids, unread };

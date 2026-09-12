@@ -83,3 +83,33 @@ degrades independently — with npm unreachable, `update` skips the package
 upgrade but still migrates and repairs the unit, which is exactly what the
 offline case needs. A daemon that was deliberately stopped before the
 update is left stopped after it.
+
+## The companion packages go up with it
+
+The CLI is one global install and its optional companions are others — the
+[Slack channel](./slack.md), the [control API and
+dashboard](./remote-access.md), and each [tool plugin](./tools.md). They
+ship from one repository in lockstep with the CLI, so `stratus update`
+upgrades every one this machine has, to the version the CLI is going to,
+in the same `npm install` call. Nothing else does: upgrading the CLI alone
+used to leave each of them at whatever version was installed the day
+`stratus setup` first ran, and nothing reported it — `stratus doctor` says
+`installed`, which was equally true of a Slack adapter two releases behind
+the daemon loading it.
+
+A companion left behind is actionable on its own, so it is reported and
+exits 1 even when the CLI itself is current:
+
+```
+$ stratus update --check
+stratus 0.11.2
+  latest      0.11.2 — up to date
+  packages    3 first-party alongside the CLI, 1 behind
+              @stratusagent/channel-slack 0.10.1 → 0.11.2
+Run `stratus update` to apply the above.
+```
+
+Only packages that are installed are considered — installing one is still
+a separate, deliberate act (`stratus setup` offers the ones your answers
+imply), and `update` never adds a package you do not have. Which ones are
+installed, and what each contributes, is `stratus plugins`.

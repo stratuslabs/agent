@@ -40,6 +40,7 @@ export {
   loadPlugins,
   pluginConfigWithHostDefaults,
   preflightPlugin,
+  installedPackageVersion,
   readPluginManifest,
   type CreatePlugin,
   type LoadedPlugin,

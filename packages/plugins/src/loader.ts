@@ -99,6 +99,38 @@ const packageJsonFor = async (
 };
 
 /**
+ * The version an installed package declares, or undefined when it is not
+ * installed or names no version.
+ *
+ * Through `packageJsonFor`, so there is one answer to where a package's
+ * package.json is rather than a second walk that drifts from it — and one
+ * that is bounded the same way, so a package without its own manifest
+ * reports nothing instead of some parent directory's version.
+ *
+ * Nothing is imported: `stratus update` asks this of every companion
+ * package before it decides what to upgrade, and importing a channel
+ * adapter to read its version would open the sockets it exists to open.
+ */
+export const installedPackageVersion = async (
+  specifier: string,
+  host: Pick<OptionalModuleHost, 'resolve'>,
+): Promise<string | undefined> => {
+  let resolved: string;
+  try {
+    resolved = host.resolve(specifier);
+  } catch {
+    return undefined;
+  }
+  try {
+    const { packageJson } = await packageJsonFor(resolved, specifier);
+    const version = (packageJson as { version?: unknown }).version;
+    return typeof version === 'string' && version.length > 0 ? version : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
  * A package's manifest, and the directory it was found in.
  *
  * Nothing here imports the package — the property `parsePluginManifest`
