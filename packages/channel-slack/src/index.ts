@@ -2976,17 +2976,25 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     // beyond what the named agent's own admission above allowed.
     // Logged rather than answered — a reply is a conversation with someone
     // the operator chose not to have one with — and logged only for a
-    // message this agent would have taken up: a channel subscribed for
-    // thread follow-through delivers every top-level post, and a line per
-    // stranger per post is a log with nothing left to read. Once per
-    // MESSAGE, on the same key the admitted path dedupes on below: a
-    // mention arrives twice under both subscriptions, and a delivery Slack
-    // did not see acknowledged arrives again, and each copy would otherwise
-    // write its own line during exactly the traffic an operator reads the
-    // log to understand. Consuming the key here is safe because a refused
-    // message records nothing a later copy could be needed for.
+    // message this agent would have taken up: a mention, or an untagged
+    // reply inside a thread this agent is known to hold. A channel
+    // subscribed for thread follow-through delivers every post and every
+    // reply in every thread, including the threads this agent was never
+    // part of, and a line per stranger per reply is a log with nothing
+    // left to read. Known from what this process has seen, as the
+    // admitted path below judges it; a thread nothing here remembers is
+    // one the sessions would have to be asked about, and a refused message
+    // does not get a place in that queue. Once per MESSAGE, on the same key
+    // the admitted path dedupes on: a mention arrives twice under both
+    // subscriptions, and a delivery Slack did not see acknowledged arrives
+    // again, and each copy would otherwise write its own line during
+    // exactly the traffic an operator reads the log to understand.
+    // Consuming the key here is safe because a refused message records
+    // nothing a later copy could be needed for.
     if (!admitsSender(connection.config, sender)) {
-      if ((addressed || event.thread_ts !== undefined) && !alreadySeen(eventKey)) {
+      const engaged = addressed
+        || (threadKey !== undefined && holderAt(threadKey, event.ts) === connection.config.agentId);
+      if (engaged && !alreadySeen(eventKey)) {
         log(`slack: ${connection.config.agentId} refused a message from ${sender}: not a listed principal, and admit is "principals"`);
       }
       return undefined;

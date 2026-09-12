@@ -4381,6 +4381,43 @@ test('under admit: principals an unlisted sender gets no turn and is not overhea
   assert.equal(web.posts.filter((post) => post.channel === 'D1').length, 0);
 });
 
+test('a refused reply is logged only in a thread the agent holds; a thread it was never part of gets no line', async () => {
+  const socket = createFakeSocket();
+  const web = createFakeWeb('B-AVA', 'T1');
+  const gateway = createStubGateway(({ sessionId }) => sessionWithReply(sessionId, 'ok'));
+  const logged: string[] = [];
+
+  const adapter = createSlackChannelAdapter({
+    agents: [{ agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', principals: ['U-DYLAN'], admit: 'principals' }],
+    editIntervalMs: 0,
+    createSocketClient: () => socket,
+    createWebClient: () => web,
+    log: (line) => logged.push(line),
+  });
+  await adapter.start(gateway);
+
+  // A channel subscribed for thread follow-through delivers every reply in
+  // every thread. Two strangers talking in a thread Ava was never part of
+  // are not Ava's to refuse out loud: no line.
+  await socket.deliver('message', mention('so anyway', { type: 'message', ts: '500.2', thread_ts: '500.0', user: 'U-STRANGER' }));
+  await socket.deliver('message', mention('right', { type: 'message', ts: '500.3', thread_ts: '500.0', user: 'U-OTHER' }));
+  assert.equal(logged.filter((line) => /refused a message/.test(line)).length, 0);
+
+  // A mention in that thread is Ava's, and refused with a line; so is the
+  // stranger's next untagged reply once the operator has put Ava in the
+  // thread — that thread Ava holds.
+  await socket.deliver('app_mention', mention('<@B-AVA> hey', { ts: '500.4', thread_ts: '500.0', user: 'U-STRANGER' }));
+  await socket.deliver('app_mention', mention('<@B-AVA> hello', { ts: '600.1' }));
+  await socket.deliver('message', mention('and me?', { type: 'message', ts: '600.2', thread_ts: '600.1', user: 'U-STRANGER' }));
+  await adapter.stop();
+
+  assert.deepEqual(
+    logged.filter((line) => /refused a message/.test(line)).map((line) => /from (U-[A-Z]+)/.exec(line)?.[1]),
+    ['U-STRANGER', 'U-STRANGER'],
+  );
+  assert.deepEqual(gateway.observes, []);
+});
+
 test('a refused message is logged once however many times Slack delivers it', async () => {
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
