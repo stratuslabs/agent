@@ -2148,7 +2148,14 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
       : event.reason === 'decided' && event.answer === 'always'
         ? alwaysOutcome(post.always, post.agentName, post.agentId)
         : OUTCOME_TEXT[`${event.reason}:${event.answer}`] ?? 'Resolved';
-    const by = event.actor ? ` by <@${event.actor}>` : '';
+    // A mention only for an actor this post knows as a Slack user — its
+    // approvers, which is the only set a click can come from. An approval
+    // decided through the control API arrives as `api:…` or `dashboard`,
+    // and `<@api:ops-bot>` is not a mention, it is a broken one; escaped
+    // plain text says who it was.
+    const by = event.actor
+      ? ` by ${post.approvers.has(event.actor) ? `<@${event.actor}>` : escapeSlackText(event.actor)}`
+      : '';
     const text = `*${escapeSlackText(post.agentName)}* — \`${escapeSlackText(post.toolName)}\` (${post.risk}): ${outcome}${by}.`;
     try {
       await post.connection.web.chat.update({
