@@ -889,16 +889,20 @@ export const createMcpPlugin = (config: JsonObject = {}, options: McpPluginOptio
           `MCP server ${state.spec.name} advertises two tools that both bridge to ${registered} (one of them ${JSON.stringify(tool.name)}). Rename one on the server.`,
         );
       }
-      // The schema's own prose is bounded the way the description is; a
-      // schema too long even then is refused by name, like a tool whose
-      // name leaves nothing usable — the server's to shorten.
+      // The schema's own prose is bounded the way the description is. A
+      // schema too long even then leaves that one tool unbridged, named in
+      // the log — not the server refused, and not the plugin: registrations
+      // are staged until setup succeeds, so a load-time throw here would
+      // take every tool of every configured server down over one page of
+      // parameters. The server's to shorten; everything else keeps working.
       const parameters = isObject(tool.inputSchema) ? bridgedSchema(tool.inputSchema) : undefined;
       if (isObject(tool.inputSchema) && parameters === undefined) {
-        throw new McpConfigError(
-          `MCP server ${state.spec.name} advertises ${JSON.stringify(tool.name)} with an input schema longer than `
-          + `${BRIDGED_SCHEMA_MAX_LENGTH} characters once its descriptions are bounded. A schema that size is a page, `
-          + 'not a parameter list, and is not bridged; shorten it on the server.',
+        warn(
+          `mcp server ${state.spec.name}: ${registered} was not bridged: its input schema is longer than `
+          + `${BRIDGED_SCHEMA_MAX_LENGTH} characters once its descriptions are bounded, and a schema that size is a page, `
+          + 'not a parameter list. Shorten it on the server.',
         );
+        continue;
       }
       next.set(registered, {
         mcpName: tool.name,

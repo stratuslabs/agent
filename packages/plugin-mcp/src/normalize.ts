@@ -91,11 +91,11 @@ const boundedSchemaValue = (value: unknown): unknown => {
   }
   if (typeof value === 'object' && value !== null) {
     return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
-      spelledOut(key),
+      key,
       SCHEMA_ANNOTATION_KEYS.has(key) && typeof entry === 'string' ? bridgedDescription(entry) : boundedSchemaValue(entry),
     ]));
   }
-  return typeof value === 'string' ? spelledOut(value) : value;
+  return value;
 };
 
 /**
@@ -104,12 +104,14 @@ const boundedSchemaValue = (value: unknown): unknown => {
  * top-level description is not the only prose in `tools/list`: a
  * `description` or `title` on any property, at any depth, is text the
  * model reads too, and it was copied through unbounded. Each is bounded
- * like the tool's own description; every other string in the schema —
- * enum values, defaults, patterns, the property names themselves — has
- * its control and bidi characters spelled out but keeps its length, since
- * cutting one would change what the schema means. `undefined` when the
- * bounded schema is still longer than {@link BRIDGED_SCHEMA_MAX_LENGTH}
- * characters: that tool is not bridged, and the caller names it.
+ * like the tool's own description. Nothing else in the schema is touched:
+ * a property name, an enum value, a const or a pattern is what the model
+ * sends back in a call, and the bridge forwards arguments to the server
+ * as the model wrote them — a value spelled out here would arrive at the
+ * server as a different value, and the schema would be a lie in the
+ * direction that breaks calls. `undefined` when the bounded schema is
+ * still longer than {@link BRIDGED_SCHEMA_MAX_LENGTH} characters: that
+ * tool is not bridged, and the caller names it.
  */
 export const bridgedSchema = (schema: Record<string, unknown>): Record<string, unknown> | undefined => {
   const bounded = boundedSchemaValue(schema) as Record<string, unknown>;
