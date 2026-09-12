@@ -2844,7 +2844,9 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
    * handover at or before it. Undefined when this process has no handover
    * that old, which sends the question to the sessions.
    */
-  const holderAt = (key: string, ts: string): string | undefined => {
+  const holderAt = (key: string, ts: string): string | undefined => handoverAt(key, ts)?.agentId;
+  /** The handover in force at `ts` — who holds, and from which message. */
+  const handoverAt = (key: string, ts: string): { agentId: string; ts: string } | undefined => {
     const handovers = threadAddressee.get(key);
     if (!handovers) {
       return undefined;
@@ -2852,10 +2854,37 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
     for (let index = handovers.length - 1; index >= 0; index -= 1) {
       const handover = handovers[index];
       if (handover && handover.ts <= ts) {
-        return handover.agentId;
+        return handover;
       }
     }
     return undefined;
+  };
+  /**
+   * The record a turn that spoke leaves once its reply has landed, at the
+   * message it answered. A judged turn always leaves one: it took no part
+   * in the holder rule at intake, and without it a thread-rule colleague
+   * that held the thread before would keep answering beside it. Any other
+   * turn had its record written at intake, and leaves one here only when
+   * that record has since been overtaken: a judge answering an OLDER
+   * message and landing first inserts itself ahead of this turn's, which
+   * the intake's write — a no-op while this agent still held the thread —
+   * does not cover, so the next reply would go to the judge though this
+   * agent spoke last. A judge that answered the SAME message keeps it,
+   * whichever landed first: two answers to one message are one tie, and
+   * the rule is that a judge that chose to speak takes the thread, rather
+   * than whichever socket's reply happened to settle last. Late, either
+   * way, for a message typed while the turn was still running, which the
+   * other may therefore still take, and exact for everything after.
+   */
+  const rememberSpeaker = (key: string, agentId: string, ts: string, judged: boolean): void => {
+    if (judged) {
+      rememberAddressee(key, agentId, ts);
+      return;
+    }
+    const held = handoverAt(key, ts);
+    if (held !== undefined && held.agentId !== agentId && held.ts < ts) {
+      rememberAddressee(key, agentId, ts);
+    }
   };
   /**
    * Which of this process's agents a message names, or undefined if it
@@ -3458,22 +3487,16 @@ export const createSlackChannelAdapter = (options: SlackAdapterOptions): Channel
         ? overhearReply(connection, event.channel, thread, reply, session, finalized.then((outcome) => outcome.published))
         : undefined;
       const { spoke } = await finalized;
-      if (renderer.lazy && spoke && threadKey !== undefined) {
-        // A judging agent that chose to speak is now the voice that just
-        // answered, and the thread rule's record has to say so, or a
-        // thread-rule colleague that held the thread before would keep
-        // answering beside it. Recorded at the message it answered, once
-        // the reply has landed — late for a message typed while it was
-        // still deciding, which that colleague may therefore still take,
-        // and exact for everything after.
-        rememberAddressee(threadKey, connection.config.agentId, event.ts);
+      if (spoke && threadKey !== undefined) {
+        // The voice that just answered — see `rememberSpeaker`.
+        rememberSpeaker(threadKey, connection.config.agentId, event.ts, renderer.lazy);
       }
       await heard;
     } else {
       const { spoke } = await renderer.fail(failure instanceof Error ? failure.message : String(failure));
-      if (renderer.lazy && spoke && threadKey !== undefined) {
+      if (spoke && threadKey !== undefined) {
         // A file it posted before breaking is still the last thing said.
-        rememberAddressee(threadKey, connection.config.agentId, event.ts);
+        rememberSpeaker(threadKey, connection.config.agentId, event.ts, renderer.lazy);
       }
     }
   };
